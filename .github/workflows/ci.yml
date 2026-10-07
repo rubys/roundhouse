@@ -61,7 +61,11 @@ jobs:
       plan: ${{ steps.plan.outputs.plan }}
       jobs: ${{ steps.plan.outputs.jobs }}
       extra-compare: ${{ steps.plan.outputs.extra-compare }}
+      compare: ${{ steps.plan.outputs.compare }}
       smoke: ${{ steps.plan.outputs.smoke }}
+      smoke-extra: ${{ steps.plan.outputs.smoke-extra }}
+      extras-advisory: ${{ steps.plan.outputs.extras-advisory }}
+      spinel-advisory: ${{ steps.plan.outputs.spinel-advisory }}
       archives: ${{ steps.plan.outputs.archives }}
       wasm: ${{ steps.plan.outputs.wasm }}
       site: ${{ steps.plan.outputs.site }}
@@ -416,15 +420,10 @@ jobs:
     outputs:
       artifact-id: ${{ steps.toolchain.outputs.artifact-id }}
       execution: ${{ steps.result.outputs.status }}
-    # Re-enabled 2026-06-17 (framework-tests-spinel 5/5 + compare-spinel 7/7
-    # green again on matz/spinel master). Tracks moving matz/spinel master,
-    # so it can go red independently of any roundhouse change; continue-on-error
-    # keeps that advisory rather than failing the whole run (the downstream
-    # framework-tests / compare-spinel jobs are likewise advisory). If a build
-    # failure here cascades to skipped/failed downstream jobs, that's fine — the
-    # signal is still visible without blocking unrelated work. (toolchain-spinel
-    # stays gated below pending matz/spinel#1447.)
-    continue-on-error: true
+    # Tracks moving matz/spinel master. Advisory (continue-on-error) on
+    # main/Full/unknown; ci:spinel focus sets spinel-advisory=false so the
+    # CORE lane is merge-gate required for the fix round.
+    continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -968,15 +967,15 @@ jobs:
   # `ar_base` is disabled in-test (b453fcf) pending real-sqlite
   # rewiring of the test_helper.
   framework-tests-spinel:
-    # Re-enabled 2026-06-17 (5/5 green on matz/spinel master). Advisory.
     # Needs the real-blog fixture: date_columns_spinel overlays it.
+    # Advisory unless ci:spinel focus hardens CORE (+ this suite).
     needs: [generate-fixture, build-spinel, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'framework-tests-spinel') && needs.generate-fixture.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
     outputs: &advisory-outputs
       execution: ${{ steps.result.outputs.status }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true
+    continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     env:
       MAKEFLAGS: "-j4"
     steps:
@@ -1894,19 +1893,14 @@ jobs:
   # closes. Running it (vs `if: false`) keeps the model-suite progress
   # visible and catches regressions in the compile path.
   toolchain-spinel:
-    # Un-gated 2026-06-18: matz/spinel#1447 (the `||=`-into-poly-setter →
-    # null-Flash segfault in the controller integration test) closed
-    # upstream, clearing the last blocker on the real-blog AOT suite (the
-    # void-tail compile error was already fixed in #1444). Stays advisory
-    # via continue-on-error — like every spinel job it tracks matz/spinel
-    # master UNPINNED, so it surfaces regressions without gating unrelated
-    # work; if master churns red, the signal is visible but non-blocking.
+    # Tracks matz/spinel master UNPINNED. Advisory unless ci:spinel focus
+    # hardens the CORE lane (spinel-advisory=false).
     needs: [generate-fixture, build-spinel, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'toolchain-spinel') && needs.generate-fixture.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true
+    continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     env:
       MAKEFLAGS: "-j4"
     steps:
@@ -2019,7 +2013,9 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        target: [rust, typescript]
+        # Independent legs: selecting rust must not force typescript (and
+        # vice versa). Empty matrix never runs — plan omits the job then.
+        target: ${{ fromJSON(needs.plan.outputs.compare) }}
     steps: &compare-steps
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -2177,6 +2173,9 @@ jobs:
   compare-extra:
     needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-extra') }}
+    # Ledger by default: Full/path extras do not fail the workflow conclusion.
+    # Focus labels set extras-advisory=false so fix rounds stay hard.
+    continue-on-error: ${{ needs.plan.outputs.extras-advisory == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -2308,13 +2307,13 @@ jobs:
   # spinel master can churn faster than this job rebuilds against it;
   # drop it once the upstream cadence settles.
   compare-spinel:
-    # Re-enabled 2026-06-17 (7/7 paths match Rails on matz/spinel master). Advisory.
+    # Advisory unless ci:spinel focus hardens CORE (spinel-advisory=false).
     needs: [generate-fixture, build-spinel, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'compare-spinel') && needs.generate-fixture.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true
+    continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -2401,8 +2400,10 @@ jobs:
       fail-fast: false
       max-parallel: 6
       matrix:
+        # Floor smoke only (ruby/jruby/rust/typescript). The seven extras
+        # use smoke-extra so ledger red does not soften floor smoke.
         target: ${{ fromJSON(needs.plan.outputs.smoke) }}
-    steps:
+    steps: &smoke-steps
       - uses: actions/checkout@v7
       - name: Use an explicit browser payload directory
         run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/ci-reuse-browsers" >> "$GITHUB_ENV"
@@ -2558,6 +2559,25 @@ jobs:
         with:
           name: ci-archive-validation-${{ matrix.target }}-${{ github.run_attempt }}
           path: ci-evidence/*.json
+
+  # Extra-language smoke (crystal…python). Same steps as smoke; ledger by
+  # default (continue-on-error when extras-advisory). Focus labels make the
+  # job hard so Autopilot/fix rounds still get a required signal.
+  smoke-extra:
+    needs: [build-site, plan]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.build-site.result == 'success' && contains(fromJSON(needs.plan.outputs.jobs), 'smoke-extra') }}
+    continue-on-error: ${{ needs.plan.outputs.extras-advisory == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      max-parallel: 7
+      matrix:
+        target: ${{ fromJSON(needs.plan.outputs.smoke-extra) }}
+    steps: *smoke-steps
 
   # spinel: the archive's README § Build AOT-compiles main.rb → build/blog
   # with the spinel toolchain (build-spinel artifact); § Test runs the
@@ -3560,7 +3580,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, writebook-inventory, build-spinel, framework-tests-spinel, build-campfire-compare-spinel, campfire-compare-spinel, campfire-db-differential-spinel, toolchain-spinel, compare-spinel, smoke-spinel, build-campfire-archive, smoke-campfire, smoke-campfire-docker, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, writebook-inventory, build-spinel, framework-tests-spinel, build-campfire-compare-spinel, campfire-compare-spinel, campfire-db-differential-spinel, toolchain-spinel, compare-spinel, smoke-spinel, build-campfire-archive, smoke-campfire, smoke-campfire-docker, archive-results, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Select coverage, not test results.
 
-Extra-language SDKs need a path owner, a focus label (`ci:<lang>` /
-`ci:extras`), `ci:full`, or scheduled full validation. Unknown inputs
-keep the Ruby floor plus Spinel (unless a focus label is already set).
+Two gates: merge-gate is the Ruby floor (BASE) plus any focus lanes the
+author made required; the Full/extra ledger can stay red without holding
+merge. Extra-language SDKs need a path owner, a focus label, `ci:full`,
+or scheduled full validation. Unknown inputs keep the Ruby floor plus
+advisory Spinel (unless a focus label is already set).
 """
 
 import argparse
@@ -27,12 +29,14 @@ TARGETS = [
     "ruby",
     "jruby",
 ]
-# compare-extra / smoke matrix cells for the seven emitted SDK langs.
+# compare-extra / smoke-extra matrix cells for the seven emitted SDK langs.
 # Order matches TARGETS. Rust/TS ride the separate `compare` job; ruby /
 # jruby are the interpreted floor / compare-jruby lane.
 EXTRA_COMPARE_TARGETS = [
     t for t in TARGETS if t not in {"rust", "typescript", "ruby", "jruby"}
 ]
+COMPARE_TARGETS = ["rust", "typescript"]
+FLOOR_SMOKE_TARGETS = ["rust", "typescript", "ruby", "jruby"]
 # PR floor: the Ruby shape plus Campfire. Extra languages, Rust/TS
 # compare, WASM, and Spinel are not in this list.
 BASE = [
@@ -74,11 +78,16 @@ SPINEL11 = [
     "smoke-campfire",
     "smoke-campfire-docker",
 ]
-# Opt-in Spinel lane (`ci:spinel`): Ruby floor plus the full Spinel suite,
-# without other-language emitters, WASM, or Writebook. smoke-spinel needs
-# build-site; archive-results closes packaging evidence.
+# Main-push / unknown-input Spinel suite (advisory). PR `ci:spinel` uses the
+# narrower CORE focus lane (built in focus_plan) and makes those jobs required.
 SPINEL_LANE = [*BASE, *SPINEL11, "build-site", "archive-results"]
 ADVISORY = set(SPINEL11) - {"build-campfire-archive"}
+# Extra-language ledger jobs: advisory on Full/path unless a focus label
+# makes them required for a fix round.
+LEDGER_EXTRAS = {"compare-extra", "smoke-extra"}
+# CORE (+ framework suite) can be hard under ci:spinel focus; workflow CoE
+# follows plan spinel-advisory the same way extras-advisory flips extras.
+SPINEL_FOCUS_HARD = set(CORE) | {"framework-tests-spinel"}
 # Packaging evidence report only. Selected for completeness and required by
 # assemble-site when publishing; never a hard CI-summary / compact failure.
 # GitHub can mark the job `abandoned` (queued, never assigned) on large
@@ -94,30 +103,22 @@ PROJECT_BUILDERS = {
     "spin_shape": "ruby-family",
 }
 
-# Coverage labels. Precedence when planning: ci:full (or CI_FULL) >
-# focus extras (ci:<lang> / ci:extras) > ci:spinel > path ownership.
-# Focus mode is NARROW: BASE + selected extras only; path ownership does
-# not expand the plan while any focus label is active.
+# Coverage labels. Precedence: ci:full (or CI_FULL) > any focus labels
+# (ci:<lang> / ci:extras / ci:jruby / ci:spinel) > path ownership.
+# Focus mode is NARROW: BASE + selected focus lanes only.
 CI_FULL = "ci:full"
 CI_SPINEL = "ci:spinel"
+CI_JRUBY = "ci:jruby"
 CI_EXTRAS = "ci:extras"
 CI_FOCUS_BY_LABEL = {f"ci:{t}": t for t in EXTRA_COMPARE_TARGETS}
-# Extension point (not shipped): do NOT fold jruby/spinel into ci:extras.
-# A future `ci:jruby` would select compare-jruby + smoke jruby (+ archives)
-# via parse_coverage_labels + select(), with contract tests. Unknown names
-# (including a premature `ci:jruby` label) are ignored today. Finer Spinel
-# focus beyond the existing `ci:spinel` lane would similarly need select()
-# + tests — do not half-bake labels.
 
-CoverageLabels = namedtuple("CoverageLabels", "full spinel_lane focus_extras")
+CoverageLabels = namedtuple(
+    "CoverageLabels", "full focus_spinel focus_jruby focus_extras"
+)
 
 
 def parse_coverage_labels(names, *, env_full=False):
-    """Interpret PR/env coverage labels into a structured request.
-
-    `focus_extras` is an ordered tuple of EXTRA_COMPARE_TARGETS members.
-    Unknown `ci:*` names (e.g. a future `ci:jruby`) are ignored.
-    """
+    """Interpret PR/env coverage labels into a structured request."""
     labels = set(names)
     full = bool(env_full) or CI_FULL in labels
     focus = set()
@@ -129,34 +130,58 @@ def parse_coverage_labels(names, *, env_full=False):
     focus_extras = tuple(t for t in EXTRA_COMPARE_TARGETS if t in focus)
     return CoverageLabels(
         full=full,
-        spinel_lane=CI_SPINEL in labels,
+        focus_spinel=CI_SPINEL in labels,
+        focus_jruby=CI_JRUBY in labels,
         focus_extras=focus_extras,
     )
 
 
-def focus_lane(langs):
-    """Ruby floor plus compare-extra and smoke for the selected extras only.
+def focus_plan(extras=(), jruby=False, spinel=False):
+    """BASE plus selected focus lanes; path ownership suppressed.
 
-    Lane green means both matrix cells for each lang. build-site feeds smoke
-    archives; archive-results stays selected as REPORTING evidence (#578).
-    WASM, Spinel11, jruby, rust/ts compare, and Writebook stay off.
+    Focused extras / jruby / CORE Spinel are merge-gate required for the
+    fix round. Unrelated extras, WASM, rust/ts compare, Writebook, and the
+    heavy Spinel11 Campfire matrix stay off.
     """
-    extra = [t for t in EXTRA_COMPARE_TARGETS if t in langs]
+    extra = [t for t in EXTRA_COMPARE_TARGETS if t in extras]
     jobs = list(BASE)
+    smoke_floor = []
+    reasons = []
     if extra:
-        jobs.extend(["compare-extra", "build-site", "smoke", "archive-results"])
+        jobs.extend(["compare-extra", "build-site", "smoke-extra", "archive-results"])
+        reasons.append(
+            "ci focus: BASE + "
+            + ", ".join(extra)
+            + " (compare-extra and smoke-extra; required)"
+        )
+    if jruby:
+        if "build-site" not in jobs:
+            jobs.extend(["build-site", "archive-results"])
+        jobs.append("compare-jruby")
+        if "smoke" not in jobs:
+            jobs.append("smoke")
+        smoke_floor.append("jruby")
+        reasons.append("ci:jruby: compare-jruby + smoke jruby (required)")
+    if spinel:
+        for job in (*CORE, "framework-tests-spinel", "build-site", "archive-results"):
+            if job not in jobs:
+                jobs.append(job)
+        reasons.append("ci:spinel: CORE Spinel lane (required)")
+    if not reasons:
+        reasons.append("ci focus: BASE only")
     return finish(
         jobs,
         extra,
-        list(extra),
+        smoke_floor,
         False,
         False,
-        False,
-        [
-            "ci focus: BASE + "
-            + (", ".join(extra) if extra else "(none)")
-            + " (compare-extra and smoke); path ownership suppressed"
-        ],
+        bool(spinel),
+        reasons,
+        smoke_extra=extra,
+        compare=[],
+        focus_required=bool(extra) or jruby,
+        hard_spinel=bool(spinel),
+        spinel_tests=list(SPINEL_TESTS) if spinel else None,
     )
 
 
@@ -315,14 +340,16 @@ def select(
     full=False,
     spinel_lane=False,
     focus_extras=(),
+    focus_jruby=False,
+    focus_spinel=False,
     publish=False,
     project_scope=None,
 ):
     focus_extras = tuple(focus_extras or ())
-    # Focus labels narrow the plan before path ownership or ci:spinel.
+    # Focus labels narrow the plan before path ownership or main-push Spinel.
     # ci:full still falls through to the full ledger below.
-    if focus_extras and not full:
-        return focus_lane(focus_extras)
+    if not full and (focus_extras or focus_jruby or focus_spinel):
+        return focus_plan(focus_extras, focus_jruby, focus_spinel)
     if spinel_lane and not full:
         return finish(
             SPINEL_LANE,
@@ -331,7 +358,7 @@ def select(
             False,
             False,
             True,
-            ["ci:spinel: Ruby floor plus Spinel suite"],
+            ["main/unknown: Ruby floor plus advisory Spinel suite"],
             spinel_tests=list(SPINEL_TESTS),
         )
     targets, smoke = set(), set()
@@ -442,7 +469,10 @@ def select(
         jobs_selected.add("build-spinel")
     jobs = list(BASE)
     extra = [t for t in EXTRA_COMPARE_TARGETS if t in targets]
-    if "rust" in targets or "typescript" in targets:
+    compare = [t for t in COMPARE_TARGETS if t in targets]
+    floor_smoke = [t for t in FLOOR_SMOKE_TARGETS if t in smoke]
+    extra_smoke = [t for t in EXTRA_COMPARE_TARGETS if t in smoke]
+    if compare:
         jobs.append("compare")
     if extra:
         jobs.append("compare-extra")
@@ -452,10 +482,12 @@ def select(
         jobs.append("browser-smoke-typescript")
     if wasm:
         jobs.extend(["build-wasm", "browser-smoke-ide"])
-    if smoke or site:
+    if floor_smoke or extra_smoke or site:
         jobs.append("build-site")
-    if smoke - {"spinel"}:
+    if floor_smoke:
         jobs.append("smoke")
+    if extra_smoke:
+        jobs.append("smoke-extra")
     if spinel_tests:
         jobs_selected.add("framework-tests-spinel")
     if "smoke-spinel" in jobs_selected:
@@ -474,35 +506,70 @@ def select(
     return finish(
         jobs,
         extra,
-        [t for t in TARGETS if t in smoke],
+        floor_smoke,
         wasm,
         site,
         spinel,
         reasons,
         publish,
         [t for t in SPINEL_TESTS if t in spinel_tests],
+        smoke_extra=extra_smoke,
+        compare=compare,
     )
 
 
 def finish(
-    jobs, extra, smoke, wasm, site, spinel, reasons, publish=False, spinel_tests=None
+    jobs,
+    extra,
+    smoke,
+    wasm,
+    site,
+    spinel,
+    reasons,
+    publish=False,
+    spinel_tests=None,
+    *,
+    smoke_extra=None,
+    compare=None,
+    focus_required=False,
+    hard_spinel=False,
 ):
+    smoke_extra = list(smoke_extra or [])
+    compare = list(compare or [])
     archives = (
         ["blog", "spinel", *TARGETS, "typescript-worker"]
         if site
-        else [*smoke, *(["spinel"] if "smoke-spinel" in jobs else [])]
+        else [
+            *smoke,
+            *smoke_extra,
+            *(["spinel"] if "smoke-spinel" in jobs else []),
+        ]
     )
+    advisory = set(ADVISORY)
+    if hard_spinel:
+        # Focused CORE Spinel is merge-gate required for the fix round.
+        advisory -= SPINEL_FOCUS_HARD
+    if not focus_required:
+        advisory |= LEDGER_EXTRAS & set(jobs)
+    extras_advisory = bool(LEDGER_EXTRAS & advisory & set(jobs))
+    # Workflow CoE for CORE / framework-tests-spinel follows this flag.
+    spinel_advisory = bool(SPINEL_FOCUS_HARD & advisory & set(jobs))
     return {
         "jobs": jobs,
-        "required": [j for j in jobs if j not in ADVISORY and j not in REPORTING],
+        "required": [j for j in jobs if j not in advisory and j not in REPORTING],
+        "advisory": sorted(advisory & set(jobs)),
         "extra_compare": extra,
+        "compare": compare,
         "smoke": smoke,
+        "smoke_extra": smoke_extra,
         "archives": archives,
         "wasm": wasm,
         "site": site,
         "spinel": spinel,
         "spinel_tests": spinel_tests or [],
         "publish": publish,
+        "extras_advisory": extras_advisory,
+        "spinel_advisory": spinel_advisory,
         "reasons": reasons,
     }
 
@@ -649,23 +716,38 @@ def check_results(plan, needs, *, compact=False):
         failures.append("compact-required: no successful baseline gate")
     # Advisory work never blocks the gate, but incomplete work is not complete.
     # Compact only claims completeness for the publication floor it can see.
+    # Prefer the plan's advisory set (focus can harden CORE Spinel / extras);
+    # older plan blobs without the field fall back to the static Spinel set.
+    advisory = set(plan["advisory"]) if "advisory" in plan else set(ADVISORY)
     tracked = required if compact else plan["jobs"]
     complete = not failures and all(
-        needs.get(j, {}).get("result") == "success"
-        and (
-            j not in ADVISORY
-            or all(
-                needs[j].get("outputs", {}).get(key) == "success"
-                for key in (
-                    ["default", "minor-gc", "verify-gen"]
-                    if j == "campfire-compare-spinel"
-                    else ["execution"]
-                )
-            )
-        )
-        for j in tracked
+        _advisory_complete(j, needs.get(j, {}), advisory) for j in tracked
     )
     return failures, complete
+
+
+def _advisory_complete(job, need, advisory):
+    """Whether one selected job counts as actually finished.
+
+    Under continue-on-error, GitHub reports needs.*.result=success even when
+    the job failed. Spinel advisory jobs expose an execution (or GC-mode)
+    output from an always() receipt; require that. Matrix ledger extras
+    (compare-extra / smoke-extra) cannot prove every cell passed via a
+    single job output, so they never count as complete while advisory —
+    merge still ignores them via plan["required"].
+    """
+    if need.get("result") != "success":
+        return False
+    if job not in advisory:
+        return True
+    if job in LEDGER_EXTRAS:
+        return False
+    keys = (
+        ["default", "minor-gc", "verify-gen"]
+        if job == "campfire-compare-spinel"
+        else ["execution"]
+    )
+    return all(need.get("outputs", {}).get(key) == "success" for key in keys)
 
 
 def write_outputs(values):
@@ -710,8 +792,12 @@ def main():
         env_full=os.environ.get("CI_FULL") == "true",
     )
     full = coverage.full
-    spinel_lane = coverage.spinel_lane
     focus_extras = coverage.focus_extras
+    focus_jruby = coverage.focus_jruby
+    focus_spinel = coverage.focus_spinel
+    any_focus = bool(focus_extras or focus_jruby or focus_spinel)
+    # Main-push / unknown-input advisory Spinel suite (not the PR focus lane).
+    spinel_lane = False
     if (
         event_name == "push"
         and os.environ.get("GITHUB_REF") == "refs/heads/main"
@@ -729,16 +815,16 @@ def main():
             event,
             event_name,
             os.environ["GITHUB_SHA"],
-            need_project_scope=not full and not focus_extras and not spinel_lane,
+            need_project_scope=not full and not any_focus and not spinel_lane,
         )
     except (KeyError, ValueError, UnicodeError, subprocess.CalledProcessError) as e:
         paths, project_scope = [], None
         if full:
             reason = f"Unknown changed inputs: {e}; running full validation"
-        elif focus_extras:
+        elif any_focus:
             reason = (
                 f"Unknown changed inputs: {e}; "
-                "focus labels keep BASE+selected extras"
+                "focus labels keep BASE+selected lanes"
             )
         else:
             spinel_lane = True
@@ -758,6 +844,8 @@ def main():
         full=full,
         spinel_lane=spinel_lane,
         focus_extras=focus_extras,
+        focus_jruby=focus_jruby,
+        focus_spinel=focus_spinel,
         publish=publish,
         project_scope=project_scope,
     )
@@ -782,8 +870,12 @@ def main():
             "plan": plan,
             "jobs": plan["jobs"],
             "extra-compare": plan["extra_compare"],
+            "compare": plan["compare"],
             "spinel-tests": plan["spinel_tests"],
             "smoke": plan["smoke"],
+            "smoke-extra": plan["smoke_extra"],
+            "extras-advisory": plan["extras_advisory"],
+            "spinel-advisory": plan["spinel_advisory"],
             "archives": ",".join(plan["archives"]),
             "wasm": plan["wasm"],
             "site": plan["site"],

@@ -105,13 +105,17 @@ class Routing(unittest.TestCase):
                     plan["extra_compare"],
                     ["crystal", "kotlin", "swift", "csharp", "go", "elixir", "python"],
                 )
-                self.assertEqual(plan["smoke"], ci.TARGETS)
+                self.assertEqual(plan["smoke"], ["rust", "typescript", "ruby", "jruby"])
+                self.assertEqual(plan["smoke_extra"], list(ci.EXTRA_COMPARE_TARGETS))
+                self.assertTrue(plan["extras_advisory"])
                 self.assertTrue(plan["site"])
                 self.assertTrue(plan["wasm"])
                 self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
                 self.assertIn("writebook-inventory", plan["required"])
                 self.assertIn("archive-results", plan["jobs"])
                 self.assertNotIn("archive-results", plan["required"])
+                self.assertNotIn("compare-extra", plan["required"])
+                self.assertNotIn("smoke-extra", plan["required"])
 
     def test_native_only_test_selects_core_without_archives_or_campfire(self):
         plan = ci.select(["tests/spinel_toolchain.rs"])
@@ -201,7 +205,9 @@ class Routing(unittest.TestCase):
 
     def test_full_overrides_spinel_without_enabling_publication(self):
         plan = ci.select(["README.md"], spinel_lane=True, full=True)
-        self.assertEqual(plan["smoke"], ci.TARGETS)
+        self.assertEqual(plan["smoke"], ["rust", "typescript", "ruby", "jruby"])
+        self.assertEqual(plan["smoke_extra"], list(ci.EXTRA_COMPARE_TARGETS))
+        self.assertTrue(plan["extras_advisory"])
         self.assertTrue(plan["site"])
         self.assertTrue(plan["wasm"])
         self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
@@ -260,7 +266,9 @@ class Routing(unittest.TestCase):
             ):
                 self.assertEqual(ci.main(), 0)
             plan = output.call_args.args[0]["plan"]
-            self.assertEqual(plan["smoke"], ci.TARGETS)
+            self.assertEqual(plan["smoke"], ["rust", "typescript", "ruby", "jruby"])
+            self.assertEqual(plan["smoke_extra"], list(ci.EXTRA_COMPARE_TARGETS))
+            self.assertTrue(plan["extras_advisory"])
             self.assertTrue(plan["wasm"])
             self.assertIn("compare-extra", plan["jobs"])
             self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
@@ -303,15 +311,21 @@ class Routing(unittest.TestCase):
                 "CI_SPINEL_REVISION": "2" * 40,
             }
             cases = [
-                (["README.md"], [], [], False),
-                (["README.md"], ["ci:draft"], [], False),
-                (["src/emit/go.rs"], [], ["go"], False),
-                (["README.md"], ["ci:spinel"], [], True),
-                (["README.md"], ["ci:swift"], ["swift"], False),
-                (["README.md"], ["ci:full", "ci:spinel"], ci.TARGETS, True),
-                ([".github/workflows/ci.yml"], [], [], False),
+                (["README.md"], [], [], [], False),
+                (["README.md"], ["ci:draft"], [], [], False),
+                (["src/emit/go.rs"], [], [], ["go"], False),
+                (["README.md"], ["ci:spinel"], [], [], True),
+                (["README.md"], ["ci:swift"], [], ["swift"], False),
+                (
+                    ["README.md"],
+                    ["ci:full", "ci:spinel"],
+                    ["rust", "typescript", "ruby", "jruby"],
+                    list(ci.EXTRA_COMPARE_TARGETS),
+                    True,
+                ),
+                ([".github/workflows/ci.yml"], [], [], [], False),
             ]
-            for paths, labels, expected_smoke, expect_spinel in cases:
+            for paths, labels, expected_smoke, expected_extra, expect_spinel in cases:
                 for draft in (False, True):
                     with self.subTest(paths=paths, labels=labels, draft=draft):
                         event.write_text(json.dumps({
@@ -329,17 +343,20 @@ class Routing(unittest.TestCase):
                             self.assertEqual(ci.main(), 0)
                         plan = output.call_args.args[0]["plan"]
                         self.assertEqual(plan["smoke"], expected_smoke)
+                        self.assertEqual(plan["smoke_extra"], expected_extra)
                         self.assertEqual(plan["spinel"], expect_spinel)
                         self.assertTrue(set(ci.BASE).issubset(plan["required"]))
                         self.assertNotIn("assemble-site", plan["jobs"])
                         if paths == ["README.md"] and labels in ([], ["ci:draft"]):
                             self.assertEqual(plan["jobs"], ci.BASE)
                         elif labels == ["ci:spinel"]:
-                            self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
+                            self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
+                            self.assertIn("compare-spinel", plan["required"])
+                            self.assertNotIn("campfire-compare-spinel", plan["jobs"])
                         elif labels == ["ci:swift"]:
                             self.assertEqual(plan["extra_compare"], ["swift"])
-                            self.assertIn("compare-extra", plan["jobs"])
-                            self.assertIn("smoke", plan["jobs"])
+                            self.assertIn("compare-extra", plan["required"])
+                            self.assertIn("smoke-extra", plan["required"])
                             self.assertNotIn("build-wasm", plan["jobs"])
 
     def test_contract_tests_do_not_expand_the_exercised_workflows(self):
@@ -360,15 +377,21 @@ class Routing(unittest.TestCase):
         self.assertEqual(ci.select(paths + [".github/workflows/ci.yml"])["smoke"], [])
         partial = ci.select(paths + ["src/emit/go.rs"])
         self.assertEqual(partial["extra_compare"], ["go"])
-        self.assertEqual(partial["smoke"], ["go"])
+        self.assertEqual(partial["smoke"], [])
+        self.assertEqual(partial["smoke_extra"], ["go"])
+        self.assertTrue(partial["extras_advisory"])
         self.assertNotIn("build-wasm", partial["jobs"])
-        self.assertEqual(ci.select(paths, full=True)["smoke"], ci.TARGETS)
+        full = ci.select(paths, full=True)
+        self.assertEqual(full["smoke"], ["rust", "typescript", "ruby", "jruby"])
+        self.assertEqual(full["smoke_extra"], list(ci.EXTRA_COMPARE_TARGETS))
 
     def test_target_partial_does_not_pull_in_wasm_or_other_archives(self):
         plan = ci.select(["src/emit/go/expressions.rs"])
         self.assertEqual(plan["extra_compare"], ["go"])
         self.assertEqual(plan["archives"], ["go"])
-        self.assertEqual(plan["smoke"], ["go"])
+        self.assertEqual(plan["smoke"], [])
+        self.assertEqual(plan["smoke_extra"], ["go"])
+        self.assertTrue(plan["extras_advisory"])
         self.assertFalse(plan["site"])
         self.assertFalse(plan["wasm"])
         self.assertNotIn("build-spinel", plan["jobs"])
@@ -376,6 +399,7 @@ class Routing(unittest.TestCase):
     def test_baseline_emitter_adds_its_archive_not_duplicate_compare(self):
         plan = ci.select(["src/emit/rust.rs"])
         self.assertEqual(plan["extra_compare"], [])
+        self.assertEqual(plan["compare"], ["rust"])
         self.assertEqual(plan["archives"], ["rust"])
         self.assertNotIn("compare-extra", plan["jobs"])
 
@@ -384,7 +408,8 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 plan = ci.select([path])
                 self.assertEqual(plan["extra_compare"], ["swift"])
-                self.assertEqual(plan["smoke"], ["swift"])
+                self.assertEqual(plan["smoke_extra"], ["swift"])
+                self.assertEqual(plan["smoke"], [])
 
     def test_ruby_emit_preserves_interpreted_family_and_adds_native_core(self):
         plan = ci.select(["src/emit/ruby.rs"])
@@ -642,10 +667,10 @@ class Routing(unittest.TestCase):
             (["src/project.rs"], {"full": True}),
             (["src/project.rs", "src/emit/shared/ops.rs"], {}),
         ]:
-            self.assertEqual(
-                ci.select(paths, project_scope="interpreted", **options)["smoke"],
-                ci.TARGETS,
-            )
+            plan = ci.select(paths, project_scope="interpreted", **options)
+            self.assertEqual(plan["smoke"], ["rust", "typescript", "ruby", "jruby"])
+            self.assertEqual(plan["smoke_extra"], list(ci.EXTRA_COMPARE_TARGETS))
+            self.assertTrue(plan["extras_advisory"])
         self.assertEqual(
             ci.select(["src/project.rs"], project_scope="unknown")["jobs"],
             ci.BASE,
@@ -681,7 +706,9 @@ class Routing(unittest.TestCase):
 
     def test_shared_smoke_and_compare_harnesses_select_their_owners(self):
         plan = ci.select(["scripts/smoke"])
-        self.assertEqual(plan["smoke"], ci.TARGETS)
+        self.assertEqual(plan["smoke"], ["rust", "typescript", "ruby", "jruby"])
+        self.assertEqual(plan["smoke_extra"], list(ci.EXTRA_COMPARE_TARGETS))
+        self.assertTrue(plan["extras_advisory"])
         self.assertTrue(plan["spinel"])
         self.assertEqual(plan["extra_compare"], [])
         self.assertEqual(
@@ -753,12 +780,24 @@ class Results(unittest.TestCase):
         }
 
     def test_selected_skips_and_missing_results_are_not_green(self):
-        plan = ci.select(["src/emit/go.rs"])
+        # Path-owned extras are ledger/advisory: incomplete, not a required fail.
+        ledger = ci.select(["src/emit/go.rs"])
+        self.assertTrue(ledger["extras_advisory"])
         for outcome in ["skipped", "cancelled", "failure", None]:
-            with self.subTest(outcome=outcome):
-                needs = self.needs(plan)
+            with self.subTest(mode="ledger", outcome=outcome):
+                needs = self.needs(ledger)
                 needs["compare-extra"] = {"result": outcome}
-                failures, complete = ci.check_results(plan, needs)
+                failures, complete = ci.check_results(ledger, needs)
+                self.assertEqual(failures, [])
+                self.assertFalse(complete)
+        # Focus makes the same lane required for the fix round.
+        focused = ci.select([], focus_extras=("go",))
+        self.assertFalse(focused["extras_advisory"])
+        for outcome in ["skipped", "cancelled", "failure", None]:
+            with self.subTest(mode="focus", outcome=outcome):
+                needs = self.needs(focused)
+                needs["compare-extra"] = {"result": outcome}
+                failures, complete = ci.check_results(focused, needs)
                 self.assertTrue(failures)
                 self.assertFalse(complete)
 
@@ -767,9 +806,12 @@ class Results(unittest.TestCase):
         needs = self.needs(plan)
         needs["compare-extra"]["result"] = "failure"
         self.assertFalse(ci.check_results(plan, needs, compact=True)[0])
-        self.assertTrue(ci.check_results(plan, needs)[0])
+        failures, complete = ci.check_results(plan, needs)
+        self.assertEqual(failures, [])
+        self.assertFalse(complete)
         needs["compare"]["result"] = "failure"
         self.assertTrue(ci.check_results(plan, needs, compact=True)[0])
+        self.assertTrue(ci.check_results(plan, needs)[0])
 
     def test_speculative_success_cannot_hide_unit_or_compiler_failure(self):
         plan = ci.select([])
@@ -822,7 +864,9 @@ class Results(unittest.TestCase):
         self.assertFalse(ci.check_results(plan, needs)[1])
 
     def test_each_gc_mode_must_actually_pass_for_completion(self):
-        plan = ci.select([], full=True)
+        # Full selects advisory ledger extras; those never count as complete
+        # under CoE (matrix cells). Probe GC-mode receipts on the Spinel lane.
+        plan = ci.select([], spinel_lane=True)
         self.assertEqual(ci.check_results(plan, self.needs(plan)), ([], True))
         for mode in ["default", "minor-gc", "verify-gen"]:
             for status in ["failure", "cancelled", "", None]:
@@ -835,6 +879,26 @@ class Results(unittest.TestCase):
                         outputs[mode] = status
                     self.assertEqual(ci.check_results(plan, needs), ([], False))
 
+    def test_advisory_ledger_extras_never_claim_complete_under_coe(self):
+        # continue-on-error makes needs.*.result=success even when a matrix
+        # cell failed; without a trustworthy job-level proof, complete stays
+        # false while extras remain advisory.
+        ledger = ci.select(["src/emit/go.rs"])
+        self.assertTrue(ledger["extras_advisory"])
+        needs = self.needs(ledger)
+        needs["compare-extra"] = {"result": "success", "outputs": {"execution": "success"}}
+        needs["smoke-extra"] = {"result": "success", "outputs": {"execution": "success"}}
+        failures, complete = ci.check_results(ledger, needs)
+        self.assertEqual(failures, [])
+        self.assertFalse(complete)
+        full = ci.select([], full=True)
+        self.assertTrue(full["extras_advisory"])
+        self.assertEqual(ci.check_results(full, self.needs(full))[0], [])
+        self.assertFalse(ci.check_results(full, self.needs(full))[1])
+        focused = ci.select([], focus_extras=("go",))
+        self.assertFalse(focused["extras_advisory"])
+        self.assertEqual(ci.check_results(focused, self.needs(focused)), ([], True))
+
     def test_unselected_jobs_may_skip_but_planner_must_succeed(self):
         for lane in ({}, {"spinel_lane": True}, {"full": True}):
             with self.subTest(lane=lane):
@@ -843,7 +907,14 @@ class Results(unittest.TestCase):
                 for job in ["build-wasm", "compare", "browser-smoke-typescript", "assemble-site"]:
                     if job not in plan["jobs"]:
                         needs[job] = {"result": "skipped"}
-                self.assertEqual(ci.check_results(plan, needs), ([], True))
+                failures, complete = ci.check_results(plan, needs)
+                self.assertEqual(failures, [])
+                # Full keeps advisory ledger extras → incomplete; floor /
+                # Spinel-lane plans can still claim complete.
+                if plan.get("extras_advisory"):
+                    self.assertFalse(complete)
+                else:
+                    self.assertTrue(complete)
                 self.assertEqual(ci.check_results(plan, needs, compact=True), ([], True))
                 needs["plan"]["result"] = "failure"
                 self.assertTrue(ci.check_results(plan, needs)[0])

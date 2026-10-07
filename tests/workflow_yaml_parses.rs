@@ -25,7 +25,10 @@ fn spinel_cache_download_failure_falls_back_without_hiding_build_failures() {
     let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let job = &workflow["jobs"]["build-spinel"];
-    assert_eq!(job["continue-on-error"].as_bool(), Some(true));
+    assert_eq!(
+        job["continue-on-error"].as_str(),
+        Some("${{ needs.plan.outputs.spinel-advisory == 'true' }}")
+    );
     let steps = job["steps"].as_sequence().unwrap();
     let step = |name: &str| {
         steps
@@ -1094,28 +1097,41 @@ fn pr_reuse_never_masks_validation_failures_or_changes_the_job_graph() {
             .as_str()
             .unwrap()
             .contains("scripts/ci-reuse.py probe"));
-        assert!(job.get("continue-on-error").is_none());
         let validation_ids: &[&str] = match name {
             "store-check" => {
+                assert!(job.get("continue-on-error").is_none());
                 assert_eq!(job["needs"][0].as_str(), Some("generate-fixture"));
                 assert_eq!(job["needs"][1].as_str(), Some("plan"));
                 &["build", "check"]
             }
             "writebook-inventory" => {
+                assert!(job.get("continue-on-error").is_none());
                 assert_eq!(job["needs"].as_str(), Some("plan"));
                 &["inventory", "report"]
             }
             "browser-smoke-typescript" => {
+                assert!(job.get("continue-on-error").is_none());
                 assert_eq!(job["needs"][0].as_str(), Some("generate-fixture"));
                 assert_eq!(job["needs"][1].as_str(), Some("plan"));
                 &["browser"]
             }
             "smoke" => {
+                assert!(job.get("continue-on-error").is_none());
                 assert_eq!(job["needs"][0].as_str(), Some("build-site"));
                 assert_eq!(
                     probe["if"].as_str(),
                     Some("github.event_name == 'pull_request' && matrix.target == 'rust'")
                 );
+                &["smoke"]
+            }
+            // Shares smoke steps (incl. rust reuse probe). Ledger-advisory at
+            // the job level when extras-advisory; focus makes it hard.
+            "smoke-extra" => {
+                assert_eq!(
+                    job["continue-on-error"].as_str(),
+                    Some("${{ needs.plan.outputs.extras-advisory == 'true' }}")
+                );
+                assert_eq!(job["needs"][0].as_str(), Some("build-site"));
                 &["smoke"]
             }
             _ => panic!("unaudited reuse job: {name}"),
@@ -1148,11 +1164,31 @@ fn pr_reuse_never_masks_validation_failures_or_changes_the_job_graph() {
         [
             "browser-smoke-typescript",
             "smoke",
+            "smoke-extra",
             "store-check",
             "writebook-inventory"
         ]
     );
     assert!(ci["on"].get("pull_request_target").is_none());
+    // Fork / first-time contributor PRs must use the same pull_request path.
+    // Org "Approve and run" is a GitHub setting, not workflow logic — see docs/ci.
+    let serialized = serde_yaml_ng::to_string(&ci).unwrap();
+    for needle in [
+        "pull_request_target",
+        "head.repo.full_name",
+        "head.repo.name",
+        "isFork",
+        "fork == false",
+        "fork == true",
+        ".fork ==",
+    ] {
+        assert!(
+            !serialized.contains(needle),
+            "CI must not gate on fork identity via {needle}"
+        );
+    }
+    assert!(ci["on"].get("pull_request").is_some());
+    assert_eq!(ci["permissions"]["contents"].as_str(), Some("read"));
 }
 
 #[test]

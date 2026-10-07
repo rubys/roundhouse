@@ -11,7 +11,7 @@
 //!
 //!     PATH=$HOME/git/spinel:$PATH cargo test --test framework_tests_spinel -- --ignored --nocapture
 //!
-//! Status: CI job is `continue-on-error: true` while spinel-side
+//! Status: CI job follows plan `spinel-advisory` continue-on-error while spinel-side
 //! gaps close. The `view_helpers` false-positive previously listed
 //! here (Article+ViewHelpersTest dual-class shape silently dropped
 //! the test class) is closed by issue #4 — `ingest_test_file` now
