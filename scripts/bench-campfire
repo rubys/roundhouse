@@ -10,7 +10,7 @@
 #
 # Usage:  scripts/bench-campfire [options] [LANE ...]
 #
-#   LANE ∈ { rails | ruby | roundsnap | spinel | rust | go | elixir |
+#   LANE ∈ { rails | ruby | roundsnap | spinel | tobi | rust | go | elixir |
 #            rails-1p | ruby-1p | roundsnap-1p | spinel-1p |
 #            jruby | truffleruby | rails-truffleruby |
 #            rails-nocache | rails-nocache-1p }
