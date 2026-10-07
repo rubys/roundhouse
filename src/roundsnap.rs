@@ -49,6 +49,12 @@ fn keep_as_source(path: &str) -> bool {
         || path.starts_with("vendor/")
         || path.starts_with("test/")
         || path.starts_with("e2e/")
+        // test_helper.rb require_relatives these after boot; they are not
+        // on the app boot closure, so without this they vanish and the
+        // Campfire suite cannot load. Keep as .rb (not ISeq) — small.
+        || path == "runtime/resolv.rb"
+        || path == "runtime/tcp_socket_stub.rb"
+        || path == "runtime/secure_random_stub.rb"
         || !path.ends_with(".rb")
 }
 
@@ -402,14 +408,29 @@ fn original_location(app: &App, label: &str, emit_path: &str) -> (String, i64) {
 }
 
 fn patch_config_ru(ru: &str) -> String {
-    // Ensure the loader is installed before require_relative main/cable.
-    // Avoid double-boot: thin boot.rb already ran boot!; config.ru only
-    // installs the require hook so subsequent requires resolve via iseq.
-    if ru.contains("roundsnap") || ru.contains("Roundsnap::Loader") {
+    // Puma loads config.ru, not thin boot.rb. Must boot! the ISeq units
+    // before require_relative main/cable — main's require_relative "boot"
+    // was stripped, so install-only leaves ActiveRecord undefined.
+    if ru.contains("Roundsnap::Loader") && ru.contains(".boot!") {
         return ru.to_string();
     }
     let inject = "require \"roundsnap\"\n\
-Roundsnap::Loader.install!(root: __dir__)\n\n";
+Roundsnap::Loader.install!(root: __dir__).boot!\n\n";
+    // Replace a prior install-only inject from an older emit.
+    let ru = if ru.contains("Roundsnap::Loader.install!(root: __dir__)\n")
+        && !ru.contains(".boot!")
+    {
+        ru.replacen(
+            "Roundsnap::Loader.install!(root: __dir__)\n",
+            "Roundsnap::Loader.install!(root: __dir__).boot!\n",
+            1,
+        )
+    } else {
+        ru.to_string()
+    };
+    if ru.contains("Roundsnap::Loader") {
+        return ru;
+    }
     if let Some(i) = ru.find("require \"rack\"\n") {
         let mut out = String::new();
         out.push_str(&ru[..i]);

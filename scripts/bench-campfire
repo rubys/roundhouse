@@ -10,13 +10,22 @@
 #
 # Usage:  scripts/bench-campfire [options] [LANE ...]
 #
-#   LANE ∈ { rails | ruby | spinel | rust | go | elixir |
-#            rails-1p | ruby-1p | spinel-1p |
+#   LANE ∈ { rails | ruby | roundsnap | spinel | rust | go | elixir |
+#            rails-1p | ruby-1p | roundsnap-1p | spinel-1p |
 #            jruby | truffleruby | rails-truffleruby |
 #            rails-nocache | rails-nocache-1p }
 #          (default: rails ruby spinel rails-1p ruby-1p spinel-1p
 #                    jruby truffleruby rails-truffleruby —
 #                     the nocache pair is a DIAGNOSTIC, ask for it by name)
+#
+#     roundsnap / roundsnap-1p
+#                    Roundhouse `--target ruby` with `ROUNDSNAP=1`: MRI
+#                    ISeq delivery (gems/roundsnap) instead of app .rb —
+#                    the Bootsnap analogue for the *emitted* tree. Same
+#                    Puma shape as `ruby` / `ruby-1p`. Not Bootsnap on
+#                    stock Rails. Three-way compare:
+#                      scripts/bench-campfire-roundsnap
+#                    → rails-1p · ruby-1p · roundsnap-1p.
 #
 #   THE DEPLOYED LANES — what each project would actually run on this box:
 #
@@ -325,7 +334,7 @@ while [[ $# -gt 0 ]]; do
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
         -h|--help)     sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
-        rails|rails-nocache|ruby|spinel|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
+        rails|rails-nocache|ruby|roundsnap|spinel|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|roundsnap-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -338,6 +347,7 @@ POST_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-post.lua"
 
 ORACLE="$REPO_ROOT/build/campfire-oracle"
 EMIT="$REPO_ROOT/build/transpiled-campfire-ruby"
+ROUNDSNAP_EMIT="$REPO_ROOT/build/transpiled-campfire-roundsnap"
 SP_EMIT="$REPO_ROOT/build/transpiled-campfire-spinel"
 JRUBY_EMIT="$REPO_ROOT/build/transpiled-campfire-jruby"
 # The managed heaps, pinned so the memory column is a working set and
@@ -659,6 +669,45 @@ drop_lane() {   # $1 = lane, $2 = stage, $3 = reason, $4 = log
 }
 wants_lane() { local _l; for _l in "${LANES[@]}"; do [[ "$_l" == "$1" ]] && return 0; done; return 1; }
 
+# Roundsnap lane: same app as `ruby`, ISeq delivery (ROUNDSNAP=1).
+if wants_lane roundsnap || wants_lane roundsnap-1p; then
+    if (( SKIP_PREPARE == 0 )) || [[ ! -f "$ROUNDSNAP_EMIT/manifest.json" ]]; then
+        step "transpiling campfire → $ROUNDSNAP_EMIT (ROUNDSNAP=1)"
+        if ! env ROUNDSNAP=1 ROUNDHOUSE_RUBY_ISEQ=1 \
+            cargo run --quiet --release --bin roundhouse -- --target ruby "$APP" \
+            -o "$ROUNDSNAP_EMIT" --allow-unsupported > "$LOG_DIR/emit-roundsnap.log" 2>&1; then
+            fail "roundsnap emit failed (see $LOG_DIR/emit-roundsnap.log) — dropping lanes"
+            drop_lane roundsnap build "the roundsnap emit failed" "$LOG_DIR/emit-roundsnap.log"
+            drop_lane roundsnap-1p build "the roundsnap emit failed" "$LOG_DIR/emit-roundsnap.log"
+        else
+            if [[ -f "$REPO_ROOT/scripts/campfire-roundsnap-stubs.rb" ]]; then
+                cp "$REPO_ROOT/scripts/campfire-roundsnap-stubs.rb" \
+                    "$ROUNDSNAP_EMIT/campfire-roundsnap-stubs.rb"
+                if ! grep -q 'campfire-roundsnap-stubs' "$ROUNDSNAP_EMIT/boot.rb" 2>/dev/null; then
+                    cat > "$ROUNDSNAP_EMIT/boot.rb" <<'RUBY'
+# frozen_string_literal: true
+require "roundsnap"
+loader = Roundsnap::Loader.install!(root: __dir__)
+loader.require("runtime/active_storage") if loader.resolve_key("runtime/active_storage")
+require_relative "campfire-roundsnap-stubs"
+loader.boot!
+RUBY
+                fi
+            fi
+            step "bundling the roundsnap emit"
+            if ! (cd "$ROUNDSNAP_EMIT" && bundle install >"$LOG_DIR/bundle-roundsnap.log" 2>&1); then
+                fail "roundsnap bundle failed — dropping lanes"
+                drop_lane roundsnap build "roundsnap bundle install failed" "$LOG_DIR/bundle-roundsnap.log"
+                drop_lane roundsnap-1p build "roundsnap bundle install failed" "$LOG_DIR/bundle-roundsnap.log"
+            else
+                step "building the roundsnap emit's assets"
+                (cd "$ROUNDSNAP_EMIT" && rake assets >/dev/null 2>&1) \
+                    || step "  (no assets task — continuing)"
+            fi
+        fi
+    fi
+fi
+
 # One Puma thread per hardware thread for the JVM lane: no GVL, no fork,
 # so one process is the whole box and threads past the cores only queue
 # (the ladder is in the header). The TruffleRuby lanes take --threads,
@@ -814,6 +863,7 @@ stage_sqlite() {
 stage_seeded_db() {
     [[ -f "$SEED_DB" ]] || die "no seeded production DB at $ORACLE"
     stage_sqlite "$EMIT/storage/development.sqlite3"
+    if [[ -d "$ROUNDSNAP_EMIT" ]]; then stage_sqlite "$ROUNDSNAP_EMIT/storage/development.sqlite3"; fi
     if [[ -d "$SP_EMIT" ]]; then stage_sqlite "$SP_EMIT/storage/development.sqlite3"; fi
     if [[ -d "$JRUBY_EMIT" ]]; then stage_sqlite "$JRUBY_EMIT/storage/development.sqlite3"; fi
     if wants_lane rust && [[ -d "$RUST_ROOT" ]]; then
@@ -898,7 +948,7 @@ start_lane() {
                 $nc1 > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
-        ruby|ruby-1p)
+        ruby|ruby-1p|roundsnap|roundsnap-1p)
             # RAILS_ENV=production, for the same reason the oracle serves it
             # (see campfire-oracle's header: development measured 11.4 req/s
             # against production's 141.1 — the SAME app, 12x apart). The emit
@@ -915,12 +965,19 @@ start_lane() {
             # jemalloc; this lane is Ruby too, and a memory column that
             # compared their allocator against ours would be measuring
             # malloc rather than runtimes.
+            #
+            # roundsnap / roundsnap-1p: same Puma shape, tree from
+            # ROUNDSNAP_EMIT (ISeq + thin boot) instead of EMIT (.rb).
             local jem; jem="$(find_jemalloc || true)"
             local w=1
-            [[ "$lane" == "ruby" ]] && w="$(deployed_worker_count)"
+            local tree="$EMIT"
+            [[ "$lane" == "ruby" || "$lane" == "roundsnap" ]] && w="$(deployed_worker_count)"
+            [[ "$lane" == roundsnap* ]] && tree="$ROUNDSNAP_EMIT"
             echo "jemalloc=${jem:-ABSENT}" > "$shape"
             echo "workers=$w" >> "$shape"
-            ( cd "$EMIT" && exec env RAILS_ENV=production RUBY_YJIT_ENABLE=1 \
+            echo "tree=$tree" >> "$shape"
+            [[ "$lane" == roundsnap* ]] && echo "delivery=roundsnap-iseq" >> "$shape"
+            ( cd "$tree" && exec env RAILS_ENV=production RUBY_YJIT_ENABLE=1 \
                 RAILS_MAX_THREADS="$THREADS" ${jem:+LD_PRELOAD="$jem"} \
                 bundle exec puma -p "$port" -w "$w" -t "$THREADS:$THREADS" \
                 config.ru ) > "$log" 2>&1 &
@@ -1081,7 +1138,7 @@ login_cookie() {
             scripts/campfire-oracle login --out "$ORACLE" --port "$port" --jar "$jar" >/dev/null \
                 || { fail "$lane sign-in failed"; return 1; }
             ;;
-        ruby|ruby-1p|spinel|spinel-1p|jruby|truffleruby|elixir)
+        ruby|ruby-1p|roundsnap|roundsnap-1p|spinel|spinel-1p|jruby|truffleruby|elixir)
             # The emitted tree verifies campfire's `protect_from_forgery
             # with: :exception` (09567dd7), so the token comes from the
             # lane's own form, under the session cookie that holds it.
@@ -1256,6 +1313,8 @@ for lane in "${LANES[@]}"; do
         rails-nocache-1p)    shape_note="1 worker x $THREADS threads, RENDERING (no fragment cache)" ;;
         rails|rails-nocache) shape_note="campfire's own worker formula x $THREADS threads, thruster, jemalloc, resque-pool" ;;
         ruby)                shape_note="$(deployed_worker_count) worker(s) x $THREADS threads, jemalloc" ;;
+        roundsnap)           shape_note="$(deployed_worker_count) worker(s) x $THREADS threads, jemalloc, Roundsnap ISeq" ;;
+        roundsnap-1p)        shape_note="1 worker x $THREADS threads, jemalloc, Roundsnap ISeq" ;;
         spinel)              shape_note="one process, workers autodetected" ;;
         spinel-1p)           shape_note="one process, SPINEL_WORKERS=1" ;;
         rust)                shape_note="once-campfire-rust, one process, own front server" ;;

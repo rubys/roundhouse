@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# scripts/bench-campfire-roundsnap — three-way Campfire compare:
+#
+#   rails-1p      stock once-campfire (one Puma worker)
+#   ruby-1p       Roundhouse `--target ruby` classic .rb emit
+#   roundsnap-1p  same emit with ROUNDSNAP=1 (MRI ISeq / gems/roundsnap)
+#
+# Thin wrapper around scripts/bench-campfire so the Roundsnap prototype
+# has a named, repeatable bench path — not a one-off manual trial.
+#
+# Usage:  scripts/bench-campfire-roundsnap [bench-campfire options...]
+#
+# Defaults lean short (smokeable on a cloud box). Override with the usual
+# flags (--duration, --warmup, --runs, --out, …).
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUT_DEFAULT="$REPO_ROOT/bench/results/campfire-roundsnap-$(date +%Y%m%d-%H%M%S)"
+
+exec "$REPO_ROOT/scripts/bench-campfire" \
+  --no-sockets \
+  --workers 1 \
+  --threads 5 \
+  --duration "${BENCH_DURATION:-15}" \
+  --warmup "${BENCH_WARMUP:-10}" \
+  --runs "${BENCH_RUNS:-1}" \
+  --out "${BENCH_OUT:-$OUT_DEFAULT}" \
+  "$@" \
+  rails-1p ruby-1p roundsnap-1p
