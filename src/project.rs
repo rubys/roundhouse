@@ -8750,9 +8750,14 @@ mod tests {
             "{view}"
         );
         let ruby = ruby_runtime_files(&app, fixture).expect("ruby tree");
+        // Whole-line markers only (docs like SPECIMEN.md may *mention*
+        // `#<SPINEL_SOURCE>` without emitting them into `.rb`).
         let marked: Vec<&str> = ruby
             .iter()
-            .filter(|(_, c)| c.contains("#<SPINEL_SOURCE>"))
+            .filter(|(p, c)| {
+                p.ends_with(".rb")
+                    && c.lines().any(|l| l.trim_start().starts_with("#<SPINEL_SOURCE>"))
+            })
             .map(|(p, _)| p.as_str())
             .collect();
         assert!(marked.is_empty(), "ruby tree carries spinel markers: {marked:?}");
