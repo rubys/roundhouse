@@ -571,9 +571,24 @@ module Db
   # Tests, scripts and the console never ask, and keep SQLite's default.
   CHECKPOINT_INTERVAL = 0.25
   CHECKPOINT_RESTART_FRAMES = 8192 # ~32 MB of 4 KB pages
+  # Cap failure noise: the loop keeps its 250 ms cadence (no Campfire-style
+  # backoff that slows copying), but a stuck disk / permission / corruption
+  # path must not stay completely silent either. One warn per interval.
+  CHECKPOINT_WARN_INTERVAL = 30.0
 
   def self.checkpoint_in_background!
     @checkpoint_wanted = true
+  end
+
+  # Rate-limited visibility for checkpoint_loop failures. Resets the
+  # suppress window only by time, not by success — a later success simply
+  # stops calling this. Safe to call from tests.
+  def self.warn_checkpoint_failure(error)
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    last = @checkpoint_warn_at
+    return if last && (now - last) < CHECKPOINT_WARN_INTERVAL
+    @checkpoint_warn_at = now
+    warn "[db] WAL checkpoint failed: #{error.class}: #{error.message}"
   end
 
   def self.prepare_for_checkpointer(conn)
@@ -666,9 +681,11 @@ module Db
             end
           end
         end
-      rescue StandardError
-        # A busy or failed checkpoint is retried on the next outer
-        # pass; the log only grows meanwhile.
+      rescue StandardError => error
+        # Retry on the next outer pass (same 250 ms cadence). Warn at
+        # most once per CHECKPOINT_WARN_INTERVAL so a persistent failure
+        # is visible without a multi-contender log storm.
+        warn_checkpoint_failure(error)
       ensure
         release_checkpoint_lock(lock)
       end

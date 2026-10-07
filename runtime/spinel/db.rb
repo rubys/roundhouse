@@ -1397,9 +1397,12 @@ module Db
   # (scaffold/main.rb): starts one thread with its own connection that
   # runs PASSIVE every CHECKPOINT_INTERVAL and RESTART (under the permit)
   # past CHECKPOINT_RESTART_FRAMES; each pooled connection turns its own
-  # automatic checkpoint off at its next lease. No fork on this lane, so
-  # unlike the CRuby shim it can start at boot. Only a database file has
-  # a WAL to checkpoint.
+  # automatic checkpoint off at its next lease. The measured Spinel lane
+  # is one process (WORKERS=1); with `--workers N` the parent starts this
+  # thread before prefork and children inherit `@checkpoint_wanted`
+  # without their own loop — do not paper over that with a flock (second
+  # home); default does not hit it. Only a database file has a WAL to
+  # checkpoint.
   def self.checkpoint_in_background!
     return nil if @checkpoint_wanted
     path = @db_path

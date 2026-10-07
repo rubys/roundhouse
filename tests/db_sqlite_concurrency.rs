@@ -294,6 +294,90 @@ check("background checkpoint copied the log (#{before} -> #{File.size(path)})",
     );
 }
 
+/// Persistent checkpoint failures must be visible, but not every 250 ms.
+/// Cap at CHECKPOINT_WARN_INTERVAL (honest visibility without a log storm).
+#[test]
+fn checkpoint_failure_warn_is_rate_limited() {
+    run(
+        "checkpoint_warn",
+        r#"
+require "stringio"
+Db.instance_variable_set(:@checkpoint_warn_at, nil)
+buf = StringIO.new
+real = $stderr
+$stderr = buf
+begin
+  Db.warn_checkpoint_failure(RuntimeError.new("first"))
+  Db.warn_checkpoint_failure(RuntimeError.new("second"))
+  Db.instance_variable_set(
+    :@checkpoint_warn_at,
+    Process.clock_gettime(Process::CLOCK_MONOTONIC) - Db::CHECKPOINT_WARN_INTERVAL - 1
+  )
+  Db.warn_checkpoint_failure(RuntimeError.new("third"))
+ensure
+  $stderr = real
+end
+out = buf.string
+check("first failure warned", out.include?("first"))
+check("second failure suppressed inside the interval", !out.include?("second"))
+check("third failure warned after the interval", out.include?("third"))
+check("warn names the checkpoint", out.include?("WAL checkpoint failed"))
+"#,
+    );
+}
+
+/// Kill the flock holder: a surviving process's checkpointer must take
+/// the lock and copy the WAL (leader election / takeover). The leader
+/// only holds the flock — same shape as a wedged sibling worker — while
+/// the survivor has already opted into background checkpoints and grown
+/// the log with `wal_autocheckpoint=0`.
+#[test]
+fn checkpoint_flock_takeover_after_leader_exit() {
+    run(
+        "checkpoint_takeover",
+        r#"
+Db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, b BLOB)")
+path = Db.instance_variable_get(:@path)
+lock_path = Db.checkpoint_lock_path(path)
+ready_r, ready_w = IO.pipe
+leader = fork do
+  ready_r.close
+  held = Db.try_checkpoint_lock(lock_path)
+  exit!(1) unless held.is_a?(File)
+  ready_w.write("1")
+  ready_w.close
+  sleep 60
+  exit!(0)
+end
+ready_w.close
+check("leader signalled ready", ready_r.read(1) == "1")
+ready_r.close
+
+baseline = File.size(path)
+Db.checkpoint_in_background!
+Db.with_connection do
+  st = Db.current_dbh.execute("PRAGMA wal_autocheckpoint")
+  check("survivor disabled autocheckpoint", st[0][0] == 0)
+  200.times { Db.exec("INSERT INTO t (b) VALUES (randomblob(4096))") }
+end
+# Leader still holds the flock: the survivor's loop is on :busy, so
+# PASSIVE cannot run and the main db file stays near baseline while
+# pages sit in the -wal file.
+check("db file not yet grown under foreign flock",
+      File.size(path) <= baseline + 50_000)
+
+Process.kill("KILL", leader)
+_pid, status = Process.wait2(leader)
+check("leader exited", status.signaled?)
+
+deadline = Time.now + 5
+sleep 0.05 while File.size(path) <= baseline + 400_000 && Time.now < deadline
+check("survivor checkpointer took over and copied (#{baseline} -> #{File.size(path)})",
+      File.size(path) > baseline + 400_000)
+"#,
+    );
+}
+
 /// The permit wait is bounded. A transaction that starts a writer
 /// thread and joins it would wait on itself forever; instead the
 /// writer stops queueing after the timeout and goes to SQLite, which
