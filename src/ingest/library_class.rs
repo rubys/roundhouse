@@ -2046,10 +2046,18 @@ fn library_mattr_claim(
                     };
                     match symbol_value(&assoc.key()).as_deref() {
                         Some("default") if default.is_none() => {
-                            // Strict: survey-mode nil substitution must not
-                            // become a claimed `@@attr = nil` default.
+                            // Strict top-level + nested survey recovery:
+                            // recursive `ingest_expr` can still substitute
+                            // nil under survey — reject if the collector grew.
+                            let before = super::survey::recorded().len();
                             match ingest_expr_strict(&assoc.value(), file) {
-                                Ok(expr) => default = Some(expr),
+                                Ok(expr)
+                                    if !super::survey::is_active()
+                                        || super::survey::recorded().len() == before =>
+                                {
+                                    default = Some(expr);
+                                }
+                                Ok(_) => unmodeled = true,
                                 Err(err) => {
                                     if super::survey::is_active() {
                                         super::survey::record(&err);
@@ -2080,8 +2088,15 @@ fn library_mattr_claim(
         let Some(body) = block_node.body() else {
             return Ok(LibraryMattrClaim::Unmodeled);
         };
+        let before = super::survey::recorded().len();
         match ingest_expr_strict(&body, file) {
-            Ok(expr) => default = Some(expr),
+            Ok(expr)
+                if !super::survey::is_active()
+                    || super::survey::recorded().len() == before =>
+            {
+                default = Some(expr);
+            }
+            Ok(_) => return Ok(LibraryMattrClaim::Unmodeled),
             Err(err) => {
                 if super::survey::is_active() {
                     super::survey::record(&err);

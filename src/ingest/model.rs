@@ -589,10 +589,19 @@ fn expand_mattr_cattr(
                     };
                     match symbol_value(&assoc.key()).as_deref() {
                         Some("default") if default.is_none() => {
-                            // Strict: survey-mode nil substitution must not
-                            // become a claimed `class_attr_defaults` seed.
+                            // Strict top-level + nested survey recovery:
+                            // `ingest_expr_strict` still recurses through
+                            // `ingest_expr`, which can substitute nil under
+                            // survey — reject if the collector grew.
+                            let before = super::survey::recorded().len();
                             match ingest_expr_strict(&assoc.value(), file) {
-                                Ok(expr) => default = Some(expr),
+                                Ok(expr)
+                                    if !super::survey::is_active()
+                                        || super::survey::recorded().len() == before =>
+                                {
+                                    default = Some(expr);
+                                }
+                                Ok(_) => unsupported = true,
                                 Err(err) => {
                                     if super::survey::is_active() {
                                         super::survey::record(&err);
@@ -619,8 +628,15 @@ fn expand_mattr_cattr(
         let Some(body) = block_node.body() else {
             return Ok(None);
         };
+        let before = super::survey::recorded().len();
         match ingest_expr_strict(&body, file) {
-            Ok(expr) => default = Some(expr),
+            Ok(expr)
+                if !super::survey::is_active()
+                    || super::survey::recorded().len() == before =>
+            {
+                default = Some(expr);
+            }
+            Ok(_) => return Ok(None),
             Err(err) => {
                 if super::survey::is_active() {
                     super::survey::record(&err);
