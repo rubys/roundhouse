@@ -668,9 +668,20 @@ module Db
   end
 
   def self.checkpoint_loop(path)
-    conn = SQLite3::Database.new(path)
-    conn.busy_handler_timeout = 100
     lock_path = checkpoint_lock_path(path)
+    # Open can fail (permissions, missing file mid-deploy). Do not let
+    # the thread die after prepare_for_checkpointer already set
+    # wal_autocheckpoint=0 — warn and retry on the same cadence.
+    conn = nil
+    until conn
+      begin
+        conn = SQLite3::Database.new(path)
+        conn.busy_handler_timeout = 100
+      rescue StandardError => error
+        warn_checkpoint_failure(error)
+        sleep CHECKPOINT_INTERVAL
+      end
+    end
     loop do
       # Hold the flock for the whole inner loop (Campfire #319), not
       # per tick: releasing every 250ms lets a sibling overlap a
@@ -681,6 +692,7 @@ module Db
         sleep CHECKPOINT_INTERVAL
         next
       end
+      held_error = nil
       begin
         loop do
           sleep CHECKPOINT_INTERVAL
@@ -697,13 +709,16 @@ module Db
           end
         end
       rescue StandardError => error
-        # Retry on the next outer pass (same 250 ms cadence). Warn at
-        # most once per CHECKPOINT_WARN_INTERVAL so a persistent failure
-        # is visible without a multi-contender log storm.
-        warn_checkpoint_failure(error)
+        held_error = error
       ensure
+        # Release before warn so a blocked $stderr cannot extend the
+        # exclusive flock and delay sibling takeover.
         release_checkpoint_lock(lock)
       end
+      # Retry on the next outer pass (same 250 ms cadence). Warn at
+      # most once per CHECKPOINT_WARN_INTERVAL so a persistent failure
+      # is visible without a multi-contender log storm.
+      warn_checkpoint_failure(held_error) if held_error
     end
   end
 
