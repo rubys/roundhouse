@@ -5338,14 +5338,38 @@ fn qualify_relative_includes(app: &mut App) {
     // app/controllers/concerns/authentication/session_lookup.rb.
     // Unqualified, the emitted `include SessionLookup` raises NameError
     // at load time (and nothing pulls the file into the require graph).
+    //
+    // Past the lexical scopes Ruby searches the class's ancestors before
+    // the top level: `class Child < Base::Entity` opening with
+    // `include(WithIds)` means `Base::Entity::WithIds`.
+    let parents: HashMap<String, crate::ident::ClassId> = app
+        .library_classes
+        .iter()
+        .filter_map(|lc| Some((lc.name.0.as_str().to_string(), lc.parent.clone()?)))
+        .collect();
+    let join = |path: &[crate::ident::Symbol]| path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
     for lc in &mut app.library_classes {
         let owner = lc.name.0.as_str().to_string();
         for inc in &mut lc.includes {
             let path: Vec<crate::ident::Symbol> =
                 inc.0.as_str().split("::").map(crate::ident::Symbol::from).collect();
             if let Some(qualified) = resolve(&owner, &path, &known) {
-                let joined = qualified.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-                *inc = crate::ident::ClassId(crate::ident::Symbol::from(joined));
+                *inc = crate::ident::ClassId(crate::ident::Symbol::from(join(&qualified)));
+                continue;
+            }
+            let mut class = owner.clone();
+            // A cycle guard on the superclass walk.
+            for _ in 0..32 {
+                let Some(parent) = parents.get(&class) else { break };
+                let written: Vec<crate::ident::Symbol> =
+                    parent.0.as_str().split("::").map(crate::ident::Symbol::from).collect();
+                let ancestor = resolve(&class, &written, &known).map(|p| join(&p)).unwrap_or_else(|| join(&written));
+                let candidate = crate::ident::ClassId(crate::ident::Symbol::from(format!("{ancestor}::{}", inc.0)));
+                if known.contains(&candidate) {
+                    *inc = candidate;
+                    break;
+                }
+                class = ancestor;
             }
         }
     }
