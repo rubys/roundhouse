@@ -2920,14 +2920,7 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
                     .and_then(|_| call.arguments())
                     .filter(|args| args.arguments().len() == 1)
                     .and_then(|args| symbol_or_string_value(&args.arguments().iter().next()?))
-                    // Shared DDL/DML currently emits bare table names.
-                    // Refuse names needing qualification or SQL quoting.
-                    .filter(|name| {
-                        let mut bytes = name.bytes();
-                        bytes.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-                            && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                            && !crate::naming::is_sqlite_keyword(name)
-                    });
+                    .filter(|name| bare_table_identifier(name));
                 self.writes.push(name.map(|name| (name, offset)));
             } else {
                 let name = node.as_call_and_write_node().map(|w| w.write_name())
@@ -2963,7 +2956,7 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
     };
     ruby_prism::Visit::visit(&mut collector, &body);
     if collector.writes.is_empty() {
-        Ok(None)
+        Ok(table_name_reader_override(&body))
     } else if collector.writes.len() == 1 && collector.writes[0].is_some() {
         Ok(collector.writes.pop().unwrap())
     } else {
@@ -2972,6 +2965,73 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
             message: "table_name binding requires one direct self.table_name assignment to a literal string or symbol naming a safe bare SQL identifier".into(),
         })
     }
+}
+
+/// Shared DDL/DML currently emits bare table names. Refuse names
+/// needing qualification or SQL quoting.
+fn bare_table_identifier(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && !crate::naming::is_sqlite_keyword(name)
+}
+
+/// The other way to name the table: a class-side reader answering one
+/// literal, `def self.table_name = "x"` or `class << self; def
+/// table_name; "x"; end; end` directly in the body (a
+/// `Catalog::Item::Detail`). Rails reads the table through that
+/// method, so it binds the schema row. The direct `def self.` form is
+/// consumed like the setter (lowering writes `def self.table_name` from
+/// `Model::table`); the `class << self` form stays, saying the same name.
+/// Any other shape, or more than one reader, keeps the convention.
+fn table_name_reader_override(body: &Node<'_>) -> Option<(String, usize)> {
+    fn literal_reader(def: &ruby_prism::DefNode<'_>) -> Option<String> {
+        if constant_id_str(&def.name()) != "table_name" || def.parameters().is_some() {
+            return None;
+        }
+        let body = def.body()?;
+        let value = match body.as_statements_node() {
+            Some(stmts) if stmts.body().len() == 1 => stmts.body().iter().next()?,
+            Some(_) => return None,
+            None => body,
+        };
+        symbol_or_string_value(&value).filter(|name| bare_table_identifier(name))
+    }
+    fn statements<'pr>(node: &Node<'pr>) -> Vec<Node<'pr>> {
+        match node.as_statements_node() {
+            Some(stmts) => stmts.body().iter().collect(),
+            None => vec![],
+        }
+    }
+    let mut found = Vec::new();
+    for stmt in statements(body) {
+        if let Some(def) = stmt.as_def_node() {
+            if def.receiver().is_some_and(|r| r.as_self_node().is_some()) {
+                if let Some(name) = literal_reader(&def) {
+                    found.push((name, stmt.location().start_offset()));
+                } else if constant_id_str(&def.name()) == "table_name" {
+                    return None;
+                }
+            }
+        } else if let Some(sclass) = stmt.as_singleton_class_node() {
+            if sclass.expression().as_self_node().is_none() {
+                continue;
+            }
+            for inner in sclass.body().map(|b| statements(&b)).unwrap_or_default() {
+                let Some(def) = inner.as_def_node() else { continue };
+                if def.receiver().is_some() {
+                    continue;
+                }
+                if let Some(name) = literal_reader(&def) {
+                    // Not a body statement: nothing is consumed.
+                    found.push((name, usize::MAX));
+                } else if constant_id_str(&def.name()) == "table_name" {
+                    return None;
+                }
+            }
+        }
+    }
+    (found.len() == 1).then(|| found.pop()).flatten()
 }
 
 pub(crate) fn dependent_from_sym(s: &str) -> Option<crate::dialect::Dependent> {
