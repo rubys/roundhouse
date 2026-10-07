@@ -569,9 +569,12 @@ fn constant_names_class(expr: &Expr, class: &ClassId) -> bool {
     let ExprNode::Const { path } = &*expr.node else {
         return false;
     };
+    // `::Shop::Refund` names `Shop::Refund`: the leading `::` is an empty
+    // first segment, not part of the name.
     let spelling = path
         .iter()
         .map(|p| p.as_str())
+        .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
         .join("::");
     class.0.as_str() == spelling || class.0.as_str().ends_with(&format!("::{spelling}"))

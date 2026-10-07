@@ -945,6 +945,10 @@ pub enum LibraryClassOrigin {
         owner: Symbol,
         members: Vec<Symbol>,
     },
+    /// A `Dry::Struct` class lowered into its readers and constructor
+    /// (`ingest::dry_struct`). Carried so a target can tell the coercions
+    /// it generated from the app's own code.
+    DryStruct,
 }
 
 /// A graphql-ruby object type (a class descending from

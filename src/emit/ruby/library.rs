@@ -7015,15 +7015,25 @@ fn require_path_for_body_const(
     // `Sound::Image` lives at app/models/sound/image.rb even though the
     // reference's first segment is `Sound`. Resolve the full path before
     // the self-reference short-circuit below.
+    let defined = |name: &str| {
+        app.models.iter().any(|m| m.name.0.as_str() == name)
+            || app.library_classes.iter().any(|lc| lc.name.0.as_str() == name)
+    };
+    // A value constant (`Shop::Types::LABEL`) lives in the file of the
+    // longest prefix that is a class or module (`Shop::Types`), which
+    // neither the whole path nor its first segment (`Shop`, a bare
+    // namespace) names.
     let joined = path.join("::");
-    if joined != self_name
-        && (app.models.iter().any(|m| m.name.0.as_str() == joined)
-            || app.library_classes.iter().any(|lc| lc.name.0.as_str() == joined))
-    {
+    let holder = (1..=path.len())
+        .rev()
+        .map(|n| path[..n].join("::"))
+        .find(|prefix| prefix.contains("::") && defined(prefix))
+        .unwrap_or_else(|| joined.clone());
+    if holder != self_name && defined(&holder) {
         // The file that DEFINES it, which for a nested class is its
         // parent's — and when that is the file being emitted, there is
         // nothing to require: the class is already in it.
-        let owner = file_owner(&joined, app);
+        let owner = file_owner(&holder, app);
         if owner == self_name {
             return None;
         }

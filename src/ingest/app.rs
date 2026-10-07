@@ -1741,6 +1741,9 @@ end
     if let Err(err) = super::alba::lower_alba_resources(&mut app, &sources) {
         survey::continue_or_fail(err)?;
     }
+    // `Dry::Struct` classes become plain readers and a constructor,
+    // before anything reads their methods.
+    super::dry_struct::lower_dry_structs(&mut app, &sources);
     // graphql-ruby object types: analyzer-only field methods, so
     // inference carries each type's record class down the schema.
     super::graphql_ruby::lower_graphql_types(&mut app);

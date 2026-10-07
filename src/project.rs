@@ -1277,6 +1277,64 @@ fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
     }
 }
 
+/// The date and decimal coercions `ingest::dry_struct` generates call
+/// stdlib the CRuby and JRuby trees load. Spinel's tree has its own
+/// `Date` (`runtime/spinel/date.rb`, ISO `parse` included) and
+/// `BigDecimal()`, but no `DateTime`, `Time.parse` or
+/// `BigDecimal.interpret_loosely`; the other targets have none of them.
+fn report_dry_struct_stdlib(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        use crate::expr::ExprNode;
+        let spinel = matches!(target, BuildTarget::Spinel);
+        let named = |path: &[crate::ident::Symbol]| -> Vec<String> {
+            path.iter().map(|p| p.as_str().to_string()).filter(|p| !p.is_empty()).collect()
+        };
+        let construct = match &*expr.node {
+            ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "parse" => match &*recv.node {
+                ExprNode::Const { path } if named(path) == ["Time"] => Some(("Time.parse", "Dry::Struct date coercion")),
+                _ => None,
+            },
+            ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "interpret_loosely" => match &*recv.node {
+                ExprNode::Const { path } if named(path) == ["BigDecimal"] => {
+                    Some(("BigDecimal.interpret_loosely", "Dry::Struct decimal coercion"))
+                }
+                _ => None,
+            },
+            ExprNode::Send { recv: None, method, .. } if method.as_str() == "BigDecimal" && !spinel => {
+                Some(("BigDecimal()", "Dry::Struct decimal coercion"))
+            }
+            ExprNode::Const { path } if named(path) == ["DateTime"] => Some(("DateTime", "Dry::Struct date coercion")),
+            ExprNode::Const { path } if named(path) == ["Date"] && !spinel => {
+                Some(("Date", "Dry::Struct date coercion"))
+            }
+            _ => None,
+        };
+        if let Some((what, construct)) = construct {
+            crate::emit::diagnostics::report_unsupported(
+                expr.span,
+                target.as_str(),
+                construct,
+                &format!("`{what}` has no runtime on this target"),
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    for lc in &app.library_classes {
+        if lc.origin == Some(crate::dialect::LibraryClassOrigin::DryStruct) {
+            for method in &lc.methods {
+                visit(&method.body, target);
+            }
+            // Shared defaults are class constants, evaluated at load.
+            for (_, value) in &lc.constants {
+                visit(value, target);
+            }
+        }
+    }
+}
+
 /// Report syntax whose runtime contract is currently native Ruby only.
 fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
@@ -1355,6 +1413,7 @@ pub fn target_files(
     report_unsupported_keys(app, target);
     report_sqlite_index_predicates(app, target);
     report_native_ruby_syntax(app, target);
+    report_dry_struct_stdlib(app, target);
     // Full forwarding currently has a native Ruby contract only. A
     // declaration must be gated even when its body never forwards.
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
