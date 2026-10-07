@@ -855,11 +855,18 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
     );
     assert!(deploy.get("continue-on-error").is_none());
     assert_eq!(deploy["permissions"]["pages"].as_str(), Some("write"));
+    let deploy_text = serde_yaml_ng::to_string(deploy).unwrap();
     assert!(
-        deploy["steps"][0]["run"]
-            .as_str()
-            .unwrap()
-            .contains("$VALIDATED_SHA")
+        !deploy_text.contains("VALIDATED_SHA"),
+        "tip-equality must not abort Pages after a successful assemble"
+    );
+    assert!(
+        !deploy_text.contains("Refuse to publish a superseded main snapshot"),
+        "main advancing mid-run must not starve github-pages"
+    );
+    assert_eq!(
+        deploy["steps"][0]["uses"].as_str(),
+        Some("actions/deploy-pages@v5")
     );
 }
 

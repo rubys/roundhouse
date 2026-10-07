@@ -122,12 +122,14 @@ without publication. The four-hour scheduled cycle on canonical
 publication. Manual publication is opt-in on canonical main.
 
 Pages requires the compact publication floor (Ruby plus any selected
-Rust/TypeScript lanes), verified same-run assembly, and a live-main SHA
-check before deployment. It does **not** require all extra/advisory lanes
-to pass. Failed archives may be useful repro downloads, not validated output.
-The published `ci/archive-results.json` reports archive presence and validation
-separately. Evidence applies to exact bytes: testing a TGZ does not certify its
-sibling ZIP/JSON. A commit racing the last main check is not atomic with deploy.
+Rust/TypeScript lanes) and verified same-run assembly before deployment.
+Main advancing while Full validation is still running does **not** abort
+publish: deploy ships that run's assembled artifact for its validated SHA.
+It does **not** require all extra/advisory lanes to pass. Failed archives may
+be useful repro downloads, not validated output. The published
+`ci/archive-results.json` reports archive presence and validation separately.
+Evidence applies to exact bytes: testing a TGZ does not certify its sibling
+ZIP/JSON.
 
 CLI binary releases are different: the tag-triggered cargo-dist
 [release workflow](../../.github/workflows/release.yml) creates GitHub Releases;
