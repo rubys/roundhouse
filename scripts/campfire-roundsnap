@@ -58,13 +58,6 @@ REUSE="$(abs_path "$REUSE")"
 step() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 fail() { printf '\n\033[1;31mFAIL\033[0m %s\n' "$*" >&2; }
 
-LOG_DIR="${ROUNDSNAP_LOG_DIR:-/opt/cursor/artifacts}"
-mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="$(mktemp -d -t roundsnap-logs.XXXXXX)"
-BOOT_LOG="$LOG_DIR/campfire-roundsnap-boot.log"
-EMIT_LOG="$LOG_DIR/campfire-roundsnap-emit.log"
-BUNDLE_LOG="$LOG_DIR/campfire-roundsnap-bundle.log"
-REPORT="$LOG_DIR/campfire-roundsnap-report.md"
-
 if [[ -n "$REUSE" ]]; then
   [[ -d "$REUSE" ]] || { fail "no emit at $REUSE"; exit 2; }
   OUT="$REUSE"
@@ -73,6 +66,20 @@ else
   [[ -d "$APP" ]] || { fail "no app at $APP (clone once-campfire first)"; exit 2; }
   [[ -z "$OUT" ]] && OUT="$(mktemp -d -t roundhouse-campfire-roundsnap.XXXXXX)"
 fi
+
+# Logs live under the emit (or ROUNDSNAP_LOG_DIR). Never default to a
+# vendor CI path like /opt/cursor/artifacts.
+if [[ -n "${ROUNDSNAP_LOG_DIR:-}" ]]; then
+  LOG_DIR="$ROUNDSNAP_LOG_DIR"
+  mkdir -p "$LOG_DIR"
+else
+  LOG_DIR="$OUT/.roundsnap-logs"
+  mkdir -p "$LOG_DIR"
+fi
+BOOT_LOG="$LOG_DIR/campfire-roundsnap-boot.log"
+EMIT_LOG="$LOG_DIR/campfire-roundsnap-emit.log"
+BUNDLE_LOG="$LOG_DIR/campfire-roundsnap-bundle.log"
+REPORT="$LOG_DIR/campfire-roundsnap-report.md"
 
 cleanup() {
   local code=$?

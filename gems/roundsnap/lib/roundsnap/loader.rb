@@ -181,11 +181,19 @@ module Roundsnap
         end
       end
 
+      # Gem lib root (`…/lib`), not a `/roundsnap/` substring — emit trees
+      # under `/tmp/campfire-roundsnap/` (or an app named roundsnap) must
+      # still count as outside callers for require_relative.
+      GEM_LIB = File.expand_path("..", __dir__).freeze
+
       def self.outside_gem_caller
+        prefix = GEM_LIB + File::SEPARATOR
         caller_locations(2, 32)&.find do |l|
-          path = l.path.to_s
-          !path.include?("/roundsnap/") &&
-            !path.end_with?("roundsnap.rb")
+          raw = l.absolute_path || l.path
+          next false if raw.nil? || raw.empty?
+
+          path = File.expand_path(raw)
+          !path.start_with?(prefix) && path != File.join(GEM_LIB, "roundsnap.rb")
         end
       end
     end

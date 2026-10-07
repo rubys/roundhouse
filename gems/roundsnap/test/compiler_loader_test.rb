@@ -212,4 +212,50 @@ class CompilerLoaderTest < Minitest::Test
     Roundsnap::Loader.install!(root: @dir).require("ok")
     assert OK
   end
+
+  def test_failed_compile_leaves_prior_iseq_intact
+    good = [
+      {
+        "key" => "keep",
+        "source" => "KEEP = true\n",
+        "file" => "keep.rb",
+        "first_lineno" => 1,
+      },
+    ]
+    Roundsnap::Compiler.compile!(units: good, out_dir: @dir)
+    prior = File.binread(File.join(@dir, "iseq/keep.iseq"))
+    prior_manifest = File.read(File.join(@dir, "manifest.json"))
+
+    bad = [
+      {
+        "key" => "keep",
+        "source" => "def broken(\n",
+        "file" => "keep.rb",
+        "first_lineno" => 1,
+      },
+    ]
+    assert_raises(SyntaxError) do
+      Roundsnap::Compiler.compile!(units: bad, out_dir: @dir)
+    end
+    assert_equal prior, File.binread(File.join(@dir, "iseq/keep.iseq"))
+    assert_equal prior_manifest, File.read(File.join(@dir, "manifest.json"))
+    refute File.exist?(File.join(@dir, ".iseq.staging-#{Process.pid}")),
+           "staging dir must not linger"
+  end
+
+  def test_outside_gem_caller_ignores_app_paths_named_roundsnap
+    # A frame under /tmp/campfire-roundsnap/ must count as OUTSIDE the gem.
+    app_path = "/tmp/campfire-roundsnap/app/models/thing.rb"
+    gem_lib = Roundsnap::Loader::RequireHook::GEM_LIB
+    gem_frame = File.join(gem_lib, "roundsnap", "loader.rb")
+    # Synthetic: expand_path of app path is not under gem_lib.
+    refute app_path.start_with?(gem_lib + File::SEPARATOR)
+    assert gem_frame.start_with?(gem_lib + File::SEPARATOR)
+    # Real caller from this test file (not under gem lib).
+    loc = Roundsnap::Loader::RequireHook.outside_gem_caller
+    assert loc, "expected a caller outside the gem"
+    path = File.expand_path(loc.absolute_path || loc.path)
+    refute path.start_with?(gem_lib + File::SEPARATOR),
+           "test file must not be treated as gem lib: #{path}"
+  end
 end

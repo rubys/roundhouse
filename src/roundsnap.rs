@@ -201,20 +201,16 @@ pub fn finalize(dest: &Path) -> Result<(), String> {
 }
 
 fn compiler_exe() -> Result<PathBuf, String> {
-    let candidates = [
-        PathBuf::from("gems/roundsnap/exe/roundsnap-compile"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("gems/roundsnap/exe/roundsnap-compile"),
-    ];
-    for c in &candidates {
-        if c.is_file() {
-            return Ok(c.clone());
-        }
+    // Same root as `vendor_gem` — never a CWD-relative checkout that
+    // could disagree with the vendored loader.
+    let exe = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("gems/roundsnap/exe/roundsnap-compile");
+    if exe.is_file() {
+        return Ok(exe);
     }
-    Err(
-        "roundsnap::finalize: gems/roundsnap/exe/roundsnap-compile not found \
-         (run from the roundhouse checkout)"
-            .to_string(),
-    )
+    Err(format!(
+        "roundsnap::finalize: {} not found",
+        exe.display()
+    ))
 }
 
 fn vendor_gem(by_path: &mut BTreeMap<String, String>) -> Result<(), String> {
@@ -504,6 +500,9 @@ require_relative 'app/views'
 
     #[test]
     fn enabled_reads_roundsnap_or_legacy_alias() {
+        // Cargo runs tests on parallel threads; serialize env mutation.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::remove_var("ROUNDSNAP");
             std::env::remove_var("ROUNDHOUSE_RUBY_ISEQ");

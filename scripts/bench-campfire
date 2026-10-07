@@ -1592,7 +1592,7 @@ for lane in "${LANES[@]}"; do
     # no such row, so every cold-start boot answered 302 to the login page
     # until it timed out (10-07, the first nightly with POST in the default
     # suite). The writes went to the POST route's room, not /rooms/1.
-    if (( wrote )); then
+    if [[ "${wrote:-0}" -eq 1 ]]; then
         step "restaging the seed after $lane writes"
         restore_seeded_db
     fi

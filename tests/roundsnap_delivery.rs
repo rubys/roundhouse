@@ -5,10 +5,15 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 
 use roundhouse::analyze::Analyzer;
 use roundhouse::ingest::app::ingest_app;
 use roundhouse::project::{self, BuildTarget};
+
+/// Cargo runs integration tests on parallel threads; serialize every
+/// `std::env::{set,remove}_var` in this binary.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn scratch_dir(name: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!("rh-roundsnap-{name}-{}", std::process::id()));
@@ -19,19 +24,21 @@ fn scratch_dir(name: &str) -> std::path::PathBuf {
     p
 }
 
-fn enable_roundsnap() {
-    // SAFETY: single-threaded test process before any parallel workers.
+fn enable_roundsnap() -> MutexGuard<'static, ()> {
+    let guard = ENV_LOCK.lock().unwrap();
+    // SAFETY: held under ENV_LOCK for the duration of the calling test.
     unsafe {
         std::env::set_var("ROUNDSNAP", "1");
         std::env::remove_var("ROUNDHOUSE_RUBY_ISEQ");
         std::env::remove_var("ROUNDSNAP_KEEP_SOURCE");
         std::env::remove_var("ROUNDHOUSE_ISEQ_KEEP_SOURCE");
     }
+    guard
 }
 
 #[test]
 fn tiny_blog_roundsnap_artifact_shape() {
-    enable_roundsnap();
+    let _env = enable_roundsnap();
 
     let fixture = Path::new("fixtures/tiny-blog");
     assert!(fixture.is_dir(), "fixtures/tiny-blog missing");
@@ -91,7 +98,7 @@ fn tiny_blog_roundsnap_artifact_shape() {
 #[test]
 #[ignore = "needs real-blog fixture + bundle; run with --ignored"]
 fn real_blog_roundsnap_boots_without_app_rb() {
-    enable_roundsnap();
+    let _env = enable_roundsnap();
 
     let fixture = roundhouse::fixtures::real_blog();
     let mut app = ingest_app(fixture).expect("ingest real-blog");
