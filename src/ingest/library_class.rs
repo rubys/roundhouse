@@ -3057,6 +3057,7 @@ const CONCERN_MODEL_MACROS: &[&str] = &[
     "generates_token_for",
     "has_one_attached",
     "has_rich_text",
+    "has_markdown",
     "has_secure_token",
     "has_secure_password",
     "has_json",

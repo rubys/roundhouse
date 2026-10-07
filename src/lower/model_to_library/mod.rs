@@ -741,6 +741,16 @@ fn report_unclaimed_unknowns(model: &Model) {
         {
             continue;
         }
+        // Bare `has_markdown :body` — claimed by lower::plain_text_attr
+        // (named plain-text association+storage). Option-carrying
+        // forms stay unclaimed.
+        if name == "has_markdown"
+            && crate::lower::plain_text_attr::plain_text_attrs(model)
+                .iter()
+                .any(|(span, _)| *span == expr.span)
+        {
+            continue;
+        }
         // 2-arg `attribute :name, :type` — claimed by
         // markers::push_attribute_api_methods (typed virtual
         // attributes). Other arities (default:-carrying) stay
@@ -928,6 +938,9 @@ pub fn writable_field_set(
     // Without this the permit filter drops it and campfire's composer
     // posts a message with no content.
     for (_span, attr) in crate::lower::rich_text::rich_text_attrs(model) {
+        writable.insert(attr);
+    }
+    for (_span, attr) in crate::lower::plain_text_attr::plain_text_attrs(model) {
         writable.insert(attr);
     }
     // `has_one_attached :avatar` synthesizes `avatar=` the same way, so
@@ -1145,6 +1158,9 @@ fn build_methods_with_finder_inputs(
     // before `push_user_methods` for the usual reason (a hand-written
     // method in the model body wins).
     crate::lower::rich_text::push_rich_text_methods(&mut methods, model);
+    // Named plain-text association (`has_markdown`) — same slot; the
+    // record's `content` column needs no coder override.
+    crate::lower::plain_text_attr::push_plain_text_methods(&mut methods, model);
     // `has_one_attached` — the attachment-EXISTENCE reader, over the
     // synthesized `ActiveStorage::Attachment` row. Same ordering
     // rationale as the macros above (a hand-written method wins).

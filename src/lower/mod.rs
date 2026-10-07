@@ -163,6 +163,7 @@ pub mod column_ops;
 pub mod signed_id;
 pub(crate) mod secure_token;
 pub mod rich_text;
+pub mod plain_text_attr;
 pub mod capture_inline;
 pub mod partial_qualify;
 pub mod time_current;

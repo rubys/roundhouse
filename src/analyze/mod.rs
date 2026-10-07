@@ -499,6 +499,8 @@ impl Analyzer {
             // `has_rich_text :body` generates the reader/predicate/
             // writer and the scoped has_one behind them.
             register_has_rich_text(model, &mut cls.instance_methods);
+            // Named plain-text association (`has_markdown`) — same surface.
+            register_plain_text_attr(model, &mut cls.instance_methods);
 
             // Named scopes resolve as relation-returning class methods, so
             // `Story.active` types and chains like `Story.active.recent`
@@ -563,6 +565,11 @@ impl Analyzer {
             // returning like any other scope; the bodies are synthesized
             // at the ruby emit seam.
             for name in crate::lower::rich_text::preload_scope_names(model) {
+                cls.class_methods
+                    .entry(name)
+                    .or_insert(Ty::Relation { of: model.name.clone() });
+            }
+            for name in crate::lower::plain_text_attr::preload_scope_names(model) {
                 cls.class_methods
                     .entry(name)
                     .or_insert(Ty::Relation { of: model.name.clone() });
@@ -7673,6 +7680,24 @@ fn register_has_rich_text(model: &crate::dialect::Model, methods: &mut HashMap<S
     for (_, attr) in rich_text::rich_text_attrs(model) {
         let a = attr.as_str();
         for name in [format!("rich_text_{a}"), format!("build_rich_text_{a}"), a.to_string()] {
+            methods.entry(Symbol::from(name)).or_insert(record.clone());
+        }
+        methods.entry(Symbol::from(format!("{a}?"))).or_insert(Ty::Bool);
+        methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::Untyped);
+    }
+}
+
+/// Register methods `has_markdown :name` generates — mirror of
+/// [`register_has_rich_text`] for the plain-text association lowerer.
+fn register_plain_text_attr(model: &crate::dialect::Model, methods: &mut HashMap<Symbol, Ty>) {
+    use crate::lower::plain_text_attr;
+    if plain_text_attr::is_record_model(model) {
+        return;
+    }
+    let record = Ty::Class { id: plain_text_attr::record_class(), args: vec![] };
+    for (_, attr) in plain_text_attr::plain_text_attrs(model) {
+        let a = attr.as_str();
+        for name in [format!("markdown_{a}"), format!("build_markdown_{a}"), a.to_string()] {
             methods.entry(Symbol::from(name)).or_insert(record.clone());
         }
         methods.entry(Symbol::from(format!("{a}?"))).or_insert(Ty::Bool);

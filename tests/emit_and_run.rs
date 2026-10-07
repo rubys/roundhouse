@@ -825,6 +825,73 @@ puts "action_text markdown storage passed"
         .assert_passes();
 }
 
+/// Named plain-text association (`has_markdown :body`): assign through
+/// the owner, autosave on save, reload scoped by owner/name. Abstract
+/// overlay — Writebook `Page#body` is extra fixture coverage only.
+#[test]
+fn named_plain_text_attr_assign_save_reload() {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "articles", force: :cascade do |t|
+    t.string "title"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+
+  create_table "action_text_markdowns", force: :cascade do |t|
+    t.text "content", default: "", null: false
+    t.string "name", null: false
+    t.bigint "record_id", null: false
+    t.string "record_type", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_markdown :body\nend\n",
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        )
+        .run_ruby(
+            r##"
+a = Article.new
+a.title = "Hello"
+a.body = "# Title\n\nParagraph"
+a.save!
+reloaded = Article.find(a.id)
+raise "body missing" unless reloaded.body
+raise "content lost: #{reloaded.body.content.inspect}" unless reloaded.body.content == "# Title\n\nParagraph"
+raise "name wrong: #{reloaded.body.name.inspect}" unless reloaded.body.name == "body"
+raise "record_type wrong: #{reloaded.body.record_type.inspect}" unless reloaded.body.record_type == "Article"
+raise "record_id wrong: #{reloaded.body.record_id.inspect}" unless reloaded.body.record_id == reloaded.id
+# Ordinary autosave includes blank content (unlike RichText blank suppression).
+b = Article.create!(title: "Empty")
+b.body = ""
+b.save!
+blank = Article.find(b.id)
+raise "blank content not saved: #{blank.body.content.inspect}" unless blank.body.content == ""
+raise "predicate false on blank row" unless blank.body?
+puts "named plain text attr assign/save/reload passed"
+"##,
+        )
+        .assert_passes();
+}
+
 /// Rails 7.2's query assertions and the notification they are built on,
 /// over the runtime's statement capture, with `connection.select_rows`
 /// answering Arrays: campfire's tests count queries, assert none match a

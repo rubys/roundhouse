@@ -1132,11 +1132,12 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) -> bo
 /// Lower demanded model and association chains to Relations, including
 /// scope-free apps; each body still has its own rewrite demand gate.
 pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
-    // `has_rich_text`'s two preload scopes, and `has_one_attached`'s
-    // one. Ahead of the `any_scopes` early return below, because an app
-    // can declare a rich-text attribute or an attachment and no `scope`
-    // at all — and these still have to exist or every call site
-    // chaining through them is a NoMethodError.
+    // `has_rich_text` / `has_markdown` preload scopes, and
+    // `has_one_attached`'s one. Ahead of the `any_scopes` early return
+    // below, because an app can declare a rich-text / plain-text
+    // attribute or an attachment and no `scope` at all — and these
+    // still have to exist or every call site chaining through them is
+    // a NoMethodError.
     // `attachable_sgid` for the models that mix in
     // `ActionText::Attachable` (campfire declares it one level down,
     // through `User::Mentionable`). Ruby-family only, like the
@@ -1145,6 +1146,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     for lc in lcs.iter_mut() {
         if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
             crate::lower::rich_text::push_preload_scope_methods(&mut lc.methods, model);
+            crate::lower::plain_text_attr::push_preload_scope_methods(&mut lc.methods, model);
             crate::lower::attached::push_preload_scope_methods(&mut lc.methods, model);
             crate::lower::attachable::push_attachable_sgid(&mut lc.methods, model, &attachable);
             crate::lower::broadcasts::push_to_gid_param(&mut lc.methods, model);
@@ -7566,6 +7568,9 @@ enum PreloadKind {
     /// `has_rich_text :<attr>`: one `IN` over `action_text_rich_texts`,
     /// installed through the owner's load-once setter.
     RichText { attr: String, owner: String },
+    /// `has_markdown :<attr>`: one `IN` over `action_text_markdowns`,
+    /// installed through the owner's load-once setter.
+    PlainText { attr: String, owner: String },
 }
 
 /// Select association shapes whose batch queries preserve the reader's filters,
@@ -7697,6 +7702,17 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
             out.push((
                 format!("rich_text_{}", attr.as_str()),
                 PreloadKind::RichText {
+                    attr: attr.as_str().to_string(),
+                    owner: model.name.0.as_str().to_string(),
+                },
+            ));
+        }
+    }
+    if model_exists(&crate::lower::plain_text_attr::record_class()) {
+        for (_span, attr) in crate::lower::plain_text_attr::plain_text_attrs(model) {
+            out.push((
+                format!("markdown_{}", attr.as_str()),
+                PreloadKind::PlainText {
                     attr: attr.as_str().to_string(),
                     owner: model.name.0.as_str().to_string(),
                 },
@@ -7919,6 +7935,31 @@ end
 "#
                 );
             }
+            PreloadKind::PlainText { attr, owner } => {
+                let _ = write!(
+                    src,
+                    r#"
+def self._preload_batch_{name}(records)
+  ids = []
+  records.each do |r|
+    ids << r.id
+  end
+  by_id = {{}}
+  loaded = []
+  if ids.length > 0
+    loaded = ActiveRecord::Relation.new(ActionText::Markdown).where(record_type: "{owner}", name: "{attr}", record_id: ids).to_a
+  end
+  loaded.each do |rec|
+    by_id[rec.record_id] = rec
+  end
+  records.each do |r|
+    r._preload_{name}(by_id[r.id])
+  end
+  loaded
+end
+"#
+                );
+            }
         }
     }
 
@@ -7937,6 +7978,7 @@ end
                 PreloadKind::HasOne { target, .. } => Some(target.as_str()),
                 PreloadKind::Through { target, .. } => Some(target.as_str()),
                 PreloadKind::RichText { .. } => Some("ActionText::RichText"),
+                PreloadKind::PlainText { .. } => Some("ActionText::Markdown"),
                 // `includes(logo_attachment: :blob)`: the blob is already
                 // in the row the loader fetched; there is no model to
                 // recurse into.

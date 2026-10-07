@@ -127,6 +127,14 @@ pub(crate) fn expand_model_macros(
             {
                 continue;
             }
+            // Bare `has_markdown :sym` is claimed by
+            // `lower::plain_text_attr` as Unknown DSL — same shape as
+            // `has_rich_text`. Skip concern `class_eval` expansion so
+            // the leftover `has_one`/`scope` forms do not fail-close
+            // the whole expansion into an ingest gap.
+            if crate::lower::plain_text_attr::claims_call(method, args) {
+                continue;
+            }
             let Some((origin, def)) = macro_provider(method, &macros, &origins, &hook_macros)
             else {
                 continue;

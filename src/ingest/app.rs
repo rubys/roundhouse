@@ -1772,11 +1772,12 @@ end
     // Last: needs every model's complete `enums` table, including the
     // columns an included concern declared.
     map_enum_labels(&mut app);
-    // Last of all: `has_rich_text` can arrive through a concern's
-    // `included do`, so the declaration scan has to run after the
-    // splices — and `ActionText::RichText` has to be in `app.models`
-    // before anything downstream enumerates models.
+    // Last of all: `has_rich_text` / `has_markdown` can arrive through a
+    // concern's `included do`, so the declaration scan has to run after
+    // the splices — and the ActionText record models have to be in
+    // `app.models` before anything downstream enumerates models.
     crate::lower::rich_text::synthesize_record_model(&mut app);
+    crate::lower::plain_text_attr::synthesize_record_model(&mut app);
     app.const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
     // Admission needs complete controller permit demand and model DSL,
     // including declarations contributed by either kind of Concern,

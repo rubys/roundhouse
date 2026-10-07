@@ -2762,7 +2762,10 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
     // the secure-password block above routes through its plaintext
     // writers. `Cast` to `Str` bridges the untyped attrs value for the
     // strict targets, whose writer signature takes a String.
-    for (_span, attr) in crate::lower::rich_text::rich_text_attrs(model) {
+    for (_span, attr) in crate::lower::rich_text::rich_text_attrs(model)
+        .into_iter()
+        .chain(crate::lower::plain_text_attr::plain_text_attrs(model))
+    {
         let lookup = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
@@ -3891,8 +3894,13 @@ fn synth_update_hash(
     // `has_secure_password`'s plaintext pair, `has_rich_text` attrs.
     // Each has a synthesized `<attr>=` writer; route through it, exactly
     // as `synth_initialize` routes the password and rich-text keys.
-    let rich_text: std::collections::BTreeSet<Symbol> =
-        crate::lower::rich_text::rich_text_attrs(model).into_iter().map(|(_s, a)| a).collect();
+    let rich_text: std::collections::BTreeSet<Symbol> = crate::lower::rich_text::rich_text_attrs(
+        model,
+    )
+    .into_iter()
+    .chain(crate::lower::plain_text_attr::plain_text_attrs(model))
+    .map(|(_s, a)| a)
+    .collect();
     let mut virtuals = super::writable_field_set(model, table);
     // Hand-written `def <field>=` in the model body. `writable_field_set`
     // deliberately leaves these out — its callers hold a field name and
