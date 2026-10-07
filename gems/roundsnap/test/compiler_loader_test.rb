@@ -51,8 +51,14 @@ class CompilerLoaderTest < Minitest::Test
 
     err = assert_raises(RuntimeError) { run_lib }
     frames = err.backtrace
-    assert frames.any? { |f| f.include?("app/views/greeting.html.erb") },
-           "expected original path in backtrace, got:\n#{frames.first(5).join("\n")}"
+    leaf = frames.find { |f| f.include?("app/views/greeting.html.erb") }
+    assert leaf, "expected original path in backtrace, got:\n#{frames.first(5).join("\n")}"
+    # first_lineno 12 → `def` on 12, `raise` on 13 (not iseq/leaf.iseq noise)
+    assert_match(%r{app/views/greeting\.html\.erb:13}, leaf, leaf)
+    assert frames.any? { |f| f.include?("app/models/thing.rb") },
+           "expected caller frame with original path, got:\n#{frames.first(5).join("\n")}"
+    refute frames.any? { |f| f.include?("iseq/") || f.end_with?(".iseq") },
+           "backtrace must not name iseq blob paths:\n#{frames.first(8).join("\n")}"
   end
 
   def test_file_constant_is_original_path

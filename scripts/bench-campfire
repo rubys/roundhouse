@@ -464,7 +464,37 @@ command -v wrk >/dev/null || die "wrk not on PATH"
 
 # Rails fragment-cache lanes need a live Redis (production.rb uses
 # redis_cache_store). Without it, rails-1p silently renders ~1s/page
-# instead of the warm ~5 ms fragment-read path the harness documents.
+# instead of the warm fragment-read path the harness documents. Match
+# campfire's Procfile: redis is the box service — start it here if the
+# binary is present and nothing answers yet (same URL the oracle uses).
+ensure_redis_for_rails_fragment_cache() {
+    local url="${REDIS_URL:-redis://127.0.0.1:6379/0}"
+    command -v redis-cli >/dev/null \
+        || die "redis-cli required for rails fragment-cache lanes (install redis-server)"
+    if redis-cli -u "$url" ping >/dev/null 2>&1; then
+        ok "Redis up for rails fragment-cache ($url → $(redis-cli -u "$url" ping))"
+        return 0
+    fi
+    command -v redis-server >/dev/null \
+        || die "Redis not answering ($url) and redis-server not on PATH — install redis-server for fair rails-1p"
+    step "starting redis-server for rails fragment-cache ($url)"
+    local conf=""
+    [[ -f "$ORACLE/config/redis.conf" ]] && conf="$ORACLE/config/redis.conf"
+    [[ -z "$conf" && -f "$APP/config/redis.conf" ]] && conf="$APP/config/redis.conf"
+    if [[ -n "$conf" ]]; then
+        redis-server "$conf" --daemonize yes
+    else
+        redis-server --daemonize yes --port 6379 --bind 127.0.0.1
+    fi
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        redis-cli -u "$url" ping >/dev/null 2>&1 && break
+        sleep 0.2
+    done
+    redis-cli -u "$url" ping >/dev/null 2>&1 \
+        || die "started redis-server but $url still not answering"
+    ok "Redis started for rails fragment-cache ($url → $(redis-cli -u "$url" ping))"
+}
 rails_needs_redis=0
 for _lane in "${LANES[@]}"; do
     case "$_lane" in
@@ -472,11 +502,7 @@ for _lane in "${LANES[@]}"; do
     esac
 done
 if (( rails_needs_redis )); then
-    command -v redis-cli >/dev/null \
-        || die "redis-cli required for rails fragment-cache lanes (apt install redis-server)"
-    redis-cli -u "${REDIS_URL:-redis://127.0.0.1:6379/0}" ping >/dev/null 2>&1 \
-        || die "Redis not answering (${REDIS_URL:-redis://127.0.0.1:6379/0}) — start redis-server for fair rails-1p (warm fragment cache ~5 ms)"
-    ok "Redis up for rails fragment-cache lanes ($(redis-cli -u "${REDIS_URL:-redis://127.0.0.1:6379/0}" ping))"
+    ensure_redis_for_rails_fragment_cache
 fi
 
 SERVER_PID=""
