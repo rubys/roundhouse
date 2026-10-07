@@ -19,6 +19,9 @@ module Rails
     def +: (String part) -> AppPath
     def to_s: () -> String
     def to_path: () -> String
+    def readlines: (?chomp: bool) -> Array[String]
+    def read: () -> String
+    def exist?: () -> bool
   end
 
   class Env
