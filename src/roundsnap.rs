@@ -85,7 +85,16 @@ pub fn prepare(app: &App, files: &mut Vec<(String, String)>) -> Result<(), Strin
             seeds.push(extra.to_string());
         }
     }
-    let ordered_keys = transitive_rb_closure(&seeds, &by_path);
+    let mut ordered_keys = transitive_rb_closure(&seeds, &by_path);
+    // Controllers (and other app/*) are often required at request time
+    // via Main.instantiate_controller, not from boot.rb. Without them in
+    // the manifest, Puma boots but every route LoadErrors on missing .rb.
+    for path in by_path.keys() {
+        if path.starts_with("app/") && path.ends_with(".rb") && !ordered_keys.iter().any(|k| k == path)
+        {
+            ordered_keys.push(path.clone());
+        }
+    }
     // Never compile classic boot.rb as a unit: on-disk boot.rb becomes
     // THIN_BOOT (Loader.boot!). Including the classic chain as unit
     // `boot` made main.rb's `require_relative "boot"` re-enter the full

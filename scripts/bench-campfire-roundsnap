@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# scripts/bench-campfire-roundsnap — three-way Campfire compare:
+# scripts/bench-campfire-roundsnap — Campfire YJIT matrix:
 #
-#   rails-1p      stock once-campfire (one Puma worker)
-#   ruby-1p       Roundhouse `--target ruby` classic .rb emit
-#   roundsnap-1p  same emit with ROUNDSNAP=1 (MRI ISeq / gems/roundsnap)
+#   rails-1p              stock once-campfire, YJIT on
+#   rails-1p-noyjit       stock once-campfire, YJIT off
+#   ruby-1p               Roundhouse classic .rb emit, YJIT on
+#   ruby-1p-noyjit        Roundhouse classic .rb emit, YJIT off
+#   roundsnap-1p          Roundhouse ROUNDSNAP=1 ISeq emit, YJIT on
+#   roundsnap-1p-noyjit   Roundhouse ROUNDSNAP=1 ISeq emit, YJIT off
 #
-# Thin wrapper around scripts/bench-campfire so the Roundsnap prototype
-# has a named, repeatable bench path — not a one-off manual trial.
+# Thin wrapper around scripts/bench-campfire. YJIT is toggled by lane
+# name (`*-noyjit` → RUBY_YJIT_ENABLE=0 / campfire-oracle --no-yjit).
 #
 # Usage:  scripts/bench-campfire-roundsnap [bench-campfire options...]
-#
-# Defaults lean short (smokeable on a cloud box). Override with the usual
-# flags (--duration, --warmup, --runs, --out, …).
 
 set -euo pipefail
 
@@ -25,6 +25,10 @@ exec "$REPO_ROOT/scripts/bench-campfire" \
   --duration "${BENCH_DURATION:-15}" \
   --warmup "${BENCH_WARMUP:-10}" \
   --runs "${BENCH_RUNS:-1}" \
+  --endpoint /rooms/1 \
+  --endpoint /rooms/1/messages \
   --out "${BENCH_OUT:-$OUT_DEFAULT}" \
   "$@" \
-  rails-1p ruby-1p roundsnap-1p
+  rails-1p rails-1p-noyjit \
+  ruby-1p ruby-1p-noyjit \
+  roundsnap-1p roundsnap-1p-noyjit

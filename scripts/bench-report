@@ -90,7 +90,7 @@ end
 
 # ── ordering / metadata ──────────────────────────────────────────────
 
-TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel spinel-1p spinel-fiber elixir typescript python tobi ruby ruby-1p roundsnap roundsnap-1p ruby-int jruby truffleruby rails rails-nocache rails-1p rails-int rails-jruby rails-truffleruby]
+TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel spinel-1p spinel-fiber elixir typescript python tobi ruby ruby-1p ruby-1p-noyjit roundsnap roundsnap-1p roundsnap-1p-noyjit ruby-int jruby truffleruby rails rails-nocache rails-1p rails-1p-noyjit rails-int rails-jruby rails-truffleruby]
 ENDPOINT_ORDER = %w[
   /articles /articles/1 /articles/new /articles.json /articles/1.json
   /rooms/1 /rooms/1/messages /users/me/sidebar /searches?q=coffee

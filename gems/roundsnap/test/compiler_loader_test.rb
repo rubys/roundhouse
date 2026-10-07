@@ -192,7 +192,6 @@ class CompilerLoaderTest < Minitest::Test
     assert_equal 1, CIRC_A
     assert_equal 1, CIRC_B
   end
-end
 
   def test_yjit_description_mismatch_is_tolerated
     units = [
@@ -213,3 +212,4 @@ end
     Roundsnap::Loader.install!(root: @dir).require("ok")
     assert OK
   end
+end
