@@ -24,7 +24,9 @@ pub(super) enum ThroughWriterJoin {
     /// matching the target class when that model is in the slice
     /// (survives `foreign_key:` overrides); a join model outside the
     /// slice falls back to the `<target>_id` convention.
-    Resolved(ClassId, Symbol, Symbol),
+    /// The fourth field is the through association's `as:` interface:
+    /// a polymorphic join row also carries `<as>_type` = the owner.
+    Resolved(ClassId, Symbol, Symbol, Option<Symbol>),
     /// The chain is nested — the join model reaches the target through
     /// ANOTHER association rather than a `belongs_to` (`Category
     /// has_many :stories, through: :tags` — Tag#stories itself goes
@@ -47,12 +49,15 @@ pub(super) fn through_writer_join(
     thr_name: &Symbol,
     target: &ClassId,
 ) -> ThroughWriterJoin {
-    let Some((join_class, owner_fk, thr_through)) = model.associations().find_map(|a| match a {
-        Association::HasMany { name: n, target: jt, foreign_key: jfk, through: jthru, .. }
-            if n == thr_name =>
-        {
-            Some((jt.clone(), jfk.clone(), jthru.clone()))
-        }
+    let Some((join_class, owner_fk, thr_through, thr_as)) = model.associations().find_map(|a| match a {
+        Association::HasMany {
+            name: n,
+            target: jt,
+            foreign_key: jfk,
+            through: jthru,
+            as_interface,
+            ..
+        } if n == thr_name => Some((jt.clone(), jfk.clone(), jthru.clone(), as_interface.clone())),
         _ => None,
     }) else {
         return ThroughWriterJoin::NoJoin;
@@ -62,18 +67,32 @@ pub(super) fn through_writer_join(
     if thr_through.is_some() {
         return ThroughWriterJoin::Nested(join_class);
     }
-    let Some(join_model) = models.iter().find(|m| m.name == join_class) else {
-        let src_fk =
-            Symbol::from(format!("{}_id", crate::naming::snake_case(target.0.as_str())));
-        return ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk);
+    // `class_name: "::Admin::Report::Rule"` keeps its leading
+    // `::` in the IR; the model's own name never has it. Compare the
+    // constant paths, not the spellings, or a top-level-anchored
+    // class_name misses its join model and falls to the convention.
+    let same = |a: &ClassId, b: &ClassId| {
+        a.0.as_str().trim_start_matches("::") == b.0.as_str().trim_start_matches("::")
+    };
+    let Some(join_model) = models.iter().find(|m| same(&m.name, &join_class)) else {
+        // Rails' source `belongs_to` defaults its key from the
+        // association name, which is unqualified: `condition_id` for
+        // `Admin::Report::Rule`, never a `::`-pathed name.
+        let src_fk = Symbol::from(format!(
+            "{}_id",
+            crate::naming::snake_case(crate::naming::demodulize(
+                target.0.as_str().trim_start_matches("::")
+            ))
+        ));
+        return ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as);
     };
     match join_model.associations().find_map(|a| match a {
-        Association::BelongsTo { target: t, foreign_key, .. } if t == target => {
+        Association::BelongsTo { target: t, foreign_key, .. } if same(t, target) => {
             Some(foreign_key.clone())
         }
         _ => None,
     }) {
-        Some(src_fk) => ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk),
+        Some(src_fk) => ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as),
         None => ThroughWriterJoin::Nested(join_class),
     }
 }
@@ -194,7 +213,7 @@ pub(super) fn push_association_methods(
                 if let Some(thr_name) = through {
                     let writer_name = Symbol::from(format!("{}=", name.as_str()));
                     match through_writer_join(model, models, thr_name, target) {
-                        ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk) => {
+                        ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as) => {
                             if !model_defines_instance_method(model, &writer_name)
                                 && !methods.iter().any(|m| {
                                     m.name == writer_name && m.receiver == MethodReceiver::Instance
@@ -207,6 +226,7 @@ pub(super) fn push_association_methods(
                                     &join_class,
                                     &owner_fk,
                                     &src_fk,
+                                    thr_as.as_ref(),
                                 ));
                                 super::markers::fold_into_or_push(
                                     methods,
@@ -1785,11 +1805,21 @@ fn synth_through_sync(
     join_class: &ClassId,
     owner_fk: &Symbol,
     src_fk: &Symbol,
+    owner_as: Option<&Symbol>,
 ) -> MethodDef {
     use crate::ident::VarId;
 
     let stale_ivar = Symbol::from(format!("{}_stale", name.as_str()));
     let id_ivar = || Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") });
+    // `as: :responder` on the through association: Rails scopes and
+    // writes the join rows by `responder_type` too (the owner's class
+    // name, as the has_many reader's own scope does).
+    let owner_type = || {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Str { value: owner.0.as_str().to_string() } },
+        )
+    };
     let send = |recv: Expr, method: &str, args: Vec<Expr>| {
         Expr::new(
             Span::synthetic(),
@@ -1812,7 +1842,16 @@ fn synth_through_sync(
             args: vec![Expr::new(
                 Span::synthetic(),
                 ExprNode::Hash {
-                    entries: vec![(lit_sym(owner_fk.clone()), id_ivar())],
+                    entries: {
+                        let mut e = vec![(lit_sym(owner_fk.clone()), id_ivar())];
+                        if let Some(intf) = owner_as {
+                            e.push((
+                                lit_sym(Symbol::from(format!("{intf}_type"))),
+                                owner_type(),
+                            ));
+                        }
+                        e
+                    },
                     kwargs: true,
                 },
             )],
@@ -1845,7 +1884,7 @@ fn synth_through_sync(
     //                    __join.<src_fk> = __target.id; __join.save }
     let target_var = Symbol::from("__target");
     let join_var = Symbol::from("__join");
-    let insert_body = seq(vec![
+    let mut insert_stmts = vec![
         Expr::new(
             Span::synthetic(),
             ExprNode::Assign {
@@ -1863,6 +1902,15 @@ fn synth_through_sync(
             },
         ),
         send(var_ref(join_var.clone()), &format!("{}=", owner_fk.as_str()), vec![id_ivar()]),
+    ];
+    if let Some(intf) = owner_as {
+        insert_stmts.push(send(
+            var_ref(join_var.clone()),
+            &format!("{intf}_type="),
+            vec![owner_type()],
+        ));
+    }
+    insert_stmts.extend([
         send(
             var_ref(join_var.clone()),
             &format!("{}=", src_fk.as_str()),
@@ -1870,6 +1918,7 @@ fn synth_through_sync(
         ),
         send(var_ref(join_var), "save", vec![]),
     ]);
+    let insert_body = seq(insert_stmts);
     let insert_block = Expr::new(
         Span::synthetic(),
         ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
