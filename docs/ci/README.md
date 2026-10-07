@@ -13,6 +13,7 @@ labels and changed paths; draft and ready PRs use the same policy:
 |---|---|
 | **Draft or ready**, no special label | Path-selected coverage on the Ruby floor |
 | **Draft or ready** + `ci:spinel` | Ruby floor plus the full Spinel suite; no other language SDKs |
+| **Draft or ready** + focus label(s) | Ruby floor plus **only** the selected extra-language lanes (see below) |
 | **Draft or ready** + `ci:full` | Full validation (all targets, WASM, Writebook, Spinel) |
 | **Push to canonical `main`** | Ruby floor plus the full Spinel suite; extra-language SDKs wait for the schedule |
 | **Scheduled / manual Full validation** | Full validation (the extra-language ledger and publication cycle) |
@@ -56,9 +57,33 @@ is not unknown input.
 See the run's **plan** job for its selected jobs and reasons.
 
 Changing draft status does not restart checks or change coverage. `ci:draft`
-has no effect. Stacked labels prefer the broader lane: `ci:full` > `ci:spinel`.
-Documentation-only PRs still receive checks; changes to the rendered user guide
-also select site/browser coverage.
+has no effect. Stacked labels prefer the broader lane:
+`ci:full` > focus extras (`ci:<lang>` / `ci:extras`) > `ci:spinel` > path
+ownership. Documentation-only PRs still receive checks; changes to the
+rendered user guide also select site/browser coverage.
+
+### Focus labels (narrow extra-language fix rounds)
+
+When Full validation (or a `ci:full` PR) shows red extra-language lanes,
+apply focus labels so fix rounds only queue the lanes under repair:
+
+| Label | Selects |
+|---|---|
+| `ci:crystal`, `ci:kotlin`, `ci:swift`, `ci:csharp`, `ci:go`, `ci:elixir`, `ci:python` | That language's `compare-extra` **and** `smoke` cells (plus `build-site` / archives / `archive-results` as the planner already wires for smoke) |
+| `ci:extras` | All seven of the above |
+
+**Narrow semantics:** with any focus label set and `ci:full` **not** set, the
+plan is the Ruby floor (`BASE`) plus only the selected extras. Other extras,
+WASM, full Spinel11, jruby, rust/typescript `compare`, and Writebook do **not**
+start — path ownership does not expand the plan while focus labels are active.
+`ci:full` still wins as the full ledger.
+
+**Flow:** Full red → set focus label(s) → fix rounds → remove focus labels →
+Full again. Do not treat a focus-green PR as multi-target support without a
+subsequent Full (or `ci:full`) pass.
+
+`ci:jruby` is not shipped; jruby stays on path ownership / `ci:full`. Existing
+`ci:spinel` remains the Spinel-only lane and is not part of `ci:extras`.
 
 Pushes to canonical `main` run the Ruby floor plus the full Spinel suite
 and cancel a superseded SHA on the same ref. They do **not** run Crystal,
@@ -68,12 +93,17 @@ the four-hour scheduled Full validation cycle, not a merge gate for later
 Ruby PRs. That schedule remains the extra-language ledger, publication
 path, and floating-pin catch-up.
 
-## Request full, Spinel, or fresh validation
+## Request full, Spinel, focus, or fresh validation
 
+- **Extra-language fix rounds:** apply one or more focus labels (`ci:swift`,
+  `ci:go`, …, or `ci:extras`) on a draft or ready PR. Runs the Ruby floor plus
+  only those `compare-extra` and `smoke` lanes. Prefer this over `ci:full`
+  when repairing a few red extras after Full validation.
 - **Spinel-focused CI:** apply `ci:spinel` on a draft or ready PR. Runs the
   Ruby floor plus every Spinel job; skips Crystal/Go/Swift/… SDKs, WASM, and
   Writebook. Prefer this over `ci:full` when only the native/Ruby-family lane
-  matters.
+  matters. Focus extras supersede `ci:spinel` when both are set without
+  `ci:full`.
 - **More coverage:** ask a maintainer to apply `ci:full` to a ready or draft PR. The
   label triggers a full run of the current PR merge tree and keeps full
   coverage on later pushes. A comment requesting it is not itself a trigger.

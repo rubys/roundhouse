@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Select coverage, not test results.
 
-Extra-language SDKs need a path owner, `ci:full`, or scheduled full
-validation. Unknown inputs keep the Ruby floor plus Spinel.
+Extra-language SDKs need a path owner, a focus label (`ci:<lang>` /
+`ci:extras`), `ci:full`, or scheduled full validation. Unknown inputs
+keep the Ruby floor plus Spinel (unless a focus label is already set).
 """
 
 import argparse
@@ -10,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+from collections import namedtuple
 from pathlib import Path
 
 TARGETS = [
@@ -24,6 +26,12 @@ TARGETS = [
     "python",
     "ruby",
     "jruby",
+]
+# compare-extra / smoke matrix cells for the seven emitted SDK langs.
+# Order matches TARGETS. Rust/TS ride the separate `compare` job; ruby /
+# jruby are the interpreted floor / compare-jruby lane.
+EXTRA_COMPARE_TARGETS = [
+    t for t in TARGETS if t not in {"rust", "typescript", "ruby", "jruby"}
 ]
 # PR floor: the Ruby shape plus Campfire. Extra languages, Rust/TS
 # compare, WASM, and Spinel are not in this list.
@@ -85,6 +93,70 @@ PROJECT_BUILDERS = {
     "spinel_files": "ruby-family",
     "spin_shape": "ruby-family",
 }
+
+# Coverage labels. Precedence when planning: ci:full (or CI_FULL) >
+# focus extras (ci:<lang> / ci:extras) > ci:spinel > path ownership.
+# Focus mode is NARROW: BASE + selected extras only; path ownership does
+# not expand the plan while any focus label is active.
+CI_FULL = "ci:full"
+CI_SPINEL = "ci:spinel"
+CI_EXTRAS = "ci:extras"
+CI_FOCUS_BY_LABEL = {f"ci:{t}": t for t in EXTRA_COMPARE_TARGETS}
+# Extension point — do NOT fold these into ci:extras / EXTRA_COMPARE_TARGETS.
+# A future `ci:jruby` would select compare-jruby + smoke jruby (+ archives).
+# Finer Spinel focus (beyond today's ci:spinel lane) would select a SPINEL11
+# subset. Ship labels only with select() + contract tests, not half-baked.
+CI_DEFERRED_FOCUS_LABELS = ("ci:jruby",)
+
+CoverageLabels = namedtuple("CoverageLabels", "full spinel_lane focus_extras")
+
+
+def parse_coverage_labels(names, *, env_full=False):
+    """Interpret PR/env coverage labels into a structured request.
+
+    `focus_extras` is an ordered tuple of EXTRA_COMPARE_TARGETS members.
+    Unknown `ci:*` names are ignored (including deferred focus labels).
+    """
+    labels = set(names)
+    full = bool(env_full) or CI_FULL in labels
+    focus = set()
+    if CI_EXTRAS in labels:
+        focus.update(EXTRA_COMPARE_TARGETS)
+    for label, target in CI_FOCUS_BY_LABEL.items():
+        if label in labels:
+            focus.add(target)
+    focus_extras = tuple(t for t in EXTRA_COMPARE_TARGETS if t in focus)
+    return CoverageLabels(
+        full=full,
+        spinel_lane=CI_SPINEL in labels,
+        focus_extras=focus_extras,
+    )
+
+
+def focus_lane(langs):
+    """Ruby floor plus compare-extra and smoke for the selected extras only.
+
+    Lane green means both matrix cells for each lang. build-site feeds smoke
+    archives; archive-results stays selected as REPORTING evidence (#578).
+    WASM, Spinel11, jruby, rust/ts compare, and Writebook stay off.
+    """
+    extra = [t for t in EXTRA_COMPARE_TARGETS if t in langs]
+    jobs = list(BASE)
+    if extra:
+        jobs.extend(["compare-extra", "build-site", "smoke", "archive-results"])
+    return finish(
+        jobs,
+        extra,
+        list(extra),
+        False,
+        False,
+        False,
+        [
+            "ci focus: BASE + "
+            + (", ".join(extra) if extra else "(none)")
+            + " (compare-extra and smoke); path ownership suppressed"
+        ],
+    )
 
 
 def native_coverage(path):
@@ -241,9 +313,15 @@ def select(
     *,
     full=False,
     spinel_lane=False,
+    focus_extras=(),
     publish=False,
     project_scope=None,
 ):
+    focus_extras = tuple(focus_extras or ())
+    # Focus labels narrow the plan before path ownership or ci:spinel.
+    # ci:full still falls through to the full ledger below.
+    if focus_extras and not full:
+        return focus_lane(focus_extras)
     if spinel_lane and not full:
         return finish(
             SPINEL_LANE,
@@ -362,11 +440,7 @@ def select(
     if spinel:
         jobs_selected.add("build-spinel")
     jobs = list(BASE)
-    extra = [
-        t
-        for t in TARGETS
-        if t in targets and t not in {"rust", "typescript", "ruby", "jruby"}
-    ]
+    extra = [t for t in EXTRA_COMPARE_TARGETS if t in targets]
     if "rust" in targets or "typescript" in targets:
         jobs.append("compare")
     if extra:
@@ -630,9 +704,13 @@ def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     event_name = os.environ["GITHUB_EVENT_NAME"]
     pr = event.get("pull_request", {})
-    labels = {label["name"] for label in pr.get("labels", [])}
-    full = os.environ.get("CI_FULL") == "true" or "ci:full" in labels
-    spinel_lane = "ci:spinel" in labels
+    coverage = parse_coverage_labels(
+        {label["name"] for label in pr.get("labels", [])},
+        env_full=os.environ.get("CI_FULL") == "true",
+    )
+    full = coverage.full
+    spinel_lane = coverage.spinel_lane
+    focus_extras = coverage.focus_extras
     if (
         event_name == "push"
         and os.environ.get("GITHUB_REF") == "refs/heads/main"
@@ -643,18 +721,24 @@ def main():
         spinel_lane = True
     reason = None
     try:
-        # project_scope only narrows path selection; spinel/full short-circuit
-        # before that, so skip the expensive project.rs body scan there.
+        # project_scope only narrows path selection; full / focus / spinel
+        # short-circuit before that, so skip the expensive project.rs body
+        # scan there.
         paths, project_scope = changed_inputs(
             event,
             event_name,
             os.environ["GITHUB_SHA"],
-            need_project_scope=not full and not spinel_lane,
+            need_project_scope=not full and not focus_extras and not spinel_lane,
         )
     except (KeyError, ValueError, UnicodeError, subprocess.CalledProcessError) as e:
         paths, project_scope = [], None
         if full:
             reason = f"Unknown changed inputs: {e}; running full validation"
+        elif focus_extras:
+            reason = (
+                f"Unknown changed inputs: {e}; "
+                "focus labels keep BASE+selected extras"
+            )
         else:
             spinel_lane = True
             reason = (
@@ -672,6 +756,7 @@ def main():
         paths,
         full=full,
         spinel_lane=spinel_lane,
+        focus_extras=focus_extras,
         publish=publish,
         project_scope=project_scope,
     )
