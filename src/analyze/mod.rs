@@ -1214,10 +1214,12 @@ impl Analyzer {
                 }
                 let missing: Vec<_> = args.iter().filter_map(|arg| {
                     let ExprNode::Const { path } = &*arg.node else { return None };
-                    let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-                    let id = ClassId(Symbol::from(name.as_str()));
+                    let id = mixin_path_id(path);
+                    let name = id.0.as_str().to_string();
+                    // `::A::B` is never a lexical neighbour.
+                    let rooted = path.first().is_some_and(|head| head.as_str().is_empty());
                     let known = self.classes.contains_key(&id)
-                        || body::lexical_class(&id, model.name.0.as_str(), &self.classes).is_some()
+                        || (!rooted && body::lexical_class(&id, model.name.0.as_str(), &self.classes).is_some())
                         || body::RUBY_TOP_LEVEL.contains(&name.as_str());
                     (!known).then_some(name)
                 }).collect();
@@ -7431,6 +7433,20 @@ fn class_ids_for_call_receiver(ty: &Ty) -> Vec<ClassId> {
     }
 }
 
+/// The module a mixin's constant path names. Ingest keeps `::A::B`'s
+/// root as an empty first segment (`["", "A", "B"]`); a mixin resolves
+/// it from the top level, so it is `A::B`. Joined whole it read as
+/// `::A::B`, which no registry entry carries: `include ::A::B` was
+/// refused as unresolved and its `ClassMethods` never reached the
+/// class side.
+pub(crate) fn mixin_path_id(path: &[Symbol]) -> ClassId {
+    let path = match path.split_first() {
+        Some((head, rest)) if head.as_str().is_empty() => rest,
+        _ => path,
+    };
+    ClassId(Symbol::from(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")))
+}
+
 /// The model-side twin of [`controller_includes`]: modules a model mixes
 /// in via top-level `include X` calls (round-tripped as `Unknown` body
 /// items).
@@ -7444,6 +7460,7 @@ pub(crate) fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
         }
         for arg in args {
             if let ExprNode::Const { path } = &*arg.node {
+                let id = mixin_path_id(path);
                 // Framework MARKER mixins — `ActiveModel::*`,
                 // `ActionView::Helpers::*` — drop here, in the single
                 // shared home feeding every MODEL's `lc.includes`,
@@ -7451,14 +7468,13 @@ pub(crate) fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
                 // intact. See `is_framework_marker_include` for what
                 // supplies each family instead; the library-class twin
                 // calls the same predicate from ingest's decl walk.
-                let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+                let segs: Vec<&str> = id.0.as_str().split("::").collect();
                 if crate::ingest::util::is_active_model_marker_include(&segs)
                     || crate::ingest::util::is_view_helper_marker_include(&segs)
                 {
                     continue;
                 }
-                let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-                out.push(ClassId(Symbol::from(joined)));
+                out.push(id);
             }
         }
     }
@@ -7666,9 +7682,7 @@ pub(crate) fn controller_include_groups(controller: &Controller) -> Vec<Vec<Clas
         let mut group = Vec::new();
         for arg in args {
             if let ExprNode::Const { path } = &*arg.node {
-                let joined =
-                    path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-                group.push(ClassId(Symbol::from(joined)));
+                group.push(mixin_path_id(path));
             }
         }
         if !group.is_empty() {
