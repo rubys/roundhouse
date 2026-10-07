@@ -269,6 +269,39 @@ check("child acquired after adopt closed inherited FD", status.exitstatus == 0)
     );
 }
 
+/// `before_worker_boot` calls `Db.configure`, which sets `@owner_pid` to
+/// the child and skips `adopt_after_fork`. Configure must still close an
+/// inherited checkpoint-lock FD without LOCK_UN and clear the parent's
+/// checkpointer pid.
+#[test]
+fn configure_closes_inherited_checkpoint_lock_after_fork() {
+    run(
+        "checkpoint_flock_configure",
+        r#"
+path = Db.instance_variable_get(:@path)
+lock_path = Db.checkpoint_lock_path(path)
+held = Db.try_checkpoint_lock(lock_path)
+check("parent acquired", held.is_a?(File))
+Db.instance_variable_set(:@checkpointer_pid, Process.pid)
+r, w = IO.pipe
+pid = fork do
+  w.close
+  r.read(1)
+  Db.configure(path, pool_size: 2)
+  check("checkpointer pid cleared", Db.instance_variable_get(:@checkpointer_pid).nil?)
+  got = Db.try_checkpoint_lock(lock_path)
+  exit(got.is_a?(File) ? 0 : 1)
+end
+r.close
+held.close
+w.write("x")
+w.close
+_pid, status = Process.wait2(pid)
+check("configure closed inherited FD so child acquired", status.exitstatus == 0)
+"#,
+    );
+}
+
 /// Once the server asks, serving connections stop checkpointing inside
 /// COMMIT and a background thread copies the log into the database
 /// file instead: the file grows without any request checkpointing.

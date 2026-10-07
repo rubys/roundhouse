@@ -98,6 +98,21 @@ module Db
     @cv        = ConditionVariable.new
     @quarantined = []
     @missing_connections = 0
+    # Puma `before_worker_boot` re-configure sets @owner_pid to the child
+    # and therefore skips `adopt_after_fork`. Drop any inherited
+    # checkpoint-lock FD without LOCK_UN (same rule as adopt) and forget
+    # the parent's checkpointer pid so the child's first lease starts a
+    # fresh loop. Normal master boot never holds the flock; this closes
+    # the gap if it ever did.
+    inherited = @checkpoint_lock_file
+    if inherited && !inherited.closed?
+      begin
+        inherited.close
+      rescue StandardError
+      end
+    end
+    @checkpoint_lock_file = nil
+    @checkpointer_pid = nil
     @pool      = open_pool
     @owner_pid = Process.pid
   end
