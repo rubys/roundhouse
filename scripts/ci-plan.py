@@ -346,6 +346,10 @@ def select(
     project_scope=None,
 ):
     focus_extras = tuple(focus_extras or ())
+    # Publication always requires full mode — reject before any narrow lane
+    # (focus / main Spinel) can silently drop publish=True.
+    if publish and not full:
+        raise ValueError("publication requires full validation mode")
     # Focus labels narrow the plan before path ownership or main-push Spinel.
     # ci:full still falls through to the full ledger below.
     if not full and (focus_extras or focus_jruby or focus_spinel):

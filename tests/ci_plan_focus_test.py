@@ -121,6 +121,14 @@ class FocusLabels(unittest.TestCase):
         self.assertNotIn("compare-extra", plan["required"])
         self.assertNotIn("smoke-extra", plan["required"])
 
+    def test_publish_requires_full_even_with_focus(self):
+        with self.assertRaisesRegex(ValueError, "publication requires full"):
+            ci.select([], focus_extras=("go",), publish=True)
+        with self.assertRaisesRegex(ValueError, "publication requires full"):
+            ci.select([], focus_spinel=True, publish=True)
+        with self.assertRaisesRegex(ValueError, "publication requires full"):
+            ci.select([], spinel_lane=True, publish=True)
+
     def test_path_extras_are_advisory_ledger(self):
         plan = ci.select(["src/emit/go.rs"])
         self.assertEqual(plan["extra_compare"], ["go"])
