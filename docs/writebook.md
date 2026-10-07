@@ -76,14 +76,17 @@ Writebook pin, or relaxing error, gap, emission or corpus checks.
    helpers against an emitted Ruby database, including parent/filter selection,
    ordering, self-exclusion and private dispatch. This proves those helpers,
    not Positionable's complete locking/rebalancing behavior or native Writebook.
-3. **Markdown declarations and runtime.** `has_markdown` remains unsupported.
-   Its statically known `class_eval` template could be parsed without executing
-   application Ruby, but allowing that would amend the boundary in
-   [issue #30](https://github.com/rubys/roundhouse/issues/30). First establish
-   association scoping by owner/name, build/assign/save/reload behavior,
-   inverse/autosave/destruction semantics and load-hook installation. Expanding
-   only its methods would not make the declaration work. Markdown rendering,
-   attachments and unmodeled gems remain separate obligations.
+3. **Markdown declarations and runtime.** Bare `has_markdown :name` is claimed
+   as a first-class named plain-text association (`lower::plain_text_attr`),
+   the same shape as `has_rich_text`: scoped `markdown_<name>` storage on
+   `ActionText::Markdown`, reader/predicate/writer through `.content`, ordinary
+   autosave (including blanks), dependent destroy, and preload scopes. Proven
+   with abstract `emit_and_run` overlays — not by expanding the concern's
+   interpolatable `class_eval` / leftover `has_one` template (generic string
+   eval stays unsupported per [issue #30](https://github.com/rubys/roundhouse/issues/30)).
+   Option-carrying forms (`strict_loading:`), concern-body residue on the
+   HasMarkdown installer, `#body` through `Relation[Leaf|Edit]`, Markdown
+   rendering, attachments and unmodeled gems remain separate obligations.
 4. **Original tests.** Run Writebook's own tests against the Ruby output,
    starting with positioning and Page behavior. Record total tests and named
    failures; ratchet passing tests upward. Add negative authorization tests

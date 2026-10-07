@@ -833,8 +833,8 @@
     "Error|send_dispatch_failed|app/controllers/concerns/set_book_leaf.rb:27:7|no known method `constantize` on String": 1,
     "Error|send_dispatch_failed|app/controllers/leafables_controller.rb:70:7|no known method `broadcast_render_later_to` on Turbo::StreamsChannel": 1,
     "Error|send_dispatch_failed|app/views/leafables/show.html.erb:21:60|no known method `body` on Relation[Leaf]": 1,
+    "Error|send_dispatch_failed|app/views/leaves/_header.html.erb:12:19|no known method `title` on Page | Section | Picture | nil": 1,
     "Error|send_dispatch_failed|app/views/leaves/_leaf.html.erb:27:28|no known method `html_preview` on Relation[Leaf]": 1,
-    "Error|send_dispatch_failed|app/views/leaves/_leaf.html.erb:56:24|no known method `content` on String?": 1,
     "Error|send_dispatch_failed|app/views/pages/edits/show.html.erb:54:28|no known method `body` on Relation[Edit]": 1,
     "Error|send_dispatch_failed|app/views/pages/edits/show.html.erb:65:26|no known method `body` on Relation[Leaf]": 1,
     "Error|unsupported|<synthetic>|include not supported (all targets): MarkdownRenderer includes unresolved Rouge::Plugins::Redcarpet": 1,
@@ -856,9 +856,6 @@
     "Error|unsupported|lib/rails_ext/action_text_has_markdown.rb:31:10|ActiveRecord::Base not supported (all targets): reflect_on_association lacks a shared runtime/lowering implementation": 1,
     "Error|unsupported|lib/rails_ext/action_text_has_markdown.rb:6:46|ActiveRecord::Base not supported (all targets): strict_loading_by_default lacks a shared runtime/lowering implementation": 1,
     "Info|ivar_unresolved|app/views/layouts/application.html.erb:43:32|@layout_class has no known type — likely roundhouse coverage, not an app error (ingest gap in app/controllers/users_controller.rb: controller class-body macro not recognized: `require_unauthenticated_access`)": 1,
-    "Info|send_dispatch_failed|app/views/leaves/_header.html.erb:12:19|no known method `title` on Page | Section | Picture | nil — likely roundhouse coverage, not an app error (ingest gap in app/models/page.rb: model macro `has_markdown` not expanded: requires distinct parameterless definitions, symbol bindings and named visibili)": 1,
-    "Info|unresolved_type|app/models/page.rb:25:5|method call `body` has unresolved type — likely roundhouse coverage, not an app error (ingest gap in app/models/page.rb: model macro `has_markdown` not expanded: requires distinct parameterless definitions, symbol bindings and named visibili)": 1,
-    "Info|unresolved_type|app/models/page.rb:39:7|method call `body` has unresolved type — likely roundhouse coverage, not an app error (ingest gap in app/models/page.rb: model macro `has_markdown` not expanded: requires distinct parameterless definitions, symbol bindings and named visibili)": 1,
     "Warning|gradual_untyped|<synthetic>|method call resolves to RBS `untyped` (gradual escape)": 1,
     "Warning|gradual_untyped|app/controllers/action_text/markdown/uploads_controller.rb:22:8|expression resolves to RBS `untyped` (gradual escape)": 1,
     "Warning|gradual_untyped|app/controllers/action_text/markdown/uploads_controller.rb:22:8|ivar read resolves to RBS `untyped` (gradual escape)": 1,
@@ -1104,7 +1101,6 @@
     "app/helpers/arrangement_helper.rb|anonymous `**` keyword forwarding not yet supported": 1,
     "app/helpers/books_helper.rb|anonymous `**` keyword forwarding not yet supported": 1,
     "app/helpers/leaves_helper.rb|anonymous `**` keyword forwarding not yet supported": 3,
-    "app/models/page.rb|model macro `has_markdown` not expanded: requires distinct parameterless definitions, symbol bindings and named visibility on those definitions": 1,
     "app/views/books/show.md.erb|view template not ingested: erb (non-html format)": 1,
     "app/views/leafables/show.md.erb|view template not ingested: erb (non-html format)": 1,
     "lib/rails_ext/action_text_markdown.rb|`ActiveSupport.on_load(:active_storage_attachment)` reopens `ActionText::Markdown`, which is not carried: a reopen of a framework class inside a load hook is dropped (the tolerant-sgid `ActionText::Attachment.from_node` shape is the one read)": 1,
@@ -1225,8 +1221,7 @@
       "Warning|lower_residue|lib/rails_ext/action_text_markdown.rb:38:3|`included` in the body of `ActionText::Markdown::Uploads` is not modelled and is dropped; only a class extending a base roundhouse does NOT model (a gem's, whose DSL is the class) replays its class body verbatim": 1,
       "Warning|lower_residue|lib/rails_ext/active_storage_sluggable.rb:2:3|`extend` in the body of `ActiveStorage::Sluggable` is not modelled and is dropped; only a class extending a base roundhouse does NOT model (a gem's, whose DSL is the class) replays its class body verbatim": 1,
       "Warning|lower_residue|lib/rails_ext/active_storage_sluggable.rb:4:3|`included` in the body of `ActiveStorage::Sluggable` is not modelled and is dropped; only a class extending a base roundhouse does NOT model (a gem's, whose DSL is the class) replays its class body verbatim": 1,
-      "Warning|unsupported|app/models/leaf.rb:8:3|delegate not supported (all targets): model DSL call on `Leaf` not lowered": 1,
-      "Warning|unsupported|app/models/page.rb:9:3|has_markdown not supported (all targets): model DSL call on `Page` not lowered": 1
+      "Warning|unsupported|app/models/leaf.rb:8:3|delegate not supported (all targets): model DSL call on `Leaf` not lowered": 1
     },
     "spinel": {
       "Error|unsupported|app/helpers/arrangement_helper.rb:2:7|keyword rest declaration not supported (spinel): native Ruby forwarding is preserved; this target's argument/block carrier is not verified": 1,
@@ -1286,8 +1281,7 @@
       "Warning|lower_residue|lib/rails_ext/action_text_markdown.rb:38:3|`included` in the body of `ActionText::Markdown::Uploads` is not modelled and is dropped; only a class extending a base roundhouse does NOT model (a gem's, whose DSL is the class) replays its class body verbatim": 1,
       "Warning|lower_residue|lib/rails_ext/active_storage_sluggable.rb:2:3|`extend` in the body of `ActiveStorage::Sluggable` is not modelled and is dropped; only a class extending a base roundhouse does NOT model (a gem's, whose DSL is the class) replays its class body verbatim": 1,
       "Warning|lower_residue|lib/rails_ext/active_storage_sluggable.rb:4:3|`included` in the body of `ActiveStorage::Sluggable` is not modelled and is dropped; only a class extending a base roundhouse does NOT model (a gem's, whose DSL is the class) replays its class body verbatim": 1,
-      "Warning|unsupported|app/models/leaf.rb:8:3|delegate not supported (all targets): model DSL call on `Leaf` not lowered": 1,
-      "Warning|unsupported|app/models/page.rb:9:3|has_markdown not supported (all targets): model DSL call on `Page` not lowered": 1
+      "Warning|unsupported|app/models/leaf.rb:8:3|delegate not supported (all targets): model DSL call on `Leaf` not lowered": 1
     }
   }
 }
