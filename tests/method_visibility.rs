@@ -413,6 +413,38 @@ fn nonpublic_model_accessors_are_not_silently_accepted_without_method_metadata()
     }
 }
 
+/// A model aliases a private def under `private` with `alias_method`. The
+/// alias is a copy of the def with the original's visibility, as Ruby gives it:
+/// `T.private_instance_methods(false)` is `[:hidden, :hidden_too]`, the
+/// public ones `[:shown, :shown_too]`.
+#[test]
+fn a_model_alias_method_of_a_local_def_copies_it_with_the_originals_visibility() {
+    let source = "class Thing < ApplicationRecord\n def shown; 1; end\n private\n def hidden; 2; end\n alias_method :hidden_too, :hidden\n alias_method :shown_too, :shown\nend";
+    let methods = methods(source, true);
+    for (name, want) in [
+        ("hidden", MethodVisibility::Private),
+        ("hidden_too", MethodVisibility::Private),
+        ("shown", MethodVisibility::Public),
+        ("shown_too", MethodVisibility::Public),
+    ] {
+        assert_eq!(visibility(&methods, name, MethodReceiver::Instance), want, "{name}");
+    }
+    let copy = methods.iter().find(|m| m.name.as_str() == "hidden_too").unwrap();
+    let original = methods.iter().find(|m| m.name.as_str() == "hidden").unwrap();
+    assert_eq!(copy.body, original.body);
+}
+
+/// Ruby's alias of a def that calls `super` reaches the original name's
+/// super method; a renamed copy would reach its own, so it is not made.
+#[test]
+fn a_model_alias_method_of_a_super_calling_def_is_not_copied() {
+    let source = "class Thing < ApplicationRecord\n private\n def save; super; end\n alias_method :store, :save\nend";
+    assert!(
+        ingest_model(source.as_bytes(), "thing.rb", &Schema::default(), &Default::default()).is_err(),
+        "{source}"
+    );
+}
+
 #[test]
 fn a_custom_definition_can_unambiguously_override_an_accessor() {
     let source =

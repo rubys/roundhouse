@@ -270,6 +270,25 @@ pub(super) fn ingest_model_with_enum_constants(
             // place; `ingest_model_body_item` returns a single item and
             // can't. Library classes get the same treatment one level
             // down, in `walk_decl_body`.
+            //
+            // `alias_method :to, :from` of an instance method this body
+            // already defined copies that def, as the library walk does
+            // (`library_class::alias_source`), and the copy takes the
+            // visibility Ruby gives the alias: the original's
+            // (`Visibility`'s walk). Not one whose body calls `super`:
+            // Ruby's alias reaches the original name's super method and a
+            // renamed copy would reach its own. Anything else stays an
+            // unknown item.
+            if let Some(mut copy) = stmt.as_call_node().and_then(|call| model_alias_method_copy(&call, &body)) {
+                visibility.apply(&statement, &mut copy);
+                body.push(ModelBodyItem::Method {
+                    method: copy,
+                    leading_comments: leading,
+                    leading_blank_line: leading_blank,
+                });
+                prev_end = Some(stmt.location().end_offset());
+                continue;
+            }
             if let Some(alias) = stmt.as_alias_method_node() {
                 let to = super::library_class::alias_keyword_name(&alias.new_name());
                 let from = super::library_class::alias_keyword_name(&alias.old_name());
@@ -454,6 +473,37 @@ pub(super) fn ingest_model_with_enum_constants(
             end: class_loc.end_offset() as u32,
         },
     }))
+}
+
+/// `alias_method :to, :from` (literal names) of the last instance def of
+/// `from` already in `body`, renamed `to`. None when the def calls
+/// `super`.
+fn model_alias_method_copy(call: &ruby_prism::CallNode<'_>, body: &[ModelBodyItem]) -> Option<crate::dialect::MethodDef> {
+    fn calls_super(expr: &Expr) -> bool {
+        let mut found = matches!(&*expr.node, ExprNode::Super { .. });
+        expr.node.for_each_child(&mut |child| found = found || calls_super(child));
+        found
+    }
+    if call.receiver().is_some() || call.block().is_some() || constant_id_str(&call.name()) != "alias_method" {
+        return None;
+    }
+    let args: Vec<_> = call.arguments()?.arguments().iter().collect();
+    let [to, from] = args.as_slice() else { return None };
+    let (to, from) = (symbol_value(to)?, symbol_value(from)?);
+    let source = body.iter().rev().find_map(|item| match item {
+        ModelBodyItem::Method { method, .. }
+            if method.name.as_str() == from && method.receiver == crate::dialect::MethodReceiver::Instance =>
+        {
+            Some(method)
+        }
+        _ => None,
+    })?;
+    if calls_super(&source.body) {
+        return None;
+    }
+    let mut copy = source.clone();
+    copy.name = Symbol::from(to.as_str());
+    Some(copy)
 }
 
 /// Classify one class-body statement into its `ModelBodyItem` variant.
