@@ -162,8 +162,7 @@ pub(super) fn ingest_model_with_enum_constants(
     // must ingest as `Admin::Report` (the compound `class Admin::Report`
     // spelling already carries its path). Falls back to the scopeless
     // finder for shapes the scoped walk doesn't cover.
-    let (scope, class) = match super::util::find_all_classes_with_scope(&root).into_iter().next()
-    {
+    let (scope, class) = match super::util::primary_class_with_scope(&root) {
         Some((s, c)) => (s, Some(c)),
         None => (Vec::new(), find_first_class(&root)),
     };

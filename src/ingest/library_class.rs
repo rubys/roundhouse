@@ -3215,7 +3215,7 @@ impl ModelBases {
 pub fn has_active_record_base(source: &[u8], bases: &ModelBases) -> bool {
     let result = parse(source);
     let root = result.node();
-    let Some((scope, class)) = find_all_classes_with_scope(&root).into_iter().next() else {
+    let Some((scope, class)) = super::util::primary_class_with_scope(&root) else {
         return false;
     };
     class
@@ -3227,7 +3227,7 @@ pub fn has_active_record_base(source: &[u8], bases: &ModelBases) -> bool {
 pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKind> {
     let result = parse(source);
     let root = result.node();
-    let Some((scope, class)) = find_all_classes_with_scope(&root).into_iter().next() else {
+    let Some((scope, class)) = super::util::primary_class_with_scope(&root) else {
         // No class node. A bare top-level module under app/models/
         // (`module InactiveUser; def self.x; …; end`) is a namespace of
         // singleton methods, not a model — classify it as a library

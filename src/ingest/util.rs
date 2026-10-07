@@ -148,6 +148,38 @@ pub(super) fn find_all_classes_with_scope<'pr>(
         .collect()
 }
 
+/// The class a file declares, past namespace wrappers. A file such as
+/// `module Catalog; class Item; class Detail < ApplicationRecord …
+/// end; end; end` reopens `Item` only to nest the model. Taking the first
+/// class read it as a reopening of `Item` and left
+/// `Catalog::Item::Detail` a plain nested class with no table. A
+/// class with no superclass whose body holds nothing but class and module
+/// declarations is such a wrapper; its first nested class is meant.
+pub(super) fn primary_class_with_scope<'pr>(
+    node: &Node<'pr>,
+) -> Option<(Vec<String>, ruby_prism::ClassNode<'pr>)> {
+    let mut classes = find_all_classes_with_scope(node).into_iter();
+    let mut primary = classes.next()?;
+    while is_namespace_wrapper(&primary.1) {
+        let inside = primary.1.location();
+        match classes.next() {
+            Some(next) if next.1.location().start_offset() < inside.end_offset() => primary = next,
+            _ => break,
+        }
+    }
+    Some(primary)
+}
+
+fn is_namespace_wrapper(class: &ruby_prism::ClassNode<'_>) -> bool {
+    if class.superclass().is_some() {
+        return false;
+    }
+    let Some(body) = class.body() else { return false };
+    let stmts = flatten_statements(body);
+    stmts.iter().any(|stmt| stmt.as_class_node().is_some())
+        && stmts.iter().all(|stmt| stmt.as_class_node().is_some() || stmt.as_module_node().is_some())
+}
+
 /// `find_all_classes_with_scope`, plus each class's lexical nesting at
 /// its `class` keyword — what `Module.nesting` reports there: the
 /// qualified names of the enclosing `module`/`class` bodies, innermost
