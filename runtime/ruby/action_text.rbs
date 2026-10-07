@@ -128,6 +128,7 @@ module ActionText
     def to_s: () -> String
     def rendered_html: () -> String
     def render_attachments: () -> String
+    def render_action_text_content: () -> String
     def self.render_attachment: (ActionText::Attachment attachment) -> String
     def self.content_type_attachable: (ActionText::Attachment attachment) -> untyped
     def self.attachment_plain_text: (ActionText::Attachment attachment) -> String
@@ -169,10 +170,13 @@ module ActionText
     def self.allowed_attributes: () -> Array[String]
     def self.app_allowed_attributes: () -> Array[String]
     def self.sanitizer: () -> ActionText::SafeListSanitizer
+    def self.allowed_tags: () -> Array[String]
+    def self.sanitize_action_text_content: (String html) -> String
   end
 
   class SafeListSanitizer
     def self.allowed_attributes: () -> Array[String]
+    def self.allowed_tags: () -> Array[String]
     def sanitize: (String html, tags: Array[String], attributes: Array[String]) -> String
   end
 end

@@ -2958,7 +2958,7 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     // emit wrote `…boxes.</div>` without it.
     let layout = format!(
         "{HEAD}    def rendered_html\n      \
-         Views::Layouts::ActionText::Contents.content(render_attachments + \"\\n\")\n    end\n{TAIL}"
+         Views::Layouts::ActionText::Contents.content(render_action_text_content + \"\\n\")\n    end\n{TAIL}"
     );
 
     // Two kinds of arm, in the order campfire's own `from_node` reopen
@@ -8334,7 +8334,7 @@ mod tests {
         // the layout yields.
         assert!(
             out.contains(
-                "    def rendered_html\n      Views::Layouts::ActionText::Contents.content(render_attachments + \"\\n\")\n    end\n"
+                "    def rendered_html\n      Views::Layouts::ActionText::Contents.content(render_action_text_content + \"\\n\")\n    end\n"
             ),
             "generated dispatch not written:\n{out}"
         );
