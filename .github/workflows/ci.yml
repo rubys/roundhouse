@@ -1904,6 +1904,62 @@ jobs:
           path: /tmp/campfire-suite/summary.json
           if-no-files-found: warn
 
+  # campfire-roundsnap: ROUNDSNAP=1 emit of once-campfire + thin boot smoke
+  # (scripts/campfire-roundsnap). Selected by ci:roundsnap focus, roundsnap
+  # path ownership, or ci:full — not part of the default Ruby floor.
+  campfire-roundsnap:
+    name: campfire-roundsnap (ISeq boot)
+    needs: [build-roundhouse, plan]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-roundsnap') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - name: Stage shared debug roundhouse binary
+        run: |
+          set -euo pipefail
+          chmod +x roundhouse-debug-bin/roundhouse
+          test -x roundhouse-debug-bin/roundhouse
+          test -f roundhouse-debug-bin/identity.txt
+          echo "=== producer identity ==="
+          cat roundhouse-debug-bin/identity.txt
+          echo "=== consumer probe ==="
+          ./roundhouse-debug-bin/roundhouse --version
+          grep -q "source_sha=${GITHUB_SHA}" roundhouse-debug-bin/identity.txt
+          grep -q 'profile=debug' roundhouse-debug-bin/identity.txt
+          echo "ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse" >> "$GITHUB_ENV"
+          echo "ROUNDHOUSE_BIN_TRACE=1" >> "$GITHUB_ENV"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.MRI_RUBY }}
+      - name: System libvips for ruby-vips at boot
+        timeout-minutes: 8
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42
+      - name: Fetch pinned once-campfire
+        timeout-minutes: 5
+        run: |
+          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
+          mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+      - name: scripts/campfire-roundsnap
+        env:
+          ROUNDSNAP_LOG_DIR: ${{ runner.temp }}/roundsnap-logs
+        run: |
+          mkdir -p "$ROUNDSNAP_LOG_DIR"
+          scripts/campfire-roundsnap --keep --out "${{ runner.temp }}/campfire-roundsnap" /tmp/campfire
+      - name: Upload roundsnap boot report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: campfire-roundsnap-report
+          path: ${{ runner.temp }}/roundsnap-logs
+          if-no-files-found: warn
+          retention-days: 7
+
   # -------------------------------------------------------------------
   # (toolchain-ruby retired by the smoke consolidation: smoke-ruby's
   # README § Test runs the same five driver suites from the published
@@ -3653,7 +3709,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, writebook-inventory, spinel-build, spinel-framework, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, campfire-roundsnap, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, writebook-inventory, spinel-build, spinel-framework, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, archive-results, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

@@ -72,9 +72,9 @@ See the run's **plan** job for its selected jobs and reasons.
 Changing draft status does not restart checks or change coverage. `ci:draft`
 has no effect. Stacked labels prefer the broader lane:
 `ci:full` > any focus labels (`ci:<lang>` / `ci:extras` / `ci:jruby` /
-`ci:spinel`, unioned on `BASE`) > path ownership. Documentation-only PRs
-still receive checks; changes to the rendered user guide also select
-site/browser coverage.
+`ci:spinel` / `ci:roundsnap`, unioned on `BASE`) > path ownership.
+Documentation-only PRs still receive checks; changes to the rendered user
+guide also select site/browser coverage.
 
 ### Focus labels (narrow fix rounds)
 
@@ -88,6 +88,7 @@ so fix rounds only queue the lanes under repair — and those lanes are
 | `ci:extras` | All seven of the above |
 | `ci:jruby` | `compare-jruby` + floor `smoke` jruby (+ site/archives) |
 | `ci:spinel` | CORE Spinel (`spinel-build`, `spinel-toolchain`, `spinel-compare`) + `spinel-framework` (+ site/archives). Not the heavy Campfire Spinel suite (`campfire-spinel-*`); not folded into `ci:extras`. |
+| `ci:roundsnap` | `campfire-roundsnap` (ROUNDSNAP=1 Campfire emit + thin boot via `scripts/campfire-roundsnap`). Skips Spinel11 / extras / WASM / Writebook. Path ownership for `gems/roundsnap/`, `src/roundsnap.rs`, the campfire-roundsnap scripts, and `tests/roundsnap_delivery.rs` also selects that job without forcing focus. |
 
 **Narrow semantics:** with any focus label set and `ci:full` **not** set, the
 plan is the Ruby floor (`BASE`) plus only the selected focus lanes. Path
@@ -144,6 +145,10 @@ path, and floating-pin catch-up.
   WASM, Writebook, and the heavy Campfire Spinel suite. Prefer this over
   `ci:full` when only the native/Ruby-family lane matters. Multiple focus
   labels union on `BASE`.
+- **Roundsnap-focused CI:** apply `ci:roundsnap` on a draft or ready PR. Runs
+  the Ruby floor plus `campfire-roundsnap` (ISeq emit + boot smoke) as
+  **required**; skips Spinel11, extras, WASM, and Writebook. Prefer this when
+  iterating on `gems/roundsnap` / `src/roundsnap.rs` without a full Spinel ledger.
 - **More coverage:** ask a maintainer to apply `ci:full` to a ready or draft PR. The
   label triggers a full run of the current PR merge tree and keeps full
   coverage on later pushes. Extra-language lanes stay advisory on Full so the

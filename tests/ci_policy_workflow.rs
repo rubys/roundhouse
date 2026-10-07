@@ -252,7 +252,7 @@ fn shared_debug_compiler_is_selected_and_built_without_waiting_for_tests() {
 fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    for job_name in ["campfire-compare", "campfire-conformance"] {
+    for job_name in ["campfire-compare", "campfire-conformance", "campfire-roundsnap"] {
         let job = &ci["jobs"][job_name];
         assert_eq!(job["needs"][0].as_str(), Some("build-roundhouse"));
         assert_eq!(job["needs"][1].as_str(), Some("plan"));
