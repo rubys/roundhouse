@@ -4056,6 +4056,36 @@ fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App, form: Mixin
     }
 }
 
+/// `app/route_helpers.rb` is generated from the app's named routes, so
+/// a tree whose source carries no `config/routes.rb` (an engine, a
+/// gem's test app) gets no file. Code that names a route helper still
+/// requires `app/route_helpers` at LOAD time, so the tree did not boot
+/// (`cannot load such file -- app/route_helpers`, from a controller).
+/// The module is emitted empty instead: the tree loads, and a call to a
+/// helper raises NoMethodError naming it, as Rails does for a route that
+/// is not declared.
+fn apply_route_helpers_demand(files: &mut Vec<(String, String)>) {
+    const PATH: &str = "app/route_helpers.rb";
+    if files.iter().any(|(p, _)| p == PATH) {
+        return;
+    }
+    let named = files
+        .iter()
+        .any(|(p, c)| p.ends_with(".rb") && !p.starts_with("runtime/") && c.contains("RouteHelpers"));
+    if !named {
+        return;
+    }
+    files.push((
+        PATH.to_string(),
+        "# The source app declares no named routes (its config/routes.rb is\n\
+         # not in this tree), so no route helper is generated. Code that\n\
+         # names one loads; calling it raises NoMethodError, naming it.\n\
+         module RouteHelpers\n\
+         end\n"
+            .to_string(),
+    ));
+}
+
 fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
     use std::fmt::Write;
 
@@ -5557,6 +5587,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_attachable_locate(&mut files, app);
     apply_views_aggregator(&mut files);
     apply_models_aggregator(&mut files);
+    apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,
