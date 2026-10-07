@@ -310,7 +310,7 @@ def archive_and_campfire_jobs(path, interpreter_only):
     campfire_archive = (
         path.startswith(
             (
-                "scripts/campfire-archive-build",
+                "scripts/build-campfire-archive",
                 "scripts/campfire-archive",
                 "e2e/campfire/",
             )

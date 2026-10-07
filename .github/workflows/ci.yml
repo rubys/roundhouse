@@ -2709,7 +2709,7 @@ jobs:
   # first time it is compiled and browser-driven on Linux.
   #
   # Where the blog archives come out of `roundhouse --site`, this one is
-  # built by scripts/campfire-archive-build, for two reasons the script's
+  # built by scripts/build-campfire-archive, for two reasons the script's
   # header states: `--site` is one-fixture-many-targets, and its archive
   # writer is text-only — campfire's hundred binary assets (mp3, png,
   # webp, gif) cannot be represented as `(String, String)` at all. The
@@ -2768,7 +2768,7 @@ jobs:
           mkdir -p /tmp/campfire
           tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Build campfire/spinel.tgz + campfire/docker.tgz
-        run: scripts/campfire-archive-build --out _site /tmp/campfire
+        run: scripts/build-campfire-archive --out _site /tmp/campfire
       - name: Record archive producer evidence
         if: always()
         env:

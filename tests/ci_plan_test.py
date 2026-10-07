@@ -752,7 +752,7 @@ class Routing(unittest.TestCase):
         )
         self.assertEqual(
             ci.select(["scripts/campfire-docker-files"])["jobs"],
-            ci.select(["scripts/campfire-archive-build"])["jobs"],
+            ci.select(["scripts/build-campfire-archive"])["jobs"],
         )
         self.assertNotIn(
             "campfire-spinel-compare",
