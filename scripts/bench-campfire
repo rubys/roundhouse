@@ -462,6 +462,23 @@ die()  { fail "$*"; exit 1; }
 
 command -v wrk >/dev/null || die "wrk not on PATH"
 
+# Rails fragment-cache lanes need a live Redis (production.rb uses
+# redis_cache_store). Without it, rails-1p silently renders ~1s/page
+# instead of the warm ~5 ms fragment-read path the harness documents.
+rails_needs_redis=0
+for _lane in "${LANES[@]}"; do
+    case "$_lane" in
+        rails|rails-1p|rails-1p-noyjit|rails-truffleruby) rails_needs_redis=1 ;;
+    esac
+done
+if (( rails_needs_redis )); then
+    command -v redis-cli >/dev/null \
+        || die "redis-cli required for rails fragment-cache lanes (apt install redis-server)"
+    redis-cli -u "${REDIS_URL:-redis://127.0.0.1:6379/0}" ping >/dev/null 2>&1 \
+        || die "Redis not answering (${REDIS_URL:-redis://127.0.0.1:6379/0}) — start redis-server for fair rails-1p (warm fragment cache ~5 ms)"
+    ok "Redis up for rails fragment-cache lanes ($(redis-cli -u "${REDIS_URL:-redis://127.0.0.1:6379/0}" ping))"
+fi
+
 SERVER_PID=""
 cleanup() {
     local code=$?
@@ -1477,14 +1494,33 @@ for lane in "${LANES[@]}"; do
     # rest (503 ms against 5 ms), and wrk's own warmup would absorb it
     # anyway — doing it here means the `rails` lane measures the steady
     # state it is meant to, rather than one cold render smeared across a
-    # short run.
+    # short run. Log cold vs warm wall times for /rooms/1 so a missing
+    # Redis cannot look like a fair steady-state row.
     case "$lane" in
-        rails|rails-1p|rails-truffleruby)
+        rails|rails-1p|rails-1p-noyjit|rails-truffleruby)
+            step "warm fragment cache for $lane (Redis)"
+            warm_log="$LOG_DIR/fragment-warm-$lane.txt"
+            : > "$warm_log"
             for ep in "${ENDPOINTS[@]}"; do
                 ep_is_post "$ep" && continue
-                curl -s -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" \
-                    -o /dev/null "http://127.0.0.1:$port$(ep_path "$ep")"
+                url="http://127.0.0.1:$port$(ep_path "$ep")"
+                # Two GETs: first populates Redis, second should be warm.
+                cold_ms="$(curl -s -o /dev/null -w '%{time_total}' \
+                    -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" "$url" \
+                    | awk '{printf "%.0f", $1 * 1000}')"
+                warm_ms="$(curl -s -o /dev/null -w '%{time_total}' \
+                    -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" "$url" \
+                    | awk '{printf "%.0f", $1 * 1000}')"
+                printf '%s\tcold_ms=%s\twarm_ms=%s\n' "$ep" "$cold_ms" "$warm_ms" | tee -a "$warm_log"
             done
+            # Room page is the canary: warm should be far below cold when Redis works.
+            if room_warm="$(awk -F'\t' '$1 ~ /^\/rooms\/[0-9]+$/ {print $3}' "$warm_log" | head -1)"; then
+                room_warm_ms="${room_warm#warm_ms=}"
+                if [[ -n "$room_warm_ms" ]] && (( room_warm_ms > 200 )); then
+                    die "$lane: /rooms/* warm_ms=${room_warm_ms} (>200) — Redis fragment cache not warm; refuse unfair rails row (see $warm_log). Is redis-server up?"
+                fi
+                ok "$lane fragment cache warm (room warm_ms=${room_warm_ms:-?}; see $warm_log)"
+            fi
             ;;
     esac
 

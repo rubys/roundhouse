@@ -18,15 +18,18 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DEFAULT="$REPO_ROOT/bench/results/campfire-roundsnap-$(date +%Y%m%d-%H%M%S)"
 
+# Default HTTP suite (resolved from the seed DB): /rooms/N,
+# /rooms/N/messages?before=…, /users/me/sidebar, /searches?q=coffee,
+# /users/{avatar}/avatar, {css}, /up, POST:/rooms/M/messages.
+# Pass explicit --endpoint flags after this wrapper to override.
 exec "$REPO_ROOT/scripts/bench-campfire" \
+  --http-suite \
   --no-sockets \
   --workers 1 \
   --threads 5 \
   --duration "${BENCH_DURATION:-15}" \
   --warmup "${BENCH_WARMUP:-10}" \
   --runs "${BENCH_RUNS:-1}" \
-  --endpoint /rooms/1 \
-  --endpoint /rooms/1/messages \
   --out "${BENCH_OUT:-$OUT_DEFAULT}" \
   "$@" \
   rails-1p rails-1p-noyjit \
