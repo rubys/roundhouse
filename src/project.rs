@@ -1626,8 +1626,9 @@ pub fn write_to_dir(files: &[(String, String)], dest: &Path) -> Result<(), Strin
     for (path, content) in files {
         write_if_changed(&dest.join(path), content.as_bytes())?;
     }
-    // CRuby ISeq delivery: compile units.json → iseq/** + manifest.json.
-    crate::ruby_iseq::finalize(dest)?;
+    // Roundsnap ISeq delivery: compile units.json → iseq/** + manifest.json.
+    // No-op unless ROUNDSNAP=1 left a units.json in the tree.
+    crate::roundsnap::finalize(dest)?;
     Ok(())
 }
 
@@ -2549,11 +2550,12 @@ fn ruby_family_runtime_files(
     // gets the block exactly once; this is the ruby family's turn, and
     // the ruby family is the one that can run the lines.
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
-    // CRuby straight-to-ISeq: rewrite the file set to units.json + vendored
-    // roundhouse_iseq gem. Binaries are materialized after write_to_dir via
-    // `ruby_iseq::finalize`. Kill-switch: ROUNDHOUSE_RUBY_ISEQ=0.
+    // CRuby straight-to-ISeq via roundsnap: rewrite the file set to
+    // units.json + vendored gems/roundsnap. Binaries are materialized
+    // after write_to_dir via `roundsnap::finalize`. Opt-in: ROUNDSNAP=1
+    // (alias ROUNDHOUSE_RUBY_ISEQ=1).
     if flavor == RubyFlavor::CRuby {
-        crate::ruby_iseq::prepare(app, &mut files)?;
+        crate::roundsnap::prepare(app, &mut files)?;
     }
     Ok(files)
 }

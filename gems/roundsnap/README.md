@@ -1,9 +1,9 @@
-# roundhouse_iseq
+# roundsnap
 
 MRI-only gem that compiles lowered Ruby **units** to
 `RubyVM::InstructionSequence` binaries and loads them by **manifest key**.
 
-This is Roundhouse’s CRuby delivery vehicle — the Bootsnap-shaped piece for
+Roundsnap is Roundhouse’s CRuby delivery vehicle — the Bootsnap analogue for
 emitted trees, not a `Bootsnap.setup` drop-in for unmodified Rails.
 
 ## Why
@@ -27,9 +27,9 @@ out/
 ## Usage
 
 ```ruby
-require "roundhouse_iseq"
+require "roundsnap"
 
-RoundhouseIseq::Compiler.compile!(
+Roundsnap::Compiler.compile!(
   units: [
     {
       "key" => "app/models/article",
@@ -41,23 +41,40 @@ RoundhouseIseq::Compiler.compile!(
   out_dir: "/tmp/app",
 )
 
-loader = RoundhouseIseq::Loader.install!(root: "/tmp/app")
+loader = Roundsnap::Loader.install!(root: "/tmp/app")
 loader.boot!("app/models/article")
 ```
 
 CLI (used by Roundhouse at emit time):
 
 ```sh
-roundhouse-iseq-compile --out /tmp/app --units units.json
+roundsnap-compile --out /tmp/app --units units.json
 # or: … < units.json
 ```
+
+## Opt-in at emit time
+
+```sh
+ROUNDSNAP=1 bin/rh transpile ruby --app ~/git/once-campfire --out /tmp/campfire-roundsnap
+```
+
+(`ROUNDHOUSE_RUBY_ISEQ=1` remains accepted as an alias.)
 
 ## Tests
 
 ```sh
-cd gems/roundhouse_iseq
+cd gems/roundsnap
 ruby -Ilib:test test/compiler_loader_test.rb
 ```
+
+## Campfire prototype check
+
+```sh
+scripts/campfire-roundsnap
+```
+
+Emits once-campfire with Roundsnap, bundles, and boots. That is the
+standard smoke for this gem — not a one-off manual trial.
 
 ## Limits
 

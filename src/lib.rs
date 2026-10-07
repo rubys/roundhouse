@@ -54,9 +54,9 @@ pub mod naming;
 pub mod profile;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod project;
-/// CRuby straight-to-ISeq delivery (`ROUNDHOUSE_RUBY_ISEQ`). Host-only.
+/// CRuby straight-to-ISeq delivery via roundsnap (`ROUNDSNAP=1`). Host-only.
 #[cfg(not(target_arch = "wasm32"))]
-pub mod ruby_iseq;
+pub mod roundsnap;
 /// Embedded Ruby sources for constant lookup on all targets, plus the
 /// full Ruby and Spinel emit trees on native targets.
 #[cfg(not(target_arch = "wasm32"))]

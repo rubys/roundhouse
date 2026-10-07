@@ -1,7 +1,7 @@
-//! Straight-to-ISeq delivery for `--target ruby` (ROUNDHOUSE_RUBY_ISEQ=1).
+//! Straight-to-ISeq delivery for `--target ruby` (ROUNDSNAP=1).
 //!
 //! Proves the emitted tree contains units → manifest/iseq, vendors the
-//! gem, omits app/runtime `.rb`, and boots on MRI without those files.
+//! roundsnap gem, omits app/runtime `.rb`, and boots on MRI without those files.
 
 use std::path::Path;
 use std::process::Command;
@@ -11,7 +11,7 @@ use roundhouse::ingest::app::ingest_app;
 use roundhouse::project::{self, BuildTarget};
 
 fn scratch_dir(name: &str) -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("rh-iseq-{name}-{}", std::process::id()));
+    let p = std::env::temp_dir().join(format!("rh-roundsnap-{name}-{}", std::process::id()));
     if p.exists() {
         std::fs::remove_dir_all(&p).ok();
     }
@@ -19,17 +19,19 @@ fn scratch_dir(name: &str) -> std::path::PathBuf {
     p
 }
 
-fn enable_iseq() {
+fn enable_roundsnap() {
     // SAFETY: single-threaded test process before any parallel workers.
     unsafe {
-        std::env::set_var("ROUNDHOUSE_RUBY_ISEQ", "1");
+        std::env::set_var("ROUNDSNAP", "1");
+        std::env::remove_var("ROUNDHOUSE_RUBY_ISEQ");
+        std::env::remove_var("ROUNDSNAP_KEEP_SOURCE");
         std::env::remove_var("ROUNDHOUSE_ISEQ_KEEP_SOURCE");
     }
 }
 
 #[test]
-fn tiny_blog_iseq_artifact_shape() {
-    enable_iseq();
+fn tiny_blog_roundsnap_artifact_shape() {
+    enable_roundsnap();
 
     let fixture = Path::new("fixtures/tiny-blog");
     assert!(fixture.is_dir(), "fixtures/tiny-blog missing");
@@ -39,13 +41,13 @@ fn tiny_blog_iseq_artifact_shape() {
     let files = project::target_files(&app, fixture, BuildTarget::Ruby).expect("target_files");
     assert!(
         files.iter().any(|(p, _)| p == "units.json"),
-        "expected units.json in ISeq file set"
+        "expected units.json in Roundsnap file set"
     );
     assert!(
         files
             .iter()
-            .any(|(p, _)| p == "vendor/roundhouse_iseq/lib/roundhouse_iseq.rb"),
-        "expected vendored gem"
+            .any(|(p, _)| p == "vendor/roundsnap/lib/roundsnap.rb"),
+        "expected vendored roundsnap gem"
     );
     assert!(
         !files.iter().any(|(p, _)| p.starts_with("app/") && p.ends_with(".rb")),
@@ -56,8 +58,8 @@ fn tiny_blog_iseq_artifact_shape() {
         .find(|(p, _)| p == "boot.rb")
         .expect("boot.rb present");
     assert!(
-        boot.1.contains("RoundhouseIseq::Loader"),
-        "thin boot should use the gem loader"
+        boot.1.contains("Roundsnap::Loader"),
+        "thin boot should use the roundsnap loader"
     );
 
     let scratch = scratch_dir("tiny-shape");
@@ -78,8 +80,8 @@ fn tiny_blog_iseq_artifact_shape() {
 
 #[test]
 #[ignore = "needs real-blog fixture + bundle; run with --ignored"]
-fn real_blog_iseq_boots_without_app_rb() {
-    enable_iseq();
+fn real_blog_roundsnap_boots_without_app_rb() {
+    enable_roundsnap();
 
     let fixture = roundhouse::fixtures::real_blog();
     let mut app = ingest_app(fixture).expect("ingest real-blog");
@@ -108,7 +110,7 @@ fn real_blog_iseq_boots_without_app_rb() {
         .arg("exec")
         .arg("ruby")
         .arg("-e")
-        .arg("require_relative \"boot\"; puts \"ISEQ_BOOT_OK\"")
+        .arg("require_relative \"boot\"; puts \"ROUNDSNAP_BOOT_OK\"")
         .current_dir(&scratch)
         .env("BUNDLE_GEMFILE", scratch.join("Gemfile"))
         .env("BUNDLE_PATH", scratch.join(".bundle"))
@@ -117,7 +119,7 @@ fn real_blog_iseq_boots_without_app_rb() {
     let stdout = String::from_utf8_lossy(&boot.stdout);
     let stderr = String::from_utf8_lossy(&boot.stderr);
     assert!(
-        boot.status.success() && stdout.contains("ISEQ_BOOT_OK"),
-        "ISeq boot failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        boot.status.success() && stdout.contains("ROUNDSNAP_BOOT_OK"),
+        "Roundsnap boot failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }

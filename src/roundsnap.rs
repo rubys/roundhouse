@@ -1,14 +1,15 @@
-//! CRuby straight-to-ISeq delivery for `--target ruby`.
+//! CRuby straight-to-ISeq delivery via the in-repo **roundsnap** gem.
 //!
-//! When `ROUNDHOUSE_RUBY_ISEQ=1`, the in-memory file set is rewritten to:
+//! When `ROUNDSNAP=1` (alias: `ROUNDHOUSE_RUBY_ISEQ=1`), the in-memory
+//! file set is rewritten to:
 //!
 //! - `units.json` — lowered sources + original `file` metadata
-//! - `vendor/roundhouse_iseq/` — vendored copy of `gems/roundhouse_iseq`
+//! - `vendor/roundsnap/` — vendored copy of `gems/roundsnap`
 //! - thin `boot.rb` / patched `config.ru` / Gemfile path gem
-//! - app/runtime `.rb` bodies removed (unless `ROUNDHOUSE_ISEQ_KEEP_SOURCE=1`)
+//! - app/runtime `.rb` bodies removed (unless `ROUNDSNAP_KEEP_SOURCE=1`)
 //!
 //! After [`crate::project::write_to_dir`], call [`finalize`] so the host
-//! Ruby runs `roundhouse-iseq-compile` and writes binary `iseq/**`.
+//! Ruby runs `roundsnap-compile` and writes binary `iseq/**`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -16,19 +17,20 @@ use std::process::Command;
 
 use crate::App;
 
-/// Opt-in. Set `ROUNDHOUSE_RUBY_ISEQ=1` to emit the ISeq artifact for
-/// `--target ruby`. Unset / `0` keeps the classic `.rb` tree (default),
-/// so existing toolchain tests stay on the known layout.
+/// Opt-in. Set `ROUNDSNAP=1` (or legacy `ROUNDHOUSE_RUBY_ISEQ=1`) to emit
+/// the ISeq artifact for `--target ruby`. Unset / `0` keeps the classic
+/// `.rb` tree (default), so existing toolchain tests stay on the known layout.
 pub fn enabled() -> bool {
-    matches!(
-        std::env::var("ROUNDHOUSE_RUBY_ISEQ").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
-    )
+    env_flag("ROUNDSNAP") || env_flag("ROUNDHOUSE_RUBY_ISEQ")
 }
 
 fn keep_source() -> bool {
+    env_flag("ROUNDSNAP_KEEP_SOURCE") || env_flag("ROUNDHOUSE_ISEQ_KEEP_SOURCE")
+}
+
+fn env_flag(name: &str) -> bool {
     matches!(
-        std::env::var("ROUNDHOUSE_ISEQ_KEEP_SOURCE").as_deref(),
+        std::env::var(name).as_deref(),
         Ok("1") | Ok("true") | Ok("yes") | Ok("on")
     )
 }
@@ -49,7 +51,7 @@ fn keep_as_source(path: &str) -> bool {
         || !path.ends_with(".rb")
 }
 
-/// Rewrite the CRuby file set for ISeq delivery. Idempotent if
+/// Rewrite the CRuby file set for Roundsnap ISeq delivery. Idempotent if
 /// `units.json` is already present.
 pub fn prepare(app: &App, files: &mut Vec<(String, String)>) -> Result<(), String> {
     if !enabled() {
@@ -64,7 +66,7 @@ pub fn prepare(app: &App, files: &mut Vec<(String, String)>) -> Result<(), Strin
 
     let boot = by_path
         .get("boot.rb")
-        .ok_or("ruby_iseq::prepare: boot.rb missing from CRuby file set")?
+        .ok_or("roundsnap::prepare: boot.rb missing from CRuby file set")?
         .clone();
     // Boot-chain first, then the Rack entry points. Do NOT dump every
     // leftover .rb into the manifest — spinel-only files (e.g.
@@ -82,7 +84,7 @@ pub fn prepare(app: &App, files: &mut Vec<(String, String)>) -> Result<(), Strin
     for key in &ordered_keys {
         let source = by_path
             .get(key)
-            .ok_or_else(|| format!("ruby_iseq::prepare: missing source for {key}"))?
+            .ok_or_else(|| format!("roundsnap::prepare: missing source for {key}"))?
             .clone();
         let (file, first_lineno) = original_location(app, &label, key);
         units.push(serde_json::json!({
@@ -94,21 +96,21 @@ pub fn prepare(app: &App, files: &mut Vec<(String, String)>) -> Result<(), Strin
     }
 
     let units_json = serde_json::to_string_pretty(&units)
-        .map_err(|e| format!("ruby_iseq::prepare: serialize units: {e}"))?;
+        .map_err(|e| format!("roundsnap::prepare: serialize units: {e}"))?;
     by_path.insert("units.json".to_string(), units_json + "\n");
 
     vendor_gem(&mut by_path)?;
 
     let gemfile = by_path
         .get_mut("Gemfile")
-        .ok_or("ruby_iseq::prepare: Gemfile missing")?;
-    if !gemfile.contains("roundhouse_iseq") {
+        .ok_or("roundsnap::prepare: Gemfile missing")?;
+    if !gemfile.contains("roundsnap") {
         gemfile.push_str(
-            "\n# MRI ISeq delivery — vendored from gems/roundhouse_iseq\n\
-             gem \"roundhouse_iseq\", path: \"vendor/roundhouse_iseq\"\n",
+            "\n# MRI ISeq delivery — vendored from gems/roundsnap\n\
+             gem \"roundsnap\", path: \"vendor/roundsnap\"\n",
         );
     }
-    // Scaffold lock is MRI-without-roundhouse_iseq; drop it so `bundle
+    // Scaffold lock is MRI-without-roundsnap; drop it so `bundle
     // install` in the emitted tree resolves the path gem.
     by_path.remove("Gemfile.lock");
 
@@ -131,8 +133,9 @@ pub fn prepare(app: &App, files: &mut Vec<(String, String)>) -> Result<(), Strin
 }
 
 /// Run the gem compiler in `dest` after the text tree was written.
-/// No-op when ISeq mode is off or `units.json` is absent / `manifest.json`
-/// already exists.
+/// No-op when Roundsnap mode is off or `units.json` is absent.
+/// Always recompiles when `units.json` is present (stale `manifest.json`
+/// / `iseq/**` from a prior emit are replaced).
 pub fn finalize(dest: &Path) -> Result<(), String> {
     if !enabled() {
         return Ok(());
@@ -141,9 +144,10 @@ pub fn finalize(dest: &Path) -> Result<(), String> {
     if !units.is_file() {
         return Ok(());
     }
-    if dest.join("manifest.json").is_file() {
-        return Ok(());
-    }
+
+    // Drop prior artifacts so a re-emit cannot leave stale binaries.
+    let _ = std::fs::remove_file(dest.join("manifest.json"));
+    let _ = std::fs::remove_dir_all(dest.join("iseq"));
 
     let exe = compiler_exe()?;
     let output = Command::new(&exe)
@@ -152,10 +156,10 @@ pub fn finalize(dest: &Path) -> Result<(), String> {
         .arg("--units")
         .arg(&units)
         .output()
-        .map_err(|e| format!("ruby_iseq::finalize: spawn {}: {e}", exe.display()))?;
+        .map_err(|e| format!("roundsnap::finalize: spawn {}: {e}", exe.display()))?;
     if !output.status.success() {
         return Err(format!(
-            "ruby_iseq::finalize: compiler failed\nstdout:\n{}\nstderr:\n{}",
+            "roundsnap::finalize: compiler failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         ));
@@ -168,8 +172,8 @@ pub fn finalize(dest: &Path) -> Result<(), String> {
 
 fn compiler_exe() -> Result<PathBuf, String> {
     let candidates = [
-        PathBuf::from("gems/roundhouse_iseq/exe/roundhouse-iseq-compile"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("gems/roundhouse_iseq/exe/roundhouse-iseq-compile"),
+        PathBuf::from("gems/roundsnap/exe/roundsnap-compile"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("gems/roundsnap/exe/roundsnap-compile"),
     ];
     for c in &candidates {
         if c.is_file() {
@@ -177,33 +181,33 @@ fn compiler_exe() -> Result<PathBuf, String> {
         }
     }
     Err(
-        "ruby_iseq::finalize: gems/roundhouse_iseq/exe/roundhouse-iseq-compile not found \
+        "roundsnap::finalize: gems/roundsnap/exe/roundsnap-compile not found \
          (run from the roundhouse checkout)"
             .to_string(),
     )
 }
 
 fn vendor_gem(by_path: &mut BTreeMap<String, String>) -> Result<(), String> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("gems/roundhouse_iseq");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("gems/roundsnap");
     if !root.is_dir() {
         return Err(format!(
-            "ruby_iseq::prepare: gem source missing at {}",
+            "roundsnap::prepare: gem source missing at {}",
             root.display()
         ));
     }
     for rel in [
-        "roundhouse_iseq.gemspec",
+        "roundsnap.gemspec",
         "README.md",
-        "lib/roundhouse_iseq.rb",
-        "lib/roundhouse_iseq/version.rb",
-        "lib/roundhouse_iseq/compiler.rb",
-        "lib/roundhouse_iseq/loader.rb",
-        "exe/roundhouse-iseq-compile",
+        "lib/roundsnap.rb",
+        "lib/roundsnap/version.rb",
+        "lib/roundsnap/compiler.rb",
+        "lib/roundsnap/loader.rb",
+        "exe/roundsnap-compile",
     ] {
         let src = root.join(rel);
         let text = std::fs::read_to_string(&src)
-            .map_err(|e| format!("ruby_iseq::prepare: read {}: {e}", src.display()))?;
-        by_path.insert(format!("vendor/roundhouse_iseq/{rel}"), text);
+            .map_err(|e| format!("roundsnap::prepare: read {}: {e}", src.display()))?;
+        by_path.insert(format!("vendor/roundsnap/{rel}"), text);
     }
     Ok(())
 }
@@ -366,11 +370,13 @@ fn original_location(app: &App, label: &str, emit_path: &str) -> (String, i64) {
 
 fn patch_config_ru(ru: &str) -> String {
     // Ensure the loader is installed before require_relative main/cable.
-    if ru.contains("roundhouse_iseq") {
+    // Avoid double-boot: thin boot.rb already ran boot!; config.ru only
+    // installs the require hook so subsequent requires resolve via iseq.
+    if ru.contains("roundsnap") || ru.contains("Roundsnap::Loader") {
         return ru.to_string();
     }
-    let inject = "require \"roundhouse_iseq\"\n\
-RoundhouseIseq::Loader.install!(root: __dir__)\n\n";
+    let inject = "require \"roundsnap\"\n\
+Roundsnap::Loader.install!(root: __dir__)\n\n";
     if let Some(i) = ru.find("require \"rack\"\n") {
         let mut out = String::new();
         out.push_str(&ru[..i]);
@@ -385,10 +391,10 @@ RoundhouseIseq::Loader.install!(root: __dir__)\n\n";
 
 const THIN_BOOT: &str = "\
 # frozen_string_literal: true
-# ISeq delivery: load every compiled unit via roundhouse_iseq.
-# Set ROUNDHOUSE_RUBY_ISEQ=0 at emit time for the classic require_relative boot.
-require \"roundhouse_iseq\"
-RoundhouseIseq::Loader.install!(root: __dir__).boot!
+# Roundsnap ISeq delivery: load every compiled unit via the roundsnap gem.
+# Set ROUNDSNAP=0 at emit time for the classic require_relative boot.
+require \"roundsnap\"
+Roundsnap::Loader.install!(root: __dir__).boot!
 ";
 
 #[cfg(test)]
@@ -418,5 +424,26 @@ require_relative 'app/views'
     fn key_for_manifest_strips_rb() {
         assert_eq!(key_for_manifest("app/models/article.rb"), "app/models/article");
         assert_eq!(key_for_manifest("main"), "main");
+    }
+
+    #[test]
+    fn enabled_reads_roundsnap_or_legacy_alias() {
+        unsafe {
+            std::env::remove_var("ROUNDSNAP");
+            std::env::remove_var("ROUNDHOUSE_RUBY_ISEQ");
+        }
+        assert!(!enabled());
+        unsafe {
+            std::env::set_var("ROUNDSNAP", "1");
+        }
+        assert!(enabled());
+        unsafe {
+            std::env::remove_var("ROUNDSNAP");
+            std::env::set_var("ROUNDHOUSE_RUBY_ISEQ", "1");
+        }
+        assert!(enabled());
+        unsafe {
+            std::env::remove_var("ROUNDHOUSE_RUBY_ISEQ");
+        }
     }
 }

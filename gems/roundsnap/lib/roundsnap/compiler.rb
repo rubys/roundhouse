@@ -4,7 +4,7 @@ require "digest"
 require "json"
 require "fileutils"
 
-module RoundhouseIseq
+module Roundsnap
   # Compiles lowered Ruby source units to MRI ISeq binaries.
   #
   # Each unit is a Hash (string or symbol keys) with:
@@ -18,18 +18,32 @@ module RoundhouseIseq
   module Compiler
     module_function
 
+    # Unit keys become relative paths under iseq/. Reject anything that
+    # would escape that directory (absolute paths, `..` segments).
+    def sanitize_key!(key)
+      k = key.to_s
+      raise ArgumentError, "roundsnap: empty unit key" if k.empty?
+      raise ArgumentError, "roundsnap: absolute unit key #{k.inspect}" if k.start_with?("/", "\\")
+      parts = k.split(%r{[/\\]})
+      if parts.any? { |p| p.empty? || p == "." || p == ".." }
+        raise ArgumentError, "roundsnap: unsafe unit key #{k.inspect}"
+      end
+      k
+    end
+
     def compile!(units:, out_dir:)
       raise ArgumentError, "units must be an Array" unless units.is_a?(Array)
-      raise "roundhouse_iseq requires MRI (RUBY_ENGINE=ruby)" unless RUBY_ENGINE == "ruby"
+      raise "roundsnap requires MRI (RUBY_ENGINE=ruby)" unless RUBY_ENGINE == "ruby"
 
       out_dir = File.expand_path(out_dir)
       iseq_dir = File.join(out_dir, "iseq")
+      FileUtils.rm_rf(iseq_dir)
       FileUtils.mkdir_p(iseq_dir)
 
       entries = {}
       units.each do |raw|
         unit = stringify_keys(raw)
-        key = unit.fetch("key")
+        key = sanitize_key!(unit.fetch("key"))
         source = unit.fetch("source")
         file = unit.fetch("file")
         first_lineno = (unit["first_lineno"] || 1).to_i
@@ -59,7 +73,7 @@ module RoundhouseIseq
       manifest = {
         "version" => 1,
         "ruby_description" => RUBY_DESCRIPTION,
-        "entry" => units.empty? ? nil : stringify_keys(units.first).fetch("key"),
+        "entry" => units.empty? ? nil : sanitize_key!(stringify_keys(units.first).fetch("key")),
         "units" => entries,
       }
       File.write(File.join(out_dir, "manifest.json"), JSON.pretty_generate(manifest) + "\n")

@@ -112,17 +112,17 @@ has a `<turbo-cable-stream-source>` that opens a WebSocket back to
 Puma; subsequent creates from any other browser tab — or even from
 `curl` — appear in the index in real time without a page refresh.
 
-### Straight-to-ISeq (optional CRuby delivery)
+### Roundsnap / straight-to-ISeq (optional CRuby delivery)
 
-With `ROUNDHOUSE_RUBY_ISEQ=1`, `--target ruby` ships MRI bytecode instead
-of app/runtime `.rb` files: `manifest.json` + `iseq/**` plus a vendored
-[`roundhouse_iseq`](../../../gems/roundhouse_iseq/) gem. `boot.rb` loads
-units by manifest key; ISeq `file` metadata carries original app paths
-from IR spans (the CRuby analogue of Spinel's `#<SPINEL_SOURCE>`). This
-is the Bootsnap-shaped compile cache for the **emitted** tree — not a
-`Bootsnap.setup` drop-in for unmodified Rails. Keep sources beside the
-binaries with `ROUNDHOUSE_ISEQ_KEEP_SOURCE=1`. Default emit (unset) stays
-the classic `.rb` tree.
+With `ROUNDSNAP=1` (alias `ROUNDHOUSE_RUBY_ISEQ=1`), `--target ruby` ships
+MRI bytecode instead of app/runtime `.rb` files: `manifest.json` +
+`iseq/**` plus a vendored [`roundsnap`](../../../gems/roundsnap/) gem.
+`boot.rb` loads units by manifest key; ISeq `file` metadata carries
+original app paths from IR spans (the CRuby analogue of Spinel's
+`#<SPINEL_SOURCE>`). This is the Bootsnap analogue for the **emitted**
+tree — not a `Bootsnap.setup` drop-in for unmodified Rails. Keep sources
+beside the binaries with `ROUNDSNAP_KEEP_SOURCE=1`. Default emit (unset)
+stays the classic `.rb` tree. Prototype check: `scripts/campfire-roundsnap`.
 
 Build/test targets — the CRuby target uses `rake` (the overlay's
 Rakefile owns the dev server); the spinel target uses `make` (no

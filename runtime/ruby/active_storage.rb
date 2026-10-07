@@ -200,6 +200,14 @@ module ActiveStorage
             "ActiveStorage::Previewer.poster: no previewer on this target — " \
             "a video poster needs ffmpeg"
     end
+
+    # Rails nests the ffmpeg-backed video previewer here
+    # (`ActiveStorage::Previewer::VideoPreviewer`). Campfire subclasses
+    # it (`TimeLimitedVideoPreviewer`). The ruby-family poster path is
+    # `Previewer.poster` above; this empty nested class exists so the
+    # subclass constant resolves at load time.
+    class VideoPreviewer
+    end
   end
 
   # Rails' `ActiveStorage::Preview`: a still of a previewable blob (a

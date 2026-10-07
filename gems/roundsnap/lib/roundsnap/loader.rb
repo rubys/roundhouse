@@ -2,7 +2,7 @@
 
 require "json"
 
-module RoundhouseIseq
+module Roundsnap
   # Loads ISeq binaries by logical manifest key.
   #
   # Require is by key, not filesystem path, so the ISeq's stored `file`
@@ -38,6 +38,7 @@ module RoundhouseIseq
       @manifest = JSON.parse(File.read(path))
       @units = @manifest.fetch("units")
       @loaded = {}
+      validate_manifest!
     end
 
     def install!
@@ -101,19 +102,31 @@ module RoundhouseIseq
       return false if @loaded[key]
 
       entry = @units[key]
-      raise LoadError, "roundhouse_iseq: unknown key #{key.inspect}" unless entry
+      raise LoadError, "roundsnap: unknown key #{key.inspect}" unless entry
 
-      if @manifest["ruby_description"] && @manifest["ruby_description"] != RUBY_DESCRIPTION
+      built = @manifest["ruby_description"]
+      if built.nil? || built.to_s.empty?
+        raise LoadError, "roundsnap: manifest missing ruby_description (rebuild required)"
+      end
+      if built != RUBY_DESCRIPTION
         raise LoadError,
-              "roundhouse_iseq: ISeq built for #{@manifest["ruby_description"].inspect}, " \
+              "roundsnap: ISeq built for #{built.inspect}, " \
               "running #{RUBY_DESCRIPTION.inspect}"
       end
 
-      path = File.join(@root, entry.fetch("iseq"))
+      path = safe_iseq_path(entry.fetch("iseq"))
       binary = File.binread(path)
       iseq = RubyVM::InstructionSequence.load_from_binary(binary)
+      # Reserve before eval so circular require_relative (common in Rails
+      # model trees) short-circuits like MRI's $LOADED_FEATURES. Clear the
+      # reservation on failure so a failed unit can be retried.
       @loaded[key] = true
-      iseq.eval
+      begin
+        iseq.eval
+      rescue StandardError
+        @loaded.delete(key)
+        raise
+      end
       true
     end
 
@@ -131,12 +144,12 @@ module RoundhouseIseq
     end
 
     def loaded?(key)
-      @loaded[key.to_s]
+      !!@loaded[key.to_s]
     end
 
     module RequireHook
       def require(name)
-        loader = RoundhouseIseq::Loader.current
+        loader = Roundsnap::Loader.current
         if loader
           key = loader.resolve_key(name)
           return loader.require(key) if key
@@ -146,7 +159,7 @@ module RoundhouseIseq
 
       def require_relative(name)
         loc = RequireHook.outside_gem_caller
-        loader = RoundhouseIseq::Loader.current
+        loader = Roundsnap::Loader.current
         if loader
           key = loader.resolve_relative(name, loc&.path)
           return loader.require(key) if key
@@ -168,10 +181,38 @@ module RoundhouseIseq
       def self.outside_gem_caller
         caller_locations(2, 32)&.find do |l|
           path = l.path.to_s
-          !path.include?("/roundhouse_iseq/") &&
-            !path.end_with?("roundhouse_iseq.rb")
+          !path.include?("/roundsnap/") &&
+            !path.end_with?("roundsnap.rb")
         end
       end
+    end
+
+    private
+
+    def validate_manifest!
+      @units.each do |key, entry|
+        Compiler.sanitize_key!(key)
+        rel = entry.fetch("iseq")
+        safe_iseq_path(rel)
+      end
+    end
+
+    def safe_iseq_path(rel)
+      rel = rel.to_s
+      raise LoadError, "roundsnap: absolute iseq path #{rel.inspect}" if rel.start_with?("/", "\\")
+      parts = rel.split(%r{[/\\]})
+      if parts.any? { |p| p.empty? || p == "." || p == ".." }
+        raise LoadError, "roundsnap: unsafe iseq path #{rel.inspect}"
+      end
+      unless rel.start_with?("iseq/")
+        raise LoadError, "roundsnap: iseq path must be under iseq/: #{rel.inspect}"
+      end
+      path = File.expand_path(rel, @root)
+      root_prefix = @root.end_with?("/") ? @root : "#{@root}/"
+      unless path == @root || path.start_with?(root_prefix)
+        raise LoadError, "roundsnap: iseq path escapes root: #{rel.inspect}"
+      end
+      path
     end
   end
 end
