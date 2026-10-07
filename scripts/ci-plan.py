@@ -52,7 +52,7 @@ BASE = [
 # selected (scheduled full, or a change that owns them). Unselected skips
 # must not fail the Ruby PR floor.
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
-CORE = ["build-spinel", "toolchain-spinel", "compare-spinel"]
+CORE = ["spinel-build", "spinel-toolchain", "spinel-compare"]
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
     "date_columns_spinel",
@@ -66,28 +66,28 @@ SPINEL_TESTS = [
     "rails_compat_vectors_spinel",
 ]
 SPINEL11 = [
-    "build-spinel",
-    "framework-tests-spinel",
-    "build-campfire-compare-spinel",
-    "campfire-compare-spinel",
-    "campfire-db-differential-spinel",
-    "toolchain-spinel",
-    "compare-spinel",
-    "smoke-spinel",
-    "build-campfire-archive",
-    "smoke-campfire",
-    "smoke-campfire-docker",
+    "spinel-build",
+    "spinel-framework",
+    "campfire-spinel-build",
+    "campfire-spinel-compare",
+    "campfire-spinel-db",
+    "spinel-toolchain",
+    "spinel-compare",
+    "spinel-smoke",
+    "campfire-archive-build",
+    "campfire-smoke",
+    "campfire-smoke-docker",
 ]
 # Main-push / unknown-input Spinel suite (advisory). PR `ci:spinel` uses the
 # narrower CORE focus lane (built in focus_plan) and makes those jobs required.
 SPINEL_LANE = [*BASE, *SPINEL11, "build-site", "archive-results"]
-ADVISORY = set(SPINEL11) - {"build-campfire-archive"}
+ADVISORY = set(SPINEL11) - {"campfire-archive-build"}
 # Extra-language ledger jobs: advisory on Full/path unless a focus label
 # makes them required for a fix round.
 LEDGER_EXTRAS = {"compare-extra", "smoke-extra"}
 # CORE (+ framework suite) can be hard under ci:spinel focus; workflow CoE
 # follows plan spinel-advisory the same way extras-advisory flips extras.
-SPINEL_FOCUS_HARD = set(CORE) | {"framework-tests-spinel"}
+SPINEL_FOCUS_HARD = set(CORE) | {"spinel-framework"}
 # Packaging evidence report only. Selected for completeness and required by
 # assemble-site when publishing; never a hard CI-summary / compact failure.
 # GitHub can mark the job `abandoned` (queued, never assigned) on large
@@ -141,7 +141,7 @@ def focus_plan(extras=(), jruby=False, spinel=False):
 
     Focused extras / jruby / CORE Spinel are merge-gate required for the
     fix round. Unrelated extras, WASM, rust/ts compare, Writebook, and the
-    heavy Spinel11 Campfire matrix stay off.
+    heavy Spinel11 Campfire suite stay off.
     """
     extra = [t for t in EXTRA_COMPARE_TARGETS if t in extras]
     jobs = list(BASE)
@@ -163,7 +163,7 @@ def focus_plan(extras=(), jruby=False, spinel=False):
         smoke_floor.append("jruby")
         reasons.append("ci:jruby: compare-jruby + smoke jruby (required)")
     if spinel:
-        for job in (*CORE, "framework-tests-spinel", "build-site", "archive-results"):
+        for job in (*CORE, "spinel-framework", "build-site", "archive-results"):
             if job not in jobs:
                 jobs.append(job)
         reasons.append("ci:spinel: CORE Spinel lane (required)")
@@ -300,17 +300,17 @@ def archive_and_campfire_jobs(path, interpreter_only):
     """Select packaging and Campfire consumers, not every native runtime edit."""
     jobs = set()
     if path.startswith("runtime/spinel/scaffold/") and not interpreter_only:
-        jobs.update((*CORE, "smoke-spinel", "build-site"))
+        jobs.update((*CORE, "spinel-smoke", "build-site"))
     if path.startswith(("scripts/campfire-compare", "scripts/build-campfire-compare")):
         jobs.update(
-            ("build-spinel", "build-campfire-compare-spinel", "campfire-compare-spinel")
+            ("spinel-build", "campfire-spinel-build", "campfire-spinel-compare")
         )
     if path.startswith("scripts/campfire-db-differential"):
-        jobs.update(("build-spinel", "campfire-db-differential-spinel"))
+        jobs.update(("spinel-build", "campfire-spinel-db"))
     campfire_archive = (
         path.startswith(
             (
-                "scripts/build-campfire-archive",
+                "scripts/campfire-archive-build",
                 "scripts/campfire-archive",
                 "e2e/campfire/",
             )
@@ -323,14 +323,14 @@ def archive_and_campfire_jobs(path, interpreter_only):
     if campfire_archive or shared_smoke:
         jobs.update(
             (
-                "build-spinel",
-                "build-campfire-archive",
-                "smoke-campfire",
-                "smoke-campfire-docker",
+                "spinel-build",
+                "campfire-archive-build",
+                "campfire-smoke",
+                "campfire-smoke-docker",
             )
         )
     if shared_smoke:
-        jobs.add("smoke-spinel")
+        jobs.add("spinel-smoke")
     return jobs
 
 
@@ -470,7 +470,7 @@ def select(
         jobs_selected.update(SPINEL11)
         spinel_tests.update(SPINEL_TESTS)
     if spinel:
-        jobs_selected.add("build-spinel")
+        jobs_selected.add("spinel-build")
     jobs = list(BASE)
     extra = [t for t in EXTRA_COMPARE_TARGETS if t in targets]
     compare = [t for t in COMPARE_TARGETS if t in targets]
@@ -493,12 +493,12 @@ def select(
     if extra_smoke:
         jobs.append("smoke-extra")
     if spinel_tests:
-        jobs_selected.add("framework-tests-spinel")
-    if "smoke-spinel" in jobs_selected:
+        jobs_selected.add("spinel-framework")
+    if "spinel-smoke" in jobs_selected:
         jobs_selected.add("build-site")
     if "build-site" in jobs_selected and "build-site" not in jobs:
         jobs.append("build-site")
-    if "build-site" in jobs or {"build-site", "build-campfire-archive"} & jobs_selected:
+    if "build-site" in jobs or {"build-site", "campfire-archive-build"} & jobs_selected:
         jobs_selected.add("archive-results")
     jobs.extend(j for j in [*SPINEL11, "archive-results"] if j in jobs_selected)
     if writebook:
@@ -546,7 +546,7 @@ def finish(
         else [
             *smoke,
             *smoke_extra,
-            *(["spinel"] if "smoke-spinel" in jobs else []),
+            *(["spinel"] if "spinel-smoke" in jobs else []),
         ]
     )
     advisory = set(ADVISORY)
@@ -556,7 +556,7 @@ def finish(
     if not focus_required:
         advisory |= LEDGER_EXTRAS & set(jobs)
     extras_advisory = bool(LEDGER_EXTRAS & advisory & set(jobs))
-    # Workflow CoE for CORE / framework-tests-spinel follows this flag.
+    # Workflow CoE for CORE / spinel-framework follows this flag.
     spinel_advisory = bool(SPINEL_FOCUS_HARD & advisory & set(jobs))
     return {
         "jobs": jobs,
@@ -748,7 +748,7 @@ def _advisory_complete(job, need, advisory):
         return False
     keys = (
         ["default", "minor-gc", "verify-gen"]
-        if job == "campfire-compare-spinel"
+        if job == "campfire-spinel-compare"
         else ["execution"]
     )
     return all(need.get("outputs", {}).get(key) == "success" for key in keys)

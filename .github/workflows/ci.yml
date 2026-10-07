@@ -92,7 +92,8 @@ jobs:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'writebook-inventory') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     permissions:
       contents: read
       actions: read
@@ -360,7 +361,8 @@ jobs:
     # The job normally finishes in a few minutes; a hung apt install
     # once rode the old 45-minute ceiling and stalled the whole
     # build-site → smoke → deploy tail behind it (2026-08-19).
-    timeout-minutes: 20
+    timeout-minutes: 15
+
     env:
       WASI_SDK_VERSION: "33.0"
     steps:
@@ -372,6 +374,7 @@ jobs:
         with:
           workspaces: wasm
       - name: Install libclang (host bindgen)
+        timeout-minutes: 8
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libclang-dev
       - name: Cache WASI SDK
@@ -404,8 +407,8 @@ jobs:
 
   # -------------------------------------------------------------------
   # Build the spinel AOT compiler from matz/spinel@master and publish
-  # the toolchain as an artifact. Downstream toolchain-spinel /
-  # compare-spinel jobs download + chmod +x and either prepend to PATH
+  # the toolchain as an artifact. Downstream spinel-toolchain /
+  # spinel-compare jobs download + chmod +x and either prepend to PATH
   # or pass SPINEL=.../spinel to the scaffold Makefile (runtime/spinel/
   # scaffold/Makefile honors SPINEL ?= spinel).
   #
@@ -414,9 +417,10 @@ jobs:
   # Resolve current master once in the planner/caller, then build that SHA.
   # A failed lookup falls back to fresh master and cannot save a checkpoint.
   # -------------------------------------------------------------------
-  build-spinel:
+  spinel-build:
+    name: spinel-build (compiler)
     needs: plan
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'build-spinel') }}
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'spinel-build') }}
     outputs:
       artifact-id: ${{ steps.toolchain.outputs.artifact-id }}
       execution: ${{ steps.result.outputs.status }}
@@ -425,7 +429,7 @@ jobs:
     # CORE lane is merge-gate required for the fix round.
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     env:
       SCCACHE_DIR: ${{ github.workspace }}/.spinel-sccache
       SCCACHE_CACHE_SIZE: "256M"
@@ -485,12 +489,12 @@ jobs:
         # The single binary locates both `spinel_rbs_extract` and `lib/`
         # relative to the directory it is invoked from, so they must ship
         # alongside it. The extractor is REQUIRED for the --rbs path
-        # (toolchain-spinel / compare-spinel); without it, --rbs is silently
+        # (spinel-toolchain / spinel-compare); without it, --rbs is silently
         # a no-op and the seeded path goes untested. `cp -L` dereferences the
         # symlink to copy the real binary.
         # `spin` (spinel's project tool, a native binary spinel compiles
         # from tools/spin.rb) ships too: the spinel archive is a spin
-        # package and smoke-spinel's README blocks drive `spin build` /
+        # package and spinel-smoke's README blocks drive `spin build` /
         # `spin test`. spin locates the compiler as its PATH sibling.
         # `packages/` ships as well: the compiler resolves bundled spin
         # packages (json, set, …) at `<lib-parent>/packages` — a plain
@@ -586,6 +590,7 @@ jobs:
       # policy. CRuby binds through FFI, so the library is enough; headers
       # are the compiled Spinel job.
       - name: System libvips for the emitted ruby-vips processor
+        timeout-minutes: 8
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42
       # One gem process: three sequential `gem install` steps were paying
@@ -669,7 +674,8 @@ jobs:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'build-roundhouse') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+
     outputs:
       roundhouse-bin-artifact-id: ${{ steps.roundhouse-bin.outputs.artifact-id }}
     steps:
@@ -740,7 +746,8 @@ jobs:
     needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'browser-smoke-typescript') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     permissions:
       contents: read
       actions: read
@@ -820,7 +827,8 @@ jobs:
   browser-smoke-ide:
     needs: [build-wasm, generate-fixture]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -961,20 +969,22 @@ jobs:
   # #1275 and #1255 have since closed upstream (2026-07 audit); (a)'s
   # direct ivar write is idiomatic-ctor Ruby and (b)'s sidecar is typed
   # surface we want anyway, so neither is reverted. continue-on-error
-  # stays ON for the same structural reason as toolchain-spinel below:
+  # stays ON for the same structural reason as spinel-toolchain below:
   # every spinel job tracks matz/spinel master UNPINNED, so it surfaces
   # regressions without letting upstream churn gate unrelated work.
   # `ar_base` is disabled in-test (b453fcf) pending real-sqlite
   # rewiring of the test_helper.
-  framework-tests-spinel:
+  spinel-framework:
+    name: spinel-framework (suite)
     # Needs the real-blog fixture: date_columns_spinel overlays it.
     # Advisory unless ci:spinel focus hardens CORE (+ this suite).
-    needs: [generate-fixture, build-spinel, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'framework-tests-spinel') && needs.generate-fixture.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
+    needs: [generate-fixture, spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-framework') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
     outputs: &advisory-outputs
       execution: ${{ steps.result.outputs.status }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     env:
       MAKEFLAGS: "-j4"
@@ -1026,7 +1036,7 @@ jobs:
   # fine. Bumping CAMPFIRE_SHA moves the number deliberately, and the
   # commit that bumps it owns the delta.
   #
-  # BLOCKING, NOT ADVISORY. `framework-tests-spinel` above is
+  # BLOCKING, NOT ADVISORY. `spinel-framework` above is
   # `continue-on-error` because it tracks matz/spinel master unpinned and
   # upstream churn must not gate unrelated work — but the cost is that a
   # break there is invisible in the run's conclusion (learned the hard
@@ -1047,17 +1057,18 @@ jobs:
   # compare can carry. Known divergences are forgiven BY NAME against
   # docs/pipeline/runtime.md; anything new fails.
   #
-  # This is the REQUIRED lane (CRuby emit). The binary legs below —
-  # campfire-compare-spinel (default) and (minor-gc) — take the same
-  # walk against the compiled binary and stay advisory, because spinel
-  # is tracked unpinned.
+  # This is the REQUIRED lane (CRuby emit). The binary job below —
+  # campfire-spinel-compare — walks the same cable path under three GC
+  # modes (default, minor-gc, verify-gen) and stays advisory, because
+  # spinel is tracked unpinned.
   campfire-compare:
     needs: [build-roundhouse, plan]
     # Require the producer's debug binary artifact id so a missing
     # upload cannot skip into a green compact gate (#317).
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-compare') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 35
+
     services:
       redis:
         image: redis
@@ -1101,6 +1112,7 @@ jobs:
       # app's own hardening line.
       # CRuby binds libvips through FFI; only compiled Spinel needs headers.
       - name: System libvips
+        timeout-minutes: 8
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 sqlite3
       - name: Cache the prepared oracle
@@ -1158,11 +1170,12 @@ jobs:
   # All GC modes execute the same program; compile it once and preserve
   # its executable bit in a tarball. The DB differential builds its own
   # scenario overlay and must not reuse this binary.
-  build-campfire-compare-spinel:
-    needs: [build-spinel, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'build-campfire-compare-spinel') && needs.build-spinel.outputs.artifact-id != '' }}
+  campfire-spinel-build:
+    name: campfire-spinel-build (binary)
+    needs: [spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-build') && needs.spinel-build.outputs.artifact-id != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 35
     continue-on-error: true
     outputs:
       artifact-id: ${{ steps.binary.outputs.artifact-id }}
@@ -1182,14 +1195,17 @@ jobs:
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: System libvips + libsqlite3-dev + libjemalloc-dev
+        timeout-minutes: 8
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev libsqlite3-dev libjemalloc-dev
       - name: Fetch pinned once-campfire
+        timeout-minutes: 5
         run: |
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
           mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Emit and build the comparison binary
         id: build
+        timeout-minutes: 25
         run: |
           set -o pipefail
           cargo run --quiet --bin roundhouse -- --target spinel /tmp/campfire \
@@ -1235,7 +1251,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         id: binary
         with:
-          name: campfire-compare-spinel
+          name: campfire-spinel-binary
           path: campfire-compare-spinel.tar.gz
           compression-level: 0
           retention-days: 1
@@ -1251,32 +1267,33 @@ jobs:
           fi
       - *advisory-result
 
-  # campfire-compare-spinel: the same equivalence, with the compiled
+  # campfire-spinel-compare: the same equivalence, with the compiled
   # BINARY as the emit lane — Rails' broadcast frames vs the binary's.
   # A real gate since matz/spinel#4240 (SanitizeTags inert through an
   # untyped slot) was fixed the day it was filed; its first green run
   # is the strongest claim this repo makes about the demo artifact.
-  # `continue-on-error` for the same reason framework-tests-spinel is:
+  # `continue-on-error` for the same reason spinel-framework is:
   # spinel is tracked unpinned, and upstream churn must not gate
   # unrelated work — with the known cost that a break here is invisible
-  # in the run conclusion, so check these legs BY NAME when campfire
+  # in the run conclusion, so check these modes BY NAME when campfire
   # moves.
   #
-  # Three legs, one definition. `default` serves the binary with spinel's
-  # whole-heap mark; `minor-gc` serves it under SPINEL_GC_MINOR=1, the
-  # generational collector that is opt-in until it goes default-on.
-  # matz asked for this leg by name (matz/spinel#4260): the default-on
-  # decision needs a workload with a large, stable retained heap, and a
-  # long-lived process holding connection registries and a rendered
-  # room page is that shape — lobsters is request-shaped, LangArena the
-  # opposite. All legs consume the SAME comparison binary artifact of the
-  # SAME run. A red `minor-gc` beside a green `default` is a mode-specific
-  # signal, not proof of an upstream collector defect: reduce the case
-  # and establish its cause before filing upstream. Only the served
-  # binary sees the variable — scripts/campfire-compare exports it
-  # explicitly, 0 or 1, on the launch line and nowhere else.
+  # One job, three sequential GC modes after shared setup. `default`
+  # serves the binary with spinel's whole-heap mark; `minor-gc` serves
+  # it under SPINEL_GC_MINOR=1, the generational collector that is
+  # opt-in until it goes default-on. matz asked for this mode by name
+  # (matz/spinel#4260): the default-on decision needs a workload with a
+  # large, stable retained heap, and a long-lived process holding
+  # connection registries and a rendered room page is that shape —
+  # lobsters is request-shaped, LangArena the opposite. All modes
+  # consume the SAME comparison binary artifact of the SAME run. A red
+  # `minor-gc` beside a green `default` is a mode-specific signal, not
+  # proof of an upstream collector defect: reduce the case and establish
+  # its cause before filing upstream. Only the served binary sees the
+  # variable — scripts/campfire-compare exports it explicitly, 0 or 1,
+  # on the launch line and nowhere else.
   #
-  # `verify-gen` is the third leg, and it is why the other two can be
+  # `verify-gen` is the third mode, and it is why the other two can be
   # believed. SPINEL_GC_MINOR alone only fails when a missed write
   # barrier reaches the PAGE; SPINEL_GC_VERIFY_GEN=1 re-marks the whole
   # heap after every minor cycle and makes the runtime name the young
@@ -1287,73 +1304,57 @@ jobs:
   # and it is not the mode anything ships in. matz/spinel#4311 is the
   # shape this produces (a `minor-GC-only` title, fixed the same day).
   #
-  # All three legs also carry the collector's own attestation now: the
+  # All three modes also carry the collector's own attestation now: the
   # emit is stopped before the diff and Tep.on_shutdown prints GC.stat,
-  # and a `minor-gc` leg reporting remembered_peak=0 FAILS — a walk that
+  # and a `minor-gc` walk reporting remembered_peak=0 FAILS — a walk that
   # never took a minor cycle with a live remembered set is green about
-  # nothing.
-  campfire-compare-spinel:
-    name: campfire-compare-spinel (${{ matrix.gc }})
-    needs: [build-campfire-compare-spinel, plan]
-    # An advisory producer failure must not become three artifact-download
-    # failures. Only the upload's artifact ID proves the binary is available.
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-compare-spinel') && needs.build-campfire-compare-spinel.outputs.artifact-id != '' }}
+  # nothing. Per-mode outcomes stay on job outputs so ci-plan `complete`
+  # still requires default / minor-gc / verify-gen == success.
+  campfire-spinel-compare:
+    name: campfire-spinel-compare (GC walks)
+    needs: [campfire-spinel-build, plan]
+    # An advisory producer failure must not become an artifact-download
+    # failure. Only the upload's artifact ID proves the binary is available.
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-compare') && needs.campfire-spinel-build.outputs.artifact-id != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Setup once + three walks. Not 3× the old 45m matrix ceiling: hung
+    # apt/setup must die via step timeouts; healthy walks fit in 75m.
+    timeout-minutes: 75
     continue-on-error: true
     outputs:
       default: ${{ steps.result.outputs.default }}
       minor-gc: ${{ steps.result.outputs.minor-gc }}
       verify-gen: ${{ steps.result.outputs.verify-gen }}
-    strategy:
-      fail-fast: false
-      max-parallel: 3
-      matrix:
-        include:
-          - gc: default
-            flag: ''
-          - gc: minor-gc
-            flag: --minor-gc
-          - gc: verify-gen
-            flag: --verify-gen
     services:
       redis:
         image: redis
         ports: ['6379:6379']
     env:
       BUNDLE_PATH: vendor/bundle
-      MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # --reuse serves the prebuilt binary; no Roundhouse rebuild, no
+      # spinel-dist staging, and no rust-cache.
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
       - uses: actions/download-artifact@v8
         with:
-          name: spinel-dist
-          path: spinel-dist
-      - name: Stage spinel binaries
-        run: |
-          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
-          echo "$PWD/spinel-dist" >> $GITHUB_PATH
-      - uses: actions/download-artifact@v8
-        with:
-          name: campfire-compare-spinel
+          name: campfire-spinel-binary
       - name: Extract the comparison binary
         run: |
           mkdir -p build
           tar -xzf campfire-compare-spinel.tar.gz -C build
           test -x build/campfire-compare-spinel/build/blog
       - name: System libvips + libsqlite3-dev + libjemalloc-dev
-        # libjemalloc-dev because the emitted spin.toml names jemalloc as
-        # this program's allocator and `spin build` links `-ljemalloc`.
-        # The DEV package, not libjemalloc2: the runtime library LD_PRELOAD
-        # uses cannot be linked against.
+        # Runtime deps for the served binary + oracle. DEV packages match
+        # the producer link set; step timeout fails fast on mirror hangs
+        # (apt Acquire timeouts alone have left jobs stuck for tens of minutes).
+        timeout-minutes: 8
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
       - name: Fetch pinned once-campfire
+        timeout-minutes: 5
         run: |
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
           mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
@@ -1365,28 +1366,62 @@ jobs:
           key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby${{ env.MRI_RUBY }}-v1
       - name: Prepare the Rails oracle (cache miss)
         if: steps.oracle.outputs.cache-hit != 'true'
+        timeout-minutes: 15
         run: scripts/campfire-oracle prepare --app /tmp/campfire
       - name: Walk gems
+        timeout-minutes: 5
         run: gem install websocket-driver --no-document
-      - name: scripts/campfire-compare --spinel ${{ matrix.flag }}
-        run: scripts/campfire-compare --reuse "$PWD/build/campfire-compare-spinel" --spinel ${{ matrix.flag }} /tmp/campfire
+      - name: Walk default GC
+        id: walk-default
+        timeout-minutes: 20
+        continue-on-error: true
+        run: scripts/campfire-compare --reuse "$PWD/build/campfire-compare-spinel" --spinel /tmp/campfire
+      - name: Walk minor-gc
+        id: walk-minor-gc
+        timeout-minutes: 20
+        continue-on-error: true
+        run: scripts/campfire-compare --reuse "$PWD/build/campfire-compare-spinel" --spinel --minor-gc /tmp/campfire
+      - name: Walk verify-gen
+        id: walk-verify-gen
+        timeout-minutes: 20
+        continue-on-error: true
+        run: scripts/campfire-compare --reuse "$PWD/build/campfire-compare-spinel" --spinel --verify-gen /tmp/campfire
       - name: Report each GC mode's actual execution
         id: result
         if: always()
         env:
-          STATUS: ${{ job.status }}
-          MODE: ${{ matrix.gc }}
-        run: echo "$MODE=$STATUS" >> "$GITHUB_OUTPUT"
+          DEFAULT: ${{ steps.walk-default.outcome }}
+          MINOR_GC: ${{ steps.walk-minor-gc.outcome }}
+          VERIFY_GEN: ${{ steps.walk-verify-gen.outcome }}
+        run: |
+          {
+            echo "default=$DEFAULT"
+            echo "minor-gc=$MINOR_GC"
+            echo "verify-gen=$VERIFY_GEN"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo '### campfire-spinel-compare GC modes'
+            echo '| mode | outcome |'
+            echo '|---|---|'
+            echo "| default | $DEFAULT |"
+            echo "| minor-gc | $MINOR_GC |"
+            echo "| verify-gen | $VERIFY_GEN |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Fail job if any GC mode failed
+        if: always() && (steps.walk-default.outcome != 'success' || steps.walk-minor-gc.outcome != 'success' || steps.walk-verify-gen.outcome != 'success')
+        run: exit 1
 
   # A different app (the model-scenario overlay), so it needs its own
   # build, not the comparison binary. Start after the toolchain is ready
   # instead of serializing it behind the shared build and request walk.
-  campfire-db-differential-spinel:
-    needs: [build-spinel, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-db-differential-spinel') && needs.build-spinel.outputs.artifact-id != '' }}
+  campfire-spinel-db:
+    name: campfire-spinel-db (models)
+    needs: [spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-db') && needs.spinel-build.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 35
+
     continue-on-error: true
     services:
       redis:
@@ -1411,6 +1446,7 @@ jobs:
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: System libvips + libsqlite3-dev + libjemalloc-dev
+        timeout-minutes: 8
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
       - name: Fetch pinned once-campfire
@@ -1436,7 +1472,8 @@ jobs:
     # upload cannot skip into a green compact gate (#317).
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-conformance') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 35
+
     steps:
       - uses: actions/checkout@v7
       # No setup-rust: strict-emit and campfire-suite use the shared debug binary.
@@ -1548,6 +1585,7 @@ jobs:
       #             and `Message::AttachmentTest` posts a .mov and asserts
       #             the poster frame got attached.
       - name: Install libvips (ruby-vips binds it through FFI) and ffmpeg
+        timeout-minutes: 8
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 ffmpeg
       #   concurrent-ruby, net-http-persistent, web-push — also from the
@@ -1869,7 +1907,7 @@ jobs:
   # -------------------------------------------------------------------
   # Spinel-AOT toolchain. Same emit pipeline as toolchain-ruby (lowered
   # real-blog + target-specific tests), but the runner is the spinel
-  # AOT compiler from build-spinel. Each emitted test file compiles to
+  # AOT compiler from spinel-build. Each emitted test file compiles to
   # a native binary via `$SPINEL <file>.rb -o <bin>`; each binary
   # runs and asserts exit 0 (autorun shim emits explicit per-test
   # dispatch — no minitest at_exit).
@@ -1892,14 +1930,16 @@ jobs:
   # emit bug), so the job stays advisory via continue-on-error until that
   # closes. Running it (vs `if: false`) keeps the model-suite progress
   # visible and catches regressions in the compile path.
-  toolchain-spinel:
+  spinel-toolchain:
+    name: spinel-toolchain (suite)
     # Tracks matz/spinel master UNPINNED. Advisory unless ci:spinel focus
     # hardens the CORE lane (spinel-advisory=false).
-    needs: [generate-fixture, build-spinel, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'toolchain-spinel') && needs.generate-fixture.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
+    needs: [generate-fixture, spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     env:
       MAKEFLAGS: "-j4"
@@ -1921,6 +1961,7 @@ jobs:
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev + libjemalloc-dev
+        timeout-minutes: 8
         # jemalloc for the same reason the emitted README now lists it:
         # spin.toml names it as the allocator, so the link needs the dev
         # package present.
@@ -1999,13 +2040,14 @@ jobs:
   # bin/rails; see the old compare-kotlin note) and harmless everywhere
   # else. fail-fast off so one target's failure doesn't cancel the rest
   # (matches the old independent jobs). ruby/jruby/spinel stay separate
-  # below: two setup-ruby steps / an extra build-spinel dependency don't
+  # below: two setup-ruby steps / an extra spinel-build dependency don't
   # fit this shape.
   compare:
     needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 35
+
     permissions:
       contents: read
       actions: read
@@ -2051,6 +2093,7 @@ jobs:
           swift-version: '6.1'
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
+        timeout-minutes: 8
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
       - &swiftpm-cache
@@ -2177,7 +2220,8 @@ jobs:
     # Focus labels set extras-advisory=false so fix rounds stay hard.
     continue-on-error: ${{ needs.plan.outputs.extras-advisory == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 35
+
     permissions:
       contents: read
       actions: read
@@ -2198,7 +2242,8 @@ jobs:
     needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-ruby') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -2249,7 +2294,8 @@ jobs:
     needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-jruby') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -2297,7 +2343,7 @@ jobs:
       - name: scripts/compare jruby
         run: scripts/compare jruby
 
-  # compare-spinel: DOM-diff against a live AOT-compiled binary served
+  # spinel-compare: DOM-diff against a live AOT-compiled binary served
   # over Tep::Server (FFI HTTP/1.1). The spinel-transpile Makefile
   # target vendors the Tep transport (precompiles sphttp.o + sed-
   # substitutes @TEP_SPHTTP_O@ in net.rb) before AOT-compile; the
@@ -2306,13 +2352,15 @@ jobs:
   # + #1020 (commit 23d9a18). `continue-on-error` is still on because
   # spinel master can churn faster than this job rebuilds against it;
   # drop it once the upstream cadence settles.
-  compare-spinel:
+  spinel-compare:
+    name: spinel-compare (blog)
     # Advisory unless ci:spinel focus hardens CORE (spinel-advisory=false).
-    needs: [generate-fixture, build-spinel, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'compare-spinel') && needs.generate-fixture.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
+    needs: [generate-fixture, spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-compare') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     steps:
       - uses: actions/checkout@v7
@@ -2332,6 +2380,7 @@ jobs:
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev + libjemalloc-dev
+        timeout-minutes: 8
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev
       - uses: ruby/setup-ruby@v1
@@ -2392,7 +2441,8 @@ jobs:
     needs: [build-site, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.build-site.result == 'success' && contains(fromJSON(needs.plan.outputs.jobs), 'smoke') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+
     permissions:
       contents: read
       actions: read
@@ -2440,6 +2490,7 @@ jobs:
           swift-version: '6.1'
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
+        timeout-minutes: 8
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
       - *swiftpm-cache
@@ -2568,7 +2619,8 @@ jobs:
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.build-site.result == 'success' && contains(fromJSON(needs.plan.outputs.jobs), 'smoke-extra') }}
     continue-on-error: ${{ needs.plan.outputs.extras-advisory == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+
     permissions:
       contents: read
       actions: read
@@ -2580,21 +2632,23 @@ jobs:
     steps: *smoke-steps
 
   # spinel: the archive's README § Build AOT-compiles main.rb → build/blog
-  # with the spinel toolchain (build-spinel artifact); § Test runs the
+  # with the spinel toolchain (spinel-build artifact); § Test runs the
   # scaffold Makefile's `spinel-test` (each emitted test → a native binary);
   # § End-to-end boots build/blog under Playwright. Unlike ruby it needs no
   # MRI/bundler — static assets ship prebuilt in the archive (ensure_static_
   # assets, like jruby) so Build is the bare native compile. Toolchain =
   # spinel on PATH + a C compiler + libsqlite3-dev (the binary links
   # -lsqlite3) + Node for Playwright. Advisory (continue-on-error) like every
-  # spinel job — it tracks matz/spinel master UNPINNED. needs build-spinel
+  # spinel job — it tracks matz/spinel master UNPINNED. needs spinel-build
   # for the compiler and build-site for the published spinel.tgz.
-  smoke-spinel:
-    needs: [build-site, build-spinel, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'smoke-spinel') && needs.build-site.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
+  spinel-smoke:
+    name: spinel-smoke
+    needs: [build-site, spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-smoke') && needs.build-site.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+
     continue-on-error: true
     env:
       MAKEFLAGS: "-j4"
@@ -2613,6 +2667,7 @@ jobs:
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev + libjemalloc-dev
+        timeout-minutes: 8
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev
       - uses: actions/setup-node@v7
@@ -2630,7 +2685,7 @@ jobs:
         if: always()
         env:
           ARCHIVE_PATH: browse/spinel.tgz
-          CHECK: smoke-spinel
+          CHECK: spinel-smoke
           OUTCOME: ${{ steps.smoke.outcome }}
         run: *archive-validation
       - name: Save archive validation evidence
@@ -2642,7 +2697,7 @@ jobs:
       - *advisory-result
 
   # -------------------------------------------------------------------
-  # build-campfire-archive: ONCE Campfire for the spinel target, packaged
+  # campfire-archive-build: ONCE Campfire for the spinel target, packaged
   # the way the blog archives are.
   #
   # Published at rubys.github.io/roundhouse/campfire/spinel.tgz — NOT
@@ -2654,7 +2709,7 @@ jobs:
   # first time it is compiled and browser-driven on Linux.
   #
   # Where the blog archives come out of `roundhouse --site`, this one is
-  # built by scripts/build-campfire-archive, for two reasons the script's
+  # built by scripts/campfire-archive-build, for two reasons the script's
   # header states: `--site` is one-fixture-many-targets, and its archive
   # writer is text-only — campfire's hundred binary assets (mp3, png,
   # webp, gif) cannot be represented as `(String, String)` at all. The
@@ -2668,20 +2723,22 @@ jobs:
   #
   # It also builds campfire/docker.tgz — the same program after `spin
   # pack`, with a Dockerfile — when the spinel toolchain is available.
-  # build-spinel is advisory (matz/spinel master, unpinned), so the
+  # spinel-build is advisory (matz/spinel master, unpinned), so the
   # download is tolerant and the script skips the Docker archive with a
   # warning when `spin` is not on PATH: a red spinel build must not stop
   # the source archive from publishing.
   # -------------------------------------------------------------------
-  build-campfire-archive:
-    needs: [build-spinel, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'build-campfire-archive') }}
+  campfire-archive-build:
+    name: campfire-archive-build
+    needs: [spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-archive-build') }}
     runs-on: ubuntu-latest
-    # 60, not 30: `spin pack` runs spinel's front-end over the whole
+    # 50, not 30: `spin pack` runs spinel's front-end over the whole
     # campfire tree, and with the ruby-vips package in it the job took
-    # 26 of its 30 minutes on 2026-09-12 (run 34725916085). A publish
-    # that times out four minutes short is a flake waiting to happen.
-    timeout-minutes: 60
+    # 26 of its 30 minutes on 2026-09-12 (run 34725916085). Still below
+    # the old 60m ceiling so a hung pack fails sooner.
+    timeout-minutes: 50
+
     env:
       MAKEFLAGS: "-j4"
     steps:
@@ -2711,7 +2768,7 @@ jobs:
           mkdir -p /tmp/campfire
           tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Build campfire/spinel.tgz + campfire/docker.tgz
-        run: scripts/build-campfire-archive --out _site /tmp/campfire
+        run: scripts/campfire-archive-build --out _site /tmp/campfire
       - name: Record archive producer evidence
         if: always()
         env:
@@ -2734,7 +2791,7 @@ jobs:
           name: campfire-archive
           path: _site/campfire/*.tgz
 
-  # smoke-campfire-docker: the Docker archive's README says "Docker and
+  # campfire-smoke-docker: the Docker archive's README says "Docker and
   # nothing else", so that is what this job has — no spinel, no C
   # toolchain of its own. Extract, `docker build`, run, and ask the
   # server for what a fresh install answers first: `/` redirects to
@@ -2749,12 +2806,14 @@ jobs:
   # A docker-container Buildx builder exports type=local on hosted
   # runners (default docker driver may not); the image is still loaded
   # and tagged `campfire` so docker run matches the README install.
-  smoke-campfire-docker:
-    needs: [build-campfire-archive, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'smoke-campfire-docker') && needs.build-campfire-archive.result == 'success' }}
+  campfire-smoke-docker:
+    name: campfire-smoke-docker
+    needs: [campfire-archive-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-smoke-docker') && needs.campfire-archive-build.result == 'success' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
@@ -2833,7 +2892,7 @@ jobs:
         if: always()
         env:
           ARCHIVE_PATH: campfire/docker.tgz
-          CHECK: smoke-campfire-docker
+          CHECK: campfire-smoke-docker
           OUTCOME: ${{ steps.smoke.outcome }}
         run: *archive-validation
       - name: Save archive validation evidence
@@ -2844,8 +2903,8 @@ jobs:
           path: ci-evidence/*.json
       - *advisory-result
 
-  # smoke-campfire: the campfire archive runs its own README, exactly as
-  # smoke-spinel does for the blog — extract, execute every fenced ```sh
+  # campfire-smoke: the campfire archive runs its own README, exactly as
+  # spinel-smoke does for the blog — extract, execute every fenced ```sh
   # block in order, skip `## Run` and `## Regenerate`.
   #
   # The difference from every other smoke is WHAT proves it: this archive
@@ -2860,12 +2919,14 @@ jobs:
   # matz/spinel master UNPINNED, so a red here can be upstream drift
   # rather than our regression. Read it job-by-job; a green RUN does not
   # mean this passed.
-  smoke-campfire:
-    needs: [build-campfire-archive, build-spinel, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'smoke-campfire') && needs.build-campfire-archive.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
+  campfire-smoke:
+    name: campfire-smoke
+    needs: [campfire-archive-build, spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-smoke') && needs.campfire-archive-build.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     continue-on-error: true
     env:
       MAKEFLAGS: "-j4"
@@ -2884,6 +2945,7 @@ jobs:
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev + libjemalloc-dev + libvips-dev
+        timeout-minutes: 8
         # libvips-dev: the emitted spin.toml names ruby-vips (campfire
         # declares image variants), and the package links -lvips.
         run: |
@@ -2903,7 +2965,7 @@ jobs:
         if: always()
         env:
           ARCHIVE_PATH: campfire/spinel.tgz
-          CHECK: smoke-campfire
+          CHECK: campfire-smoke
           OUTCOME: ${{ steps.smoke.outcome }}
         run: *archive-validation
       - name: Save archive validation evidence
@@ -2939,7 +3001,8 @@ jobs:
     needs: [generate-fixture, build-wasm, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'build-site') && needs.generate-fixture.result == 'success' && (needs.plan.outputs.site != 'true' || needs.build-wasm.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
@@ -3430,7 +3493,7 @@ jobs:
   # Report actual per-archive outcomes, including failed/unavailable advisory
   # consumers. A report is not a passing validation or an execution receipt.
   archive-results:
-    needs: [plan, build-site, build-campfire-archive, smoke, smoke-spinel, smoke-campfire, smoke-campfire-docker]
+    needs: [plan, build-site, campfire-archive-build, smoke, spinel-smoke, campfire-smoke, campfire-smoke-docker]
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(fromJSON(needs.plan.outputs.jobs), 'archive-results') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -3462,12 +3525,13 @@ jobs:
     # for triage, but a failed compact floor still prevents Pages deploy.
     # A missing summary degrades to a skipped render and warning here;
     # assembly does not override the separate publication guards.
-    needs: [build-site, campfire-conformance, build-campfire-archive, archive-results, plan]
+    needs: [build-site, campfire-conformance, campfire-archive-build, archive-results, plan]
     if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' && needs.archive-results.result == 'success' }}
     outputs:
       ready: ${{ steps.ready.outputs.ready }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
     steps:
       - uses: actions/checkout@v7
       - uses: ruby/setup-ruby@v1
@@ -3485,7 +3549,7 @@ jobs:
           name: archive-results
           path: _site/ci
 
-      # The campfire archive, built by the parallel build-campfire-archive
+      # The campfire archive, built by the parallel campfire-archive-build
       # job, is attached after restoring this run's site-base artifact.
       # Assembly never re-emits archives or rebuilds from a newer main.
       #
@@ -3508,7 +3572,7 @@ jobs:
           if [ -f _site/campfire/spinel.tgz ]; then
             echo "campfire archive: $(du -h _site/campfire/spinel.tgz | cut -f1)"
           else
-            echo "::warning::no campfire archive this run (build-campfire-archive did not produce one)"
+            echo "::warning::no campfire archive this run (campfire-archive-build did not produce one)"
           fi
           if [ -f _site/campfire/docker.tgz ]; then
             echo "campfire Docker archive: $(du -h _site/campfire/docker.tgz | cut -f1)"
@@ -3580,7 +3644,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, writebook-inventory, build-spinel, framework-tests-spinel, build-campfire-compare-spinel, campfire-compare-spinel, campfire-db-differential-spinel, toolchain-spinel, compare-spinel, smoke-spinel, build-campfire-archive, smoke-campfire, smoke-campfire-docker, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, writebook-inventory, spinel-build, spinel-framework, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, archive-results, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

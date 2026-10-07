@@ -24,7 +24,7 @@ fn spinel_cache_download_failure_falls_back_without_hiding_build_failures() {
 
     let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    let job = &workflow["jobs"]["build-spinel"];
+    let job = &workflow["jobs"]["spinel-build"];
     assert_eq!(
         job["continue-on-error"].as_str(),
         Some("${{ needs.plan.outputs.spinel-advisory == 'true' }}")
@@ -194,7 +194,7 @@ fn campfire_docker_recipe_avoids_a_frontend_pull_and_ships_executable_boot() {
 fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
     let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    let job = &workflow["jobs"]["smoke-campfire-docker"];
+    let job = &workflow["jobs"]["campfire-smoke-docker"];
     let steps = job["steps"].as_sequence().unwrap();
     let step = |name: &str| {
         steps
@@ -511,13 +511,13 @@ fn campfire_comparisons_require_an_uploaded_binary_and_report_blocking() {
 
     let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    let producer = &workflow["jobs"]["build-campfire-compare-spinel"];
-    let consumer = &workflow["jobs"]["campfire-compare-spinel"];
+    let producer = &workflow["jobs"]["campfire-spinel-build"];
+    let consumer = &workflow["jobs"]["campfire-spinel-compare"];
     assert_eq!(producer["continue-on-error"].as_bool(), Some(true));
     assert_eq!(consumer["continue-on-error"].as_bool(), Some(true));
     assert_eq!(
         consumer["needs"][0].as_str(),
-        Some("build-campfire-compare-spinel")
+        Some("campfire-spinel-build")
     );
     assert_eq!(consumer["needs"][1].as_str(), Some("plan"));
     assert_eq!(
@@ -527,7 +527,7 @@ fn campfire_comparisons_require_an_uploaded_binary_and_report_blocking() {
     assert_eq!(
         consumer["if"].as_str(),
         Some(
-            "${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-compare-spinel') && needs.build-campfire-compare-spinel.outputs.artifact-id != '' }}"
+            "${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-compare') && needs.campfire-spinel-build.outputs.artifact-id != '' }}"
         )
     );
     let steps = producer["steps"].as_sequence().unwrap();
@@ -541,28 +541,45 @@ fn campfire_comparisons_require_an_uploaded_binary_and_report_blocking() {
         .starts_with("actions/upload-artifact@"));
     assert_eq!(
         upload["with"]["name"].as_str(),
-        Some("campfire-compare-spinel")
+        Some("campfire-spinel-binary")
     );
-    let matrix = consumer["strategy"]["matrix"]["include"]
-        .as_sequence()
-        .unwrap();
-    let modes: Vec<_> = matrix
+    assert!(
+        consumer.get("strategy").is_none(),
+        "GC modes share one job after setup; no matrix"
+    );
+    assert_eq!(consumer["timeout-minutes"].as_u64(), Some(75));
+    let consumer_steps = consumer["steps"].as_sequence().unwrap();
+    let walks: Vec<_> = consumer_steps
         .iter()
-        .map(|entry| {
-            (
-                entry["gc"].as_str().unwrap(),
-                entry["flag"].as_str().unwrap(),
-            )
+        .filter_map(|step| {
+            let id = step["id"].as_str()?;
+            let run = step["run"].as_str()?;
+            if !id.starts_with("walk-") {
+                return None;
+            }
+            Some((id, run))
         })
         .collect();
     assert_eq!(
-        modes,
-        [
-            ("default", ""),
-            ("minor-gc", "--minor-gc"),
-            ("verify-gen", "--verify-gen")
-        ]
+        walks
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        ["walk-default", "walk-minor-gc", "walk-verify-gen"]
     );
+    assert!(walks[0].1.contains("--spinel /tmp/campfire"));
+    assert!(!walks[0].1.contains("--minor-gc"));
+    assert!(walks[1].1.contains("--minor-gc"));
+    assert!(walks[2].1.contains("--verify-gen"));
+    assert!(consumer_steps.iter().all(|step| {
+        step["uses"].as_str() != Some("./.github/actions/setup-rust")
+            && step["uses"].as_str() != Some("Swatinem/rust-cache@v2")
+            && step
+                .get("with")
+                .and_then(|w| w.get("name"))
+                .and_then(|n| n.as_str())
+                != Some("spinel-dist")
+    }));
 
     let report = steps
         .iter()
@@ -834,7 +851,7 @@ fn campfire_failure_capture_keeps_the_original_exit_and_actual_c() {
 
     let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    let job = &workflow["jobs"]["build-campfire-compare-spinel"];
+    let job = &workflow["jobs"]["campfire-spinel-build"];
     assert_eq!(job["continue-on-error"].as_bool(), Some(true));
     let steps = job["steps"].as_sequence().unwrap();
     let step = |name: &str| {
@@ -1024,8 +1041,8 @@ fn spinel_model_differential_does_not_wait_for_the_gc_comparison_build() {
     let src = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
     let ci: serde_yaml_ng::Value = serde_yaml_ng::from_str(&src).expect("parse CI workflow");
     let jobs = &ci["jobs"];
-    let db = &jobs["campfire-db-differential-spinel"];
-    assert_eq!(db["needs"][0].as_str(), Some("build-spinel"));
+    let db = &jobs["campfire-spinel-db"];
+    assert_eq!(db["needs"][0].as_str(), Some("spinel-build"));
     assert_eq!(db["needs"][1].as_str(), Some("plan"));
     assert_eq!(db["continue-on-error"].as_bool(), Some(true));
 
@@ -1041,25 +1058,26 @@ fn spinel_model_differential_does_not_wait_for_the_gc_comparison_build() {
         "do not gate it on a GC matrix value"
     );
 
-    let gc = &jobs["campfire-compare-spinel"];
+    let gc = &jobs["campfire-spinel-compare"];
     assert_eq!(
         gc["needs"][0].as_str(),
-        Some("build-campfire-compare-spinel")
+        Some("campfire-spinel-build")
     );
     assert_eq!(gc["needs"][1].as_str(), Some("plan"));
-    let modes: Vec<_> = gc["strategy"]["matrix"]["include"]
+    assert!(
+        gc.get("strategy").is_none(),
+        "GC modes are sequential steps, not a matrix"
+    );
+    let walk_ids: Vec<_> = gc["steps"]
         .as_sequence()
-        .expect("GC matrix")
+        .unwrap()
         .iter()
-        .map(|mode| (mode["gc"].as_str().unwrap(), mode["flag"].as_str().unwrap()))
+        .filter_map(|step| step["id"].as_str())
+        .filter(|id| id.starts_with("walk-"))
         .collect();
     assert_eq!(
-        modes,
-        [
-            ("default", ""),
-            ("minor-gc", "--minor-gc"),
-            ("verify-gen", "--verify-gen")
-        ]
+        walk_ids,
+        ["walk-default", "walk-minor-gc", "walk-verify-gen"]
     );
     assert!(gc["steps"]
         .as_sequence()

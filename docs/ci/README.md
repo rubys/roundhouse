@@ -87,7 +87,7 @@ so fix rounds only queue the lanes under repair — and those lanes are
 | `ci:crystal` … `ci:python` | That language's `compare-extra` **and** `smoke-extra` (+ `build-site` / archives / `archive-results`) |
 | `ci:extras` | All seven of the above |
 | `ci:jruby` | `compare-jruby` + floor `smoke` jruby (+ site/archives) |
-| `ci:spinel` | CORE Spinel (`build-spinel`, `toolchain-spinel`, `compare-spinel`) + `framework-tests-spinel` (+ site/archives). Not the heavy Campfire Spinel11 matrix; not folded into `ci:extras`. |
+| `ci:spinel` | CORE Spinel (`spinel-build`, `spinel-toolchain`, `spinel-compare`) + `spinel-framework` (+ site/archives). Not the heavy Campfire Spinel suite (`campfire-spinel-*`); not folded into `ci:extras`. |
 
 **Narrow semantics:** with any focus label set and `ci:full` **not** set, the
 plan is the Ruby floor (`BASE`) plus only the selected focus lanes. Path
@@ -141,7 +141,7 @@ path, and floating-pin catch-up.
 - **JRuby fix rounds:** `ci:jruby` — `compare-jruby` + smoke jruby, required.
 - **Spinel-focused CI:** apply `ci:spinel` on a draft or ready PR. Runs the
   Ruby floor plus the CORE Spinel lane as **required**; skips Crystal/Go/… SDKs,
-  WASM, Writebook, and the heavy Campfire Spinel11 matrix. Prefer this over
+  WASM, Writebook, and the heavy Campfire Spinel suite. Prefer this over
   `ci:full` when only the native/Ruby-family lane matters. Multiple focus
   labels union on `BASE`.
 - **More coverage:** ask a maintainer to apply `ci:full` to a ready or draft PR. The

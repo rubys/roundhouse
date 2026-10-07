@@ -154,25 +154,25 @@ class FocusLabels(unittest.TestCase):
         self.assertEqual(
             [j for j in plan["jobs"] if j not in ci.BASE],
             [
-                "build-spinel",
-                "toolchain-spinel",
-                "compare-spinel",
-                "framework-tests-spinel",
+                "spinel-build",
+                "spinel-toolchain",
+                "spinel-compare",
+                "spinel-framework",
                 "build-site",
                 "archive-results",
             ],
         )
-        for job in ci.CORE + ["framework-tests-spinel"]:
+        for job in ci.CORE + ["spinel-framework"]:
             self.assertIn(job, plan["required"])
             self.assertNotIn(job, plan["advisory"])
         self.assertFalse(plan["spinel_advisory"])
-        self.assertNotIn("campfire-compare-spinel", plan["jobs"])
+        self.assertNotIn("campfire-spinel-compare", plan["jobs"])
         self.assertEqual(plan["spinel_tests"], ci.SPINEL_TESTS)
 
     def test_main_spinel_lane_stays_advisory_full_suite(self):
         plan = ci.select([], spinel_lane=True)
         self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
-        self.assertNotIn("compare-spinel", plan["required"])
+        self.assertNotIn("spinel-compare", plan["required"])
         self.assertTrue(plan["spinel_advisory"])
         self.assertTrue(set(ci.CORE).issubset(plan["advisory"]))
         self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))

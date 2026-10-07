@@ -131,7 +131,7 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 plan = ci.select([path])
                 self.assertEqual(
-                    self.extras(plan), set(ci.CORE) | {"framework-tests-spinel"}
+                    self.extras(plan), set(ci.CORE) | {"spinel-framework"}
                 )
                 self.assertEqual(plan["spinel_tests"], ["framework_tests_spinel"])
                 self.assertEqual(plan["archives"], [])
@@ -192,8 +192,8 @@ class Routing(unittest.TestCase):
         for job in plan["jobs"]:
             needs.setdefault(job, {"result": "success", "outputs": {"execution": "success"}})
         # Advisory Spinel GC matrix needs per-mode outputs when present.
-        if "campfire-compare-spinel" in plan["jobs"]:
-            needs["campfire-compare-spinel"] = {
+        if "campfire-spinel-compare" in plan["jobs"]:
+            needs["campfire-spinel-compare"] = {
                 "result": "success",
                 "outputs": {
                     "default": "success",
@@ -351,8 +351,8 @@ class Routing(unittest.TestCase):
                             self.assertEqual(plan["jobs"], ci.BASE)
                         elif labels == ["ci:spinel"]:
                             self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
-                            self.assertIn("compare-spinel", plan["required"])
-                            self.assertNotIn("campfire-compare-spinel", plan["jobs"])
+                            self.assertIn("spinel-compare", plan["required"])
+                            self.assertNotIn("campfire-spinel-compare", plan["jobs"])
                         elif labels == ["ci:swift"]:
                             self.assertEqual(plan["extra_compare"], ["swift"])
                             self.assertIn("compare-extra", plan["required"])
@@ -394,7 +394,7 @@ class Routing(unittest.TestCase):
         self.assertTrue(plan["extras_advisory"])
         self.assertFalse(plan["site"])
         self.assertFalse(plan["wasm"])
-        self.assertNotIn("build-spinel", plan["jobs"])
+        self.assertNotIn("spinel-build", plan["jobs"])
 
     def test_baseline_emitter_adds_its_archive_not_duplicate_compare(self):
         plan = ci.select(["src/emit/rust.rs"])
@@ -423,7 +423,7 @@ class Routing(unittest.TestCase):
                 plan = ci.select([f"tests/{binary}.rs"])
                 self.assertEqual(plan["spinel_tests"], [binary])
                 self.assertEqual(
-                    self.extras(plan), set(ci.CORE) | {"framework-tests-spinel"}
+                    self.extras(plan), set(ci.CORE) | {"spinel-framework"}
                 )
 
     def test_param_binds_owns_lowering_drivers_and_database_runtime(self):
@@ -447,7 +447,7 @@ class Routing(unittest.TestCase):
                     ci.PARAM_BIND_TESTS if path.startswith("src/") or path == "tests/support/emit_and_run.rs" else ["param_binds"],
                 )
                 self.assertEqual(
-                    self.extras(plan), set(ci.CORE) | {"framework-tests-spinel"}
+                    self.extras(plan), set(ci.CORE) | {"spinel-framework"}
                 )
         # Generated-read ensure/finalize lives in the Ruby emitter.
         # Native core already runs for this path; the bind cleanup suite
@@ -489,7 +489,7 @@ class Routing(unittest.TestCase):
             ("tests/support/jdbc_cleanup_failures.rb", set(), []),
             (
                 "runtime/spinel/test/statement_cache_cases.rb",
-                set(ci.CORE) | {"framework-tests-spinel"},
+                set(ci.CORE) | {"spinel-framework"},
                 ["param_binds"],
             ),
         ]:
@@ -507,7 +507,7 @@ class Routing(unittest.TestCase):
                 with self.subTest(suite=suite, suffix=suffix):
                     plan = ci.select(["tests/" + suite + suffix])
                     self.assertEqual(plan["spinel_tests"], [suite])
-                    self.assertIn("framework-tests-spinel", plan["jobs"])
+                    self.assertIn("spinel-framework", plan["jobs"])
 
     def test_runtime_owners_choose_asymmetric_focused_binaries(self):
         cases = {
@@ -534,7 +534,7 @@ class Routing(unittest.TestCase):
                 plan = ci.select([path])
                 self.assertEqual(plan["smoke"], targets)
                 self.assertIn("compare-jruby", plan["jobs"])
-                self.assertNotIn("build-spinel", plan["jobs"])
+                self.assertNotIn("spinel-build", plan["jobs"])
                 self.assertEqual(plan["spinel_tests"], [])
         self.assertEqual(ci.select(["README.md"])["jobs"], ci.BASE)
 
@@ -589,7 +589,7 @@ class Routing(unittest.TestCase):
                 plan = ci.select([path])
                 self.assertEqual(plan["spinel_tests"], expected)
                 self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
-                self.assertNotIn("smoke-campfire", plan["jobs"])
+                self.assertNotIn("campfire-smoke", plan["jobs"])
 
     def test_routing_union_is_order_independent(self):
         paths = [
@@ -723,39 +723,39 @@ class Routing(unittest.TestCase):
         scaffold = ci.select(["runtime/spinel/scaffold/Makefile"])
         self.assertEqual(
             self.extras(scaffold),
-            set(ci.CORE) | {"build-site", "smoke-spinel", "archive-results"},
+            set(ci.CORE) | {"build-site", "spinel-smoke", "archive-results"},
         )
         self.assertEqual(scaffold["archives"], ["spinel"])
         compare = ci.select(["scripts/campfire-compare-diff.rb"])
         self.assertEqual(
             self.extras(compare),
             {
-                "build-spinel",
-                "build-campfire-compare-spinel",
-                "campfire-compare-spinel",
+                "spinel-build",
+                "campfire-spinel-build",
+                "campfire-spinel-compare",
             },
         )
         db = ci.select(["scripts/campfire-db-differential"])
         self.assertEqual(
-            self.extras(db), {"build-spinel", "campfire-db-differential-spinel"}
+            self.extras(db), {"spinel-build", "campfire-spinel-db"}
         )
         archive = ci.select(["e2e/campfire/assets.spec.js"])
         self.assertEqual(
             self.extras(archive),
             {
-                "build-spinel",
-                "build-campfire-archive",
-                "smoke-campfire",
-                "smoke-campfire-docker",
+                "spinel-build",
+                "campfire-archive-build",
+                "campfire-smoke",
+                "campfire-smoke-docker",
                 "archive-results",
             },
         )
         self.assertEqual(
             ci.select(["scripts/campfire-docker-files"])["jobs"],
-            ci.select(["scripts/build-campfire-archive"])["jobs"],
+            ci.select(["scripts/campfire-archive-build"])["jobs"],
         )
         self.assertNotIn(
-            "campfire-compare-spinel",
+            "campfire-spinel-compare",
             ci.select(["scripts/campfire-docker-files"])["jobs"],
         )
 
@@ -827,11 +827,11 @@ class Results(unittest.TestCase):
     def test_advisory_failure_is_visible_but_does_not_fail_required_gate(self):
         plan = ci.select([], full=True)
         needs = self.needs(plan)
-        needs["build-spinel"]["outputs"]["execution"] = "failure"
+        needs["spinel-build"]["outputs"]["execution"] = "failure"
         failures, complete = ci.check_results(plan, needs)
         self.assertEqual(failures, [])
         self.assertFalse(complete)
-        needs["smoke-spinel"]["result"] = "skipped"
+        needs["spinel-smoke"]["result"] = "skipped"
         self.assertFalse(ci.check_results(plan, needs)[1])
 
     def test_archive_results_report_never_fails_summary_gate(self):
@@ -872,7 +872,7 @@ class Results(unittest.TestCase):
             for status in ["failure", "cancelled", "", None]:
                 with self.subTest(mode=mode, status=status):
                     needs = self.needs(plan)
-                    outputs = needs["campfire-compare-spinel"]["outputs"]
+                    outputs = needs["campfire-spinel-compare"]["outputs"]
                     if status is None:
                         del outputs[mode]
                     else:
