@@ -110,7 +110,8 @@ class Routing(unittest.TestCase):
                 self.assertTrue(plan["wasm"])
                 self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
                 self.assertIn("writebook-inventory", plan["required"])
-                self.assertIn("archive-results", plan["required"])
+                self.assertIn("archive-results", plan["jobs"])
+                self.assertNotIn("archive-results", plan["required"])
 
     def test_native_only_test_selects_core_without_archives_or_campfire(self):
         plan = ci.select(["tests/spinel_toolchain.rs"])
@@ -205,7 +206,8 @@ class Routing(unittest.TestCase):
         self.assertTrue(plan["wasm"])
         self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
         self.assertIn("build-roundhouse", plan["required"])
-        self.assertIn("archive-results", plan["required"])
+        self.assertIn("archive-results", plan["jobs"])
+        self.assertNotIn("archive-results", plan["required"])
         self.assertNotIn("assemble-site", plan["jobs"])
 
     def test_canonical_main_push_selects_spinel_lane_without_extra_sdks(self):
@@ -618,7 +620,8 @@ class Routing(unittest.TestCase):
                 self.assertEqual(plan["extra_compare"], [])
                 self.assertIn("compare-jruby", plan["required"])
                 self.assertIn("writebook-inventory", plan["required"])
-                self.assertIn("archive-results", plan["required"])
+                self.assertIn("archive-results", plan["jobs"])
+                self.assertNotIn("archive-results", plan["required"])
                 self.assertFalse(plan["wasm"])
                 self.assertFalse(plan["site"])
                 if scope == "ruby-family":
@@ -659,12 +662,13 @@ class Routing(unittest.TestCase):
         plan = ci.select([], full=True)
         self.assertEqual(plan["spinel_tests"], ci.SPINEL_TESTS)
         self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
-        self.assertIn("archive-results", plan["required"])
+        self.assertIn("archive-results", plan["jobs"])
+        self.assertNotIn("archive-results", plan["required"])
         self.assertIn("writebook-inventory", plan["required"])
         self.assertNotIn("deploy", plan["jobs"])
-        self.assertIn(
-            "assemble-site", ci.select([], full=True, publish=True)["required"]
-        )
+        published = ci.select([], full=True, publish=True)
+        self.assertIn("assemble-site", published["required"])
+        self.assertNotIn("archive-results", published["required"])
         with self.assertRaises(ValueError):
             ci.select([], publish=True)
 
@@ -780,6 +784,28 @@ class Results(unittest.TestCase):
         self.assertFalse(complete)
         needs["smoke-spinel"]["result"] = "skipped"
         self.assertFalse(ci.check_results(plan, needs)[1])
+
+    def test_archive_results_report_never_fails_summary_gate(self):
+        # Repro: PR ci:full run 37652830796 — every producer succeeded, but
+        # GitHub left archive-results `abandoned` and CI summary exited 1.
+        plan = ci.select([], full=True)
+        self.assertIn("archive-results", plan["jobs"])
+        self.assertNotIn("archive-results", plan["required"])
+        self.assertEqual(ci.REPORTING, {"archive-results"})
+        for outcome in ["abandoned", "skipped", "failure", "cancelled", None]:
+            with self.subTest(outcome=outcome):
+                needs = self.needs(plan)
+                needs["archive-results"] = {"result": outcome}
+                failures, complete = ci.check_results(plan, needs)
+                self.assertEqual(failures, [])
+                self.assertFalse(complete)
+        # Publication still selects assemble-site as required; the report job
+        # stays evidence-only at the summary gate.
+        published = ci.select([], full=True, publish=True)
+        needs = self.needs(published)
+        needs["archive-results"] = {"result": "abandoned"}
+        self.assertEqual(ci.check_results(published, needs)[0], [])
+        self.assertFalse(ci.check_results(published, needs)[1])
 
     def test_assembly_failure_cannot_issue_checkpoint(self):
         plan = ci.select([], full=True, publish=True)

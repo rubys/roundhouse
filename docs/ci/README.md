@@ -100,8 +100,11 @@ A missing plan output is not a valid successful selection.
 ## Read results honestly
 
 `CI summary` reports selected non-advisory checks that failed, skipped, were
-cancelled, or are missing. Unselected skips are expected. It is informational:
-the workflow does not impose branch protection or decide when to merge.
+cancelled, or are missing. Unselected skips are expected. The `archive-results`
+job is packaging evidence, not a validation receipt: abandoned or failed
+reports do not fail the summary gate (Pages assembly still requires a
+successful report when publishing). It is informational: the workflow does
+not impose branch protection or decide when to merge.
 
 Read advisory jobs and raw step outcomes too. `continue-on-error` can hide a
 Spinel failure in the overall conclusion. A green summary is not proof that

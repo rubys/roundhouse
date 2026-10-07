@@ -71,6 +71,12 @@ SPINEL11 = [
 # build-site; archive-results closes packaging evidence.
 SPINEL_LANE = [*BASE, *SPINEL11, "build-site", "archive-results"]
 ADVISORY = set(SPINEL11) - {"build-campfire-archive"}
+# Packaging evidence report only. Selected for completeness and required by
+# assemble-site when publishing; never a hard CI-summary / compact failure.
+# GitHub can mark the job `abandoned` (queued, never assigned) on large
+# ci:full PR graphs even when every producer succeeded — that must not red
+# an otherwise green PR summary.
+REPORTING = {"archive-results"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 PROJECT_BUILDERS = {
     "ruby_runtime_files": "interpreted",
@@ -413,7 +419,7 @@ def finish(
     )
     return {
         "jobs": jobs,
-        "required": [j for j in jobs if j not in ADVISORY],
+        "required": [j for j in jobs if j not in ADVISORY and j not in REPORTING],
         "extra_compare": extra,
         "smoke": smoke,
         "archives": archives,
