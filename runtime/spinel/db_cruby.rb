@@ -113,6 +113,7 @@ module Db
     end
     @checkpoint_lock_file = nil
     @checkpointer_pid = nil
+    @checkpoint_warn_at = nil
     @pool      = open_pool
     @owner_pid = Process.pid
   end
@@ -211,6 +212,8 @@ module Db
           end
         end
         @checkpoint_lock_file = nil
+        @checkpointer_pid = nil
+        @checkpoint_warn_at = nil
         # The parent's handles are simply dropped. They are already
         # discarded by the gem's fork safety, and closing a descriptor
         # this process shares with its parent is not ours to do.
@@ -597,7 +600,8 @@ module Db
 
   # Rate-limited visibility for checkpoint_loop failures. Resets the
   # suppress window only by time, not by success — a later success simply
-  # stops calling this. Safe to call from tests.
+  # stops calling this. Private: the loop is the only production caller;
+  # tests reach it via `send`.
   def self.warn_checkpoint_failure(error)
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     last = @checkpoint_warn_at
@@ -605,6 +609,7 @@ module Db
     @checkpoint_warn_at = now
     warn "[db] WAL checkpoint failed: #{error.class}: #{error.message}"
   end
+  private_class_method :warn_checkpoint_failure
 
   def self.prepare_for_checkpointer(conn)
     start_checkpointer if @checkpointer_pid != Process.pid

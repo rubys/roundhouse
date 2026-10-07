@@ -327,8 +327,9 @@ check("background checkpoint copied the log (#{before} -> #{File.size(path)})",
     );
 }
 
-/// Persistent checkpoint failures must be visible, but not every 250 ms.
-/// Cap at CHECKPOINT_WARN_INTERVAL (honest visibility without a log storm).
+/// Rate-limit pin for `warn_checkpoint_failure` itself (observability
+/// garnish). Does **not** couple to `checkpoint_loop`'s rescue wire —
+/// deleting the rescue call would keep this green; takeover pins flock.
 #[test]
 fn checkpoint_failure_warn_is_rate_limited() {
     run(
@@ -340,13 +341,13 @@ buf = StringIO.new
 real = $stderr
 $stderr = buf
 begin
-  Db.warn_checkpoint_failure(RuntimeError.new("first"))
-  Db.warn_checkpoint_failure(RuntimeError.new("second"))
+  Db.send(:warn_checkpoint_failure, RuntimeError.new("first"))
+  Db.send(:warn_checkpoint_failure, RuntimeError.new("second"))
   Db.instance_variable_set(
     :@checkpoint_warn_at,
     Process.clock_gettime(Process::CLOCK_MONOTONIC) - Db::CHECKPOINT_WARN_INTERVAL - 1
   )
-  Db.warn_checkpoint_failure(RuntimeError.new("third"))
+  Db.send(:warn_checkpoint_failure, RuntimeError.new("third"))
 ensure
   $stderr = real
 end
@@ -382,31 +383,45 @@ leader = fork do
   sleep 60
   exit!(0)
 end
-ready_w.close
-check("leader signalled ready", ready_r.read(1) == "1")
-ready_r.close
+begin
+  ready_w.close
+  check("leader signalled ready", ready_r.read(1) == "1")
+  ready_r.close
 
-baseline = File.size(path)
-Db.checkpoint_in_background!
-Db.with_connection do
-  st = Db.current_dbh.execute("PRAGMA wal_autocheckpoint")
-  check("survivor disabled autocheckpoint", st[0][0] == 0)
-  200.times { Db.exec("INSERT INTO t (b) VALUES (randomblob(4096))") }
+  baseline = File.size(path)
+  Db.checkpoint_in_background!
+  Db.with_connection do
+    st = Db.current_dbh.execute("PRAGMA wal_autocheckpoint")
+    check("survivor disabled autocheckpoint", st[0][0] == 0)
+    200.times { Db.exec("INSERT INTO t (b) VALUES (randomblob(4096))") }
+  end
+  # Leader still holds the flock: the survivor's loop is on :busy, so
+  # PASSIVE cannot run and the main db file stays near baseline while
+  # pages sit in the -wal file.
+  check("db file not yet grown under foreign flock",
+        File.size(path) <= baseline + 50_000)
+
+  Process.kill("KILL", leader)
+  _pid, status = Process.wait2(leader)
+  leader = nil
+  check("leader exited", status.signaled?)
+
+  deadline = Time.now + 5
+  sleep 0.05 while File.size(path) <= baseline + 400_000 && Time.now < deadline
+  check("survivor checkpointer took over and copied (#{baseline} -> #{File.size(path)})",
+        File.size(path) > baseline + 400_000)
+ensure
+  if leader
+    begin
+      Process.kill("KILL", leader)
+    rescue Errno::ESRCH
+    end
+    begin
+      Process.wait2(leader)
+    rescue Errno::ECHILD
+    end
+  end
 end
-# Leader still holds the flock: the survivor's loop is on :busy, so
-# PASSIVE cannot run and the main db file stays near baseline while
-# pages sit in the -wal file.
-check("db file not yet grown under foreign flock",
-      File.size(path) <= baseline + 50_000)
-
-Process.kill("KILL", leader)
-_pid, status = Process.wait2(leader)
-check("leader exited", status.signaled?)
-
-deadline = Time.now + 5
-sleep 0.05 while File.size(path) <= baseline + 400_000 && Time.now < deadline
-check("survivor checkpointer took over and copied (#{baseline} -> #{File.size(path)})",
-      File.size(path) > baseline + 400_000)
 "#,
     );
 }
