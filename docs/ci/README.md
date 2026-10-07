@@ -84,6 +84,9 @@ subsequent Full (or `ci:full`) pass.
 
 `ci:jruby` is not shipped; jruby stays on path ownership / `ci:full`. Existing
 `ci:spinel` remains the Spinel-only lane and is not part of `ci:extras`.
+The focus `ci:*` labels are defined on the GitHub repo; if a fork is missing
+them, create labels with those exact names (color may match other `ci:*`
+labels) so applying them on a PR is possible.
 
 Pushes to canonical `main` run the Ruby floor plus the full Spinel suite
 and cancel a superseded SHA on the same ref. They do **not** run Crystal,
@@ -174,7 +177,7 @@ Read the owner and its executable contract before editing:
 
 | Concern | Source | Tests |
 |---|---|---|
-| Coverage and execution | [ci.yml](../../.github/workflows/ci.yml), [ci-plan.py](../../scripts/ci-plan.py), [ci-unit-tests.py](../../scripts/ci-unit-tests.py) | `tests/ci_policy_workflow.rs`, `tests/workflow_yaml_parses.rs` |
+| Coverage and execution | [ci.yml](../../.github/workflows/ci.yml), [ci-plan.py](../../scripts/ci-plan.py), [ci-unit-tests.py](../../scripts/ci-unit-tests.py) | `tests/ci_plan_test.py`, `tests/ci_plan_focus_test.py`, `tests/ci_policy_workflow.rs`, `tests/workflow_yaml_parses.rs` |
 | Toolchain selection | [ci.yml](../../.github/workflows/ci.yml), [`.ruby-version`](../../.ruby-version), [bin/rh](../../bin/rh) | `tests/ci_toolchain_workflow.rs`, `tests/rh_verify.rs` |
 | Receipt reuse | [ci-reuse.py](../../scripts/ci-reuse.py) | `tests/ci_reuse_test.py` |
 | Fixture caching | [generate-fixture in ci.yml](../../.github/workflows/ci.yml) | `tests/ci_fixture_workflow.rs` |

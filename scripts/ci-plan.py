@@ -102,11 +102,12 @@ CI_FULL = "ci:full"
 CI_SPINEL = "ci:spinel"
 CI_EXTRAS = "ci:extras"
 CI_FOCUS_BY_LABEL = {f"ci:{t}": t for t in EXTRA_COMPARE_TARGETS}
-# Extension point — do NOT fold these into ci:extras / EXTRA_COMPARE_TARGETS.
-# A future `ci:jruby` would select compare-jruby + smoke jruby (+ archives).
-# Finer Spinel focus (beyond today's ci:spinel lane) would select a SPINEL11
-# subset. Ship labels only with select() + contract tests, not half-baked.
-CI_DEFERRED_FOCUS_LABELS = ("ci:jruby",)
+# Extension point (not shipped): do NOT fold jruby/spinel into ci:extras.
+# A future `ci:jruby` would select compare-jruby + smoke jruby (+ archives)
+# via parse_coverage_labels + select(), with contract tests. Unknown names
+# (including a premature `ci:jruby` label) are ignored today. Finer Spinel
+# focus beyond the existing `ci:spinel` lane would similarly need select()
+# + tests — do not half-bake labels.
 
 CoverageLabels = namedtuple("CoverageLabels", "full spinel_lane focus_extras")
 
@@ -115,7 +116,7 @@ def parse_coverage_labels(names, *, env_full=False):
     """Interpret PR/env coverage labels into a structured request.
 
     `focus_extras` is an ordered tuple of EXTRA_COMPARE_TARGETS members.
-    Unknown `ci:*` names are ignored (including deferred focus labels).
+    Unknown `ci:*` names (e.g. a future `ci:jruby`) are ignored.
     """
     labels = set(names)
     full = bool(env_full) or CI_FULL in labels

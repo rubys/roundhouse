@@ -402,7 +402,11 @@ fn resource_and_harness_helpers_preserve_failures_and_contracts() {
 
 #[test]
 fn routing_and_required_results_reject_false_green() {
-    for test in ["tests/ci_plan_test.py", "tests/ci_archive_evidence_test.py"] {
+    for test in [
+        "tests/ci_plan_test.py",
+        "tests/ci_plan_focus_test.py",
+        "tests/ci_archive_evidence_test.py",
+    ] {
         let result = std::process::Command::new("python3")
             .args(["-B", test, "-v"])
             .output()
