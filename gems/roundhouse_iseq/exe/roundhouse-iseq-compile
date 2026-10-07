@@ -1,0 +1,30 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "json"
+require "optparse"
+
+$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
+require "roundhouse_iseq"
+
+out_dir = nil
+units_path = nil
+OptionParser.new do |o|
+  o.banner = "Usage: roundhouse-iseq-compile --out DIR [--units FILE|-]"
+  o.on("--out DIR", "Output directory for manifest.json and iseq/") { |v| out_dir = v }
+  o.on("--units FILE", "JSON array of units (default: stdin)") { |v| units_path = v }
+end.parse!
+
+abort "roundhouse-iseq-compile: --out is required" if out_dir.nil? || out_dir.empty?
+
+raw = if units_path.nil? || units_path == "-"
+  $stdin.read
+else
+  File.read(units_path)
+end
+
+units = JSON.parse(raw)
+abort "roundhouse-iseq-compile: units JSON must be an Array" unless units.is_a?(Array)
+
+RoundhouseIseq::Compiler.compile!(units: units, out_dir: out_dir)
+puts "wrote #{units.size} unit(s) to #{out_dir}"
