@@ -2067,14 +2067,11 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
                     {
                         args.iter()
                             .filter_map(|arg| match &*arg.node {
-                                ExprNode::Const { path } => {
-                                    Some(crate::ident::ClassId(crate::ident::Symbol::from(
-                                        path.iter()
-                                            .map(|s| s.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join("::"),
-                                    )))
-                                }
+                                ExprNode::Const { path } => Some(concern_named(
+                                    model.name.0.as_str(),
+                                    path,
+                                    &app.concern_model_items,
+                                )),
                                 _ => None,
                             })
                             .collect()
@@ -2100,6 +2097,33 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
             i += 1;
         }
     }
+}
+
+/// The concern an `include` arg written inside `owner` names. A rooted
+/// `::Blog::Concerns::X` (a leading empty segment) names the top-level
+/// `Blog::Concerns::X`, with no lexical lookup. A relative `Concerns::X`
+/// resolves from the owner's namespace outward (`Blog::Post::Concerns::X`,
+/// then `Blog::Concerns::X`), innermost first, falling back to the path as
+/// written. Keyed by the written path, a rooted include matched no
+/// concern and its `included do` block vanished from the includer.
+fn concern_named<V>(
+    owner: &str,
+    path: &[crate::ident::Symbol],
+    concerns: &std::collections::HashMap<crate::ident::ClassId, V>,
+) -> crate::ident::ClassId {
+    let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    if let Some(top) = written.strip_prefix("::") {
+        return crate::ident::ClassId(crate::ident::Symbol::from(top));
+    }
+    let mut scope = Some(owner);
+    while let Some(prefix) = scope {
+        let id = crate::ident::ClassId(crate::ident::Symbol::from(format!("{prefix}::{written}")));
+        if concerns.contains_key(&id) {
+            return id;
+        }
+        scope = prefix.rsplit_once("::").map(|(prefix, _)| prefix);
+    }
+    crate::ident::ClassId(crate::ident::Symbol::from(written))
 }
 
 /// An owner-derived FOREIGN KEY, recomputed for the model the
