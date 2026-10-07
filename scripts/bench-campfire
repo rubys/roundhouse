@@ -140,18 +140,18 @@
 #
 # ONE RAILS LANE NOW, AND THAT IS THE WHOLE POINT OF THE LAST YEAR.
 # campfire renders its message list as `render partial: …, collection:
-# @messages, cached: true`, so with Redis up the 40 fragments are read
-# back rather than rendered. `rails-nocache` existed because the emitted
-# tree had NO fragment cache: comparing a caching Rails against a
-# rendering emit measured Redis, not Rails, so the honest renderer-vs-
-# renderer operand had to be published beside it.
+# @messages, cached: true`. Stock production points that at Redis; the
+# emit uses in-process MemoryStore. For the default 1p rails-vs-emit
+# matrix this harness therefore boots rails fragment cache on
+# MemoryStore too (`--rails-fragment-store memory`, the default) so the
+# warm path is the same *store type* — not Redis vs MemoryStore. Pass
+# `--rails-fragment-store redis` for the deployed Redis shape.
 #
 # The emit caches as of 72474b41 (`<% cache %>` served from Rails.cache,
 # /rooms/1/messages 127 -> 7 sqlite round trips, the same 7 Rails
-# spends). Both sides now read fragments back, the deployed lanes
-# compare like with like, and `rails` is the only opponent the page
-# needs. Publishing a rendering-Rails column beside two caching lanes
-# would be the mirror of the error the old pairing prevented.
+# spends). Both sides now read fragments back, and `rails` is the only
+# opponent the page needs. `rails-nocache` remains a diagnostic
+# (renderer cost with caching off), never a headline.
 #
 # THE PAIR IS STILL REQUESTABLE BY NAME, and deliberately so:
 # `--no-fragment-cache` is how we measured that Rails' own renderer
@@ -210,6 +210,10 @@
 #   --socket-per-room N     subscribers per room (default 50, which is
 #                     the shape the runtime ledger's tiers were measured
 #                     at; the sweep derives the room count from it)
+#   --rails-fragment-store memory|redis
+#                     Fragment-cache backend for rails* caching lanes
+#                     (default memory — same store type as the emit).
+#                     `redis` is the deployed production.rb shape.
 #   --skip-prepare    reuse the oracle tree, emit and spinel binary
 #                     already on disk
 #   --keep            leave servers running on exit
@@ -349,6 +353,12 @@ while [[ $# -gt 0 ]]; do
         --socket-per-room) SOCKET_PER_ROOM="$2"; shift 2 ;;
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
+        --rails-fragment-store)
+            case "$2" in
+                memory|redis) RAILS_FRAGMENT_STORE="$2" ;;
+                *) echo "bench-campfire: --rails-fragment-store needs memory|redis (got $2)" >&2; exit 2 ;;
+            esac
+            shift 2 ;;
         -h|--help)     sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
         rails|rails-nocache|ruby|roundsnap|spinel|tobi|rust|go|elixir|rails-1p|rails-1p-noyjit|rails-nocache-1p|ruby-1p|ruby-1p-noyjit|roundsnap-1p|roundsnap-1p-noyjit|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
@@ -356,6 +366,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 (( ${#LANES[@]} )) || LANES=(rails ruby spinel)
+# Default: MemoryStore on rails fragment-cache lanes — same store type
+# as the emit. Redis remains opt-in for the deployed-shape comparison.
+RAILS_FRAGMENT_STORE="${RAILS_FRAGMENT_STORE:-memory}"
 GET_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-get.lua"
 POST_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-post.lua"
 [[ -n "$OUT_DIR" ]] || OUT_DIR="$REPO_ROOT/bench/results/campfire-$(date +%Y%m%d-%H%M%S)"
@@ -462,21 +475,18 @@ die()  { fail "$*"; exit 1; }
 
 command -v wrk >/dev/null || die "wrk not on PATH"
 
-# Rails fragment-cache lanes need a live Redis (production.rb uses
-# redis_cache_store). Without it, rails-1p silently renders ~1s/page
-# instead of the warm fragment-read path the harness documents. Match
-# campfire's Procfile: redis is the box service — start it here if the
-# binary is present and nothing answers yet (same URL the oracle uses).
+# Redis only when rails fragment-cache lanes ask for the deployed store.
+# Default is MemoryStore (same type as emit); see --rails-fragment-store.
 ensure_redis_for_rails_fragment_cache() {
     local url="${REDIS_URL:-redis://127.0.0.1:6379/0}"
     command -v redis-cli >/dev/null \
-        || die "redis-cli required for rails fragment-cache lanes (install redis-server)"
+        || die "redis-cli required for --rails-fragment-store redis (install redis-server)"
     if redis-cli -u "$url" ping >/dev/null 2>&1; then
         ok "Redis up for rails fragment-cache ($url → $(redis-cli -u "$url" ping))"
         return 0
     fi
     command -v redis-server >/dev/null \
-        || die "Redis not answering ($url) and redis-server not on PATH — install redis-server for fair rails-1p"
+        || die "Redis not answering ($url) and redis-server not on PATH — install redis-server for --rails-fragment-store redis"
     step "starting redis-server for rails fragment-cache ($url)"
     local conf=""
     [[ -f "$ORACLE/config/redis.conf" ]] && conf="$ORACLE/config/redis.conf"
@@ -496,13 +506,17 @@ ensure_redis_for_rails_fragment_cache() {
     ok "Redis started for rails fragment-cache ($url → $(redis-cli -u "$url" ping))"
 }
 rails_needs_redis=0
-for _lane in "${LANES[@]}"; do
-    case "$_lane" in
-        rails|rails-1p|rails-1p-noyjit|rails-truffleruby) rails_needs_redis=1 ;;
-    esac
-done
+if [[ "$RAILS_FRAGMENT_STORE" == "redis" ]]; then
+    for _lane in "${LANES[@]}"; do
+        case "$_lane" in
+            rails|rails-1p|rails-1p-noyjit|rails-truffleruby) rails_needs_redis=1 ;;
+        esac
+    done
+fi
 if (( rails_needs_redis )); then
     ensure_redis_for_rails_fragment_cache
+else
+    ok "rails fragment-cache store=$RAILS_FRAGMENT_STORE (no Redis required)"
 fi
 
 SERVER_PID=""
@@ -1057,19 +1071,23 @@ start_lane() {
             # all six lanes and the memory column compares runtimes
             # rather than mallocs.
             local nocache=""; [[ "$lane" == "rails-nocache" ]] && nocache="--no-fragment-cache"
+            local store_flag=""
+            [[ -z "$nocache" ]] && store_flag="--fragment-store $RAILS_FRAGMENT_STORE"
             scripts/campfire-oracle serve --deployed --out "$ORACLE" --port "$port" \
                 --threads "$THREADS" --shape-report "$shape" \
-                $nocache > "$log" 2>&1 &
+                $nocache $store_flag > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
         rails-1p|rails-1p-noyjit|rails-nocache-1p)
             local nc1=""; [[ "$lane" == "rails-nocache-1p" ]] && nc1="--no-fragment-cache"
+            local store_flag1=""
+            [[ -z "$nc1" ]] && store_flag1="--fragment-store $RAILS_FRAGMENT_STORE"
             local yjit_flag=""
             lane_yjit "$lane" || yjit_flag="--no-yjit"
             echo "yjit=$(lane_yjit "$lane" && echo 1 || echo 0)" > "$shape"
             scripts/campfire-oracle serve --out "$ORACLE" --port "$port" \
                 --workers 1 --threads "$THREADS" --shape-report "$shape" \
-                $yjit_flag $nc1 > "$log" 2>&1 &
+                $yjit_flag $nc1 $store_flag1 > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
         ruby|ruby-1p|ruby-1p-noyjit|roundsnap|roundsnap-1p|roundsnap-1p-noyjit)
@@ -1157,6 +1175,7 @@ start_lane() {
             # `cmd_serve_truffleruby` for what cannot be the same.
             scripts/campfire-oracle serve --runtime truffleruby --heap "$RAILS_TR_HEAP" \
                 --out "$ORACLE" --port "$port" --threads "$THREADS" \
+                --fragment-store "$RAILS_FRAGMENT_STORE" \
                 --shape-report "$shape" > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
@@ -1524,13 +1543,13 @@ for lane in "${LANES[@]}"; do
     # Redis cannot look like a fair steady-state row.
     case "$lane" in
         rails|rails-1p|rails-1p-noyjit|rails-truffleruby)
-            step "warm fragment cache for $lane (Redis)"
+            step "warm fragment cache for $lane (store=$RAILS_FRAGMENT_STORE)"
             warm_log="$LOG_DIR/fragment-warm-$lane.txt"
             : > "$warm_log"
             for ep in "${ENDPOINTS[@]}"; do
                 ep_is_post "$ep" && continue
                 url="http://127.0.0.1:$port$(ep_path "$ep")"
-                # Two GETs: first populates Redis, second should be warm.
+                # Two GETs: first populates the store, second should be warm.
                 cold_ms="$(curl -s -o /dev/null -w '%{time_total}' \
                     -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" "$url" \
                     | awk '{printf "%.0f", $1 * 1000}')"
@@ -1539,13 +1558,13 @@ for lane in "${LANES[@]}"; do
                     | awk '{printf "%.0f", $1 * 1000}')"
                 printf '%s\tcold_ms=%s\twarm_ms=%s\n' "$ep" "$cold_ms" "$warm_ms" | tee -a "$warm_log"
             done
-            # Room page is the canary: warm should be far below cold when Redis works.
+            # Room page is the canary: warm should be far below cold when the store works.
             if room_warm="$(awk -F'\t' '$1 ~ /^\/rooms\/[0-9]+$/ {print $3}' "$warm_log" | head -1)"; then
                 room_warm_ms="${room_warm#warm_ms=}"
                 if [[ -n "$room_warm_ms" ]] && (( room_warm_ms > 200 )); then
-                    die "$lane: /rooms/* warm_ms=${room_warm_ms} (>200) — Redis fragment cache not warm; refuse unfair rails row (see $warm_log). Is redis-server up?"
+                    die "$lane: /rooms/* warm_ms=${room_warm_ms} (>200) — fragment cache (store=$RAILS_FRAGMENT_STORE) not warm; refuse unfair rails row (see $warm_log)"
                 fi
-                ok "$lane fragment cache warm (room warm_ms=${room_warm_ms:-?}; see $warm_log)"
+                ok "$lane fragment cache warm via $RAILS_FRAGMENT_STORE (room warm_ms=${room_warm_ms:-?}; see $warm_log)"
             fi
             ;;
     esac

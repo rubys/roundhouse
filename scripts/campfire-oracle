@@ -123,6 +123,12 @@
 #                   store. Default is ON, which is what a campfire
 #                   deployment does — and which makes the message list a
 #                   Redis read rather than a render. See the header.
+#   --fragment-store redis|memory
+#                   Backend for the fragment-cache-ON lane (default redis).
+#                   `memory` keeps `perform_caching` on but points
+#                   `cache_store` at ActiveSupport::Cache::MemoryStore —
+#                   the same store type the emit uses — so a 1-process
+#                   rails-vs-emit comparison is not Redis vs MemoryStore.
 #   --jar PATH      cookie jar for `login` (default <out>/tmp/bench-jar.txt)
 #   --count N       users to mint cookies for (`cookies`, default --users)
 #   --cookie-file P where `cookies` writes them (default <out>/tmp/session-cookies.txt)
@@ -159,10 +165,11 @@ YJIT=1
 #
 # `login` and `prepare` are environment-agnostic; only `serve` reads this.
 RAILS_ENV_NAME="production"
-# 1 = campfire as deployed (Redis-backed fragment cache); 0 = Rails
-# actually rendering. See the header — these are two different
-# measurements and both are real.
+# 1 = fragment cache ON; 0 = Rails actually rendering (null store).
+# Backend when ON is FRAGMENT_STORE (redis = deployed shape; memory =
+# same store type as the emit). See the header.
 FRAGMENT_CACHE=1
+FRAGMENT_STORE=redis
 # The deployed shape (their Dockerfile + Procfile), off by default so the
 # single-worker diagnostic lanes stay exactly what they were.
 DEPLOYED=0
@@ -208,6 +215,12 @@ while [[ $# -gt 0 ]]; do
         --runtime)  RUNTIME="$2"; shift 2 ;;
         --heap)     HEAP="$2"; shift 2 ;;
         --no-fragment-cache) FRAGMENT_CACHE=0; shift ;;
+        --fragment-store)
+            case "$2" in
+                redis|memory) FRAGMENT_STORE="$2" ;;
+                *) echo "campfire-oracle: --fragment-store needs redis|memory (got $2)" >&2; exit 2 ;;
+            esac
+            shift 2 ;;
         --env)      RAILS_ENV_NAME="$2"; shift 2 ;;
         --jar)      JAR="$2"; shift 2 ;;
         --count)    COUNT="$2"; shift 2 ;;
@@ -231,6 +244,49 @@ export SECRET_KEY_BASE="${SECRET_KEY_BASE:-campfire-oracle-benchmark-secret-not-
 
 step() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31mcampfire-oracle:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Lane knob under config/initializers/. Rewritten on every prepare and
+# every serve so `--skip-prepare` still picks up store-backend changes.
+write_bench_cache_initializer() {
+    local tree="$1"
+    mkdir -p "$tree/config/initializers"
+    cat > "$tree/config/initializers/zz_bench_cache.rb" <<'INIT'
+# Benchmark lane knob, added by roundhouse's scripts/campfire-oracle.
+# NOT campfire's. Env gates:
+#   DISABLE_FRAGMENT_CACHE=1  → perform_caching off, null_store
+#   FRAGMENT_CACHE_STORE=memory → caching on, ActiveSupport::Cache::MemoryStore
+#                                (same store type as the Roundhouse emit)
+# Otherwise production.rb's redis_cache_store stands (deployed shape).
+if ENV["DISABLE_FRAGMENT_CACHE"] == "1"
+  Rails.application.config.action_controller.perform_caching = false
+  Rails.application.config.cache_store = :null_store
+elsif ENV["FRAGMENT_CACHE_STORE"] == "memory"
+  Rails.application.config.action_controller.perform_caching = true
+  Rails.application.config.cache_store = :memory_store
+end
+INIT
+}
+
+# Append DISABLE_FRAGMENT_CACHE / FRAGMENT_CACHE_STORE to a serve env array.
+append_fragment_cache_env() {
+    # usage: append_fragment_cache_env arr_name
+    local -n _fc_env="$1"
+    if (( FRAGMENT_CACHE == 0 )); then
+        _fc_env+=( DISABLE_FRAGMENT_CACHE=1 FRAGMENT_CACHE_STORE= )
+    elif [[ "$FRAGMENT_STORE" == "memory" ]]; then
+        _fc_env+=( DISABLE_FRAGMENT_CACHE=0 FRAGMENT_CACHE_STORE=memory )
+    else
+        _fc_env+=( DISABLE_FRAGMENT_CACHE=0 FRAGMENT_CACHE_STORE= )
+    fi
+}
+
+fragment_cache_shape() {
+    if (( FRAGMENT_CACHE == 0 )); then
+        echo "fragment-cache=0"
+    else
+        echo "fragment-cache=1 store=$FRAGMENT_STORE"
+    fi
+}
 
 cmd_prepare() {
     [[ -d "$APP" ]] || die "no campfire checkout at $APP"
@@ -269,21 +325,7 @@ cmd_prepare() {
     # inert unless the env var is set — see the header on why fragment
     # caching is a lane rather than a setting.
     step "installing the fragment-cache lane knob"
-    cat > "$OUT/config/initializers/zz_bench_cache.rb" <<'INIT'
-# Benchmark lane knob, added by roundhouse's scripts/campfire-oracle.
-# NOT campfire's: inert unless DISABLE_FRAGMENT_CACHE=1.
-#
-# campfire renders its message list with `cached: true` against a
-# Redis-backed store. That is what a deployment does, and it means the
-# 40 message fragments are READ BACK rather than rendered — measured at
-# 503 ms cold against 5 ms warm. A tree with no fragment cache cannot be
-# compared against the warm number; this switch produces the other
-# operand, Rails actually rendering.
-if ENV["DISABLE_FRAGMENT_CACHE"] == "1"
-  Rails.application.config.action_controller.perform_caching = false
-  Rails.application.config.cache_store = :null_store
-end
-INIT
+    write_bench_cache_initializer "$OUT"
 
     # The production DB is a COPY of the seeded development one, not a
     # second seeding run: both lanes of the benchmark have to read the
@@ -367,7 +409,8 @@ cmd_serve() {
         *) die "unknown --runtime $RUNTIME (cruby | truffleruby)" ;;
     esac
     (( DEPLOYED )) && { cmd_serve_deployed; return; }
-    step "puma :$PORT — $RAILS_ENV_NAME, $WORKERS worker(s), $THREADS thread(s), yjit=$YJIT, fragment-cache=$FRAGMENT_CACHE"
+    write_bench_cache_initializer "$OUT"
+    step "puma :$PORT — $RAILS_ENV_NAME, $WORKERS worker(s), $THREADS thread(s), yjit=$YJIT, $(fragment_cache_shape)"
     cd "$OUT"
     # WEB_CONCURRENCY is what campfire's config/puma.rb reads; without it the
     # oracle sizes itself to the box and the comparison stops being one.
@@ -399,13 +442,13 @@ cmd_serve() {
     # appendix says only "jemalloc=..." for them and a reader cannot tell
     # a one-worker Rails from an eight-worker one.
     report_shape "workers=$WORKERS"
-    report_shape "fragment-cache=$FRAGMENT_CACHE"
+    report_shape "$(fragment_cache_shape)"
     local pre=(
         WEB_CONCURRENCY="$WORKERS" RAILS_MAX_THREADS="$THREADS"
         RUBY_YJIT_ENABLE="$YJIT" RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1
-        DISABLE_FRAGMENT_CACHE="$(( 1 - FRAGMENT_CACHE ))"
         RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}"
     )
+    append_fragment_cache_env pre
     [[ -n "$jem" ]] && pre+=( LD_PRELOAD="$jem" )
     exec env "${pre[@]}" bundle exec puma -p "$PORT" -e "$RAILS_ENV_NAME" config.ru
 }
@@ -468,21 +511,22 @@ cmd_serve_truffleruby() {
     command -v truffleruby >/dev/null || die "truffleruby not on PATH"
     local bp; bp="$(tr_bundle_path)"
     [[ -f "$bp/Gemfile.lock" ]] || die "no TruffleRuby bundle at $bp — run 'bundle --runtime truffleruby' first"
-    step "puma :$PORT — $RAILS_ENV_NAME, truffleruby, one process, $THREADS thread(s), heap $HEAP, fragment-cache=$FRAGMENT_CACHE"
+    write_bench_cache_initializer "$OUT"
+    step "puma :$PORT — $RAILS_ENV_NAME, truffleruby, one process, $THREADS thread(s), heap $HEAP, $(fragment_cache_shape)"
     cd "$OUT"
     report_shape "runtime=truffleruby"
     report_shape "bundler=$(BUNDLE_VERSION=system truffleruby -S bundle --version 2>/dev/null | awk '{print $NF}'), own lockfile at $bp/Gemfile.lock"
     report_shape "jemalloc=n/a (managed heap, --vm.Xmx$HEAP)"
     report_shape "heap=$HEAP"
     report_shape "workers=0 (one process, no fork)"
-    report_shape "fragment-cache=$FRAGMENT_CACHE"
+    report_shape "$(fragment_cache_shape)"
     local pre=(
         WEB_CONCURRENCY=0 RAILS_MAX_THREADS="$THREADS"
         RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1
-        DISABLE_FRAGMENT_CACHE="$(( 1 - FRAGMENT_CACHE ))"
         RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}"
         TRUFFLERUBYOPT="--vm.Xmx$HEAP"
     )
+    append_fragment_cache_env pre
     local benv=(); mapfile -t benv < <(tr_bundle_env)
     exec env "${pre[@]}" "${benv[@]}" truffleruby -S bundle exec puma -p "$PORT" -e "$RAILS_ENV_NAME" config.ru
 }
@@ -588,20 +632,22 @@ cmd_serve_deployed() {
     # `bundle info` and never by running it: `thrust` treats its first
     # argument as the command to wrap, so `thrust --version` starts a
     # server on :80 before failing.
+    write_bench_cache_initializer "$OUT"
     local common=(
         RAILS_MAX_THREADS="$THREADS"
         RUBY_YJIT_ENABLE="$YJIT"
         RAILS_ENV="$RAILS_ENV_NAME"
         DISABLE_SSL=1
-        DISABLE_FRAGMENT_CACHE="$(( 1 - FRAGMENT_CACHE ))"
         RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}"
     )
+    append_fragment_cache_env common
     [[ -n "$jem" ]] && common+=( LD_PRELOAD="$jem" )
+    report_shape "$(fragment_cache_shape)"
 
     if bundle info thruster >/dev/null 2>&1; then
         report_shape "thruster=front on :$PORT -> puma :$inner"
         report_shape "workers=campfire's own formula (WEB_CONCURRENCY unset)"
-        step "deployed :$PORT — thruster -> puma :$inner, campfire's worker formula, $THREADS thread(s), fragment-cache=$FRAGMENT_CACHE"
+        step "deployed :$PORT — thruster -> puma :$inner, campfire's worker formula, $THREADS thread(s), $(fragment_cache_shape)"
         # NOT `exec`. `exec` replaces this shell, and with it the EXIT
         # trap that stops resque-pool — which would then outlive the
         # lane, keep a Redis connection and keep taking cores from the
