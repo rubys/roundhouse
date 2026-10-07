@@ -427,14 +427,15 @@ fn ingest_route_stmts<'pr>(
         //     flattened child with its `ResourceScope` and let the
         //     flattener build the right path. `find_comment` reading
         //     `params[:id]` depends on the member routes carrying `:id`.
-        //   - `authenticated` / `unauthenticated` / `devise_scope` —
-        //     Devise visibility wrappers. Runtime auth is not modeled;
-        //     nested routes still belong in the table.
+        //   - `authenticate` / `authenticated` / `unauthenticated` /
+        //     `devise_scope` — Devise visibility wrappers. Runtime auth
+        //     is not modeled; nested routes still belong in the table.
         if matches!(
             method.as_str(),
             "constraints"
                 | "member"
                 | "collection"
+                | "authenticate"
                 | "authenticated"
                 | "unauthenticated"
                 | "devise_scope"

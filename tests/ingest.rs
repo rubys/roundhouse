@@ -386,6 +386,42 @@ end
 }
 
 #[test]
+fn devise_authenticate_passthrough_nested_routes() {
+    let source = br#"Rails.application.routes.draw do
+  authenticate :user do
+    namespace :account do
+      resources :invoices, only: [:index]
+    end
+  end
+  authenticate :user, ->(u) { u.staff? } do
+    get "reports", to: "reports#index"
+  end
+end
+"#;
+    roundhouse::ingest::survey::activate();
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let gaps = roundhouse::ingest::survey::drain();
+    let table = result.expect("ingest");
+    assert!(
+        gaps.iter().all(|g| !format!("{g:?}").contains("authenticate")),
+        "Devise's authenticate wrapper must not survey: {gaps:?}"
+    );
+    let mut app = roundhouse::App::default();
+    app.routes = table;
+    let flat = roundhouse::lower::flatten_routes(&app);
+    assert!(
+        flat.iter().any(|r| r.path == "/account/invoices" && r.as_name == "account_invoices"),
+        "authenticate nested resources: {flat:?}"
+    );
+    assert!(
+        flat.iter().any(|r| r.path == "/reports" && r.controller.0.as_str() == "ReportsController"),
+        "authenticate with a lambda constraint: {flat:?}"
+    );
+}
+
+#[test]
 fn devise_scope_and_authenticated_passthrough_nested_routes() {
     let source = br#"Rails.application.routes.draw do
   authenticated :user, lambda { |u| u.admin? } do
