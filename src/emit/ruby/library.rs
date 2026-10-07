@@ -6764,7 +6764,7 @@ fn emit_library_class_decl_inner(
         let qualified = segments[..=i].join("::");
         let parent = outer_class_parent(&qualified, app);
         match (is_app_class(&qualified, app), parent) {
-            (true, Some(p)) => format!("class {seg} < {}", p.0.as_str()),
+            (true, Some(p)) => format!("class {seg} < {}", lexically_qualified(p.0.as_str(), &segments[..i], app)),
             (true, None) => format!("class {seg}"),
             (false, _) => format!("module {seg}"),
         }
@@ -6789,7 +6789,10 @@ fn emit_library_class_decl_inner(
             let last = segments[depth - 1];
             let pad = "  ".repeat(depth - 1);
             match lc.parent.as_ref() {
-                Some(p) => writeln!(s, "{pad}class {last} < {}", p.0.as_str()).unwrap(),
+                Some(p) => {
+                    let parent = lexically_qualified(p.0.as_str(), &segments[..depth - 1], app);
+                    writeln!(s, "{pad}class {last} < {parent}").unwrap()
+                }
                 None => writeln!(s, "{pad}class {last}").unwrap(),
             }
         }
@@ -6804,7 +6807,7 @@ fn emit_library_class_decl_inner(
     }
 
     for inc in &lc.includes {
-        writeln!(s, "{body_pad}include {}", inc.0.as_str()).unwrap();
+        writeln!(s, "{body_pad}include {}", lexically_qualified(inc.0.as_str(), &segments, app)).unwrap();
     }
     if !lc.includes.is_empty() && !lc.methods.is_empty() {
         writeln!(s).unwrap();
@@ -7294,6 +7297,46 @@ fn owns_a_file(name: &str, app: &App) -> bool {
     app.library_classes
         .iter()
         .any(|c| c.name.0.as_str() == name && !c.is_module)
+}
+
+/// Does the app declare the constant `path`, or a namespace enclosing a
+/// declaration (models, controllers, library classes and modules, test
+/// modules)?
+fn declares_constant_path(path: &str, app: &App) -> bool {
+    let names = app.models.iter().map(|m| m.name.0.as_str())
+        .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
+        .chain(app.library_classes.iter().map(|c| c.name.0.as_str()))
+        .chain(app.test_modules.iter().map(|t| t.name.0.as_str()));
+    names.into_iter().any(|name| {
+        let name = name.trim_start_matches("::");
+        name == path || name.strip_prefix(path).is_some_and(|rest| rest.starts_with("::"))
+    })
+}
+
+/// An app constant `written` as a class header's superclass or a body's
+/// mixin must spell it, given the lexical `scopes` (innermost last) Ruby
+/// searches first: `::Api::Base` inside `module Admin; module Api`, where
+/// a bare `Api` is `Admin::Api`. The ingest records the absolute name
+/// without its `::`, and written bare the header died with
+/// `uninitialized constant Admin::Api::Base`. A name the innermost
+/// shadowing scope does declare in full is that scope's, as Ruby binds
+/// it, and stays as written; so does a name the app does not declare.
+fn lexically_qualified(written: &str, scopes: &[&str], app: &App) -> String {
+    if written.starts_with("::") || scopes.is_empty() {
+        return written.to_string();
+    }
+    let first = written.split("::").next().unwrap_or(written);
+    let Some(scope) = (1..=scopes.len())
+        .rev()
+        .map(|i| scopes[..i].join("::"))
+        .find(|scope| declares_constant_path(&format!("{scope}::{first}"), app))
+    else {
+        return written.to_string();
+    };
+    if declares_constant_path(&format!("{scope}::{written}"), app) || !declares_constant_path(written, app) {
+        return written.to_string();
+    }
+    format!("::{written}")
 }
 
 fn is_app_class(name: &str, app: &App) -> bool {
