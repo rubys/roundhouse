@@ -1474,7 +1474,10 @@ fn column_with_type(
         // solid_cache's and solid_cable's schemas still write it for their
         // hash columns.
         "integer" if matches!(opts.limit, Some(5..=8)) => ColumnType::BigInt,
-        "integer" => ColumnType::Integer,
+        // `smallint` is the PostgreSQL adapter's native type name, which
+        // `t.column :island, :smallint` passes through; structure.sql's
+        // `smallint` reads alike.
+        "integer" | "smallint" => ColumnType::Integer,
         "bigint" => ColumnType::BigInt,
         "float" => ColumnType::Float,
         "decimal" | "numeric" => ColumnType::Decimal { precision: None, scale: None },
@@ -1605,6 +1608,18 @@ fn column_from_call(
             ),
         });
     }
+    // `t.column :name, :type, …` is the generic form of `t.<type> :name, …`
+    // (`TableDefinition#column`).
+    if col_type_name == "column" {
+        let Some(type_name) = args.get(1).and_then(name_value) else {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!("column dropped: {table}.{col_name} has no literal type"),
+            });
+        };
+        let opts = parse_column_opts(args.iter().skip(2));
+        return column_with_type(&type_name, col_name, &opts, table, file).map(Some);
+    }
     let opts = parse_column_opts(args.iter().skip(1));
     column_with_type(&col_type_name, col_name, &opts, table, file).map(Some)
 }
@@ -1673,6 +1688,26 @@ mod tests {
         let clips = &schema.tables[&Symbol::from("clips")];
         assert!(matches!(clips.columns[3].col_type, ColumnType::Float));
         assert!(!clips.columns[4].nullable, "timestamps are null: false");
+    }
+
+    #[test]
+    fn generic_column_with_a_native_type() {
+        // `t.column(:island, :smallint, …)`.
+        let schema = fold(&[r#"
+            class CreateCounts < ActiveRecord::Migration[8.1]
+              def change
+                create_table :counts do |t|
+                  t.column(:island, :smallint, null: false)
+                  t.column "label", "string"
+                end
+              end
+            end
+        "#]);
+        assert_eq!(col_names(&schema, "counts"), ["id", "island", "label"]);
+        let counts = &schema.tables[&Symbol::from("counts")];
+        assert!(matches!(counts.columns[1].col_type, ColumnType::Integer));
+        assert!(!counts.columns[1].nullable);
+        assert!(matches!(counts.columns[2].col_type, ColumnType::String { .. }));
     }
 
     #[test]
