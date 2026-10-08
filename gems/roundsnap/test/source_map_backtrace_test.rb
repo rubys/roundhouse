@@ -83,6 +83,31 @@ class SourceMapBacktraceTest < Minitest::Test
     assert_equal [File.join(@dir, "chosen/leaf.rb"), File.join(@dir, "chosen"), 38], CUSTOM_PATH_PROBE
   end
 
+  def test_file_paths_take_precedence_over_aliases_in_either_unit_order
+    units = [
+      { "key" => "a", "file" => "b.rb", "first_lineno" => 11,
+        "source" => "def path_collision_boom\n#<SPINEL_SOURCE>original/a.rb:42\nraise 'file-path-probe'\nend\n" },
+      { "key" => "b", "file" => "x.rb", "first_lineno" => 37,
+        "source" => "#<SPINEL_SOURCE>original/b.rb:99\nraise 'alias must not replace a file path'\n" },
+    ]
+    [units, units.reverse].each do |ordered|
+      Roundsnap::Compiler.compile!(units: ordered, out_dir: @dir)
+      loader = Roundsnap::Loader.install!(root: @dir)
+      assert_equal "a", loader.resolve_key(File.join(@dir, "b.rb"))
+      assert_equal "a", loader.resolve_key(File.join(@dir, "b"))
+      assert_equal "b", loader.resolve_key("b"), "logical keys remain directly addressable"
+      assert_equal "b", loader.resolve_key(File.join(@dir, "x.rb"))
+      assert_equal "a", loader.resolve_key(File.join(@dir, "a.rb")), "noncolliding aliases remain available"
+      assert require(File.join(@dir, "b.rb")), "require the file's unit, not the colliding alias"
+      assert loader.loaded?("a")
+      refute loader.loaded?("b")
+      error = assert_raises(RuntimeError) { path_collision_boom }
+      assert_equal "file-path-probe", error.message
+      assert_match(/\A#{Regexp.escape(File.join(@dir, 'b.rb'))}:13:/, error.backtrace.first)
+      assert_match(/\Aoriginal\/a\.rb:42:/, loader.format_backtrace(error.backtrace).first)
+    end
+  end
+
   def test_backwards_and_colliding_markers_never_reorder_statements
     # rubys' actual failure sequence: a body marker jumps before its def.
     source = <<~RUBY

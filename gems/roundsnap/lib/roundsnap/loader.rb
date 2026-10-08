@@ -44,7 +44,9 @@ module Roundsnap
       @paths = {}
       @units.each do |key, entry|
         @paths[File.expand_path(entry.fetch("file"), @compile_root)] = key
-        @paths[File.expand_path("#{key}.rb", @root)] = key
+      end
+      @units.each_key do |key|
+        @paths[File.expand_path("#{key}.rb", @root)] ||= key
       end
       @loaded = {}
       @locks = @units.to_h { |key, _| [key, Monitor.new] }
