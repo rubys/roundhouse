@@ -1,0 +1,47 @@
+module ActionController
+  class InertiaPage
+    @component: String
+    @version: String
+    @encrypt_history: bool
+    @partial: bool
+    @only: Array[String]
+    @except: Array[String]
+    @keys: Array[String]
+    @values: Array[String]
+    @shared_keys: Array[String]
+    @deferred_groups: Array[String]
+    @deferred_keys: Array[String]
+
+    def initialize: () -> void
+    def version: () -> String
+    def start_page: (String component, String version, bool encrypt_history, String partial_component, String partial_data, String partial_except) -> nil
+    def self.header_list: (String value) -> Array[String]
+    def requested?: (String key) -> bool
+    def eager?: (String key) -> bool
+    def optional?: (String key) -> bool
+    def deferred?: (String key, String group) -> bool
+    def shared_eager?: (String key) -> bool
+    def shared_optional?: (String key) -> bool
+    def shared_deferred?: (String key, String group) -> bool
+    def prop_json: (String key, String json) -> nil
+    def page_json: (String url, String? notice, String? alert) -> String
+    def flash_json: (String? notice, String? alert) -> String
+    def shared_json: () -> String
+    def deferred_json: () -> String
+    def self.json_string_array: (Array[String] values) -> String
+  end
+
+  class Base
+    @inertia_page_object: ActionController::InertiaPage?
+
+    def inertia_page: () -> ActionController::InertiaPage
+    def inertia_request?: () -> bool
+    def inertia_header: (String name) -> String
+    def inertia_begin: (String component, String version, bool encrypt_history, bool always_include_errors_hash) -> nil
+    def inertia_errors_json: (String json) -> nil
+    def inertia_url: () -> String
+    def render_inertia_json: (?status: Symbol) -> nil
+    def inertia_redirect_see_other: () -> nil
+    def inertia_root_html: (bool use_script_element) -> String
+  end
+end

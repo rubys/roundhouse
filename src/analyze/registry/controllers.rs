@@ -303,7 +303,7 @@ pub(in crate::analyze) fn register(
         }
         for m in [
             "get?", "post?", "put?", "patch?", "delete?", "head?", "options?", "xhr?",
-            "xml_http_request?", "ssl?", "local?", "form_data?",
+            "xml_http_request?", "ssl?", "local?", "form_data?", "inertia?",
         ] {
             request.instance_methods.insert(Symbol::from(m), Ty::Bool);
         }
@@ -353,6 +353,7 @@ pub(in crate::analyze) fn register(
         }
         app_ctrl.class_methods.insert(Symbol::from("request"), request_ty);
     }
+    register_inertia(classes, &mut app_ctrl);
     // HTTP Basic and Token auth (runtime/spinel/http_authentication.rb):
     // each yields the credentials the client sent and answers what the
     // block decided; the `or_request` forms render the 401 challenge
@@ -548,4 +549,28 @@ pub(crate) fn param_value_ty(nilable: bool) -> Ty {
         variants.push(Ty::Nil);
     }
     Ty::Union { variants }
+}
+
+/// `prop` and `inertia_errors` are typed here and have no runtime method:
+/// the controller lowering replaces them with their `_json` variants. A
+/// runtime `prop(String, untyped)` was rejected because the strict targets
+/// cannot compile an untyped parameter.
+fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut ClassInfo) {
+    const RBS: &str = include_str!("../../../runtime/ruby/action_controller/inertia.rbs");
+    let Ok(parsed) = crate::rbs::parse_app_signatures(RBS) else { return };
+    let page_id = ClassId(Symbol::from("ActionController::InertiaPage"));
+    let mut page = ClassInfo::default();
+    if let Some(methods) = parsed.get(&page_id) {
+        for (name, ty) in methods {
+            page.instance_methods.insert(name.clone(), ty.clone());
+        }
+    }
+    page.instance_methods.insert(Symbol::from("prop"), Ty::Nil);
+    classes.entry(page_id).or_insert(page);
+    if let Some(methods) = parsed.get(&ClassId(Symbol::from("ActionController::Base"))) {
+        for (name, ty) in methods {
+            app_ctrl.class_methods.insert(name.clone(), ty.clone());
+        }
+    }
+    app_ctrl.class_methods.insert(Symbol::from("inertia_errors"), Ty::Nil);
 }
