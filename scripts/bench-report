@@ -90,7 +90,7 @@ end
 
 # ── ordering / metadata ──────────────────────────────────────────────
 
-TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel spinel-1p spinel-fiber elixir typescript python tobi ruby ruby-1p ruby-1p-noyjit roundsnap roundsnap-1p roundsnap-1p-noyjit ruby-int jruby truffleruby rails rails-nocache rails-1p rails-1p-noyjit rails-int rails-jruby rails-truffleruby]
+TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel spinel-1p spinel-fiber elixir typescript python tobi ruby ruby-1p ruby-int jruby truffleruby rails rails-nocache rails-1p rails-int rails-jruby rails-truffleruby]
 ENDPOINT_ORDER = %w[
   /articles /articles/1 /articles/new /articles.json /articles/1.json
   /rooms/1 /rooms/1/messages /users/me/sidebar /searches?q=coffee
@@ -130,21 +130,16 @@ COLOR = {
   'elixir'     => '#4b275f',
   'typescript' => '#3178c6',
   'python'     => '#3776ab',
-  'ruby'               => '#cc342d',
-  'ruby-1p'            => '#e08079',
-  'ruby-1p-noyjit'     => '#e89c93',
-  'ruby-int'           => '#e89c93',
-  'roundsnap'          => '#b33a32',
-  'roundsnap-1p'       => '#c96a64',
-  'roundsnap-1p-noyjit'=> '#d99a96',
-  'jruby'              => '#5382a1',
-  'truffleruby'        => '#d35400',
-  'rails'              => '#666666',
-  'rails-1p'           => '#9a9a9a',
-  'rails-1p-noyjit'    => '#b0b0b0',
-  'rails-int'          => '#aaaaaa',
-  'rails-jruby'        => '#46707f',
-  'rails-truffleruby'  => '#8e5a3a',
+  'ruby'       => '#cc342d',
+  'ruby-1p'    => '#e08079',
+  'ruby-int'   => '#e89c93',
+  'jruby'      => '#5382a1',
+  'truffleruby' => '#d35400',
+  'rails'      => '#666666',
+  'rails-1p'   => '#9a9a9a',
+  'rails-int'  => '#aaaaaa',
+  'rails-jruby' => '#46707f',
+  'rails-truffleruby' => '#8e5a3a',
 }
 
 GROUP_LABEL = {

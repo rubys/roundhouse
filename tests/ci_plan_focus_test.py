@@ -87,18 +87,13 @@ class FocusLabels(unittest.TestCase):
         )
         self.assertEqual(ci.CI_JRUBY, "ci:jruby")
         self.assertEqual(ci.CI_SPINEL, "ci:spinel")
-        self.assertEqual(ci.CI_ROUNDSNAP, "ci:roundsnap")
-        self.assertEqual(ci.ROUNDSNAP_JOB, "campfire-roundsnap")
         self.assertEqual(ci.LEDGER_EXTRAS, {"compare-extra", "smoke-extra"})
 
     def test_parse_coverage_labels(self):
-        parsed = ci.parse_coverage_labels(
-            ["ci:swift", "ci:go", "ci:jruby", "ci:spinel", "ci:roundsnap"]
-        )
+        parsed = ci.parse_coverage_labels(["ci:swift", "ci:go", "ci:jruby", "ci:spinel"])
         self.assertFalse(parsed.full)
         self.assertTrue(parsed.focus_jruby)
         self.assertTrue(parsed.focus_spinel)
-        self.assertTrue(parsed.focus_roundsnap)
         self.assertEqual(parsed.focus_extras, ("swift", "go"))
         extras = ci.parse_coverage_labels(["ci:extras"])
         self.assertEqual(extras.focus_extras, tuple(ci.EXTRA_COMPARE_TARGETS))
@@ -131,8 +126,6 @@ class FocusLabels(unittest.TestCase):
             ci.select([], focus_extras=("go",), publish=True)
         with self.assertRaisesRegex(ValueError, "publication requires full"):
             ci.select([], focus_spinel=True, publish=True)
-        with self.assertRaisesRegex(ValueError, "publication requires full"):
-            ci.select([], focus_roundsnap=True, publish=True)
         with self.assertRaisesRegex(ValueError, "publication requires full"):
             ci.select([], spinel_lane=True, publish=True)
 
@@ -175,40 +168,6 @@ class FocusLabels(unittest.TestCase):
         self.assertFalse(plan["spinel_advisory"])
         self.assertNotIn("campfire-spinel-compare", plan["jobs"])
         self.assertEqual(plan["spinel_tests"], ci.SPINEL_TESTS)
-
-    def test_ci_roundsnap_focus_is_base_plus_boot_smoke(self):
-        plan = ci.select([], focus_roundsnap=True)
-        self.assertEqual(
-            [j for j in plan["jobs"] if j not in ci.BASE],
-            [ci.ROUNDSNAP_JOB],
-        )
-        self.assertIn(ci.ROUNDSNAP_JOB, plan["required"])
-        self.assertNotIn(ci.ROUNDSNAP_JOB, plan["advisory"])
-        self.assertFalse(plan["spinel"])
-        self.assertFalse(set(ci.SPINEL11).intersection(plan["jobs"]))
-        self.assertNotIn("compare-extra", plan["jobs"])
-        self.assertFalse(plan["wasm"])
-        # Path ownership suppressed under focus.
-        wide = ci.select(
-            ["src/emit/go.rs", "runtime/spinel/db.rb"],
-            focus_roundsnap=True,
-        )
-        self.assertEqual(wide["jobs"], [*ci.BASE, ci.ROUNDSNAP_JOB])
-
-    def test_roundsnap_path_ownership_selects_boot_smoke(self):
-        for path in [
-            "gems/roundsnap/lib/roundsnap/loader.rb",
-            "src/roundsnap.rs",
-            "scripts/campfire-roundsnap",
-            "tests/roundsnap_delivery.rs",
-        ]:
-            with self.subTest(path=path):
-                plan = ci.select([path])
-                self.assertIn(ci.ROUNDSNAP_JOB, plan["jobs"])
-                self.assertIn(ci.ROUNDSNAP_JOB, plan["required"])
-                self.assertTrue(set(ci.BASE).issubset(plan["jobs"]))
-                # Does not fan out Spinel11 merely for Roundsnap paths.
-                self.assertFalse(set(ci.SPINEL11).intersection(plan["jobs"]))
 
     def test_main_spinel_lane_stays_advisory_full_suite(self):
         plan = ci.select([], spinel_lane=True)

@@ -104,30 +104,16 @@ PROJECT_BUILDERS = {
 }
 
 # Coverage labels. Precedence: ci:full (or CI_FULL) > any focus labels
-# (ci:<lang> / ci:extras / ci:jruby / ci:spinel / ci:roundsnap) > path ownership.
+# (ci:<lang> / ci:extras / ci:jruby / ci:spinel) > path ownership.
 # Focus mode is NARROW: BASE + selected focus lanes only.
 CI_FULL = "ci:full"
 CI_SPINEL = "ci:spinel"
 CI_JRUBY = "ci:jruby"
-CI_ROUNDSNAP = "ci:roundsnap"
 CI_EXTRAS = "ci:extras"
 CI_FOCUS_BY_LABEL = {f"ci:{t}": t for t in EXTRA_COMPARE_TARGETS}
-# CRuby ISeq delivery smoke (scripts/campfire-roundsnap). Not Spinel.
-ROUNDSNAP_JOB = "campfire-roundsnap"
-ROUNDSNAP_PATH_PREFIXES = ("gems/roundsnap/",)
-ROUNDSNAP_PATHS = frozenset(
-    {
-        "src/roundsnap.rs",
-        "scripts/campfire-roundsnap",
-        "scripts/campfire-roundsnap-stubs.rb",
-        "scripts/bench-campfire-roundsnap",
-        "tests/roundsnap_delivery.rs",
-    }
-)
 
 CoverageLabels = namedtuple(
-    "CoverageLabels",
-    "full focus_spinel focus_jruby focus_roundsnap focus_extras",
+    "CoverageLabels", "full focus_spinel focus_jruby focus_extras"
 )
 
 
@@ -146,22 +132,16 @@ def parse_coverage_labels(names, *, env_full=False):
         full=full,
         focus_spinel=CI_SPINEL in labels,
         focus_jruby=CI_JRUBY in labels,
-        focus_roundsnap=CI_ROUNDSNAP in labels,
         focus_extras=focus_extras,
     )
 
 
-def owns_roundsnap(path):
-    """True when the path is Roundsnap gem, wire-up, or Campfire boot smoke."""
-    return path.startswith(ROUNDSNAP_PATH_PREFIXES) or path in ROUNDSNAP_PATHS
-
-
-def focus_plan(extras=(), jruby=False, spinel=False, roundsnap=False):
+def focus_plan(extras=(), jruby=False, spinel=False):
     """BASE plus selected focus lanes; path ownership suppressed.
 
-    Focused extras / jruby / CORE Spinel / Roundsnap are merge-gate required
-    for the fix round. Unrelated extras, WASM, rust/ts compare, Writebook,
-    and the heavy Spinel11 Campfire suite stay off.
+    Focused extras / jruby / CORE Spinel are merge-gate required for the
+    fix round. Unrelated extras, WASM, rust/ts compare, Writebook, and the
+    heavy Spinel11 Campfire suite stay off.
     """
     extra = [t for t in EXTRA_COMPARE_TARGETS if t in extras]
     jobs = list(BASE)
@@ -187,10 +167,6 @@ def focus_plan(extras=(), jruby=False, spinel=False, roundsnap=False):
             if job not in jobs:
                 jobs.append(job)
         reasons.append("ci:spinel: CORE Spinel lane (required)")
-    if roundsnap:
-        if ROUNDSNAP_JOB not in jobs:
-            jobs.append(ROUNDSNAP_JOB)
-        reasons.append("ci:roundsnap: Campfire Roundsnap boot smoke (required)")
     if not reasons:
         reasons.append("ci focus: BASE only")
     return finish(
@@ -366,7 +342,6 @@ def select(
     focus_extras=(),
     focus_jruby=False,
     focus_spinel=False,
-    focus_roundsnap=False,
     publish=False,
     project_scope=None,
 ):
@@ -377,10 +352,8 @@ def select(
         raise ValueError("publication requires full validation mode")
     # Focus labels narrow the plan before path ownership or main-push Spinel.
     # ci:full still falls through to the full ledger below.
-    if not full and (focus_extras or focus_jruby or focus_spinel or focus_roundsnap):
-        return focus_plan(
-            focus_extras, focus_jruby, focus_spinel, roundsnap=focus_roundsnap
-        )
+    if not full and (focus_extras or focus_jruby or focus_spinel):
+        return focus_plan(focus_extras, focus_jruby, focus_spinel)
     if spinel_lane and not full:
         return finish(
             SPINEL_LANE,
@@ -394,12 +367,9 @@ def select(
         )
     targets, smoke = set(), set()
     jobs_selected, spinel_tests = set(), set()
-    wasm = site = spinel = writebook = roundsnap = False
+    wasm = site = spinel = writebook = False
     reasons = []
     for path in paths:
-        if owns_roundsnap(path):
-            roundsnap = True
-            reasons.append(f"{path}: Roundsnap delivery / Campfire boot smoke")
         if path == "src/project.rs" and project_scope in PROJECT_BUILDERS.values():
             targets.update(("ruby", "jruby"))
             smoke.update(("ruby", "jruby"))
@@ -495,15 +465,13 @@ def select(
     if full:
         targets.update(TARGETS)
         smoke.update(TARGETS)
-        wasm = site = spinel = writebook = roundsnap = True
+        wasm = site = spinel = writebook = True
         reasons.append("full validation requested")
         jobs_selected.update(SPINEL11)
         spinel_tests.update(SPINEL_TESTS)
     if spinel:
         jobs_selected.add("spinel-build")
     jobs = list(BASE)
-    if roundsnap and ROUNDSNAP_JOB not in jobs:
-        jobs.append(ROUNDSNAP_JOB)
     extra = [t for t in EXTRA_COMPARE_TARGETS if t in targets]
     compare = [t for t in COMPARE_TARGETS if t in targets]
     floor_smoke = [t for t in FLOOR_SMOKE_TARGETS if t in smoke]
@@ -831,8 +799,7 @@ def main():
     focus_extras = coverage.focus_extras
     focus_jruby = coverage.focus_jruby
     focus_spinel = coverage.focus_spinel
-    focus_roundsnap = coverage.focus_roundsnap
-    any_focus = bool(focus_extras or focus_jruby or focus_spinel or focus_roundsnap)
+    any_focus = bool(focus_extras or focus_jruby or focus_spinel)
     # Main-push / unknown-input advisory Spinel suite (not the PR focus lane).
     spinel_lane = False
     if (
@@ -883,7 +850,6 @@ def main():
         focus_extras=focus_extras,
         focus_jruby=focus_jruby,
         focus_spinel=focus_spinel,
-        focus_roundsnap=focus_roundsnap,
         publish=publish,
         project_scope=project_scope,
     )

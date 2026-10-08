@@ -173,65 +173,6 @@ fn counted_terminal_on_a_seeded_association_is_renamed() {
     );
 }
 
-/// campfire `Page.load(relation, :last, size)` after the selector is
-/// grounded: `relation.skip_preloading!.last(size)`. The parameter is
-/// untyped, but `skip_preloading!` is Relation-only — rename anyway.
-#[test]
-fn counted_terminal_through_skip_preloading_on_untyped_param_is_renamed() {
-    let app = ingest_app_from_tree(tree(&[
-        (
-            "db/schema.rb",
-            r#"ActiveRecord::Schema.define do
-  create_table "widgets", force: :cascade do |t|
-    t.string "name"
-  end
-end
-"#,
-        ),
-        (
-            "app/models/widget.rb",
-            r#"class Widget < ApplicationRecord
-  def self.load_page(relation, direction, size)
-    case direction
-    when :first
-      relation.skip_preloading!.first(size)
-    when :last
-      relation.skip_preloading!.last(size)
-    end
-  end
-end
-"#,
-        ),
-        (
-            "app/controllers/widgets_controller.rb",
-            r#"class WidgetsController < ApplicationController
-  def index
-    Widget.load_page(Widget.order(:name), :last, 2)
-    render plain: "ok"
-  end
-end
-"#,
-        ),
-    ]))
-    .expect("ingest");
-    // Full analyze+lower — emit_lowered_models alone only rewrites
-    // scope bodies via apply_scope_lowering; class-method counted
-    // terminals need relation_counted_terminal on the App first.
-    let mut app = app;
-    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
-    analyzer.analyze(&mut app);
-    roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
-    let widget = emitted(&ruby::emit_lowered_models(&app), "app/models/widget.rb");
-    assert!(
-        widget.contains("last_n(size)") && widget.contains("first_n(size)"),
-        "skip_preloading!.last/first(size) must rename:\n{widget}"
-    );
-    assert!(
-        !widget.contains(".last(size)") && !widget.contains(".first(size)"),
-        "counted forms must not remain:\n{widget}"
-    );
-}
-
 /// The gate. `String#split` answers an Array, whose `first(n)`/`last(n)`
 /// already mean what Rails means — renaming them would call a method
 /// Array does not have.

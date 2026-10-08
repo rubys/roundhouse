@@ -10,30 +10,13 @@
 #
 # Usage:  scripts/bench-campfire [options] [LANE ...]
 #
-#   LANE ∈ { rails | ruby | roundsnap | spinel | tobi | rust | go | elixir |
-#            rails-1p | rails-1p-noyjit |
-#            ruby-1p | ruby-1p-noyjit |
-#            roundsnap-1p | roundsnap-1p-noyjit |
-#            roundsnap | spinel-1p |
+#   LANE ∈ { rails | ruby | spinel | rust | go | elixir |
+#            rails-1p | ruby-1p | spinel-1p |
 #            jruby | truffleruby | rails-truffleruby |
 #            rails-nocache | rails-nocache-1p }
 #          (default: rails ruby spinel. Since 2026-10-07 the -1p,
 #           JVM-family and nocache lanes are requestable by name only:
 #           the published page compares the deployed shapes, per route.)
-#
-#     roundsnap / roundsnap-1p
-#                    Roundhouse `--target ruby` with `ROUNDSNAP=1`: MRI
-#                    ISeq delivery (gems/roundsnap) instead of app .rb —
-#                    the Bootsnap analogue for the *emitted* tree. Same
-#                    Puma shape as `ruby` / `ruby-1p`. Not Bootsnap on
-#                    stock Rails. YJIT matrix (one-process):
-#                      scripts/bench-campfire-roundsnap
-#                    → rails-1p · rails-1p-noyjit ·
-#                      ruby-1p · ruby-1p-noyjit ·
-#                      roundsnap-1p · roundsnap-1p-noyjit
-#                    Suffix `-noyjit` sets RUBY_YJIT_ENABLE=0 (rails via
-#                    campfire-oracle --no-yjit). Unsuffixed MRI lanes
-#                    keep YJIT on.
 #
 #   THE DEPLOYED LANES — what each project would actually run on this box:
 #
@@ -128,30 +111,24 @@
 # one-process rows are what separate "their runtime is slower" from "we
 # gave them fewer cores". Publish the pair.
 #
-# YJIT ± MATRIX (one-process). The six named lanes
-#   rails-1p · rails-1p-noyjit ·
-#   ruby-1p · ruby-1p-noyjit ·
-#   roundsnap-1p · roundsnap-1p-noyjit
-# separate delivery (stock Rails / classic .rb emit / Roundsnap ISeq)
-# from the JIT. Suffix `-noyjit` turns YJIT off; unsuffixed MRI 1p
-# lanes keep it on. Wrapper: `scripts/bench-campfire-roundsnap`.
-# The older `rails-int` / `ruby-int` pair is retired for this matrix —
-# lane names carry the switch now.
+# NO no-JIT LANES. `rails-int` and `ruby-int` measured within a percent of
+# their YJIT siblings on these two pages (40 vs 40 req/s, 22 vs 23) and
+# cost a seventh of the run to say nothing.
 #
 # ONE RAILS LANE NOW, AND THAT IS THE WHOLE POINT OF THE LAST YEAR.
 # campfire renders its message list as `render partial: …, collection:
-# @messages, cached: true`. Stock production points that at Redis; the
-# emit uses in-process MemoryStore. For the default 1p rails-vs-emit
-# matrix this harness therefore boots rails fragment cache on
-# MemoryStore too (`--rails-fragment-store memory`, the default) so the
-# warm path is the same *store type* — not Redis vs MemoryStore. Pass
-# `--rails-fragment-store redis` for the deployed Redis shape.
+# @messages, cached: true`, so with Redis up the 40 fragments are read
+# back rather than rendered. `rails-nocache` existed because the emitted
+# tree had NO fragment cache: comparing a caching Rails against a
+# rendering emit measured Redis, not Rails, so the honest renderer-vs-
+# renderer operand had to be published beside it.
 #
 # The emit caches as of 72474b41 (`<% cache %>` served from Rails.cache,
 # /rooms/1/messages 127 -> 7 sqlite round trips, the same 7 Rails
-# spends). Both sides now read fragments back, and `rails` is the only
-# opponent the page needs. `rails-nocache` remains a diagnostic
-# (renderer cost with caching off), never a headline.
+# spends). Both sides now read fragments back, the deployed lanes
+# compare like with like, and `rails` is the only opponent the page
+# needs. Publishing a rendering-Rails column beside two caching lanes
+# would be the mirror of the error the old pairing prevented.
 #
 # THE PAIR IS STILL REQUESTABLE BY NAME, and deliberately so:
 # `--no-fragment-cache` is how we measured that Rails' own renderer
@@ -210,10 +187,6 @@
 #   --socket-per-room N     subscribers per room (default 50, which is
 #                     the shape the runtime ledger's tiers were measured
 #                     at; the sweep derives the room count from it)
-#   --rails-fragment-store memory|redis
-#                     Fragment-cache backend for rails* caching lanes
-#                     (default memory — same store type as the emit).
-#                     `redis` is the deployed production.rb shape.
 #   --skip-prepare    reuse the oracle tree, emit and spinel binary
 #                     already on disk
 #   --keep            leave servers running on exit
@@ -353,29 +326,19 @@ while [[ $# -gt 0 ]]; do
         --socket-per-room) SOCKET_PER_ROOM="$2"; shift 2 ;;
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
-        --rails-fragment-store)
-            case "$2" in
-                memory|redis) RAILS_FRAGMENT_STORE="$2" ;;
-                *) echo "bench-campfire: --rails-fragment-store needs memory|redis (got $2)" >&2; exit 2 ;;
-            esac
-            shift 2 ;;
         -h|--help)     sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
-        rails|rails-nocache|ruby|roundsnap|spinel|tobi|rust|go|elixir|rails-1p|rails-1p-noyjit|rails-nocache-1p|ruby-1p|ruby-1p-noyjit|roundsnap-1p|roundsnap-1p-noyjit|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
+        rails|rails-nocache|ruby|spinel|tobi|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
     esac
 done
 
 (( ${#LANES[@]} )) || LANES=(rails ruby spinel)
-# Default: MemoryStore on rails fragment-cache lanes — same store type
-# as the emit. Redis remains opt-in for the deployed-shape comparison.
-RAILS_FRAGMENT_STORE="${RAILS_FRAGMENT_STORE:-memory}"
 GET_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-get.lua"
 POST_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-post.lua"
 [[ -n "$OUT_DIR" ]] || OUT_DIR="$REPO_ROOT/bench/results/campfire-$(date +%Y%m%d-%H%M%S)"
 
 ORACLE="$REPO_ROOT/build/campfire-oracle"
 EMIT="$REPO_ROOT/build/transpiled-campfire-ruby"
-ROUNDSNAP_EMIT="$REPO_ROOT/build/transpiled-campfire-roundsnap"
 SP_EMIT="$REPO_ROOT/build/transpiled-campfire-spinel"
 JRUBY_EMIT="$REPO_ROOT/build/transpiled-campfire-jruby"
 # The managed heaps, pinned so the memory column is a working set and
@@ -474,50 +437,6 @@ die()  { fail "$*"; exit 1; }
 [[ -f "$GET_LUA" && -f "$POST_LUA" ]] || die "missing wrk lua scripts next to bench-campfire"
 
 command -v wrk >/dev/null || die "wrk not on PATH"
-
-# Redis only when rails fragment-cache lanes ask for the deployed store.
-# Default is MemoryStore (same type as emit); see --rails-fragment-store.
-ensure_redis_for_rails_fragment_cache() {
-    local url="${REDIS_URL:-redis://127.0.0.1:6379/0}"
-    command -v redis-cli >/dev/null \
-        || die "redis-cli required for --rails-fragment-store redis (install redis-server)"
-    if redis-cli -u "$url" ping >/dev/null 2>&1; then
-        ok "Redis up for rails fragment-cache ($url → $(redis-cli -u "$url" ping))"
-        return 0
-    fi
-    command -v redis-server >/dev/null \
-        || die "Redis not answering ($url) and redis-server not on PATH — install redis-server for --rails-fragment-store redis"
-    step "starting redis-server for rails fragment-cache ($url)"
-    local conf=""
-    [[ -f "$ORACLE/config/redis.conf" ]] && conf="$ORACLE/config/redis.conf"
-    [[ -z "$conf" && -f "$APP/config/redis.conf" ]] && conf="$APP/config/redis.conf"
-    if [[ -n "$conf" ]]; then
-        redis-server "$conf" --daemonize yes
-    else
-        redis-server --daemonize yes --port 6379 --bind 127.0.0.1
-    fi
-    local i
-    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-        redis-cli -u "$url" ping >/dev/null 2>&1 && break
-        sleep 0.2
-    done
-    redis-cli -u "$url" ping >/dev/null 2>&1 \
-        || die "started redis-server but $url still not answering"
-    ok "Redis started for rails fragment-cache ($url → $(redis-cli -u "$url" ping))"
-}
-rails_needs_redis=0
-if [[ "$RAILS_FRAGMENT_STORE" == "redis" ]]; then
-    for _lane in "${LANES[@]}"; do
-        case "$_lane" in
-            rails|rails-1p|rails-1p-noyjit|rails-truffleruby) rails_needs_redis=1 ;;
-        esac
-    done
-fi
-if (( rails_needs_redis )); then
-    ensure_redis_for_rails_fragment_cache
-else
-    ok "rails fragment-cache store=$RAILS_FRAGMENT_STORE (no Redis required)"
-fi
 
 SERVER_PID=""
 cleanup() {
@@ -756,57 +675,6 @@ drop_lane() {   # $1 = lane, $2 = stage, $3 = reason, $4 = log
 }
 wants_lane() { local _l; for _l in "${LANES[@]}"; do [[ "$_l" == "$1" ]] && return 0; done; return 1; }
 
-# Roundsnap lane: same app as `ruby`, ISeq delivery (ROUNDSNAP=1).
-want_roundsnap=0
-for _l in "${LANES[@]}"; do [[ "$_l" == roundsnap* ]] && want_roundsnap=1; done
-if (( want_roundsnap )); then
-    if (( SKIP_PREPARE == 0 )) || [[ ! -f "$ROUNDSNAP_EMIT/manifest.json" ]]; then
-        step "transpiling campfire → $ROUNDSNAP_EMIT (ROUNDSNAP=1)"
-        if ! env ROUNDSNAP=1 ROUNDHOUSE_RUBY_ISEQ=1 \
-            cargo run --quiet --release --bin roundhouse -- --target ruby "$APP" \
-            -o "$ROUNDSNAP_EMIT" --allow-unsupported > "$LOG_DIR/emit-roundsnap.log" 2>&1; then
-            fail "roundsnap emit failed (see $LOG_DIR/emit-roundsnap.log) — dropping lanes"
-            for _l in "${LANES[@]}"; do
-                [[ "$_l" == roundsnap* ]] && drop_lane "$_l" build "the roundsnap emit failed" "$LOG_DIR/emit-roundsnap.log"
-            done
-        else
-            if [[ -f "$REPO_ROOT/scripts/campfire-roundsnap-stubs.rb" ]]; then
-                cp "$REPO_ROOT/scripts/campfire-roundsnap-stubs.rb" \
-                    "$ROUNDSNAP_EMIT/campfire-roundsnap-stubs.rb"
-                if ! grep -q 'campfire-roundsnap-stubs' "$ROUNDSNAP_EMIT/boot.rb" 2>/dev/null; then
-                    cat > "$ROUNDSNAP_EMIT/boot.rb" <<'RUBY'
-# frozen_string_literal: true
-require "roundsnap"
-loader = Roundsnap::Loader.install!(root: __dir__)
-loader.require("runtime/active_storage") if loader.resolve_key("runtime/active_storage")
-require_relative "campfire-roundsnap-stubs"
-loader.boot!
-RUBY
-                fi
-            fi
-            step "bundling the roundsnap emit"
-            if ! (cd "$ROUNDSNAP_EMIT" && bundle install >"$LOG_DIR/bundle-roundsnap.log" 2>&1); then
-                fail "roundsnap bundle failed — dropping lanes"
-                for _l in "${LANES[@]}"; do
-                    [[ "$_l" == roundsnap* ]] && drop_lane "$_l" build "roundsnap bundle install failed" "$LOG_DIR/bundle-roundsnap.log"
-                done
-            else
-                step "building the roundsnap emit's assets"
-                (cd "$ROUNDSNAP_EMIT" && rake assets >/dev/null 2>&1) \
-                    || step "  (no assets task — continuing)"
-            fi
-        fi
-    fi
-fi
-
-# YJIT on unless the lane name ends with -noyjit.
-lane_yjit() {
-    case "$1" in
-        *-noyjit) return 1 ;;
-        *) return 0 ;;
-    esac
-}
-
 # One Puma thread per hardware thread for the JVM lane: no GVL, no fork,
 # so one process is the whole box and threads past the cores only queue
 # (the ladder is in the header). The TruffleRuby lanes take --threads,
@@ -980,7 +848,6 @@ stage_sqlite() {
 stage_seeded_db() {
     [[ -f "$SEED_DB" ]] || die "no seeded production DB at $ORACLE"
     stage_sqlite "$EMIT/storage/development.sqlite3"
-    if [[ -d "$ROUNDSNAP_EMIT" ]]; then stage_sqlite "$ROUNDSNAP_EMIT/storage/development.sqlite3"; fi
     if [[ -d "$SP_EMIT" ]]; then stage_sqlite "$SP_EMIT/storage/development.sqlite3"; fi
     if [[ -d "$JRUBY_EMIT" ]]; then stage_sqlite "$JRUBY_EMIT/storage/development.sqlite3"; fi
     if wants_lane rust && [[ -d "$RUST_ROOT" ]]; then
@@ -1071,26 +938,19 @@ start_lane() {
             # all six lanes and the memory column compares runtimes
             # rather than mallocs.
             local nocache=""; [[ "$lane" == "rails-nocache" ]] && nocache="--no-fragment-cache"
-            local store_flag=""
-            [[ -z "$nocache" ]] && store_flag="--fragment-store $RAILS_FRAGMENT_STORE"
             scripts/campfire-oracle serve --deployed --out "$ORACLE" --port "$port" \
                 --threads "$THREADS" --shape-report "$shape" \
-                $nocache $store_flag > "$log" 2>&1 &
+                $nocache > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
-        rails-1p|rails-1p-noyjit|rails-nocache-1p)
+        rails-1p|rails-nocache-1p)
             local nc1=""; [[ "$lane" == "rails-nocache-1p" ]] && nc1="--no-fragment-cache"
-            local store_flag1=""
-            [[ -z "$nc1" ]] && store_flag1="--fragment-store $RAILS_FRAGMENT_STORE"
-            local yjit_flag=""
-            lane_yjit "$lane" || yjit_flag="--no-yjit"
-            echo "yjit=$(lane_yjit "$lane" && echo 1 || echo 0)" > "$shape"
             scripts/campfire-oracle serve --out "$ORACLE" --port "$port" \
                 --workers 1 --threads "$THREADS" --shape-report "$shape" \
-                $yjit_flag $nc1 $store_flag1 > "$log" 2>&1 &
+                $nc1 > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
-        ruby|ruby-1p|ruby-1p-noyjit|roundsnap|roundsnap-1p|roundsnap-1p-noyjit)
+        ruby|ruby-1p)
             # RAILS_ENV=production, for the same reason the oracle serves it
             # (see campfire-oracle's header: development measured 11.4 req/s
             # against production's 141.1 — the SAME app, 12x apart). The emit
@@ -1107,22 +967,12 @@ start_lane() {
             # jemalloc; this lane is Ruby too, and a memory column that
             # compared their allocator against ours would be measuring
             # malloc rather than runtimes.
-            #
-            # roundsnap*: same Puma shape, tree from ROUNDSNAP_EMIT (ISeq).
-            # *-noyjit: RUBY_YJIT_ENABLE=0; otherwise YJIT on.
             local jem; jem="$(find_jemalloc || true)"
             local w=1
-            local tree="$EMIT"
-            local yjit=1
-            lane_yjit "$lane" || yjit=0
-            [[ "$lane" == "ruby" || "$lane" == "roundsnap" ]] && w="$(deployed_worker_count)"
-            [[ "$lane" == roundsnap* ]] && tree="$ROUNDSNAP_EMIT"
+            [[ "$lane" == "ruby" ]] && w="$(deployed_worker_count)"
             echo "jemalloc=${jem:-ABSENT}" > "$shape"
             echo "workers=$w" >> "$shape"
-            echo "tree=$tree" >> "$shape"
-            echo "yjit=$yjit" >> "$shape"
-            [[ "$lane" == roundsnap* ]] && echo "delivery=roundsnap-iseq" >> "$shape"
-            ( cd "$tree" && exec env RAILS_ENV=production RUBY_YJIT_ENABLE="$yjit" \
+            ( cd "$EMIT" && exec env RAILS_ENV=production RUBY_YJIT_ENABLE=1 \
                 RAILS_MAX_THREADS="$THREADS" ${jem:+LD_PRELOAD="$jem"} \
                 bundle exec puma -p "$port" -w "$w" -t "$THREADS:$THREADS" \
                 config.ru ) > "$log" 2>&1 &
@@ -1175,7 +1025,6 @@ start_lane() {
             # `cmd_serve_truffleruby` for what cannot be the same.
             scripts/campfire-oracle serve --runtime truffleruby --heap "$RAILS_TR_HEAP" \
                 --out "$ORACLE" --port "$port" --threads "$THREADS" \
-                --fragment-store "$RAILS_FRAGMENT_STORE" \
                 --shape-report "$shape" > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
@@ -1297,11 +1146,11 @@ login_cookie() {
     local jar="$LOG_DIR/jar-$lane.txt"
     rm -f "$jar"
     case "$lane" in
-        rails|rails-nocache|rails-1p|rails-1p-noyjit|rails-nocache-1p|rails-truffleruby)
+        rails|rails-nocache|rails-1p|rails-nocache-1p|rails-truffleruby)
             scripts/campfire-oracle login --out "$ORACLE" --port "$port" --jar "$jar" >/dev/null \
                 || { fail "$lane sign-in failed"; return 1; }
             ;;
-        ruby|ruby-1p|ruby-1p-noyjit|roundsnap|roundsnap-1p|roundsnap-1p-noyjit|spinel|spinel-1p|jruby|truffleruby|elixir)
+        ruby|ruby-1p|spinel|spinel-1p|jruby|truffleruby|elixir)
             # The emitted tree verifies campfire's `protect_from_forgery
             # with: :exception` (09567dd7), so the token comes from the
             # lane's own form, under the session cookie that holds it.
@@ -1476,11 +1325,6 @@ for lane in "${LANES[@]}"; do
         rails-nocache-1p)    shape_note="1 worker x $THREADS threads, RENDERING (no fragment cache)" ;;
         rails|rails-nocache) shape_note="campfire's own worker formula x $THREADS threads, thruster, jemalloc, resque-pool" ;;
         ruby)                shape_note="$(deployed_worker_count) worker(s) x $THREADS threads, jemalloc" ;;
-        roundsnap)              shape_note="$(deployed_worker_count) worker(s) x $THREADS threads, jemalloc, Roundsnap ISeq, YJIT" ;;
-        roundsnap-1p)           shape_note="1 worker x $THREADS threads, jemalloc, Roundsnap ISeq, YJIT" ;;
-        roundsnap-1p-noyjit)    shape_note="1 worker x $THREADS threads, jemalloc, Roundsnap ISeq, no YJIT" ;;
-        rails-1p-noyjit)        shape_note="1 worker x $THREADS threads, no YJIT" ;;
-        ruby-1p-noyjit)         shape_note="1 worker x $THREADS threads, jemalloc, no YJIT" ;;
         spinel)              shape_note="one process, workers autodetected" ;;
         spinel-1p)           shape_note="one process, SPINEL_WORKERS=1" ;;
         rust)                shape_note="once-campfire-rust, one process, own front server" ;;
@@ -1539,33 +1383,14 @@ for lane in "${LANES[@]}"; do
     # rest (503 ms against 5 ms), and wrk's own warmup would absorb it
     # anyway — doing it here means the `rails` lane measures the steady
     # state it is meant to, rather than one cold render smeared across a
-    # short run. Log cold vs warm wall times for /rooms/1 so a missing
-    # Redis cannot look like a fair steady-state row.
+    # short run.
     case "$lane" in
-        rails|rails-1p|rails-1p-noyjit|rails-truffleruby)
-            step "warm fragment cache for $lane (store=$RAILS_FRAGMENT_STORE)"
-            warm_log="$LOG_DIR/fragment-warm-$lane.txt"
-            : > "$warm_log"
+        rails|rails-1p|rails-truffleruby)
             for ep in "${ENDPOINTS[@]}"; do
                 ep_is_post "$ep" && continue
-                url="http://127.0.0.1:$port$(ep_path "$ep")"
-                # Two GETs: first populates the store, second should be warm.
-                cold_ms="$(curl -s -o /dev/null -w '%{time_total}' \
-                    -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" "$url" \
-                    | awk '{printf "%.0f", $1 * 1000}')"
-                warm_ms="$(curl -s -o /dev/null -w '%{time_total}' \
-                    -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" "$url" \
-                    | awk '{printf "%.0f", $1 * 1000}')"
-                printf '%s\tcold_ms=%s\twarm_ms=%s\n' "$ep" "$cold_ms" "$warm_ms" | tee -a "$warm_log"
+                curl -s -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" \
+                    -o /dev/null "http://127.0.0.1:$port$(ep_path "$ep")"
             done
-            # Room page is the canary: warm should be far below cold when the store works.
-            if room_warm="$(awk -F'\t' '$1 ~ /^\/rooms\/[0-9]+$/ {print $3}' "$warm_log" | head -1)"; then
-                room_warm_ms="${room_warm#warm_ms=}"
-                if [[ -n "$room_warm_ms" ]] && (( room_warm_ms > 200 )); then
-                    die "$lane: /rooms/* warm_ms=${room_warm_ms} (>200) — fragment cache (store=$RAILS_FRAGMENT_STORE) not warm; refuse unfair rails row (see $warm_log)"
-                fi
-                ok "$lane fragment cache warm via $RAILS_FRAGMENT_STORE (room warm_ms=${room_warm_ms:-?}; see $warm_log)"
-            fi
             ;;
     esac
 
@@ -1673,7 +1498,7 @@ for lane in "${LANES[@]}"; do
     # no such row, so every cold-start boot answered 302 to the login page
     # until it timed out (10-07, the first nightly with POST in the default
     # suite). The writes went to the POST route's room, not /rooms/1.
-    if [[ "${wrote:-0}" -eq 1 ]]; then
+    if (( wrote )); then
         step "restaging the seed after $lane writes"
         restore_seeded_db
     fi
