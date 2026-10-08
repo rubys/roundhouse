@@ -938,6 +938,31 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let f = n.as_float_node().unwrap();
             ExprNode::Lit { value: Literal::Float { value: f.value() } }
         }
+        // `999999.9r` / `3r`: an exact Rational literal. Prism gives the
+        // value as numerator and denominator (`9999999` and `10`), so it
+        // becomes `Rational(9999999, 10)`, the same exact value; going
+        // through a Float would round it. `1/3r` is `1 / 3r` and needs
+        // nothing else. Kernel#Rational reduces the fraction as the
+        // literal does.
+        n if n.as_rational_node().is_some() => {
+            let r = n.as_rational_node().unwrap();
+            let int = |i: &ruby_prism::Integer<'_>| {
+                let Some(value) = super::util::integer_i64(i) else {
+                    return Err(IngestError::Unsupported {
+                        file: file.to_string(),
+                        message: "rational literal's numerator or denominator does not fit in a 64-bit integer".to_string(),
+                    });
+                };
+                Ok(Expr::new(span, ExprNode::Lit { value: Literal::Int { value } }))
+            };
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("Rational"),
+                args: vec![int(&r.numerator())?, int(&r.denominator())?],
+                block: None,
+                parenthesized: true,
+            }
+        }
         n if n.as_string_node().is_some() => {
             let s = n.as_string_node().unwrap();
             let bytes = s.unescaped();
