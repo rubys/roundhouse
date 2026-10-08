@@ -20,9 +20,9 @@ pub fn apply_relation_counted_terminals(app: &mut App) {
 
 fn rewrite(e: &mut Expr) {
     e.node.for_each_child_mut(&mut |c| rewrite(c));
-    rewrite_count_gt_when(e, |rel| matches!(rel.ty, Some(Ty::Relation { .. })));
+    rewrite_count_gt_when(e, recv_is_relation);
     if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *e.node {
-        if args.len() == 1 && matches!(r.ty, Some(Ty::Relation { .. })) {
+        if args.len() == 1 && recv_is_relation(r) {
             let renamed = match method.as_str() {
                 "first" => "first_n",
                 "last" => "last_n",
@@ -30,6 +30,26 @@ fn rewrite(e: &mut Expr) {
             };
             *method = Symbol::from(renamed);
         }
+    }
+}
+
+/// Typed `Relation` or a zero-arg relation-builder chain over an
+/// untyped seed (`Page.load`'s `relation.skip_preloading!.last(size)`).
+/// `skip_preloading!` / `preloaded` exist only on Relation in the
+/// runtime, so the builder hop is enough proof for the rename — without
+/// it, an untyped parameter keeps `.last(n)` and MRI raises arity error.
+fn recv_is_relation(e: &Expr) -> bool {
+    if matches!(e.ty, Some(Ty::Relation { .. })) {
+        return true;
+    }
+    match &*e.node {
+        ExprNode::Send { recv: Some(inner), method, args, block: None, .. }
+            if args.is_empty() && matches!(method.as_str(), "skip_preloading!" | "preloaded") =>
+        {
+            matches!(&*inner.node, ExprNode::Var { .. } | ExprNode::Ivar { .. })
+                || recv_is_relation(inner)
+        }
+        _ => false,
     }
 }
 
