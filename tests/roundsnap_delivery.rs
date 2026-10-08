@@ -89,9 +89,14 @@ fn tiny_blog_roundsnap_artifact_shape() {
         &manifest[..manifest.len().min(400)]
     );
     assert!(
-        manifest.contains("\"file\": \"tiny-blog/") || manifest.contains("app/models"),
-        "manifest should carry original or emit file paths: {}",
-        &manifest[..manifest.len().min(400)]
+        manifest.contains("\"mapped\": true"),
+        "app units with #<SPINEL_SOURCE> must be source-mapped: {}",
+        &manifest[..manifest.len().min(600)]
+    );
+    assert!(
+        manifest.contains(".html.erb") || manifest.contains("app/models/"),
+        "mapped units should name original .rb / .erb paths: {}",
+        &manifest[..manifest.len().min(600)]
     );
 }
 

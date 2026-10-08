@@ -3,6 +3,7 @@
 require_relative "roundsnap/version"
 require_relative "roundsnap/compiler"
 require_relative "roundsnap/loader"
+require_relative "roundsnap/source_map"
 
 module Roundsnap
   # MRI-only delivery for Roundhouse-lowered Ruby: compile units to

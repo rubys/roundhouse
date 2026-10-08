@@ -1466,7 +1466,16 @@ pub fn target_files(
         // table used to live inside `spin_shape` and so reached only
         // the spinel tree, which cost campfire two test files on a
         // Ruby 3.4 runner (`Pathname()`).
-        BuildTarget::Ruby => ruby_runtime_files(app, fixture).map(with_bundled_requires),
+        BuildTarget::Ruby => {
+            // Roundsnap needs `#<SPINEL_SOURCE>` markers so ISeq units can
+            // pad to original app lines (ERB included). Plain ruby emit
+            // stays unmarked.
+            if crate::roundsnap::enabled() {
+                ruby_runtime_files_with_source_markers(app, fixture).map(with_bundled_requires)
+            } else {
+                ruby_runtime_files(app, fixture).map(with_bundled_requires)
+            }
+        }
         BuildTarget::Jruby => jruby_runtime_files(app, fixture).map(with_bundled_requires),
         BuildTarget::Roda => Ok(sort_files(emit::roda::emit(app))),
         BuildTarget::Crystal => Ok(sort_files(emit::crystal::emit(app))),
@@ -4373,6 +4382,23 @@ fn spinel_files_with_source_markers(
         }
     }
     Ok((files, stems))
+}
+
+/// CRuby tree with the same `#<SPINEL_SOURCE>` markers Spinel uses, for
+/// Roundsnap contiguous-span ISeq alignment. Not used for plain `--target ruby`.
+fn ruby_runtime_files_with_source_markers(
+    app: &App,
+    fixture: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    emit::ruby::source_markers::with_source_markers(app, || {
+        let mut files = ruby_runtime_files(app, fixture)?;
+        for (path, content) in files.iter_mut() {
+            if path.ends_with(".rb") {
+                *content = emit::ruby::source_markers::finish(content);
+            }
+        }
+        Ok(files)
+    })
 }
 
 fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec<String>), String> {

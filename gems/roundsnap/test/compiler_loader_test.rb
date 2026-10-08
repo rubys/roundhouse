@@ -219,6 +219,42 @@ class CompilerLoaderTest < Minitest::Test
     assert OK
   end
 
+  def test_manifest_records_compile_option
+    units = [
+      {
+        "key" => "opt",
+        "source" => "OPT = true\n",
+        "file" => "opt.rb",
+        "first_lineno" => 1,
+      },
+    ]
+    man = Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
+    assert_equal Roundsnap::Compiler.compile_option_fingerprint, man["compile_option"]
+    Roundsnap::Loader.install!(root: @dir).require("opt")
+    assert OPT
+  end
+
+  def test_compile_option_mismatch_raises_rebuild_hint
+    units = [
+      {
+        "key" => "opt",
+        "source" => "OPT2 = true\n",
+        "file" => "opt.rb",
+        "first_lineno" => 1,
+      },
+    ]
+    Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
+    path = File.join(@dir, "manifest.json")
+    man = JSON.parse(File.read(path))
+    man["compile_option"] = { "tailcall_optimization" => true }
+    File.write(path, JSON.pretty_generate(man) + "\n")
+    err = assert_raises(LoadError) do
+      Roundsnap::Loader.install!(root: @dir).require("opt")
+    end
+    assert_match(/compile_option mismatch/, err.message)
+    assert_match(/rebuild/i, err.message)
+  end
+
   def test_failed_compile_leaves_prior_iseq_intact
     good = [
       {

@@ -47,13 +47,30 @@ module Roundsnap
 
       begin
         entries = {}
+        # Expand `#<SPINEL_SOURCE>` spans before compile so each unit's
+        # physical lines match original app lines (or stay on the emit
+        # path when unmarked — never a fake original:emitted mix).
+        expanded = []
         units.each do |raw|
+          unit = stringify_keys(raw)
+          key = unit.fetch("key")
+          source = unit.fetch("source")
+          if source.include?(SourceMap::MARKER_PREFIX)
+            SourceMap.units_from(source, emit_key: key).each { |u| expanded << u }
+          else
+            expanded << unit
+          end
+        end
+
+        expanded.each do |raw|
           unit = stringify_keys(raw)
           key = sanitize_key!(unit.fetch("key"))
           source = unit.fetch("source")
           file = unit.fetch("file")
+          # May be <= 0 when a mapped unit has an unmarked prefix
+          # (module wrappers): first_lineno = 1 - prefix_len so source
+          # line L reports as L after padding. Do not clamp to 1.
           first_lineno = (unit["first_lineno"] || 1).to_i
-          first_lineno = 1 if first_lineno < 1
 
           iseq = RubyVM::InstructionSequence.compile(
             source,
@@ -71,6 +88,7 @@ module Roundsnap
             "iseq" => File.join("iseq", rel),
             "file" => file,
             "first_lineno" => first_lineno,
+            "mapped" => unit["mapped"] == true,
             "size" => source.bytesize,
             "digest" => Digest::SHA256.hexdigest(source),
           }
@@ -78,9 +96,13 @@ module Roundsnap
 
         swap_iseq_dir!(iseq_dir, staging)
 
+        # Bootsnap keys ISeq caches on compile_option as well as Ruby
+        # version; a mismatched option loads as "broken binary". Record
+        # the option hash so the loader can fail with a clear rebuild hint.
         manifest = {
           "version" => 1,
           "ruby_description" => RUBY_DESCRIPTION,
+          "compile_option" => compile_option_fingerprint,
           "entry" => units.empty? ? nil : sanitize_key!(stringify_keys(units.first).fetch("key")),
           "units" => entries,
         }
@@ -107,5 +129,16 @@ module Roundsnap
       h.each_with_object({}) { |(k, v), out| out[k.to_s] = v }
     end
     private_class_method :stringify_keys
+
+    # Stable, JSON-friendly fingerprint of InstructionSequence.compile_option.
+    def compile_option_fingerprint
+      opt = RubyVM::InstructionSequence.compile_option
+      return {} unless opt.is_a?(Hash)
+
+      opt.keys.map(&:to_s).sort.each_with_object({}) do |k, out|
+        out[k] = opt[k.to_sym]
+      end
+    end
+    module_function :compile_option_fingerprint
   end
 end

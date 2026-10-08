@@ -60,7 +60,7 @@ fn keep_as_source(path: &str) -> bool {
 
 /// Rewrite the CRuby file set for Roundsnap ISeq delivery. Idempotent if
 /// `units.json` is already present.
-pub fn prepare(app: &App, files: &mut Vec<(String, String)>) -> Result<(), String> {
+pub fn prepare(_app: &App, files: &mut Vec<(String, String)>) -> Result<(), String> {
     if !enabled() {
         return Ok(());
     }
@@ -68,7 +68,6 @@ pub fn prepare(app: &App, files: &mut Vec<(String, String)>) -> Result<(), Strin
         return Ok(());
     }
 
-    let label = app_label(app);
     let mut by_path: BTreeMap<String, String> = files.iter().cloned().collect();
 
     let boot = by_path
@@ -112,13 +111,25 @@ pub fn prepare(app: &App, files: &mut Vec<(String, String)>) -> Result<(), Strin
             .clone();
         // Drop require_relative "boot" — thin boot already owns startup.
         let source = strip_boot_require(&source);
-        let (file, first_lineno) = original_location(app, &label, key);
-        units.push(serde_json::json!({
-            "key": key_for_manifest(key),
-            "source": source,
-            "file": file,
-            "first_lineno": first_lineno,
-        }));
+        let stem = key_for_manifest(key);
+        // Marked sources: leave `file` unset so the gem's SourceMap
+        // expands contiguous spans with original paths + padded lines.
+        // Unmarked: emit path (honest) — never original path + emitted
+        // linenos (Sam: a wrong file:line is worse than an inconvenient one).
+        if source.contains("#<SPINEL_SOURCE>") {
+            // Gem SourceMap expands spans → original file + padded lines.
+            units.push(serde_json::json!({
+                "key": stem,
+                "source": source,
+            }));
+        } else {
+            units.push(serde_json::json!({
+                "key": stem,
+                "source": source,
+                "file": key,
+                "first_lineno": 1,
+            }));
+        }
     }
 
     let units_json = serde_json::to_string_pretty(&units)
@@ -228,6 +239,7 @@ fn vendor_gem(by_path: &mut BTreeMap<String, String>) -> Result<(), String> {
         "lib/roundsnap/version.rb",
         "lib/roundsnap/compiler.rb",
         "lib/roundsnap/loader.rb",
+        "lib/roundsnap/source_map.rb",
         "exe/roundsnap-compile",
     ] {
         let src = root.join(rel);
@@ -236,14 +248,6 @@ fn vendor_gem(by_path: &mut BTreeMap<String, String>) -> Result<(), String> {
         by_path.insert(format!("vendor/roundsnap/{rel}"), text);
     }
     Ok(())
-}
-
-fn app_label(app: &App) -> String {
-    Path::new(app.root.trim_end_matches('/'))
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("app")
-        .to_string()
 }
 
 fn key_for_manifest(emit_path: &str) -> String {
@@ -374,46 +378,6 @@ fn boot_require_keys(boot: &str) -> Vec<String> {
         }
     }
     keys
-}
-
-/// Map an emitted path to the original app path for ISeq `file` metadata.
-fn original_location(app: &App, label: &str, emit_path: &str) -> (String, i64) {
-    let root = app.root.trim_end_matches('/');
-    let emit_no_rb = emit_path.strip_suffix(".rb").unwrap_or(emit_path);
-
-    for src in &app.sources {
-        let rel = src
-            .path
-            .strip_prefix(root)
-            .map(|r| r.trim_start_matches('/'))
-            .unwrap_or(src.path.as_str());
-        let rel_no_rb = rel.strip_suffix(".rb").unwrap_or(rel);
-
-        if rel == emit_path || rel_no_rb == emit_no_rb {
-            return (format!("{label}/{rel}"), 1);
-        }
-
-        // ERB → app/views/<name>.rb
-        if let Some(without_erb) = rel.strip_suffix(".erb") {
-            let stem = without_erb
-                .strip_suffix(".html")
-                .or_else(|| without_erb.strip_suffix(".json"))
-                .or_else(|| without_erb.strip_suffix(".js"))
-                .or_else(|| without_erb.strip_suffix(".text"))
-                .unwrap_or(without_erb);
-            if stem == emit_no_rb || format!("{stem}") == emit_no_rb {
-                return (format!("{label}/{rel}"), 1);
-            }
-            // json view emit uses _json suffix
-            if emit_no_rb == format!("{stem}_json") || emit_path.ends_with("_json.rb") {
-                if stem.replace('\\', "/") == emit_no_rb.trim_end_matches("_json") {
-                    return (format!("{label}/{rel}"), 1);
-                }
-            }
-        }
-    }
-
-    (emit_path.to_string(), 1)
 }
 
 fn patch_config_ru(ru: &str) -> String {

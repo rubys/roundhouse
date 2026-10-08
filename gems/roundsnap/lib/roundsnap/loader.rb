@@ -116,10 +116,28 @@ module Roundsnap
               "roundsnap: ISeq built for #{built.inspect}, " \
               "running #{RUBY_DESCRIPTION.inspect}"
       end
+      built_opt = @manifest["compile_option"]
+      if !built_opt.nil? && built_opt != Compiler.compile_option_fingerprint
+        raise LoadError,
+              "roundsnap: ISeq compile_option mismatch " \
+              "(built #{built_opt.inspect}, running " \
+              "#{Compiler.compile_option_fingerprint.inspect}); rebuild"
+      end
 
       path = safe_iseq_path(entry.fetch("iseq"))
       binary = File.binread(path)
-      iseq = RubyVM::InstructionSequence.load_from_binary(binary)
+      begin
+        iseq = RubyVM::InstructionSequence.load_from_binary(binary)
+      rescue RuntimeError => e
+        # Bootsnap rejects "broken binary format" and regenerates; we
+        # have no source at deploy time, so ask for a rebuild.
+        if e.message.include?("broken binary")
+          raise LoadError,
+                "roundsnap: broken ISeq for #{key.inspect} (#{path}); " \
+                "rebuild with matching Ruby / compile_option"
+        end
+        raise
+      end
       # Reserve before eval so circular require_relative (common in Rails
       # model trees) short-circuits like MRI's $LOADED_FEATURES. Clear the
       # reservation on failure so a failed unit can be retried.
