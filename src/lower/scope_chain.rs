@@ -1973,16 +1973,18 @@ pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> boo
         if *found {
             return;
         }
-        if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+        if let ExprNode::Send { recv: Some(r), method, args, block, .. } = &*e.node {
             // Chain methods and `all` open a chain; so do the terminals
             // that need a seeded Relation at a Const root. Leaving the
             // latter out is a gate that closes over the very shape
             // `CLASS_ROOT_TERMINALS` exists to rewrite — a body whose
             // ONLY relation surface is `Push::Subscription.destroy_by(…)`
-            // never reached the rewriter at all.
+            // never reached the rewriter at all. Likewise the counted
+            // `Developer.first(2)` / `.last(2)`.
             if (is_relation_chain_method(method.as_str())
                 || method.as_str() == "all"
-                || CLASS_ROOT_TERMINALS.contains(&method.as_str()))
+                || CLASS_ROOT_TERMINALS.contains(&method.as_str())
+                || counted_terminal(method, args, block.as_ref()).is_some())
                 && const_model(r, models).is_some()
             {
                 *found = true;
@@ -2029,13 +2031,15 @@ pub fn mentions_bare_chain_start(expr: &Expr) -> bool {
         if *found {
             return;
         }
-        if let ExprNode::Send { recv, method, .. } = &*e.node {
+        if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
             let self_rooted = match recv {
                 None => true,
                 Some(r) => matches!(&*r.node, ExprNode::SelfRef),
             };
             if self_rooted
-                && (is_relation_chain_method(method.as_str()) || method.as_str() == "all")
+                && (is_relation_chain_method(method.as_str())
+                    || method.as_str() == "all"
+                    || (recv.is_none() && counted_terminal(method, args, block.as_ref()).is_some()))
             {
                 *found = true;
                 return;
@@ -3379,6 +3383,13 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(seed), method, args, block, parenthesized);
                     return Some(self_model);
                 }
+                // A bare `first(n)` / `last(n)` there: the same counted
+                // terminal as `Model.first(n)` below.
+                if let Some(counted) = counted_terminal(&method, &args, block.as_ref()) {
+                    let seed = relation_new(span, &self_model);
+                    *expr = put(span, Some(seed), counted, args, block, parenthesized);
+                    return None;
+                }
             }
             *expr = put(span, None, method, args, block, parenthesized);
             None
@@ -3620,6 +3631,16 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         *expr = put(span, Some(seed), method, args, block, parenthesized);
                     }
                     return Some(m);
+                }
+                // `Developer.first(2)` / `.last(2)`: the counted forms are
+                // Relation terminals (`first_n` / `last_n`). The runtime's
+                // class-side `first` takes no count, and Rails' class
+                // method delegates to `all`, so the count rides a fresh
+                // relation, as the chain methods above do. Answers an
+                // Array, not a relation: no model to thread.
+                if let Some(counted) = counted_terminal(&method, &args, block.as_ref()) {
+                    *expr = put(span, Some(relation_new(span, &m)), counted, args, block, parenthesized);
+                    return None;
                 }
                 let returns = ctx.user_returns.class.get(&(m.clone(), method.clone())).cloned();
                 *expr = put(span, Some(r), method, args, block, parenthesized);
