@@ -226,7 +226,7 @@ module ActiveRecord
     def one?: () -> bool
     def many?: () -> bool
     def all?: () { (Base) -> bool } -> bool
-    def exists?: (?(Integer | String | Hash[String | Symbol, untyped] | nil) id) -> bool
+    def exists?: (*(Integer | String | Hash[String | Symbol, untyped] | nil) conditions) -> bool
     def probe_existence: (Integer n) -> Integer
     def more_than?: (Integer n) -> bool
     def length: () -> Integer

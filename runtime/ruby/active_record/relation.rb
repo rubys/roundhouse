@@ -1552,13 +1552,18 @@ module ActiveRecord
 
     # Hash conditions share where's predicate builder; scalar conditions
     # select the primary key. Unloaded: exists_sql (SELECT 1 LIMIT 1).
-    def exists?(id = nil)
+    # No argument asks for any row; `exists?(nil)` is false, as Rails'
+    # `return false if !conditions`. The argument is a splat so "absent"
+    # and `nil` stay distinct without an untyped default.
+    def exists?(*conditions)
       return false if @limit == 0
-      if id.nil?
+      if conditions.empty?
         r = @records
         return r.length > 0 unless r.nil?
         return probe_existence(1) > 0
       end
+      id = conditions[0]
+      return false if id.nil?
       own_lists
       # Popped for the same reason `find` and `find_by` pop: a terminal
       # that answered a question must not narrow the relation it was

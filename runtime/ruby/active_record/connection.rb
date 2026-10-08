@@ -360,8 +360,12 @@ module ActiveRecord
     # Reject nil before a key-typed adapter can coerce it. Generated
     # models override `_exists_primary_key_input` with schema-selected
     # dispatch (same split as find) so Spinel never compiles String into
-    # an Integer adapter slot.
-    def self.exists?(id)
+    # an Integer adapter slot. No argument asks for any row (Rails'
+    # `exists?(conditions = :none)`); the optional argument is a splat
+    # so "absent" and `nil` stay distinct without an untyped default.
+    def self.exists?(*ids)
+      return all.exists? if ids.empty?
+      id = ids[0]
       return false if id.nil?
       _exists_primary_key_input(id)
     end

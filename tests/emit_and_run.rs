@@ -11004,3 +11004,32 @@ end
         .assert_passes();
 }
 
+
+/// Rails' `exists?(conditions = :none)` asks for any row when called bare
+/// and answers false for a nil/false argument (`return false if
+/// !conditions`), on the model class and on a relation alike.
+#[test]
+fn exists_without_an_argument_asks_for_any_row_and_nil_is_false() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_exists_test.rb",
+            r#"require "test_helper"
+
+class ArticleExistsTest < ActiveSupport::TestCase
+  test "bare exists? is any row; exists?(nil) is false" do
+    Article.delete_all
+    assert_not Article.exists?
+    assert_not Article.all.exists?
+    article = Article.create!(title: "Exists", body: "Body text here")
+    assert Article.exists?
+    assert Article.all.exists?
+    assert Article.exists?(article.id)
+    assert_not Article.exists?(nil)
+    assert_not Article.all.exists?(nil)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_exists_test.rb")
+        .assert_passes();
+}
