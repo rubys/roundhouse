@@ -1428,6 +1428,9 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
             ExprNode::Assign { target: LValue::Var { name, .. }, .. }
             | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
                 if name.as_str().starts_with("@@") => Some("class variable write"),
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
+                if name.as_str().starts_with('$') => Some("global variable write"),
             ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => Some("class variable read"),
             _ => None,
         };

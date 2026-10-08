@@ -1381,6 +1381,20 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 value,
             }
         }
+        // `$stdout = STDOUT` — a global-variable write. Like a read
+        // (`n.as_global_variable_read_node()` below) and like `@@x`, the
+        // `$`-prefixed name rides in `LValue::Var` so the sigil
+        // round-trips on the Ruby emit, and the targets without Ruby's
+        // globals refuse it by name (`project.rs::report_native_ruby_syntax`).
+        n if n.as_global_variable_write_node().is_some() => {
+            let w = n.as_global_variable_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+                value,
+            }
+        }
         // `FOO = expr` — bare constant write. In a class body this is
         // a class-scoped constant; at top level it's a global constant.
         // Lowerers/emitters resolve the containing scope.
@@ -1460,6 +1474,36 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 },
                 op,
                 value,
+            }
+        }
+        // `$x ||= y`, `$x &&= y`, `$x += y` — a global, as `$x = y` above.
+        n if n.as_global_variable_or_write_node().is_some() => {
+            let w = n.as_global_variable_or_write_node().unwrap();
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: Symbol::from(constant_id_str(&w.name())) },
+                op: crate::expr::OpAssignOp::OrOr,
+                value: ingest_expr(&w.value(), file)?,
+            }
+        }
+        n if n.as_global_variable_and_write_node().is_some() => {
+            let w = n.as_global_variable_and_write_node().unwrap();
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: Symbol::from(constant_id_str(&w.name())) },
+                op: crate::expr::OpAssignOp::AndAnd,
+                value: ingest_expr(&w.value(), file)?,
+            }
+        }
+        n if n.as_global_variable_operator_write_node().is_some() => {
+            let w = n.as_global_variable_operator_write_node().unwrap();
+            let op = op_assign_op_from_binary(&constant_id_str(&w.binary_operator()))
+                .ok_or_else(|| IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!("unsupported compound-assignment operator: {}", constant_id_str(&w.binary_operator())),
+                })?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: Symbol::from(constant_id_str(&w.name())) },
+                op,
+                value: ingest_expr(&w.value(), file)?,
             }
         }
         // `x &&= y` — local var, short-circuit.
@@ -2386,16 +2430,6 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             return Err(IngestError::Unsupported {
                 file: file.into(),
                 message: "unparsed fragment (Prism recovery node)".into(),
-            });
-        }
-        // `$stdout = …` — a global-variable write. Reads of the same
-        // sigil already ingest (see `n.as_global_variable_read_node()`
-        // above); writing global state isn't modeled, and the specific
-        // message says exactly what's missing instead of the generic one.
-        n if n.as_global_variable_write_node().is_some() => {
-            return Err(IngestError::Unsupported {
-                file: file.into(),
-                message: "global variable write".into(),
             });
         }
         // `class`/`module` at expression position — e.g. inside a

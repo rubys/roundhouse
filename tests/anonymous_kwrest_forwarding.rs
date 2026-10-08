@@ -178,6 +178,9 @@ fn anonymous_keywords_and_runtime_guards_are_honest_target_boundaries() {
         ("class Probe; def call; @@count += 3; @@count; end; end", "class variable write"),
         ("class Probe; def self.call; @@count; end; end", "class variable read"),
         ("class Probe; @@count = nil; end", "class variable write"),
+        ("class Probe; def self.call; $stdout = STDOUT; end; end", "global variable write"),
+        ("class Probe; def self.call; $rh_memo ||= []; end; end", "global variable write"),
+        ("class Probe; def self.call; $rh_count += 1; end; end", "global variable write"),
     ] {
         let mut app = ingest_app_from_tree(tree(&[("app/services/probe.rb", source)])).unwrap();
         roundhouse::session::analyze_and_lower(&mut app);
