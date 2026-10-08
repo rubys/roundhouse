@@ -99,11 +99,18 @@ module Roundsnap
         # Bootsnap keys ISeq caches on compile_option as well as Ruby
         # version; a mismatched option loads as "broken binary". Record
         # the option hash so the loader can fail with a clear rebuild hint.
+        entry_key = nil
+        unless units.empty?
+          entry_key = sanitize_key!(stringify_keys(units.first).fetch("key"))
+          # SourceMap may expand the first input into stem / stem__spanN;
+          # prefer the stem key when present.
+          entry_key = entries.key?(entry_key) ? entry_key : entries.keys.first
+        end
         manifest = {
           "version" => 1,
           "ruby_description" => RUBY_DESCRIPTION,
           "compile_option" => compile_option_fingerprint,
-          "entry" => units.empty? ? nil : sanitize_key!(stringify_keys(units.first).fetch("key")),
+          "entry" => entry_key,
           "units" => entries,
         }
         File.write(File.join(out_dir, "manifest.json"), JSON.pretty_generate(manifest) + "\n")

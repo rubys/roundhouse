@@ -26,6 +26,7 @@ module Roundsnap
       def mark_hooked!
         @hooked = true
       end
+      private :mark_hooked!
     end
 
     attr_reader :root, :manifest
@@ -45,7 +46,7 @@ module Roundsnap
       self.class.current = self
       unless self.class.hooked?
         Kernel.prepend(RequireHook)
-        self.class.mark_hooked!
+        self.class.send(:mark_hooked!)
       end
       self
     end
@@ -59,15 +60,19 @@ module Roundsnap
       bare = n.sub(/\A\.\//, "").sub(/\.rb\z/, "")
       return bare if @units.key?(bare)
 
-      # Original-path ISeqs are labeled `fixture/app/...`; require_relative
-      # joins against that and would miss emit keys `app/...`.
-      if (idx = bare.index("/app/"))
-        tail = bare[(idx + 1)..]
-        return tail if @units.key?(tail)
-      end
-      if (idx = bare.index("/runtime/"))
-        tail = bare[(idx + 1)..]
-        return tail if @units.key?(tail)
+      # Absolute host paths (e.g. /var/runtime/… on Lambda) must never
+      # steal a manifest key via substring. Bridging is only for relative
+      # labels like fixture/app/... or real-blog/app/... that require_relative
+      # builds against an original ISeq `file`.
+      unless bare.start_with?("/", "\\")
+        if (idx = bare.index("/app/"))
+          tail = bare[(idx + 1)..]
+          return tail if @units.key?(tail)
+        end
+        if (idx = bare.index("/runtime/"))
+          tail = bare[(idx + 1)..]
+          return tail if @units.key?(tail)
+        end
       end
       %w[app/ runtime/].each do |prefix|
         return bare if bare.start_with?(prefix) && @units.key?(bare)

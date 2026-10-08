@@ -235,6 +235,7 @@ fn vendor_gem(by_path: &mut BTreeMap<String, String>) -> Result<(), String> {
     for rel in [
         "roundsnap.gemspec",
         "README.md",
+        "LICENSE",
         "lib/roundsnap.rb",
         "lib/roundsnap/version.rb",
         "lib/roundsnap/compiler.rb",
@@ -323,18 +324,7 @@ fn require_relative_targets(source: &str, from_path: &str) -> Vec<String> {
 }
 
 fn normalize_rel_path(path: &str) -> String {
-    let mut parts = Vec::new();
-    for p in path.split('/') {
-        if p.is_empty() || p == "." {
-            continue;
-        }
-        if p == ".." {
-            parts.pop();
-        } else {
-            parts.push(p);
-        }
-    }
-    parts.join("/")
+    crate::project::vpath_normalize(path)
 }
 
 /// Emit-path keys (`runtime/foo.rb`) in boot.rb `require_relative` order.

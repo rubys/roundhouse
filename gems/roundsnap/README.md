@@ -92,10 +92,13 @@ emitted lines; never original path + emitted linenos).
 - MRI only (`RUBY_ENGINE == "ruby"`).
 - Contiguous-span alignment (not yet one ISeq per method). Held markers
   with several statements auto-increment after the first exact line.
+- One original file per marked unit — mixed `#<SPINEL_SOURCE>` files in
+  the same source raise (flushing mid-wrapper would break `end` balance).
 - ISeq binaries are tied to `RUBY_DESCRIPTION` and
   `InstructionSequence.compile_option`; rebuild after Ruby upgrades or
   option changes.
 - No `$LOAD_PATH` pre-scan and no YAML/JSON compile cache — the emitted
   tree resolves by manifest key. Those Bootsnap features stay out of scope.
 - The loader still uses `Kernel.prepend` require hooks so `require_relative`
-  against original ISeq `file` paths can resolve emit keys.
+  against original ISeq `file` paths can resolve emit keys. Absolute host
+  paths are never rewritten to manifest keys.

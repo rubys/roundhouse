@@ -12,8 +12,10 @@ module Roundsnap
   #    the next marker (MRI cannot stack two statements on one line).
   # 3. `first_lineno = 1 - prefix_len` so backtraces report source line L.
   #
-  # A marker that changes file flushes a new unit. Unmarked source (no
-  # markers) keeps the emit path — honest emitted lines, never a fake
+  # One original file per marked unit (Roundhouse emit shape). A second
+  # `#<SPINEL_SOURCE>` file in the same source raises — flushing mid-wrapper
+  # would split unbalanced `module`/`class`/`end` across ISeqs. Unmarked
+  # source keeps the emit path — honest emitted lines, never a fake
   # original:emitted mix.
   module SourceMap
     MARKER_PREFIX = "#<SPINEL_SOURCE>"
@@ -104,7 +106,10 @@ module Roundsnap
           new_file = m[1]
           new_line = m[2].to_i
           if seen_marker && !file.nil? && new_file != file
-            flush.call
+            raise ArgumentError,
+                  "roundsnap: multi-file #<SPINEL_SOURCE> markers in one " \
+                  "unit are unsupported (saw #{file.inspect} then " \
+                  "#{new_file.inspect}); emit one original file per unit"
           end
           file = new_file
           held = new_line

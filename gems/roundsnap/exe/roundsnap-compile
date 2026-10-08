@@ -26,5 +26,6 @@ end
 units = JSON.parse(raw)
 abort "roundsnap-compile: units JSON must be an Array" unless units.is_a?(Array)
 
-Roundsnap::Compiler.compile!(units: units, out_dir: out_dir)
-puts "wrote #{units.size} unit(s) to #{out_dir}"
+manifest = Roundsnap::Compiler.compile!(units: units, out_dir: out_dir)
+n = manifest.fetch("units").size
+puts "wrote #{n} unit(s) to #{out_dir}"

@@ -85,6 +85,23 @@ class SourceMapBacktraceTest < Minitest::Test
     assert_equal "app/models/thing.rb", units[0]["file"]
   end
 
+  def test_multi_file_markers_in_one_unit_raise
+    mixed = <<~RUBY
+      module Wrap
+      #<SPINEL_SOURCE>a.rb:1
+        def self.a; 1; end
+      #<SPINEL_SOURCE>b.rb:1
+        def self.b; 2; end
+      end
+    RUBY
+    err = assert_raises(ArgumentError) do
+      Roundsnap::SourceMap.units_from(mixed, emit_key: "mixed")
+    end
+    assert_match(/multi-file/, err.message)
+    assert_match(/a\.rb/, err.message)
+    assert_match(/b\.rb/, err.message)
+  end
+
   def test_compiler_auto_expands_marked_units
     marked = <<~RUBY
       module Demo

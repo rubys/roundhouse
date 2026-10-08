@@ -57,6 +57,12 @@ fn tiny_blog_roundsnap_artifact_shape() {
         "expected vendored roundsnap gem"
     );
     assert!(
+        files
+            .iter()
+            .any(|(p, _)| p == "vendor/roundsnap/LICENSE"),
+        "expected vendored LICENSE (gemspec ships LICENSE*)"
+    );
+    assert!(
         !files.iter().any(|(p, _)| p.starts_with("app/") && p.ends_with(".rb")),
         "app/*.rb should be omitted from the text file set"
     );

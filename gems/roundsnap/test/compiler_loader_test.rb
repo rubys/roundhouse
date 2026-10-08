@@ -300,4 +300,28 @@ class CompilerLoaderTest < Minitest::Test
     refute path.start_with?(gem_lib + File::SEPARATOR),
            "test file must not be treated as gem lib: #{path}"
   end
+
+  def test_resolve_key_bridges_relative_fixture_prefix_not_absolute_host
+    units = [
+      {
+        "key" => "app/models/thing",
+        "source" => "THING = 1\n",
+        "file" => "fixture/app/models/thing.rb",
+        "first_lineno" => 1,
+      },
+      {
+        "key" => "runtime/gzip_cache",
+        "source" => "GZ = 1\n",
+        "file" => "runtime/gzip_cache.rb",
+        "first_lineno" => 1,
+      },
+    ]
+    Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
+    loader = Roundsnap::Loader.new(root: @dir)
+    assert_equal "app/models/thing", loader.resolve_key("fixture/app/models/thing")
+    assert_equal "runtime/gzip_cache", loader.resolve_key("real-blog/runtime/gzip_cache")
+    # Absolute host paths must not steal manifest keys (Lambda /var/runtime, …).
+    assert_nil loader.resolve_key("/var/runtime/gzip_cache")
+    assert_nil loader.resolve_key("/opt/deploy/app/models/thing")
+  end
 end

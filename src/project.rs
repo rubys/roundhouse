@@ -7238,7 +7238,7 @@ fn rewrite_requires_for_move(
 }
 
 /// Normalize a set-relative path: fold `.` and `..` components.
-fn vpath_normalize(p: &str) -> String {
+pub(crate) fn vpath_normalize(p: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for c in p.split('/') {
         match c {
