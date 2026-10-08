@@ -369,7 +369,17 @@ fn emit_node(n: &ExprNode) -> String {
         },
         ExprNode::Retry => "retry".to_string(),
         ExprNode::Redo => "redo".to_string(),
-        ExprNode::Splat { value } => format!("*{}", emit_expr(value)),
+        // `*(handles unless ready)`: bare, a modifier operand ends the
+        // element (`[*handles unless ready, x]` does not parse) or binds
+        // the whole enclosing statement; a command operand takes the
+        // following elements as its arguments.
+        ExprNode::Splat { value } => {
+            if renders_open_ended(value) {
+                format!("*({})", emit_expr(value))
+            } else {
+                format!("*{}", emit_arg(value))
+            }
+        }
         ExprNode::ForwardArgs => "...".to_string(),
         ExprNode::ForwardKeywords => "**".to_string(),
         ExprNode::ForwardKeywordsWithPairs { entries } => {
@@ -864,7 +874,10 @@ fn is_simple_ident(s: &str) -> bool {
 /// and `f((g a: 1 do ... end))` parses identically everywhere.
 /// Everything else passes through unchanged.
 fn emit_arg(e: &Expr) -> String {
-    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) {
+    // A multiple assignment is a statement unless parenthesized: `if a, b
+    // = pair` does not parse, and as an argument its comma splits it.
+    let multi_assign = matches!(&*e.node, ExprNode::MultiAssign { .. });
+    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) || multi_assign {
         format!("({})", emit_expr(e))
     } else {
         emit_expr(e)
