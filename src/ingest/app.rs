@@ -444,6 +444,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // `action_text_markdowns` (not `markdowns`). Seed the framework
     // prefix so ordinary model ingest matches the gem.
     table_prefixes.insert("ActionText".to_string(), "action_text_".to_string());
+    // An app engine's own `isolate_namespace` (in its `lib/`): a prefix
+    // the module's declared `table_name_prefix` overrides.
+    let mut isolated_prefixes = super::model::TablePrefixes::default();
     // Qualified enum arrays can live in a later file (e.g. a service
     // module). Collect literal inputs before expanding any model DSL.
     let mut enum_constants = super::model::EnumConstants::default();
@@ -485,12 +488,16 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 &source,
                 &entry.display().to_string(),
             ));
+            isolated_prefixes.extend(super::model::ingest_isolated_namespace_prefixes(&source, &entry.display().to_string()));
             model_bases.record(&source, &mut base_pairs);
             if sub != "lib" || !ignored_lib_file(&entry) {
                 enum_constants.record(&source, &entry.display().to_string());
                 enum_input_files.insert(entry);
             }
         }
+    }
+    for (module, prefix) in isolated_prefixes {
+        table_prefixes.entry(module).or_insert(prefix);
     }
     enum_constants.finish();
     model_bases.close_over(&base_pairs);

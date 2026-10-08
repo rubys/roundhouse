@@ -108,6 +108,43 @@ pub fn ingest_table_name_prefixes(source: &[u8], file: &str) -> TablePrefixes {
     out
 }
 
+/// `isolate_namespace Billing` in an engine body: Rails defines
+/// `Billing.table_name_prefix` as the engine name and `_`
+/// (`billing_`), unless the module already declares one. A
+/// `Billing::Rate` with no `table_name` read `rates` without the
+/// prefix, a table no schema has, and every column read on it was
+/// `no known method`. The written module is the enclosing one it names
+/// (`module Billing; class Engine`), else the name as written.
+pub fn ingest_isolated_namespace_prefixes(source: &[u8], file: &str) -> TablePrefixes {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let mut out = TablePrefixes::default();
+    for (scope, class) in super::util::find_all_classes_with_scope(&root) {
+        let Some(body) = class.body() else { continue };
+        let mut nesting = scope;
+        nesting.extend(class_name_path(&class).unwrap_or_default());
+        for stmt in flatten_statements(body) {
+            let Some(call) = stmt.as_call_node() else { continue };
+            if call.receiver().is_some() || constant_id_str(&call.name()) != "isolate_namespace" {
+                continue;
+            }
+            let Some(arg) = call.arguments().and_then(|args| args.arguments().iter().next()) else { continue };
+            let Some(written) = constant_path_of(&arg) else { continue };
+            let rooted = arg.as_constant_path_node().is_some_and(|p| super::util::constant_path_is_rooted(&p));
+            let enclosing = (!rooted)
+                .then(|| nesting[..nesting.len().saturating_sub(1)].iter().rposition(|s| *s == written[0]))
+                .flatten();
+            let full = match enclosing {
+                Some(at) => nesting[..at].iter().chain(&written).cloned().collect::<Vec<_>>().join("::"),
+                None => written.join("::"),
+            };
+            let prefix = format!("{}_", crate::naming::underscore(&full).replace('/', "_"));
+            out.insert(full, prefix);
+        }
+    }
+    out
+}
+
 /// `self.table_name_prefix = "three_d_secure_"` in a model body: the
 /// class's own prefix, which wins over any namespace module's.
 fn explicit_table_prefix(body: ruby_prism::Node<'_>) -> Option<String> {
