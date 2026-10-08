@@ -7123,9 +7123,53 @@ pub fn missing_bundled_requires(files: &[(String, String)]) -> Vec<String> {
 /// stable order.
 fn write_bundled_requires(files: &mut [(String, String)]) {
     for (i, require_line) in bundled_require_gaps(files) {
-        files[i].1.insert_str(0, &format!("{require_line}\n"));
+        insert_require_line(&mut files[i].1, &require_line);
     }
     apply_bundled_gem_wiring(files);
+}
+
+/// Write `line` (a `require`) at the top of a Ruby file, after its
+/// leading magic comments: Ruby reads `# frozen_string_literal: true`
+/// (and `encoding`, `warn_indent`, `shareable_constant_value`) only
+/// before the first token, so a require written above one switches it
+/// off and warns "'frozen_string_literal' is ignored after any tokens".
+/// A shebang stays the first line.
+fn insert_require_line(content: &mut String, line: &str) {
+    // Ruby reads magic comments anywhere in the leading run of comments
+    // and blank lines, so scan that whole run (a license header may come
+    // first, a blank line may separate two magic comments) and write the
+    // require after the last magic line, or the shebang.
+    let mut at = 0;
+    let mut end = 0;
+    for (n, text) in content.split_inclusive('\n').enumerate() {
+        end += text.len();
+        let trimmed = text.trim_end();
+        if n == 0 && trimmed.starts_with("#!") {
+            at = end;
+        } else if ruby_magic_comment(trimmed) {
+            at = end;
+        } else if !(trimmed.is_empty() || trimmed.starts_with('#')) {
+            break;
+        }
+    }
+    if at > 0 && !content[..at].ends_with('\n') {
+        content.push('\n');
+        at = content.len();
+    }
+    content.insert_str(at, &format!("{line}\n"));
+}
+fn ruby_magic_comment(line: &str) -> bool {
+    let Some(body) = line.strip_prefix('#') else { return false };
+    let body = body.trim();
+    if body.starts_with("-*-") {
+        return true;
+    }
+    let Some((key, _)) = body.split_once(':') else { return false };
+    let key = key.trim().to_ascii_lowercase().replace('-', "_");
+    matches!(
+        key.as_str(),
+        "frozen_string_literal" | "encoding" | "coding" | "warn_indent" | "shareable_constant_value" | "warn_past_scope"
+    )
 }
 
 /// The emitted call every declared variant lowers to (`lower::attached
@@ -8176,6 +8220,31 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_written_require_stays_below_the_files_magic_comments() {
+        let cases = [
+            ("# frozen_string_literal: true\n\n# doc\nx = 1\n", "# frozen_string_literal: true\nrequire \"bigdecimal\"\n\n# doc\nx = 1\n"),
+            ("#!/usr/bin/env ruby\n# encoding: utf-8\n# frozen_string_literal: true\nx\n", "#!/usr/bin/env ruby\n# encoding: utf-8\n# frozen_string_literal: true\nrequire \"bigdecimal\"\nx\n"),
+            ("# -*- coding: utf-8 -*-\nx\n", "# -*- coding: utf-8 -*-\nrequire \"bigdecimal\"\nx\n"),
+            ("# A doc comment: not magic\nx\n", "require \"bigdecimal\"\n# A doc comment: not magic\nx\n"),
+            ("x = 1\n", "require \"bigdecimal\"\nx = 1\n"),
+            ("# frozen_string_literal: true", "# frozen_string_literal: true\nrequire \"bigdecimal\"\n"),
+            // A license or doc header above the magic comment.
+            ("# Copyright 2020\n# License: MIT\n\n# frozen_string_literal: true\n\nx = 1\n", "# Copyright 2020\n# License: MIT\n\n# frozen_string_literal: true\nrequire \"bigdecimal\"\n\nx = 1\n"),
+            // A blank line between two magic comments.
+            ("# encoding: utf-8\n\n# frozen_string_literal: true\nx = 1\n", "# encoding: utf-8\n\n# frozen_string_literal: true\nrequire \"bigdecimal\"\nx = 1\n"),
+            // A shebang with no magic comment.
+            ("#!/usr/bin/env ruby\n# doc\nx = 1\n", "#!/usr/bin/env ruby\nrequire \"bigdecimal\"\n# doc\nx = 1\n"),
+            // A magic-looking comment after the first token is no magic comment.
+            ("x = 1\n# frozen_string_literal: true\n", "require \"bigdecimal\"\nx = 1\n# frozen_string_literal: true\n"),
+        ];
+        for (before, after) in cases {
+            let mut content = before.to_string();
+            super::insert_require_line(&mut content, "require \"bigdecimal\"");
+            assert_eq!(content, after, "{before:?}");
+        }
+    }
 
     #[test]
     fn a_bare_exception_class_is_named_only_in_rescue_or_raise_position() {
