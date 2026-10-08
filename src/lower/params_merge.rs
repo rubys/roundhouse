@@ -219,27 +219,11 @@ impl SiteShapes {
     /// PASSED; it cannot say what the body NEEDS, and where they
     /// disagree the body wins. See [`hash_only_params`].
     fn conclude(&self, user_written: bool, body_needs_hash: bool) -> Option<Binding> {
-        if self.specs.len() != 1 {
+        if self.saw_other || self.specs.len() != 1 {
             return None;
         }
         let spec = self.specs.iter().next()?.clone();
-        // The body's Hash need outweighs opaque call sites. campfire's
-        // `Message.create_with_attachment!(attributes)` is reached from
-        // the controller with `message_params`, from `Webhook` with a
-        // kwargs hash, AND from tests with a local `attributes` bag —
-        // that last shape set `saw_other` and collapsed the binding, so
-        // the assoc-scope pass declined (`create!` "not an attribute
-        // hash") and `@room.messages.create_with_attachment!` stayed on
-        // the Array reader. Production already agrees on one Spec class;
-        // a test local must not veto Attrs when the body only accepts a
-        // Hash (`create!(attributes)`).
-        if body_needs_hash && user_written {
-            return Some(Binding::Attrs(spec));
-        }
-        if self.saw_other {
-            return None;
-        }
-        if self.saw_hash {
+        if self.saw_hash || body_needs_hash {
             return user_written.then_some(Binding::Attrs(spec));
         }
         Some(Binding::Spec(spec))
@@ -442,7 +426,7 @@ fn hash_only_params(app: &App) -> std::collections::HashSet<BindKey> {
     out
 }
 
-/// Is `name` used in a way only a Hash answers anywhere in `body`?
+/// Is `name` the receiver of a hash-only mutation anywhere in `body`?
 fn uses_as_hash(body: &Expr, name: &Symbol) -> bool {
     let mut found = false;
     walk(body, &mut |e| {
@@ -453,27 +437,6 @@ fn uses_as_hash(body: &Expr, name: &Symbol) -> bool {
             matches!(&*x.node, ExprNode::Var { name: n, .. } if n == name)
         };
         match &*e.node {
-            // `create!(attributes)` / `new(attributes)` — the runtime
-            // constructors take a Symbol-keyed attribute hash. Without
-            // this arm, campfire's `create_with_attachment!` body never
-            // counted as `body_needs_hash` (it has no `delete`/`[]=`),
-            // and test sites passing a local `attributes` poisoned Attrs.
-            ExprNode::Send { method, args, .. }
-                if args.len() == 1
-                    && reads_name(&args[0])
-                    && matches!(
-                        method.as_str(),
-                        "create!"
-                            | "create"
-                            | "new"
-                            | "update!"
-                            | "update"
-                            | "assign_attributes"
-                            | "attributes="
-                    ) =>
-            {
-                found = true;
-            }
             ExprNode::Send { recv: Some(r), method, .. }
                 if matches!(method.as_str(), "delete" | "[]=") && reads_name(r) =>
             {
