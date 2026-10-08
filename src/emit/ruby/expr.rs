@@ -163,7 +163,16 @@ fn emit_node(n: &ExprNode) -> String {
             if let Some(b) = block { format!("{base} {{ {} }}", emit_expr(b)) } else { base }
         }
         ExprNode::Send { recv, method, args, block, parenthesized } => {
-            let base = emit_send_base(recv.as_ref(), method, args, *parenthesized);
+            // A brace block binds to the nearest call: after paren-less
+            // arguments it is the last argument's block (`f a, b { }` is
+            // `f(a, b { })`) or a syntax error (`f a, k: 1 { }`). The
+            // call's own `{ }` block (`field :name, :string,
+            // &:upcase`, ingested as `{ |x| x.upcase }`) takes the
+            // arguments in parentheses.
+            let brace = block.as_ref().is_some_and(|b| {
+                matches!(&*b.node, ExprNode::Lambda { block_style: crate::expr::BlockStyle::Brace, .. })
+            });
+            let base = emit_send_base(recv.as_ref(), method, args, *parenthesized || (brace && !args.is_empty()));
             match block {
                 None => base,
                 Some(b) => emit_do_block(&base, b),
