@@ -1424,6 +1424,22 @@ pub(super) fn expand_enum_decl(
             EnumStored::Expr(_) => None,
         })
         .collect::<Option<Vec<_>>>();
+    let writes = mapping_constant_writes(&mapping_node, file)?;
+    // The declaration's comments ride the first item, so with constant
+    // writes ahead of the generated items they move to the first write.
+    let mut doc_comments = if writes.is_empty() {
+        Vec::new()
+    } else {
+        std::mem::take(items[0].leading_comments_mut())
+    };
+    items.splice(
+        0..0,
+        writes.into_iter().map(|expr| ModelBodyItem::Unknown {
+            expr,
+            leading_comments: std::mem::take(&mut doc_comments),
+            leading_blank_line: false,
+        }),
+    );
     Ok(Some(EnumExpansion { column: Symbol::from(column.as_str()), mapping, default, items }))
 }
 
@@ -1736,13 +1752,57 @@ fn enum_label_pairs<'a>(
         let Some(assoc) = el.as_assoc_node() else { return Ok(None) };
         let Some(label) = consts.label(&assoc.key()) else { return Ok(None) };
         let value = assoc.value();
-        let stored = match consts.scalar(&value) {
-            Some(lit) => EnumStored::Lit(lit),
-            None => EnumStored::Expr(ingest_expr(&value, file)?),
+        // `pending: PENDING = "pending"` stores the written value and
+        // defines the constant, which `mapping_constant_writes` hoists
+        // into the class body; the generated methods read the constant.
+        let stored = match value.as_constant_write_node() {
+            Some(cw) => match consts.scalar(&cw.value()) {
+                Some(lit) => EnumStored::Lit(lit),
+                None => EnumStored::Expr(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from(constant_id_str(&cw.name()))] },
+                )),
+            },
+            None => match consts.scalar(&value) {
+                Some(lit) => EnumStored::Lit(lit),
+                None => EnumStored::Expr(ingest_expr(&value, file)?),
+            },
         };
         out.push((label, stored));
     }
     Ok(Some(out))
+}
+
+/// The constants an enum's hash mapping assigns as it is built
+/// (`pending: PENDING = "pending"`), as class-body writes. Ruby runs
+/// them when the class body evaluates the `enum` call's arguments; left
+/// inside the mapping they would be copied into the generated methods,
+/// where a constant assignment does not parse.
+fn mapping_constant_writes(node: &Node<'_>, file: &str) -> IngestResult<Vec<Expr>> {
+    if let Some(call) = node.as_call_node() {
+        if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() && call.block().is_none() {
+            if let Some(recv) = call.receiver() {
+                return mapping_constant_writes(&recv, file);
+            }
+        }
+        return Ok(Vec::new());
+    }
+    let elements: Vec<Node<'_>> = if let Some(hash) = node.as_hash_node() {
+        hash.elements().iter().collect()
+    } else if let Some(kwhash) = node.as_keyword_hash_node() {
+        kwhash.elements().iter().collect()
+    } else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for el in elements {
+        let Some(assoc) = el.as_assoc_node() else { continue };
+        let value = assoc.value();
+        if value.as_constant_write_node().is_some() {
+            out.push(ingest_expr(&value, file)?);
+        }
+    }
+    Ok(out)
 }
 
 /// Rails `scopes:` / `instance_methods:` — only the unprefixed
