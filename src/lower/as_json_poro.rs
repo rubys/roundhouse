@@ -89,9 +89,6 @@ use super::typing::with_ty;
 
 pub fn apply_as_json_synthesis(app: &mut App, registry: &HashMap<ClassId, ClassInfo>) {
     let wanted = json_rendered_classes(app);
-    if wanted.is_empty() {
-        return;
-    }
     // BOTH homes. A tableless class under `app/models/` — which is what
     // campfire's `Opengraph::Metadata` is — rides in `app.models`, not
     // `app.library_classes`, so looking in one place found nothing and
@@ -177,14 +174,199 @@ pub fn apply_as_json_synthesis(app: &mut App, registry: &HashMap<ClassId, ClassI
         lc.methods.push(as_json_str_method(&lc.name, &readers));
         written.insert(lc.name.clone());
     }
-    if written.is_empty() {
-        return;
-    }
+    let representers = settle_representable_writers(app, registry);
+    // Runs even when no class was given a PORO writer: a representer
+    // brings its own.
     for controller in &mut app.controllers {
         for action in controller.actions_mut() {
-            replace_in(&mut action.body, &mut |e| rewrite_render_json(e, &written));
+            replace_in(&mut action.body, &mut |e| {
+                rewrite_render_json(e, &written)
+                    .or_else(|| rewrite_render_json_representer(e, &representers))
+            });
         }
     }
+}
+
+/// Settle the `as_json_str` writers `ingest::representable` synthesized.
+///
+/// Ingest wrote every plain value through `JsonBuilder.encode_value`,
+/// because the value's type was not known yet. Now it is: a scalar (or a
+/// Symbol, which `encode_value` quotes by name, as Rails renders it)
+/// keeps that call, an `Array[String]` switches to `encode_string_array`,
+/// and anything else - a Time, a Hash, an untyped value - has no
+/// encoding here, so the class loses its writer and its `render json:`
+/// sites keep the runtime encoder. A nested representer's writer is
+/// only kept while the one it renders through is.
+///
+/// Returns the classes whose writer stands.
+fn settle_representable_writers(
+    app: &mut App,
+    registry: &HashMap<ClassId, ClassInfo>,
+) -> HashSet<ClassId> {
+    use crate::dialect::LibraryClassOrigin;
+    let mut valid: HashSet<ClassId> = HashSet::new();
+    let mut nested_on: Vec<(ClassId, ClassId)> = Vec::new();
+    let mut renames: HashMap<ClassId, Vec<Symbol>> = HashMap::new();
+    for lc in &app.library_classes {
+        let Some(LibraryClassOrigin::RepresentableDecorator { fields, .. }) = &lc.origin else { continue };
+        let mut ok = true;
+        for field in fields {
+            if let Some(target) = &field.nested {
+                nested_on.push((lc.name.clone(), target.clone()));
+                continue;
+            }
+            let reader = format!("representable_{}", field.name.as_str());
+            let ty = registry
+                .get(&lc.name)
+                .and_then(|info| match info.instance_methods.get(&Symbol::from(reader.as_str())) {
+                    Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+                    _ => None,
+                })
+                .or_else(|| lc.methods.iter().find(|m| m.name.as_str() == reader).and_then(|m| m.body.ty.clone()));
+            let Some(ty) = ty else {
+                ok = false;
+                break;
+            };
+            match (&ty, encoding_for(&ty)) {
+                (Ty::Sym, _) | (_, Ok(PairEncoding::Scalar(_))) => {}
+                (_, Ok(PairEncoding::StringArray)) => {
+                    renames.entry(lc.name.clone()).or_default().push(field.name.clone())
+                }
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            valid.insert(lc.name.clone());
+        }
+    }
+    // A writer that renders through another class's writer stands only
+    // while that one does.
+    loop {
+        let before = valid.len();
+        for (owner, target) in &nested_on {
+            if !valid.contains(target) {
+                valid.remove(owner);
+            }
+        }
+        if valid.len() == before {
+            break;
+        }
+    }
+    for lc in &mut app.library_classes {
+        if !matches!(lc.origin, Some(LibraryClassOrigin::RepresentableDecorator { .. })) {
+            continue;
+        }
+        if !valid.contains(&lc.name) {
+            lc.methods.retain(|m| m.name.as_str() != WRITER_METHOD);
+            continue;
+        }
+        let Some(names) = renames.get(&lc.name) else { continue };
+        let locals: HashSet<String> = names.iter().map(|n| format!("j_{}", n.as_str())).collect();
+        for m in lc.methods.iter_mut().filter(|m| m.name.as_str() == WRITER_METHOD) {
+            replace_in(&mut m.body, &mut |e| {
+                let ExprNode::Send { recv: Some(r), method, args, block, parenthesized } = &*e.node else {
+                    return None;
+                };
+                let is_builder = matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "JsonBuilder");
+                let reads_local = matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Var { name, .. } if locals.contains(name.as_str())));
+                if !(is_builder && method.as_str() == "encode_value" && reads_local) {
+                    return None;
+                }
+                Some(Expr {
+                    node: Box::new(ExprNode::Send {
+                        recv: Some(r.clone()),
+                        method: Symbol::from("encode_string_array"),
+                        args: args.clone(),
+                        block: block.clone(),
+                        parenthesized: *parenthesized,
+                    }),
+                    ..e.clone()
+                })
+            });
+        }
+    }
+    valid
+}
+
+/// `render json: <representer>.to_hash` (or `.to_json`, or the
+/// decorator itself) → `render plain: <representer>.as_json_str`, for a
+/// representer whose writer stands.
+fn rewrite_render_json_representer(e: &Expr, representers: &HashSet<ClassId>) -> Option<Expr> {
+    let ExprNode::Send { recv: None, method, args, .. } = &*e.node else { return None };
+    if method.as_str() != "render" || args.len() != 1 || representers.is_empty() {
+        return None;
+    }
+    let ExprNode::Hash { entries, kwargs: true } = &*args[0].node else { return None };
+    let value = entries.iter().find_map(|(k, v)| is_sym(k, "json").then_some(v))?;
+    let decorator = match &*value.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if args.is_empty() && matches!(method.as_str(), "to_hash" | "to_json" | "as_json") =>
+        {
+            r
+        }
+        _ => value,
+    };
+    let Some(Ty::Class { id, .. }) = decorator.ty.as_ref() else { return None };
+    if !representers.contains(id) {
+        return None;
+    }
+    Some(with_plain_json(e, writer_call(decorator.clone())))
+}
+
+/// The `render` call `e` (already checked to carry a `json:` entry)
+/// with that entry swapped for `plain: <encoded>`, plus `content_type:
+/// "application/json"` unless the author gave one. Other entries ride
+/// along untouched.
+fn with_plain_json(e: &Expr, encoded: Expr) -> Expr {
+    let ExprNode::Send { method, args, block, parenthesized, .. } = &*e.node else {
+        unreachable!("with_plain_json is handed a render Send")
+    };
+    let ExprNode::Hash { entries, .. } = &*args[0].node else {
+        unreachable!("with_plain_json is handed render's keyword Hash")
+    };
+    let span = encoded.span;
+    let sym = |name: &str| {
+        with_ty(
+            Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name) } }),
+            Ty::Sym,
+        )
+    };
+    let mut new_entries: Vec<(Expr, Expr)> = Vec::new();
+    for (k, v) in entries {
+        if is_sym(k, "json") {
+            new_entries.push((sym("plain"), encoded.clone()));
+        } else {
+            new_entries.push((k.clone(), v.clone()));
+        }
+    }
+    if !entries.iter().any(|(k, _)| is_sym(k, "content_type")) {
+        new_entries.push((
+            sym("content_type"),
+            with_ty(
+                Expr::new(span, ExprNode::Lit { value: Literal::Str { value: "application/json".to_string() } }),
+                Ty::Str,
+            ),
+        ));
+    }
+    let mut hash = args[0].clone();
+    hash.node = Box::new(ExprNode::Hash { entries: new_entries, kwargs: true });
+    Expr {
+        node: Box::new(ExprNode::Send {
+            recv: None,
+            method: method.clone(),
+            args: vec![hash],
+            block: block.clone(),
+            parenthesized: *parenthesized,
+        }),
+        ..e.clone()
+    }
+}
+
+fn is_sym(k: &Expr, name: &str) -> bool {
+    matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name)
 }
 
 /// `render json: <v>` → `render plain: <v>.as_json_str, content_type:

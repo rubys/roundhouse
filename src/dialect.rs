@@ -929,6 +929,18 @@ impl LibraryClass {
     }
 }
 
+/// One property of a [`LibraryClassOrigin::RepresentableDecorator`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RepresentableField {
+    /// The property name; its value is read by `representable_<name>`.
+    pub name: Symbol,
+    /// The JSON key (`as:`, else the name).
+    pub key: String,
+    /// The representer `extend:` names, when the value is rendered by
+    /// another one.
+    pub nested: Option<ClassId>,
+}
+
 /// What synthesized a `LibraryClass`. Used by per-target collapsers to
 /// fold structurally-equivalent instances back to a generic shape (e.g.
 /// `Record<string, FieldType>`-style narrowing in TS) when the target
@@ -943,6 +955,15 @@ pub enum LibraryClassOrigin {
     /// alone. This remains a source library class, not a model/params sibling.
     AlbaResource {
         declaration_span: Span,
+    },
+    /// A `Representable::Decorator` expanded to ordinary methods before
+    /// inference (`ingest::representable`): `representable_<name>`
+    /// readers, `to_hash`, `as_json_str`. `fields` lets
+    /// `lower::as_json_poro` settle each value's JSON encoder from its
+    /// analyzed type.
+    RepresentableDecorator {
+        declaration_span: Span,
+        fields: Vec<RepresentableField>,
     },
     /// Per-resource params holder synthesized from a controller's
     /// `permit([:f1, :f2, …])` declaration. `resource` is the singular

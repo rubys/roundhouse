@@ -41,6 +41,10 @@ mod class_configuration;
 mod rails_root_join;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
+#[path = "support/representable_decorator.rs"]
+mod representable_decorator;
+#[path = "spinel_toolchain/representable.rs"]
+mod representable;
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]

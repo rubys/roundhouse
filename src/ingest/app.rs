@@ -1764,6 +1764,9 @@ end
     // graphql-ruby object types: analyzer-only field methods, so
     // inference carries each type's record class down the schema.
     super::graphql_ruby::lower_graphql_types(&mut app);
+    // Representable decorators: expanded into plain methods the same way;
+    // survey mode ledgers an unsupported one and keeps going.
+    super::representable::lower_representable_decorators(&mut app, &sources)?;
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.

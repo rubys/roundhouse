@@ -316,6 +316,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("pretender", GemFate::Modeled), // impersonates with local current_* → true_* wrap + impersonate_*; inherited-only stays unsupported
     ("pushover", GemFate::Modeled),    // catalog/gems: Pushover
     ("rack-mini-profiler", GemFate::Modeled), // catalog/gems: Rack::MiniProfiler
+    ("representable", GemFate::Modeled), // ingest/representable: Decorator + JSON, property/collection subset
     ("rotp", GemFate::Modeled),        // catalog/gems: ROTP::*
     ("rqrcode", GemFate::Modeled),     // catalog/gems: RQRCode::QRCode
     ("ruby-vips", GemFate::Modeled),   // active_storage variants seam

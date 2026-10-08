@@ -11,6 +11,10 @@ mod emit_and_run;
 mod class_attribute;
 #[path = "emit_and_run/integer_query_find_by.rs"]
 mod integer_query_find_by;
+#[path = "support/representable_decorator.rs"]
+mod representable_decorator;
+#[path = "emit_and_run/representable.rs"]
+mod representable;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
