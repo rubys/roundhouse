@@ -3,6 +3,7 @@
 require "digest"
 require "json"
 require "fileutils"
+require "tmpdir"
 
 module Roundsnap
   # Compiles lowered Ruby source units to MRI ISeq binaries.
@@ -23,7 +24,9 @@ module Roundsnap
     def sanitize_key!(key)
       k = key.to_s
       raise ArgumentError, "roundsnap: empty unit key" if k.empty?
-      raise ArgumentError, "roundsnap: absolute unit key #{k.inspect}" if k.start_with?("/", "\\")
+      if k.start_with?("/", "\\") || k.match?(/\A[A-Za-z]:/) || k.include?("\\") || k.include?("\0")
+        raise ArgumentError, "roundsnap: unsafe unit key #{k.inspect}"
+      end
       parts = k.split(%r{[/\\]})
       if parts.any? { |p| p.empty? || p == "." || p == ".." }
         raise ArgumentError, "roundsnap: unsafe unit key #{k.inspect}"
@@ -38,25 +41,23 @@ module Roundsnap
       out_dir = File.expand_path(out_dir)
       FileUtils.mkdir_p(out_dir)
       iseq_dir = File.join(out_dir, "iseq")
-      # Stage into a fresh tree; leave the live iseq/ alone until every
-      # unit compiles. A mid-run SyntaxError must not orphan an old
-      # manifest.json that still names deleted binaries.
-      staging = File.join(out_dir, ".iseq.staging-#{Process.pid}-#{Thread.current.object_id}")
-      FileUtils.rm_rf(staging)
-      FileUtils.mkdir_p(staging)
+      # Publish a complete generation, then atomically replace the manifest.
+      # Old generations stay available to already-installed loaders. Never
+      # swap/delete their binaries before publishing the new manifest.
+      staging = Dir.mktmpdir(".iseq.staging-", out_dir)
+      generation = File.basename(staging).delete_prefix(".")
+      manifest_tmp = "#{staging}.json"
 
       begin
         entries = {}
-        # Expand `#<SPINEL_SOURCE>` spans before compile so each unit's
-        # physical lines match original app lines (or stay on the emit
-        # path when unmarked — never a fake original:emitted mix).
+        # Markers become a sidecar, never a transformation of program text.
         expanded = []
         units.each do |raw|
           unit = stringify_keys(raw)
           key = unit.fetch("key")
           source = unit.fetch("source")
           if source.include?(SourceMap::MARKER_PREFIX)
-            SourceMap.units_from(source, emit_key: key).each { |u| expanded << u }
+            SourceMap.units_from(source, emit_key: key).each { |u| expanded << (u["mapped"] ? u : unit) }
           else
             expanded << unit
           end
@@ -65,17 +66,17 @@ module Roundsnap
         expanded.each do |raw|
           unit = stringify_keys(raw)
           key = sanitize_key!(unit.fetch("key"))
+          raise ArgumentError, "roundsnap: duplicate unit key #{key.inspect}" if entries.key?(key)
+
           source = unit.fetch("source")
           file = unit.fetch("file")
-          # May be <= 0 when a mapped unit has an unmarked prefix
-          # (module wrappers): first_lineno = 1 - prefix_len so source
-          # line L reports as L after padding. Do not clamp to 1.
-          first_lineno = (unit["first_lineno"] || 1).to_i
+          first_lineno = Integer(unit.fetch("first_lineno", 1))
+          absolute_file = File.expand_path(file, out_dir)
 
           iseq = RubyVM::InstructionSequence.compile(
             source,
-            file,
-            file,
+            absolute_file,
+            absolute_file,
             first_lineno,
           )
           binary = iseq.to_binary
@@ -85,16 +86,15 @@ module Roundsnap
           File.binwrite(dest, binary)
 
           entries[key] = {
-            "iseq" => File.join("iseq", rel),
+            "iseq" => File.join("iseq", generation, rel),
             "file" => file,
             "first_lineno" => first_lineno,
             "mapped" => unit["mapped"] == true,
+            "source_map" => unit.fetch("source_map", {}),
             "size" => source.bytesize,
             "digest" => Digest::SHA256.hexdigest(source),
           }
         end
-
-        swap_iseq_dir!(iseq_dir, staging)
 
         # Bootsnap keys ISeq caches on compile_option as well as Ruby
         # version; a mismatched option loads as "broken binary". Record
@@ -102,35 +102,26 @@ module Roundsnap
         entry_key = nil
         unless units.empty?
           entry_key = sanitize_key!(stringify_keys(units.first).fetch("key"))
-          # SourceMap may expand the first input into stem / stem__spanN;
-          # prefer the stem key when present.
           entry_key = entries.key?(entry_key) ? entry_key : entries.keys.first
         end
         manifest = {
-          "version" => 1,
+          "version" => 2,
+          "compile_root" => out_dir,
           "ruby_description" => RUBY_DESCRIPTION,
           "compile_option" => compile_option_fingerprint,
           "entry" => entry_key,
           "units" => entries,
         }
-        File.write(File.join(out_dir, "manifest.json"), JSON.pretty_generate(manifest) + "\n")
+        File.write(manifest_tmp, JSON.pretty_generate(manifest) + "\n")
+        FileUtils.mkdir_p(iseq_dir)
+        File.rename(staging, File.join(iseq_dir, generation))
+        File.rename(manifest_tmp, File.join(out_dir, "manifest.json"))
         manifest
       ensure
         FileUtils.rm_rf(staging) if File.directory?(staging)
+        FileUtils.rm_f(manifest_tmp)
       end
     end
-
-    # Replace live iseq/ with the staged tree. Same-filesystem rename so
-    # readers never see a half-deleted directory.
-    def swap_iseq_dir!(iseq_dir, staging)
-      parent = File.dirname(iseq_dir)
-      retired = File.join(parent, ".iseq.retired-#{Process.pid}-#{Thread.current.object_id}")
-      FileUtils.rm_rf(retired)
-      File.rename(iseq_dir, retired) if File.directory?(iseq_dir)
-      File.rename(staging, iseq_dir)
-      FileUtils.rm_rf(retired)
-    end
-    private_class_method :swap_iseq_dir!
 
     def stringify_keys(h)
       h.each_with_object({}) { |(k, v), out| out[k.to_s] = v }

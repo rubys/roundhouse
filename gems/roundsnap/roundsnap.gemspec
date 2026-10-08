@@ -9,7 +9,8 @@ Gem::Specification.new do |s|
   s.description   = <<~DESC
     Roundsnap is Roundhouse's MRI delivery vehicle — the Bootsnap analogue
     for Roundhouse-emitted trees: compile source units to
-    RubyVM::InstructionSequence binaries with original file metadata,
+    RubyVM::InstructionSequence binaries with emitted file locations
+    and source-map sidecars,
     then require them by logical key from a manifest.
     MRI only — not a Bootsnap.setup drop-in for unmodified Rails.
   DESC

@@ -117,10 +117,12 @@ Puma; subsequent creates from any other browser tab — or even from
 With `ROUNDSNAP=1` (alias `ROUNDHOUSE_RUBY_ISEQ=1`), `--target ruby` ships
 MRI bytecode instead of app/runtime `.rb` files: `manifest.json` +
 `iseq/**` plus a vendored [`roundsnap`](../../../gems/roundsnap/) gem.
-`boot.rb` loads units by manifest key; ISeq `file` metadata carries
-original app paths from IR spans (the CRuby analogue of Spinel's
-`#<SPINEL_SOURCE>`). This is the Bootsnap analogue for the **emitted**
-tree — not a `Bootsnap.setup` drop-in for unmodified Rails. Keep sources
+The original `boot.rb` chain installs the loader; requires resolve units
+by key without eagerly evaluating unrelated files. ISeq metadata names
+honest emitted file:line locations. A sidecar from `#<SPINEL_SOURCE>`
+markers formats source frames through `Loader#format_backtrace`, without
+moving code or claiming native Coverage/profiler remapping. This is for the
+**emitted** tree, not a `Bootsnap.setup` drop-in for unmodified Rails. Keep sources
 beside the binaries with `ROUNDSNAP_KEEP_SOURCE=1`. Default emit (unset)
 stays the classic `.rb` tree. Prototype check: `scripts/campfire-roundsnap`.
 

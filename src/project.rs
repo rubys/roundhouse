@@ -1467,11 +1467,10 @@ pub fn target_files(
         // the spinel tree, which cost campfire two test files on a
         // Ruby 3.4 runner (`Pathname()`).
         BuildTarget::Ruby => {
-            // Roundsnap needs `#<SPINEL_SOURCE>` markers so ISeq units can
-            // pad to original app lines (ERB included). Plain ruby emit
-            // stays unmarked.
             if crate::roundsnap::enabled() {
-                ruby_runtime_files_with_source_markers(app, fixture).map(with_bundled_requires)
+                emit::ruby::source_markers::with_source_markers(app, || {
+                    ruby_runtime_files(app, fixture)
+                }).map(with_bundled_requires)
             } else {
                 ruby_runtime_files(app, fixture).map(with_bundled_requires)
             }
@@ -1543,7 +1542,18 @@ pub fn target_files(
         let files = ensure_static_assets(files, target);
         ensure_e2e(files, target)
     };
-    Ok(ensure_readme(files, target))
+    let mut files = ensure_readme(files, target);
+    if target == BuildTarget::Ruby && crate::roundsnap::enabled() {
+        // Package only the final text: bundled requires, tree shake and
+        // scaffold wiring must all see real .rb entries, not units.json.
+        for (path, content) in &mut files {
+            if path.ends_with(".rb") {
+                *content = emit::ruby::source_markers::finish(content);
+            }
+        }
+        crate::roundsnap::prepare(&mut files)?;
+    }
+    Ok(files)
 }
 
 /// Targets whose archives ship the Playwright e2e suite under `e2e/`
@@ -2813,13 +2823,6 @@ fn ruby_family_runtime_files(
     // `inject_cruby_date_calendar_helpers`).
     if app_uses_date(app) {
         inject_cruby_date_calendar_boot_requires(&mut files)?;
-    }
-    // CRuby straight-to-ISeq via roundsnap: rewrite the file set to
-    // units.json + vendored gems/roundsnap. Binaries are materialized
-    // by `finalize_roundsnap` after write (CLI / test harness). Opt-in:
-    // ROUNDSNAP=1 (alias ROUNDHOUSE_RUBY_ISEQ=1).
-    if flavor == RubyFlavor::CRuby {
-        crate::roundsnap::prepare(app, &mut files)?;
     }
     Ok(files)
 }
@@ -4382,23 +4385,6 @@ fn spinel_files_with_source_markers(
         }
     }
     Ok((files, stems))
-}
-
-/// CRuby tree with the same `#<SPINEL_SOURCE>` markers Spinel uses, for
-/// Roundsnap contiguous-span ISeq alignment. Not used for plain `--target ruby`.
-fn ruby_runtime_files_with_source_markers(
-    app: &App,
-    fixture: &Path,
-) -> Result<Vec<(String, String)>, String> {
-    emit::ruby::source_markers::with_source_markers(app, || {
-        let mut files = ruby_runtime_files(app, fixture)?;
-        for (path, content) in files.iter_mut() {
-            if path.ends_with(".rb") {
-                *content = emit::ruby::source_markers::finish(content);
-            }
-        }
-        Ok(files)
-    })
 }
 
 fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec<String>), String> {
@@ -7238,7 +7224,7 @@ fn rewrite_requires_for_move(
 }
 
 /// Normalize a set-relative path: fold `.` and `..` components.
-pub(crate) fn vpath_normalize(p: &str) -> String {
+fn vpath_normalize(p: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for c in p.split('/') {
         match c {

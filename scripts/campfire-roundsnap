@@ -2,7 +2,7 @@
 # scripts/campfire-roundsnap — standard Roundsnap prototype check on Campfire.
 #
 # Emits once-campfire with ROUNDSNAP=1 (MRI ISeq delivery instead of app .rb),
-# bundle-installs the path gem, and boots via thin boot.rb. This is the
+# bundle-installs the path gem, and boots via the original boot chain. This is the
 # Bootsnap-analogue smoke for Roundhouse-emitted trees — not a one-off manual
 # trial. Exit non-zero on emit/bundle/boot failure; print an honest ledger of
 # what blocked further when boot dies mid-chain.
@@ -91,11 +91,14 @@ cleanup() {
   fi
   exit "$code"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ -z "$REUSE" ]]; then
   step "transpiling $APP → $OUT (ROUNDSNAP=1, target ruby)"
-  rm -rf "$OUT"
+  # write_to_dir safely reuses a tree; never wipe a user-supplied output.
+  # Wiping here also deleted LOG_DIR immediately before its redirection.
   mkdir -p "$OUT"
   export ROUNDSNAP=1
   export ROUNDHOUSE_RUBY_ISEQ=1
@@ -116,34 +119,8 @@ fi
 [[ -d "$OUT/vendor/roundsnap" ]] || { fail "vendor/roundsnap missing"; exit 2; }
 [[ -f "$OUT/boot.rb" ]] || { fail "boot.rb missing"; exit 2; }
 
-# Splice roundsnap stubs into thin boot: load ActiveStorage first, then
-# stubs (reopen VideoPreviewer if needed), then the rest of boot!.
-step "wiring campfire-roundsnap-stubs into boot.rb"
-cp "$REPO_ROOT/scripts/campfire-roundsnap-stubs.rb" "$OUT/campfire-roundsnap-stubs.rb"
-ruby -e '
-  path = ARGV[0]
-  src = File.read(path)
-  if src.include?("campfire-roundsnap-stubs")
-    warn "  boot.rb already wired for stubs"
-  else
-    File.write(path, <<~RUBY)
-      # frozen_string_literal: true
-      # Roundsnap ISeq delivery + Campfire prototype stubs.
-      require "roundsnap"
-      loader = Roundsnap::Loader.install!(root: __dir__)
-      # Runtime first so stubs can reopen ActiveStorage::Previewer.
-      if loader.resolve_key("runtime/active_storage")
-        loader.require("runtime/active_storage")
-      end
-      require_relative "campfire-roundsnap-stubs"
-      loader.boot!
-    RUBY
-    warn "  wrote thin boot with ActiveStorage → stubs → boot!"
-  end
-' "$OUT/boot.rb"
-
 unit_count="$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV[0]))["units"].size' "$OUT/manifest.json")"
-app_rb="$(find "$OUT/app" -name '*.rb' 2>/dev/null | wc -l | tr -d ' ')"
+app_rb="$(ruby -e 'puts Dir.glob(File.join(ARGV[0], "app/**/*.rb")).size' "$OUT")"
 echo "  units: $unit_count   app/*.rb on disk: $app_rb (want 0)"
 
 step "bundle install"
@@ -181,7 +158,7 @@ set -e
   echo "- app/*.rb on disk: $app_rb"
   echo "- boot rc: $boot_rc"
   echo
-  if grep -q 'ROUNDSNAP_BOOT_OK' "$BOOT_LOG" 2>/dev/null; then
+  if (( boot_rc == 0 )) && grep -Fxq 'ROUNDSNAP_BOOT_OK' "$BOOT_LOG"; then
     echo "## Result: BOOT OK"
   else
     echo "## Result: BOOT FAILED"
@@ -191,21 +168,11 @@ set -e
     tail -60 "$BOOT_LOG"
     echo '```'
     echo
-    echo "### Known blockers (honest ledger)"
-    echo
-    echo "| Symptom | Cause | Status |"
-    echo "|---|---|---|"
-    echo "| \`libvips.so.42\` / \`ruby-vips\` LoadError | host needs \`libvips42t64\` (or equiv.) | env |"
-    echo "| \`ActiveStorage::Previewer::VideoPreviewer\` | was missing in runtime; fixed in \`runtime/ruby/active_storage.rb\` + stubs | runtime |"
-    echo "| circular \`require_relative\` stack overflow | loader now reserves key before eval | fixed in gem |"
-    echo "| further \`NameError\` / unmodeled Rails | Roundhouse support gap, not Roundsnap | ledger |"
-    echo "| ISeq \`RUBY_DESCRIPTION\` mismatch | binaries tied to compile-time MRI | re-emit |"
-    echo
     echo "Full boot log: \`$BOOT_LOG\`"
   fi
 } >"$REPORT"
 
-if grep -q 'ROUNDSNAP_BOOT_OK' "$BOOT_LOG" 2>/dev/null; then
+if (( boot_rc == 0 )) && grep -Fxq 'ROUNDSNAP_BOOT_OK' "$BOOT_LOG"; then
   step "BOOT OK"
   echo "  report: $REPORT"
   exit 0

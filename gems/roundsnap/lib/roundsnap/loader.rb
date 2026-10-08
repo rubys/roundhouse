@@ -1,13 +1,13 @@
 # frozen_string_literal: true
 
 require "json"
+require "monitor"
 
 module Roundsnap
   # Loads ISeq binaries by logical manifest key.
   #
-  # Require is by key, not filesystem path, so the ISeq's stored `file`
-  # (original app path) is free for __FILE__ and backtraces without
-  # breaking resolution.
+  # Resolve only logical keys and exact emitted paths. Original source
+  # locations live in a sidecar and never participate in require resolution.
   class Loader
     @current = nil
     @hooked = false
@@ -37,8 +37,17 @@ module Roundsnap
       raise Errno::ENOENT, path unless File.file?(path)
 
       @manifest = JSON.parse(File.read(path))
+      raise LoadError, "roundsnap: unsupported manifest version; rebuild" unless @manifest["version"] == 2
+
       @units = @manifest.fetch("units")
+      @compile_root = @manifest.fetch("compile_root")
+      @paths = {}
+      @units.each do |key, entry|
+        @paths[File.expand_path(entry.fetch("file"), @compile_root)] = key
+        @paths[File.expand_path("#{key}.rb", @root)] = key
+      end
       @loaded = {}
+      @locks = @units.to_h { |key, _| [key, Monitor.new] }
       validate_manifest!
     end
 
@@ -56,116 +65,105 @@ module Roundsnap
 
       n = name.to_s
       return n if @units.key?(n)
+      return @paths[n] if @paths.key?(n)
+      return @paths["#{n}.rb"] if @paths.key?("#{n}.rb")
 
       bare = n.sub(/\A\.\//, "").sub(/\.rb\z/, "")
       return bare if @units.key?(bare)
 
-      # Absolute host paths (e.g. /var/runtime/… on Lambda) must never
-      # steal a manifest key via substring. Bridging is only for relative
-      # labels like fixture/app/... or real-blog/app/... that require_relative
-      # builds against an original ISeq `file`.
-      unless bare.start_with?("/", "\\")
-        if (idx = bare.index("/app/"))
-          tail = bare[(idx + 1)..]
-          return tail if @units.key?(tail)
-        end
-        if (idx = bare.index("/runtime/"))
-          tail = bare[(idx + 1)..]
-          return tail if @units.key?(tail)
-        end
-      end
-      %w[app/ runtime/].each do |prefix|
-        return bare if bare.start_with?(prefix) && @units.key?(bare)
-      end
-
       nil
     end
 
-    # Resolve a require_relative name against the caller's ISeq path
-    # (which may be an original app path that is not on disk).
+    # No bare-name fallback: a gem's require_relative "main" must not
+    # steal an application unit just because the process hook is installed.
     def resolve_relative(name, caller_path)
-      return resolve_key(name) if caller_path.nil? || caller_path.empty?
+      return nil if caller_path.nil? || caller_path.empty?
 
-      base = File.dirname(caller_path)
-      joined = File.join(base, name.to_s.sub(/\.rb\z/, ""))
-      # Collapse .. and . without requiring the path to exist.
-      parts = []
-      joined.split("/").each do |p|
-        next if p.empty? || p == "."
-        if p == ".."
-          parts.pop unless parts.empty?
-        else
-          parts << p
-        end
+      resolve_key(relative_path(name, caller_path))
+    end
+
+    def relative_path(name, caller_path)
+      caller_file = File.expand_path(caller_path, @compile_root)
+      if @paths.key?(caller_file) && caller_file.start_with?("#{@compile_root}/")
+        caller_file = File.join(@root, caller_file.delete_prefix("#{@compile_root}/"))
       end
-      candidate = parts.join("/")
-      resolve_key(candidate) || resolve_key(name)
+      File.expand_path(name.to_s, File.dirname(caller_file))
+    end
+
+    # Explicit presentation API: native backtraces, Coverage and profiler
+    # locations remain emitted file:line; callers can format source frames
+    # without mutating exceptions or claiming native per-method mapping.
+    def format_backtrace(backtrace)
+      Array(backtrace).map do |frame|
+        match = /\A(.+):(\d+)(:.*)?\z/.match(frame)
+        key = match && @paths[match[1]]
+        location = key && @units[key].fetch("source_map", {})[match[2]]
+        location ? "#{location.fetch('file')}:#{location.fetch('line')}#{match[3]}" : frame
+      end
     end
 
     def require(key)
       key = key.to_s
-      return false if @loaded[key]
-
       entry = @units[key]
       raise LoadError, "roundsnap: unknown key #{key.inspect}" unless entry
 
-      built = @manifest["ruby_description"]
-      if built.nil? || built.to_s.empty?
-        raise LoadError, "roundsnap: manifest missing ruby_description (rebuild required)"
-      end
-      # YJIT is a runtime JIT flag; it does not change ISeq binary layout, but
-      # it does change RUBY_DESCRIPTION ("+YJIT"). Normalize so compile-without-
-      # YJIT / run-with-YJIT (the campfire bench shape) still loads.
-      if normalize_ruby_description(built) != normalize_ruby_description(RUBY_DESCRIPTION)
-        raise LoadError,
-              "roundsnap: ISeq built for #{built.inspect}, " \
-              "running #{RUBY_DESCRIPTION.inspect}"
-      end
-      built_opt = @manifest["compile_option"]
-      if !built_opt.nil? && built_opt != Compiler.compile_option_fingerprint
-        raise LoadError,
-              "roundsnap: ISeq compile_option mismatch " \
-              "(built #{built_opt.inspect}, running " \
-              "#{Compiler.compile_option_fingerprint.inspect}); rebuild"
-      end
+      @locks.fetch(key).synchronize do
+        return false if @loaded[key]
 
-      path = safe_iseq_path(entry.fetch("iseq"))
-      binary = File.binread(path)
-      begin
-        iseq = RubyVM::InstructionSequence.load_from_binary(binary)
-      rescue RuntimeError => e
-        # Bootsnap rejects "broken binary format" and regenerates; we
-        # have no source at deploy time, so ask for a rebuild.
-        if e.message.include?("broken binary")
-          raise LoadError,
-                "roundsnap: broken ISeq for #{key.inspect} (#{path}); " \
-                "rebuild with matching Ruby / compile_option"
+        built = @manifest["ruby_description"]
+        if built.nil? || built.to_s.empty?
+          raise LoadError, "roundsnap: manifest missing ruby_description (rebuild required)"
         end
-        raise
+        # YJIT is a runtime JIT flag; it does not change ISeq binary layout,
+        # but it does change RUBY_DESCRIPTION. Normalize that runtime flag.
+        if normalize_ruby_description(built) != normalize_ruby_description(RUBY_DESCRIPTION)
+          raise LoadError,
+                "roundsnap: ISeq built for #{built.inspect}, " \
+                "running #{RUBY_DESCRIPTION.inspect}"
+        end
+        built_opt = @manifest["compile_option"]
+        if !built_opt.nil? && built_opt != Compiler.compile_option_fingerprint
+          raise LoadError,
+                "roundsnap: ISeq compile_option mismatch " \
+                "(built #{built_opt.inspect}, running " \
+                "#{Compiler.compile_option_fingerprint.inspect}); rebuild"
+        end
+
+        path = safe_iseq_path(entry.fetch("iseq"))
+        binary = File.binread(path)
+        begin
+          iseq = RubyVM::InstructionSequence.load_from_binary(binary)
+        rescue RuntimeError => e
+          # Bootsnap rejects "broken binary format" and regenerates; we
+          # have no source at deploy time, so ask for a rebuild.
+          if e.message.include?("broken binary")
+            raise LoadError,
+                  "roundsnap: broken ISeq for #{key.inspect} (#{path}); " \
+                  "rebuild with matching Ruby / compile_option"
+          end
+          raise
+        end
+        # Reentrant per-unit locks let circular requires on this thread
+        # short-circuit, while other threads wait for initialization.
+        # Unrelated units can load concurrently, including from a thread
+        # started (and joined) by a unit's own top-level code.
+        @loaded[key] = true
+        completed = false
+        begin
+          iseq.eval
+          completed = true
+        ensure
+          @loaded.delete(key) unless completed
+        end
+        true
       end
-      # Reserve before eval so circular require_relative (common in Rails
-      # model trees) short-circuits like MRI's $LOADED_FEATURES. Clear the
-      # reservation on failure so a failed unit can be retried.
-      @loaded[key] = true
-      begin
-        iseq.eval
-      rescue StandardError
-        @loaded.delete(key)
-        raise
-      end
-      true
     end
 
-    def boot!(entry_key = nil)
+    def boot!(entry_key = @manifest["entry"])
       install!
-      # Load every unit in manifest order (boot-chain first). An explicit
-      # entry_key is loaded too when present; default entry is informational.
-      @units.each_key { |k| require(k) }
-      if entry_key
-        require(entry_key)
-      elsif (key = @manifest["entry"])
-        require(key) unless @loaded[key.to_s]
-      end
+      # Evaluate only the entry and its actual requires, not every file in
+      # the manifest. Conditional/lazy files must remain conditional/lazy.
+      require(entry_key) if entry_key
       true
     end
 
@@ -184,10 +182,10 @@ module Roundsnap
       end
 
       def require_relative(name)
-        loc = RequireHook.outside_gem_caller
+        loc = caller_locations(1, 1)&.first
         loader = Roundsnap::Loader.current
         if loader
-          key = loader.resolve_relative(name, loc&.path)
+          key = loader.resolve_relative(name, loc&.absolute_path || loc&.path)
           return loader.require(key) if key
         end
         # Do not call super: with Kernel.prepend, super's require_relative
@@ -196,28 +194,8 @@ module Roundsnap
         base = loc&.absolute_path || loc&.path
         raise LoadError, "require_relative: cannot infer base path for #{name.inspect}" if base.nil? || base.empty?
 
-        path = File.expand_path(name.to_s, File.dirname(base))
-        begin
-          require path
-        rescue LoadError
-          require "#{path}.rb"
-        end
-      end
-
-      # Gem lib root (`…/lib`), not a `/roundsnap/` substring — emit trees
-      # under `/tmp/campfire-roundsnap/` (or an app named roundsnap) must
-      # still count as outside callers for require_relative.
-      GEM_LIB = File.expand_path("..", __dir__).freeze
-
-      def self.outside_gem_caller
-        prefix = GEM_LIB + File::SEPARATOR
-        caller_locations(2, 32)&.find do |l|
-          raw = l.absolute_path || l.path
-          next false if raw.nil? || raw.empty?
-
-          path = File.expand_path(raw)
-          !path.start_with?(prefix) && path != File.join(GEM_LIB, "roundsnap.rb")
-        end
+        path = loader ? loader.relative_path(name, base) : File.expand_path(name.to_s, File.dirname(base))
+        require path
       end
     end
 
@@ -241,11 +219,7 @@ module Roundsnap
 
     def safe_iseq_path(rel)
       rel = rel.to_s
-      raise LoadError, "roundsnap: absolute iseq path #{rel.inspect}" if rel.start_with?("/", "\\")
-      parts = rel.split(%r{[/\\]})
-      if parts.any? { |p| p.empty? || p == "." || p == ".." }
-        raise LoadError, "roundsnap: unsafe iseq path #{rel.inspect}"
-      end
+      Compiler.sanitize_key!(rel)
       unless rel.start_with?("iseq/")
         raise LoadError, "roundsnap: iseq path must be under iseq/: #{rel.inspect}"
       end

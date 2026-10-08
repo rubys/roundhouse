@@ -3,126 +3,103 @@
 require "minitest/autorun"
 require "fileutils"
 require "tmpdir"
-require "json"
+require_relative "../lib/roundsnap"
 
-$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
-require "roundsnap"
-
-# Hard assertions: backtrace lines name the *source* line, not the
-# denser emitted line. Covers an app .rb method and an ERB view —
-# matching the Spinel `#<SPINEL_SOURCE>` shape (unmarked wrappers,
-# then markers on def / body).
 class SourceMapBacktraceTest < Minitest::Test
   def setup
     @dir = Dir.mktmpdir("roundsnap_map_")
   end
 
   def teardown
-    FileUtils.remove_entry(@dir) if @dir && File.directory?(@dir)
+    Roundsnap::Loader.current = nil
+    FileUtils.remove_entry(@dir)
   end
 
-  def test_mapped_ruby_method_backtrace_hits_source_line
-    # Unmarked class wrapper, then markers — raise is source line 12.
-    marked = <<~RUBY
-      class Thing
-      #<SPINEL_SOURCE>app/models/thing.rb:10
-        def self.boom
-      #<SPINEL_SOURCE>app/models/thing.rb:12
-          raise "boom-from-model"
-        end
-      end
-    RUBY
-
-    units = Roundsnap::SourceMap.units_from(marked, emit_key: "app/models/thing")
-    assert units[0]["mapped"]
-    assert_equal "app/models/thing.rb", units[0]["file"]
-    assert_equal 0, units[0]["first_lineno"], "one prefix line → first_lineno 0"
-
-    Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
-    Roundsnap::Loader.install!(root: @dir).boot!("app/models/thing")
-
-    err = assert_raises(RuntimeError) { Thing.boom }
-    top = err.backtrace.first
-    assert_match(%r{app/models/thing\.rb:12}, top,
-                 "backtrace must hit source line 12, got:\n#{err.backtrace.first(8).join("\n")}")
-    refute_match(%r{iseq/}, top)
-  end
-
-  def test_mapped_erb_view_backtrace_hits_template_line
-    # Real spinel shape: unmarked module wrappers, marker on def (:1),
-    # marker on body (:4).
-    marked = <<~RUBY
-      module Views
-        module Articles
-      #<SPINEL_SOURCE>app/views/articles/_article.html.erb:1
-          def self.render_boom
-      #<SPINEL_SOURCE>app/views/articles/_article.html.erb:4
-            raise "boom-from-erb"
-          end
-        end
-      end
-    RUBY
-
-    units = Roundsnap::SourceMap.units_from(marked, emit_key: "app/views/articles/_article")
-    assert units[0]["mapped"]
-    assert_equal "app/views/articles/_article.html.erb", units[0]["file"]
-    assert_equal(-1, units[0]["first_lineno"], "two prefix lines → first_lineno -1")
-
-    Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
-    Roundsnap::Loader.install!(root: @dir).boot!("app/views/articles/_article")
-
-    err = assert_raises(RuntimeError) { Views::Articles.render_boom }
-    top = err.backtrace.first
-    assert_match(%r{app/views/articles/_article\.html\.erb:4}, top,
-                 "ERB backtrace must hit template line 4, got:\n#{err.backtrace.first(8).join("\n")}")
-  end
-
-  def test_unmarked_unit_keeps_emit_path_not_fake_original
-    source = "def unmarked_boom\n  raise \"x\"\nend\n"
-    units = Roundsnap::SourceMap.units_from(source, emit_key: "app/models/thing")
-    assert_equal 1, units.size
-    refute units[0]["mapped"]
-    assert_equal "app/models/thing.rb", units[0]["file"]
-  end
-
-  def test_multi_file_markers_in_one_unit_raise
-    mixed = <<~RUBY
-      module Wrap
-      #<SPINEL_SOURCE>a.rb:1
-        def self.a; 1; end
-      #<SPINEL_SOURCE>b.rb:1
-        def self.b; 2; end
-      end
-    RUBY
-    err = assert_raises(ArgumentError) do
-      Roundsnap::SourceMap.units_from(mixed, emit_key: "mixed")
+  def test_model_and_erb_source_frames_are_formatted_not_rewritten
+    { "ModelProbe" => ["app/models/thing.rb", 12],
+      "ErbProbe" => ["app/views/articles/_article.html.erb", 4] }.each do |name, (file, line)|
+      source = "module #{name}\n#<SPINEL_SOURCE>#{file}:1\ndef self.boom\n#<SPINEL_SOURCE>#{file}:#{line}\nraise 'probe'\nend\nend\n"
+      Roundsnap::Compiler.compile!(units: [{ "key" => name, "source" => source }], out_dir: @dir)
+      loader = Roundsnap::Loader.install!(root: @dir)
+      loader.require(name)
+      err = assert_raises(RuntimeError) { Object.const_get(name).boom }
+      original = err.backtrace.dup
+      assert_match(/#{Regexp.escape(@dir)}\/#{name}\.rb:5/, original.first)
+      assert_match(/#{Regexp.escape(file)}:#{line}:/, loader.format_backtrace(original).first)
+      assert_equal original, err.backtrace, "formatting must not mutate native exception locations"
     end
-    assert_match(/multi-file/, err.message)
-    assert_match(/a\.rb/, err.message)
-    assert_match(/b\.rb/, err.message)
   end
 
-  def test_compiler_auto_expands_marked_units
-    marked = <<~RUBY
-      module Demo
-      #<SPINEL_SOURCE>lib/demo.rb:5
-        def self.boom
-      #<SPINEL_SOURCE>lib/demo.rb:7
-          raise "demo"
+  def test_backwards_and_colliding_markers_never_reorder_statements
+    # rubys' actual failure sequence: a body marker jumps before its def.
+    source = <<~RUBY
+      module OrderProbe
+      #<SPINEL_SOURCE>app/models/t.rb:20
+        def self.run
+          log = []
+      #<SPINEL_SOURCE>app/models/t.rb:5
+          log << :first
+      #<SPINEL_SOURCE>app/models/t.rb:5
+          log << :second
+          log
         end
       end
     RUBY
-    Roundsnap::Compiler.compile!(
-      units: [{ "key" => "lib/demo", "source" => marked, "file" => "ignored.rb", "first_lineno" => 1 }],
-      out_dir: @dir,
-    )
-    man = JSON.parse(File.read(File.join(@dir, "manifest.json")))
-    entry = man["units"]["lib/demo"]
-    assert entry["mapped"]
-    assert_equal "lib/demo.rb", entry["file"]
-    Roundsnap::Loader.install!(root: @dir).boot!("lib/demo")
-    err = assert_raises(RuntimeError) { Demo.boom }
-    assert_match(%r{lib/demo\.rb:7}, err.backtrace.first,
-                 "got:\n#{err.backtrace.first(6).join("\n")}")
+    unit = Roundsnap::SourceMap.units_from(source, emit_key: "order").first
+    assert_equal source, unit["source"]
+    Roundsnap::Compiler.compile!(units: [unit], out_dir: @dir)
+    Roundsnap::Loader.install!(root: @dir).require("order")
+    assert_equal [:first, :second], OrderProbe.run
+    assert_equal({ "file" => "app/models/t.rb", "line" => 5 }, unit["source_map"]["9"])
+  end
+
+  def test_spliced_concerns_can_map_different_files_without_splitting_wrappers
+    source = <<~RUBY
+      module ConcernProbe
+      #<SPINEL_SOURCE>app/models/a.rb:10
+        def self.a = 3
+      #<SPINEL_SOURCE>app/models/a/concern.rb:2
+        def self.b = 7
+      end
+    RUBY
+    unit = Roundsnap::SourceMap.units_from(source, emit_key: "mixed").first
+    assert_equal source, unit["source"]
+    assert_equal({ "file" => "app/models/a/concern.rb", "line" => 2 }, unit["source_map"]["5"])
+    Roundsnap::Compiler.compile!(units: [unit], out_dir: @dir)
+    Roundsnap::Loader.install!(root: @dir).require("mixed")
+    assert_equal [3, 7], [ConcernProbe.a, ConcernProbe.b]
+  end
+
+  def test_heredocs_blank_lines_and_marker_looking_data_are_unchanged
+    source = <<~'RUBY'
+      #<SPINEL_SOURCE>app/x.rb:1
+      HEREDOC_PROBE = <<~TEXT
+        a
+
+        #<SPINEL_SOURCE>not-a-marker.rb:0
+        b
+      TEXT
+    RUBY
+    unit = Roundsnap::SourceMap.units_from(source, emit_key: "heredoc").first
+    assert_equal source, unit["source"]
+    assert_equal({ "file" => "app/x.rb", "line" => 1 }, unit["source_map"]["6"])
+    Roundsnap::Compiler.compile!(units: [unit], out_dir: @dir)
+    Roundsnap::Loader.install!(root: @dir).require("heredoc")
+    assert_equal "a\n\n#<SPINEL_SOURCE>not-a-marker.rb:0\nb\n", HEREDOC_PROBE
+  end
+
+  def test_line_zero_fails_instead_of_dropping_code
+    assert_raises(ArgumentError) do
+      Roundsnap::SourceMap.units_from("#<SPINEL_SOURCE>x.rb:0\ndef kept = 1\n", emit_key: "zero")
+    end
+  end
+
+  def test_unmarked_units_have_honest_emitted_locations
+    source = "def unmarked_boom\n  raise 'x'\nend\n"
+    unit = Roundsnap::SourceMap.units_from(source, emit_key: "app/models/thing").first
+    refute unit["mapped"]
+    assert_equal "app/models/thing.rb", unit["file"]
+    assert_equal source, unit["source"]
+    assert_empty unit["source_map"]
   end
 end

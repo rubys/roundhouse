@@ -14,6 +14,7 @@ class CompilerLoaderTest < Minitest::Test
   end
 
   def teardown
+    Roundsnap::Loader.current = nil
     FileUtils.remove_entry(@dir) if @dir && File.directory?(@dir)
   end
 
@@ -41,9 +42,9 @@ class CompilerLoaderTest < Minitest::Test
       },
     ]
 
-    Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
+    manifest = Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
     assert File.file?(File.join(@dir, "manifest.json"))
-    assert File.file?(File.join(@dir, "iseq/leaf.iseq"))
+    assert File.file?(File.join(@dir, manifest["units"]["leaf"]["iseq"]))
 
     loader = Roundsnap::Loader.install!(root: @dir)
     loader.require("leaf")
@@ -72,7 +73,7 @@ class CompilerLoaderTest < Minitest::Test
     ]
     Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
     Roundsnap::Loader.install!(root: @dir).require("probe")
-    assert_equal "real-blog/app/models/article.rb", PROBE_FILE
+    assert_equal File.join(@dir, "real-blog/app/models/article.rb"), PROBE_FILE
   end
 
   def test_second_require_is_idempotent
@@ -126,11 +127,11 @@ class CompilerLoaderTest < Minitest::Test
     assert CLI_OK
   end
 
-  def test_boot_loads_all_units_in_order
+  def test_boot_loads_only_entry_and_its_dependencies
     units = [
       {
         "key" => "a",
-        "source" => "A_LOADED = true\n",
+        "source" => "A_LOADED = true\nrequire_relative 'b'\n",
         "file" => "a.rb",
         "first_lineno" => 1,
       },
@@ -140,6 +141,7 @@ class CompilerLoaderTest < Minitest::Test
         "file" => "b.rb",
         "first_lineno" => 1,
       },
+      { "key" => "lazy", "source" => "raise 'must stay lazy'\n", "file" => "lazy.rb" },
     ]
     Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
     Roundsnap::Loader.install!(root: @dir).boot!("a")
@@ -264,8 +266,9 @@ class CompilerLoaderTest < Minitest::Test
         "first_lineno" => 1,
       },
     ]
-    Roundsnap::Compiler.compile!(units: good, out_dir: @dir)
-    prior = File.binread(File.join(@dir, "iseq/keep.iseq"))
+    manifest = Roundsnap::Compiler.compile!(units: good, out_dir: @dir)
+    binary = File.join(@dir, manifest["units"]["keep"]["iseq"])
+    prior = File.binread(binary)
     prior_manifest = File.read(File.join(@dir, "manifest.json"))
 
     bad = [
@@ -279,29 +282,29 @@ class CompilerLoaderTest < Minitest::Test
     assert_raises(SyntaxError) do
       Roundsnap::Compiler.compile!(units: bad, out_dir: @dir)
     end
-    assert_equal prior, File.binread(File.join(@dir, "iseq/keep.iseq"))
+    assert_equal prior, File.binread(binary)
     assert_equal prior_manifest, File.read(File.join(@dir, "manifest.json"))
-    refute File.exist?(File.join(@dir, ".iseq.staging-#{Process.pid}")),
-           "staging dir must not linger"
+    assert_empty Dir.glob(File.join(@dir, ".iseq.staging-*")), "staging must not linger"
   end
 
-  def test_outside_gem_caller_ignores_app_paths_named_roundsnap
-    # A frame under /tmp/campfire-roundsnap/ must count as OUTSIDE the gem.
-    app_path = "/tmp/campfire-roundsnap/app/models/thing.rb"
-    gem_lib = Roundsnap::Loader::RequireHook::GEM_LIB
-    gem_frame = File.join(gem_lib, "roundsnap", "loader.rb")
-    # Synthetic: expand_path of app path is not under gem_lib.
-    refute app_path.start_with?(gem_lib + File::SEPARATOR)
-    assert gem_frame.start_with?(gem_lib + File::SEPARATOR)
-    # Real caller from this test file (not under gem lib).
-    loc = Roundsnap::Loader::RequireHook.outside_gem_caller
-    assert loc, "expected a caller outside the gem"
-    path = File.expand_path(loc.absolute_path || loc.path)
-    refute path.start_with?(gem_lib + File::SEPARATOR),
-           "test file must not be treated as gem lib: #{path}"
+  def test_previous_manifest_version_asks_for_rebuild
+    File.write(File.join(@dir, "manifest.json"), JSON.generate({ "version" => 1, "units" => {} }))
+    error = assert_raises(LoadError) { Roundsnap::Loader.new(root: @dir) }
+    assert_match(/unsupported manifest version; rebuild/, error.message)
   end
 
-  def test_resolve_key_bridges_relative_fixture_prefix_not_absolute_host
+  def test_load_error_and_syntax_error_reservations_are_cleared
+    ["LoadError", "SyntaxError"].each do |type|
+      Roundsnap::Compiler.compile!(units: [{ "key" => "retry", "source" => "raise #{type}, 'retry'", "file" => "retry.rb" }], out_dir: @dir)
+      loader = Roundsnap::Loader.install!(root: @dir)
+      2.times do
+        assert_raises(Object.const_get(type)) { loader.require("retry") }
+        refute loader.loaded?("retry")
+      end
+    end
+  end
+
+  def test_resolve_key_uses_exact_emitted_paths_not_substrings
     units = [
       {
         "key" => "app/models/thing",
@@ -318,10 +321,99 @@ class CompilerLoaderTest < Minitest::Test
     ]
     Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
     loader = Roundsnap::Loader.new(root: @dir)
-    assert_equal "app/models/thing", loader.resolve_key("fixture/app/models/thing")
-    assert_equal "runtime/gzip_cache", loader.resolve_key("real-blog/runtime/gzip_cache")
+    assert_equal "app/models/thing", loader.resolve_key(File.join(@dir, "fixture/app/models/thing"))
+    assert_nil loader.resolve_key("other/app/models/thing")
+    assert_nil loader.resolve_key("real-blog/runtime/gzip_cache")
     # Absolute host paths must not steal manifest keys (Lambda /var/runtime, …).
     assert_nil loader.resolve_key("/var/runtime/gzip_cache")
     assert_nil loader.resolve_key("/opt/deploy/app/models/thing")
+  end
+
+  def test_gem_relative_requires_and_nested_load_errors_are_not_hijacked
+    Roundsnap::Compiler.compile!(units: [{ "key" => "main", "source" => "raise 'hijacked'", "file" => "main.rb" }], out_dir: @dir)
+    loader = Roundsnap::Loader.install!(root: @dir)
+    other = File.join(@dir, "roundsnap", "other-gem")
+    FileUtils.mkdir_p(other)
+    File.write(File.join(other, "entry.rb"), "require_relative 'main'\n")
+    File.write(File.join(other, "main.rb"), "GEM_MAIN_OK = 7\n")
+    require File.join(other, "entry")
+    assert_equal 7, GEM_MAIN_OK
+    refute loader.loaded?("main")
+    assert_nil loader.resolve_relative("main", nil)
+    File.write(File.join(other, "broken.rb"), "require 'roundsnap_missing_dependency'\n")
+    File.write(File.join(other, "nested.rb"), "require_relative 'broken'\n")
+    err = assert_raises(LoadError) { require File.join(other, "nested") }
+    assert_equal "roundsnap_missing_dependency", err.path, "preserve dependency LoadError instead of retrying .rb"
+  end
+
+  def test_old_loader_can_load_its_generation_after_recompile
+    units = [{ "key" => "versioned", "source" => "GENERATION_OLD = 3", "file" => "versioned.rb" }]
+    Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
+    old = Roundsnap::Loader.new(root: @dir)
+    units[0]["source"] = "GENERATION_NEW = 7"
+    Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
+    old.require("versioned")
+    Roundsnap::Loader.new(root: @dir).require("versioned")
+    assert_equal [3, 7], [GENERATION_OLD, GENERATION_NEW]
+  end
+
+  def test_duplicate_keys_fail_without_replacing_manifest
+    unit = { "key" => "dup", "source" => "1", "file" => "dup.rb" }
+    Roundsnap::Compiler.compile!(units: [unit], out_dir: @dir)
+    before = File.read(File.join(@dir, "manifest.json"))
+    assert_raises(ArgumentError) { Roundsnap::Compiler.compile!(units: [unit, unit], out_dir: @dir) }
+    assert_equal before, File.read(File.join(@dir, "manifest.json"))
+  end
+
+  def test_file_and_dir_do_not_depend_on_runtime_cwd
+    source = "FILE_DIR_PROBE = [__FILE__, __dir__]\n"
+    Roundsnap::Compiler.compile!(units: [{ "key" => "app/probe", "source" => source, "file" => "app/probe.rb" }], out_dir: @dir)
+    Dir.chdir("/") { Roundsnap::Loader.install!(root: @dir).require("app/probe") }
+    assert_equal [File.join(@dir, "app/probe.rb"), File.join(@dir, "app")], FILE_DIR_PROBE
+  end
+
+  def test_moved_artifact_keeps_relative_requires_working
+    units = [
+      { "key" => "app/parent", "file" => "app/parent.rb", "source" => "require_relative 'child'\nrequire_relative '../config'\n" },
+      { "key" => "app/child", "file" => "app/child.rb", "source" => "MOVED_CHILD_PROBE = 17\n" },
+    ]
+    original = File.join(@dir, "original")
+    moved = File.join(@dir, "moved")
+    Roundsnap::Compiler.compile!(units: units, out_dir: original)
+    File.write(File.join(original, "config.rb"), "MOVED_CONFIG_PROBE = 19\n")
+    FileUtils.mv(original, moved)
+    Dir.chdir("/") { Roundsnap::Loader.install!(root: moved).require("app/parent") }
+    assert_equal [17, 19], [MOVED_CHILD_PROBE, MOVED_CONFIG_PROBE]
+    refute File.exist?(original)
+  end
+
+  def test_marker_looking_data_keeps_explicit_iseq_metadata
+    unit = { "key" => "literal", "file" => "custom.rb", "first_lineno" => 23,
+             "source" => "MARKER_LITERAL_PROBE = '#<SPINEL_SOURCE>data.rb:0'\nraise 'literal-probe'\n" }
+    Roundsnap::Compiler.compile!(units: [unit], out_dir: @dir)
+    error = assert_raises(RuntimeError) { Roundsnap::Loader.install!(root: @dir).require("literal") }
+    assert_equal "#<SPINEL_SOURCE>data.rb:0", MARKER_LITERAL_PROBE
+    assert_match(%r{#{Regexp.escape(@dir)}/custom\.rb:24:}, error.backtrace.first)
+  end
+
+  def test_concurrent_requires_wait_for_completed_initialization
+    source = "sleep 0.05\nTHREAD_PROBE = 9\n"
+    Roundsnap::Compiler.compile!(units: [{ "key" => "threaded", "source" => source, "file" => "threaded.rb" }], out_dir: @dir)
+    loader = Roundsnap::Loader.install!(root: @dir)
+    results = 2.times.map { Thread.new { [loader.require("threaded"), THREAD_PROBE] } }.map(&:value)
+    assert_equal [false, true], results.map(&:first).sort_by(&:to_s)
+    assert_equal [9, 9], results.map(&:last)
+  end
+
+  def test_unit_can_join_thread_loading_another_unit
+    units = [
+      { "key" => "parent", "file" => "parent.rb", "source" => "Thread.new { require_relative 'child' }.value\n" },
+      { "key" => "child", "file" => "child.rb", "source" => "THREAD_CHILD_PROBE = 13\n" },
+    ]
+    Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
+    loader = Roundsnap::Loader.install!(root: @dir)
+    assert loader.require("parent")
+    assert_equal 13, THREAD_CHILD_PROBE
+    assert loader.loaded?("child")
   end
 end

@@ -367,6 +367,7 @@ class Routing(unittest.TestCase):
             "tests/workflow_yaml_parses.rs",
             "tests/ci_policy_workflow.rs",
             "tests/ci_fixture_workflow.rs",
+            "docs/ci/README.md",
         ]
         for path in paths:
             with self.subTest(path=path):
@@ -625,6 +626,44 @@ class Routing(unittest.TestCase):
         self.assertTrue(plan["wasm"])
         self.assertIn("browser-smoke-ide", plan["required"])
         self.assertNotIn("build-site", plan["jobs"])
+
+    def test_roundsnap_paths_stay_on_the_ruby_floor(self):
+        """Gem/delivery edits must not invent a Campfire ISeq smoke matrix.
+
+        `unit` (in BASE) already runs default `tests/roundsnap_delivery.rs`
+        and shard-0 `gems/roundsnap` Minitest. Compiler/runtime owners keep
+        their existing lanes; none of them select a campfire-roundsnap job.
+        """
+        for path in [
+            "gems/roundsnap/lib/roundsnap/loader.rb",
+            "gems/roundsnap/test/compiler_loader_test.rb",
+            "gems/roundsnap/test/source_map_backtrace_test.rb",
+            "src/roundsnap.rs",
+            "tests/roundsnap_delivery.rs",
+            "scripts/campfire-roundsnap",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertEqual(plan["jobs"], ci.BASE)
+                self.assertIn("unit", plan["required"])
+                self.assertNotIn("campfire-roundsnap", plan["jobs"])
+                self.assertEqual(plan["smoke"], [])
+                self.assertEqual(plan["extra_compare"], [])
+                self.assertFalse(set(ci.SPINEL11).intersection(plan["jobs"]))
+        for path in [
+            "src/emit/ruby.rs",
+            "runtime/ruby/active_record.rb",
+            "src/project.rs",
+        ]:
+            with self.subTest(compiler_or_runtime=path):
+                plan = ci.select([path])
+                self.assertIn("unit", plan["jobs"])
+                self.assertNotIn("campfire-roundsnap", plan["jobs"])
+        full = ci.select([], full=True)
+        self.assertIn("unit", full["jobs"])
+        self.assertNotIn("campfire-roundsnap", full["jobs"])
+        self.assertFalse(hasattr(ci, "CI_ROUNDSNAP"))
+        self.assertFalse(hasattr(ci, "ROUNDSNAP_JOB"))
 
     def test_packaging_and_unknown_target_changes_keep_the_ruby_floor(self):
         for path in [
