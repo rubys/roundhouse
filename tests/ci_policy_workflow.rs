@@ -338,7 +338,12 @@ fn roundsnap_campfire_gate_checks_results_not_only_totals() {
     assert!(body.contains("--reuse /tmp/campfire-roundsnap --no-stubs"));
     assert!(body.contains("test -z \"$(find"));
 
-    let root = std::env::temp_dir().join(format!("roundsnap-parity-{}", std::process::id()));
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("roundsnap-parity-{}-{unique}", std::process::id()));
     fs::create_dir(&root).unwrap();
     let prefix = root.join("campfire").to_string_lossy().to_string();
     // Execute the actual workflow's comparison tail, with isolated paths.

@@ -95,9 +95,13 @@ module Roundsnap
     # without mutating exceptions or claiming native per-method mapping.
     def format_backtrace(backtrace)
       Array(backtrace).map do |frame|
-        match = /\A(.+):(\d+)(:.*)?\z/.match(frame)
+        match = /\A(.+):(-?\d+)(:.*)?\z/.match(frame)
         key = match && @paths[match[1]]
-        location = key && @units[key].fetch("source_map", {})[match[2]]
+        entry = key && @units[key]
+        # The sidecar indexes source text from 1, whereas MRI honors the
+        # caller's first_lineno (including zero and negative offsets).
+        line = entry && (Integer(match[2]) - entry.fetch("first_lineno", 1) + 1)
+        location = entry && entry.fetch("source_map", {})[line.to_s]
         location ? "#{location.fetch('file')}:#{location.fetch('line')}#{match[3]}" : frame
       end
     end

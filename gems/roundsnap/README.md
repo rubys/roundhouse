@@ -84,6 +84,11 @@ loader.require("app/probe")
 # boot! loads only its entry and that entry's requires, not every unit.
 ```
 
+Source markers preserve caller-supplied `key`, `file` and `first_lineno`.
+The sidecar indexes the source text from line 1; `format_backtrace` accounts
+for the ISeq's `first_lineno` offset without changing native locations.
+Marked units without `file` default to the emit-key `.rb` path.
+
 CLI: `roundsnap-compile --out /tmp/app --units units.json` (or JSON on stdin).
 ISeq binaries execute code: manifests and binaries must be trusted build
 artifacts. Path validation is not a sandbox for untrusted bytecode.

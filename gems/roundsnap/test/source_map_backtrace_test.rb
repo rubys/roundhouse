@@ -30,6 +30,59 @@ class SourceMapBacktraceTest < Minitest::Test
     end
   end
 
+  def test_markers_preserve_caller_metadata_and_map_native_line_offsets
+    source = <<~RUBY
+      #<SPINEL_SOURCE>app/models/original.rb:42
+      def metadata_probe
+        [__FILE__, __dir__, __LINE__]
+      end
+      def metadata_boom
+      #<SPINEL_SOURCE>app/views/original.html.erb:7
+        raise 'metadata-probe'
+      #<SPINEL_SOURCE>generated/wrapper.rb:99
+      end
+    RUBY
+    # Adjacent markers make either off-by-one translation fail instead of
+    # landing on a neighboring statement with the same held source span.
+    # Include zero/negative MRI offsets and a string accepted by Integer().
+    { 1 => [3, 7], 20 => [22, 26], 0 => [2, 6], -20 => [-18, -14], "20" => [22, 26] }.each do |first, (read_line, raise_line)|
+      key = "logical/probe.rb"
+      file = "chosen/probe.rb"
+      unit = { key: key, source: source, file: file, first_lineno: first }
+      manifest = Roundsnap::Compiler.compile!(units: [unit], out_dir: @dir)
+      assert_equal [key], manifest.fetch("units").keys, "markers must not normalize the caller's key"
+      entry = manifest.fetch("units").fetch(key)
+      assert_equal file, entry.fetch("file")
+      assert_equal Integer(first), entry.fetch("first_lineno")
+      assert_equal({ "file" => "app/views/original.html.erb", "line" => 7 }, entry.fetch("source_map")["7"])
+      loader = Roundsnap::Loader.install!(root: @dir)
+      loader.require(key)
+      assert_equal [File.join(@dir, file), File.join(@dir, "chosen"), read_line], metadata_probe
+      error = assert_raises(RuntimeError) { metadata_boom }
+      native = error.backtrace.dup
+      assert_match(/\A#{Regexp.escape(File.join(@dir, file))}:#{raise_line}:in .*metadata_boom/, native.first)
+      assert_match(/\Aapp\/views\/original\.html\.erb:7:in .*metadata_boom/, loader.format_backtrace(native).first)
+      assert_equal native, error.backtrace
+      assert_equal native.drop(1), loader.format_backtrace(native).drop(1), "unmapped caller frames stay unchanged"
+    end
+  end
+
+  def test_marked_custom_paths_resolve_requires_without_using_source_origins
+    units = [
+      { "key" => "logical/entry", "file" => "chosen/entry.rb", "first_lineno" => 23,
+        "source" => "#<SPINEL_SOURCE>original/entry.rb:90\nrequire_relative 'leaf'\n" },
+      { "key" => "logical/leaf", "file" => "chosen/leaf.rb", "first_lineno" => 37,
+        "source" => "#<SPINEL_SOURCE>original/leaf.rb:4\nCUSTOM_PATH_PROBE = [__FILE__, __dir__, __LINE__]\n" },
+    ]
+    Roundsnap::Compiler.compile!(units: units, out_dir: @dir)
+    loader = Roundsnap::Loader.install!(root: @dir)
+    assert_equal "logical/entry", loader.resolve_key(File.join(@dir, "chosen/entry.rb"))
+    assert_nil loader.resolve_key(File.join(@dir, "original/entry.rb"))
+    assert require(File.join(@dir, "chosen/entry"))
+    assert loader.loaded?("logical/leaf")
+    assert_equal [File.join(@dir, "chosen/leaf.rb"), File.join(@dir, "chosen"), 38], CUSTOM_PATH_PROBE
+  end
+
   def test_backwards_and_colliding_markers_never_reorder_statements
     # rubys' actual failure sequence: a body marker jumps before its def.
     source = <<~RUBY

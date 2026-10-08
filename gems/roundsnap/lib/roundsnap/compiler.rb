@@ -57,7 +57,14 @@ module Roundsnap
           key = unit.fetch("key")
           source = unit.fetch("source")
           if source.include?(SourceMap::MARKER_PREFIX)
-            SourceMap.units_from(source, emit_key: key).each { |u| expanded << (u["mapped"] ? u : unit) }
+            SourceMap.units_from(source, emit_key: key).each do |u|
+              # Markers add provenance, not replacement ISeq metadata.
+              expanded << (u["mapped"] ? unit.merge(
+                "file" => unit.fetch("file", u.fetch("file")),
+                "mapped" => true,
+                "source_map" => u.fetch("source_map"),
+              ) : unit)
+            end
           else
             expanded << unit
           end
