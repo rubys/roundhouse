@@ -98,6 +98,21 @@ end
 end
 "#,
         ),
+        // Campfire's suite passes a local `attributes` hash — that used to
+        // set saw_other and collapse the Attrs binding so assoc-scope
+        // declined and the controller kept the Array-reader call.
+        (
+            "test/models/message_attachment_test.rb",
+            r#"require "test_helper"
+
+class MessageAttachmentTest < ActiveSupport::TestCase
+  test "create" do
+    attributes = { body: "hi", client_message_id: "x" }
+    rooms(:hq).messages.create_with_attachment!(attributes)
+  end
+end
+"#,
+        ),
     ]))
     .expect("ingest");
     roundhouse::session::analyze_and_lower(&mut app);

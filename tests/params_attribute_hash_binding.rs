@@ -230,19 +230,20 @@ fn the_callee_takes_the_scope_because_its_parameter_is_a_hash() {
     );
 }
 
-/// A method reached with ONLY a params helper keeps the params object —
-/// nothing converts, because nothing proved the parameter is a hash.
+/// A body that is just `create!(attributes)` needs a Hash even when every
+/// call site passes a params helper — `create!` does not take a params
+/// object. The call site converts; the association scope can merge.
 #[test]
-fn a_single_shape_callee_is_left_alone() {
+fn create_bang_body_forces_attribute_hash_binding() {
     let create = controller();
     assert!(
-        !create.contains("note_params.to_attrs"),
-        "a callee nobody passes a hash to is untouched:\n{create}"
+        create.contains("note_params.to_attrs"),
+        "create!(attributes) body converts the helper at the call site:\n{create}"
     );
     let note = model("app/models/note.rb");
     assert!(
-        !note.contains("scope_attributes"),
-        "and it takes no scope — its `create!` argument is not provably a hash:\n{note}"
+        note.contains("scope_attributes"),
+        "and the assoc scope merges once the argument is a hash:\n{note}"
     );
 }
 
@@ -267,14 +268,13 @@ fn a_body_that_needs_a_hash_binds_one_however_its_call_sites_look() {
     );
 }
 
-/// `to_attrs` is synthesized only where a call site asks for it: the
-/// demand is read back off the rewritten controller body, the same way
-/// `wants_create` is read off `<Model>.create(<helper>)`.
+/// `to_attrs` is synthesized where a call site asks for it — including a
+/// `create!(attributes)` body that forced Attrs from a helper-only census.
 #[test]
-fn to_attrs_is_demand_gated() {
+fn to_attrs_follows_attribute_hash_demand() {
     let params = params_class("note_params.rb");
     assert!(
-        !params.contains("def to_attrs"),
-        "a list nobody converts carries no to_attrs:\n{params}"
+        params.contains("def to_attrs"),
+        "NoteParams grows to_attrs once file! binds Attrs:\n{params}"
     );
 }
