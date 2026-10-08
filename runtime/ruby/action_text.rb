@@ -588,6 +588,14 @@ module ActionText
       @html
     end
 
+    # Campfire asks the attachment-free fragment for the same plain-text
+    # conversion ActionText::Content uses. Keep conversion in Content's
+    # shared parser so entities, block boundaries, and Action Text nodes
+    # have the same behavior instead of maintaining a second HTML scanner.
+    def to_plain_text
+      Content.new(@html, canonicalize: false).convert_html_to_plain_text
+    end
+
     # Elements matching `selector`, in document order — detached nodes,
     # a read (Rails' `Fragment#find_all`).
     def find_all(selector)

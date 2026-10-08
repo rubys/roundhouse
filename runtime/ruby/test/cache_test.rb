@@ -6,6 +6,7 @@ require_relative "test_helper"
 class CacheStrTest < Minitest::Test
   def setup
     @cache = Rails::Cache.new
+    Rails.cache_enabled = true
   end
 
   def test_read_str_miss_and_hit
@@ -37,5 +38,17 @@ class CacheStrTest < Minitest::Test
     sleep 1.1
     assert_nil @cache.read_str("views/short")
     assert_nil @cache.read_str("views/short")
+  end
+
+  def test_disabled_cache_always_misses_and_does_not_store
+    Rails.cache_enabled = false
+
+    assert_nil @cache.read_str("views/fragment/a")
+    assert_equal "<p>hi</p>", @cache.write_str("views/fragment/a", "<p>hi</p>", 0)
+    assert_nil @cache.read_str("views/fragment/a")
+    assert_equal 1, @cache.increment_str("rate-limit", 60)
+    assert_equal 1, @cache.increment_str("rate-limit", 60)
+  ensure
+    Rails.cache_enabled = true
   end
 end

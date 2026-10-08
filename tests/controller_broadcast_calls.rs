@@ -120,15 +120,15 @@ fn a_literal_stream_lowers_with_the_named_partial_as_its_payload() {
     );
 }
 
-/// A RECORD streamable contributes `<singular>_<id>` — the half that has
-/// to agree with `turbo_stream_from` — and `target: [record, :prefix]`
-/// spells the prefix FIRST.
+/// A record streamable contributes its own GlobalID parameter — the half
+/// that has to agree with `turbo_stream_from` — and
+/// `target: [record, :prefix]` spells the prefix FIRST.
 #[test]
 fn a_record_streamable_names_the_stream_and_the_target_puts_the_prefix_first() {
     let src = controller_src();
     assert!(
         src.contains(
-            "Broadcasts.replace(stream: \"#{GlobalID.param(\"User\", user.id)}:rooms\", \
+            "Broadcasts.replace(stream: \"#{user.to_gid_param}:rooms\", \
              target: \"list_#{@room.dom_prefix}_#{@room.dom_record_key}\""
         ),
         "{src}",

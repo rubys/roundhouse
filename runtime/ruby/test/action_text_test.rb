@@ -312,6 +312,11 @@ class ActionTextFragmentTest < Minitest::Test
     assert_equal ["<b>world</b>"], fragment.find_all("b").map { |node| node.to_s }
   end
 
+  def test_to_plain_text_converts_fragment_markup
+    fragment = ActionText::Fragment.wrap("<div>Hello <b>world</b> &amp;<br>again</div>")
+    assert_equal "Hello world &\nagain", fragment.to_plain_text
+  end
+
   def test_find_all_descends_into_matched_elements
     fragment = ActionText::Content.new("<div><div>inner</div></div>").fragment
     assert_equal 2, fragment.find_all("div").length

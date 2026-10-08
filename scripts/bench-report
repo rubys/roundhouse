@@ -88,9 +88,31 @@ skipped = begin
   end
 end
 
+# A renderer speedup is meaningful only when the harness captured matching
+# pre-load responses for both lanes. Keep these rows available to every
+# comparison section, not just the audit table below.
+parity_rows = begin
+  File.readlines(File.join(run_path, 'parity.txt'), chomp: true).reject(&:empty?)
+rescue Errno::ENOENT
+  []
+end
+
+def parity_match?(rows, left, right, endpoint)
+  records = rows.to_h do |line|
+    lane, ep, status, tags, bytes, sha256 = line.split("\t")
+    [[lane, ep], [status.to_s.split('=', 2).last, tags.to_s.split('=', 2).last,
+                  bytes.to_s.split('=', 2).last, sha256.to_s.split('=', 2).last]]
+  end
+  left_shape = records[[left, endpoint]]
+  right_shape = records[[right, endpoint]]
+  left_shape && right_shape && left_shape[0] == '200' && right_shape[0] == '200' &&
+    left_shape[1] == right_shape[1] && left_shape[2] == right_shape[2] &&
+    !left_shape[3].to_s.empty? && left_shape[3] == right_shape[3]
+end
+
 # ── ordering / metadata ──────────────────────────────────────────────
 
-TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel spinel-1p spinel-fiber elixir typescript python tobi ruby ruby-1p ruby-int jruby truffleruby rails rails-nocache rails-1p rails-int rails-jruby rails-truffleruby]
+TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift spinel spinel-1p spinel-fiber elixir typescript python tobi ruby ruby-lowering ruby-1p ruby-int jruby truffleruby rails rails-lowering rails-nocache rails-1p rails-int rails-jruby rails-truffleruby]
 ENDPOINT_ORDER = %w[
   /articles /articles/1 /articles/new /articles.json /articles/1.json
   /rooms/1 /rooms/1/messages /users/me/sidebar /searches?q=coffee
@@ -758,15 +780,15 @@ endpoints.each do |ep|
   html << hbar_log(rows, metric: 'req_sec', unit: 'req/sec')
 end
 
-# ── Section: lowerer dividend ────────────────────────────────────────
+# ── Section: deployed-stack comparison ──────────────────────────────
 
 # Cross-language comparison: only meaningful when both ruby and rails
 # were measured this run. Skip the whole section otherwise so a partial
 # run (e.g. spinel-only) still produces a report.
 if (%w[ruby rails] - measured_targets).empty?
-  html << h2.('Lowerer dividend (ruby vs rails)')
+  html << h2.('Deployed-stack comparison (emitted Ruby vs Rails)')
   html << <<~P
-    <p>Same Ruby interpreter, same YJIT, same Puma — the only variable is whether the framework runtime is Rails or Roundhouse-emitted. The multiplier under each pair is the lift from the lowerer pipeline.#{endpoints.size > 4 ? ' Bars are log-scaled, so the multiplier, not bar height, is the ratio.' : ''}</p>
+    <p>This compares the measured deployed lanes, not lowering alone: Rails uses Campfire's process-local full-response and fragment caches (not Redis), Thruster and resque-pool; the emitted lane uses its process-local cache and a different Puma version. The multiplier is emitted Ruby divided by Rails.#{endpoints.size > 4 ? ' Bars are log-scaled, so the multiplier, not bar height, is the ratio.' : ''}</p>
   P
 
   groups = endpoints.map do |ep|
@@ -822,6 +844,34 @@ if (%w[ruby rails] - measured_targets).empty?
       html << %(<p>Against the deployed shapes on <code>#{swap_ep}</code>: one <code>jruby</code> process is <strong>#{fmt_dec(j / rd, 2)}×</strong> the eight-worker <code>ruby</code> row and <strong>#{fmt_dec(j / rr, 1)}×</strong> the deployed <code>rails</code> row — and, unlike <code>ruby</code>, it is a shape campfire could run (one registry, one cache, one queue).</p>\n)
     end
   end
+end
+
+# The controlled, renderer-focused comparison. Both operands are the
+# single-worker lanes with fragment caching disabled. Keep this distinct
+# from the deployed-stack chart above: Rails still uses its normal Redis
+# adapters for services other than the fragment cache, and Puma versions
+# are recorded in the environment appendix.
+lowering_endpoints = endpoints.select do |ep|
+  !%w[{css} /up].include?(ep) && !ep.include?('{avatar}') &&
+    measured?(by[ep]['ruby-lowering']) && measured?(by[ep]['rails-lowering']) &&
+    parity_match?(parity_rows, 'ruby-lowering', 'rails-lowering', ep)
+end
+unless lowering_endpoints.empty?
+  html << h2.('Lowerer dividend (single process, fragment cache off)')
+  html << <<~P
+    <p>Dynamic HTML GET routes only: static assets, health checks and POST are excluded (POST exercises Redis-backed queue and cable adapters). Both sides use the same Campfire source, CRuby/YJIT, one Puma worker and no fragment-cache hits; Rails also drops Thruster and resque-pool. The ratio is emitted Ruby divided by Rails. This is a cleaner renderer comparison, not a pure compiler-only measurement: Rails and the emitted framework runtime still differ, and their Puma versions are listed in the environment appendix.#{lowering_endpoints.size > 4 ? ' Bars are log-scaled, so the multiplier, not bar height, is the ratio.' : ''}</p>
+  P
+
+  groups = lowering_endpoints.map do |ep|
+    ruby_v = by[ep]['ruby-lowering']&.dig('req_sec').to_f
+    rails_v = by[ep]['rails-lowering']&.dig('req_sec').to_f
+    {
+      label: lowering_endpoints.size > 4 ? ep_short_label(ep) : ep_label(ep),
+      annotation: rails_v > 0 ? "#{fmt_dec(ruby_v / rails_v, 1)}×" : '',
+      values: { 'ruby-lowering' => ruby_v, 'rails-lowering' => rails_v },
+    }
+  end
+  html << grouped_bars(groups, series: %w[ruby-lowering rails-lowering], log: lowering_endpoints.size > 4)
 end
 
 # ── Section: YJIT contribution ───────────────────────────────────────
@@ -1027,7 +1077,7 @@ if coldstart && !coldstart.empty?
   reps = cs_by.values.map(&:size).max
 
   html << h2.('Cold start')
-  html << "<p>Time from <code>exec</code> to a server that answers, and to a signed-in <code>/rooms/1</code> that comes back 200. Median of #{reps} boots per lane, all on the shape named in the row. The room page is the number that matters: it contains the first render, and on a fragment-cached lane a restart keeps the Redis its own Procfile runs in a separate process, so this is a warm-cache restart rather than a cold deployment.</p>\n"
+  html << "<p>Time from <code>exec</code> to a server that answers, and to a signed-in <code>/rooms/1</code> that comes back 200. Median of #{reps} boots per lane, all on the shape named in the row. The room-page time includes its first render; process-local state starts empty on each fresh boot, while external services may retain their own state.</p>\n"
   html << "<table>\n<thead><tr><th>target</th><th>answers (ms)</th><th>room page (ms)</th></tr></thead>\n<tbody>\n"
   cs_targets.sort_by { |t| cs_median(cs_by[t].map { |r| r['page_ms'] }) || Float::INFINITY }.each do |tgt|
     rows = cs_by[tgt]
@@ -1038,7 +1088,7 @@ if coldstart && !coldstart.empty?
     html << %(<tr><td><strong>#{tgt}</strong></td><td class="num">#{acc ? fmt_dec(acc, 0) : '—'}</td><td class="num">#{pg ? fmt_dec(pg, 0) : '—'}#{note}</td></tr>\n)
   end
   html << "</tbody></table>\n"
-  html << %(<p class="legend">Milliseconds. Lower is better. A deployed Rails lane boots a proxy, a Puma master and one worker per <code>(processor_count &times; 0.666).ceil</code>; the binary boots one process.</p>\n)
+  html << %(<p class="legend">Milliseconds. Lower is better. Each row uses the lane shape recorded for this run; renderer-only comparisons use one Puma worker on both sides.</p>\n)
 end
 
 # ── Section: WebSocket connections ───────────────────────────────────
@@ -1088,22 +1138,20 @@ end
 # endpoint before any load and writes the tally here; without it a reader
 # has to take on faith that the lanes were answering with the same
 # document. Optional, and TSV so any harness can leave one:
-#   <lane>\t<endpoint>\tstatus=<n>\ttags=<n>\tbytes=<n>
-parity_rows = begin
-  File.readlines(File.join(run_path, 'parity.txt'), chomp: true).reject(&:empty?)
-rescue Errno::ENOENT
-  []
-end
+#   <lane>\t<endpoint>\tstatus=<n>\ttags=<n>\tbytes=<n>\tsha256=<digest>
 
 unless parity_rows.empty?
   html << h2.('What each lane rendered')
-  html << "<p>One authenticated GET per lane per endpoint, captured before any load. Equal tag counts are what makes the throughput numbers above a comparison rather than two measurements.</p>\n"
-  html << "<table>\n<thead><tr><th>lane</th><th>endpoint</th><th>status</th><th>tags</th><th>bytes</th></tr></thead>\n<tbody>\n"
+  html << "<p>One authenticated GET per lane per endpoint, captured before any load. The response SHA-256 makes the renderer comparison require byte-identical sampled bodies, not just equal tag counts.</p>\n"
+  html << "<table>\n<thead><tr><th>lane</th><th>endpoint</th><th>status</th><th>tags</th><th>bytes</th><th>body SHA-256 (prefix)</th></tr></thead>\n<tbody>\n"
   parity_rows.each do |line|
-    lane, ep, status, tags, bytes = line.split("\t").map { |f| f.to_s.sub(/\A[a-z_]+=/, '') }
+    lane, ep, status, tags, bytes, sha256 = line.split("\t").map { |f| f.to_s.sub(/\A[a-z_]+=/, '') }
+    sha256 = sha256.to_s
+    sha_title = sha256.empty? ? 'unavailable' : "SHA-256: #{sha256}"
+    sha_prefix = sha256.empty? ? '—' : sha256[0, 12]
     html << %(<tr><td>#{lane}</td><td><code>#{ep_label(ep)}</code></td>) +
             %(<td class="num">#{status}</td><td class="num">#{fmt_int(tags.to_i)}</td>) +
-            %(<td class="num">#{fmt_int(bytes.to_i)}</td></tr>\n)
+            %(<td class="num">#{fmt_int(bytes.to_i)}</td><td><code title="#{sha_title}">#{sha_prefix}</code></td></tr>\n)
   end
   html << "</tbody></table>\n"
 end
@@ -1229,6 +1277,7 @@ if env
     html << "<h3>Application under test</h3>\n"
     html << kv_table([
       ['app',      env['benchmark']],
+      ['source',   env['campfire_source_mode']],
       ['revision', app_sha && "<code>#{app_sha.to_s[0, 12]}</code>"],
       ['Rails',    rails],
       ['Ruby',     oracle['ruby_version']],

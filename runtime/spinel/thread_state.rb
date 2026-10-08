@@ -90,6 +90,7 @@ module ActionView
     end
 
     def self.csrf_token_hidden_input
+      return "" unless ActionController::Base.allow_forgery_protection
       return "" if Thread.current[:view_broadcast_rendering] == true
       %(<input type="hidden" name="authenticity_token" value="#{form_authenticity_token}">)
     end

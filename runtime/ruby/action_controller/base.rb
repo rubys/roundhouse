@@ -361,6 +361,14 @@ module ActionController
     # subscript spelling.
     attr_reader   :cache_control_max_age, :cache_control_public
 
+    # `response` is this controller in the shared runtime, so controller
+    # actions that set `response.content_type` need the same writer Rails'
+    # response object exposes.
+    def content_type=(value)
+      @content_type = value
+      @content_type
+    end
+
     def initialize
       @params  = {}
       @path_parameters = {}
@@ -536,6 +544,15 @@ module ActionController
     # the harness when a consumer needs them.
     def response
       self
+    end
+
+    def response_body
+      @body
+    end
+
+    def response_body=(value)
+      @body = value
+      @body
     end
 
     # ---- conditional GET: ALWAYS FRESH -----------------------------

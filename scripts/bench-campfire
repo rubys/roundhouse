@@ -10,13 +10,19 @@
 #
 # Usage:  scripts/bench-campfire [options] [LANE ...]
 #
-#   LANE ∈ { rails | ruby | spinel | rust | go | elixir |
-#            rails-1p | ruby-1p | spinel-1p |
-#            jruby | truffleruby | rails-truffleruby |
-#            rails-nocache | rails-nocache-1p }
-#          (default: rails ruby spinel. Since 2026-10-07 the -1p,
-#           JVM-family and nocache lanes are requestable by name only:
-#           the published page compares the deployed shapes, per route.)
+#   Supported lanes ∈ { rails-lowering | ruby-lowering }
+#          (default: rails-lowering ruby-lowering. This harness currently
+#           supports only renderer comparisons on a disposable, cache-off
+#           Campfire copy; deployed/cache-on and alternate-runtime lanes are
+#           not available from this entry point.)
+#
+#   By default, clone current basecamp/once-campfire main into the result
+#   directory and use that immutable source SHA for both Rails and
+#   Roundhouse. `--app PATH` selects an explicit pinned checkout instead.
+#
+#   Historical lane notes below describe the former multi-runtime harness;
+#   they are not currently selectable. Only the renderer-only lanes above
+#   run from this entry point.
 #
 #   THE DEPLOYED LANES — what each project would actually run on this box:
 #
@@ -30,6 +36,11 @@
 #                    RENDERING
 #     ruby           roundhouse emit on CRuby, the same Puma shape and
 #                    the same allocator
+#     rails-lowering / ruby-lowering
+#                    one Puma worker, no Thruster/resque-pool, and
+#                    fragment caching disabled on both sides. These are
+#                    the renderer-focused comparison; Redis remains
+#                    configured for Rails' other adapters.
 #     spinel         the roundhouse spinel BINARY, workers autodetected
 #     jruby          the roundhouse emit for the JVM (`--target jruby`:
 #                    the same tree over JDBC), ONE process, one Puma
@@ -115,28 +126,19 @@
 # their YJIT siblings on these two pages (40 vs 40 req/s, 22 vs 23) and
 # cost a seventh of the run to say nothing.
 #
-# ONE RAILS LANE NOW, AND THAT IS THE WHOLE POINT OF THE LAST YEAR.
-# campfire renders its message list as `render partial: …, collection:
-# @messages, cached: true`, so with Redis up the 40 fragments are read
-# back rather than rendered. `rails-nocache` existed because the emitted
-# tree had NO fragment cache: comparing a caching Rails against a
-# rendering emit measured Redis, not Rails, so the honest renderer-vs-
-# renderer operand had to be published beside it.
+# THE DEPLOYED AND RENDERER COMPARISONS ARE DIFFERENT QUESTIONS.
+# Current Campfire main has a 64 MiB per-worker full-response cache and
+# a separate in-process fragment/record cache. Rails.cache is configured
+# with Redis for other facilities; it is NOT the backend for these page
+# caches. The deployed `rails` / `ruby` pair retains its cache behavior.
+# The `rails-lowering` / `ruby-lowering` pair disables both caches plus
+# record snapshots on both sides, uses one worker, and removes Thruster
+# and resque-pool from Rails; this is renderer-focused, not a
+# compiler-only claim.
 #
-# The emit caches as of 72474b41 (`<% cache %>` served from Rails.cache,
-# /rooms/1/messages 127 -> 7 sqlite round trips, the same 7 Rails
-# spends). Both sides now read fragments back, the deployed lanes
-# compare like with like, and `rails` is the only opponent the page
-# needs. Publishing a rendering-Rails column beside two caching lanes
-# would be the mirror of the error the old pairing prevented.
-#
-# THE PAIR IS STILL REQUESTABLE BY NAME, and deliberately so:
-# `--no-fragment-cache` is how we measured that Rails' own renderer
-# costs 93 queries on /rooms/1 and 127 on /rooms/1/messages — campfire's
-# messages index preloads only `with_creator`, so boosts, rich text and
-# attachments are N+1 in Rails too. That number is what justified
-# building the cache, and it has to stay re-takeable. It is a
-# DIAGNOSTIC, never a headline; it is no longer published by default.
+# Earlier versions exposed `--no-fragment-cache` as a separate diagnostic.
+# The current entry point transforms both renderer inputs identically before
+# serving them, so there is no separate cache-on/off lane here.
 #
 # Options:
 #   --workers N       Puma workers per lane (default 1). PIN IT: campfire's
@@ -187,14 +189,14 @@
 #   --socket-per-room N     subscribers per room (default 50, which is
 #                     the shape the runtime ledger's tiers were measured
 #                     at; the sweep derives the room count from it)
-#   --skip-prepare    reuse the oracle tree, emit and spinel binary
-#                     already on disk
+#   --skip-prepare    reuse the oracle, transformed source, and emitted tree
+#                     already on disk (with matching provenance)
 #   --keep            leave servers running on exit
 #
-# --http-suite: signed-in HTTP, optional gzip, 16 concurrent clients, the
-# five routes above. Named rust/go/elixir lanes boot the native
-# once-campfire-* binaries on this box against the same sqlite file.
-# Default lanes stay Rails vs the emit.
+# HTTP run: signed-in GET requests against the same transformed source,
+# optional gzip, 16 concurrent clients. Only the Rails and emitted Ruby
+# renderer lanes are currently supported; no deployed-stack or POST result
+# is included in the Lowerer Dividend chart.
 #
 # WHY 16 CONNECTIONS AND NOT 64. A campfire room page is ~400 KB and
 # takes single-digit milliseconds to build; at 64 connections against one
@@ -215,7 +217,7 @@
 #   <out>/per-run.json    raw records, one JSON object per line
 #   <out>/summary.json    median per (lane, endpoint)
 #   <out>/summary.md      rendered table
-#   <out>/parity.txt      tag-tally diff per endpoint, both lanes
+#   <out>/parity.txt      pre-load response body digest and shape per endpoint
 #   <out>/coldstart.json  one record per boot: to an answer, to a page
 #   <out>/sockets.json    the WebSocket tier, both lanes, folded from
 #                         scripts/campfire-cable-sweep
@@ -295,6 +297,9 @@ SOCKET_DB=""
 SOCKET_COOKIES=""
 SOCKET_PER_ROOM=50
 APP="$HOME/git/once-campfire"
+LATEST_CAMPFIRE=1
+LATEST_EXPLICIT=0
+APP_OVERRIDE=0
 GZIP=0
 HTTP_SUITE=0
 USER_ENDPOINTS=0
@@ -316,7 +321,8 @@ while [[ $# -gt 0 ]]; do
         --users)       USERS="$2"; shift 2 ;;
         --rooms)       ROOMS="$2"; shift 2 ;;
         --messages)    MESSAGES="$2"; shift 2 ;;
-        --app)         APP="$2"; shift 2 ;;
+        --app)         APP="$2"; APP_OVERRIDE=1; shift 2 ;;
+        --latest-campfire) LATEST_CAMPFIRE=1; LATEST_EXPLICIT=1; shift ;;
         --sockets)     SOCKETS=1; SOCKETS_SET=1; shift ;;
         --no-sockets)  SOCKETS=0; SOCKETS_SET=1; shift ;;
         --socket-sizes) SOCKET_SIZES="$2"; shift 2 ;;
@@ -327,17 +333,18 @@ while [[ $# -gt 0 ]]; do
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
         -h|--help)     sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
-        rails|rails-nocache|ruby|spinel|tobi|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
+        rails-lowering|ruby-lowering) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
     esac
 done
 
-(( ${#LANES[@]} )) || LANES=(rails ruby spinel)
+(( ${#LANES[@]} )) || LANES=(rails-lowering ruby-lowering)
 GET_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-get.lua"
 POST_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-post.lua"
 [[ -n "$OUT_DIR" ]] || OUT_DIR="$REPO_ROOT/bench/results/campfire-$(date +%Y%m%d-%H%M%S)"
 
 ORACLE="$REPO_ROOT/build/campfire-oracle"
+EMIT_SOURCE="$OUT_DIR/campfire-emit-source"
 EMIT="$REPO_ROOT/build/transpiled-campfire-ruby"
 SP_EMIT="$REPO_ROOT/build/transpiled-campfire-spinel"
 JRUBY_EMIT="$REPO_ROOT/build/transpiled-campfire-jruby"
@@ -375,6 +382,7 @@ GO_BIN="${GO_BIN:-$GO_ROOT/campfire}"
 # path, so nothing caught it.
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+EMIT_SOURCE="$OUT_DIR/campfire-emit-source"
 LOG_DIR="$OUT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
@@ -434,9 +442,52 @@ step() { printf '\033[36m→\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
 die()  { fail "$*"; exit 1; }
+if (( APP_OVERRIDE )); then
+    (( LATEST_EXPLICIT == 0 )) \
+        || die "use either --latest-campfire or --app PATH, not both"
+    LATEST_CAMPFIRE=0
+fi
+(( LATEST_CAMPFIRE == 0 || SKIP_PREPARE == 0 )) \
+    || die "--latest-campfire cannot be combined with --skip-prepare"
+if (( SKIP_PREPARE )); then
+    [[ -d "$EMIT_SOURCE" && -d "$ORACLE" && -d "$EMIT" ]] \
+        || die "--skip-prepare requires a prior run in the same --out directory"
+    [[ -f "$ORACLE/oracle.json" && -f "$EMIT_SOURCE/oracle.json" && -f "$EMIT/benchmark-provenance.json" ]] \
+        || die "--skip-prepare requires complete oracle and emitted-tree provenance"
+    requested_sha="$(git -C "$APP" rev-parse HEAD 2>/dev/null)" \
+        || die "--skip-prepare requires --app to name the original Git checkout"
+    ruby -rjson -e '
+      oracle_path, source_path, emit_path, requested_sha = ARGV
+      oracle, source, emit = [oracle_path, source_path, emit_path].map { |path| JSON.parse(File.read(path)) }
+      valid = [oracle, source, emit].all? do |metadata|
+        metadata["campfire_sha"] == requested_sha && metadata["benchmark_transform"] == "campfire-lowering-v6"
+      end
+      exit(valid ? 0 : 1)
+    ' "$ORACLE/oracle.json" "$EMIT_SOURCE/oracle.json" "$EMIT/benchmark-provenance.json" "$requested_sha" \
+        || die "--skip-prepare provenance does not match the requested Campfire source and transform"
+fi
+for lane in "${LANES[@]}"; do
+    case "$lane" in
+        rails-lowering|ruby-lowering) ;;
+        *) die "current Campfire harness supports renderer-only lanes; request rails-lowering or ruby-lowering (got $lane)" ;;
+    esac
+done
 [[ -f "$GET_LUA" && -f "$POST_LUA" ]] || die "missing wrk lua scripts next to bench-campfire"
 
 command -v wrk >/dev/null || die "wrk not on PATH"
+
+# For an up-to-date run, take a clean shallow snapshot of canonical
+# Campfire main into this run's output directory. The source SHA is then
+# captured by campfire-oracle; the Rails lane uses that unmodified source,
+# while only the emitted copy receives the compiler-compatibility shim.
+# Neither the user's checkout nor its branch is modified.
+if (( LATEST_CAMPFIRE )); then
+    APP="$OUT_DIR/campfire-source"
+    git clone --quiet --depth 1 --branch main --single-branch \
+        https://github.com/basecamp/once-campfire.git "$APP" \
+        || die "could not fetch latest Campfire from basecamp/once-campfire"
+    step "using Campfire upstream main @ $(git -C "$APP" rev-parse --short HEAD)"
+fi
 
 SERVER_PID=""
 cleanup() {
@@ -585,7 +636,8 @@ wait_for_port() {
 if (( SKIP_PREPARE == 0 )); then
     step "preparing the Rails oracle ($USERS users, $ROOMS rooms, $MESSAGES msgs/room)"
     scripts/campfire-oracle prepare --app "$APP" --out "$ORACLE" \
-        --users "$USERS" --rooms "$ROOMS" --messages "$MESSAGES" >/dev/null \
+        --users "$USERS" --rooms "$ROOMS" --messages "$MESSAGES" \
+        --renderer-only >/dev/null \
         || die "campfire-oracle prepare failed"
 
     # FRESH TREES. The emitter writes over its output and never removes a
@@ -593,11 +645,52 @@ if (( SKIP_PREPARE == 0 )); then
     # the box's spinel tree carried a 09-25 `index.rbs` beside the current
     # `index_turbo_stream.rbs`, and `spinel --rbs` refused the two
     # declarations of one method (2026-10-07).
-    rm -rf "$EMIT" "$SP_EMIT"
-    step "transpiling campfire → $EMIT"
-    cargo run --quiet --release --bin roundhouse -- --target ruby "$APP" \
+    rm -rf "$EMIT_SOURCE" "$EMIT" "$SP_EMIT"
+    cp -a "$ORACLE" "$EMIT_SOURCE"
+    step "using the same transformed source for the emitted renderer"
+    step "transpiling Campfire → $EMIT"
+    cargo run --quiet --release --bin roundhouse -- --target ruby "$EMIT_SOURCE" \
         -o "$EMIT" --allow-unsupported > "$LOG_DIR/emit.log" 2>&1 \
         || die "transpile failed (see $LOG_DIR/emit.log)"
+    ruby - "$EMIT/boot.rb" <<'RUBY'
+path = ARGV.fetch(0)
+source = File.read(path)
+setting = 'Rails.env_name = ENV["RAILS_ENV"]'
+unless source.lines.count { |line| line.chomp == setting } == 1
+  abort "expected exactly one Rails.env_name assignment in emitted boot"
+end
+File.write(path, source.sub(setting, "#{setting}\nRails.cache_enabled = false"))
+RUBY
+    ruby - "$EMIT/runtime/action_controller/authenticity_token.rb" <<'RUBY'
+path = ARGV.fetch(0)
+source = File.read(path)
+setting = "  set_forgery_flag(true)"
+unless source.lines.count { |line| line.chomp == setting } == 1
+  abort "expected exactly one forgery-protection enable in emitted token runtime"
+end
+File.write(path, source.sub(setting, "  set_forgery_flag(false)"))
+RUBY
+    ruby -rjson - "$ORACLE/oracle.json" "$EMIT/benchmark-provenance.json" <<'RUBY'
+source, destination = ARGV
+metadata = JSON.parse(File.read(source))
+metadata = metadata.slice("campfire_sha", "benchmark_transform")
+metadata["benchmark_cache_override"] = "disabled in disposable emitted boot; does not affect generated applications"
+metadata["benchmark_forgery_override"] = "disabled in disposable emitted token runtime; Campfire header_only strategy is not modeled"
+File.write(destination, JSON.pretty_generate(metadata) + "\n")
+RUBY
+
+    # Use the same Puma release as the Rails source lockfile so the matched
+    # renderer pair does not accidentally compare app-server versions.
+    rails_puma="$(awk '/^    puma \(/ {gsub(/[()]/, "", $2); print $2; exit}' "$ORACLE/Gemfile.lock")"
+    [[ -n "$rails_puma" ]] || die "could not read Puma version from Campfire Gemfile.lock"
+    ruby - "$EMIT/Gemfile" "$rails_puma" <<'RUBY'
+path, version = ARGV
+source = File.read(path)
+unless source.lines.count { |line| line.chomp == 'gem "puma"' } == 1
+  abort "expected exactly one unpinned Puma dependency in emitted Gemfile"
+end
+File.write(path, source.sub('gem "puma"', %(gem "puma", "=#{version}")))
+RUBY
 
     step "bundling the emit"
     (cd "$EMIT" && bundle install >/dev/null 2>&1) || die "emit bundle install failed"
@@ -943,6 +1036,14 @@ start_lane() {
                 $nocache > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
+        rails-lowering)
+            # Renderer comparison: one worker, no Thruster/resque-pool,
+            # and Rails' null store, matching ruby-lowering below.
+            scripts/campfire-oracle serve --out "$ORACLE" --port "$port" \
+                --workers 1 --threads "$THREADS" --shape-report "$shape" \
+                --no-fragment-cache > "$log" 2>&1 &
+            SERVER_PID=$!
+            ;;
         rails-1p|rails-nocache-1p)
             local nc1=""; [[ "$lane" == "rails-nocache-1p" ]] && nc1="--no-fragment-cache"
             scripts/campfire-oracle serve --out "$ORACLE" --port "$port" \
@@ -975,6 +1076,25 @@ start_lane() {
             ( cd "$EMIT" && exec env RAILS_ENV=production RUBY_YJIT_ENABLE=1 \
                 RAILS_MAX_THREADS="$THREADS" ${jem:+LD_PRELOAD="$jem"} \
                 bundle exec puma -p "$port" -w "$w" -t "$THREADS:$THREADS" \
+                config.ru ) > "$log" 2>&1 &
+            SERVER_PID=$!
+            ;;
+        ruby-lowering)
+            # Same Ruby/Puma/worker shape as rails-lowering. Disable the
+            # Rails-level cache switch, custom response-cache budget, and
+            # runtime store so no cache path is exercised in this lane.
+            local jem; jem="$(find_jemalloc || true)"
+            echo "jemalloc=${jem:-ABSENT}" > "$shape"
+            echo "workers=1" >> "$shape"
+            echo "fragment-and-response-cache=disabled" >> "$shape"
+            echo "response-cache-budget-mb=0" >> "$shape"
+            echo "forgery-protection=disabled in disposable emitted token runtime (header_only strategy unsupported)" >> "$shape"
+            ( cd "$EMIT" && exec env RAILS_ENV=production SECRET_KEY_BASE="$SPINEL_SECRET" \
+                DISABLE_FRAGMENT_CACHE=1 \
+                CAMPFIRE_RESPONSE_CACHE_MB=0 \
+                RUBY_YJIT_ENABLE=1 RAILS_MAX_THREADS="$THREADS" \
+                ${jem:+LD_PRELOAD="$jem"} \
+                bundle exec puma -p "$port" -w 1 -t "$THREADS:$THREADS" \
                 config.ru ) > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
@@ -1146,26 +1266,32 @@ login_cookie() {
     local jar="$LOG_DIR/jar-$lane.txt"
     rm -f "$jar"
     case "$lane" in
-        rails|rails-nocache|rails-1p|rails-nocache-1p|rails-truffleruby)
+        rails|rails-nocache|rails-1p|rails-nocache-1p|rails-truffleruby|rails-lowering)
             scripts/campfire-oracle login --out "$ORACLE" --port "$port" --jar "$jar" >/dev/null \
                 || { fail "$lane sign-in failed"; return 1; }
             ;;
-        ruby|ruby-1p|spinel|spinel-1p|jruby|truffleruby|elixir)
-            # The emitted tree verifies campfire's `protect_from_forgery
-            # with: :exception` (09567dd7), so the token comes from the
-            # lane's own form, under the session cookie that holds it.
-            # Elixir still renders the meta tag; rust/go do not.
+        ruby|ruby-1p|ruby-lowering|spinel|spinel-1p|jruby|truffleruby|elixir)
+            # Token-based lanes post the form token; the lowerer-only
+            # Campfire lane is explicitly configured with
+            # The disposable emitted token runtime is adjusted after
+            # transpilation because header_only is not modeled yet.
             local token code
             token="$(curl -sS -H 'Accept-Encoding: identity' -c "$jar" \
                      "http://127.0.0.1:$port/session/new" \
                      | grep -o 'name="authenticity_token" value="[^"]*"' | head -1 \
                      | sed 's/.*value="//; s/"$//')"
-            [[ -n "$token" ]] || { fail "$lane served no CSRF token at /session/new"; return 1; }
-            code="$(curl -sS -b "$jar" -c "$jar" -o /dev/null -w '%{http_code}' \
-                    -X POST "http://127.0.0.1:$port/session" \
-                    --data-urlencode "email_address=user1@example.com" \
-                    --data-urlencode "password=secret123456" \
-                    --data-urlencode "authenticity_token=$token")"
+            if [[ -n "$token" ]]; then
+                code="$(curl -sS -b "$jar" -c "$jar" -o /dev/null -w '%{http_code}' \
+                        -X POST "http://127.0.0.1:$port/session" \
+                        --data-urlencode "email_address=user1@example.com" \
+                        --data-urlencode "password=secret123456" \
+                        --data-urlencode "authenticity_token=$token")"
+            else
+                code="$(curl -sS -b "$jar" -c "$jar" -o /dev/null -w '%{http_code}' \
+                        -X POST "http://127.0.0.1:$port/session" \
+                        --data-urlencode "email_address=user1@example.com" \
+                        --data-urlencode "password=secret123456")"
+            fi
             [[ "$code" == "302" ]] || { fail "$lane sign-in returned $code"; return 1; }
             ;;
         rust|go|tobi)
@@ -1188,14 +1314,18 @@ login_cookie() {
 }
 
 parse_wrk() {
-    local out="$1" req_sec p50 p99 non2xx
+    local out="$1" req_sec p50 p99 non2xx socket_errors
     req_sec="$(grep -E '^Requests/sec:' "$out" | awk '{print $2}')"
     p50="$(awk '/Latency Distribution/{f=1;next} f && /^[[:space:]]*50%/{print $2; exit}' "$out")"
     p99="$(awk '/Latency Distribution/{f=1;next} f && /^[[:space:]]*99%/{print $2; exit}' "$out")"
+    socket_errors="$(awk '/Socket errors:/ {for (i=3; i<=NF; i+=2) sum += $(i+1); print sum+0; found=1; exit} END {if (!found) print 0}' "$out")"
     # A 422 error page is cheap to serve. Counting it as throughput is
     # how the first POST cells reported thousands of rejected writes.
     non2xx="$(grep -E 'Non-2xx or 3xx responses:' "$out" | awk '{print $NF}')"
-    if [[ -n "$non2xx" && "$non2xx" != "0" ]]; then
+    # wrk excludes requests that time out before receiving a response.
+    # A throughput figure from a cell with socket errors is therefore a
+    # censored rate, not a comparable completed-request rate.
+    if [[ ( -n "$non2xx" && "$non2xx" != "0" ) || "$socket_errors" != "0" ]]; then
         req_sec=null
     fi
     norm() {
@@ -1210,7 +1340,7 @@ parse_wrk() {
         }'
     }
     [[ -z "$req_sec" ]] && req_sec=null
-    echo "{\"req_sec\":$req_sec,\"p50_ms\":$(norm "$p50"),\"p99_ms\":$(norm "$p99")}"
+    echo "{\"req_sec\":$req_sec,\"p50_ms\":$(norm "$p50"),\"p99_ms\":$(norm "$p99"),\"socket_errors\":$socket_errors}"
 }
 
 # ── run ──────────────────────────────────────────────────────────────
@@ -1323,6 +1453,8 @@ for lane in "${LANES[@]}"; do
     # "1 worker(s)".
     case "$lane" in
         rails-nocache-1p)    shape_note="1 worker x $THREADS threads, RENDERING (no fragment cache)" ;;
+        rails-lowering)     shape_note="1 worker x $THREADS threads, no fragment cache, no Thruster/resque-pool" ;;
+        ruby-lowering)      shape_note="1 worker x $THREADS threads, emitted cache disabled" ;;
         rails|rails-nocache) shape_note="campfire's own worker formula x $THREADS threads, thruster, jemalloc, resque-pool" ;;
         ruby)                shape_note="$(deployed_worker_count) worker(s) x $THREADS threads, jemalloc" ;;
         spinel)              shape_note="one process, workers autodetected" ;;
@@ -1385,7 +1517,7 @@ for lane in "${LANES[@]}"; do
     # state it is meant to, rather than one cold render smeared across a
     # short run.
     case "$lane" in
-        rails|rails-1p|rails-truffleruby)
+        rails|rails-1p|rails-truffleruby|rails-lowering)
             for ep in "${ENDPOINTS[@]}"; do
                 ep_is_post "$ep" && continue
                 curl -s -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" \
@@ -1405,9 +1537,9 @@ for lane in "${LANES[@]}"; do
         code="$(curl -s -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" \
                 -o "$body" -w '%{http_code}' \
                 "http://127.0.0.1:$port$(ep_path "$ep")")"
-        tags="$(ruby -e 'print File.read(ARGV[0]).scan(/<([a-zA-Z][-a-zA-Z0-9]*)/).size' "$body")"
-        printf '%s\t%s\tstatus=%s\ttags=%s\tbytes=%s\n' \
-            "$lane" "$ep" "$code" "$tags" "$(wc -c < "$body" | tr -d ' ')" \
+        read -r tags body_sha256 < <(ruby -rdigest -e 'html = File.read(ARGV[0]); print html.scan(/<([a-zA-Z][-a-zA-Z0-9]*)/).size, " ", Digest::SHA256.file(ARGV[0]).hexdigest' "$body")
+        printf '%s\t%s\tstatus=%s\ttags=%s\tbytes=%s\tsha256=%s\n' \
+            "$lane" "$ep" "$code" "$tags" "$(wc -c < "$body" | tr -d ' ')" "$body_sha256" \
             >> "$OUT_DIR/parity.txt"
     done
 
@@ -1427,6 +1559,10 @@ for lane in "${LANES[@]}"; do
     gzip_note=""
     (( GZIP )) && gzip_note=", gzip"
     for ep in "${ENDPOINTS[@]}"; do
+        if [[ "$lane" == "rails-lowering" || "$lane" == "ruby-lowering" ]] \
+            && ep_is_post "$ep"; then
+            continue
+        fi
         path="$(ep_path "$ep")"
         url="http://127.0.0.1:$port$path"
         if ep_is_post "$ep"; then
@@ -1726,10 +1862,10 @@ RUBY
     > "$OUT_DIR/env.base.json" 2>/dev/null || echo '{}' > "$OUT_DIR/env.base.json"
 
 ruby - "$OUT_DIR/env.base.json" "$ORACLE/oracle.json" "$OUT_DIR/env.json" \
-       "$ORACLE/Gemfile.lock" "$EMIT/Gemfile.lock" <<'RUBY'
+       "$ORACLE/Gemfile.lock" "$EMIT/Gemfile.lock" "$LATEST_CAMPFIRE" <<'RUBY'
 require "json"
 
-base_path, oracle_path, out_path, rails_lock, emit_lock = ARGV
+base_path, oracle_path, out_path, rails_lock, emit_lock, latest_campfire = ARGV
 
 def read_json(path)
   JSON.parse(File.read(path))
@@ -1741,17 +1877,15 @@ env = read_json(base_path) || {}
 env["benchmark"] = "campfire"
 oracle = read_json(oracle_path)
 env["oracle"] = oracle if oracle
+env["campfire_source_mode"] = latest_campfire == "1" ?
+  "latest basecamp/once-campfire main snapshot" : "explicit --app checkout"
 
 # The lane note travels WITH the data, because the renderer is generic
 # and the only place a sentence about THESE lanes can live is here,
-# beside the run it describes. It used to say what `rails-nocache` was,
-# because a page carrying `rails` without it published a caching Rails
-# against a rendering emit. Both sides cache now, so the note says that
-# instead — and the nocache gloss appears only when that lane ran.
+# beside the run it describes.
 # The app server is part of the measurement and the two lanes resolve it
 # separately — campfire's lockfile pins one, the emitted Gemfile asks for
-# whatever is current. They came out 7.2.1 and 8.0.1, which the published
-# logs said and the published page did not.
+# whatever is current. Their exact versions are attached below.
 def puma_version(lock_path)
   File.read(lock_path)[/^\s+puma \(([^)]+)\)/, 1]
 rescue Errno::ENOENT
@@ -1782,26 +1916,40 @@ one_p_ran   = targets_ran.any? { |t| t.end_with?("-1p") }
 tobi_ran    = targets_ran.include?("tobi")
 
 env["notes"] = [
-  ("<code>rails</code> and the emit lanes BOTH serve campfire's message " \
-   "fragments from a cache — Rails from Redis (<code>cached: true</code>), " \
-   "the emitted tree from its own process-local store — so the deployed " \
-   "lanes compare like with like. Until 2026-09-07 the emit had no " \
-   "fragment cache and this page carried a <code>rails-nocache</code> " \
-   "column so the comparison was renderer against renderer rather than " \
-   "emit against Redis; that column is now a diagnostic, requested by " \
-   "name, and is not published here." unless nocache_ran),
+  "Current Campfire's full-response, fragment/presentation, and record " \
+  "caches are bounded process-local stores, separate from its configured " \
+  "Rails.cache Redis adapter. This report is restricted to renderer-only " \
+  "lanes; cache-on deployment comparisons are not produced by this " \
+  "cache-off harness.",
   ("<code>rails-nocache</code> is Rails RENDERING, with " \
-   "<code>perform_caching = false</code>. It is a diagnostic — campfire's " \
+   "<code>perform_caching = false</code>. It is a legacy diagnostic — campfire's " \
    "messages index preloads only <code>with_creator</code>, so boosts, " \
-   "rich text and attachments are N+1 in Rails too — and never the " \
-   "headline: what campfire's users get is the cached page." if nocache_ran),
+   "rich text and attachments are N+1 in Rails too." if nocache_ran),
+  ("<code>rails-lowering</code> and <code>ruby-lowering</code> are the " \
+   "GET-only renderer-focused pair: both lanes use the current upstream " \
+   "source plus the identical documented campfire-lowering-v6 cache-off " \
+   "transform. One Puma worker, full-response, " \
+   "fragment/presentation, and record-snapshot caches disabled on both " \
+   "sides, and no Thruster/resque-pool on Rails; the production cache store " \
+   "is also replaced by Rails' null store. Both use the same Ruby and Puma " \
+   "versions. The disposable source transform disables forgery protection " \
+   "in Rails, and the emitted tree's disposable token runtime is adjusted the same " \
+   "way, because its runtime does not yet model Campfire's header-only CSRF " \
+   "strategy. This keeps form markup comparable but is not " \
+   "a security or deployment comparison. POST is " \
+   "excluded; Redis-backed job and cable adapters remain configured but " \
+   "are not part of these GET requests." \
+   if targets_ran.include?("rails-lowering") && targets_ran.include?("ruby-lowering")),
   "The deployed lanes are what each project would run on this box. " \
   "<code>rails</code> is once-campfire AS ITS OWN DOCKERFILE RUNS IT: " \
   "Thruster in front of Puma, <code>(processor_count * 0.666).ceil</code> " \
   "workers x 5 threads from its own <code>config/puma.rb</code>, jemalloc " \
   "preloaded, resque-pool alongside. <code>ruby</code> is the CRuby emit " \
-  "in the same Puma shape with the same allocator; <code>spinel</code> is " \
-  "the binary with its workers autodetected.",
+  "in the same worker/thread shape with the same allocator. The renderer " \
+  "pair pins both Puma lanes to Campfire's lockfile version. " \
+  "<code>spinel</code> is " \
+  "the binary with its workers autodetected." \
+  if (targets_ran & %w[rails ruby spinel]).any?,
   "<code>ruby</code> IS A MATCHED-SHAPE RUNTIME COMPARISON, NOT A " \
   "DEPLOYMENT CLAIM. It runs Rails' worker count so the number is not a " \
   "core count, but the emitted tree's Action Cable registry and its job " \
@@ -1812,7 +1960,8 @@ env["notes"] = [
   "shape <code>spinel</code> already has) is the planned replacement. " \
   "<code>spinel</code> needs none of this: " \
   "one process, green threads, one shared registry — which is why it is " \
-  "the emit lane the WebSocket tier can measure at its full worker count.",
+  "the emit lane the WebSocket tier can measure at its full worker count." \
+  if (targets_ran & %w[ruby spinel]).any?,
   ("The <code>-1p</code> lanes are the diagnostic, and what they pin is " \
   "ONE CPU rather than one process — CRuby needs a process per core " \
   "because of the GVL, while the binary is a single process either way " \
@@ -1825,15 +1974,16 @@ env["notes"] = [
   "and resque-pool, so its delta is not attributable to cores alone." if one_p_ran),
   "Known omissions, stated rather than discovered: the WebSocket phase's " \
   "rails lane runs Puma with campfire's worker count and its allocator but " \
-  "WITHOUT Thruster and resque-pool, and no lane terminates TLS.",
+  "WITHOUT Thruster and resque-pool, and no lane terminates TLS." \
+  if (targets_ran & %w[rails ruby spinel]).any?,
   "MEMORY IS THE SERVER PROCESS TREE, and the rails lanes keep part of " \
-  "themselves outside it. Their fragment cache, their Action Cable " \
-  "adapter and Resque's queue all live in a system Redis (~16 MB RSS " \
-  "here) that is nobody's descendant and so is in no lane's number — " \
-  "while the emit lanes hold their equivalent inside the measured " \
-  "process. Throughput is unaffected: the rails lanes pay for every " \
-  "Redis round trip in their req/s. Counted for rails: Thruster, the " \
-  "Puma master and its workers, resque-pool and its workers.",
+  "themselves outside it. Action Cable and Resque adapters may use system " \
+  "Redis, which is nobody's descendant and so is outside lane RSS; " \
+  "Campfire's page caches are process-local and are counted in Rails' RSS. " \
+  "Throughput includes any Redis round trips made by those adapters. " \
+  "Counted for rails: Thruster, the Puma master and its workers, " \
+  "resque-pool and its workers." \
+  if (targets_ran & %w[rails ruby spinel]).any?,
   ("<code>tobi</code> is <a href=\"https://github.com/tobi/campfire-once-ruby-ractor\">" \
    "tobi/campfire-once-ruby-ractor</a>: campfire ported BY HAND to plain " \
    "Ruby, no Rails, served by Falcon from worker Ractors in one process, " \
@@ -1845,7 +1995,7 @@ env["notes"] = [
    "listed in its README." if tobi_ran),
   "The CRuby fragment store is PER PROCESS, so the <code>ruby</code> " \
   "lane holds one cache per worker where <code>spinel</code> holds one " \
-  "for the whole binary.",
+  "for the whole binary." if (targets_ran & %w[ruby spinel]).any?,
   ("<code>jruby</code> and <code>truffleruby</code> are the SAME emitted " \
    "tree under another Ruby — <code>jruby</code> re-emitted with " \
    "<code>--target jruby</code> (identical app and framework; SQLite over " \
@@ -1881,8 +2031,9 @@ env["notes"] = [
    "row against <code>ruby-1p</code>, the same one-process shape on " \
    "CRuby." if tr_ran),
   ("<code>rails-truffleruby</code> is once-campfire ITSELF under " \
-   "TruffleRuby: the same oracle tree, rows, production config and Redis " \
-   "fragment cache, with a second bundle whose C extensions TruffleRuby " \
+   "TruffleRuby: the same oracle tree, rows, production config and " \
+   "process-local full-response/fragment caches (not Redis), with a second " \
+   "bundle whose C extensions TruffleRuby " \
    "compiled. It is ONE Puma process × 5 threads — TruffleRuby has no " \
    "<code>fork</code>, so neither campfire's worker formula nor " \
    "resque-pool can run, and Thruster is not in front — which makes it a " \
@@ -1918,6 +2069,18 @@ require "json"
 per_run, sj, sm, parity = ARGV
 records = File.readlines(per_run, chomp: true).reject(&:empty?).map { |l| JSON.parse(l) }
 abort "no measurements" if records.empty?
+parity_rows = {}
+if File.file?(parity)
+  File.readlines(parity, chomp: true).each do |line|
+    lane, endpoint, status, tags, bytes, sha256 = line.split("\t")
+    parity_rows[[lane, endpoint]] = {
+      status: status.to_s.split("=", 2).last,
+      tags: tags.to_s.split("=", 2).last,
+      bytes: bytes.to_s.split("=", 2).last,
+      sha256: sha256.to_s.split("=", 2).last
+    }
+  end
+end
 
 def median(xs)
   xs = xs.compact.sort
@@ -1944,6 +2107,26 @@ File.write(sj, JSON.pretty_generate(cells))
 
 md = +"# campfire: Rails vs the emitted tree\n\n"
 md << "_#{records.size} measurements across #{cells.size} cells_\n\n"
+if cells.any? { |c| c[:target] == "rails-lowering" } &&
+   cells.any? { |c| c[:target] == "ruby-lowering" }
+  unmatched = cells.select { |c| c[:target] == "rails-lowering" }.filter_map do |rails_cell|
+    ruby_cell = cells.find do |candidate|
+      candidate[:target] == "ruby-lowering" && candidate[:endpoint] == rails_cell[:endpoint]
+    end
+    rails_shape = parity_rows[["rails-lowering", rails_cell[:endpoint]]]
+    ruby_shape = parity_rows[["ruby-lowering", rails_cell[:endpoint]]]
+    rails_cell[:endpoint] unless ruby_cell && rails_shape && ruby_shape &&
+      rails_shape[:status] == "200" && ruby_shape[:status] == "200" &&
+      rails_shape[:tags] == ruby_shape[:tags] && rails_shape[:bytes] == ruby_shape[:bytes] &&
+      !rails_shape[:sha256].empty? && rails_shape[:sha256] == ruby_shape[:sha256]
+  end
+  unless unmatched.empty?
+    md << "**No valid Rails-vs-emitted speedup is reported:** the pre-load response check " \
+          "(HTTP status, HTML tag count, byte count, and full-body SHA-256) differs for " \
+          "#{unmatched.map { |ep| "`#{ep}`" }.join(", ")}. The rates below are diagnostic only; " \
+          "they do not establish equivalent output.\n\n"
+  end
+end
 cell = ->(v, p) { v.nil? ? "—" : ("%.#{p}f" % v) }
 cells.group_by { |c| c[:endpoint] }.each do |ep, eg|
   md << "## `#{ep}`\n\n"
@@ -1958,37 +2141,34 @@ cells.group_by { |c| c[:endpoint] }.each do |ep, eg|
   # operands were measured in this run.
   ruby = eg.find { |c| c[:target] == "ruby" }
   if ruby && ruby[:req_sec] && ruby[:req_sec] > 0
-    %w[rails rails-nocache].each do |name|
-      cmp = eg.find { |c| c[:target] == name }
-      next unless cmp && cmp[:req_sec]
-      md << "\n_%s / ruby = %.2fx_\n" % [name, cmp[:req_sec] / ruby[:req_sec]]
+    rails = eg.find { |c| c[:target] == "rails" }
+    if rails && rails[:req_sec] && rails[:req_sec] > 0
+      md << "\n_Deployment: ruby / rails = %.2fx_\n" % (ruby[:req_sec] / rails[:req_sec])
     end
   end
-  # Only when the diagnostic lane was actually requested. Both sides
-  # cache now, so `rails` is the like-for-like opponent and needs no
-  # gloss; a rendering-Rails column does, because a reader who takes it
-  # for the deployed number gets the mirror of the error the old
-  # `rails`/`rails-nocache` pairing existed to prevent.
-  if eg.any? { |c| c[:target] == "rails-nocache" }
-    md << "\n`rails-nocache` is Rails RENDERING (`perform_caching = " \
-          "false`) — a diagnostic, not the deployed number. campfire's " \
-          "messages index preloads only `with_creator`, so boosts, rich " \
-          "text and attachments are N+1 in Rails too; what its users get " \
-          "is the cached page, which is what `rails` measures.\n"
+  ruby_lowering = eg.find { |c| c[:target] == "ruby-lowering" }
+  rails_lowering = eg.find { |c| c[:target] == "rails-lowering" }
+  rails_shape = parity_rows[["rails-lowering", ep]]
+  ruby_shape = parity_rows[["ruby-lowering", ep]]
+  parity_ok = rails_shape && ruby_shape && rails_shape[:status] == "200" &&
+    ruby_shape[:status] == "200" && rails_shape[:tags] == ruby_shape[:tags] &&
+    rails_shape[:bytes] == ruby_shape[:bytes] && !rails_shape[:sha256].empty? &&
+    rails_shape[:sha256] == ruby_shape[:sha256]
+  if parity_ok && ruby_lowering&.dig(:req_sec).to_f > 0 && rails_lowering&.dig(:req_sec).to_f > 0
+    md << "\n_Renderer comparison (fragment cache off): ruby-lowering / rails-lowering = %.2fx_\n" %
+          (ruby_lowering[:req_sec] / rails_lowering[:req_sec])
   end
   md << "\n"
 end
 
 if File.exist?(parity) && !File.read(parity).empty?
   md << "## What each lane rendered\n\n"
-  md << "A throughput number for a page that is not the same page is not\n"
-  md << "a comparison. One authenticated GET per lane per endpoint,\n"
-  md << "before any load:\n\n"
-  md << "| lane | endpoint | status | tags | bytes |\n|---|---|--:|--:|--:|\n"
+  md << "Pre-load response audit: one authenticated GET per lane per endpoint.\n\n"
+  md << "| lane | endpoint | status | tags | bytes | body SHA-256 (prefix) |\n|---|---|--:|--:|--:|---|\n"
   File.readlines(parity, chomp: true).each do |line|
-    lane, ep, st, tags, bytes = line.split("\t")
-    md << "| %s | `%s` | %s | %s | %s |\n" % [lane, ep, st.sub("status=", ""),
-                                              tags.sub("tags=", ""), bytes.sub("bytes=", "")]
+    lane, ep, st, tags, bytes, sha256 = line.split("\t")
+    md << "| %s | `%s` | %s | %s | %s | `%s` |\n" % [lane, ep, st.sub("status=", ""),
+                                                        tags.sub("tags=", ""), bytes.sub("bytes=", ""), sha256.to_s.sub("sha256=", "")[0, 12]]
   end
   md << "\n"
 end

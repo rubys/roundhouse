@@ -2,6 +2,8 @@ module Rails
   def self.env: () -> Env
   def self.env_name: () -> String?
   def self.env_name=: (String? name) -> String?
+  def self.cache_enabled: () -> bool
+  def self.cache_enabled=: (bool enabled) -> bool
   def self.secret_key_base: () -> String?
   def self.secret_key_base=: (String? key) -> String?
   def self.root: () -> AppPath

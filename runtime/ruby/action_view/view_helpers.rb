@@ -843,6 +843,7 @@ module ActionView
     # output is for OTHER sessions' pages". Found as a per-form byte
     # divergence in every broadcast frame by scripts/campfire-compare.
     def self.csrf_token_hidden_input
+      return "" unless ActionController::Base.allow_forgery_protection
       # `== true`, not truthiness: what an UNSET module var reads as
       # is target-dependent (elixir's process-dictionary default was a
       # truthy `%{}`, which stripped this input from every page render

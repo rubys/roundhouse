@@ -451,8 +451,7 @@ fn view_stream_name(streamables: &[Expr], ctx: &ViewCtx) -> Option<Expr> {
                     return None;
                 }
                 parts.push(Streamable::Record {
-                    singular: name,
-                    id: send(Some(arg.clone()), "id", vec![], None, false),
+                    record: arg.clone(),
                 });
             }
         }

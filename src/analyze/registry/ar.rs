@@ -675,7 +675,7 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     let node_ty = Ty::Class { id: node_id.clone(), args: vec![] };
     let mut fragment = ClassInfo::default();
     fragment.class_methods.insert(Symbol::from("wrap"), fragment_ty.clone());
-    for m in ["to_s", "to_html", "source"] {
+    for m in ["to_s", "to_html", "source", "to_plain_text"] {
         fragment.instance_methods.insert(Symbol::from(m), Ty::Str);
     }
     for m in ["find_all", "css"] {

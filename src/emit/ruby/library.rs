@@ -3425,9 +3425,11 @@ fn rewrite_helper_calls(
         }
         if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
             let m = method.as_str();
-            if (m == "request" || m == "cookies" || m == "session" || m == "flash"
-                || m == "params")
+            if (m == "request" || m == "controller" || m == "cookies" || m == "session"
+                || m == "flash" || m == "params")
                 && args.is_empty()
+                && (m != "controller"
+                    || (!own_methods.contains(method) && !own_params.contains(method)))
             {
                 let span = expr.span;
                 let current = Expr::new(
@@ -3439,8 +3441,8 @@ fn rewrite_helper_calls(
                         ],
                     },
                 );
-                let (recv, meth) = if m == "request" {
-                    (current, Symbol::from("request"))
+                let (recv, meth) = if m == "request" || m == "controller" {
+                    (current, method.clone())
                 } else {
                     (
                         Expr::new(

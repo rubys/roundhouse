@@ -379,9 +379,8 @@ fn hash_sym_key(k: &Expr) -> Option<Symbol> {
 pub enum Streamable {
     /// A literal segment: `:messages`, `"articles"`.
     Literal(String),
-    /// A record, contributing `<singular>_<id>` with the id read at
-    /// run time.
-    Record { singular: String, id: Expr },
+    /// A record, contributing its runtime GlobalID parameter.
+    Record { record: Expr },
 }
 
 /// Spell a turbo stream name from its streamables — THE convention,
@@ -439,12 +438,8 @@ pub enum Streamable {
 /// appears, and the call sites are not all ours to see — the app's test
 /// helpers are app code.
 ///
-/// The model NAME is a literal rather than `self.class.name`, the same
-/// rule `push_attachable_sgid` and `lower::signed_id` state: it is a
-/// compile-time fact, and baking it keeps the runtime free of
-/// reflection. NOTE the consequence for STI — `Rooms::Closed` mints
-/// `gid://app/Rooms::Closed/3` where Rails mints the same, because
-/// Rails uses the instance's own class too.
+/// The record's concrete class name comes from `self.class.name`, which
+/// matches Rails' GlobalID behavior even when STI stores demodulized names.
 pub fn push_to_gid_param(
     methods: &mut Vec<crate::dialect::MethodDef>,
     model: &crate::dialect::Model,
@@ -456,11 +451,32 @@ pub fn push_to_gid_param(
     {
         return;
     }
-    let mut model_lit = Expr::new(
+    let self_ref = || Expr::new(crate::span::Span::synthetic(), ExprNode::SelfRef);
+    let mut class_read = Expr::new(
         crate::span::Span::synthetic(),
-        ExprNode::Lit { value: Literal::Str { value: model.name.0.as_str().to_string() } },
+        ExprNode::Send {
+            recv: Some(self_ref()),
+            method: Symbol::from("class"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
     );
-    model_lit.ty = Some(crate::ty::Ty::Str);
+    class_read.ty = Some(crate::ty::Ty::Class {
+        id: model.name.clone(),
+        args: vec![],
+    });
+    let mut model_name = Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_read),
+            method: Symbol::from("name"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    model_name.ty = Some(crate::ty::Ty::Str);
     // `self.id`, NOT `@id`: this method lands on every model INCLUDING
     // the abstract `ApplicationRecord`, and an ivar read there makes
     // the ancestor hold the `@id` slot — the union point that widens
@@ -490,10 +506,12 @@ pub fn push_to_gid_param(
         ExprNode::Send {
             recv: Some(Expr::new(
                 crate::span::Span::synthetic(),
-                ExprNode::Const { path: vec![crate::ident::Symbol::from("GlobalID")] },
+                ExprNode::Const {
+                    path: vec![crate::ident::Symbol::from("GlobalID")],
+                },
             )),
             method: crate::ident::Symbol::from("param"),
-            args: vec![model_lit, id_read],
+            args: vec![model_name, id_read],
             block: None,
             parenthesized: true,
         },
@@ -518,27 +536,18 @@ pub fn push_to_gid_param(
     });
 }
 
-/// `GlobalID.param("Room", <id expr>)` — the runtime mint. The model
-/// name is camelized from the streamable's singular, which is the same
-/// name the record's class carries.
-fn gid_param_call(singular: &str, id: &Expr) -> Expr {
-    let model = crate::naming::camelize(singular);
-    let model_lit = Expr::new(
-        crate::span::Span::synthetic(),
-        ExprNode::Lit { value: Literal::Str { value: model } },
-    );
-    let recv = Expr::new(
-        crate::span::Span::synthetic(),
-        ExprNode::Const { path: vec![crate::ident::Symbol::from("GlobalID")] },
-    );
+/// Ask the record for its GlobalID parameter. Besides matching Rails'
+/// `try(:to_gid_param) || to_param`, this preserves the concrete class
+/// name for STI records instead of guessing it from the base singular.
+fn gid_param_call(record: &Expr) -> Expr {
     Expr::new(
         crate::span::Span::synthetic(),
         ExprNode::Send {
-            recv: Some(recv),
-            method: crate::ident::Symbol::from("param"),
-            args: vec![model_lit, id.clone()],
+            recv: Some(record.clone()),
+            method: crate::ident::Symbol::from("to_gid_param"),
+            args: vec![],
             block: None,
-            parenthesized: true,
+            parenthesized: false,
         },
     )
 }
@@ -552,12 +561,12 @@ pub fn stream_name(parts: &[Streamable]) -> Expr {
         }
         match part {
             Streamable::Literal(text) => pending.push_str(text),
-            Streamable::Record { singular, id } => {
+            Streamable::Record { record } => {
                 interp.push(crate::expr::InterpPart::Text {
                     value: std::mem::take(&mut pending),
                 });
                 interp.push(crate::expr::InterpPart::Expr {
-                    expr: gid_param_call(singular, id),
+                    expr: gid_param_call(record),
                 });
             }
         }

@@ -378,6 +378,13 @@ class ViewHelpersTest < Minitest::Test
     assert_equal %(<input type="hidden" name="authenticity_token" value="">), out
   end
 
+  def test_csrf_token_hidden_input_is_omitted_when_forgery_protection_is_disabled
+    ActionController::Base.allow_forgery_protection = false
+    assert_equal "", ViewHelpers.csrf_token_hidden_input
+  ensure
+    ActionController::Base.allow_forgery_protection = true
+  end
+
   def test_method_override_input_emits_for_patch
     out = ViewHelpers.method_override_input(:patch)
     assert_equal %(<input type="hidden" name="_method" value="patch">), out

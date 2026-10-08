@@ -2339,6 +2339,21 @@ jobs:
       - name: scripts/compare ruby
         if: ${{ !cancelled() }}
         run: scripts/compare ruby
+      # Keep 3.4 as the supported minimum above; exercise the same emitted
+      # runtime gates on Ruby 4.0 as a separate forward-compatibility lane.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+          working-directory: ./runtime/spinel/scaffold
+      - name: Ruby 4.0 framework runtime tests
+        if: ${{ !cancelled() }}
+        run: cargo test --test framework_tests_ruby -- --ignored --nocapture
+      - name: Ruby 4.0 CRuby gates
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --test uuid_key_ruby -- --ignored --nocapture
+          cargo test --test tiny_api cruby_gate_ -- --ignored --nocapture
 
   # compare-jruby: same emitted tree as compare-ruby but served by Puma
   # on the JVM via JRuby with the JDBC db backend (runtime/db.rb =

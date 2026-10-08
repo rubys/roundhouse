@@ -23,21 +23,14 @@
 # result is not enough — `prepare` records the revision in oracle.json and
 # the report should print it. See [[feedback_pin_benchmarks_not_ledgers]].
 #
-# FRAGMENT CACHING IS A LANE, NOT A DETAIL. campfire renders its message
-# list as `render partial: …, collection: @messages, cached: true`, and
-# production.rb points `cache_store` at Redis. With Redis up, Rails reads
-# 40 rendered message fragments back out of it and never runs the
-# partial. MEASURED on this box, `/rooms/1/messages` after
-# `redis-cli flushall`: 503 ms cold, 5 ms warm — 100x, and the 18-query
-# request log is the same fact from the other side.
-#
-# That is what a campfire deployment really does, so it is a lane worth
-# measuring. It is NOT a comparison against a tree that has no fragment
-# cache: that number is Redis's, not Rails' renderer's. `serve` takes
-# `--no-fragment-cache`, which sets `perform_caching = false` and the
-# null store through `config/initializers/zz_bench_cache.rb` (written by
-# `prepare`, gated on an env var, and the only file this oracle adds to
-# campfire's own source). Rails RENDERING the same page takes ~46 ms.
+# CAMPFIRE'S CURRENT CACHES ARE NOT ITS RAILS REDIS CACHE. Current main
+# has a per-worker ResponseCache (full HTML) and a separate per-worker
+# FragmentCache MemoryStore; the production Rails.cache Redis store is a
+# different facility. Do not attribute these renderer measurements to
+# Redis. `--renderer-only` applies a deterministic cache-off source transform
+# to the disposable oracle before it is bundled; both the Rails and emitted
+# renderer lanes use that identical transformed source. The deployed lanes
+# retain Campfire's real cache behavior.
 #
 # Publish both or publish neither.
 #
@@ -86,6 +79,8 @@
 #   --users N       seeded users (default 50)
 #   --rooms N       seeded rooms (default 5)
 #   --messages N    seeded messages per room (default 100)
+#   --renderer-only Apply the deterministic cache-off transform used by the
+#                   matched Rails/Roundhouse renderer comparison.
 #   --deployed      Serve the shape once-campfire's own Dockerfile serves:
 #                   campfire's `config/puma.rb` worker formula rather than
 #                   a pinned count, jemalloc preloaded, Thruster in front,
@@ -119,10 +114,8 @@
 #   --env NAME      RAILS_ENV for `serve` (default production). Development
 #                   is 12x slower on this app and is not a benchmark.
 #   --no-fragment-cache
-#                   Serve with `perform_caching = false` and the null
-#                   store. Default is ON, which is what a campfire
-#                   deployment does — and which makes the message list a
-#                   Redis read rather than a render. See the header.
+#                   Disable fragment/presentation, record-snapshot, and
+#                   full-response caches. Default is ON. See the header.
 #   --jar PATH      cookie jar for `login` (default <out>/tmp/bench-jar.txt)
 #   --count N       users to mint cookies for (`cookies`, default --users)
 #   --cookie-file P where `cookies` writes them (default <out>/tmp/session-cookies.txt)
@@ -179,6 +172,7 @@ COOKIE_FILE=""
 SEED_DB=""
 SEED_COOKIES=""
 FORCE=0
+RENDERER_ONLY=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -194,6 +188,7 @@ while [[ $# -gt 0 ]]; do
         --users)    USERS="$2"; shift 2 ;;
         --rooms)    ROOMS="$2"; shift 2 ;;
         --messages) MESSAGES="$2"; shift 2 ;;
+        --renderer-only) RENDERER_ONLY=1; shift ;;
         --deployed) DEPLOYED=1; shift ;;
         # Absolutised here because `serve` writes to it AFTER `cd
         # "$OUT"`, so a relative path would land in the app's tree — or,
@@ -253,6 +248,12 @@ cmd_prepare() {
         (cd "$APP" && tar -cf - .) | tar -x -C "$OUT"
     fi
 
+    if (( RENDERER_ONLY )); then
+        step "applying the matched cache-off renderer transform"
+        "$REPO_ROOT/scripts/campfire-lowering-transform" "$OUT" \
+            || die "Campfire renderer transform failed"
+    fi
+
     step "bundling (see the header on why this is a copy)"
     (cd "$OUT" && bundle install >/dev/null) || die "bundle install failed"
 
@@ -265,20 +266,12 @@ cmd_prepare() {
         bin/rails runner "$(cat "$REPO_ROOT/scripts/campfire-oracle-seed.rb")") \
         || die "seeding failed"
 
-    # The one file this oracle adds to campfire's own source, and it is
-    # inert unless the env var is set — see the header on why fragment
-    # caching is a lane rather than a setting.
-    step "installing the fragment-cache lane knob"
+    # This initializer controls Rails' cache path for the no-cache lane.
+    # The serve command independently sets the full-response cache budget.
+    step "installing the renderer-cache lane switch"
     cat > "$OUT/config/initializers/zz_bench_cache.rb" <<'INIT'
-# Benchmark lane knob, added by roundhouse's scripts/campfire-oracle.
-# NOT campfire's: inert unless DISABLE_FRAGMENT_CACHE=1.
-#
-# campfire renders its message list with `cached: true` against a
-# Redis-backed store. That is what a deployment does, and it means the
-# 40 message fragments are READ BACK rather than rendered — measured at
-# 503 ms cold against 5 ms warm. A tree with no fragment cache cannot be
-# compared against the warm number; this switch produces the other
-# operand, Rails actually rendering.
+# Benchmark lane knob, added to the disposable copy by
+# scripts/campfire-oracle. NOT part of Campfire upstream.
 if ENV["DISABLE_FRAGMENT_CACHE"] == "1"
   Rails.application.config.action_controller.perform_caching = false
   Rails.application.config.cache_store = :null_store
@@ -311,8 +304,12 @@ INIT
   "rails_revision": "$rails_rev",
   "rails_version": "$(cd "$OUT" && bin/rails runner 'print Rails.version' 2>/dev/null || echo unknown)",
   "ruby_version": "$(ruby -e 'print RUBY_VERSION')",
+  "puma_version": "$(cd "$OUT" && bundle exec ruby -e 'require "puma"; print Gem.loaded_specs.fetch("puma").version' 2>/dev/null || echo unknown)",
   "serve_env": "$RAILS_ENV_NAME",
-  "fragment_cache_default": true,
+  "fragment_cache_default": $( (( RENDERER_ONLY )) && echo false || echo true ),
+  "full_response_cache_default_mb": 64,
+  "benchmark_transform": "$( (( RENDERER_ONLY )) && echo campfire-lowering-v6 || echo none )",
+  "benchmark_transform_scope": "$( (( RENDERER_ONLY )) && echo identical cache-off source transform for Rails oracle and emitted renderer || echo unmodified upstream source )",
   "seed": { "users": $USERS, "rooms": $ROOMS, "messages_per_room": $MESSAGES }
 }
 JSON
@@ -359,6 +356,12 @@ cmd_serve() {
     if [[ "$RAILS_ENV_NAME" == "production" && ! -f "$OUT/storage/db/production.sqlite3" ]]; then
         die "no production DB — run 'prepare' (it stages one from the seed)"
     fi
+    if (( FRAGMENT_CACHE )); then
+        export CAMPFIRE_RESPONSE_CACHE_MB=64
+    else
+        export CAMPFIRE_RESPONSE_CACHE_MB=0
+    fi
+    report_shape "response-cache-budget-mb=$CAMPFIRE_RESPONSE_CACHE_MB"
     case "$RUNTIME" in
         cruby) ;;
         truffleruby)
@@ -722,14 +725,25 @@ cmd_login() {
     token="$(curl -sS -H 'Accept-Encoding: identity' -c "$JAR" \
              "http://127.0.0.1:$PORT/session/new" \
              | grep -o 'name="authenticity_token" value="[^"]*"' | head -1 \
-             | sed 's/.*value="//; s/"$//')"
-    [[ -n "$token" ]] || die "no CSRF token at /session/new — is the server up on :$PORT?"
+             | sed 's/.*value="//; s/"$//' || true)"
     local code
-    code="$(curl -sS -b "$JAR" -c "$JAR" -o /dev/null -w '%{http_code}' \
-            -X POST "http://127.0.0.1:$PORT/session" \
-            --data-urlencode "email_address=user1@example.com" \
-            --data-urlencode "password=secret123456" \
-            --data-urlencode "authenticity_token=$token")"
+    if [[ -n "$token" ]]; then
+        code="$(curl -sS -b "$JAR" -c "$JAR" -o /dev/null -w '%{http_code}' \
+                -X POST "http://127.0.0.1:$PORT/session" \
+                --data-urlencode "email_address=user1@example.com" \
+                --data-urlencode "password=secret123456" \
+                --data-urlencode "authenticity_token=$token")"
+    else
+        # Latest Campfire uses header_only verification and intentionally
+        # emits no hidden token. Preserve that Rails behavior: same-origin
+        # Fetch Metadata plus Origin, not a token-less cross-site POST.
+        code="$(curl -sS -b "$JAR" -c "$JAR" -o /dev/null -w '%{http_code}' \
+                -X POST "http://127.0.0.1:$PORT/session" \
+                -H 'Sec-Fetch-Site: same-origin' \
+                -H "Origin: http://127.0.0.1:$PORT" \
+                --data-urlencode "email_address=user1@example.com" \
+                --data-urlencode "password=secret123456")"
+    fi
     [[ "$code" == "302" ]] || die "sign-in returned $code, expected 302"
     step "signed in — jar at $JAR"
 }

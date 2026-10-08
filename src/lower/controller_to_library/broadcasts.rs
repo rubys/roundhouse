@@ -362,9 +362,9 @@ fn streamable(arg: &Expr) -> Option<Streamable> {
     if let Some(text) = literal_text(arg) {
         return Some(Streamable::Literal(text));
     }
+    record_singular(arg)?;
     Some(Streamable::Record {
-        singular: record_singular(arg)?,
-        id: read_id(arg.clone(), arg.span),
+        record: arg.clone(),
     })
 }
 
@@ -406,19 +406,6 @@ fn record_singular(e: &Expr) -> Option<String> {
         }
         _ => None,
     }
-}
-
-fn read_id(recv: Expr, span: Span) -> Expr {
-    Expr::new(
-        span,
-        ExprNode::Send {
-            recv: Some(recv),
-            method: Symbol::from("id"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    )
 }
 
 #[derive(Clone, Copy)]

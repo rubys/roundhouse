@@ -1,0 +1,183 @@
+#!/usr/bin/env ruby
+# Apply the explicit, renderer-only normalization used by both sides of the
+# Campfire lowering comparison. This runs on a disposable source copy, never
+# the fetched/upstream checkout.
+
+require "json"
+require "digest"
+require "fileutils"
+require "find"
+require "pathname"
+
+root = Pathname(ARGV.fetch(0)).expand_path
+abort "usage: scripts/campfire-lowering-transform CAMPFIRE_COPY" unless root.directory?
+
+def transform_file(root, relative)
+  path = root.join(relative)
+  abort "benchmark transform: missing #{relative}" unless path.file?
+  original = path.read
+  updated = yield original
+  abort "benchmark transform: expected source shape not found in #{relative}" if updated == original
+  path.write(updated)
+end
+
+def require_source(root, relative, needle, explanation)
+  path = root.join(relative)
+  abort "benchmark transform: missing #{relative}" unless path.file?
+  abort "benchmark transform: #{explanation}" unless path.read.include?(needle)
+end
+
+# These classes are replaced wholesale below, so checking only their names
+# would silently erase any later upstream behavior. A source change requires
+# reviewing and updating the transformation contract before benchmarking it.
+EXPECTED_SOURCE_SHA256 = {
+  "app/models/response_cache.rb" => "5651b407dceab835abdf385aef9289f830458be908cf14dd2b31965233ee80e8",
+  "app/models/record_cache.rb" => "d3efdc9dfea17a2ea0c8d6399accd1768333e2d3c929cdd10e19fe86ce4cab15",
+  "app/controllers/concerns/cached_responses.rb" => "0f26f44672464d2edbf2ac8562caafe45071874b5db4beb3a8a343a133b1edf5",
+  "app/models/fragment_cache.rb" => "8b6e9feba41ea732cfc53aeae0fb3297705df8a229df2f875e3458378927db85"
+}.freeze
+
+EXPECTED_SOURCE_SHA256.each do |relative, expected|
+  path = root.join(relative)
+  abort "benchmark transform: missing #{relative}" unless path.file?
+  actual = Digest::SHA256.file(path).hexdigest
+  unless actual == expected
+    abort "benchmark transform: #{relative} changed (sha256 #{actual}); review and update the cache-off transform contract"
+  end
+end
+
+# Rails' cache store is switched to NullStore by the benchmark serve path.
+# A direct Redis client call would bypass that switch, so refuse a source
+# tree that introduces one rather than silently including Redis work.
+direct_redis_call = /\b[A-Za-z_]*redis[A-Za-z0-9_]*\s*(?:\.|\[|::)/i
+Find.find(root.join("app").to_s) do |entry|
+  next unless File.file?(entry) && entry.match?(/\.(?:rb|erb|jbuilder)\z/)
+  next unless File.read(entry).match?(direct_redis_call)
+  abort "benchmark transform: direct Redis client call found in #{Pathname(entry).relative_path_from(root)}; renderer-only lanes cannot claim Redis is disabled"
+end
+
+transform_file(root, "config/environments/production.rb") do |source|
+  setting = "  config.action_controller.perform_caching = true"
+  unless source.lines.count { |line| line.chomp == setting } == 1
+    abort "benchmark transform: expected exactly one production perform_caching=true setting"
+  end
+  source.sub(
+    setting,
+    [
+      "  config.action_controller.perform_caching = false",
+      # The emitted runtime does not yet implement Campfire's header-only
+      # CSRF strategy. Disable it in the Rails copy too; the emitted tree's
+      # disposable boot gets the matching override after transpilation.
+      "  config.action_controller.allow_forgery_protection = false"
+    ].join("\n")
+  )
+end
+
+require_source(root, "app/models/response_cache.rb", "class ResponseCache",
+  "ResponseCache implementation shape changed")
+require_source(root, "app/models/record_cache.rb", "class RecordCache",
+  "RecordCache implementation shape changed")
+
+transform_file(root, "app/models/response_cache.rb") do |_source|
+  <<~RUBY
+    # This renderer-only benchmark disables caches on both lanes. Keep the
+    # constants referenced by view helpers, but omit cache/version machinery.
+    class ResponseCache
+      MAX_ENTRY_BYTES = 1_048_576
+      MAX_KEY_BYTES = 2_048
+
+      def self.instance
+        self
+      end
+
+      def self.budget
+        0
+      end
+
+      def self.version
+        nil
+      end
+    end
+  RUBY
+end
+
+transform_file(root, "app/models/record_cache.rb") do |_source|
+  <<~RUBY
+    # Record snapshots are disabled alongside the other caches.
+    class RecordCache
+      def self.fetch(_key, _version)
+        yield
+      end
+    end
+  RUBY
+end
+
+transform_file(root, "app/controllers/concerns/cached_responses.rb") do |source|
+  unless source.include?("module CachedResponses")
+    abort "benchmark transform: unexpected CachedResponses implementation"
+  end
+  <<~RUBY
+    # Do not register the upstream cache-version callback in either lane.
+    module CachedResponses
+      def perform_caching
+        false
+      end
+
+      def read_record_cache_version
+        nil
+      end
+
+      def cache_read_response
+        yield
+      end
+    end
+  RUBY
+end
+
+transform_file(root, "app/models/fragment_cache.rb") do |source|
+  unless source.include?("ContentKey = Data.define(:digest)") &&
+         source.include?("STORE = ActiveSupport::Cache::MemoryStore.new")
+    abort "benchmark transform: unexpected current FragmentCache implementation"
+  end
+  <<~RUBY
+    # Both renderer lanes disable every cache. Keep only the small interface
+    # referenced by the app; the source MemoryStore is outside this comparison.
+    class FragmentCache
+      class ContentKey
+        def initialize(digest)
+          @digest = digest
+        end
+
+        def digest
+          @digest
+        end
+
+        def cache_key
+          @digest
+        end
+      end
+
+      def self.store
+        Rails.cache
+      end
+
+      def self.transaction_open?
+        false
+      end
+    end
+  RUBY
+end
+
+provenance = {
+  "name" => "campfire-lowering-v6",
+  "source_sha256" => EXPECTED_SOURCE_SHA256,
+  "changes" => [
+    "disable perform_caching in the renderer-only disposable source copy",
+    "disable forgery protection in the disposable Rails source copy; the emitted disposable boot is adjusted after transpilation",
+    "replace ResponseCache, RecordCache, CachedResponses, and FragmentCache implementations with no-cache interfaces",
+    "apply this identical source transform to Rails and emitted renderer lanes"
+  ]
+}
+FileUtils.mkdir_p(root.join("tmp"))
+root.join("tmp/campfire-lowering-transform.json").write(JSON.pretty_generate(provenance) + "\n")
+puts "applied #{provenance.fetch("name")} to #{root}"

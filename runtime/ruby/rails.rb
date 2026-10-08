@@ -20,6 +20,10 @@ module Rails
     # scaffold). Same global-slot idiom as `ActiveRecord.adapter`.
     attr_accessor :env_name
 
+    # The emitted app's cache setting. Kept as runtime state so a
+    # renderer-only benchmark can disable caching in its disposable tree.
+    attr_accessor :cache_enabled
+
     # SECRET_KEY_BASE, parked the same way and for the same reason. The
     # app's own operator tooling is what produces it — campfire's
     # `script/admin/generate-secrets` prints `SECRET_KEY_BASE=<64 hex
@@ -34,6 +38,7 @@ module Rails
     # — it would look like it worked until the process restarted.
     attr_accessor :secret_key_base
   end
+  self.cache_enabled = true
 
   # Rails-faithful: the parked RAILS_ENV wins, development is the
   # default when unset (serving/bench harnesses pass
@@ -220,6 +225,7 @@ module Rails
     # legitimately render to nothing, and treating that as a miss would
     # re-render it on every request forever.
     def read_str(key)
+      return nil unless Rails.cache_enabled
       k = key.to_s
       return nil unless @entries.key?(k)
       due = @expires_at[k]
@@ -230,6 +236,7 @@ module Rails
     end
 
     def write_str(key, value, ttl)
+      return value unless Rails.cache_enabled
       k = key.to_s
       @entries[k] = value
       @expires_at[k] = ttl > 0 ? Time.now.to_i + ttl : 0
@@ -265,6 +272,7 @@ module Rails
     # the same). A whole-store flush at the cap resets every window;
     # that is the bound's shape, not a cost anything pays today.
     def increment_str(key, ttl)
+      return 1 unless Rails.cache_enabled
       k = key.to_s
       hit = read_str(k)
       if hit.nil?

@@ -80,8 +80,11 @@ module ActionController
     # `@status =`, `@body =`, `@location =` from render/redirect_to/head).
     def status: () -> Integer
     def body: () -> String
+    def response_body: () -> String
+    def response_body=: (String value) -> String
     def location: () -> String?
     def content_type: () -> String
+    def content_type=: (String value) -> String
 
     # True once render/redirect_to/head has produced a response — the
     # halting check the synthesized before_action preamble runs after

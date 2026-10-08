@@ -98,6 +98,7 @@ module ActionText
     def to_s: () -> String
     def to_html: () -> String
     def source: () -> String
+    def to_plain_text: () -> String
     def find_all: (String selector) -> Array[ActionText::Node]
     def css: (String selector) -> Array[ActionText::Node]
     def at_css: (String selector) -> ActionText::Node?

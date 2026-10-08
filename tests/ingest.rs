@@ -1954,6 +1954,92 @@ fn multi_write_with_post_rest_targets_ingests_and_round_trips() {
 }
 
 #[test]
+fn nested_multi_write_binds_one_literal_rhs_and_destructures_the_pair() {
+    let result = ruby_prism::parse(b"a, (b, c) = [1, [2, 3]]");
+    assert_eq!(result.errors().count(), 0);
+    let stmt = result.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+    let expr = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect("nested literal destructure");
+    let ExprNode::Seq { exprs } = &*expr.node else { panic!("expected one-shot desugar, got {:?}", expr.node) };
+
+    let ExprNode::Assign { target: LValue::Var { name: tmp, .. }, value } = &*exprs[0].node else {
+        panic!("RHS must be bound once: {:?}", exprs[0].node);
+    };
+    assert!(matches!(&*value.node, ExprNode::Array { .. }), "RHS is evaluated once: {:?}", value.node);
+
+    let assigns_nested_target = exprs.iter().any(|e| {
+        matches!(&*e.node, ExprNode::Assign { target: LValue::Var { name, .. }, .. } if name.as_str() == "c")
+    });
+    assert!(assigns_nested_target, "nested target c must be assigned: {exprs:?}");
+    assert!(
+        matches!(&*exprs.last().unwrap().node, ExprNode::Var { name, .. } if name == tmp),
+        "the expression value is the original RHS, not the last write"
+    );
+}
+
+#[test]
+fn nested_multi_write_array_literal_indexes_without_coercion() {
+    let result = ruby_prism::parse(b"a, (b, c) = [1, [2, 3]]");
+    let stmt = result.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+    let expr = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap();
+    let ExprNode::Seq { exprs } = &*expr.node else { panic!("{:?}", expr.node) };
+    assert!(matches!(&*exprs[0].node, ExprNode::Assign { value, .. } if matches!(&*value.node, ExprNode::Array { .. })));
+    for name in ["a", "b", "c"] {
+        assert!(
+            exprs.iter().any(|e| matches!(&*e.node, ExprNode::Assign { target: LValue::Var { name: n, .. }, .. } if n.as_str() == name)),
+            "{name} missing: {exprs:?}"
+        );
+    }
+    let text = format!("{exprs:?}");
+    // The outer value is the literal, so its slots are plain indexes.
+    // The nested slot is still a multiple assignment: `[2, 3]` is
+    // indexed, but a scalar element must not be sent `[]`. That split
+    // is `is_a?(Array)` on the already-evaluated element, not `to_ary`.
+    assert!(text.contains("is_a?"), "nested slot keeps the scalar rule: {text}");
+    assert!(!text.contains("to_ary"), "{text}");
+}
+
+#[test]
+fn nested_multi_write_rejects_unmodeled_coercion_and_shapes() {
+    // Retained controls. A bare value may answer `to_ary` (or be a
+    // scalar, which must not be indexed). A splat changes which value
+    // is coerced. Deeper parentheses change which element is split.
+    // None of those may ingest as the supported pair destructure.
+    for source in [
+        "_, (_, removed_size) = pair",
+        "_, (_, removed_size) = nil",
+        "_, (_, removed_size) = 5",
+        "_, (_, removed_size) = Coercible.new",
+        "_, (_, removed_size) = entries.shift(1)",
+        "_, (_, removed_size) = entries.shift",
+        "_, (_, removed_size) = @array.shift",
+        "_, (_, removed_size) = entries&.shift",
+        "a, (b, c) = [1, Coercible.new]",
+        "a, (b, *c) = [1, [2, 3]]",
+        "a, (b, c), *d = [1, [2, 3], 4]",
+        "a, ((b, c)) = [1, [2, 3]]",
+        "_, ((_, removed_size)) = @entries.shift",
+        "a, (b, c) = [*prefix, [2, 3]]",
+        "a, (b, c) = [1, *[2, [3, 4]] ]",
+        "items[side_effect], (b, c) = [1, [2, 3]]",
+        "receiver.value, (b, c) = [1, [2, 3]]",
+        "a, (items[side_effect], c) = [1, [2, 3]]",
+    ] {
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0, "legal Ruby control: {source}");
+        let stmt = result.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>")
+            .expect_err(source);
+        let message = err.to_string();
+        assert!(
+            message.contains("to_ary coercion")
+                || message.contains("splat or post-rest")
+                || message.contains("nested multi-write"),
+            "{source}: {message}"
+        );
+    }
+}
+
+#[test]
 fn multi_write_temporary_does_not_capture_a_user_target() {
     let source = "a, *__mw_0, c = [11, 22, 33]";
     let result = ruby_prism::parse(source.as_bytes());

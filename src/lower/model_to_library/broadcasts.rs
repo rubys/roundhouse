@@ -727,8 +727,7 @@ fn streamables(
             // `broadcast_append_to self` — Rails' own shorthand for a
             // per-record stream. No association read, so no nil guard.
             ExprNode::SelfRef => parts.push(Streamable::Record {
-                singular: crate::naming::snake_case(model.name.0.as_str()),
-                id: Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") }),
+                record: Expr::new(Span::synthetic(), ExprNode::SelfRef),
             }),
             ExprNode::Send { recv: None, method: name, args: a, block: None, .. }
                 if a.is_empty() =>
@@ -741,16 +740,14 @@ fn streamables(
                     }
                     _ => None,
                 });
-                let Some(target) = target else {
+                if target.is_none() {
                     return decline_opt(span, &format!("streamable `{name}` is not a belongs_to"));
-                };
+                }
                 if owner.is_some() {
                     return decline_opt(span, "more than one record streamable");
                 }
-                let singular = crate::naming::snake_case(target.0.as_str());
                 parts.push(Streamable::Record {
-                    singular,
-                    id: read_id(var_ref(owner_local())),
+                    record: var_ref(owner_local()),
                 });
                 owner = Some(OwnerRef { expr: arg.clone() });
             }
@@ -823,19 +820,6 @@ fn literal_text(e: &Expr) -> Option<String> {
         ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
         _ => None,
     }
-}
-
-fn read_id(recv: Expr) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(recv),
-            method: Symbol::from("id"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    )
 }
 
 fn return_if_nil(name: Symbol) -> Expr {

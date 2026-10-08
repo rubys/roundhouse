@@ -33,6 +33,34 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
 }
 
 
+/// Nested destructure (`_, (_, removed_size) = …`) has no IR node of its
+/// own. The supported shape is parenthesized lefts only: no splat, no
+/// post-rest targets, and no further nesting. Those rejected shapes
+/// change `to_ary` arity, evaluation order, or which value is coerced.
+fn supported_nested_multi_target(node: &Node<'_>) -> bool {
+    let Some(mt) = node.as_multi_target_node() else { return false };
+    mt.rest().is_none()
+        && mt.rights().is_empty()
+        && mt.lefts().iter().all(|left| {
+            left.as_local_variable_target_node().is_some()
+                || left.as_instance_variable_target_node().is_some()
+        })
+}
+
+/// A literal nested slot never needs Ruby's `to_ary` protocol. Arbitrary
+/// sends/constants are deliberately excluded: they may coerce even when
+/// the outer RHS is an array literal.
+fn nested_slot_needs_to_ary(node: &Node<'_>) -> bool {
+    node.as_array_node().is_none()
+        && node.as_integer_node().is_none()
+        && node.as_float_node().is_none()
+        && node.as_string_node().is_none()
+        && node.as_symbol_node().is_none()
+        && node.as_nil_node().is_none()
+        && node.as_true_node().is_none()
+        && node.as_false_node().is_none()
+}
+
 /// Extract one multi-write target — `a`, `@a`, `recv.attr`, or
 /// `recv[i]` (e.g. `link['href'], title = attrs`) — as an `LValue`. Shared by the
 /// leading targets and the trailing splat target of a `MultiAssign`.
@@ -92,6 +120,45 @@ fn ingest_multi_write(
     span: Span,
     file: &str,
 ) -> IngestResult<ExprNode> {
+    // `_, (_, removed_size) = expr` — a parenthesized target is itself a
+    // multiple assignment of that slot. The desugar below cannot model
+    // `to_ary` or preserve effects in complex LHS targets, so accept only
+    // splat-free literal arrays with local/ivar targets. Do not infer Hash#shift
+    // semantics from a receiver's application-specific name.
+    let has_nested = mw.lefts().iter().chain(mw.rights().iter()).any(|n| n.as_multi_target_node().is_some())
+        || mw.rest().is_some_and(|r| r.as_multi_target_node().is_some());
+    if has_nested {
+        if mw.rest().is_some() || !mw.rights().is_empty() {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "nested multi-write with a splat or post-rest target is not modeled".into(),
+            });
+        }
+        let literal_rhs_safe = mw.value().as_array_node().is_some_and(|array| {
+            array.elements().iter().all(|element| element.as_splat_node().is_none())
+                && mw.lefts().iter().enumerate().all(|(index, left)| {
+                    left.as_multi_target_node().is_none()
+                        || array.elements().iter().nth(index).is_some_and(|slot| !nested_slot_needs_to_ary(&slot))
+                })
+        });
+        if !literal_rhs_safe {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "nested multi-write RHS needs to_ary coercion, which is not modeled".into(),
+            });
+        }
+        if !mw.lefts().iter().all(|left| {
+            left.as_local_variable_target_node().is_some()
+                || left.as_instance_variable_target_node().is_some()
+                || supported_nested_multi_target(&left)
+        }) {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "nested multi-write with non-variable targets requires preserved LHS evaluation order".into(),
+            });
+        }
+        return ingest_nested_multi_write(mw, span, file);
+    }
     let mut targets: Vec<crate::expr::LValue> = Vec::new();
     for left in mw.lefts().iter() {
         targets.push(multi_write_target(&left, file)?);
@@ -137,14 +204,7 @@ fn ingest_multi_write(
     // rest flag through ~15 MultiAssign consumers. The Seq ends in the
     // temp read so the whole expression's value is the RHS array —
     // matching Ruby, where `(a, *b = arr)` evaluates to `arr`.
-    let stem = format!("__mw_{}", span.start);
-    let mut name = stem.clone();
-    let mut suffix = 0;
-    while super::sources::generated_local_is_reserved(&mw.location(), &name) {
-        suffix += 1;
-        name = format!("{stem}_{suffix}");
-    }
-    let tmp = Symbol::from(name);
+    let tmp = fresh_multi_write_temp(&mw.location(), span, "__mw");
     let tmp_read = || {
         Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: tmp.clone() })
     };
@@ -217,6 +277,119 @@ fn ingest_multi_write(
     }
     exprs.push(tmp_read());
     Ok(ExprNode::Seq { exprs })
+}
+
+/// `_, (_, removed_size) = expr`. Bind the RHS once, then index it.
+/// Callers have already restricted this to literal array RHSs, which
+/// need no `to_ary` conversion. The sequence ends in the temp so the
+/// expression value is that original RHS, not the last nested write.
+fn ingest_nested_multi_write(
+    mw: &ruby_prism::MultiWriteNode<'_>,
+    span: Span,
+    file: &str,
+) -> IngestResult<ExprNode> {
+    let value = ingest_expr(&mw.value(), file)?;
+    let tmp = fresh_multi_write_temp(&mw.location(), span, "__nmw");
+    let tmp_read = |name: &Symbol| {
+        Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() })
+    };
+    let int_lit = |v: i64| Expr::new(span, ExprNode::Lit { value: Literal::Int { value: v } });
+    let nil_lit = || Expr::new(span, ExprNode::Lit { value: Literal::Nil });
+    let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: true,
+            },
+        )
+    };
+    // The accepted literal RHS produces an array. Positional `[]` is
+    // that destructure. The *nested* slot is a
+    // separate multiple assignment: an array element is indexed, a
+    // scalar binds the first nested name and nils the rest, and nil
+    // nils every nested name. `[]` on that scalar is not the rule.
+    // `is_a?(Array)` is the split for a literal value already produced,
+    // not a `to_ary` stand-in.
+    let array_const = || Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Array")] });
+    let outer_index = |recv: Expr, index: i64| send(recv, "[]", vec![int_lit(index)]);
+    let guarded_slot = |recv: Expr, index: i64, scalar_on_miss: bool| {
+        Expr::new(
+            span,
+            ExprNode::If {
+                cond: send(recv.clone(), "nil?", vec![]),
+                then_branch: nil_lit(),
+                else_branch: Expr::new(
+                    span,
+                    ExprNode::If {
+                        cond: send(recv.clone(), "is_a?", vec![array_const()]),
+                        then_branch: send(recv.clone(), "[]", vec![int_lit(index)]),
+                        else_branch: if scalar_on_miss { recv } else { nil_lit() },
+                    },
+                ),
+            },
+        )
+    };
+    let mut exprs = Vec::new();
+    exprs.push(Expr::new(
+        span,
+        ExprNode::Assign {
+            target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: tmp.clone() },
+            value,
+        },
+    ));
+    for (i, left) in mw.lefts().iter().enumerate() {
+        if let Some(mt) = left.as_multi_target_node() {
+            // The nested group is a multiple assignment of this one
+            // element. Binding it once keeps an effectful element from
+            // running again for each nested name.
+            let slot = fresh_multi_write_temp(&mw.location(), span, &format!("__nmw_{i}"));
+            exprs.push(Expr::new(
+                span,
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: slot.clone() },
+                    value: outer_index(tmp_read(&tmp), i as i64),
+                },
+            ));
+            for (j, nested) in mt.lefts().iter().enumerate() {
+                exprs.push(Expr::new(
+                    span,
+                    ExprNode::Assign {
+                        target: multi_write_target(&nested, file)?,
+                        value: guarded_slot(tmp_read(&slot), j as i64, j == 0),
+                    },
+                ));
+            }
+        } else {
+            exprs.push(Expr::new(
+                span,
+                ExprNode::Assign {
+                    target: multi_write_target(&left, file)?,
+                    value: outer_index(tmp_read(&tmp), i as i64),
+                },
+            ));
+        }
+    }
+    exprs.push(tmp_read(&tmp));
+    Ok(ExprNode::Seq { exprs })
+}
+
+fn fresh_multi_write_temp(
+    location: &ruby_prism::Location<'_>,
+    span: Span,
+    stem_prefix: &str,
+) -> Symbol {
+    let stem = format!("{stem_prefix}_{}", span.start);
+    let mut name = stem.clone();
+    let mut suffix = 0;
+    while super::sources::generated_local_is_reserved(location, &name) {
+        suffix += 1;
+        name = format!("{stem}_{suffix}");
+    }
+    Symbol::from(name)
 }
 
 /// The argument a sorbet-runtime assertion evaluates to, when `node`
