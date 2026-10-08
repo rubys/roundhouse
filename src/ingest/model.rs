@@ -2338,10 +2338,13 @@ fn parse_scope(
         }
     }
 
-    let body = match lambda_body {
+    let mut body = match lambda_body {
         Some(b) => ingest_expr(&b, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
+    // The body becomes a class method, where the lambda's own `next v`
+    // (its early return) is `return v`; `next` in a def does not parse.
+    super::sql_functions::next_to_return(&mut body);
 
     Ok(Some(Scope { name, params, body }))
 }

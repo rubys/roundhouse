@@ -158,8 +158,9 @@ fn method(
 }
 
 /// `next` leaves the block; in the method it becomes, `return` does.
-/// Not inside a nested block, where `next` still means that block's.
-fn next_to_return(e: &mut Expr) {
+/// Not inside a nested block or a loop, where `next` still means that
+/// block's or that loop's.
+pub(crate) fn next_to_return(e: &mut Expr) {
     if let ExprNode::Next { value } = &mut *e.node {
         let value = value.take().unwrap_or_else(|| {
             Expr::new(e.span, ExprNode::Lit { value: crate::expr::Literal::Nil })
@@ -167,7 +168,7 @@ fn next_to_return(e: &mut Expr) {
         *e.node = ExprNode::Return { value };
         return;
     }
-    if matches!(&*e.node, ExprNode::Lambda { .. }) {
+    if matches!(&*e.node, ExprNode::Lambda { .. } | ExprNode::While { .. }) {
         return;
     }
     if let ExprNode::Send { block: Some(_), .. } = &*e.node {
