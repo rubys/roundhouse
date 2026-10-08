@@ -33,18 +33,19 @@ fn rewrite(e: &mut Expr) {
     }
 }
 
-/// Typed `Relation` or a zero-arg relation-builder chain over an
+/// Typed `Relation`, or a zero-arg `skip_preloading!` hop over an
 /// untyped seed (`Page.load`'s `relation.skip_preloading!.last(size)`).
-/// `skip_preloading!` / `preloaded` exist only on Relation in the
-/// runtime, so the builder hop is enough proof for the rename — without
-/// it, an untyped parameter keeps `.last(n)` and MRI raises arity error.
+/// That method exists only on Relation in the runtime, so the hop is
+/// enough proof for the rename — without it, an untyped parameter keeps
+/// `.last(n)` and MRI raises arity error. (`preloaded` is Relation-only
+/// too, but always arity-2 in emit/runtime, so it is not a hop here.)
 fn recv_is_relation(e: &Expr) -> bool {
     if matches!(e.ty, Some(Ty::Relation { .. })) {
         return true;
     }
     match &*e.node {
         ExprNode::Send { recv: Some(inner), method, args, block: None, .. }
-            if args.is_empty() && matches!(method.as_str(), "skip_preloading!" | "preloaded") =>
+            if args.is_empty() && method.as_str() == "skip_preloading!" =>
         {
             matches!(&*inner.node, ExprNode::Var { .. } | ExprNode::Ivar { .. })
                 || recv_is_relation(inner)

@@ -232,6 +232,47 @@ end
     );
 }
 
+/// Without a Relation-typed seed *or* a `skip_preloading!` hop, do not
+/// rename. No call site here, so the parameter stays untyped — the hop
+/// is what unlocked campfire; bare `.last(size)` must not freeload.
+#[test]
+fn counted_terminal_on_bare_untyped_param_is_left_alone() {
+    let app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def self.take_last(relation, size)
+    relation.last(size)
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    let mut app = app;
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
+    let widget = emitted(&ruby::emit_lowered_models(&app), "app/models/widget.rb");
+    assert!(
+        widget.contains("relation.last(size)"),
+        "bare untyped param must keep .last(size):\n{widget}"
+    );
+    assert!(
+        !widget.contains("last_n"),
+        "must not rename without skip_preloading!:\n{widget}"
+    );
+}
+
 /// The gate. `String#split` answers an Array, whose `first(n)`/`last(n)`
 /// already mean what Rails means — renaming them would call a method
 /// Array does not have.
