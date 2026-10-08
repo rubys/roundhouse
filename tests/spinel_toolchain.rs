@@ -41,6 +41,10 @@ mod class_configuration;
 mod rails_root_join;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
+#[path = "support/stdlib_rnp.rs"]
+mod stdlib_rnp_contract;
+#[path = "spinel_toolchain/stdlib_rnp.rs"]
+mod stdlib_rnp;
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]

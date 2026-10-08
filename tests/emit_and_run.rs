@@ -11,6 +11,10 @@ mod emit_and_run;
 mod class_attribute;
 #[path = "emit_and_run/integer_query_find_by.rs"]
 mod integer_query_find_by;
+#[path = "support/stdlib_rnp.rs"]
+mod stdlib_rnp_contract;
+#[path = "emit_and_run/stdlib_rnp.rs"]
+mod stdlib_rnp;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;

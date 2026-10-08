@@ -510,6 +510,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // `Timeout.timeout` / `rescue Timeout::Error` — Campfire unfurl
         // deadline and TimeLimitedVideoPreviewer#capture.
         "Timeout::Error",
+        // `rescue CSV::MalformedCSVError` around `CSV.parse` (csv is loaded
+        // by the emitted require, on Spinel by its csv package).
+        "CSV::MalformedCSVError",
     ] {
         register_stdlib_class(classes, exc, &[], &exception_surface);
     }
@@ -644,6 +647,29 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Exception is `Timeout::Error` above. CRuby loads via BUNDLED
     // `require "timeout"`; Spinel gets `runtime/ruby/timeout.rb`.
     register_stdlib_class(classes, "Timeout", &[], &[]);
+    // FileUtils / GC / OpenSSL::HMAC / Enumerator::Product / Enumerator::Lazy,
+    // as an API reaches for them: `FileUtils.mkdir_p(dir)` and `cp` before
+    // writing a generated file, `GC.start` between batches, an HMAC
+    // signature of a webhook payload, `Enumerator::Product.new(*lists)` over
+    // route segments, and `is_a?(Enumerator::Lazy)` in a serializer. Only
+    // the calls checked against CRuby and Spinel are registered
+    // (tests/support/stdlib_rnp.rs); another FileUtils call stays a dispatch
+    // error rather than a guess. Each library is loaded by its emitted
+    // require; on Spinel by its fileutils / openssl package.
+    register_stdlib_class(classes, "FileUtils", &[
+        ("mkdir_p", Ty::Array { elem: Box::new(Ty::Str) }),
+        // nil for one source, the source Array for several (CRuby 4.0.5).
+        ("cp", Ty::Union { variants: vec![Ty::Nil, Ty::Array { elem: Box::new(Ty::Str) }] }),
+    ], &[]);
+    register_stdlib_class(classes, "GC", &[("start", Ty::Nil)], &[]);
+    register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
+    let product = Ty::Class { id: ClassId(Symbol::from("Enumerator::Product")), args: vec![] };
+    register_stdlib_class(classes, "Enumerator::Product", &[("new", product)], &[
+        // `size` is left out: it answers nil or Float::INFINITY for an
+        // unsized or endless factor, and it is not checked on both lanes.
+        ("to_a", Ty::Array { elem: Box::new(Ty::Array { elem: Box::new(Ty::Untyped) }) }),
+    ]);
+    register_stdlib_class(classes, "Enumerator::Lazy", &[], &[]);
     // JSON dispatch is already intrinsic in BodyTyper and the emitters;
     // a source-backed reference must also recognize its exact namespace.
     register_stdlib_class(classes, "JSON", &[], &[]);

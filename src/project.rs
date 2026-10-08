@@ -4071,7 +4071,9 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
         | "ThreadError" | "ClosedQueueError" | "Comparable" | "Enumerable"
-        | "JSON::GeneratorError");
+        | "JSON::GeneratorError"
+        | "FileUtils" | "GC" | "OpenSSL::HMAC" | "CSV::MalformedCSVError"
+        | "Enumerator::Product" | "Enumerator::Lazy");
     if !bundled {
         return None;
     }
@@ -6364,7 +6366,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 15] = [
+const BUNDLED: [(&str, &str); 17] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -6384,6 +6386,9 @@ const BUNDLED: [(&str, &str); 15] = [
     ("CSV", "csv"),
     ("Digest", "digest"),
     ("ERB", "erb"),
+    // `FileUtils.mkdir_p` / `cp` - a default gem on CRuby/JRuby, spinel's
+    // `packages/fileutils`.
+    ("FileUtils", "fileutils"),
     ("JSON", "json"),
     ("OptionParser", "optparse"),
     ("Pathname", "pathname"),
@@ -6415,6 +6420,10 @@ const BUNDLED: [(&str, &str); 15] = [
     // TimeLimitedVideoPreviewer#capture. Default gem on CRuby/JRuby;
     // Spinel takes `runtime/ruby/timeout.rb` via spinel_files.
     ("Timeout", "timeout"),
+    // `OpenSSL::HMAC.digest` - a default gem on CRuby/JRuby, spinel's
+    // `packages/openssl`; an app that signs a payload without HTTP never
+    // loads it through net/http.
+    ("OpenSSL", "openssl"),
 ];
 
 /// Every gap in a tree, as `(file index, require line)`. One walk,
