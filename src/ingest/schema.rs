@@ -121,7 +121,8 @@ pub fn ingest_schema_with_generated_expression_dialect(
 /// Only the migration's `change` method is replayed (`up` when no
 /// `change` exists; `down` is never touched). Schema-mutating verbs we
 /// can't fold deterministically (`change_table`, `execute`, raw-SQL
-/// shapes — see `UNSUPPORTED_VERBS`) error with a pointer to
+/// shapes — see `UNSUPPORTED_VERBS`, or a verb whose table or column
+/// name is not a literal) error with a pointer to
 /// `rails db:migrate`, which materializes the schema.rb this fallback
 /// substitutes for. Receiver-less calls that aren't recognized verbs
 /// are ignored: migrations legitimately contain arbitrary Ruby (data
@@ -233,6 +234,26 @@ fn apply_migration_verb(
         .map(|a| a.arguments().iter().collect())
         .unwrap_or_default();
     let arg_name = |i: usize| args.get(i).and_then(table_name_value);
+    // A verb whose table or column name is not a literal cannot apply,
+    // and skipping it left the column typed: a
+    // `remove_column(:idx, :"col_#{n}")` in an `each` loop
+    // kept the dropped columns.
+    let named = match verb {
+        "drop_table" | "add_timestamps" => 1,
+        "rename_table" | "remove_column" | "change_column_null" | "change_column_default"
+        | "add_reference" | "add_belongs_to" | "remove_reference" | "remove_belongs_to" => 2,
+        "add_column" | "change_column" | "rename_column" => 3,
+        _ => 0,
+    };
+    if let Some(i) = (0..named).find(|&i| arg_name(i).is_none()) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "migration `{verb}` argument {} is not a literal name; the schema fold cannot apply it",
+                i + 1
+            ),
+        });
+    }
 
     match verb {
         "create_table" => {
@@ -1688,6 +1709,32 @@ mod tests {
         let clips = &schema.tables[&Symbol::from("clips")];
         assert!(matches!(clips.columns[3].col_type, ColumnType::Float));
         assert!(!clips.columns[4].nullable, "timestamps are null: false");
+    }
+
+    #[test]
+    fn a_non_literal_column_name_is_a_gap_not_a_skip() {
+        let mut schema = fold(&[r#"
+            class CreateIdx < ActiveRecord::Migration[8.1]
+              def change
+                create_table :idx do |t|
+                  t.string :col_1
+                end
+              end
+            end
+        "#]);
+        let err = ingest_migration(
+            br#"
+            class DropSlots < ActiveRecord::Migration[8.1]
+              def up
+                (1..1).each { |n| remove_column(:idx, :"col_#{n}") }
+              end
+            end
+        "#,
+            "drop.rb",
+            &mut schema,
+        )
+        .expect_err("a non-literal name cannot apply");
+        assert!(err.to_string().contains("`remove_column` argument 2 is not a literal"), "{err}");
     }
 
     #[test]

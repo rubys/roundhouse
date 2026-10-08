@@ -311,10 +311,16 @@ fn handle_create_table(
 }
 
 /// A comma-separated entry inside `CREATE TABLE (...)` that is a
-/// table-level constraint rather than a column definition.
+/// table-level constraint rather than a column definition. The keyword
+/// is a whole word: Postgres dumps column names unquoted, and columns
+/// named `checkout_id`, `unique_id` or `excluded_flag` were read as
+/// `CHECK`/`UNIQUE`/`EXCLUDE` constraints and dropped.
 fn is_table_level_constraint(seg: &str) -> bool {
     const KW: &[&str] = &["CONSTRAINT", "PRIMARY KEY", "UNIQUE", "CHECK", "EXCLUDE", "FOREIGN KEY"];
-    KW.iter().any(|k| starts_with_ci(seg, k))
+    KW.iter().any(|k| {
+        starts_with_ci(seg, k)
+            && !seg[k.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+    })
 }
 
 /// `[CONSTRAINT name] PRIMARY KEY (cols)` inside the column-list parens
@@ -1555,6 +1561,18 @@ fn strip_parens_capture_nums(phrase: &str) -> (String, Option<i64>, Option<i64>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_column_named_like_a_constraint_keyword_is_a_column() {
+        assert!(!is_table_level_constraint("checkout_id bigint"));
+        assert!(!is_table_level_constraint("unique_id character varying(255) NOT NULL"));
+        assert!(!is_table_level_constraint("excluded_flag boolean"));
+        assert!(!is_table_level_constraint("constraints jsonb"));
+        assert!(is_table_level_constraint("CHECK ((amount > 0))"));
+        assert!(is_table_level_constraint("CHECK(amount > 0)"));
+        assert!(is_table_level_constraint("UNIQUE (shop_id, code)"));
+        assert!(is_table_level_constraint("CONSTRAINT x_pkey PRIMARY KEY (id)"));
+    }
 
     #[test]
     fn top_level_split_respects_dollar_quoted_function_body() {
