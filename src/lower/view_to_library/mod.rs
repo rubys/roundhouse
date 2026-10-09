@@ -251,6 +251,7 @@ pub struct ViewLowerCtx<'a> {
     html_safe_methods: std::rc::Rc<std::collections::HashSet<String>>,
     model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
     slug_models: std::rc::Rc<std::collections::HashSet<String>>,
+    sti_route_stems: std::rc::Rc<std::collections::HashMap<String, Vec<String>>>,
     bool_readers: std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
     store_readers:
         std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
@@ -335,6 +336,27 @@ impl<'a> ViewLowerCtx<'a> {
                 app.models
                     .iter()
                     .map(|m| crate::naming::snake_case(m.name.0.as_str()))
+                    .collect(),
+            ),
+            sti_route_stems: std::rc::Rc::new(
+                app.models
+                    .iter()
+                    .filter(|m| !m.sti_subclass_names.is_empty())
+                    .map(|m| {
+                        let stems = m
+                            .sti_subclass_names
+                            .iter()
+                            .map(|sub| {
+                                sub.0
+                                    .as_str()
+                                    .split("::")
+                                    .map(crate::naming::snake_case)
+                                    .collect::<Vec<_>>()
+                                    .join("_")
+                            })
+                            .collect();
+                        (crate::naming::snake_case(m.name.0.as_str()), stems)
+                    })
                     .collect(),
             ),
             slug_models: std::rc::Rc::new(
@@ -794,6 +816,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         html_safe_methods: lx.html_safe_methods.clone(),
         model_singulars: lx.model_singulars.clone(),
         slug_models: lx.slug_models.clone(),
+        sti_route_stems: lx.sti_route_stems.clone(),
         bool_readers: lx.bool_readers.clone(),
         store_readers: lx.store_readers.clone(),
         route_helper_names: lx.route_helper_names.clone(),
@@ -4584,6 +4607,11 @@ pub(super) struct ViewCtx {
     /// param is String-typed. Non-slug models pass `record.id`
     /// (Integer param) so strict targets keep a typed scalar.
     pub(super) slug_models: std::rc::Rc<std::collections::HashSet<String>>,
+    /// STI base singular → subclass route stems (`room` → `rooms_open`,
+    /// …), from the `sti_subclass_names` stamp. A `form_with model:`
+    /// action names its route through the record's CLASS, which for an
+    /// STI base is a runtime question (`form_with::sti_action`).
+    pub(super) sti_route_stems: std::rc::Rc<std::collections::HashMap<String, Vec<String>>>,
     /// Per-model bool-reader names (`bool_reader_names`): Boolean
     /// columns + bool typed_store attrs. `f.check_box` grounds its
     /// checked state through these (typed ternary instead of the

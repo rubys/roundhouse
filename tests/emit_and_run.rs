@@ -50,6 +50,8 @@ mod controller_super_ivars;
 mod assoc_pluck_typed;
 #[path = "emit_and_run/sti_global_id.rs"]
 mod sti_global_id;
+#[path = "emit_and_run/sti_form_route.rs"]
+mod sti_form_route;
 
 /// A generated text column on the real-blog Article model exercises the
 /// schema-to-runtime path together with Rails-style symbol callbacks. The

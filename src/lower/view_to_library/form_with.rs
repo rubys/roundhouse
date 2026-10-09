@@ -992,7 +992,7 @@ fn classify_form_with_components(
         send(Some(model.clone()), "id", Vec::new(), None, false)
     };
     let member_path =
-        super::member_path_call(ctx, &format!("{singular}_path"), member_arg);
+        super::member_path_call(ctx, &format!("{singular}_path"), member_arg.clone());
     let collection_path = send(
         Some(route_helpers()),
         &format!("{plural}_path"),
@@ -1022,6 +1022,7 @@ fn classify_form_with_components(
             },
         ),
     };
+    let action = sti_action(ctx, &model, singular.as_str(), &persisted, &member_arg, action);
     // An explicit `method:` wins (Rails honors it verbatim); otherwise
     // the resource convention — PATCH for a persisted record, POST for a
     // new one. Feeds both the `<form>`'s `_method` override and
@@ -1045,6 +1046,61 @@ fn classify_form_with_components(
         opts_entries,
         id_prefix: namespace.unwrap_or_default(),
     })
+}
+
+/// Rails routes `form_with model: record` through the record's CLASS
+/// (`polymorphic_path`): room 1 is a `Rooms::Open`, so its form posts to
+/// `rooms_open_path(1)` / `rooms_opens_path`, not `room_path` /
+/// `rooms_path`. Hydration here is base-classed, so for an STI base the
+/// class is a runtime question: the action dispatches on `dom_prefix`
+/// (the type-column answer `sti_scope`'s stamp synthesizes, which IS the
+/// route stem), one arm per subclass whose route helpers the app
+/// declares, falling back to the base action built by the caller. Same
+/// shape and posture as `tag_builder::polymorphic_route_call`; an `If`
+/// chain because the weakest emitter has no `case` in value position.
+/// No-op for a non-STI model, or when no route table is known.
+fn sti_action(
+    ctx: &ViewCtx,
+    record: &Expr,
+    singular: &str,
+    persisted: &Expr,
+    member_arg: &Expr,
+    base: Expr,
+) -> Expr {
+    let Some(stems) = ctx.sti_route_stems.get(singular) else {
+        return base;
+    };
+    let has = |n: &str| ctx.route_helper_names.contains(n);
+    let mut dispatch = base;
+    for stem in stems.iter().rev() {
+        let member_name = format!("{stem}_path");
+        let collection_name = format!("{}_path", crate::naming::pluralize_snake(stem));
+        let member = has(&member_name)
+            .then(|| super::member_path_call(ctx, &member_name, member_arg.clone()));
+        let collection = has(&collection_name).then(|| super::route_helpers_call(&collection_name, Vec::new()));
+        let arm = match (member, collection) {
+            (Some(m), Some(c)) => Expr::new(
+                Span::synthetic(),
+                ExprNode::If { cond: persisted.clone(), then_branch: m, else_branch: c },
+            ),
+            (Some(m), None) => m,
+            (None, Some(c)) => c,
+            (None, None) => continue,
+        };
+        let prefix = send(Some(record.clone()), "dom_prefix", Vec::new(), None, true);
+        let cond = send(
+            Some(prefix),
+            "==",
+            vec![lit_str(stem.clone())],
+            None,
+            false,
+        );
+        dispatch = Expr::new(
+            Span::synthetic(),
+            ExprNode::If { cond, then_branch: arm, else_branch: dispatch },
+        );
+    }
+    dispatch
 }
 
 /// The form's object name — what Rails calls `param_key`. Rails names
@@ -1526,6 +1582,7 @@ mod tests {
                 model_singulars.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
             ),
             slug_models: Default::default(),
+            sti_route_stems: Default::default(),
             bool_readers: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
@@ -1640,6 +1697,61 @@ mod tests {
             panic!("expected ActionView::ViewHelpers receiver");
         };
         assert_eq!(path.last().map(|s| s.as_str()), Some("ViewHelpers"));
+    }
+
+    #[test]
+    fn sti_base_form_action_dispatches_on_the_records_class() {
+        // campfire `rooms/layouts/_form`: `form_with model: room`. Rails
+        // routes by the record's class, so a `Rooms::Open` posts to
+        // `/rooms/opens`, never `/rooms`. Subclasses without declared
+        // routes fold into the base action.
+        let mut ctx = ctx_with(&["room"], &[]);
+        ctx.sti_route_stems = Rc::new(HashMap::from([(
+            "room".to_string(),
+            vec!["rooms_open".to_string(), "rooms_closed".to_string()],
+        )]));
+        ctx.route_helper_names = Rc::new(
+            ["rooms_open_path", "rooms_opens_path", "room_path", "rooms_path"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<HashSet<_>>(),
+        );
+        let record = bare_local("room");
+        let persisted = send(Some(record.clone()), "persisted?", Vec::new(), None, false);
+        let member_arg = send(Some(record.clone()), "id", Vec::new(), None, false);
+        let base = lit_str("base".to_string());
+        let out = sti_action(&ctx, &record, "room", &persisted, &member_arg, base);
+        let ExprNode::If { cond, then_branch, else_branch } = &*out.node else {
+            panic!("expected a dispatch If, got {:?}", out.node);
+        };
+        let ExprNode::Send { method, args, .. } = &*cond.node else { panic!("cond") };
+        assert_eq!(method.as_str(), "==");
+        let ExprNode::Lit { value: Literal::Str { value } } = &*args[0].node else {
+            panic!("stem literal")
+        };
+        assert_eq!(value, "rooms_open");
+        let ExprNode::If { then_branch: member, else_branch: coll, .. } = &*then_branch.node
+        else {
+            panic!("expected persisted? ternary")
+        };
+        let helper = |e: &Expr| match &*e.node {
+            ExprNode::Send { method, .. } => method.as_str().to_string(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(helper(member), "rooms_open_path");
+        assert_eq!(helper(coll), "rooms_opens_path");
+        // `rooms_closed` has no routes: it is skipped, base remains.
+        assert!(matches!(&*else_branch.node, ExprNode::Lit { .. }));
+    }
+
+    #[test]
+    fn non_sti_form_action_is_untouched() {
+        let ctx = ctx_with(&["widget"], &[]);
+        let record = bare_local("widget");
+        let persisted = send(Some(record.clone()), "persisted?", Vec::new(), None, false);
+        let base = lit_str("base".to_string());
+        let out = sti_action(&ctx, &record, "widget", &persisted, &persisted, base);
+        assert!(matches!(&*out.node, ExprNode::Lit { .. }));
     }
 }
 

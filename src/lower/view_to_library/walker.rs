@@ -1691,6 +1691,7 @@ mod tests {
             html_safe_methods: Default::default(),
             model_singulars: Default::default(),
             slug_models: Default::default(),
+            sti_route_stems: Default::default(),
             bool_readers: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
