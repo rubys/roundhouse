@@ -1,9 +1,9 @@
 # Campfire on Rust: compile-to-working plan
 
-**Status:** the pinned survey-build compiler inventory is captured; a repeat
-generation/fingerprint comparison and the complete output census are pending.
-Strict Rust project generation currently refuses the app. Root-cause triage and
-semantic implementation work remain open.
+**Status:** pinned inputs, a repeatable survey-build compiler inventory, and
+the generated-output census are captured. The inventory is still only a
+survey baseline: strict Rust project generation refuses the app before Cargo.
+Source-level root-cause triage and semantic implementation work remain open.
 
 **Scope:** the ONCE Campfire revision pinned below, emitted as a Rust project by
 Roundhouse. “Rust compiles” and “Campfire works” are deliberately separate
@@ -43,6 +43,11 @@ route handling. Treat historical labels such as “app classes missing,”
 current residual-error inventory. The Oracle inspection confirmed that
 request/task metadata and `process_action` dispatch already exist; new work
 must extend the present lifecycle instead of rebuilding those foundations.
+
+**Interpretation guard:** the two captures establish deterministic survey
+output for the measured inputs; they do not complete P0.2 provenance or the
+source root-cause map. Strict generation still stops at its 181 reported
+front-end diagnostics, before a production Cargo project exists.
 
 ## Non-negotiable correctness rules
 
@@ -167,7 +172,7 @@ root cause; it does not by itself establish the complete feature contract.
 | Status | Cluster | Evidence and dependency decision |
 |---|---|---|
 | **Confirmed; split by API contract** | Rails namespace references: 119 E0433 references to `Rails` | The generated project exports no `Rails` root, but the references cover multiple services and must not be treated as one config bag: `Rails.application` and its source-backed app/VAPID config, routes and URL helpers; request-derived protocol/domain; `Rails.root`, `Rails.env`, `Rails.cache`, and `Rails.logger`; plus `Rails::HTML5::SafeListSanitizer`. The shared `runtime/ruby/rails.rb` and `.rbs` already define typed Env/AppPath/Cache/Logger and a deliberately limited Application, but that runtime is not integrated into the Rust output. First reuse/register the typed shared surface and make the app-specific configuration boundary explicit. Keep sanitizer and callback-bearing WebPush-pool work as separate contracts; never add an untyped catch-all Rails object. |
-| **Confirmed; ABI prerequisite** | Forwarded helper-block capture: 14 E0425 unresolved `capture` references | Literal `capture { ... }` lowering does not cover a forwarded helper block. Generated Rust erases closures to `Box<dyn FnOnce()>`, losing the block result and optional single-consumption contract. First preserve presence, arity, return type, ownership and forwarding across method boundaries; only then implement residual capture semantics. |
+| **Confirmed; ABI prerequisite** | Forwarded helper-block capture: 14 E0425 unresolved `capture` references in 13 generated methods | Pinned source mapping shows optional zero-argument HTML-content blocks forwarded through TagBuilder helpers. Survey Rust emits required `Box<dyn FnOnce()>`, then attempts `.clone().is_none()` and `capture(__blk)`: absence is impossible, the closure result is erased, and `FnOnce` cannot be cloned/invoked this way. First preserve optional presence, arity, return type, ownership and forwarding across method boundaries; only then implement residual capture semantics. `MessagesHelper#message_tag` also emits a `serde_json::Value` return in survey mode; keep that separate signature discrepancy visible rather than letting it hide an ABI defect. |
 | **Confirmed; transport and security contract open** | Controller cookies: 104 E0425 unresolved `cookies()` calls | These are callsites for a missing request-scoped jar/accessor and response Set-Cookie path, not 104 independent features. Plain, signed, permanent, and delete operations are represented. Signed behavior depends on a real secret/config boundary and Rails-compatible verification. Session APIs, SignedId/InvalidSignature names, and Rails encrypted `_campfire_session` are distinct; do not count or claim them as fixed by a cookie accessor. |
 | **Open; re-triage after producers** | STI/polymorphic routes and remaining E0308/E0599 groups | Prior estimates are questions, not work packages. Activate only on a current representative failure traced through model identity, lowering, route generation, or method signature. |
 
@@ -186,7 +191,7 @@ with a minimal reproducer, owned files, semantic checks, and integration check.
 |---|---|---|---|
 | **A0 — typed Rails namespace/application interface** | Source/API map prepared; contract and implementation pending | Integrate the existing typed shared `Rails::Env`, `AppPath`, `Cache`, and `Logger` behavior into Rust once; define a finite application/config contract for app-version fallback, optional git revision/VAPID credentials, routes, and request-vs-no-request protocol/domain. Keep route helpers owned by existing route lowering. No empty `Rails` class or invented defaults. Central generated-module wiring is integrated by the single integration owner. | Campfire source-to-generated mapping for every Rails-root fingerprint; tests for `APP_VERSION`/`GIT_REVISION` fallback, optional credential/VAPID values, request-derived URLs and no-request defaults, root/path behavior, cache behavior, and route access; then re-inventory newly exposed methods and separate sibling namespaces. |
 | **A1 — WebPush pool service** | Not started; separate follow-on | Separate from A0’s scalar/config interface: Campfire initializes a callback-bearing `WebPush::Pool`, mutates/replaces it in tests, and calls queue/shutdown. Requires a typed pool/callback/lifecycle contract, not a `Value` callback or dummy pool. | Emitted queue/delivery and invalid-subscription behavior, shutdown/replacement lifecycle, and Campfire push journeys; if deferred, retain an explicit unsupported boundary and do not claim push behavior. |
-| **D0 — forwarded-block ABI** | Blocked on a sound shared ABI design; two diagnosis attempts, no source edits | Preserve optional presence, arity, non-unit return type, ownership and single consumption across class/instance/helper method boundaries. The exact generated helpers pair a required `Box<dyn FnOnce()>` with a body that checks `.clone().is_none()`; method refinement does not currently provide the needed signature for these external forwarding calls. Do not make every block `String` or `Clone + 'static`. | Minimal emitted helper reproducer proves the returned value is observed, block runs once, non-Clone captures work, and absent-block checks do not consume/clone it; cover each method path actually emitted. |
+| **D0 — forwarded-block ABI** | Contract narrowed from pinned source map; standalone representation prototype compiles; emitter wiring not started | The 14 capture sites span 13 methods: `ClipboardHelper#button_to_copy_to_clipboard`; `Messages::AttachmentPresentation#inline_media_dimension_constraints` (two branches) and `#lightbox_link`; `MessagesHelper#message_area_tag`, `#messages_tag`, `#message_tag`; `QrCodeHelper#link_to_zoom_qr_code`; `Rooms::InvolvementsHelper#turbo_frame_for_involvement_tag`; `RoomsHelper#link_to_room`, `#link_to_edit_room`; `SearchesHelper#search_results_tag`; `Users::FilterHelper#user_filter_menu_tag`; `Users::ProfilesHelper#web_share_session_button`; `Users::SidebarHelper#sidebar_turbo_frame_tag`. These are optional zero-argument content blocks returning HTML text. `sidebar_turbo_frame_tag` has both block and no-block callers. Related `composer_form_tag`, `profile_form_with`, and `auto_submit_form_with` forward form-builder blocks and are compatibility checks, not part of this narrow contract. Current Rust placeholder/forwarding code is in `src/emit/rust/method.rs` and `src/emit/rust/expr/literal.rs`; `block_refine` is documented as same-class only, while these blocks cross helper/runtime boundaries. A local `rustc` prototype for the selected `Option<Box<dyn FnOnce() -> String + '_>>` shape compiled and ran through two forwarding functions, asserting present/absent output, exactly-once invocation, a borrowed local remaining usable, and a moved non-Clone capture. This proves only the Rust representation, not Roundhouse emission or Campfire support. | Next: contract/refinement tests for two resolved forwarding edges and optionality; then emitted module/instance definitions and callsites. Continue with a native compile/run through emitted methods, form-builder control, focused real-blog overlay if lowering changes, and inspect all 14 regenerated sites. Keep form-builder callback shape and the `message_tag` return discrepancy separately visible. |
 | **D1 — residual capture semantics** | Blocked on D0 | Implement only the actual forwarded-capture forms, preserving Rails output/buffer, return/fallback, nested behavior, ordering and escaping/safety semantics. | Executed emitted regression cases compare output and fallback behavior, including nested/evaluation-order cases where Campfire uses them; then re-inventory the 14 callsites rather than assuming all share the same semantics. |
 | **F0 — request cookie ownership/transport** | Root cause mapped read-only; request-lifecycle contract pending | Establish one request-owned jar shared by controller callbacks/helpers/views as required; parse request cookies; queue writes/deletes; append multiple `Set-Cookie` headers without overwriting flash/other headers. Decide lifecycle relative to outer layout middleware and response finalization. | Concurrent requests prove isolation; controller/layout access (if in scope) sees the same jar; response includes correct multiple cookies and attributes; rejection/unwind behavior is explicit. No process-global jar or per-await clone. |
 | **F1 — signing and secret boundary** | Blocked on A0 `secret_key_base` decision | Reuse shared Ruby semantics/verifier representation and native Rust crypto adapters; do not fork Rails cookie format or accept empty/missing production secrets. | Cross-language Rails-minted ↔ Rust-minted vectors, malformed/tampered/wrong-key/wrong-name/purpose/expiry rejection, missing-secret fail-closed behavior, and request isolation. |
@@ -204,6 +209,48 @@ The 14 `capture` calls are downstream of a closure contract that currently
 erases a forwarded block to `Box<dyn FnOnce()>`; they cannot be repaired by a
 capture helper that returns empty text or guesses the block result. D0 is not
 completion of the Campfire capture callsites.
+
+A follow-up Oracle decision on the now-confirmed 13-method map selects a
+narrow optional, boxed, return-carrying callable representation for these
+zero-argument HTML blocks: conceptually
+`Option<Box<dyn FnOnce() -> String + '_>>`. The `'_` lifetime is intentional:
+the view closure may borrow locals, and the closure may own non-`Clone`
+captures. Literal blocks are boxed only when entering this ABI; forwarded
+options move unchanged; omitted blocks become `None`; terminal capture
+consumes the callable once and keeps its returned string. This is a proposed
+representation to prove with a small executable fixture before propagating
+it—not a blanket ABI for all Ruby blocks.
+
+Implementation constraints from that review:
+
+- Carry callable shape and optionality as distinct contract metadata through
+  resolved call edges. `Ty::Fn.block: None` means there is no block slot in
+  that signature; it must not be overloaded to mean the source-level block
+  can be absent. Conflicting forwarding targets remain unsupported rather
+  than using first-target-wins refinement.
+- Resolve the same contract at both method definitions and callsites,
+  including omitted-block calls. Module and instance method paths must agree.
+  Do not globally box closures: typed argument-bearing form-builder blocks
+  retain their argument/result types and current semantics.
+- Inspect/narrow only the forwarded capture operation whose source proves a
+  String-valued block result. The shared `ActionView::ViewHelpers.capture`
+  accepts arbitrary block results and returns an empty String for non-String
+  results; do not globally narrow its RBS contract or change ordinary capture
+  semantics to fit this subset.
+- Nil checks borrow (`is_none()`), forwarding moves, and terminal invocation
+  consumes. No `.clone()`, no fabricated `'static`, and no accidental second
+  invocation. Verify behavior where blocks are mutually exclusive as well as
+  the absent case.
+
+**D0 proof order:** (1) contract/refinement tests for two forwarding edges,
+declaration-order independence, optionality, and conflict rejection; (2)
+module/instance emission tests for present, absent, forwarded and borrowed
+closures; (3) a native compile-and-run fixture asserting exact returned HTML,
+one invocation, absent invocation count zero, a live borrow after the call,
+and a non-Clone capture; (4) a required argument-bearing form-builder block
+control; (5) a minimal real-blog overlay if shared lowering changes; then
+(6) fresh Campfire generation and inspection of all 14 sites. Only after this
+proof should the broader D0 implementation be dispatched/integrated.
 
 For cookies, existing request/task metadata and `process_action` dispatch are
 already present. F0 must extend that request lifecycle and decide whether the
