@@ -702,6 +702,11 @@ fn emit_bool_op_operand(
         ExprNode::Seq { exprs } if exprs.len() > 1 => {
             return format!("({s})");
         }
+        // `..`/`...` bind looser than `&&`/`||`: `r || a..b` is
+        // `(r || a)..b`.
+        ExprNode::Range { .. } => {
+            return format!("({s})");
+        }
         // A CONDITIONAL AS AN OPERAND, same argument one construct over.
         // The modifier form binds looser than every boolean operator, so
         // `x.m if c || fallback` re-parses as `x.m if (c || fallback)` —
@@ -1321,6 +1326,11 @@ fn binop_of(e: &Expr) -> Option<&str> {
         // re-parses as `hrc = (HatRequest.count > 0)`, the local becoming
         // the comparison.
         ExprNode::Assign { .. } | ExprNode::OpAssign { .. } | ExprNode::MultiAssign { .. } => Some("="),
+        // A range binds looser than every infix operator and `||`/`&&`:
+        // `out << (start...limit)` written bare is `(out << start)...limit`,
+        // which pushes the Integer (and `ruby -w` flags the range as
+        // void), and `(a..b) == r` bare is `a..(b == r)`.
+        ExprNode::Range { .. } => Some(".."),
         _ => None,
     }
 }
@@ -1337,11 +1347,12 @@ fn binop_prec(op: &str) -> u8 {
         "&" => 55,
         "|" | "^" => 50,
         ">" | ">=" | "<" | "<=" => 40,
-        "==" | "!=" | "<=>" | "=~" | "===" => 30,
+        "==" | "!=" | "<=>" | "=~" | "!~" | "===" => 30,
         // Below every infix operator above; `&&` binds tighter than `||`,
         // and the `and`/`or` word forms are the loosest of all.
         "&&" => 26,
         "||" => 25,
+        ".." => 22,
         "=" => 15,
         "and" => 11,
         "or" => 10,
