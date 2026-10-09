@@ -1663,10 +1663,9 @@ module RequestDispatch
     @__host
   end
 
-  # Rails' `https!` / `https?`: whether the session's requests arrive
-  # over TLS. Carried to the app as `HTTPS=on`, which is what
-  # `request.ssl?` reads, so `request.protocol` and every `_url` built
-  # from it answer `https://`.
+  # `https!(flag = true)` — Rails' integration session: every later
+  # request in this test arrives over TLS (`request.ssl?`, and so the
+  # `https://` its absolute URLs carry).
   def https!(flag = true)
     @__https = flag
   end
@@ -1806,8 +1805,8 @@ module RequestDispatch
       "REMOTE_ADDR"     => "127.0.0.1",
       "HTTP_USER_AGENT" => "Roundhouse Test",
     }
-    env["HTTPS"] = "on" if https?
     headers.each { |k, v| env[env_key(k.to_s)] = v.to_s }
+    env["HTTPS"] = "on" if https?
     env["CONTENT_TYPE"] = "application/json" if as == :json
     env["REQUEST_METHOD"] = method
     env["PATH_INFO"]      = request_path

@@ -226,6 +226,21 @@ fn dom_target(value: &Expr, span: Span) -> Option<Expr> {
         // — an id the app spells itself. Already a String; nothing to
         // resolve, and rebuilding it would only be a chance to differ.
         ExprNode::StringInterp { .. } => Some(value.clone()),
+        // `target: helpers.dom_id(@boost.message, :boosts)` (or a bare
+        // `dom_id(…)`) — the same id the array form names.
+        ExprNode::Send { recv, method, args, block: None, .. }
+            if method.as_str() == "dom_id"
+                && args.len() == 2
+                && recv.as_ref().is_none_or(|r| matches!(&*r.node,
+                    ExprNode::Send { recv: None, method: h, args: a, block: None, .. }
+                        if h.as_str() == "helpers" && a.is_empty())) =>
+        {
+            let pair = Expr::new(
+                value.span,
+                ExprNode::Array { elements: args.clone(), style: Default::default() },
+            );
+            dom_target(&pair, span)
+        }
         ExprNode::Array { elements, .. } => {
             let [record, prefix] = elements.as_slice() else {
                 return decline(span, "target: array is not [record, prefix]");

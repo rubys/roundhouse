@@ -435,7 +435,7 @@ module ActionController
     # Rails' `response.media_type`, the content type without its
     # parameters; campfire's CachedResponses only stores `text/html`.
     def media_type
-      @content_type.to_s.split(";").first.to_s.strip
+      @content_type.to_s.split(";")[0].to_s.strip
     end
 
     def initialize

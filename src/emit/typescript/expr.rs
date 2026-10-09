@@ -126,6 +126,83 @@ pub(super) fn body_has_async_send(expr: &Expr) -> bool {
 // Set by `with_method_params` around each method/function body emit;
 // cleared on return so nested method emits don't see stale names.
 
+// Instance-method shapes of every class this emit knows (app, test and
+// framework runtime), keyed by class name: its parent and, per method,
+// whether it is a real method or an attribute slot. The Send emit reads
+// it to tell `obj.foo` (a TS field) from `obj.foo()` (a `def`), and an
+// attribute write `obj.foo = v` from a custom writer `obj.set_foo(v)`,
+// for a receiver whose class (or an ancestor) declares the method. A
+// receiver this table does not cover keeps the name-based heuristics.
+#[derive(Default, Clone)]
+pub(crate) struct ClassShape {
+    parent: Option<String>,
+    methods: HashMap<String, (crate::dialect::AccessorKind, usize)>,
+}
+
+std::thread_local! {
+    static CLASS_SHAPES: std::cell::RefCell<HashMap<String, ClassShape>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Record the instance-method shapes of `classes` for the Send emit.
+/// `fields` is each class's TS field names (`js_library_class`'s
+/// attribute readers and assigned ivars): a method whose emitted name
+/// is one of them is dropped in favour of the field, so it reads as one.
+pub(crate) fn set_class_shapes<'a>(
+    classes: impl IntoIterator<Item = (&'a crate::dialect::LibraryClass, HashSet<String>)>,
+) {
+    use crate::dialect::AccessorKind;
+    let mut map: HashMap<String, ClassShape> = HashMap::new();
+    for (c, fields) in classes {
+        let entry = map.entry(c.name.0.as_str().to_string()).or_default();
+        if entry.parent.is_none() {
+            entry.parent = c.parent.as_ref().map(|p| p.0.as_str().to_string());
+        }
+        for m in &c.methods {
+            if !matches!(m.receiver, crate::dialect::MethodReceiver::Instance) {
+                continue;
+            }
+            let kind = if m.kind == AccessorKind::Method
+                && fields.contains(&super::library::sanitize_identifier(m.name.as_str()))
+            {
+                AccessorKind::AttributeReader
+            } else {
+                m.kind
+            };
+            entry.methods.entry(m.name.as_str().to_string()).or_insert((kind, m.params.len()));
+        }
+    }
+    CLASS_SHAPES.with(|cell| *cell.borrow_mut() = map);
+}
+
+/// The shape of `method` on an instance of the class `ty` names, found
+/// on the class or its nearest ancestor that declares it.
+fn instance_method_shape(ty: Option<&Ty>, method: &str) -> Option<(crate::dialect::AccessorKind, usize)> {
+    let Some(Ty::Class { id, .. }) = strip_nullable(ty) else { return None };
+    CLASS_SHAPES.with(|cell| {
+        let map = cell.borrow();
+        let resolve = |name: &str| -> Option<&ClassShape> {
+            map.get(name).or_else(|| {
+                let last = name.rsplit("::").next().unwrap_or(name);
+                let mut hits = map.iter().filter(|(k, _)| k.rsplit("::").next() == Some(last));
+                match (hits.next(), hits.next()) {
+                    (Some((_, shape)), None) => Some(shape),
+                    _ => None,
+                }
+            })
+        };
+        let mut current = Some(id.0.as_str().to_string());
+        for _ in 0..16 {
+            let shape = resolve(current.as_deref()?)?;
+            if let Some(found) = shape.methods.get(method) {
+                return Some(found.clone());
+            }
+            current = shape.parent.clone();
+        }
+        None
+    })
+}
+
 std::thread_local! {
     static CURRENT_METHOD_PARAMS: std::cell::RefCell<HashSet<Symbol>> =
         std::cell::RefCell::new(HashSet::new());
@@ -1967,6 +2044,18 @@ fn js_send_inner(
         && args.len() == 1
     {
         let attr = &method[..method.len() - 1];
+        // A custom writer (`def foo=(v)`) is a method, `set_foo`, not
+        // a field the assignment could land in.
+        if let Some((crate::dialect::AccessorKind::Method, 1)) =
+            instance_method_shape(recv.unwrap().ty.as_ref(), method)
+        {
+            return Js::method_call(
+                span,
+                js_expr(recv.unwrap()),
+                ts_method_name(method),
+                vec![js_expr(&args[0])],
+            );
+        }
         return Js::new(
             span,
             JsExpr::Assign {
@@ -2162,13 +2251,25 @@ fn js_send_inner(
     }
     // Ruby coercions: `.to_s` / `.to_i` / `.to_sym` map to JS
     // equivalents. `.to_sym` is a no-op in JS (use the string as
-    // the hash key) — emit just the receiver. The nil case
-    // diverges from Ruby (Ruby's nil.to_s is "" but JS String(null)
-    // is "null"); call sites that care should narrow first.
+    // the hash key) — emit just the receiver. Ruby's `nil.to_s` is ""
+    // where JS `String(null)` is "null", so a receiver typed as
+    // possibly nil goes through `?? ""` first.
     if let Some(r) = recv {
         if args.is_empty() {
             match method {
-                "to_s" => return Js::call(span, Js::ident(span, "String"), vec![js_expr(r)]),
+                "to_s" => {
+                    let may_be_nil = match r.ty.as_ref() {
+                        Some(Ty::Nil) => true,
+                        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Nil)),
+                        _ => false,
+                    };
+                    let value = if may_be_nil {
+                        Js::binary(span, "??", js_expr(r), Js::str(span, ""))
+                    } else {
+                        js_expr(r)
+                    };
+                    return Js::call(span, Js::ident(span, "String"), vec![value]);
+                }
                 "to_i" => return Js::call(span, Js::ident(span, "Number"), vec![js_expr(r)]),
                 "to_sym" => return js_expr(r),
                 _ => {}
@@ -3186,10 +3287,18 @@ fn js_send_inner(
                     matches!(last, "Parameters" | "ParameterMissing" | "Router")
                 }
             );
+            // A receiver whose class declares the method as a real
+            // `def` (no attribute slot) needs the call.
+            let is_declared_method = !is_const_recv
+                && matches!(
+                    instance_method_shape(r.ty.as_ref(), method),
+                    Some((crate::dialect::AccessorKind::Method, 0))
+                );
             let raw = if args.is_empty()
                 && !parenthesized
                 && !force_parens
                 && !is_method_class_recv
+                && !is_declared_method
                 && (!is_const_recv || suppress_const_parens)
             {
                 Js::member(span, js_expr(r), ts_m)

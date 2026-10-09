@@ -2850,6 +2850,28 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
     // has_one gets `nil` (single record or absent). Harmless on dynamic
     // targets. Names from `associations::{cache_ivar,loaded_ivar}`.
     for assoc in model.associations() {
+        // belongs_to's `<name>_loaded?` (`push_singular_loaded_reader`)
+        // reads the flag the ruby family's load-once reader sets. The
+        // strict targets' reader queries every time and never sets it,
+        // so it has to exist there as `false` or the read names a field
+        // the class never declared (TS `article_loaded`, Go
+        // `ArticleLoaded`). On those targets `loaded?` stays false.
+        if let Association::BelongsTo { name, polymorphic: false, .. } = assoc {
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: super::associations::loaded_ivar(name) },
+                    value: with_ty(
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Lit { value: Literal::Bool { value: false } },
+                        ),
+                        Ty::Bool,
+                    ),
+                },
+            ));
+            continue;
+        }
         if let Association::HasOne { name, .. } = assoc {
             stmts.push(Expr::new(
                 Span::synthetic(),

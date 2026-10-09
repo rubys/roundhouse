@@ -2051,6 +2051,8 @@ fn is_relation_chain_method(name: &str) -> bool {
         name,
         "where"
             | "not"
+            | "order_sql"
+            | "reorder_sql"
             | "order"
             | "limit"
             | "offset"

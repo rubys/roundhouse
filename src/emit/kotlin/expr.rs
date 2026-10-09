@@ -1703,6 +1703,13 @@ fn emit_send(
                     return format!("this.{} = {}", camel(base), conv);
                 }
             }
+            // A custom writer (`def foo=(v)`) is a method (`fooSet`) on the
+            // receiver's class, not a property the assignment could land in.
+            if let Some(cls) = receiver_class_name(r) {
+                if ancestor_members(&cls).contains(&camel(method)) {
+                    return format!("{}.{}({})", emit_expr(r), camel(method), args_s[0]);
+                }
+            }
             return format!("{}.{} = {}", emit_expr(r), camel(base), args_s[0]);
         }
     }
@@ -1884,7 +1891,22 @@ fn emit_send(
         match coercible {
             "nil?" => return format!("({rs} == null)"),
             "!" => return format!("!({rs})"),
-            "to_s" => return format!("{rs}.toString()"),
+            // Ruby's `nil.to_s` is "" where Kotlin's `null.toString()` is
+            // "null": a receiver typed as possibly nil defaults first.
+            "to_s" => {
+                let may_be_nil = match r.ty.as_ref() {
+                    Some(crate::ty::Ty::Nil) => true,
+                    Some(crate::ty::Ty::Union { variants }) => {
+                        variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+                    }
+                    _ => false,
+                };
+                return if may_be_nil {
+                    format!("({rs} ?: \"\").toString()")
+                } else {
+                    format!("{rs}.toString()")
+                };
+            }
             // Symbols are Strings in every target's lowering, so
             // `to_sym` is the identity — drop the call and return the
             // receiver. Same rule as crystal/typescript; without it

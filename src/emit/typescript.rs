@@ -606,6 +606,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     all_app_classes.extend(fixture_lcs.iter().cloned());
     all_app_classes.extend(test_lcs.iter().cloned());
     all_app_classes.extend(test_inner_lcs.iter().cloned());
+    // Send-site shapes for every class this emit knows: see
+    // `expr::set_class_shapes`.
+    expr::set_class_shapes(
+        all_app_classes
+            .iter()
+            .chain(runtime_seed_classes.iter())
+            .map(|c| (c, instance_field_names(c))),
+    );
 
     // Reuse the runtime parse from the async-expansion step above
     // (`typescript_units` parses + emits in one step; the expansion-
@@ -1635,6 +1643,25 @@ fn emit_test_setup_ts(
 /// `js_library_class` and place the decl in a `JsModule`.
 pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String, String> {
     Ok(printer::render_decl(&js_library_class(class)?))
+}
+
+/// The instance field names `js_library_class` declares for `class`:
+/// its attribute readers and the ivars its instance methods assign.
+fn instance_field_names(class: &crate::dialect::LibraryClass) -> std::collections::HashSet<String> {
+    use crate::dialect::{AccessorKind, MethodReceiver};
+    let mut names = std::collections::HashSet::new();
+    let mut ivars: indexmap::IndexMap<String, Ty> = indexmap::IndexMap::new();
+    for m in &class.methods {
+        if !matches!(m.receiver, MethodReceiver::Instance) {
+            continue;
+        }
+        if matches!(m.kind, AccessorKind::AttributeReader) && m.params.is_empty() {
+            names.insert(m.name.as_str().to_string());
+        }
+        collect_ivar_assignments(&m.body, &mut ivars);
+    }
+    names.extend(ivars.into_keys());
+    names
 }
 
 pub(super) fn js_library_class(

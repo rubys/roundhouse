@@ -3551,6 +3551,24 @@ fn rewrite_helper_calls(
         return;
     }
 
+    // Case 1b: a controller's own `helpers.<m>(…)` — Rails' view-context
+    // proxy (campfire's `helpers.dom_id(@boost.message, :boosts)`). An
+    // app helper resolves to its module, anything else to ViewHelpers.
+    if !own_methods.contains(&Symbol::from("helpers")) {
+        if let ExprNode::Send { recv: Some(r), method, .. } = &mut *expr.node {
+            let bare_helpers = matches!(&*r.node,
+                ExprNode::Send { recv: None, method: h, args, block: None, .. }
+                    if h.as_str() == "helpers" && args.is_empty());
+            if bare_helpers {
+                let path = match index.get(method) {
+                    Some(module) => module.0.as_str().split("::").map(Symbol::from).collect(),
+                    None => view_helpers_path(),
+                };
+                *r.node = ExprNode::Const { path };
+            }
+        }
+    }
+
     // Case 2: collapse `Rails.application.routes.url_helpers` to RouteHelpers.
     if is_rails_url_helpers(&expr.node) {
         *expr.node = ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] };

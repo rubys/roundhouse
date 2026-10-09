@@ -8857,3 +8857,27 @@ raise "reload answered #{got.inspect}" unless got == [1, 2]
 "#)
         .assert_passes();
 }
+
+/// `reorder(Arel.sql("+articles.id"))` keeps its fragment: Rails takes an
+/// `Arel.sql` literal past the column-name check (campfire's
+/// `reorder(Arel.sql("+messages.created_at"))`, SQLite's index-skipping
+/// unary plus), while a bare String with the same text is refused.
+#[test]
+fn an_arel_sql_order_fragment_passes_the_column_check() {
+    emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", r#"class Article < ApplicationRecord
+  scope :plus_ordered, -> { order(:title).reorder(Arel.sql("+articles.id")) }
+"#)
+        .run_ruby(r#"
+Article.create!(title: "Second", body: "A sufficiently long article body.")
+Article.create!(title: "First", body: "A sufficiently long article body.")
+got = Article.plus_ordered.map(&:title)
+raise "Arel.sql order answered #{got.inspect}" unless got == ["Second", "First"]
+begin
+  Article.plus_ordered.reorder("+articles.id").to_a
+  raise "a bare String fragment passed the column check"
+rescue ArgumentError
+end
+"#)
+        .assert_passes();
+}
