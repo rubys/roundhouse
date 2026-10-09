@@ -440,6 +440,7 @@ pub(crate) fn apply_library_partial_render_lowering(lcs: &mut [LibraryClass], ap
         &app.views,
         &app.controllers,
         &app.library_classes,
+        &std::collections::BTreeSet::new(),
     );
     if contracts.is_empty() {
         return;

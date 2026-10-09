@@ -277,6 +277,9 @@ pub struct LowerControllerOptions<'a> {
     /// (`ParamsSpecs::mark_file_fields`). Empty (the default) types
     /// every field a String, which is what it was before.
     pub models: &'a [crate::dialect::Model],
+    /// Controller `helper_method`s explicitly exposed to views. When
+    /// present, only helpers used by a view are passed from the live controller.
+    pub view_visible_controller_methods: Option<&'a std::collections::BTreeSet<Symbol>>,
     /// `App::wrap_parameters_by_default` - Rails' ParamsWrapper default
     /// for every controller. Read only when the tree
     /// `FormatBreadth::wraps_json_params`.
@@ -299,6 +302,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         route_id_segments,
         inferred_params,
         models,
+        view_visible_controller_methods,
         wrap_parameters_by_default,
     } = opts;
     // `None` (every wrapper's default) means the projection stays
@@ -316,11 +320,16 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // The view↔controller ivar contract: each action view's read-ivars,
     // so the render rewrite passes `@<name>` for each (matching the view's
     // generated parameter list). See view_to_library::action_view_ivar_map.
-    let view_ivars = crate::lower::view_to_library::action_view_ivar_map(views, controllers, models);
+    let visible_helpers = view_visible_controller_methods.cloned().unwrap_or_default();
+    let view_ivars = crate::lower::view_to_library::action_view_ivar_map(
+        views, controllers, models, &visible_helpers,
+    );
     // Controller-side partial renders (`render partial: "commentbox",
     // locals: {…}`) bind against the partial's def-site parameter order.
     let partials: PartialMap =
-        crate::lower::view_to_library::partial_call_contracts(views, controllers, library_classes);
+        crate::lower::view_to_library::partial_call_contracts(
+            views, controllers, library_classes, &visible_helpers,
+        );
 
     let mut all_methods: Vec<(Vec<MethodDef>, &Controller)> = Vec::new();
     crate::timings::phase("lower: controllers build", || {
@@ -346,6 +355,9 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             };
             let methods = build_methods(controller, controllers, &params_specs, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, wrapper.as_ref());
             all_methods.push((methods, controller));
+        }
+        if view_visible_controller_methods.is_some() {
+            inline_inherited_view_helpers(&mut all_methods, controllers, &visible_helpers);
         }
         subclass_template_hooks(&mut all_methods, controllers, &view_ivars, &partials);
     });
@@ -871,6 +883,50 @@ fn reads_instance_state(body: &Expr) -> bool {
     }
     walk(body, &mut found);
     found
+}
+
+/// Rust controller structs do not inherit methods from their Rails
+/// superclass. When helper-aware lowering is enabled, copy the nearest
+/// inherited `helper_method` implementation onto each child controller
+/// that needs it. The method remains an instance method, so its ivars
+/// are per-controller state rather than shared or thread-local values.
+fn inline_inherited_view_helpers(
+    all_methods: &mut [(Vec<MethodDef>, &Controller)],
+    controllers: &[Controller],
+    visible_helpers: &std::collections::BTreeSet<Symbol>,
+) {
+    let lowered_by_controller: std::collections::HashMap<ClassId, Vec<MethodDef>> = all_methods
+        .iter()
+        .map(|(methods, controller)| (controller.name.clone(), methods.clone()))
+        .collect();
+
+    for (methods, controller) in all_methods.iter_mut() {
+        let ancestors = ancestor_chain(controller, controllers);
+        if ancestors.is_empty() {
+            continue;
+        }
+        for helper in visible_helpers {
+            if methods.iter().any(|method| {
+                method.name == *helper && method.receiver == MethodReceiver::Instance
+            }) {
+                continue;
+            }
+            let inherited = ancestors.iter().rev().find_map(|ancestor| {
+                lowered_by_controller
+                    .get(&ancestor.name)?
+                    .iter()
+                    .find(|method| {
+                        method.name == *helper && method.receiver == MethodReceiver::Instance
+                    })
+            });
+            let Some(inherited) = inherited.filter(|method| !calls_super(&method.body)) else {
+                continue;
+            };
+            let mut clone = inherited.clone();
+            clone.enclosing_class = Some(controller.name.0.clone());
+            methods.push(clone);
+        }
+    }
 }
 
 /// Define the virtual template hooks `rewrite_render_to_views` called.
@@ -1622,6 +1678,13 @@ fn build_filter_preamble(
     own_privs_inlined: bool,
 ) -> (Vec<PreambleStmt>, process_action::WrapFilters) {
     let chain = ancestor_chain(controller, all_controllers);
+    // Filter lambdas execute inside the synthesized dispatcher rather
+    // than in the helper method that declared them. Keep known controller
+    // instance-helper reads bound to that dispatcher's live receiver.
+    let filter_helpers: std::collections::HashSet<Symbol> = std::iter::once(controller)
+        .chain(chain.iter().copied())
+        .flat_map(|c| c.actions().map(|action| action.name.clone()))
+        .collect();
 
     // Skips, kept whole rather than reduced to a set of names: a skip
     // carries `only:`/`except:` of its own, and campfire's
@@ -1688,6 +1751,15 @@ fn build_filter_preamble(
     };
     let push_call = |f: &Filter, preamble: &mut Vec<PreambleStmt>| {
         let Some(f) = narrow(f) else { return };
+        let mut f = f;
+        f.if_cond_expr = f
+            .if_cond_expr
+            .as_ref()
+            .map(|expr| rewrites::rewrite_filter_helper_reads(expr, &filter_helpers));
+        f.unless_cond_expr = f
+            .unless_cond_expr
+            .as_ref()
+            .map(|expr| rewrites::rewrite_filter_helper_reads(expr, &filter_helpers));
         let f = &f;
         let Some(target) = find_target(&f.target) else {
             // The one framework-defined target the chain carries: the
@@ -1809,15 +1881,24 @@ fn build_filter_preamble(
                     };
                     let is_after = target.is_after();
                     let is_prepend = target.is_prepend();
-                    let halt_check = can_respond(&target.body);
+                    let body = rewrites::rewrite_filter_helper_reads(&target.body, &filter_helpers);
+                    let if_cond_expr = target
+                        .if_cond_expr
+                        .as_ref()
+                        .map(|expr| rewrites::rewrite_filter_helper_reads(expr, &filter_helpers));
+                    let unless_cond_expr = target
+                        .unless_cond_expr
+                        .as_ref()
+                        .map(|expr| rewrites::rewrite_filter_helper_reads(expr, &filter_helpers));
+                    let halt_check = can_respond(&body);
                     let stmt = PreambleStmt::Block {
-                        body: target.body,
+                        body,
                         only: target.only,
                         except: target.except,
                         if_cond: target.if_cond,
                         unless_cond: target.unless_cond,
-                        if_cond_expr: target.if_cond_expr,
-                        unless_cond_expr: target.unless_cond_expr,
+                        if_cond_expr,
+                        unless_cond_expr,
                         halt_check,
                     };
                     if is_after {

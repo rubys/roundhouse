@@ -358,7 +358,11 @@ pub(super) fn halt_if_performed() -> Expr {
 /// dispatcher parameter that holds the action Symbol.
 fn filter_dispatch_stmt(f: &Filter, param: &str) -> Expr {
     let target_call = syn(ExprNode::Send {
-        recv: None,
+        // A named filter is a method on the controller instance. Keep
+        // that dispatch explicit in shared IR so Rust emits
+        // `self.filter()` rather than looking for a free function; Ruby
+        // still has its ordinary implicit-self semantics.
+        recv: Some(syn(ExprNode::SelfRef)),
         method: f.target.clone(),
         args: vec![],
         block: None,
@@ -425,7 +429,10 @@ fn cond_from_guards(
     }
     let predicate = |name: &Symbol| {
         syn(ExprNode::Send {
-            recv: None,
+            // Guards name zero-arg controller instance methods. Make
+            // implicit self explicit in shared IR so Rust emits
+            // `self.predicate()` rather than a free-function call.
+            recv: Some(syn(ExprNode::SelfRef)),
             method: name.clone(),
             args: vec![],
             block: None,

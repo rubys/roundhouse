@@ -1699,6 +1699,7 @@ mod tests {
             stylesheets: Vec::new(),
             lexxy: false,
             partial_ivars: Default::default(),
+            partial_helpers: Default::default(),
             multipart_partials: Default::default(),
             dyn_pools: Default::default(),
             partial_extras: Default::default(),

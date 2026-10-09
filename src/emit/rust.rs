@@ -570,11 +570,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // the same struct name. Controller render branches dispatch
         // by `request_format`-driven name selection — both variants
         // need to land on the same `impl Articles { ... }`.
-        let mut raw_lcs = crate::lower::lower_views_to_library_classes(
-            &app.views,
-            app,
-            view_extras.clone(),
-        );
+        let mut raw_lcs =
+            crate::lower::view_to_library::lower_views_to_library_classes_with_controller_helpers(
+                &app.views,
+                app,
+                view_extras.clone(),
+                &app.view_visible_controller_methods,
+            );
         raw_lcs.extend(crate::lower::lower_jbuilder_to_library_classes(
             &app.views,
             app,
