@@ -19,7 +19,7 @@ falling, or a test being selected is not completion evidence.
 
 | Input | Snapshot / status |
 |---|---|
-| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN; latest code commit `db5042ec27c96aa7540eead03cd55fbb867805a7`; keep Draft unless Thomas explicitly says otherwise |
+| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`; status last inspected at head `0c9e9daef27779c2923e030aec26f5073531f238` (test/evidence only; no new compiler support); keep Draft unless Thomas explicitly says otherwise |
 | Baseline implementation SHA | `3b6d1b7576036382f82aa936fef8bcbd5b65272c`; the first plan commit `609248bcf7f51c94d56f91fbdaaf6675dd5b71fe` changed docs only |
 | Campfire | CI pin and checked-out SHA `32b4144b5206304fa8d4c67455a753e2d3c16635` |
 | Strict analyzer | `roundhouse check --strict`: exit 0, 0 errors, 404 warnings |
@@ -32,7 +32,8 @@ falling, or a test being selected is not completion evidence.
 | Historical estimate | ~2,468; current survey lib count is 2,496 (28 higher), broadly similar in magnitude but historical scope/method is unknown. Use 2,496 as this captured survey baseline, not 2,468 |
 | Environment | Debian 12, Linux x86_64; `rustc 1.98.1 (48a229cea 2026-09-01)`, host `x86_64-unknown-linux-gnu`; compiler binary SHA-256 `859254978c0a0402c32f949f6de0d99aee73be8d15f45aac00ae1448aac51e74`; Cargo 1.98.1 binary SHA-256 `da77c8b33849312255ccde3179198ada4c8deb370488d050286146b1d1b27e14`; Roundhouse root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a8e8a5981`; generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` |
 | Rails oracle | Not prepared. Required for Rails equivalence, not for compiler diagnostics |
-| Exact-head CI | As of the push of `db5042ec27c96aa7540eead03cd55fbb867805a7`, GitHub reported 0 check-runs and a pending commit-status rollup with no individual statuses. This is not a green CI result. Earlier `ci:rust` run [37986454230](https://github.com/rubys/roundhouse/actions/runs/37986454230) passed on code head `3b6d1b7576036382f82aa936fef8bcbd5b65272c`; Campfire browser smoke and extra-target jobs were skipped |
+| Exact-head CI | At inspected head `0c9e9daef27779c2923e030aec26f5073531f238`, GitHub returned an empty status-check rollup and no check runs. This is **no CI evidence**, not a green result. Earlier `ci:rust` run [37986454230](https://github.com/rubys/roundhouse/actions/runs/37986454230) passed on code head `3b6d1b7576036382f82aa936fef8bcbd5b65272c`; Campfire browser smoke and extra-target jobs were skipped |
+| Review state | At the same inspection, GitHub's review decision was empty. Existing correctness/security threads have replies marked addressed; the latest CodeRabbit review at `0b2323e` left only two low-priority performance observations (regex literal recompilation and duplicate analyzer write-site survey). They are deferred; no correctness or security finding from that review remains pending. The browser room-delete journey is still explicitly unverified on Campfire smoke |
 | Scratch evidence | Command outputs, generated files/hashes, lock, and Cargo JSON live under `/tmp/rh688-baseline` in the current orb; large scratch output is not committed |
 
 The PR already contains substantial Rust Campfire work, including app/helper
