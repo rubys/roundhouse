@@ -144,8 +144,11 @@ impl Overlay {
     /// database before the script's first line.
     pub fn run_ruby(self, script: &str) -> Run {
         let (emitted, errors) = self.emit_tree(BuildTarget::Ruby);
+        // `ruby -e` reads its script in the locale's encoding, so under
+        // `LANG=C` any non-ASCII literal is a syntax error. The magic
+        // comment must be the first line to count.
         let script = format!(
-            "require File.expand_path(\"main\", Dir.pwd)\nMain.configure_default_adapter!\n{script}"
+            "# encoding: utf-8\nrequire File.expand_path(\"main\", Dir.pwd)\nMain.configure_default_adapter!\n{script}"
         );
         let output = ruby()
             .arg("-e")
