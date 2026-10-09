@@ -1475,9 +1475,17 @@ fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr)
         // doc comment). Either way what follows it is the option hash,
         // so both spellings share one `on:` parse below.
         let (callback, opt_args): (&Expr, &[Expr]) = match (block.as_ref(), &args[..]) {
+            // A block declaring optional/keyword parameters
+            // (`before_save { |key:| … }`) binds names the spliced hook
+            // body has no binding for: leave it on the dynamic path.
+            (Some(b), _)
+                if matches!(&*b.node, ExprNode::Lambda { extra_params, .. } if !extra_params.is_empty()) =>
+            {
+                return;
+            }
             (Some(b), rest) => (b, rest),
             (None, [first, rest @ ..])
-                if matches!(&*first.node, ExprNode::Lambda { params, .. } if params.is_empty()) =>
+                if matches!(&*first.node, ExprNode::Lambda { params, extra_params, .. } if params.is_empty() && extra_params.is_empty()) =>
             {
                 (first, rest)
             }

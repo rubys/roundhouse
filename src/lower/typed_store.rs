@@ -74,9 +74,12 @@ pub(crate) fn typed_store_decls(
         }) else {
             continue;
         };
-        let ExprNode::Lambda { params, body: block_body, .. } = &*block.node else {
+        let ExprNode::Lambda { extra_params, params, body: block_body, .. } = &*block.node else {
             continue;
         };
+        if !extra_params.is_empty() {
+            continue;
+        }
         let Some(block_var) = params.first() else { continue };
         let stmts: Vec<&Expr> = match &*block_body.node {
             ExprNode::Seq { exprs } => exprs.iter().collect(),

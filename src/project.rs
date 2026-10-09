@@ -1417,6 +1417,14 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
             ExprNode::ForwardKeywordsWithPairs { .. } if target == BuildTarget::Spinel => None,
             ExprNode::ForwardKeywordsWithPairs { .. } => Some("anonymous keyword forwarding"),
             ExprNode::Defined { .. } => Some("runtime defined? query"),
+            // The Ruby emitter (Spinel's and Roda's too) renders the whole
+            // signature; the other emitters read only the required names
+            // and would drop the rest, which the body still reads.
+            ExprNode::Lambda { extra_params, .. }
+                if !extra_params.is_empty() && !matches!(target, BuildTarget::Spinel | BuildTarget::Roda) =>
+            {
+                Some("lambda optional, keyword or keyword-rest parameters")
+            }
             ExprNode::Assign { target: LValue::Var { name, .. }, .. }
             | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
                 if name.as_str().starts_with("@@") => Some("class variable write"),

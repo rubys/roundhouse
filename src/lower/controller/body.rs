@@ -149,7 +149,7 @@ fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool, breadth: For
             left: recurse(left),
             right: recurse(right),
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: recurse(body),

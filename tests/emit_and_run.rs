@@ -11,6 +11,10 @@ mod emit_and_run;
 mod class_attribute;
 #[path = "emit_and_run/integer_query_find_by.rs"]
 mod integer_query_find_by;
+#[path = "support/lambda_signatures.rs"]
+mod lambda_signatures_contract;
+#[path = "emit_and_run/lambda_signatures.rs"]
+mod lambda_signatures;
 #[path = "emit_and_run/strong_params.rs"]
 mod strong_params;
 #[path = "emit_and_run/params_wrapper.rs"]

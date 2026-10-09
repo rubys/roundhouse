@@ -78,6 +78,11 @@ pub enum ViewHelperKind<'a> {
     /// `render_attrs(hash)` — the attribute-hash helper the HAML and Slim
     /// compilers emit for dynamic attributes (never written in ERB).
     RenderAttrs { attrs: &'a Expr },
+    /// `haml_class(static, value)` — the HAML compiler's shortcut-class
+    /// merge helper (`.g{ class: k }`, see `src/haml.rs`'s `element`):
+    /// `static_classes` is the folded `.class` shortcuts, `value` the
+    /// hash `class:`'s own (scalar) value.
+    HamlClass { static_classes: &'a Expr, value: &'a Expr },
     /// `<%= pluralize(count, "word") %>`.
     Pluralize { count: &'a Expr, word: &'a Expr },
     /// `<%= truncate(text [, opts]) %>`.
@@ -528,6 +533,10 @@ pub fn classify_view_helper<'a>(
             Some(ViewHelperKind::TurboStreamFrom { streamables: args })
         }
         ("render_attrs", 1) => Some(ViewHelperKind::RenderAttrs { attrs: &args[0] }),
+        ("haml_class", 2) => Some(ViewHelperKind::HamlClass {
+            static_classes: &args[0],
+            value: &args[1],
+        }),
         ("dom_id", 1) => Some(ViewHelperKind::DomId {
             record: &args[0],
             prefix: None,

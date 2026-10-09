@@ -143,9 +143,9 @@ fn walk_for_extra(e: &Expr, bound: &[String], out: &mut Vec<String>) {
             walk_for_extra(right, bound, out);
         }
         ExprNode::Assign { value, .. } => walk_for_extra(value, bound, out),
-        ExprNode::Lambda { body, params, .. } => {
+        ExprNode::Lambda { body, params, extra_params, .. } => {
             let mut inner_bound = bound.to_vec();
-            for p in params {
+            for p in params.iter().chain(extra_params.iter().map(|p| &p.name)) {
                 inner_bound.push(p.as_str().to_string());
             }
             walk_for_extra(body, &inner_bound, out);

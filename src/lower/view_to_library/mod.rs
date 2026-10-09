@@ -2113,8 +2113,10 @@ pub(crate) fn partial_form_bindings(
     fn seed_scopes(e: &Expr, own_dir: Option<&str>, out: &mut Vec<(ViewKey, PartialFormBinding)>) {
         if let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*e.node {
             if method.as_str() == "form_with" {
-                if let ExprNode::Lambda { params, body, .. } = &*block.node {
-                    if let Some(form_param) = params.first() {
+                if let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node {
+                    // A block with optional or keyword parameters is not the
+                    // `|f|` scope this binds; it seeds nothing.
+                    if let Some(form_param) = params.first().filter(|_| extra_params.is_empty()) {
                         let mut record_refs: HashSet<String> = HashSet::new();
                         let mut id_prefix = String::new();
                         for arg in args {
@@ -3473,7 +3475,16 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
                 .collect(),
             kwargs: *kwargs,
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+            // A default (`|label = @page_title|`) reads the view local too.
+            extra_params: extra_params
+                .iter()
+                .map(|p| {
+                    let mut p = p.clone();
+                    p.default = p.default.as_ref().map(rewrite_ivars_to_locals);
+                    p
+                })
+                .collect(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_ivars_to_locals(body),

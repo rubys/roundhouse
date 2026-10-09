@@ -1300,9 +1300,12 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
 /// `do |x| … end` / `{ |x| … }`. Anything else is not the shape.
 fn item_block(block: &Option<Expr>) -> Option<(Symbol, &Expr)> {
     let block = block.as_ref()?;
-    let ExprNode::Lambda { params, rest_param: None, body, .. } = &*block.node else {
+    let ExprNode::Lambda { extra_params, params, rest_param: None, body, .. } = &*block.node else {
         return None;
     };
+    if !extra_params.is_empty() {
+        return None;
+    }
     let [item_var] = params.as_slice() else {
         return None;
     };
@@ -1479,7 +1482,7 @@ fn emit_array_partial(
 
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![item_var.clone()],
             block_param: None,
             body: partial_call,
@@ -1560,7 +1563,7 @@ fn emit_array_block(collection: &Expr, item_var: &Symbol, body: &Expr, ctx: &Ctx
 
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda {
+        ExprNode::Lambda { extra_params: Vec::new(),
             rest_param: None,
             params: vec![item_var.clone()],
             block_param: None,
@@ -2516,12 +2519,12 @@ fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
                 .collect(),
             kwargs: *kwargs,
         },
-        ExprNode::Lambda { rest_param,
+        ExprNode::Lambda { rest_param, extra_params,
             params,
             block_param,
             body,
             block_style,
-        } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_ivars_to_locals(body),

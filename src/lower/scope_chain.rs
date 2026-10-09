@@ -3050,7 +3050,7 @@ fn lower_relation_args(
                         );
                         let block = syn(
                             span,
-                            ExprNode::Lambda { rest_param: None,
+                            ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                                 params: vec![x],
                                 block_param: None,
                                 body: id_read,
@@ -3453,7 +3453,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             args: vec![],
                             block: Some(syn(
                                 span,
-                                ExprNode::Lambda { rest_param: None,
+                                ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                                     params: vec![attrs],
                                     block_param: None,
                                     body: save,

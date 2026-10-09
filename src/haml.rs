@@ -360,15 +360,59 @@ impl Compiler {
                 // Folded shortcut entries (`.class`/`#id`), skipping a key
                 // the hash already sets.
                 let mut shortcuts = String::new();
+                // The `{…}` body, rewritten in place when a shortcut class
+                // merges into a hash `class:` value (see below).
+                let mut body = body.clone();
                 if !head.classes.is_empty() {
-                    if body.contains("class:") {
-                        // shortcut class + hash `class:` merge isn't modeled.
-                        crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
-                            file: String::new(),
-                            message: "haml class shortcut + hash class: merge not supported".into(),
-                        });
-                    } else {
-                        shortcuts.push_str(&format!("class: {:?}, ", head.classes.join(" ")));
+                    match find_top_level_class_pair(&body) {
+                        Some(value_range) => {
+                            let static_classes = head.classes.join(" ");
+                            let value_text = &body[value_range.0..value_range.1];
+                            match classify_class_value(value_text) {
+                                ClassValue::Scalar(v) => {
+                                    // Haml 7.5.1: static shortcut classes
+                                    // first, in source order, then the
+                                    // dynamic value (split on whitespace,
+                                    // deduped, first occurrence wins); a
+                                    // nil/false/"" dynamic value leaves the
+                                    // static classes alone.
+                                    let merged =
+                                        format!("haml_class({static_classes:?}, {v})");
+                                    body = splice(&body, value_range, &merged);
+                                }
+                                ClassValue::ArrayLiteral(elems) => {
+                                    // A `[e1, …, en]` literal: each element
+                                    // is Haml's own conditional-class slot
+                                    // (`cond && "x"`), so chain the merge
+                                    // left to right — same fold Haml's own
+                                    // Array-flatten does, one element at a
+                                    // time.
+                                    let mut merged = format!("{static_classes:?}");
+                                    for e in elems {
+                                        merged = format!("haml_class({merged}, {e})");
+                                    }
+                                    body = splice(&body, value_range, &merged);
+                                }
+                                ClassValue::NonLiteralArray => {
+                                    // A splat (`[*xs]`) or percent-literal
+                                    // (`%w[...]`) Array the compiler cannot
+                                    // chain at compile time (no literal
+                                    // element list to fold one at a time).
+                                    // Keep today's behavior for THIS
+                                    // element: drop the shortcut classes
+                                    // and pass the hash through unmerged.
+                                    crate::ingest::survey::record(
+                                        &crate::ingest::IngestError::Unsupported {
+                                            file: String::new(),
+                                            message: "haml class shortcut + hash class: non-literal array not supported".into(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            shortcuts.push_str(&format!("class: {:?}, ", head.classes.join(" ")));
+                        }
                     }
                 }
                 if let Some(id) = &head.id {
@@ -379,7 +423,7 @@ impl Compiler {
                 // The `{…}` body is either hash-literal contents (`a: 1, b: 2`)
                 // or a bare hash expression (`%tag{ html_attributes }`); the
                 // latter must NOT be wrapped in `{ }`.
-                let hash_expr = if looks_like_hash_pairs(body) {
+                let hash_expr = if looks_like_hash_pairs(&body) {
                     format!("{{ {shortcuts}{body} }}")
                 } else if shortcuts.is_empty() {
                     body.clone()
@@ -477,6 +521,255 @@ fn looks_like_hash_pairs(body: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// Split `s` on top-level commas (depth 0, outside string literals),
+/// respecting nesting of `()`/`[]`/`{}`. Shared by the `{…}` body's own
+/// pair split and an Array literal's element split.
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut start = 0usize;
+    let mut parts = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' => quote = Some(b),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Byte offset, within `group`, of the first top-level `key`/`value`
+/// separator (`=>` or a shorthand `key:` colon) — same colon rule as
+/// `looks_like_hash_pairs`. Returns `(sep_start, sep_end)`. `None` for a
+/// group with no separator at all (a bare `**opts` spread, not a pair).
+fn find_top_level_separator(group: &str) -> Option<(usize, usize)> {
+    let bytes = group.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' => quote = Some(b),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'=' if depth == 0 && bytes.get(i + 1) == Some(&b'>') => return Some((i, i + 2)),
+            b':' if depth == 0 => {
+                let prev = if i > 0 { bytes[i - 1] } else { b' ' };
+                let next = bytes.get(i + 1).copied().unwrap_or(b' ');
+                if prev != b':' && next == b' ' {
+                    return Some((i, i + 1));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Trim ASCII whitespace off `body[start..end]`, returning adjusted
+/// byte offsets (so a caller keeps mapping into the original body text
+/// rather than a copy).
+fn trim_range(body: &str, mut start: usize, mut end: usize) -> (usize, usize) {
+    let bytes = body.as_bytes();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    (start, end)
+}
+
+/// A hash-literal key, normalized to the name it binds — `class` for
+/// `class:`, `:class`, `'class'` and `"class"` alike (Symbol vs String
+/// keys render the same attribute name downstream), `None` for anything
+/// else (a computed key, an empty key, `::Const`, …).
+fn normalize_hash_key(key_text: &str) -> Option<String> {
+    let t = key_text.trim();
+    if let Some(rest) = t.strip_prefix(':') {
+        if rest.starts_with(':') {
+            return None;
+        }
+        return Some(rest.trim().to_string());
+    }
+    if t.len() >= 2 {
+        let bytes = t.as_bytes();
+        let quoted = (bytes[0] == b'\'' && bytes[t.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[t.len() - 1] == b'"');
+        if quoted {
+            return Some(t[1..t.len() - 1].to_string());
+        }
+    }
+    if !t.is_empty() && t.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+        return Some(t.to_string());
+    }
+    None
+}
+
+/// Find the top-level `class:` pair in a `{…}` hash-literal body — any
+/// of `class:`, `:class =>`, `'class' =>`, `"class" =>`. Scans top-level
+/// COMMA groups first, then each group's own key/value separator, so a
+/// prior key's NESTED hash (`data: { class: … }`) sits at depth 1 inside
+/// ITS OWN group and is never visited as a group of its own, and
+/// `subclass:` normalizes to `"subclass"` (its colon is the first
+/// separator for THAT pair's whole key), not `"class"`. Returns the
+/// trimmed byte range of the pair's VALUE.
+fn find_top_level_class_pair(body: &str) -> Option<(usize, usize)> {
+    for (start, end) in top_level_group_ranges(body) {
+        let group = &body[start..end];
+        let Some((sep_start, sep_end)) = find_top_level_separator(group) else {
+            // No separator in this group at all (a bare `**opts` spread,
+            // not a `key: value` pair) — keep scanning the other groups.
+            continue;
+        };
+        let key = &group[..sep_start];
+        if normalize_hash_key(key).as_deref() == Some("class") {
+            return Some(trim_range(body, start + sep_end, end));
+        }
+    }
+    None
+}
+
+fn top_level_group_ranges(body: &str) -> Vec<(usize, usize)> {
+    split_top_level_commas(body)
+        .into_iter()
+        .scan(0usize, |pos, part| {
+            let start = *pos;
+            let end = start + part.len();
+            *pos = end + 1; // + the comma `split_top_level_commas` consumed
+            Some((start, end))
+        })
+        .collect()
+}
+
+/// A hash `class:` value's shape, for merging a shortcut class into it.
+enum ClassValue<'a> {
+    /// A String/Symbol/nil/conditional/method-call/… value — passed to
+    /// `haml_class` as a single scalar argument.
+    Scalar(&'a str),
+    /// A `[e1, …, en]` Array LITERAL with no splat — each element is
+    /// Haml's own conditional-class slot, chained into the merge one at
+    /// a time.
+    ArrayLiteral(Vec<&'a str>),
+    /// An Array-producing form the compiler cannot decompose at compile
+    /// time: a splat element (`[*xs]`) or a percent literal (`%w[...]`,
+    /// `%i[...]`). Not merged — see the `NonLiteralArray` survey gap in
+    /// `element`.
+    NonLiteralArray,
+}
+
+/// Is `value` a `%w[...]`/`%i[...]`/`%W[...]`/`%I[...]` percent-literal
+/// Array? (Any percent-literal delimiter is accepted, not only `[…]`.)
+fn is_percent_array_literal(value: &str) -> bool {
+    for prefix in ["%w", "%i", "%W", "%I"] {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            if rest.starts_with(['[', '(', '{', '<']) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Does `s` (already trimmed) consist of exactly ONE bracketed group —
+/// i.e. the first `[` only returns to depth 0 at `s`'s last byte, not
+/// partway through (`[1] + [2]` is two groups, not one Array literal)?
+fn bracket_spans_whole(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' => quote = Some(b),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 && i != bytes.len() - 1 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    depth == 0
+}
+
+/// Classify a hash `class:` value's (trimmed) source text for merging a
+/// shortcut class into it — see `ClassValue`.
+fn classify_class_value(value: &str) -> ClassValue<'_> {
+    let trimmed = value.trim();
+    if is_percent_array_literal(trimmed) {
+        return ClassValue::NonLiteralArray;
+    }
+    if trimmed.len() >= 2 && trimmed.starts_with('[') && trimmed.ends_with(']') && bracket_spans_whole(trimmed) {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        let elems: Vec<&str> = split_top_level_commas(inner)
+            .into_iter()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .collect();
+        if elems.iter().any(|e| e.starts_with('*')) {
+            return ClassValue::NonLiteralArray;
+        }
+        return ClassValue::ArrayLiteral(elems);
+    }
+    ClassValue::Scalar(trimmed)
+}
+
+/// Replace `body[range.0..range.1]` with `replacement`.
+fn splice(body: &str, range: (usize, usize), replacement: &str) -> String {
+    format!("{}{}{}", &body[..range.0], replacement, &body[range.1..])
 }
 
 /// Does this line's content carry a Ruby tail that a trailing comma could
@@ -676,6 +969,112 @@ mod tests {
     fn class_shortcut_folds_into_attr_hash() {
         let (ruby, _) = compile_haml_mapped("%span.flag{title: t}\n");
         assert!(ruby.contains("render_attrs({ class: \"flag\", title: t })"), "got:\n{ruby}");
+    }
+
+    #[test]
+    fn class_shortcut_merges_a_scalar_hash_class_via_haml_class() {
+        let (ruby, _) = compile_haml_mapped(".gadget{ class: @key }\n");
+        assert!(
+            ruby.contains("render_attrs({ class: haml_class(\"gadget\", @key) })"),
+            "got:\n{ruby}"
+        );
+    }
+
+    #[test]
+    fn class_shortcut_merges_a_conditional_hash_class() {
+        let (ruby, _) = compile_haml_mapped(".gadget{ class: @flag ? 'on' : 'off' }\n");
+        assert!(
+            ruby.contains("render_attrs({ class: haml_class(\"gadget\", @flag ? 'on' : 'off') })"),
+            "got:\n{ruby}"
+        );
+    }
+
+    #[test]
+    fn class_shortcut_chains_an_array_literal_hash_class() {
+        let (ruby, _) =
+            compile_haml_mapped(".gadget{ class: [@flag && 'hot', @other && 'cold'] }\n");
+        assert!(
+            ruby.contains(
+                "render_attrs({ class: haml_class(haml_class(\"gadget\", @flag && 'hot'), @other && 'cold') })"
+            ),
+            "got:\n{ruby}"
+        );
+    }
+
+    #[test]
+    fn class_shortcut_merges_a_hash_rocket_symbol_class_key() {
+        // The key spelling is left alone — only the VALUE is rewritten.
+        let (ruby, _) = compile_haml_mapped(".gadget{ :class => @key }\n");
+        assert!(
+            ruby.contains("render_attrs({ :class => haml_class(\"gadget\", @key) })"),
+            "got:\n{ruby}"
+        );
+    }
+
+    #[test]
+    fn class_shortcut_merges_a_hash_rocket_string_class_key() {
+        let (ruby, _) = compile_haml_mapped(".gadget{ 'class' => @key }\n");
+        assert!(
+            ruby.contains("render_attrs({ 'class' => haml_class(\"gadget\", @key) })"),
+            "got:\n{ruby}"
+        );
+        let (ruby, _) = compile_haml_mapped(".gadget{ \"class\" => @key }\n");
+        assert!(
+            ruby.contains("render_attrs({ \"class\" => haml_class(\"gadget\", @key) })"),
+            "got:\n{ruby}"
+        );
+    }
+
+    #[test]
+    fn subclass_key_is_not_mistaken_for_class() {
+        // `subclass:` must not be detected as the `class:` merge key —
+        // the shortcut folds as it does with no hash `class:` at all.
+        let (ruby, _) = compile_haml_mapped(".gadget{ subclass: @key }\n");
+        assert!(
+            ruby.contains("render_attrs({ class: \"gadget\", subclass: @key })"),
+            "got:\n{ruby}"
+        );
+    }
+
+    #[test]
+    fn nested_data_class_is_not_mistaken_for_top_level_class() {
+        // `data: { class: … }`'s `class:` sits inside `data`'s nested
+        // hash (depth > 0) — not the top-level `class:` merge key.
+        let (ruby, _) = compile_haml_mapped(".gadget{ data: { class: 'x' } }\n");
+        assert!(
+            ruby.contains("render_attrs({ class: \"gadget\", data: { class: 'x' } })"),
+            "got:\n{ruby}"
+        );
+    }
+
+    #[test]
+    fn non_literal_array_hash_class_records_a_survey_gap() {
+        // A splat/percent-literal Array can't be chained at compile
+        // time — keep today's drop-and-passthrough behavior and pin the
+        // gap this records instead of silently mis-merging it.
+        crate::ingest::survey::activate();
+        let (ruby, _) = compile_haml_mapped(".gadget{ class: [*@tags] }\n");
+        assert!(
+            ruby.contains("render_attrs({ class: [*@tags] })"),
+            "shortcut must be dropped, not merged:\n{ruby}"
+        );
+        assert!(
+            crate::ingest::survey::recorded().iter().any(|g| g
+                .contains("haml class shortcut + hash class: non-literal array not supported")),
+            "expected the non-literal-array gap to be recorded"
+        );
+
+        crate::ingest::survey::activate();
+        let (ruby, _) = compile_haml_mapped(".gadget{ class: %w[a b] }\n");
+        assert!(
+            ruby.contains("render_attrs({ class: %w[a b] })"),
+            "shortcut must be dropped, not merged:\n{ruby}"
+        );
+        assert!(
+            crate::ingest::survey::recorded().iter().any(|g| g
+                .contains("haml class shortcut + hash class: non-literal array not supported")),
+            "expected the non-literal-array gap to be recorded"
+        );
     }
 
     #[test]

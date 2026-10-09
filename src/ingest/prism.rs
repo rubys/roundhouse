@@ -154,7 +154,10 @@ mod tests {
         });
         assert!(diags.is_empty());
         let ExprNode::Send { block: Some(block), .. } = &*expr.node else { panic!("missing map block") };
-        let ExprNode::Lambda { params, body, .. } = &*block.node else { panic!("missing lambda") };
+        let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { panic!("missing lambda") };
+        if !extra_params.is_empty() {
+            panic!("missing lambda")
+        }
         assert_eq!(params[0].as_str(), "__mw_24");
         let ExprNode::Seq { exprs } = &*body.node else { panic!("missing block body") };
         let ExprNode::Seq { exprs } = &*exprs[0].node else { panic!("missing multi-write") };

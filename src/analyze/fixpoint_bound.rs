@@ -275,6 +275,49 @@ mod tests {
         assert_eq!(measure(&ivars[&Symbol::from("g")]).0, MAX_DEPTH);
     }
 
+    /// `bound` doesn't distribute over the join, so applying it after
+    /// every write made an ivar slot depend on the order of its
+    /// writes: with a 10-deep Array and two Hashes of 300 classes each,
+    /// one order cut the slot to `untyped` and another kept the deep
+    /// Array (#617). The bound applies once per slot, after the walk.
+    fn wide_hash(prefix: &str) -> Ty {
+        let classes = (0..300).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("{prefix}{i}").as_str())), args: vec![] });
+        str_hash(body::union_many(classes.collect()))
+    }
+
+    fn bound_order_writers() -> [Ty; 3] {
+        [nested_arrays(10), wide_hash("A"), wide_hash("B")]
+    }
+
+    #[test]
+    fn an_ivar_slot_is_bounded_once_after_its_writes() {
+        let write = |ty: Ty| {
+            let mut value = crate::expr::Expr::new(
+                crate::span::Span::synthetic(),
+                crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil },
+            );
+            value.ty = Some(ty);
+            crate::expr::Expr::new(
+                crate::span::Span::synthetic(),
+                crate::expr::ExprNode::Assign { target: crate::expr::LValue::Ivar { name: Symbol::from("h") }, value },
+            )
+        };
+        let harvest = |order: [usize; 3]| {
+            let writers = bound_order_writers();
+            let body = crate::expr::Expr::new(
+                crate::span::Span::synthetic(),
+                crate::expr::ExprNode::Seq { exprs: order.iter().map(|&i| write(writers[i].clone())).collect() },
+            );
+            let mut ivars = std::collections::HashMap::new();
+            super::super::extract_ivar_assignments(&body, &mut ivars);
+            ivars.remove(&Symbol::from("h")).unwrap()
+        };
+        let first = harvest([0, 1, 2]);
+        for order in [[1, 2, 0], [2, 0, 1], [0, 2, 1]] {
+            assert_eq!(harvest(order), first, "writes in order {order:?}");
+        }
+    }
+
     #[test]
     fn bounding_is_idempotent_so_a_cut_type_is_a_fixed_point() {
         for ty in [json_like(12), nested_arrays(MAX_DEPTH + 4)] {

@@ -76,7 +76,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     );
     let lambda = Expr::new(
         span,
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![record],
             block_param: None,
             body: read,

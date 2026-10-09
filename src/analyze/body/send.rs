@@ -217,6 +217,9 @@ impl<'a> BodyTyper<'a> {
         block: &Expr,
     ) -> Ctx {
         let mut new_ctx = outer.clone();
+        // Required parameters come first, so the extra ones (optional,
+        // keyword, keyword rest) leave their positions alone; the Lambda
+        // arm binds the extras themselves from their defaults.
         let ExprNode::Lambda { params, .. } = &*block.node else {
             return new_ctx;
         };
