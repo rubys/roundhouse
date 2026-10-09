@@ -18,6 +18,14 @@ module ActionView
       "roundhouse-nonce"
     end
 
+    # The ruby family's `url_for_path` (see the universal body in
+    # view_helpers.rb): absolute, on the request's scheme and host —
+    # `Rails.application.protocol` / `.domain`, the grounding an ERB
+    # view's `_url` gets — as Rails' view `url_for` answers it.
+    def self.url_for_path(path)
+      Rails.application.protocol + Rails.application.domain + path
+    end
+
     # Rails `class_names` (alias of `token_list`): strings/arrays add
     # their tokens, hash entries contribute their key when the value is
     # truthy (`class_names("nav", current_page: cur == path)`), nil and

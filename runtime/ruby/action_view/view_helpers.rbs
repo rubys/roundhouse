@@ -51,6 +51,7 @@ module ActionView
     def self.to_query: (Hash[Symbol, untyped] params) -> String
     def self.to_query_pairs: (Hash[Symbol, untyped] params, String namespace) -> String
     def self.to_query_value: (String name, untyped value) -> String
+    def self.url_for_path: (String path) -> String
     def self.url_encode_component: (String s) -> String
     def self.url_encode_mailto_address: (String s) -> String
     def self.needs_url_escape?: (String s) -> bool

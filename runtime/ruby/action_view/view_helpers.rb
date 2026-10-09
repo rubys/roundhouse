@@ -288,6 +288,20 @@ module ActionView
     # `"+".Replace(x, …)`, which compiles nowhere).
     MAILTO_ESCAPE_PATTERN = /[ !"\#$%&'()*+,\/:;<=>?\[\\\]^`{|}]/.freeze
 
+    # The URL a view's `<x>_url` route helper answers, given its path.
+    # Rails answers it absolute, on the request's scheme and host
+    # (`http://www.example.com/articles/1.json`). This universal body
+    # answers the PATH: a strict target's view has no request in scope
+    # (neither `ActionController::Current` nor `Rails.application`
+    # reaches those runtimes), and a path is what a client resolves
+    # against the page it came from. The ruby family reopens it in
+    # `view_helpers_ext.rb` over the request, so the lanes that know the
+    # host render what Rails renders. jbuilder's `json.url
+    # article_url(…)` is the caller (`jbuilder_to_library`).
+    def self.url_for_path(path)
+      path
+    end
+
     # Monomorphic, like `url_encode`.
     def self.url_encode_component(s)
       return s unless needs_url_escape?(s)

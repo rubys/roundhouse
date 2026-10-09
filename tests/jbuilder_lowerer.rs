@@ -81,19 +81,16 @@ fn article_partial_emits_extract_plus_url_pair() {
     // The trailing `json.url article_url(...)` becomes the "url" pair
     // and `article_url(article, format: :json)` rewrites to
     // `RouteHelpers.article_path(article.id) + ".json"` — the format
-    // kwarg threads through as a literal suffix — and the whole is
-    // grounded on the request's scheme and host, as an ERB view's
-    // `_url` is, so the output matches Rails'
-    // `http://host/articles/1.json` self-link.
+    // kwarg threads through as a literal suffix, and the whole goes
+    // through `ActionView::ViewHelpers.url_for_path`, which answers
+    // Rails' absolute `http://host/articles/1.json` on the ruby family
+    // and the path on targets with no request in a view.
     assert!(body.contains("io << \"\\\"url\\\":\""), "missing url key: {body}");
     assert!(
-        body.contains("RouteHelpers.article_path(article.id) + \".json\""),
-        "missing route-helper + format-suffix rewrite: {body}"
-    );
-    assert!(
-        body.contains("Rails.application.protocol")
-            && body.contains("Rails.application.domain"),
-        "missing absolute-url grounding: {body}"
+        body.contains(
+            "ActionView::ViewHelpers.url_for_path(RouteHelpers.article_path(article.id) + \".json\")"
+        ),
+        "missing url_for_path over the route helper + format suffix: {body}"
     );
     assert!(body.contains("io << \",\""), "missing pair separator: {body}");
     assert!(body.contains("io << \"}\""), "missing object close: {body}");

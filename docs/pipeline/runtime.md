@@ -2552,11 +2552,13 @@ has three filled cells and one empty one:
   accept an absolute one. Targets whose controller runtime has no
   request (`request_host_for_redirect` is `""` there) keep the path.
   A jbuilder template's `_url` (`json.url article_url(a, format:
-  :json)`) gets the ERB view's grounding,
-  `view_to_library::absolute_url_of`: `Rails.application.protocol` +
-  `Rails.application.domain` + the path. Views, like Rails', read the
-  request's scheme and host, but they do not yet see a controller's
-  `default_url_options`.
+  :json)`) is `ActionView::ViewHelpers.url_for_path(RouteHelpers
+  .article_path(…) + ".json")`. The universal body answers the path,
+  because a strict target's view has no request in scope. The ruby
+  family reopens it (`view_helpers_ext.rb`) over
+  `Rails.application.protocol` + `.domain`, the grounding an ERB
+  view's `_url` gets, and so renders Rails' absolute URL. Neither sees
+  a controller's `default_url_options` yet.
 * **`anchor:`** is rendered, `#tag`, after the query string — the order
   `path_for` applies `add_params` and then `add_anchor` in.
 * **`format:`** is `lower::route_format_suffix`'s, which monomorphizes
