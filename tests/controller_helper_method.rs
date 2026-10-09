@@ -112,6 +112,7 @@ end
         Vec::new(),
         LowerControllerOptions {
             inferred_params: Some(&inferred),
+            inferred_returns: None,
             routed_by_controller: Some(&routed),
             ..Default::default()
         },
