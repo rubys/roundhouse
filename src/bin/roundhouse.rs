@@ -476,6 +476,11 @@ fn run_transpile(
     // output, propagating any hard emit failure now.
     let files = files_result?;
     project::write_to_dir(&files, out)?;
+    // Never finalize a stale CRuby units.json when another target reuses
+    // this directory. Plain CRuby emission also leaves old inputs alone.
+    if target == BuildTarget::Ruby && roundhouse::roundsnap::enabled() {
+        project::finalize_roundsnap(out)?;
+    }
     // The app's own binary files — images, fonts, binary test fixtures.
     // They never became `EmittedFile`s (that type's content is a
     // `String`), so before this they were dropped without a word.

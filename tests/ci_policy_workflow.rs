@@ -41,7 +41,9 @@ fn unit_batches_all_targets_without_reducing_coverage() {
             && install.contains("bcrypt")
             && install.contains("ruby-vips")
             && install.contains("rails-html-sanitizer")
-            && install.contains("activerecord"),
+            && install.contains("activerecord")
+            && install.contains("minitest")
+            && install.contains("csv"),
         "{install}"
     );
     let vips = steps
@@ -63,6 +65,45 @@ fn unit_batches_all_targets_without_reducing_coverage() {
         .iter()
         .position(|step| step["name"].as_str() == Some("Build and run all test targets in batches"))
         .expect("batch every lib/bin/integration target through Cargo");
+    let minitest = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Run Roundsnap gem Minitest files"))
+        .expect("run each gems/roundsnap Minitest file on pinned MRI");
+    assert_eq!(steps[minitest]["if"].as_str(), Some("matrix.shard == 0"));
+    assert!(steps[minitest].get("continue-on-error").is_none());
+    let minitest_body = steps[minitest]["run"].as_str().unwrap();
+    assert!(
+        minitest_body.contains("cd gems/roundsnap")
+            && minitest_body.contains("test/*_test.rb")
+            && minitest_body.contains("ruby -Ilib:test \"$f\""),
+        "{minitest_body}"
+    );
+    assert!(
+        minitest_body.contains("no Roundsnap Minitest files") && minitest_body.contains("exit 1"),
+        "empty gems/roundsnap/test must fail, not skip green: {minitest_body}"
+    );
+    assert!(
+        !minitest_body.contains("ruby -Ilib:test test/")
+            && !minitest_body.contains("ruby -Ilib:test ${files")
+            && !minitest_body.contains("ruby -Ilib:test \"$files"),
+        "MRI treats extra positional args as ARGV, not extra files: {minitest_body}"
+    );
+    let setup_ruby = steps
+        .iter()
+        .position(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("ruby/setup-ruby@"))
+        })
+        .expect("unit pins MRI before gem tests");
+    assert_eq!(
+        steps[setup_ruby]["with"]["ruby-version"].as_str(),
+        Some("${{ env.MRI_RUBY }}")
+    );
+    assert!(
+        setup_ruby < gems && gems < minitest && minitest < tests,
+        "Roundsnap gem tests need pinned MRI, then fail closed before cargo batches"
+    );
     assert!(
         gems < tests,
         "Campfire launcher regressions require bcrypt before the batches"
@@ -116,6 +157,246 @@ fn unit_batches_all_targets_without_reducing_coverage() {
         resources["with"]["path"].as_str(),
         Some("${{ runner.temp }}/unit-resources/")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn roundsnap_gem_minitest_runs_each_file_and_fails_when_none_exist() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let body = ci["jobs"]["unit"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Run Roundsnap gem Minitest files"))
+        .expect("Roundsnap gem Minitest step")["run"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "roundsnap-minitest-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).unwrap();
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let ruby = bin.join("ruby");
+    fs::write(
+        &ruby,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RUBY_LOG\"\nexit \"${RUBY_EXIT:-0}\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&ruby, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let gem = root.join("gems/roundsnap/test");
+    fs::create_dir_all(&gem).unwrap();
+    fs::write(gem.join("compiler_loader_test.rb"), "# one\n").unwrap();
+    fs::write(gem.join("source_map_backtrace_test.rb"), "# two\n").unwrap();
+    fs::write(gem.join("helper.rb"), "# not a test file\n").unwrap();
+    let log = root.join("ruby.log");
+    let output = Command::new("bash")
+        .args(["-c", &body])
+        .current_dir(&root)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("RUBY_LOG", &log)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recorded = fs::read_to_string(&log).unwrap();
+    let mut lines: Vec<_> = recorded.lines().filter(|line| !line.is_empty()).collect();
+    lines.sort();
+    assert_eq!(
+        lines,
+        [
+            "-Ilib:test test/compiler_loader_test.rb",
+            "-Ilib:test test/source_map_backtrace_test.rb",
+        ],
+        "one MRI process per *_test.rb, never helper.rb or a multi-file ARGV: {recorded}"
+    );
+    assert!(
+        !recorded.contains("helper.rb") && !recorded.contains("compiler_loader_test.rb test/"),
+        "must not pass extra files as MRI ARGV: {recorded}"
+    );
+
+    fs::write(&log, "").unwrap();
+    let failed = Command::new("bash")
+        .args(["-c", &body])
+        .current_dir(&root)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("RUBY_LOG", &log)
+        .env("RUBY_EXIT", "17")
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(17), "{failed:?}");
+    assert_eq!(
+        fs::read_to_string(&log).unwrap().lines().count(),
+        1,
+        "set -e must stop after the first failing file"
+    );
+
+    fs::remove_dir_all(&gem).unwrap();
+    fs::create_dir_all(&gem).unwrap();
+    fs::write(&log, "").unwrap();
+    let empty = Command::new("bash")
+        .args(["-c", &body])
+        .current_dir(&root)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("RUBY_LOG", &log)
+        .output()
+        .unwrap();
+    assert_eq!(empty.status.code(), Some(1), "{empty:?}");
+    let err = String::from_utf8_lossy(&empty.stderr);
+    assert!(
+        err.contains("no Roundsnap Minitest files"),
+        "missing files must not skip green: {err}"
+    );
+    assert_eq!(fs::read_to_string(&log).unwrap(), "");
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn roundsnap_real_blog_is_a_default_gate_not_a_new_matrix() {
+    let delivery = fs::read_to_string("tests/roundsnap_delivery.rs").unwrap();
+    assert!(delivery.contains("fn real_blog_roundsnap_compiles_and_runs_emitted_tests()"));
+    assert!(delivery.contains("fn real_blog_model_and_erb_map_to_their_source_lines()"));
+    assert!(
+        !delivery.contains("#[ignore"),
+        "real-blog must execute in unit's default batches"
+    );
+    assert!(
+        !delivery.contains("std::env::set_var"),
+        "flags belong on child processes"
+    );
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let steps = ci["jobs"]["compare-ruby"]["steps"].as_sequence().unwrap();
+    for step in steps {
+        let run = step["run"].as_str().unwrap_or("");
+        assert!(
+            !run.contains("roundsnap_delivery"),
+            "roundsnap_delivery already runs in unit; do not duplicate it in compare-ruby: {run}"
+        );
+    }
+    let summary = ci["jobs"]["ci-summary"]["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !summary.contains(&"campfire-roundsnap"),
+        "no Campfire ISeq smoke job in the summary graph: {summary:?}"
+    );
+    assert!(ci["jobs"].get("campfire-roundsnap").is_none());
+}
+
+#[test]
+fn roundsnap_campfire_gate_checks_results_not_only_totals() {
+    use std::process::Command;
+
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let steps = ci["jobs"]["campfire-conformance"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let plain = steps
+        .iter()
+        .find(|s| s["name"].as_str() == Some("Run campfire's suite against the emit"))
+        .unwrap();
+    assert!(plain["run"].as_str().unwrap().contains("--no-stubs"));
+    let step = steps
+        .iter()
+        .find(|s| {
+            s["name"].as_str() == Some("Run Campfire through Roundsnap and compare with plain Ruby")
+        })
+        .unwrap();
+    assert!(step.get("continue-on-error").is_none());
+    let body = step["run"].as_str().unwrap();
+    assert!(body.contains("ROUNDSNAP=1 \"$ROUNDHOUSE_BIN\""));
+    assert!(body.contains("--reuse /tmp/campfire-roundsnap --no-stubs"));
+    assert!(body.contains("test -z \"$(find"));
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("roundsnap-parity-{}-{unique}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let prefix = root.join("campfire").to_string_lossy().to_string();
+    // Execute the actual workflow's comparison tail, with isolated paths.
+    let tail = body
+        .split_once("test -s /tmp/campfire-tally.txt\n")
+        .unwrap()
+        .1;
+    let gate = format!("set -euo pipefail\ntest -s /tmp/campfire-tally.txt\n{tail}")
+        .replace("/tmp/campfire", &prefix);
+    let run = || {
+        Command::new("bash")
+            .args(["-c", &gate])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    let tally = "PASS|test/models/a_test|2|2|\nFAIL|test/models/b_test|0|3|x\n";
+    fs::write(format!("{prefix}-tally.txt"), tally).unwrap();
+    fs::write(
+        format!("{prefix}-failures.txt"),
+        "test/models/b_test|B#test_one|x\n",
+    )
+    .unwrap();
+    fs::write(
+        format!("{prefix}-roundsnap-failures.txt"),
+        "test/models/b_test|B#test_one|x\n",
+    )
+    .unwrap();
+    // Same 2/5 total, different file results: an aggregate-only gate lies.
+    fs::write(
+        format!("{prefix}-roundsnap-tally.txt"),
+        "FAIL|test/models/a_test|0|2|x\nFAIL|test/models/b_test|2|3|x\n",
+    )
+    .unwrap();
+    assert!(!run(), "equal totals must not hide changed file results");
+    fs::write(format!("{prefix}-roundsnap-tally.txt"), tally).unwrap();
+    assert!(
+        run(),
+        "identical results may retain the plain lane's honest gaps"
+    );
+    fs::write(
+        format!("{prefix}-roundsnap-failures.txt"),
+        "test/models/b_test|B#test_two|x\n",
+    )
+    .unwrap();
+    assert!(
+        !run(),
+        "equal file counts must not hide a different failing test"
+    );
+    fs::write(format!("{prefix}-roundsnap-tally.txt"), "").unwrap();
+    assert!(!run(), "missing results must not pass green");
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -566,10 +847,12 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
         report["env"]["VERIFY_GEN"].as_str(),
         Some("${{ steps.walk-verify-gen.outcome }}")
     );
-    assert!(report["run"]
-        .as_str()
-        .unwrap()
-        .contains("echo \"default=$DEFAULT\""));
+    assert!(
+        report["run"]
+            .as_str()
+            .unwrap()
+            .contains("echo \"default=$DEFAULT\"")
+    );
     assert!(
         ci["on"]["pull_request"].get("paths-ignore").is_none(),
         "summary must run even for documentation-only PRs"

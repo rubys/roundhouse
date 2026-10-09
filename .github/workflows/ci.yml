@@ -629,8 +629,28 @@ jobs:
       # loader test dies on `cannot load such file -- vips`.
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
-          gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips
+          gem install --no-document minitest csv rails-html-sanitizer sqlite3 bcrypt rack ruby-vips
           gem install --no-document activerecord -v '~> 8.1.0'
+      # Roundsnap's in-repo MRI gem is not a Cargo target. The default
+      # `tests/roundsnap_delivery.rs` case already rides the batches below;
+      # these Minitest files are the gem's own compiler/loader/source-map
+      # checks. MRI positional args are ARGV, not extra test files — one
+      # process per `*_test.rb`. Missing files must fail, not skip green.
+      # Shard 0 only: setup-ruby already pinned MRI for every shard.
+      - name: Run Roundsnap gem Minitest files
+        if: matrix.shard == 0
+        run: |
+          set -euo pipefail
+          cd gems/roundsnap
+          shopt -s nullglob
+          files=(test/*_test.rb)
+          if (( ${#files[@]} == 0 )); then
+            echo "error: no Roundsnap Minitest files under gems/roundsnap/test" >&2
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            ruby -Ilib:test "$f"
+          done
       # Bounded build → run → free waves: every --all-targets identity still
       # goes through Cargo (lib, bins, each integration target). Finished
       # integration executables and their own split-DWARF sidecars are freed
@@ -1702,6 +1722,7 @@ jobs:
       - name: Run campfire's suite against the emit
         run: |
           scripts/campfire-suite \
+            --no-stubs --out /tmp/campfire-ruby \
             --tally /tmp/campfire-tally.txt \
             --fail-log /tmp/campfire-failures.txt \
             --json /tmp/campfire-suite/summary.json \
@@ -1917,6 +1938,39 @@ jobs:
             echo "::notice::floor is stale — raise FLOOR_TESTS/FLOOR_FILES to $tests/$files"
           fi
           exit $rc
+      # Same pinned app, MRI, gems and producer binary as the plain lane.
+      # The suite exits zero even on test failures: compare file identities,
+      # statuses/counts and every failure, not only its exit or grand total.
+      - name: Run Campfire through Roundsnap and compare with plain Ruby
+        run: |
+          set -euo pipefail
+          ROUNDSNAP=1 "$ROUNDHOUSE_BIN" \
+            --target ruby /tmp/campfire -o /tmp/campfire-roundsnap --allow-unsupported \
+            > /tmp/campfire-roundsnap-emit.log 2>&1
+          test -s /tmp/campfire-roundsnap/manifest.json
+          test -z "$(find /tmp/campfire-roundsnap/app /tmp/campfire-roundsnap/runtime -name '*.rb' -print -quit)"
+          ruby -e 'require_relative "/tmp/campfire-roundsnap/boot"; puts "ROUNDSNAP_BOOT_OK"'
+          scripts/campfire-suite \
+            --reuse /tmp/campfire-roundsnap --no-stubs \
+            --tally /tmp/campfire-roundsnap-tally.txt \
+            --fail-log /tmp/campfire-roundsnap-failures.txt \
+            --json /tmp/campfire-roundsnap-summary.json \
+            /tmp/campfire
+          test -s /tmp/campfire-tally.txt
+          test -s /tmp/campfire-roundsnap-tally.txt
+          diff -u /tmp/campfire-tally.txt /tmp/campfire-roundsnap-tally.txt
+          diff -u /tmp/campfire-failures.txt /tmp/campfire-roundsnap-failures.txt
+      - name: Upload Roundsnap Campfire evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: campfire-roundsnap-evidence
+          path: |
+            /tmp/campfire-roundsnap-emit.log
+            /tmp/campfire-roundsnap-tally.txt
+            /tmp/campfire-roundsnap-failures.txt
+            /tmp/campfire-roundsnap-summary.json
+          if-no-files-found: warn
       # Always: a regression is exactly when the per-file first-error
       # column is worth reading, and that is the run where the step above
       # failed.

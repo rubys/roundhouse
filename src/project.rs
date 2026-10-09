@@ -1561,7 +1561,15 @@ pub fn target_files(
         // table used to live inside `spin_shape` and so reached only
         // the spinel tree, which cost campfire two test files on a
         // Ruby 3.4 runner (`Pathname()`).
-        BuildTarget::Ruby => ruby_runtime_files(app, fixture).map(with_bundled_requires),
+        BuildTarget::Ruby => {
+            if crate::roundsnap::enabled() {
+                emit::ruby::source_markers::with_source_markers(app, || {
+                    ruby_runtime_files(app, fixture)
+                }).map(with_bundled_requires)
+            } else {
+                ruby_runtime_files(app, fixture).map(with_bundled_requires)
+            }
+        }
         BuildTarget::Jruby => jruby_runtime_files(app, fixture).map(with_bundled_requires),
         BuildTarget::Roda => Ok(sort_files(emit::roda::emit(app))),
         BuildTarget::Crystal => Ok(sort_files(emit::crystal::emit(app))),
@@ -1629,7 +1637,18 @@ pub fn target_files(
         let files = ensure_static_assets(files, target);
         ensure_e2e(files, target)
     };
-    Ok(ensure_readme(files, target))
+    let mut files = ensure_readme(files, target);
+    if target == BuildTarget::Ruby && crate::roundsnap::enabled() {
+        // Package only the final text: bundled requires, tree shake and
+        // scaffold wiring must all see real .rb entries, not units.json.
+        for (path, content) in &mut files {
+            if path.ends_with(".rb") {
+                *content = emit::ruby::source_markers::finish(content);
+            }
+        }
+        crate::roundsnap::prepare(&mut files)?;
+    }
+    Ok(files)
 }
 
 /// Targets whose archives ship the Playwright e2e suite under `e2e/`
@@ -1956,6 +1975,14 @@ pub fn write_to_dir(files: &[(String, String)], dest: &Path) -> Result<(), Strin
         write_if_changed(&dest.join(path), content.as_bytes())?;
     }
     Ok(())
+}
+
+/// CRuby Roundsnap post-write: compile `units.json` → `iseq/**` +
+/// `manifest.json`. No-op unless `ROUNDSNAP=1` left a `units.json`.
+/// Kept off [`write_to_dir`] so Spinel/JRuby/test sinks do not own
+/// CRuby ISeq delivery policy (Thermos boundary finding).
+pub fn finalize_roundsnap(dest: &Path) -> Result<(), String> {
+    crate::roundsnap::finalize(dest)
 }
 
 fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -8888,9 +8915,14 @@ mod tests {
             "{view}"
         );
         let ruby = ruby_runtime_files(&app, fixture).expect("ruby tree");
+        // Whole-line markers only (docs like SPECIMEN.md may *mention*
+        // `#<SPINEL_SOURCE>` without emitting them into `.rb`).
         let marked: Vec<&str> = ruby
             .iter()
-            .filter(|(_, c)| c.contains("#<SPINEL_SOURCE>"))
+            .filter(|(p, c)| {
+                p.ends_with(".rb")
+                    && c.lines().any(|l| l.trim_start().starts_with("#<SPINEL_SOURCE>"))
+            })
             .map(|(p, _)| p.as_str())
             .collect();
         assert!(marked.is_empty(), "ruby tree carries spinel markers: {marked:?}");
