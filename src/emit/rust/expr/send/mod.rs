@@ -75,6 +75,14 @@ pub(super) fn emit_send(
     if recv.is_none() && method == "request" && args.is_empty() {
         return "crate::http::current_request_context()".to_string();
     }
+    // `ActionController::Base#response`: the controller IS its response
+    // in the shared runtime, and the Rust response state lives in a
+    // thread-local, so the bare send is a handle to it rather than a
+    // method on `self` (which keeps `set_version_headers`-style bodies
+    // static-safe).
+    if recv.is_none() && method == "response" && args.is_empty() && !super::is_instance_method("response") {
+        return "crate::http::ResponseHandle".to_string();
+    }
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses
     // stored ISO-8601 text into a native `chrono::DateTime<Utc>`. Maps to
     // the hand-written rust datetime runtime helper, which is nil-safe

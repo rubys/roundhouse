@@ -25,6 +25,13 @@ pub(super) fn try_recv_typed_method(
     outer_ty: Option<&crate::ty::Ty>,
 ) -> Option<String> {
     let r = recv?;
+    // `response.headers[k]` — the read half of the header write bridge.
+    if method == "[]" && args.len() == 1 && super::super::assign::is_response_headers(r) {
+        return Some(format!(
+            "crate::http::ResponseHandle.header(&({}))",
+            emit_expr(&args[0])
+        ));
+    }
     if method == "[]" && args.len() == 1 {
         // Peel `Union<T, Nil>` from the recv Ty so receivers bound
         // via `let x = arr[i]` (typed `T | Nil` by the body-typer's
@@ -285,6 +292,15 @@ pub(super) fn try_recv_typed_method(
         ));
     }
     if method == "[]=" && args.len() == 2 {
+        // `response.headers[k] = v` — see the LValue::Index arm in
+        // `assign.rs`; the Send spelling of the same write.
+        if super::super::assign::is_response_headers(r) {
+            return Some(format!(
+                "crate::http::ResponseHandle.set_header(&({}), ({}).to_string())",
+                emit_expr(&args[0]),
+                emit_expr(&args[1]),
+            ));
+        }
         // Module-singleton Ivar `[]=`: `@slots[k] = v` in a
         // `def self.foo` body needs to mutate the static
         // `Mutex<Option<HashMap>>` slot through
