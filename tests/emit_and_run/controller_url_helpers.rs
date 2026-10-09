@@ -186,6 +186,15 @@ class ArticleJsonUrlsControllerTest < ActionDispatch::IntegrationTest
     assert_not_includes response.body, %("url":"/articles/)
   end
 
+  # Outside the harness the view reads the request (no session origin);
+  # cleared here so that path is what renders.
+  test "a standard port in the Host drops out of the self-link" do
+    host! "blog.test:80"
+    ActionView::ViewHelpers.url_origin = ""
+    get "/articles.json"
+    assert_includes response.body, %("url":"http://blog.test/articles/#{Article.first.id}.json")
+  end
+
   # campfire's bot API tests compare the two sides:
   # `assert_equal room_message_url(@room, m), json["url"]`. A test
   # body's `_url` is absolute on the session's host, as the view's is.

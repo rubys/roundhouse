@@ -39,7 +39,13 @@ module ActionView
     def self.url_for_path(path)
       origin = @url_origin
       return origin + path unless origin.empty?
-      Rails.application.protocol + Rails.application.domain + path
+      # Through the controller's `_url` builder, so the scheme's
+      # standard port drops out (`Host: blog.test:80` names
+      # `http://blog.test/…`, as Rails and `url_from_path` do).
+      hostport = Rails.application.domain
+      ActionController.build_host_url(
+        Rails.application.protocol, hostport, ActionController.url_port_of(hostport), path
+      )
     end
 
     # Rails `class_names` (alias of `token_list`): strings/arrays add
