@@ -25,7 +25,8 @@ class RateLimiterTest < Minitest::Test
     # Expiry is lazy, on read, at whole-second resolution: a 1 s window
     # written at second N is gone at second N + 1.
     sleep 1.1
-    assert_equal 1, @cache.increment_str("rate-limit:t:a", 1)
+    count = @cache.increment_str("rate-limit:t:a", 1)
+    assert_equal 1, count, "expected the rate-limit window to expire by #{Time.now.to_i}; got #{count}"
   end
 
   def test_exceeded_is_the_count_after_this_request_against_the_cap
