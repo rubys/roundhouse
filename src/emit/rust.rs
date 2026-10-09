@@ -546,8 +546,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         Vec<crate::dialect::LibraryClass>,
         std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
     ) = if !app.models.is_empty() {
+        // Rust has no module mixin: an included concern's plain instance
+        // methods (`User::Role#can_administer?`) have to live on the
+        // model struct itself. Its `included do` body is already spliced.
+        let models_with_concerns = models_with_concern_methods(app);
         let (mut lcs, registry) = crate::lower::lower_models_with_registry_and_params(
-            &app.models,
+            &models_with_concerns,
             &app.schema,
             vec![],
             &params_specs,
@@ -1753,6 +1757,65 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 }
 
 /// Does a method of `lc` call `method` on `self`?
+/// The app's models with each included concern's instance methods added
+/// to the model body (the model's own definition of a name wins). The
+/// `included do` half of a concern is spliced at ingest; the plain
+/// methods stay on the module, which Rust cannot mix in.
+fn models_with_concern_methods(app: &crate::app::App) -> Vec<crate::dialect::Model> {
+    use crate::dialect::{MethodReceiver, ModelBodyItem};
+    use crate::expr::ExprNode;
+    let modules: std::collections::HashMap<&str, &crate::dialect::LibraryClass> = app
+        .library_classes
+        .iter()
+        .filter(|lc| lc.is_module)
+        .map(|lc| (lc.name.0.as_str(), lc))
+        .collect();
+    app.models
+        .iter()
+        .map(|model| {
+            let mut model = model.clone();
+            let mut included: Vec<String> = Vec::new();
+            for item in &model.body {
+                if let ModelBodyItem::Unknown { expr, .. } = item {
+                    if let ExprNode::Send { recv: None, method, args, .. } = &*expr.node {
+                        if method.as_str() == "include" {
+                            for arg in args {
+                                if let ExprNode::Const { path } = &*arg.node {
+                                    included.push(
+                                        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for name in included {
+                // `include Role` inside `class User` names `User::Role`.
+                let candidates = [format!("{}::{name}", model.name.0.as_str()), name.clone()];
+                let Some(module) = candidates.iter().find_map(|c| modules.get(c.as_str())) else {
+                    continue;
+                };
+                for method in &module.methods {
+                    if method.receiver != MethodReceiver::Instance
+                        || model.methods().any(|m| m.name == method.name)
+                    {
+                        continue;
+                    }
+                    let mut method = method.clone();
+                    method.enclosing_class = Some(model.name.0.clone());
+                    model.body.push(ModelBodyItem::Method {
+                        method,
+                        leading_comments: Vec::new(),
+                        leading_blank_line: false,
+                    });
+                }
+            }
+            model
+        })
+        .collect()
+}
+
 /// An app with its own `Session` model (Campfire's login sessions)
 /// cannot also import the framework's `crate::session::Session`: the
 /// explicit import wins over the `models::*` glob, so `Session::find_by`

@@ -399,7 +399,6 @@ pub(super) fn emit_bool_op(op: &crate::expr::BoolOpKind, left: &Expr, right: &Ex
             Some(crate::ty::Ty::Union { variants })
                 if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
         );
-        let lhs_is_bool = matches!(left.ty.as_ref(), Some(crate::ty::Ty::Bool));
         if lhs_is_option {
             // `hash[k] || default` — the body-typer types `hash[k]` as
             // `Option<V>`, but rust emits Send `[]` as `hash[k]`
@@ -483,8 +482,11 @@ pub(super) fn emit_bool_op(op: &crate::expr::BoolOpKind, left: &Expr, right: &Ex
             };
             return format!("{}.unwrap_or({})", emit_expr(left), default_s);
         }
-        if !lhs_is_bool && left.ty.is_some() {
-            // Statically non-nil — RHS unreachable in Ruby semantics. Drop.
+        if left.ty.as_ref().is_some_and(is_always_truthy) {
+            // Statically truthy (never nil, never false) — the RHS is
+            // unreachable in Ruby semantics. Drop. A `Bool`, a union
+            // that may hold `false`, or anything untyped keeps it: a
+            // `true | false` left operand must still fall through.
             return emit_expr(left);
         }
     }
@@ -536,8 +538,29 @@ fn emits_as_or_infix(e: &Expr) -> bool {
         Some(crate::ty::Ty::Union { variants })
             if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
     );
-    let lhs_is_bool = matches!(left.ty.as_ref(), Some(crate::ty::Ty::Bool));
-    !lhs_is_option && (lhs_is_bool || left.ty.is_none())
+    !lhs_is_option && !left.ty.as_ref().is_some_and(is_always_truthy)
+}
+
+/// A type whose every value is truthy in Ruby: no `nil`, no `false`.
+/// `Bool`, `Nil`, unions and untyped values may be falsy, so they are
+/// not listed.
+fn is_always_truthy(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    matches!(
+        ty,
+        Ty::Int
+            | Ty::Float
+            | Ty::Str
+            | Ty::Sym
+            | Ty::Date
+            | Ty::Time
+            | Ty::Array { .. }
+            | Ty::Hash { .. }
+            | Ty::Tuple { .. }
+            | Ty::Record { .. }
+            | Ty::Relation { .. }
+            | Ty::Class { .. }
+    )
 }
 
 pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
@@ -1141,6 +1164,23 @@ mod tests {
         let inner_or = bool_op(BoolOpKind::Or, bool_var("c"), bool_var("d"));
         let root = bool_op(BoolOpKind::And, inner_and, inner_or);
         assert_eq!(emit(&root), "a && b && (c || d)");
+    }
+
+    #[test]
+    fn or_keeps_its_right_side_unless_the_left_is_always_truthy() {
+        // `true | false` may be false, so `a || b` must still evaluate b.
+        let mut maybe_false = bool_var("a");
+        maybe_false.ty = Some(Ty::Union {
+            variants: vec![Ty::Bool, Ty::Str],
+        });
+        let kept = bool_op(BoolOpKind::Or, maybe_false, bool_var("b"));
+        assert_eq!(emit(&kept), "a || b");
+
+        // A String is truthy even when empty: the right side is dead.
+        let mut text = bool_var("s");
+        text.ty = Some(Ty::Str);
+        let dropped = bool_op(BoolOpKind::Or, text, bool_var("b"));
+        assert_eq!(emit(&dropped), "s");
     }
 
     #[test]

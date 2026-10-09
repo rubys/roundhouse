@@ -635,6 +635,10 @@ pub(super) fn emit_send(
         } else {
             args_s
         }
+    } else if let Some(padded) = pad_instance_call_defaults(r, method, args, &args_s) {
+        // Ruby `user.can_administer?` omits a defaulted trailing param
+        // (`record = nil`); the Rust method has a fixed arity.
+        padded
     } else if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Class { .. }))
         && method.ends_with('=')
         && args.len() == 1
@@ -1065,4 +1069,33 @@ mod helper_dispatch_tests {
             );
         });
     }
+}
+
+/// Pad the omitted trailing arguments of an instance call on a typed
+/// class receiver with the callee's source-level defaults (else the
+/// Ty default), so a Ruby call that leans on `def m(record = nil)`
+/// meets the fixed-arity Rust method. `None` when the receiver is not a
+/// known class, the callee is not in the registry, or nothing is
+/// missing.
+fn pad_instance_call_defaults(
+    r: &Expr,
+    method: &str,
+    args: &[Expr],
+    args_s: &[String],
+) -> Option<Vec<String>> {
+    let class = match r.ty.as_ref().map(super::util::peel_nil) {
+        Some(crate::ty::Ty::Class { id, .. }) => id.0.as_str().rsplit("::").next()?.to_string(),
+        _ => return None,
+    };
+    let param_tys = super::global_class_method_param_tys(&class, method)?;
+    if args.len() >= param_tys.len() {
+        return None;
+    }
+    let mut out: Vec<String> = args_s.to_vec();
+    for i in args.len()..param_tys.len() {
+        let default = super::global_class_method_param_default(&class, method, i)
+            .or_else(|| synth_default_for_ty(&param_tys[i]))?;
+        out.push(default);
+    }
+    Some(out)
 }
