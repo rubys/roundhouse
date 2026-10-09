@@ -128,3 +128,35 @@ end
     )
     .assert_passes();
 }
+
+/// jbuilder's `json.url article_url(article, format: :json)` — the
+/// scaffold's self-link — renders the absolute URL too. The jbuilder
+/// lowerer used to fold it onto the path, so every article in
+/// `/articles.json` carried `"url":"/articles/1.json"`.
+#[test]
+fn jbuilder_url_helper_is_absolute_on_the_request_host() {
+    emit_and_run::real_blog()
+        .write(
+            "test/controllers/article_json_urls_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticleJsonUrlsControllerTest < ActionDispatch::IntegrationTest
+  test "the show self-link names the request's host" do
+    article = Article.first
+    get "/articles/#{article.id}.json"
+    assert_response :success
+    assert_includes response.body, %("url":"http://www.example.com/articles/#{article.id}.json")
+  end
+
+  test "the index self-links follow host!" do
+    host! "blog.test"
+    get "/articles.json"
+    assert_includes response.body, %("url":"http://blog.test/articles/#{Article.first.id}.json")
+    assert_not_includes response.body, %("url":"/articles/)
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/article_json_urls_controller_test.rb")
+        .assert_passes();
+}

@@ -2551,6 +2551,12 @@ has three filled cells and one empty one:
   compares both sides as absolute URLs, and `get`/`follow_redirect!`
   accept an absolute one. Targets whose controller runtime has no
   request (`request_host_for_redirect` is `""` there) keep the path.
+  A jbuilder template's `_url` (`json.url article_url(a, format:
+  :json)`) gets the ERB view's grounding,
+  `view_to_library::absolute_url_of`: `Rails.application.protocol` +
+  `Rails.application.domain` + the path. Views, like Rails', read the
+  request's scheme and host, but they do not yet see a controller's
+  `default_url_options`.
 * **`anchor:`** is rendered, `#tag`, after the query string — the order
   `path_for` applies `add_params` and then `add_anchor` in.
 * **`format:`** is `lower::route_format_suffix`'s, which monomorphizes

@@ -81,13 +81,19 @@ fn article_partial_emits_extract_plus_url_pair() {
     // The trailing `json.url article_url(...)` becomes the "url" pair
     // and `article_url(article, format: :json)` rewrites to
     // `RouteHelpers.article_path(article.id) + ".json"` — the format
-    // kwarg threads through as a literal suffix so the lowered output
-    // matches Rails' `/articles/1.json` self-link shape. Scheme+host
-    // is still dropped (per-deployment noise the comparator strips).
+    // kwarg threads through as a literal suffix — and the whole is
+    // grounded on the request's scheme and host, as an ERB view's
+    // `_url` is, so the output matches Rails'
+    // `http://host/articles/1.json` self-link.
     assert!(body.contains("io << \"\\\"url\\\":\""), "missing url key: {body}");
     assert!(
         body.contains("RouteHelpers.article_path(article.id) + \".json\""),
         "missing route-helper + format-suffix rewrite: {body}"
+    );
+    assert!(
+        body.contains("Rails.application.protocol")
+            && body.contains("Rails.application.domain"),
+        "missing absolute-url grounding: {body}"
     );
     assert!(body.contains("io << \",\""), "missing pair separator: {body}");
     assert!(body.contains("io << \"}\""), "missing object close: {body}");

@@ -184,13 +184,16 @@ fn a_key_with_a_collection_and_a_partial_block_is_an_array_of_partials() {
 }
 
 /// The partial's argument gets the rewrites any partial argument in a
-/// pair gets: a `<x>_url` helper becomes `RouteHelpers.<x>_path`.
+/// pair gets: a `<x>_url` helper becomes its absolute URL over
+/// `RouteHelpers.<x>_path`.
 #[test]
 fn the_partial_argument_of_a_block_element_is_rewritten() {
     let files = emitted();
     let src = view(&files, "widgets/links_json.rb");
     assert!(
-        src.contains("Views::Widgets.link_json(RouteHelpers.widget_path(widget.id))"),
+        src.contains(
+            "Views::Widgets.link_json(\"#{Rails.application.protocol}#{Rails.application.domain}#{RouteHelpers.widget_path(widget.id)}\")"
+        ),
         "the route helper is the runtime's path helper:\n{src}"
     );
 }
