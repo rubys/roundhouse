@@ -908,6 +908,23 @@ fn tail_produces_option(branch: &Expr) -> bool {
     {
         return true;
     }
+    // `Model.find_by(…)`: the generated model shim answers `Option<Model>`
+    // (nil on a miss), whatever the surrounding analyzer type widened it
+    // to. A model that defines its own `find_by` keeps that method's
+    // resolved type instead.
+    if let ExprNode::Send {
+        recv: Some(receiver),
+        method,
+        ..
+    } = &*branch.node
+        && method.as_str() == "find_by"
+        && let ExprNode::Const { path } = &*receiver.node
+        && path
+            .last()
+            .is_some_and(|model| super::global_class_method_param_tys(model.as_str(), "find_by").is_none())
+    {
+        return true;
+    }
     if let ExprNode::Send {
         recv: Some(receiver),
         ..
