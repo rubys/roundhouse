@@ -8,7 +8,6 @@
 
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fmt::Display;
 
 pub struct ActiveSupport;
 
@@ -76,6 +75,30 @@ impl Blank for Value {
     }
 }
 
+/// Text of a list element as Ruby's `to_s` gives it: a JSON string is its
+/// contents, not its quoted JSON form.
+pub trait SentenceItem {
+    fn sentence_text(&self) -> String;
+}
+impl SentenceItem for Value {
+    fn sentence_text(&self) -> String {
+        match self {
+            Value::String(s) => s.clone(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        }
+    }
+}
+macro_rules! sentence_display {
+    ($($t:ty),*) => { $(impl SentenceItem for $t { fn sentence_text(&self) -> String { self.to_string() } })* };
+}
+sentence_display!(String, str, i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64, bool);
+impl<T: SentenceItem + ?Sized> SentenceItem for &T {
+    fn sentence_text(&self) -> String {
+        (**self).sentence_text()
+    }
+}
+
 impl ActiveSupport {
     pub fn blank_pred<T: Blank>(value: T) -> bool {
         value.is_blank()
@@ -122,9 +145,9 @@ impl ActiveSupport {
     pub fn to_sentence<I>(items: I, words_connector: &str, two_words_connector: &str, last_word_connector: &str) -> String
     where
         I: IntoIterator,
-        I::Item: Display,
+        I::Item: SentenceItem,
     {
-        let parts: Vec<String> = items.into_iter().map(|i| i.to_string()).collect();
+        let parts: Vec<String> = items.into_iter().map(|i| i.sentence_text()).collect();
         match parts.len() {
             0 => String::new(),
             1 => parts[0].clone(),
@@ -162,5 +185,6 @@ mod tests {
         assert_eq!(ActiveSupport::sole(vec![7]), 7);
         assert_eq!(ActiveSupport::to_sentence(vec!["a", "b", "c"], ", ", " and ", ", and "), "a, b, and c");
         assert_eq!(ActiveSupport::to_sentence(vec!["a", "b"], ", ", " and ", ", and "), "a and b");
+        assert_eq!(ActiveSupport::to_sentence(vec![json!("a"), json!("b")], ", ", " and ", ", and "), "a and b");
     }
 }

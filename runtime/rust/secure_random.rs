@@ -5,8 +5,9 @@
 //! Only the surface the emitted code calls: `alphanumeric`, `uuid`,
 //! `stub_alphanumeric`, `stub_uuid` (and `clear_stubs`).
 //!
-//! Randomness: `/dev/urandom`, falling back (non-unix, read failure) to
-//! std's `RandomState` keyed hashing mixed with the clock. No new crates.
+//! Randomness: `/dev/urandom` only. If it is unavailable the call panics
+//! (fail closed): secure tokens never come from hash- or clock-derived
+//! bytes. No new crates.
 //!
 //! Stubs are THREAD-LOCAL: `cargo test` runs each test on its own thread,
 //! so one test's `stub_uuid` can never leak into a sibling, and a fresh
@@ -16,8 +17,6 @@
 //! stub answers EVERY call until cleared (not one-shot).
 
 use std::cell::RefCell;
-use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
 use std::io::Read;
 
 const ALPHANUMERIC: &[u8; 62] =
@@ -30,28 +29,12 @@ thread_local! {
 
 pub struct SecureRandom;
 
-fn fallback_bytes(buf: &mut [u8]) {
-    let mut counter: u64 = 0;
-    for chunk in buf.chunks_mut(8) {
-        let mut h = RandomState::new().build_hasher();
-        h.write_u64(counter);
-        counter += 1;
-        if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            h.write_u128(d.as_nanos());
-        }
-        let bytes = h.finish().to_le_bytes();
-        chunk.copy_from_slice(&bytes[..chunk.len()]);
-    }
-}
-
 fn random_bytes(len: usize) -> Vec<u8> {
     let mut buf = vec![0u8; len];
-    let ok = std::fs::File::open("/dev/urandom")
+    // Fail closed: secure tokens never come from hash- or clock-derived bytes.
+    std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut buf))
-        .is_ok();
-    if !ok {
-        fallback_bytes(&mut buf);
-    }
+        .expect("SecureRandom: no OS random source (/dev/urandom unavailable)");
     buf
 }
 
@@ -165,12 +148,5 @@ mod tests {
         assert_ne!(other, "mine");
         assert_eq!(SecureRandom::uuid(), "mine");
         SecureRandom::clear_secure_random_stubs();
-    }
-
-    #[test]
-    fn fallback_fills() {
-        let mut b = [0u8; 21];
-        fallback_bytes(&mut b);
-        assert!(b.iter().any(|x| *x != 0));
     }
 }

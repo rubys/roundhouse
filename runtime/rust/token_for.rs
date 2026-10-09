@@ -204,11 +204,13 @@ fn secure_compare(a: &str, b: &str) -> bool {
 static SECRET_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
 static KEYS: Mutex<Option<HashMap<String, Vec<u8>>>> = Mutex::new(None);
 
-fn secret_key_base() -> String {
+/// `None` when no (or an empty) secret is configured: signing then fails
+/// closed instead of deriving a key anyone can compute.
+fn secret_key_base() -> Option<String> {
     if let Some(s) = SECRET_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-        return s;
+        return (!s.is_empty()).then_some(s);
     }
-    std::env::var("SECRET_KEY_BASE").unwrap_or_default()
+    std::env::var("SECRET_KEY_BASE").ok().filter(|s| !s.is_empty())
 }
 
 /// PBKDF2 is 2000 HMACs; cache per (salt, secret) like `derive_key`.
@@ -360,7 +362,12 @@ impl TokenFor {
         } else {
             String::new()
         };
-        Self::sign(&secret_key_base(), data_json.as_str(), purpose, &exp)
+        Self::sign(
+            &secret_key_base().expect("SECRET_KEY_BASE must be set to sign ActiveRecord::TokenFor tokens"),
+            data_json.as_str(),
+            purpose,
+            &exp,
+        )
     }
 
     fn sign(secret: &str, data_json: &str, purpose: &str, exp: &str) -> String {
@@ -378,7 +385,10 @@ impl TokenFor {
     /// The `data` JSON `token` carries, or "" for every rejection:
     /// tampered, other purpose, or expired.
     pub fn verified_data(token: &str, purpose: &str) -> String {
-        Self::verify(&secret_key_base(), token, purpose, chrono::Utc::now())
+        match secret_key_base() {
+            Some(secret) => Self::verify(&secret, token, purpose, chrono::Utc::now()),
+            None => String::new(),
+        }
     }
 
     fn verify(secret: &str, token: &str, purpose: &str, now: chrono::DateTime<chrono::Utc>) -> String {

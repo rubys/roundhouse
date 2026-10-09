@@ -79,6 +79,7 @@ fn encode_string(s: &str) -> String {
             '<' => out.push_str("\\u003c"),
             '>' => out.push_str("\\u003e"),
             '&' => out.push_str("\\u0026"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
     }
@@ -439,5 +440,10 @@ mod tests {
     #[should_panic(expected = "undefined method 'other='")]
     fn assign_panics_outside_schema() {
         SchematizedJson::assign(Value::Null, json!({"other": 1}), schema());
+    }
+
+    #[test]
+    fn encode_string_escapes_control_chars() {
+        assert_eq!(encode_string("a\u{0}b\u{1b}c"), "a\\u0000b\\u001bc");
     }
 }
