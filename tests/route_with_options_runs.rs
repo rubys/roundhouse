@@ -132,6 +132,10 @@ fn unmodeled_with_options_shapes_are_declined() {
             "Rails.application.routes.draw do\n  with_options to: \"a#b\" do\n    if ENV[\"X\"]\n      get \"/x\"\n    end\n  end\nend\n",
             "only receiverless route calls",
         ),
+        (
+            "Rails.application.routes.draw do\n  with_options as: :x do\n    get \"/x\", { to: \"a#b\" }\n  end\nend\n",
+            "a positional option hash is not composed",
+        ),
     ] {
         let err = strict_error(routes);
         assert!(err.contains(detail), "{routes}\n=> {err}");

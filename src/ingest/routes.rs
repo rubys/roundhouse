@@ -1325,9 +1325,13 @@ fn ingest_with_options_call(
             ));
         }
     }
-    let trailing = args
-        .last()
-        .filter(|a| a.as_keyword_hash_node().is_some() || a.as_hash_node().is_some());
+    // A braced positional hash (`get "/p", { to: "c#a" }`) is not read
+    // as options by the route ingesters, so merging into it would claim
+    // options that never reach the route.
+    if args.last().is_some_and(|a| a.as_hash_node().is_some()) {
+        return Err(with_options_gap(file, "a positional option hash is not composed"));
+    }
+    let trailing = args.last().filter(|a| a.as_keyword_hash_node().is_some());
     let own = match trailing {
         Some(hash) => match literal_option_pairs(hash, false) {
             Some(pairs) => pairs,
@@ -1363,14 +1367,9 @@ fn ingest_with_options_call(
         return walk(call.as_node());
     }
     let added = added.join(", ");
-    let (offset, text) = match (args.last(), trailing) {
-        (Some(_), Some(hash)) if hash.as_hash_node().is_some() => {
-            let hash = hash.as_hash_node().expect("checked");
-            let sep = if hash.elements().iter().next().is_some() { ", " } else { "" };
-            (hash.closing_loc().start_offset(), format!("{sep}{added}"))
-        }
-        (Some(last), _) => (last.location().end_offset(), format!(", {added}")),
-        (None, _) => match call.closing_loc() {
+    let (offset, text) = match args.last() {
+        Some(last) => (last.location().end_offset(), format!(", {added}")),
+        None => match call.closing_loc() {
             Some(close) => (close.start_offset(), added),
             None => match call.message_loc() {
                 Some(name) => (name.end_offset(), format!(" {added}")),
