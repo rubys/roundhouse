@@ -1832,9 +1832,8 @@ fn axum_verb_fn(method: &crate::dialect::HttpMethod) -> &'static str {
 /// finding; `i64` survives only as the fallback for a param the
 /// signature does not name.
 fn render_route_helpers_bare_wrappers(lc: &crate::dialect::LibraryClass) -> String {
-    let mut out = String::from(
-        "\n// Wedge 2c.3 bare-fn compat shims — delegate to `impl RouteHelpers`.\n",
-    );
+    let mut out =
+        String::from("\n// Wedge 2c.3 bare-fn compat shims — delegate to `impl RouteHelpers`.\n");
     for m in &lc.methods {
         let name = m.name.as_str();
         // Skip non-public / synthetic helpers.
@@ -1852,7 +1851,15 @@ fn render_route_helpers_bare_wrappers(lc: &crate::dialect::LibraryClass) -> Stri
                 let ty = sig_params
                     .iter()
                     .find(|sp| sp.name == p.name)
-                    .map(|sp| method::rust_param_ty(&sp.ty))
+                    .map(|sp| {
+                        if lc.name.0.as_str() == "RouteHelpers"
+                            && matches!(&sp.ty, crate::ty::Ty::Int)
+                        {
+                            "impl std::fmt::Display".to_string()
+                        } else {
+                            method::rust_param_ty(&sp.ty)
+                        }
+                    })
                     .unwrap_or_else(|| "i64".to_string());
                 format!("{}: {ty}", p.name.as_str())
             })
@@ -1869,6 +1876,22 @@ fn render_route_helpers_bare_wrappers(lc: &crate::dialect::LibraryClass) -> Stri
         ));
     }
     out
+}
+
+fn route_helpers_view_helpers_import(body: &str) -> &'static str {
+    if body.contains("ViewHelpers::") {
+        "#[allow(unused_imports)]\nuse crate::view_helpers::ViewHelpers;\n"
+    } else {
+        ""
+    }
+}
+
+fn ruby_to_s_import(body: &str) -> &'static str {
+    if body.contains(".ruby_to_s()") {
+        "#[allow(unused_imports)]\nuse crate::http::RubyToS;\n"
+    } else {
+        ""
+    }
 }
 
 /// Wedge 2c.3: emit bare-fn delegates for per-fixture label getters

@@ -90,23 +90,93 @@ fn is_helper_shaped(name: &Symbol) -> bool {
 /// Every name a call can use and reach a real `RouteHelpers` method.
 pub(crate) fn answered_names(app: &App) -> HashSet<Symbol> {
     let mut out: HashSet<Symbol> = ENGINE_MOUNTED_HELPERS.iter().map(|n| Symbol::from(*n)).collect();
-    for route in crate::lower::routes::flatten_routes(app) {
-        if !route.named || route.as_name.is_empty() {
-            continue;
-        }
-        out.insert(Symbol::from(format!("{}_path", route.as_name)));
+    // Use the same post-survey function list that emitters consume. This
+    // includes custom `direct` helpers as well as named and format routes,
+    // while excluding names that do not actually get a definition.
+    for helper in crate::lower::routes_to_library::lower_routes_to_library_functions(app) {
+        out.insert(helper.name);
     }
     out
 }
 
-/// Add the `RouteHelpers.` receiver to bare calls naming a helper the
-/// emitted tree defines. Receiver-bearing sends are left exactly as
-/// they are — whatever put a receiver there meant it.
-pub(crate) fn qualify(body: &Expr, answered: &HashSet<Symbol>, shadowed: &HashSet<Symbol>) -> Expr {
+/// Route helpers whose emitted signature allows every argument to be
+/// omitted. An explicit `Rails.application.routes.url_helpers` call with
+/// no arguments can be redirected only when the Rust call can preserve
+/// its arity through generated defaults.
+fn no_required_arg_route_helpers(app: &App) -> HashSet<Symbol> {
+    crate::lower::routes_to_library::lower_routes_to_library_functions(app)
+        .into_iter()
+        .filter(|helper| match helper.signature.as_ref() {
+            Some(crate::ty::Ty::Fn { params, .. }) => params.iter().all(|param| {
+                matches!(
+                    param.kind,
+                    crate::ty::ParamKind::Optional
+                        | crate::ty::ParamKind::Keyword { required: false }
+                )
+            }),
+            _ => helper.params.iter().all(|param| param.default.is_some()),
+        })
+        .map(|helper| helper.name)
+        .collect()
+}
+
+fn is_rails_url_helpers_chain(expr: &Expr) -> bool {
+    let mut node = &*expr.node;
+    for step in ["url_helpers", "routes", "application"] {
+        let ExprNode::Send {
+            recv: Some(recv),
+            method,
+            args,
+            block: None,
+            ..
+        } = node
+        else {
+            return false;
+        };
+        if method.as_str() != step || !args.is_empty() {
+            return false;
+        }
+        node = &*recv.node;
+    }
+    matches!(node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Rails")
+}
+
+/// Route bare calls to helpers the emitted tree defines. Also collapse
+/// an explicit Rails URL-helper chain when the call omits all arguments
+/// and the generated signature can supply them safely.
+pub(crate) fn qualify(
+    body: &Expr,
+    answered: &HashSet<Symbol>,
+    no_required_args: &HashSet<Symbol>,
+    shadowed: &HashSet<Symbol>,
+) -> Expr {
     crate::lower::controller_to_library::util::map_expr(body, &|e: &Expr| {
-        let ExprNode::Send { recv: None, method, args, block, parenthesized } = &*e.node else {
+        let ExprNode::Send { recv, method, args, block, parenthesized } = &*e.node else {
             return None;
         };
+        let explicit_url_helper = recv.as_ref().is_some_and(is_rails_url_helpers_chain);
+        if explicit_url_helper
+            && args.is_empty()
+            && block.is_none()
+            && no_required_args.contains(method)
+        {
+            return Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(crate::lower::controller_to_library::rewrites::const_path(
+                        &["RouteHelpers"],
+                        e.span,
+                    )),
+                    method: method.clone(),
+                    args: vec![],
+                    block: None,
+                    parenthesized: *parenthesized,
+                },
+            ));
+        }
+        if recv.is_some() {
+            return None;
+        }
         if !answered.contains(&*method) || shadowed.contains(&*method) {
             return None;
         }
@@ -118,8 +188,13 @@ pub(crate) fn qualify(body: &Expr, answered: &HashSet<Symbol>, shadowed: &HashSe
                     e.span,
                 )),
                 method: method.clone(),
-                args: args.iter().map(|a| qualify(a, answered, shadowed)).collect(),
-                block: block.as_ref().map(|b| qualify(b, answered, shadowed)),
+                args: args
+                    .iter()
+                    .map(|a| qualify(a, answered, no_required_args, shadowed))
+                    .collect(),
+                block: block
+                    .as_ref()
+                    .map(|b| qualify(b, answered, no_required_args, shadowed)),
                 parenthesized: *parenthesized,
             },
         ))
@@ -143,6 +218,7 @@ pub(crate) fn helper_module_shadows(app: &App) -> HashSet<Symbol> {
 /// first claim on the name.
 pub fn qualify_lcs(lcs: &mut [crate::dialect::LibraryClass], app: &App) {
     let answered = answered_names(app);
+    let no_required_args = no_required_arg_route_helpers(app);
     // A helper module's own `<x>_path` outranks a route of the same
     // name everywhere the emit resolves bare helper calls. The modules
     // in `lcs` count as well as the ones on `app`: the view pipeline
@@ -177,7 +253,7 @@ pub fn qualify_lcs(lcs: &mut [crate::dialect::LibraryClass], app: &App) {
         .collect();
     for (lc, shadows) in lcs.iter_mut().zip(shadow_sets.iter()) {
         for m in &mut lc.methods {
-            m.body = qualify(&m.body, &answered, shadows);
+            m.body = qualify(&m.body, &answered, &no_required_args, shadows);
         }
     }
 }
@@ -196,6 +272,41 @@ mod tests {
                 recv: None,
                 method: Symbol::from(method),
                 args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        )
+    }
+
+    fn rails_url_helpers_chain() -> Expr {
+        let mut receiver = Expr::new(
+            Span::default(),
+            ExprNode::Const {
+                path: vec![Symbol::from("Rails")],
+            },
+        );
+        for method in ["application", "routes", "url_helpers"] {
+            receiver = Expr::new(
+                Span::default(),
+                ExprNode::Send {
+                    recv: Some(receiver),
+                    method: Symbol::from(method),
+                    args: vec![],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+        }
+        receiver
+    }
+
+    fn explicit_route_call(method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: Some(rails_url_helpers_chain()),
+                method: Symbol::from(method),
+                args,
                 block: None,
                 parenthesized: true,
             },
@@ -240,7 +351,7 @@ mod tests {
 
     fn app_with_room_route() -> App {
         let table = crate::ingest::ingest_routes(
-            b"Rails.application.routes.draw do\n  resources :rooms\nend\n",
+            b"Rails.application.routes.draw do\n  resources :rooms\n  direct :custom_room do |options|\n    route_for :room\n  end\nend\n",
             "config/routes.rb",
         )
         .expect("routes ingest");
@@ -278,6 +389,65 @@ mod tests {
         let mut lcs = vec![helper_module("Presenter", vec![method("link", bare_call("room_path"))])];
         qualify_lcs(&mut lcs, &app);
         assert_eq!(receiver_of(&lcs[0].methods[0].body).as_deref(), Some("RouteHelpers"));
+    }
+
+    #[test]
+    fn explicit_url_helpers_use_route_helpers_for_no_argument_routes() {
+        let app = app_with_room_route();
+        let mut lcs = vec![helper_module(
+            "Presenter",
+            vec![method("link", explicit_route_call("rooms_path", vec![]))],
+        )];
+
+        qualify_lcs(&mut lcs, &app);
+
+        assert_eq!(receiver_of(&lcs[0].methods[0].body).as_deref(), Some("RouteHelpers"));
+    }
+
+    #[test]
+    fn explicit_url_helpers_with_required_arguments_keep_their_receiver() {
+        let app = app_with_room_route();
+        let id = Expr::new(
+            Span::default(),
+            ExprNode::Lit {
+                value: crate::expr::Literal::Int { value: 1 },
+            },
+        );
+        let mut lcs = vec![helper_module(
+            "Presenter",
+            vec![method("link", explicit_route_call("room_path", vec![id]))],
+        )];
+
+        qualify_lcs(&mut lcs, &app);
+
+        let ExprNode::Send { recv: Some(recv), .. } = &*lcs[0].methods[0].body.node else {
+            panic!("required-argument route should keep its explicit receiver");
+        };
+        assert!(is_rails_url_helpers_chain(recv));
+    }
+
+    #[test]
+    fn direct_route_helper_is_qualified_in_an_app_class() {
+        let app = app_with_room_route();
+        let mut app_class = helper_module("Presenter", vec![method("link", bare_call("custom_room_path"))]);
+        app_class.is_module = false;
+        let mut lcs = vec![app_class];
+        qualify_lcs(&mut lcs, &app);
+        assert_eq!(receiver_of(&lcs[0].methods[0].body).as_deref(), Some("RouteHelpers"));
+    }
+
+    #[test]
+    fn owner_method_keeps_precedence_over_same_named_route_helper() {
+        let app = app_with_room_route();
+        let mut app_class = helper_module(
+            "Presenter",
+            vec![method("room_path", bare_call("room_path")), method("link", bare_call("room_path"))],
+        );
+        app_class.is_module = false;
+        let mut lcs = vec![app_class];
+        qualify_lcs(&mut lcs, &app);
+        assert_eq!(receiver_of(&lcs[0].methods[0].body), None);
+        assert_eq!(receiver_of(&lcs[0].methods[1].body), None);
     }
 
     /// campfire's `Messages::AttachmentPresentation` calls

@@ -174,6 +174,11 @@ fn render_params(m: &MethodDef, owner: Option<&str>) -> String {
         .map(|(i, p)| {
             let name = super::expr::util::escape_rust_keyword(p.name.as_str());
             match sig_params.and_then(|sp| sp.get(i)) {
+                Some(sig_p)
+                    if owner == Some("RouteHelpers") && matches!(&sig_p.ty, Ty::Int) =>
+                {
+                    format!("{name}: impl std::fmt::Display")
+                }
                 Some(sig_p) => format!("{name}: {}", rust_param_ty(&sig_p.ty)),
                 None => format!("{name}: ()"),
             }
