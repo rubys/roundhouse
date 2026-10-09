@@ -211,14 +211,16 @@ pub(super) fn try_recv_typed_method(
         // LazyLock constants whose stored values are `&'static str`.
         if let Some(crate::ty::Ty::Hash { key, value }) = recv_ty {
             let key_s = emit_expr(&args[0]);
-            // Normalize either an owned String or borrowed `&str` key
-            // to the `str` query type HashMap's Borrow-based lookup
-            // expects (not `&String`, which is not Borrow-compatible
-            // with a map keyed by `&'static str`).
-            let get = format!(
-                "{}.get((({key_s}).to_string()).as_str())",
-                emit_expr(r)
-            );
+            // Normalize a String/Symbol key (owned String or borrowed
+            // `&str`) to the `str` query type HashMap's Borrow-based
+            // lookup expects (not `&String`, which is not
+            // Borrow-compatible with a map keyed by `&'static str`).
+            // Other key types (Integer, …) look up by reference.
+            let get = if matches!(**key, crate::ty::Ty::Str | crate::ty::Ty::Sym) {
+                format!("{}.get((({key_s}).to_string()).as_str())", emit_expr(r))
+            } else {
+                format!("{}.get(&({key_s}))", emit_expr(r))
+            };
             if matches!(**key, crate::ty::Ty::Str | crate::ty::Ty::Sym)
                 && matches!(**value, crate::ty::Ty::Str | crate::ty::Ty::Sym)
             {
@@ -1097,6 +1099,42 @@ mod tests {
                 crate::emit::rust::expr::emit_expr(&lookup),
                 "BUILD_VERSIONS.get(((build).to_string()).as_str()).map(|value| value.to_string())"
             );
+        });
+    }
+
+    #[test]
+    fn integer_keyed_hash_read_looks_up_by_reference() {
+        use crate::expr::{Expr, ExprNode};
+        use crate::ident::{Symbol, VarId};
+        let mut recv = Expr::new(
+            Default::default(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from("by_id") },
+        );
+        recv.ty = Some(crate::ty::Ty::Hash {
+            key: Box::new(crate::ty::Ty::Int),
+            value: Box::new(crate::ty::Ty::Str),
+        });
+        let mut key = Expr::new(
+            Default::default(),
+            ExprNode::Var { id: VarId(1), name: Symbol::from("id") },
+        );
+        key.ty = Some(crate::ty::Ty::Int);
+        let mut lookup = Expr::new(
+            Default::default(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from("[]"),
+                args: vec![key],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        lookup.ty = Some(crate::ty::Ty::Union {
+            variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil],
+        });
+        crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+            let out = crate::emit::rust::expr::emit_expr(&lookup);
+            assert!(out.starts_with("by_id.get(&(id))"), "{out}");
         });
     }
 }

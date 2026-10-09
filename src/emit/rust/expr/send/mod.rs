@@ -25,7 +25,7 @@ use ops::{
 
 use super::util::{rewrite_method_name, synth_default_for_ty};
 use super::{
-    current_class_method_param_tys, emit_expr, emit_send_recv, in_class_method, in_constructor,
+    current_class_method_param_tys, emit_expr, in_class_method, in_constructor,
     is_static_method,
 };
 
@@ -664,7 +664,7 @@ pub(super) fn emit_send(
     let recv_s = if matches!(method, "nil?" | "clone") {
         emit_expr(r)
     } else {
-        emit_send_recv(r)
+        super::emit_send_recv_for(r, method)
     };
     // Static method dispatch — `Type.method(args)` in Ruby becomes
     // `Type::method(args)` in Rust when the receiver is a Const

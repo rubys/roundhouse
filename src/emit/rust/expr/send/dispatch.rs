@@ -385,7 +385,7 @@ pub(super) fn dispatch_method_by_recv_ty(
     let raw_recv_s = if matches!(method, "nil?" | "clone") {
         emit_expr(recv)
     } else {
-        super::super::emit_send_recv(recv)
+        super::super::emit_send_recv_for(recv, method)
     };
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     // Peel `Union<T, Nil>` to `T` for dispatch. The body-typer reports

@@ -202,6 +202,40 @@ pub fn apply_tag_builder_lowering(
         }
         safe_methods.extend(newly_safe);
     }
+    // The set is keyed by method NAME, and a view trusts the name for any
+    // receiver. So a name inferred here is published only when EVERY
+    // definition of it in the app returns HTML-safe output: a same-named
+    // method on another class (`user.name` beside a safe helper `name`)
+    // must keep its escaping. Dropping one name can make a wrapper that
+    // relied on it unsafe too, hence the loop.
+    let inferred_from = app.html_safe_methods.clone();
+    loop {
+        let mut unsafe_names = std::collections::BTreeSet::new();
+        let mut check = |name: &Symbol, body: &Expr| {
+            if !inferred_from.contains(name)
+                && safe_methods.contains(name)
+                && !returns_html_safe(body, &safe_methods)
+            {
+                unsafe_names.insert(name.clone());
+            }
+        };
+        for model in &app.models {
+            for item in &model.body {
+                if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
+                    check(&method.name, &method.body);
+                }
+            }
+        }
+        for class in &app.library_classes {
+            for method in &class.methods {
+                check(&method.name, &method.body);
+            }
+        }
+        if unsafe_names.is_empty() {
+            break;
+        }
+        safe_methods.retain(|name| !unsafe_names.contains(name));
+    }
     // A helper that returns a SafeBuffer-marked value has a String
     // result, regardless of the stale declared return type inferred
     // from the pre-lowered `tag.*` call. Keep the safety marker in the

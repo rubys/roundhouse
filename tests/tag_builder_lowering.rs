@@ -400,3 +400,22 @@ fn an_underscored_name_builds_its_custom_element() {
     assert!(out.contains("></lexxy-prompt>"), "{out}");
     assert_eq!(diags, 0, "{out}");
 }
+
+/// The safe-method set is name-keyed and views trust the name for any
+/// receiver, so a name is published only when every definition of it is
+/// HTML-safe: an unrelated same-named method keeps its output escaped.
+#[test]
+fn a_name_shared_with_an_unsafe_definition_is_not_published_as_html_safe() {
+    let classes = ingest_library_classes(
+        b"module H\n  def badge\n    tag.br\n  end\n  def wrapped\n    badge\n  end\nend\nclass Profile\n  def badge\n    @bio\n  end\nend\n",
+        "test.rb",
+    )
+    .expect("ingest");
+    let mut app = App::new();
+    app.library_classes.extend(classes);
+
+    apply_tag_builder_lowering(&mut app, &Default::default());
+
+    assert!(!app.html_safe_methods.contains(&roundhouse::Symbol::from("badge")));
+    assert!(!app.html_safe_methods.contains(&roundhouse::Symbol::from("wrapped")));
+}

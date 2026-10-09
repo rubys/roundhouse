@@ -164,7 +164,7 @@ pub(super) fn extract_partial_render_sites(
 /// an unrelated object silently drops its partial-local type evidence.
 fn is_implicit_render_receiver(recv: Option<&Expr>) -> bool {
     match recv.map(|r| &*r.node) {
-        None => true,
+        None | Some(ExprNode::SelfRef) => true,
         Some(ExprNode::Var { name, .. }) => name.as_str() == "self",
         _ => false,
     }
@@ -485,10 +485,8 @@ mod tests {
                 kwargs: true,
             },
         );
-        let receiver = Expr::new(
-            Default::default(),
-            ExprNode::Var { id: crate::ident::VarId(1), name: Symbol::from("self") },
-        );
+        // Ingest's shape for `self` (not a Var named "self").
+        let receiver = Expr::new(Default::default(), ExprNode::SelfRef);
         let render = Expr::new(
             Default::default(),
             ExprNode::Send {

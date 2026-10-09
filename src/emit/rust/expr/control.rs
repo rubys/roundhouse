@@ -665,7 +665,12 @@ fn emit_regex_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> Option<String
         return None;
     }
 
-    let recv = emit_expr(scrutinee);
+    // Ruby evaluates the `case` subject once. A plain local is read in
+    // every arm as is; anything else (a call such as
+    // `request.user_agent`) is bound first so each arm tests one value.
+    let scrutinee_s = emit_expr(scrutinee);
+    let bind_scrutinee = !matches!(&*scrutinee.node, ExprNode::Var { .. });
+    let recv = if bind_scrutinee { "__case_value".to_string() } else { scrutinee_s.clone() };
     let return_ty = current_return_ty();
     let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped));
     let mut branches = Vec::new();
@@ -712,6 +717,11 @@ fn emit_regex_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> Option<String
         .map(|branch| format!("{branch} else "))
         .collect::<String>();
     chain.push_str(last);
+    if bind_scrutinee {
+        return Some(format!(
+            "{{ let __case_value = {scrutinee_s}; {chain} else {{ {fallback} }} }}"
+        ));
+    }
     Some(format!("{chain} else {{ {fallback} }}"))
 }
 
@@ -1292,5 +1302,42 @@ mod tests {
         assert!(emitted.contains(".is_match(&(platform))"), "{emitted}");
         assert!(emitted.contains("else { \"Other\" }"), "{emitted}");
         assert!(!emitted.contains("match platform"), "{emitted}");
+    }
+
+    #[test]
+    fn regex_case_evaluates_a_call_subject_once() {
+        use crate::expr::{Arm, Pattern};
+        let mut recv = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from("request") },
+        );
+        recv.ty = Some(Ty::Str);
+        let mut scrutinee = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from("user_agent"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        scrutinee.ty = Some(Ty::Str);
+        let arm = |pattern: &str| Arm {
+            pattern: Pattern::Lit {
+                value: Literal::Regex { pattern: pattern.to_string(), flags: String::new() },
+            },
+            guard: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Str { value: pattern.to_string() } },
+            ),
+        };
+        let emitted = with_emit_ctx(EmitCtx::default(), || {
+            emit_case(&scrutinee, &[arm("Android"), arm("iPhone")])
+        });
+        assert!(emitted.starts_with("{ let __case_value = "), "{emitted}");
+        assert_eq!(emitted.matches("user_agent").count(), 1, "{emitted}");
+        assert_eq!(emitted.matches(".is_match(&(__case_value))").count(), 2, "{emitted}");
     }
 }

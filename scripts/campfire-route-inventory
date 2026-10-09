@@ -19,8 +19,15 @@ if [[ ! -f "$APP/config/application.rb" ]]; then
 fi
 
 SOURCE_SHA="${CAMPFIRE_SHA:-}"
-if [[ -z "$SOURCE_SHA" && -e "$APP/.git" ]]; then
-    SOURCE_SHA="$(git -C "$APP" rev-parse HEAD)"
+if [[ -e "$APP/.git" ]]; then
+    # A checkout is authoritative: an explicit CAMPFIRE_SHA must match it,
+    # or the inventory would record the pin for some other revision.
+    HEAD_SHA="$(git -C "$APP" rev-parse HEAD)"
+    if [[ -n "$SOURCE_SHA" && "$SOURCE_SHA" != "$HEAD_SHA" ]]; then
+        echo "campfire-route-inventory: CAMPFIRE_SHA $SOURCE_SHA does not match $APP HEAD $HEAD_SHA" >&2
+        exit 2
+    fi
+    SOURCE_SHA="$HEAD_SHA"
 fi
 if [[ -z "$SOURCE_SHA" ]]; then
     echo "campfire-route-inventory: set CAMPFIRE_SHA for a source archive without .git" >&2

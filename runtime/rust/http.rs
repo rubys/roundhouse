@@ -244,14 +244,23 @@ impl RequestContext {
             .unwrap_or_default()
     }
 
-    /// Rails' Request#protocol includes its trailing colon. The URI scheme
-    /// is the authoritative source available on the owned request snapshot;
-    /// a path-only URI has no known scheme and returns an empty string.
+    /// Rails' Request#protocol: `"https://"` or `"http://"`, the same
+    /// rule as the Ruby runtime's `ssl?`. The URI scheme wins when the
+    /// request target is absolute; an origin-form target (what the axum
+    /// server sees) falls back to X-Forwarded-Proto, then plain HTTP,
+    /// which is all this server listens on.
     pub fn protocol(&self) -> String {
-        self.uri
-            .scheme_str()
-            .map(|scheme| format!("{scheme}:"))
-            .unwrap_or_default()
+        let https = match self.uri.scheme_str() {
+            Some(scheme) => scheme.eq_ignore_ascii_case("https"),
+            None => self
+                .headers
+                .get("x-forwarded-proto")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+                .map(|value| value.trim().eq_ignore_ascii_case("https"))
+                .unwrap_or(false),
+        };
+        if https { "https://" } else { "http://" }.to_string()
     }
 
     pub fn remote_ip(&self) -> String {
@@ -267,12 +276,11 @@ impl RequestContext {
         if self.uri.scheme().is_some() && self.uri.authority().is_some() {
             return self.uri.to_string();
         }
-        match (self.protocol().strip_suffix(':').filter(|s| !s.is_empty()), self.host()) {
-            (Some(scheme), host) if !host.is_empty() => {
-                format!("{scheme}://{host}{}", self.uri)
-            }
-            _ => self.uri.to_string(),
+        let host = self.host();
+        if host.is_empty() {
+            return self.uri.to_string();
         }
+        format!("{}{host}{}", self.protocol(), self.uri)
     }
 
     pub fn script_name(&self) -> String {
@@ -375,12 +383,19 @@ mod request_context_tests {
             .unwrap();
         let context = RequestContext::from_request(&request);
         assert_eq!(context.host(), "chat.example.test");
-        assert_eq!(context.protocol(), "https:");
+        assert_eq!(context.protocol(), "https://");
 
         *request.uri_mut() = Uri::from_static("/messages");
         let context = RequestContext::from_request(&request);
         assert_eq!(context.host(), "chat.example.test");
-        assert_eq!(context.protocol(), "");
+        assert_eq!(context.protocol(), "http://");
+        assert_eq!(context.url(), "http://chat.example.test/messages");
+
+        request
+            .headers_mut()
+            .insert("x-forwarded-proto", "https".parse().unwrap());
+        let context = RequestContext::from_request(&request);
+        assert_eq!(context.protocol(), "https://");
     }
 }
 
