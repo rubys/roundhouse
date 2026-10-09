@@ -670,6 +670,16 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         controller_extras.extend(crate::lower::library_extras::extras_from_funcs(
             &route_helper_funcs,
         ));
+        // The app's own library classes (`Current`, `app/lib`, helpers)
+        // with the analyzer's stamped signatures: a controller reading
+        // `Current.user` resolves it to `User | nil` instead of an
+        // unresolved call whose result lands in a `serde_json::Value`
+        // field. A lowered model of the same name keeps its entry.
+        controller_extras.extend(
+            crate::lower::library_extras::extras_from_lcs(&app.library_classes)
+                .into_iter()
+                .filter(|(id, _)| !model_registry.contains_key(id)),
+        );
         let assocs = crate::lower::model_associations::compute_association_graph(app);
         let mut lcs =
             crate::lower::controller_to_library::lower_controllers_with_arel_views_assocs_and_routes(
@@ -682,6 +692,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     view_visible_controller_methods: Some(
                         &app.view_visible_controller_methods,
                     ),
+                    inferred_params: Some(&app.inferred_method_params),
+                    inferred_returns: Some(&app.inferred_method_returns),
                     ..Default::default()
                 },
             );

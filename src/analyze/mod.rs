@@ -1454,6 +1454,21 @@ impl Analyzer {
             .keys()
             .filter_map(|(c, m, _)| Some(((c.clone(), m.clone()), self.params_row(c, m)?.clone())))
             .collect();
+        app.inferred_method_returns = app
+            .controllers
+            .iter()
+            .flat_map(|controller| {
+                let table = self.classes.get(&controller.name).map(|ci| &ci.instance_methods);
+                controller.actions().filter_map(move |action| {
+                    let ty = table?.get(&action.name)?;
+                    let ty = match ty {
+                        Ty::Fn { ret, .. } => (**ret).clone(),
+                        other => other.clone(),
+                    };
+                    (!ty.mentions_unknown() && !matches!(ty, Ty::Bottom)).then(|| ((controller.name.clone(), action.name.clone()), ty))
+                })
+            })
+            .collect();
 
         // Render sites inside `app/helpers` modules seed partial locals
         // too — lobsters' ApplicationHelper#link_post renders
