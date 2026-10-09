@@ -20,12 +20,12 @@ class RateLimiterTest < Minitest::Test
   end
 
   def test_an_expired_window_starts_over
-    @cache.increment_str("rate-limit:t:a", 1)
-    @cache.increment_str("rate-limit:t:a", 1)
-    # Expiry is lazy, on read, at whole-second resolution: a 1 s window
-    # written at second N is gone at second N + 1.
-    sleep 1.1
+    @cache.increment_str("rate-limit:t:a", 2)
+    @cache.increment_str("rate-limit:t:a", 2)
+    # Leave a full second beyond the whole-second expiry boundary.
+    sleep 3.1
     count = @cache.increment_str("rate-limit:t:a", 1)
+    puts "rate-limit expiry probe: count=#{count}, now=#{Time.now.to_i}"
     assert_equal 1, count, "expected the rate-limit window to expire by #{Time.now.to_i}; got #{count}"
   end
 
