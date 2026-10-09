@@ -72,7 +72,11 @@ pub(super) fn emit_send(
     // bodies as the active request snapshot. Resolve only an unshadowed,
     // zero-argument bare send here; parameters and explicit receivers retain
     // their normal Ruby lookup behavior.
-    if recv.is_none() && method == "request" && args.is_empty() {
+    if recv.is_none()
+        && method == "request"
+        && args.is_empty()
+        && !super::is_instance_method("request")
+    {
         return "crate::http::current_request_context()".to_string();
     }
     // `ActionController::Base#response`: the controller IS its response

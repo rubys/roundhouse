@@ -94,6 +94,7 @@ fn request_app() -> roundhouse::App {
         ("app/models/current.rb", "class Current < ActiveSupport::CurrentAttributes\n  attribute :request\n  delegate :host, :protocol, to: :request, prefix: true, allow_nil: true\nend\n"),
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n  before_action do\n    Current.request = request\n  end\nend\n"),
         ("app/controllers/rooms_controller.rb", "class RoomsController < ApplicationController\n  def index\n  end\nend\n"),
+        ("lib/request_holder.rb", "class RequestHolder\n  def request\n    \"local request\"\n  end\n\n  def call_request\n    request\n  end\nend\n"),
     ]
     .into_iter()
     .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
@@ -311,4 +312,23 @@ fn request_writer_uses_the_type_from_its_controller_filter_write() {
         }),
         "controller request setup must read the active request context"
     );
+}
+
+#[test]
+fn a_bare_request_call_prefers_a_same_named_instance_method() {
+    let files = rust::emit(&request_app());
+    let source = files
+        .iter()
+        .find(|file| file.content.contains("pub fn call_request"))
+        .expect("Rust RequestHolder class")
+        .content
+        .as_str();
+    let method = source
+        .split("pub fn call_request")
+        .nth(1)
+        .and_then(|method| method.split("\n    }").next())
+        .expect("generated call_request method");
+
+    assert!(method.contains("self.request()"), "{method}");
+    assert!(!method.contains("current_request_context"), "{method}");
 }

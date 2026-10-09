@@ -419,3 +419,18 @@ fn a_name_shared_with_an_unsafe_definition_is_not_published_as_html_safe() {
     assert!(!app.html_safe_methods.contains(&roundhouse::Symbol::from("badge")));
     assert!(!app.html_safe_methods.contains(&roundhouse::Symbol::from("wrapped")));
 }
+
+#[test]
+fn a_bare_nil_helper_is_not_published_as_html_safe() {
+    let classes = ingest_library_classes(
+        b"module H\n  def stub\n    nil\n  end\nend\n",
+        "test.rb",
+    )
+    .expect("ingest");
+    let mut app = App::new();
+    app.library_classes.extend(classes);
+
+    apply_tag_builder_lowering(&mut app, &Default::default());
+
+    assert!(!app.html_safe_methods.contains(&roundhouse::Symbol::from("stub")));
+}

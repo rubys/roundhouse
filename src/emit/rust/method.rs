@@ -294,7 +294,7 @@ fn render_return(m: &MethodDef) -> String {
 pub(super) fn method_return_ty(m: &MethodDef) -> Option<Ty> {
     // A writer is emitted void (`render_return`), whatever Ruby value
     // its body ends on, so its tail is a statement.
-    if m.name.as_str().ends_with('=') {
+    if is_writer_name(m.name.as_str()) {
         return Some(Ty::Nil);
     }
     let declared = match m.signature.as_ref() {
@@ -960,6 +960,29 @@ mod tests {
         assert!(wrapped.starts_with("Some({\n"), "{wrapped}");
         assert!(wrapped.contains("}).string()\n}"), "{wrapped}");
         assert!(wrapped.ends_with("})"), "{wrapped}");
+    }
+
+    #[test]
+    fn comparison_operator_ending_in_equals_keeps_its_return_type() {
+        let mut classes = crate::ingest::ingest_library_classes(
+            b"module Comparable\n  def ==(other)\n    true\n  end\nend\n",
+            "comparable.rb",
+        )
+        .expect("ingest comparison method");
+        let method = classes[0]
+            .methods
+            .iter_mut()
+            .find(|method| method.name.as_str() == "==")
+            .expect("comparison method");
+        method.signature = Some(Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(Ty::Bool),
+            effects: Default::default(),
+        });
+
+        assert_eq!(method_return_ty(method), Some(Ty::Bool));
+        assert_eq!(render_return(method), " -> bool");
     }
 
     fn base_module_method(name: &str) -> MethodDef {

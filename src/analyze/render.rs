@@ -172,7 +172,12 @@ fn is_implicit_render_receiver(recv: Option<&Expr>) -> bool {
 
 fn is_turbo_stream_render(recv: Option<&Expr>, method: &str) -> bool {
     matches!(method, "append" | "prepend" | "replace" | "update" | "before" | "after")
-        && matches!(recv.map(|r| &*r.node), Some(ExprNode::Var { name, .. }) if name.as_str() == "turbo_stream")
+        && (matches!(recv.map(|r| &*r.node), Some(ExprNode::Var { name, .. }) if name.as_str() == "turbo_stream")
+            || matches!(
+                recv.map(|r| &*r.node),
+                Some(ExprNode::Send { recv: None, method, args, block: None, .. })
+                    if method.as_str() == "turbo_stream" && args.is_empty()
+            ))
 }
 
 /// Collect the ivar names that views use as *dynamic* partial-render
@@ -590,6 +595,40 @@ mod tests {
         let partial = Symbol::from("accounts/users/_user");
         assert_eq!(targets, [partial.clone()]);
         assert_eq!(sites[&partial][&Symbol::from("user")], user_ty);
+
+        let ExprNode::Send { method, args, .. } = &*replace.node else {
+            panic!("expected turbo-stream action")
+        };
+        let bare_turbo_stream = Expr::new(
+            Default::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("turbo_stream"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let bare_replace = Expr::new(
+            Default::default(),
+            ExprNode::Send {
+                recv: Some(bare_turbo_stream),
+                method: method.clone(),
+                args: args.clone(),
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let mut bare_sites = HashMap::new();
+        let mut bare_targets = Vec::new();
+        extract_partial_render_sites(
+            &bare_replace,
+            &Symbol::from("accounts/users/index"),
+            &mut bare_sites,
+            &mut bare_targets,
+        );
+        assert_eq!(bare_targets, [partial.clone()]);
+        assert_eq!(bare_sites[&partial][&Symbol::from("user")], user_ty);
 
         // This call's local cannot be inferred from the plural directory;
         // only the collection/as: site identifies the element model.

@@ -328,7 +328,7 @@ fn set_html_result_type(expr: &mut Expr) {
 
 fn returns_html_safe(body: &Expr, safe_methods: &std::collections::BTreeSet<Symbol>) -> bool {
     match &*body.node {
-        ExprNode::Lit { value: Literal::Nil } => true,
+        ExprNode::Lit { value: Literal::Nil } => false,
         ExprNode::Send { recv, method, args, block, .. } => {
             (recv.is_some() && method.as_str() == "html_safe" && args.is_empty() && block.is_none())
                 || safe_methods.contains(method)
@@ -336,11 +336,34 @@ fn returns_html_safe(body: &Expr, safe_methods: &std::collections::BTreeSet<Symb
         ExprNode::Seq { exprs } => exprs.last().is_some_and(|expr| returns_html_safe(expr, safe_methods)),
         ExprNode::Let { body, .. } => returns_html_safe(body, safe_methods),
         ExprNode::If { then_branch, else_branch, .. } => {
-            returns_html_safe(then_branch, safe_methods)
-                && returns_html_safe(else_branch, safe_methods)
+            returns_html_safe_or_nil(then_branch, safe_methods)
+                && returns_html_safe_or_nil(else_branch, safe_methods)
+                && (returns_html_safe(then_branch, safe_methods)
+                    || returns_html_safe(else_branch, safe_methods))
         }
         ExprNode::Case { arms, .. } => {
-            arms.iter().all(|arm| returns_html_safe(&arm.body, safe_methods))
+            arms.iter().all(|arm| returns_html_safe_or_nil(&arm.body, safe_methods))
+                && arms.iter().any(|arm| returns_html_safe(&arm.body, safe_methods))
+                && arms.iter().any(|arm| matches!(&arm.pattern, crate::expr::Pattern::Wildcard))
+        }
+        _ => false,
+    }
+}
+
+fn returns_html_safe_or_nil(body: &Expr, safe_methods: &std::collections::BTreeSet<Symbol>) -> bool {
+    returns_html_safe(body, safe_methods) || returns_nil(body)
+}
+
+fn returns_nil(body: &Expr) -> bool {
+    match &*body.node {
+        ExprNode::Lit { value: Literal::Nil } => true,
+        ExprNode::Seq { exprs } => exprs.last().is_some_and(returns_nil),
+        ExprNode::Let { body, .. } => returns_nil(body),
+        ExprNode::If { then_branch, else_branch, .. } => {
+            returns_nil(then_branch) && returns_nil(else_branch)
+        }
+        ExprNode::Case { arms, .. } => {
+            arms.iter().all(|arm| returns_nil(&arm.body))
                 && arms.iter().any(|arm| matches!(&arm.pattern, crate::expr::Pattern::Wildcard))
         }
         _ => false,

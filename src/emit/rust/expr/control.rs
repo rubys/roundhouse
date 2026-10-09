@@ -696,12 +696,17 @@ fn emit_regex_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> Option<String
     let recv = if bind_scrutinee { "__case_value".to_string() } else { scrutinee_s.clone() };
     let return_ty = current_return_ty();
     let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped));
+    let option_return_tail = in_return_tail() && current_return_is_option();
     let mut branches = Vec::new();
     let mut default = None;
     for arm in arms {
         let body = emit_expr_tail(&arm.body);
         let body = if return_is_value && !arm_body_already_value(&arm.body) {
             format!("serde_json::Value::from({body})")
+        } else if option_return_tail && !tail_produces_option(&arm.body) {
+            let body = terminate_new_local_assignment(&arm.body, body);
+            let body = wrap_as_block_if_multi(&arm.body, body);
+            format!("Some({body})")
         } else {
             body
         };
@@ -726,7 +731,7 @@ fn emit_regex_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> Option<String
     let fallback = default.unwrap_or_else(|| {
         if return_is_value {
             "serde_json::Value::Null".to_string()
-        } else if current_return_is_option() {
+        } else if option_return_tail {
             "None".to_string()
         } else {
             "()".to_string()
@@ -1396,5 +1401,62 @@ mod tests {
         assert!(emitted.starts_with("{ let __case_value = "), "{emitted}");
         assert_eq!(emitted.matches("user_agent").count(), 1, "{emitted}");
         assert_eq!(emitted.matches(".is_match(&(__case_value))").count(), 2, "{emitted}");
+    }
+
+    #[test]
+    fn regex_case_uses_option_branches_only_in_an_option_return_tail() {
+        use crate::expr::{Arm, Pattern};
+
+        let mut scrutinee = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from("platform") },
+        );
+        scrutinee.ty = Some(Ty::Str);
+        let string_arm = || Arm {
+            pattern: Pattern::Lit {
+                value: Literal::Regex { pattern: "Android".to_string(), flags: String::new() },
+            },
+            guard: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Str { value: "Android".to_string() } },
+            ),
+        };
+        let option_return = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        let emitted_option = with_emit_ctx(EmitCtx::default(), || {
+            super::super::with_current_return_ty(Some(option_return.clone()), || {
+                super::super::with_return_tail(true, || {
+                    emit_regex_case(&scrutinee, &[string_arm()]).expect("regex case")
+                })
+            })
+        });
+        assert!(emitted_option.contains("Some(\"Android\")"), "{emitted_option}");
+        assert!(emitted_option.ends_with("else { None }"), "{emitted_option}");
+
+        let statement_arm = Arm {
+            pattern: Pattern::Lit {
+                value: Literal::Regex { pattern: "Android".to_string(), flags: String::new() },
+            },
+            guard: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Var { id: VarId(1), name: Symbol::from("matched") },
+                    value: Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Bool { value: true } },
+                    ),
+                },
+            ),
+        };
+        let emitted_statement = with_emit_ctx(EmitCtx::default(), || {
+            super::super::with_current_return_ty(Some(option_return), || {
+                super::super::with_return_tail(false, || {
+                    emit_regex_case(&scrutinee, &[statement_arm]).expect("regex case")
+                })
+            })
+        });
+        assert!(emitted_statement.ends_with("else { () }"), "{emitted_statement}");
+        assert!(!emitted_statement.contains("Some("), "{emitted_statement}");
     }
 }
