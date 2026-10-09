@@ -427,6 +427,16 @@ pub(super) fn try_string_append(
         return None;
     }
     let r = recv?;
+    if matches!(
+        r.ty.as_ref(),
+        Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "StringIO"
+    ) {
+        return Some(format!(
+            "{}.append(&({}))",
+            super::super::emit_send_recv(r),
+            emit_expr(&args[0])
+        ));
+    }
     if !matches!(r.ty.as_ref(), Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)) {
         return None;
     }

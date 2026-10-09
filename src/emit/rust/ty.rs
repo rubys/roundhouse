@@ -65,6 +65,9 @@ pub fn rust_ty(ty: &Ty) -> String {
             if name == "Regexp" {
                 return "regex::Regex".to_string();
             }
+            if name == "StringIO" {
+                return "crate::string_io::StringIO".to_string();
+            }
             // Time → String for now; Rust's `chrono::DateTime<Utc>`
             // is the real target but the framework Ruby surface
             // serializes Times as ISO-8601 strings everywhere, so

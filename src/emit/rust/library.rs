@@ -1530,6 +1530,48 @@ mod op_assign_tests {
         })
     }
 
+    #[test]
+    fn user_agent_comment_initializer_preserves_its_declared_array_type() {
+        let ruby = std::fs::read_to_string("runtime/ruby/user_agent.rb").expect("Ruby source");
+        let rbs = std::fs::read_to_string("runtime/ruby/user_agent.rbs").expect("RBS source");
+        let classes = crate::runtime_src::parse_library_with_rbs(
+            ruby.as_bytes(),
+            &rbs,
+            "user_agent.rb",
+        )
+        .expect("UserAgent runtime parses and types");
+        let token = classes
+            .iter()
+            .find(|class| class.name.0.as_str() == "UserAgentToken")
+            .expect("UserAgentToken class");
+        let emitted = crate::emit::rust::expr::with_emit_ctx(
+            crate::emit::rust::EmitCtx::default(),
+            || emit_library_class(token).expect("UserAgentToken emits"),
+        );
+
+        assert!(
+            emitted.contains("pub comment: Vec<String>"),
+            "RBS declares the comment as Array[String], so its field must match:\n{emitted}"
+        );
+        assert!(
+            !emitted.contains("pub comment: Vec<serde_json::Value>"),
+            "the empty nil branch must not widen the declared element type:\n{emitted}"
+        );
+
+        let user_agent = classes
+            .iter()
+            .find(|class| class.name.0.as_str() == "UserAgent")
+            .expect("UserAgent class");
+        let emitted = crate::emit::rust::expr::with_emit_ctx(
+            crate::emit::rust::EmitCtx::default(),
+            || emit_library_class(user_agent).expect("UserAgent emits"),
+        );
+        assert!(
+            emitted.contains("s = format!(\"{}\", DEFAULT_USER_AGENT)"),
+            "assigning the static default to an owned String must emit an owned value:\n{emitted}"
+        );
+    }
+
     /// `+=` used to fall through the expression catch-all, which dropped
     /// the statement: a `while i < n; …; i += 1; end` counter never
     /// advanced, and the transpiled loop spun forever.

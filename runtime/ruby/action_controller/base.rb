@@ -89,7 +89,10 @@ module ActionController
   end
 
   def self.sanitize_location(path)
-    s = path.to_s
+    # Materialize an owned copy: the strict Rust emitter lowers a String
+    # parameter as `&str`, while the normalization steps below reassign
+    # their results into `s`.
+    s = "#{path}"
     if s.include?("\r") || s.include?("\n") || s.include?("\0") || s.include?("\t")
       s = s.gsub(REDIRECT_LINE_BREAK_PATTERN, REDIRECT_LINE_BREAKS)
     end

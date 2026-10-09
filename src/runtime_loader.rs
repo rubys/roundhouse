@@ -689,6 +689,15 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    runtime_entry! {
+        stem: "user_agent",
+        namespace: "",
+        out_path: "src/user_agent.rs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     // errors.rb intentionally NOT transpiled — the Rust-natural
     // `class < StandardError` shape needs Display + Error synthesis
     // that the transpile pipeline doesn't yet support. Phase 3
@@ -722,6 +731,17 @@ where
         let unit = transpile_entry(entry, &RUST_TARGET, "//", &mut transform)?;
         out.push(unit);
     }
+    // StringIO is a small hand-written primitive rather than a Ruby
+    // runtime class: Rust needs an owned mutable string buffer for
+    // body accumulation, while the other targets use their native IO.
+    out.push(RuntimeUnit {
+        out_path: PathBuf::from("src/string_io.rs"),
+        content: include_str!("../runtime/rust/string_io.rs").to_string(),
+        classes: Vec::new(),
+        functions: Vec::new(),
+        namespace: "",
+        extra_roots: NO_EXTRA_ROOTS,
+    });
     Ok(out)
 }
 

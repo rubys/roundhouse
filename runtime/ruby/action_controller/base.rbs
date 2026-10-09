@@ -15,7 +15,7 @@ module ActionController
 
   class HeaderStore
     @keys: Array[String]
-    @vals: Array[String]
+    @vals: Array[String?]
     def initialize: () -> void
     def []: (String key) -> String?
     def []=: (String key, String? value) -> void

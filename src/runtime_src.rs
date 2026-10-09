@@ -2005,10 +2005,15 @@ mod tests {
         }
         match ivar_assign_ty(&init.body, "vals") {
             Some(Ty::Array { elem }) => assert!(
-                matches!(elem.as_ref(), Ty::Str),
-                "expected Array[String], got Array[{elem:?}]"
+                matches!(
+                    elem.as_ref(),
+                    Ty::Union { variants }
+                        if variants.iter().any(|ty| matches!(ty, Ty::Str))
+                            && variants.iter().any(|ty| matches!(ty, Ty::Nil))
+                ),
+                "expected Array[String?], got Array[{elem:?}]"
             ),
-            other => panic!("@vals = [] must carry Array[String], got {other:?}"),
+            other => panic!("@vals = [] must carry Array[String?], got {other:?}"),
         }
     }
 }
