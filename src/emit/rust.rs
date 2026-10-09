@@ -1048,8 +1048,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     // model impls are generated here, so a tree-level grep
                     // for the name finds it in the runtime and still misses
                     // the model. `smoke (rust)` is what caught that.
+                    let where_shim = adapter_where_shim(lc);
                     format!(
                         "\nimpl {name} {{\n\
+                        {where_shim}\
                         pub fn mark_persisted_bang(&mut self) {{ }}\n\
                         pub fn errors(&self) -> Vec<String> {{ crate::errors_ext::validation_errors_snapshot() }}\n\
                         pub fn save(&mut self) -> bool {{\n\
@@ -1083,6 +1085,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn create(attrs: std::collections::HashMap<String, serde_json::Value>) -> {name} {{ let mut m = Self::new(attrs); m.save(); m }}\n\
                     }}\n",
                         name = lc.name.0.as_str(),
+                        where_shim = where_shim,
                         destroy_body = destroy_body,
                         after_create_commit = after_create_commit,
                         after_update_commit = after_update_commit,
@@ -1104,7 +1107,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // `errors` send differently), this rewrite stops firing
                 // and the bare `errors().push` falls through harmlessly
                 // until updated.
-                let content = format!("{MODEL_IMPORTS}{body}{ar_shim}");
+                let model_imports = imports_without_framework_session(MODEL_IMPORTS, &model_lcs);
+                let content = format!("{model_imports}{body}{ar_shim}");
                 let content = content.replace(
                     "self.errors().push(",
                     "crate::errors_ext::validation_errors_push(",
@@ -1336,7 +1340,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         has_process_action,
                         &app.current_attribute_classes,
                     );
-                    let content = format!("{CONTROLLER_IMPORTS}{body}{ac_shim}{axum_wrappers}");
+                    let content = format!(
+                        "{}{body}{ac_shim}{axum_wrappers}",
+                        imports_without_framework_session(CONTROLLER_IMPORTS, &model_lcs)
+                    );
                     files.push(EmittedFile {
                         path: PathBuf::from(format!("src/controllers/{stem}.rs")),
                         content,
@@ -1718,6 +1725,81 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 }
 
 /// Does a method of `lc` call `method` on `self`?
+/// An app with its own `Session` model (Campfire's login sessions)
+/// cannot also import the framework's `crate::session::Session`: the
+/// explicit import wins over the `models::*` glob, so `Session::find_by`
+/// resolved to the wrong type. The framework session is reachable by its
+/// full path wherever emitted code names it.
+fn imports_without_framework_session(
+    imports: &str,
+    model_lcs: &[crate::dialect::LibraryClass],
+) -> String {
+    if model_lcs.iter().any(|lc| lc.name.0.as_str() == "Session") {
+        imports.replace("#[allow(unused_imports)]\nuse crate::session::Session;\n", "")
+    } else {
+        imports.to_string()
+    }
+}
+
+/// `Model.find_by(col: v)` / `find_by!` / `where(col: v)` over the
+/// model's own table. The lowerer's `_adapter_all` already carries the
+/// column list in the order `from_stmt` reads it, so the conditional
+/// query borrows that SELECT and appends a `WHERE` — one query shape,
+/// not a second column list to keep in step. Skips a model that defines
+/// the name itself (a scope called `where`, say) so the shim never
+/// duplicates it.
+fn adapter_where_shim(lc: &crate::dialect::LibraryClass) -> String {
+    fn select_literal(e: &crate::expr::Expr) -> Option<String> {
+        if let crate::expr::ExprNode::Lit {
+            value: crate::expr::Literal::Str { value },
+        } = &*e.node
+        {
+            if value.starts_with("SELECT ") && !value.contains(" WHERE ") {
+                return Some(value.clone());
+            }
+        }
+        let mut found = None;
+        e.node
+            .for_each_child(&mut |c| found = found.take().or_else(|| select_literal(c)));
+        found
+    }
+    let defines = |n: &str| lc.methods.iter().any(|m| m.name.as_str() == n);
+    let Some(select) = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "_adapter_all")
+        .and_then(|m| select_literal(&m.body))
+    else {
+        return String::new();
+    };
+    let name = lc.name.0.as_str();
+    let mut out = format!(
+        "pub fn _adapter_where(clause: &str) -> Vec<{name}> {{\n\
+         let stmt = Db::prepare(&format!(\"{{}} WHERE {{}}\", {select:?}, clause));\n\
+         let mut results = vec![];\n\
+         while Db::step_pred(stmt) {{ results.push({name}::from_stmt(stmt)) }};\n\
+         Db::finalize(stmt);\n\
+         results\n\
+         }}\n"
+    );
+    if !defines("where") {
+        out.push_str(&format!(
+            "pub fn r#where<K: AsRef<str>, V: crate::db::SqlLiteral>(conditions: impl IntoIterator<Item = (K, V)>) -> Vec<{name}> {{ Self::_adapter_where(&Db::where_clause(conditions)) }}\n"
+        ));
+    }
+    if !defines("find_by") {
+        out.push_str(&format!(
+            "pub fn find_by<K: AsRef<str>, V: crate::db::SqlLiteral>(conditions: impl IntoIterator<Item = (K, V)>) -> Option<{name}> {{ Self::_adapter_where(&format!(\"{{}} LIMIT 1\", Db::where_clause(conditions))).into_iter().next() }}\n"
+        ));
+    }
+    if !defines("find_by_bang") {
+        out.push_str(&format!(
+            "pub fn find_by_bang<K: AsRef<str>, V: crate::db::SqlLiteral>(conditions: impl IntoIterator<Item = (K, V)>) -> {name} {{ Self::find_by(conditions).expect(\"record not found\") }}\n"
+        ));
+    }
+    out
+}
+
 fn lc_calls_method(lc: &crate::dialect::LibraryClass, method: &str) -> bool {
     fn walk(e: &crate::expr::Expr, method: &str) -> bool {
         if let crate::expr::ExprNode::Send {

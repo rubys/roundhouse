@@ -521,3 +521,54 @@ fn filters_that_read_action_name_compile() {
         String::from_utf8_lossy(&output.stderr),
     );
 }
+
+/// `Model.find_by(col: v)` and `Model.where(col: v)` on a model class.
+/// Rust models carry no inherited finders, so the shim must provide them,
+/// and a controller that keeps the result has to type-check against them.
+#[test]
+#[ignore]
+fn model_finders_compile() {
+    let app_dir = scratch_dir("model-finders-app");
+    if app_dir.exists() {
+        std::fs::remove_dir_all(&app_dir).expect("clean app copy");
+    }
+    let copied = Command::new("cp")
+        .arg("-R")
+        .arg(roundhouse::fixtures::real_blog())
+        .arg(&app_dir)
+        .status()
+        .expect("copy real-blog");
+    assert!(copied.success(), "copy real-blog");
+    let controller = app_dir.join("app/controllers/articles_controller.rb");
+    let source = std::fs::read_to_string(&controller).expect("read controller");
+    let edited = source.replacen(
+        "  before_action :set_article,",
+        "  before_action { @probe = Article.find_by(title: \"Probe\") }\n  \
+           before_action { @probes = Article.where(title: \"Probe\", body: \"x\") }\n  \
+           before_action :set_article,",
+        1,
+    );
+    assert_ne!(source, edited, "the filter edit applies");
+    std::fs::write(&controller, edited).expect("write controller");
+
+    let scratch = scratch_dir("model-finders");
+    generate_project(&app_dir, &scratch);
+    let model = std::fs::read_to_string(scratch.join("src/models/article.rs"))
+        .expect("read emitted model");
+    assert!(model.contains("pub fn find_by<"), "model carries find_by:\n{model}");
+    assert!(model.contains("pub fn r#where<"), "model carries where:\n{model}");
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&scratch)
+        .output()
+        .expect("run cargo check");
+
+    assert!(
+        output.status.success(),
+        "cargo check failed on the emitted project at {}:\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}

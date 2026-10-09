@@ -898,6 +898,18 @@ fn tail_produces_option(branch: &Expr) -> bool {
     {
         return true;
     }
+    // `Model.find_by(…)`: the model shim answers `Option<Model>` (nil on
+    // a miss), whatever the surrounding analyzer type widened it to.
+    if let ExprNode::Send {
+        recv: Some(receiver),
+        method,
+        ..
+    } = &*branch.node
+        && method.as_str() == "find_by"
+        && matches!(&*receiver.node, ExprNode::Const { .. })
+    {
+        return true;
+    }
     if let ExprNode::Send {
         recv: Some(receiver),
         ..
