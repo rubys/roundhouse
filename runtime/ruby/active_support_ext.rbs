@@ -66,8 +66,8 @@ module ActiveSupport
   def self.beginning_of_day: (Time t) -> Time
   def self.end_of_day: (Time t) -> Time
   def self.noon: (Time t) -> Time
-  def self.beginning_of_week: (Time t) -> Time
-  def self.end_of_week: (Time t) -> Time
+  def self.beginning_of_week: (Time t, ?Integer start) -> Time
+  def self.end_of_week: (Time t, ?Integer start) -> Time
   def self.next_week: (Time t) -> Time
   def self.prev_week: (Time t) -> Time
   def self.beginning_of_month: (Time t) -> Time

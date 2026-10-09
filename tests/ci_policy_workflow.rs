@@ -941,6 +941,16 @@ fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
             false,
             "test --test fails -- --ignored --nocapture\ntest --test survivor -- --ignored --nocapture\n",
         ),
+        (
+            "param_binds param_binds_values param_binds_cleanup framework_tests_spinel",
+            true,
+            concat!(
+                "test --test param_binds -- --ignored --nocapture _spinel\n",
+                "test --test param_binds_values -- --ignored --nocapture _spinel\n",
+                "test --test param_binds_cleanup -- --ignored --nocapture _spinel\n",
+                "test --test framework_tests_spinel -- --ignored --nocapture\n",
+            ),
+        ),
         ("", false, ""),
     ] {
         let log = root.join("cargo.log");

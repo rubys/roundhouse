@@ -399,12 +399,12 @@ module ActiveSupport
   end
 
   # Not Sunday: `Date.beginning_of_week` defaults to Monday.
-  def self.beginning_of_week(t)
-    local_on(civil_days(t.year, t.month, t.day) - (t.wday + 6) % 7, 0, 0, 0, 0)
+  def self.beginning_of_week(t, start = 1)
+    local_on(civil_days(t.year, t.month, t.day) - (t.wday + 7 - start) % 7, 0, 0, 0, 0)
   end
 
-  def self.end_of_week(t)
-    end_of_day(days_since(beginning_of_week(t), 6))
+  def self.end_of_week(t, start = 1)
+    end_of_day(days_since(beginning_of_week(t, start), 6))
   end
 
   def self.next_week(t)

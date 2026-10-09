@@ -1045,7 +1045,15 @@ jobs:
           test -n "$TESTS"
           status=0
           for suite in $TESTS; do
-            cargo test --test "$suite" -- --ignored --nocapture || status=1
+            case "$suite" in
+              param_binds|param_binds_values|param_binds_cleanup)
+                # These suites also contain JRuby tests, run in compare-jruby.
+                cargo test --test "$suite" -- --ignored --nocapture _spinel || status=1
+                ;;
+              *)
+                cargo test --test "$suite" -- --ignored --nocapture || status=1
+                ;;
+            esac
           done
           exit "$status"
       - *advisory-result
@@ -2579,6 +2587,12 @@ jobs:
             Db.close
           end
           RUBY
+      - name: JRuby parameter bind contract
+        run: |
+          jruby -S gem install jdbc-sqlite3 --no-document
+          jruby tests/param_binds_jruby.rb
+          jruby tests/support/jdbc_value_semantics.rb
+          cargo test --locked --test param_binds_values --test param_binds_cleanup jruby -- --ignored --nocapture
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
