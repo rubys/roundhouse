@@ -3226,12 +3226,7 @@ fn collect_read_ivars(
 /// widen a param that the naming convention types correctly today,
 /// which is a much larger blast radius across seven targets than this
 /// gap warrants.
-fn declared_local_ty(
-    view: &View,
-    name: &str,
-    known_models: &[String],
-    app: &App,
-) -> crate::ty::Ty {
+fn declared_local_ty(view: &View, name: &str, known_models: &[String], app: &App) -> crate::ty::Ty {
     let by_name = ivar_ty(name, known_models);
     let at_render = app
         .partial_local_types
@@ -3381,7 +3376,12 @@ pub(crate) fn build_view_signature_from(
     })
 }
 
-pub(crate) fn infer_view_arg(stem: &str, dir: &str, is_partial: bool, known_models: &[String]) -> String {
+pub(crate) fn infer_view_arg(
+    stem: &str,
+    dir: &str,
+    is_partial: bool,
+    known_models: &[String],
+) -> String {
     // A hyphenated directory (`product-item`) is no identifier.
     infer_view_arg_raw(stem, dir, is_partial, known_models).replace('-', "_")
 }
@@ -4546,5 +4546,34 @@ mod tests {
     fn arg_name_show_is_singular() {
         let n = infer_view_arg("show", "articles", false, &[]);
         assert_eq!(n, "article");
+    }
+
+    #[test]
+    fn declared_local_keeps_model_convention_when_render_site_is_untyped() {
+        use crate::ty::Ty;
+
+        let name = Symbol::from("users/_user");
+        let view = View {
+            name: name.clone(),
+            format: Symbol::from("html"),
+            locals: Default::default(),
+            body: Expr::new(
+                Default::default(),
+                ExprNode::Lit { value: Literal::Nil },
+            ),
+            strict_locals: None,
+            analysis_only: false,
+            jbuilder: false,
+        };
+        let mut app = App::default();
+        app.partial_local_types
+            .entry(name)
+            .or_default()
+            .insert(Symbol::from("user"), Ty::Untyped);
+
+        assert_eq!(
+            declared_local_ty(&view, "user", &["User".to_string()], &app),
+            Ty::Class { id: ClassId(Symbol::from("User")), args: vec![] }
+        );
     }
 }

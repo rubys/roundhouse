@@ -102,6 +102,143 @@ fn result_is_marked_html_safe_so_callers_do_not_escape_it() {
 }
 
 #[test]
+fn rewritten_helper_has_string_signature_and_remains_html_safe() {
+    use roundhouse::ty::Ty;
+
+    let classes = ingest_library_classes(
+        b"module H\n  def h\n    tag.br\n  end\nend\n",
+        "test.rb",
+    )
+    .expect("ingest");
+    let mut app = App::new();
+    app.library_classes.extend(classes);
+    let method = &mut app.library_classes[0].methods[0];
+    method.signature = Some(Ty::Fn {
+        params: Vec::new(),
+        block: None,
+        ret: Box::new(Ty::Bool),
+        effects: Default::default(),
+    });
+
+    apply_tag_builder_lowering(&mut app, &Default::default());
+    let signature = app.library_classes[0].methods[0].signature.as_ref().unwrap();
+    assert!(matches!(signature, Ty::Fn { ret, .. } if matches!(**ret, Ty::Str)));
+
+    roundhouse::lower::html_safe::apply_html_safe_lowering(&mut app);
+    assert!(app.html_safe_methods.contains(&roundhouse::Symbol::from("h")));
+    let emitted = roundhouse::emit::rust::emit(&app)
+        .into_iter()
+        .map(|file| file.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(emitted.contains("fn h(&self) -> String"), "{emitted}");
+}
+
+#[test]
+fn rewritten_helper_infers_string_from_its_html_safe_body() {
+    let classes = ingest_library_classes(
+        b"module H\n  def h\n    tag.br\n  end\nend\n",
+        "test.rb",
+    )
+    .expect("ingest");
+    let mut app = App::new();
+    app.library_classes.extend(classes);
+
+    apply_tag_builder_lowering(&mut app, &Default::default());
+    roundhouse::lower::html_safe::apply_html_safe_lowering(&mut app);
+    let emitted = roundhouse::emit::rust::emit(&app)
+        .into_iter()
+        .map(|file| file.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(emitted.contains("fn h(&self) -> String"), "{emitted}");
+    assert!(app.html_safe_methods.contains(&roundhouse::Symbol::from("h")));
+}
+
+#[test]
+fn html_safe_helper_wrappers_keep_string_and_safe_return_contracts() {
+    let classes = ingest_library_classes(
+        b"module H\n  def h\n    tag.br\n  end\n  def wrapped\n    h\n  end\nend\n",
+        "test.rb",
+    )
+    .expect("ingest");
+    let mut app = App::new();
+    app.library_classes.extend(classes);
+
+    apply_tag_builder_lowering(&mut app, &Default::default());
+    roundhouse::lower::html_safe::apply_html_safe_lowering(&mut app);
+
+    assert!(app.html_safe_methods.contains(&roundhouse::Symbol::from("h")));
+    assert!(app.html_safe_methods.contains(&roundhouse::Symbol::from("wrapped")));
+    let emitted = roundhouse::emit::rust::emit(&app)
+        .into_iter()
+        .map(|file| file.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(emitted.contains("fn h(&self) -> String"), "{emitted}");
+    assert!(emitted.contains("fn wrapped(&self) -> String"), "{emitted}");
+}
+
+#[test]
+fn nilable_html_helper_keeps_its_option_shape_and_safe_return_contract() {
+    use roundhouse::ty::Ty;
+
+    let classes = ingest_library_classes(
+        b"module H\n  def h\n    tag.br\n  end\n  def maybe_render(condition)\n    if condition\n      h\n    end\n  end\nend\n",
+        "test.rb",
+    )
+    .expect("ingest");
+    let mut app = App::new();
+    app.library_classes.extend(classes);
+    let maybe_render = app.library_classes[0]
+        .methods
+        .iter_mut()
+        .find(|method| method.name.as_str() == "maybe_render")
+        .expect("maybe_render method");
+    let nullable_html = Ty::Union {
+        variants: vec![Ty::Str, Ty::Nil],
+    };
+    maybe_render.signature = Some(Ty::Fn {
+        params: vec![roundhouse::ty::Param {
+            name: roundhouse::Symbol::from("condition"),
+            ty: Ty::Bool,
+            kind: roundhouse::ty::ParamKind::Required,
+        }],
+        block: None,
+        ret: Box::new(nullable_html.clone()),
+        effects: Default::default(),
+    });
+
+    apply_tag_builder_lowering(&mut app, &Default::default());
+
+    assert!(app
+        .html_safe_methods
+        .contains(&roundhouse::Symbol::from("h")));
+    assert!(app
+        .html_safe_methods
+        .contains(&roundhouse::Symbol::from("maybe_render")));
+    let signature = app.library_classes[0]
+        .methods
+        .iter()
+        .find(|method| method.name.as_str() == "maybe_render")
+        .and_then(|method| method.signature.as_ref())
+        .expect("maybe_render signature");
+    let expected = Ty::Union {
+        variants: vec![Ty::Str, Ty::Nil],
+    };
+    assert!(matches!(signature, Ty::Fn { ret, .. } if **ret == expected));
+    let emitted = roundhouse::emit::rust::emit(&app)
+        .into_iter()
+        .map(|file| file.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        emitted.contains("fn maybe_render(&self, condition: bool) -> Option<String>"),
+        "{emitted}"
+    );
+}
+
+#[test]
 fn a_local_named_tag_is_not_the_builder() {
     // campfire's Opengraph::Document iterates parsed nodes as |tag| and
     // calls `tag.key?(…)`. Rewriting that would be silently destructive,

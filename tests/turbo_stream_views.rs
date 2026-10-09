@@ -117,6 +117,30 @@ fn an_explicit_target_expression_is_used_verbatim() {
     assert!(body.contains("messages"), "got {body}");
 }
 
+#[test]
+fn rust_view_emission_qualifies_the_turbo_stream_runtime_composer() {
+    let app = app_with_template("<%= turbo_stream.append \"things\", @thing %>\n");
+    let emitted = roundhouse::emit::rust::emit(&app);
+    let view = emitted
+        .iter()
+        .find(|file| {
+            file.path.to_string_lossy().starts_with("src/views/")
+                && file.content.contains("fn create_turbo_stream")
+        })
+        .unwrap_or_else(|| panic!("missing emitted turbo_stream view"));
+
+    assert!(
+        view.content.contains("crate::broadcasts::Broadcasts::turbo_stream_fragment("),
+        "view must call the runtime composer explicitly: {}",
+        view.content
+    );
+    assert!(
+        !view.content.contains("= Broadcasts::turbo_stream_fragment("),
+        "no ambiguous unqualified composer call should remain: {}",
+        view.content
+    );
+}
+
 fn create_action_body(app: &App) -> String {
     let lcs = roundhouse::lower::lower_controllers_with_arel_and_views(
         &app.controllers,
@@ -302,5 +326,32 @@ fn the_partial_option_form_renders_that_partial() {
     assert!(
         body.contains("Views::Things") && body.contains("thing"),
         "the named partial supplies the template: {body}"
+    );
+}
+
+#[test]
+fn a_dynamic_frame_src_is_evaluated_once_in_rust_views() {
+    let app = app_with_template(
+        "<%= turbo_frame_tag :next_page_container, src: things_path(page: @thing.name) %>\n",
+    );
+    let emitted = roundhouse::emit::rust::emit(&app);
+    let view = emitted
+        .iter()
+        .find(|file| {
+            file.path.to_string_lossy().starts_with("src/views/")
+                && file.content.contains("fn create_turbo_stream")
+        })
+        .expect("generated turbo_stream view");
+
+    assert!(
+        view.content.contains("let __roundhouse_compacted_attr_"),
+        "dynamic compacted attribute should bind its computed value once:\n{}",
+        view.content
+    );
+    assert_eq!(
+        view.content.matches("things_path(").count(),
+        1,
+        "the path helper must not be evaluated separately for the nil check and render:\n{}",
+        view.content
     );
 }
