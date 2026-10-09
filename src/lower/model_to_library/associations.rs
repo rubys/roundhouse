@@ -621,7 +621,7 @@ fn synth_has_many_id_reader(owner: &ClassId, name: &Symbol) -> MethodDef {
             args: vec![],
             block: Some(Expr::new(
                 Span::synthetic(),
-                ExprNode::Lambda { rest_param: None,
+                ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                     params: vec![rec],
                     block_param: None,
                     body: id_read,
@@ -1823,7 +1823,7 @@ fn synth_through_sync(
     let row = Symbol::from("__row");
     let delete_block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![row.clone()],
             block_param: None,
             body: send(var_ref(row), "destroy", vec![]),
@@ -1872,7 +1872,7 @@ fn synth_through_sync(
     ]);
     let insert_block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![target_var],
             block_param: None,
             body: insert_body,
@@ -1949,7 +1949,7 @@ pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model
                 );
                 let block = Expr::new(
                     Span::synthetic(),
-                    ExprNode::Lambda { rest_param: None,
+                    ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                         params: vec![Symbol::from("c")],
                         block_param: None,
                         body: iter_body,

@@ -11,6 +11,10 @@ mod emit_and_run;
 mod class_attribute;
 #[path = "emit_and_run/integer_query_find_by.rs"]
 mod integer_query_find_by;
+#[path = "support/lambda_signatures.rs"]
+mod lambda_signatures_contract;
+#[path = "emit_and_run/lambda_signatures.rs"]
+mod lambda_signatures;
 #[path = "emit_and_run/strong_params.rs"]
 mod strong_params;
 #[path = "emit_and_run/params_wrapper.rs"]
@@ -189,6 +193,81 @@ puts "to_sql subquery passed"
         );
     run.assert_passes();
     assert!(run.stdout.contains("to_sql subquery passed"));
+}
+
+/// A has_many reader followed by `to_sql` is rooted as the association's
+/// relation: the reader alone answers an Array, which has no `to_sql`,
+/// and `check` was clean while the emitted method raised NoMethodError.
+#[test]
+fn a_has_many_readers_to_sql_is_the_scoped_query() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def comment_sql
+    comments.to_sql
+  end
+",
+        )
+        .run_ruby(
+            r#"a = Article.create!(title: "One", body: "A sufficiently long body.")
+sql = a.comment_sql
+raise "comment_sql: #{sql}" unless sql.include?("comments") && sql.include?("article_id = #{a.id}")
+puts "has_many to_sql passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("has_many to_sql passed"));
+}
+
+/// `in_batches` with a block hands each batch as a relation; without
+/// one, `update_all` and `touch_all` reach every row.
+#[test]
+fn in_batches_runs_with_and_without_a_block() {
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  scope :batched, -> { in_batches }
+
+  def self.batch_total
+    total = 0
+    in_batches(of: 1) { |batch| total += batch.count }
+    total
+  end
+
+  def self.rename_all(title)
+    in_batches.update_all(title: title)
+  end
+
+  def self.touch_everything
+    in_batches(order: :desc).touch_all
+  end
+
+  def touch_comments
+    comments.in_batches.touch_all
+  end
+",
+        )
+        .run_ruby(
+            r#"a = Article.create!(title: "One", body: "A sufficiently long body.")
+Article.create!(title: "Two", body: "A sufficiently long body.")
+Comment.create!(article: a, commenter: "Reader", body: "Comment body")
+raise "batch_total: #{Article.batch_total}" unless Article.batch_total == 2
+Article.rename_all("Renamed")
+raise "rename_all" unless Article.all.map(&:title).uniq == ["Renamed"]
+raise "touch_everything" unless Article.touch_everything == 2
+raise "touch_comments" unless a.touch_comments == 1
+raise "batched scope" unless Article.batched.where(title: "Renamed").count == 2
+puts "in_batches passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("in_batches passed"));
 }
 
 /// A class object and its instances that define the same names: each

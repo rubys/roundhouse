@@ -320,8 +320,8 @@ fn scoped_creation_model(e: &Expr, models: &ModelColumns) -> Option<ClassId> {
         || args.len() != 1 || scalar_pairs(&args[0]).is_none()
         || !match block.as_ref().map(|block| &*block.node) {
             None => true,
-            Some(ExprNode::Lambda { params, rest_param: None, block_param: None, body, .. }) =>
-                params.len() == 1 && !has_block_control_flow(body) && !has_other_local_assignment(body, &params[0]),
+            Some(ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. }) =>
+                params.len() == 1 && extra_params.is_empty() && !has_block_control_flow(body) && !has_other_local_assignment(body, &params[0]),
             _ => false,
         }
     {
@@ -417,7 +417,10 @@ fn inline_scoped_creation(e: &Expr, model_id: ClassId) -> Vec<Expr> {
     }), Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(value_ty) });
     let mut initialize = vec![assign(record(), send(model, "new", vec![attributes], record_ty.clone()))];
     if let Some(block) = block {
-        let ExprNode::Lambda { params, body, .. } = &*block.node else { unreachable!() };
+        let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { unreachable!() };
+        if !extra_params.is_empty() {
+            unreachable!()
+        }
         let block_id = super::create_block::find_var_id(body, &params[0]).unwrap_or(VarId(0));
         let block_name = Symbol::from(format!("_find_or_create_block_record_{}", span.start));
         let block_var = typed(Expr::new(span, ExprNode::Var { id: block_id, name: block_name.clone() }), record_ty.clone());

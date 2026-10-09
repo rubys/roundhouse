@@ -982,7 +982,7 @@ fn rewrite_expr(e: &Expr) -> Expr {
             target_ty: target_ty.clone(),
         }),
         // Recurse into block bodies (a block may read `@ivar`/`self`).
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => syn(ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => syn(ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_expr(body),

@@ -680,7 +680,10 @@ fn map_loop_options(
     if method.as_str() != "map" {
         return None;
     }
-    let ExprNode::Lambda { params, body, .. } = &*block.node else { return None };
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { return None };
+    if !extra_params.is_empty() {
+        return None;
+    }
     let el = params.first().cloned()?;
     // The lambda pieces were argument-position code the template walk
     // never touched — run the helper rewrite over them so `h(x)` (the
@@ -790,7 +793,7 @@ fn each_loop_with_body(
     }
     let lambda = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![el],
             block_param: None,
             body: loop_body,
@@ -866,9 +869,12 @@ pub(super) fn emit_button_tag_block(
     block: &Expr,
     ctx: &ViewCtx,
 ) -> Option<Vec<Expr>> {
-    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else {
         return None;
     };
+    if !extra_params.is_empty() {
+        return None;
+    }
     let (_positional, opts) = split_args(args);
     let mut out =
         vec![accumulator_append_call(string_interp(button_open_parts(opts.as_slice())), ctx)];
@@ -1114,9 +1120,12 @@ pub(super) fn emit_form_builder_block_inline(
     block: &Expr,
     ctx: &ViewCtx,
 ) -> Option<Vec<Expr>> {
-    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else {
         return None;
     };
+    if !extra_params.is_empty() {
+        return None;
+    }
     let (positional, opts) = split_args(args);
     match kind {
         FormBuilderMethod::Button => {

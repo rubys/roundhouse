@@ -1889,6 +1889,9 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
                             | "update_all"
                             | "find_each"
                             | "find_in_batches"
+                            | "touch_all"
+                            | "to_sql"
+                            | "in_batches"
                     )
             {
                 if let ExprNode::Send { method: aname, args: aargs, block: None, .. } = &*r.node {
@@ -2405,6 +2408,9 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
                 | "destroy_all"
                 | "delete_all"
                 | "update_all"
+                | "touch_all"
+                | "to_sql"
+                | "in_batches"
                 // Reads the relation and, on a miss, WRITES through it —
                 // so it is a terminal on both counts. Listing it here is
                 // what lets `assoc_scope_shape` see a class method whose
@@ -3044,7 +3050,7 @@ fn lower_relation_args(
                         );
                         let block = syn(
                             span,
-                            ExprNode::Lambda { rest_param: None,
+                            ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                                 params: vec![x],
                                 block_param: None,
                                 body: id_read,
@@ -3447,7 +3453,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             args: vec![],
                             block: Some(syn(
                                 span,
-                                ExprNode::Lambda { rest_param: None,
+                                ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                                     params: vec![attrs],
                                     block_param: None,
                                     body: save,

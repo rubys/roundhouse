@@ -55,11 +55,13 @@ fn emitted(test_body: &str) -> String {
 }
 
 /// campfire's shape, verbatim: a rest plus an ANONYMOUS double-splat.
+/// Both reach the emitted block as written (the `**` is a lambda
+/// `extra_params` entry); Spinel compiles `|*args, **|` natively.
 #[test]
 fn a_rest_parameter_reaches_the_emitted_block() {
     let src = emitted("Post.all.each { |*args, **| args.first }");
     assert!(
-        src.contains("|*args|"),
+        src.contains("|*args, **|"),
         "the splat is a parameter, not a dropped one:\n{src}"
     );
 }

@@ -45,6 +45,10 @@ mod cable_broadcast_json_contract;
 mod cable_broadcast_json;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
+#[path = "support/lambda_signatures.rs"]
+mod lambda_signatures_contract;
+#[path = "spinel_toolchain/lambda_signatures.rs"]
+mod lambda_signatures;
 #[path = "support/native_http.rs"]
 mod native_http;
 #[path = "spinel_toolchain/strong_params.rs"]

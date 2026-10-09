@@ -2542,7 +2542,7 @@ fn collect_rescue_handlers(
                     )
                 }
                 (None, Some(b)) => match &*b.node {
-                    ExprNode::Lambda { params, body, .. } => {
+                    ExprNode::Lambda { params, extra_params, body, .. } if extra_params.is_empty() => {
                         // A block parameter names the exception; rewrite
                         // the reads to the rescue binding rather than
                         // renaming the binding, which would collide with
@@ -3154,7 +3154,7 @@ fn flatten_seqs(expr: &Expr) -> Expr {
                 args: args.iter().map(flatten).collect(),
                 block: block.as_ref().map(flatten),
             },
-            ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+            ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
                 params: params.clone(),
                 block_param: block_param.clone(),
                 body: flatten(body),
