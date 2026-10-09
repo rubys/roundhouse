@@ -36,7 +36,9 @@ fn strip_guarded_writer_routes(body: &crate::expr::Expr) -> crate::expr::Expr {
         if is_hook(e) {
             return true;
         }
-        let ExprNode::If { then_branch, .. } = &*e.node else { return false };
+        let ExprNode::If { then_branch, .. } = &*e.node else {
+            return false;
+        };
         if is_hook(then_branch) {
             return true;
         }
@@ -52,8 +54,11 @@ fn strip_guarded_writer_routes(body: &crate::expr::Expr) -> crate::expr::Expr {
     };
     let mut out = body.clone();
     if let ExprNode::Seq { exprs } = &*out.node {
-        let kept: Vec<crate::expr::Expr> =
-            exprs.iter().filter(|e| !is_guarded_writer(e)).cloned().collect();
+        let kept: Vec<crate::expr::Expr> = exprs
+            .iter()
+            .filter(|e| !is_guarded_writer(e))
+            .cloned()
+            .collect();
         *out.node = ExprNode::Seq { exprs: kept };
     }
     out
@@ -71,6 +76,17 @@ fn render_self_receiver(mutates: bool) -> &'static str {
 /// so no extra `mod NAME { ... }` wrapping is needed — callers use
 /// `crate::inflector::pluralize(...)`.
 pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
+    emit_module_method_with_owner(m, None)
+}
+
+pub(super) fn emit_module_method_for_class(
+    m: &MethodDef,
+    owner: &str,
+) -> Result<String, String> {
+    emit_module_method_with_owner(m, Some(owner))
+}
+
+fn emit_module_method_with_owner(m: &MethodDef, owner: Option<&str>) -> Result<String, String> {
     if !matches!(m.receiver, MethodReceiver::Class) {
         return Err(format!(
             "rust::emit_module_method: only class methods supported in Module mode, \
@@ -79,30 +95,31 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
         ));
     }
     let mut out = String::new();
-    let params = render_params(m);
+    let params = render_params(m, owner);
     let ret_clause = render_return(m);
     let fn_name = super::expr::sanitize_ident(m.name.as_str());
     writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
-    let return_ty = match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
-        _ => None,
-    };
+    let return_ty = method_return_ty(m);
     let param_types = collect_param_types(m);
-    let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty.clone(), || super::expr::with_class_method_scope(|| {
-        super::expr::with_method_scope(&m.body, || {
-            // Same as emit_instance_method: enable the return-tail
-            // flag so the body's top-level expression (Seq tail / If
-            // branches in tail position) sees `in_return_tail() == true`
-            // and can apply return-type-aware coercions (Some-wrap
-            // for Option<T>-returning class methods, etc.).
-            super::expr::with_return_tail(true, || super::expr::emit_expr_tail(&m.body))
+    let body = super::expr::with_param_types(param_types, || {
+        super::expr::with_current_return_ty(return_ty.clone(), || {
+            super::expr::with_class_method_scope(|| {
+                super::expr::with_method_scope(&m.body, || {
+                    // Same as emit_instance_method: enable the return-tail
+                    // flag so the body's top-level expression (Seq tail / If
+                    // branches in tail position) sees `in_return_tail() == true`
+                    // and can apply return-type-aware coercions (Some-wrap
+                    // for Option<T>-returning class methods, etc.).
+                    super::expr::with_return_tail(true, || super::expr::emit_expr_tail(&m.body))
+                })
+            })
         })
-    })));
+    });
     // Function-tail Some(...) wrap — same logic as emit_instance_method.
     // Class methods that return Option<T> need their last expression
     // wrapped in `Some(...)` when the body-typer typed it as T.
     let body = if needs_function_tail_some_wrap(&m.body, return_ty.as_ref()) {
-        wrap_last_expression_with_some(&body)
+        wrap_function_body_in_some(&body)
     } else {
         body
     };
@@ -119,7 +136,7 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
     Ok(out)
 }
 
-fn render_params(m: &MethodDef) -> String {
+fn render_params(m: &MethodDef, owner: Option<&str>) -> String {
     // Pull positional + kwarg sig params (filter Block — handled separately).
     // The Ruby `def` syntax omits `&block` from `m.params` but the
     // RBS-derived signature appends a `Block` Param at the end. Without
@@ -251,9 +268,9 @@ fn render_return(m: &MethodDef) -> String {
     if m.name.as_str().ends_with('=') {
         return String::new();
     }
-    match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => {
-            if matches!(&**ret, Ty::Nil) {
+    match method_return_ty(m).as_ref() {
+        Some(ret) => {
+            if matches!(ret, Ty::Nil) {
                 String::new()
             } else {
                 format!(" -> {}", rust_ty(ret))
@@ -261,6 +278,30 @@ fn render_return(m: &MethodDef) -> String {
         }
         _ => String::new(),
     }
+}
+
+pub(super) fn method_return_ty(m: &MethodDef) -> Option<Ty> {
+    let declared = match m.signature.as_ref() {
+        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        _ => None,
+    };
+    if let Some(ty) = declared.as_ref().filter(|ty| !matches!(ty, Ty::Untyped)) {
+        return Some(ty.clone());
+    }
+
+    fn tail_ty(expr: &crate::expr::Expr) -> Option<Ty> {
+        match &*expr.node {
+            crate::expr::ExprNode::Seq { exprs } => exprs.last().and_then(tail_ty),
+            crate::expr::ExprNode::OpAssign {
+                op: crate::expr::OpAssignOp::OrOr,
+                value,
+                ..
+            } => value.ty.clone(),
+            _ => expr.ty.clone(),
+        }
+    }
+
+    tail_ty(&m.body).or(declared)
 }
 
 /// Parameter type rendering — borrow-aware variant of `rust_ty`.
@@ -302,7 +343,12 @@ fn needs_function_tail_some_wrap(body: &crate::expr::Expr, return_ty: Option<&Ty
     // directly. The upstream type passes (`block_refine` / `decide`) can
     // re-stamp the tail's `.ty` off the synthesized `Union{Time, Nil}`,
     // so key off the call shape rather than the (unreliable here) type.
-    if let ExprNode::Send { recv: Some(r), method, .. } = &*tail.node {
+    if let ExprNode::Send {
+        recv: Some(r),
+        method,
+        ..
+    } = &*tail.node
+    {
         if method.as_str() == "parse_db_time" {
             if let ExprNode::Const { path } = &*r.node {
                 if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
@@ -337,9 +383,7 @@ fn needs_function_tail_some_wrap(body: &crate::expr::Expr, return_ty: Option<&Ty
 fn tail_expression(e: &crate::expr::Expr) -> &crate::expr::Expr {
     use crate::expr::ExprNode;
     match &*e.node {
-        ExprNode::Seq { exprs } if !exprs.is_empty() => {
-            tail_expression(exprs.last().unwrap())
-        }
+        ExprNode::Seq { exprs } if !exprs.is_empty() => tail_expression(exprs.last().unwrap()),
         _ => e,
     }
 }
@@ -384,36 +428,14 @@ fn clone_last_self_expression(body: &str) -> String {
     lines.join("\n")
 }
 
-/// Wrap the last non-blank line of the body string in `Some(...)`.
-/// The last line is the body's tail expression (single line or
-/// multi-line — the emit produces one Rust expression per body tail).
-/// Special-case bare `self` — `Some(self)` would produce
-/// `Option<&Base>` (the receiver is `&self`/`&mut self`); use
-/// `Some(self.clone())` to match the function's owned `Option<Base>`
-/// return type. Struct emit derives Clone so this resolves cleanly.
-fn wrap_last_expression_with_some(body: &str) -> String {
-    let mut lines: Vec<String> = body.lines().map(|s| s.to_string()).collect();
-    let last_idx = lines
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, l)| !l.trim().is_empty() && !l.trim_start().starts_with("//"))
-        .map(|(i, _)| i);
-    if let Some(idx) = last_idx {
-        let trimmed = lines[idx].trim_end_matches(';').to_string();
-        let leading: String = lines[idx]
-            .chars()
-            .take_while(|c| c.is_whitespace())
-            .collect();
-        let content = trimmed.trim_start();
-        let wrapped = if content == "self" {
-            "Some(self.clone())".to_string()
-        } else {
-            format!("Some({content})")
-        };
-        lines[idx] = format!("{leading}{wrapped}");
-    }
-    lines.join("\n")
+/// Wrap the emitted method body in an expression block whose tail is
+/// wrapped in `Some`. The body can be a multi-line expression with
+/// nested closures (such as `StringIO.new.tap { ... }.string`), so
+/// wrapping its final source line corrupts delimiters and can produce
+/// invalid `Some(})` output. The IR-level `SelfRef` special case still
+/// needs an owned clone because instance methods receive `&self`.
+fn wrap_function_body_in_some(body: &str) -> String {
+    format!("Some({{\n{body}\n}})")
 }
 
 /// Emit a single instance method. `mutates_self` decides the
@@ -443,14 +465,15 @@ pub(super) fn emit_instance_method(
     let mut out = String::new();
     let is_init = m.name.as_str() == "initialize";
     let sanitized = super::expr::sanitize_ident(m.name.as_str());
-    // `pub fn new(...)` constructors and static-safe methods both
-    // drop the `&self` receiver — the latter were identified by
-    // `library.rs::method_reads_self`. Call sites for static methods
-    // route through `Self::method(args)` (see expr.rs::emit_send).
+    // `pub fn new(...)` constructors and static-safe implementation
+    // helpers both drop the `&self` receiver. Static-safe methods also
+    // get an instance wrapper below so Ruby's public instance API stays
+    // callable through a value receiver.
+    let static_helper_name = format!("__rh_static_{sanitized}");
     let (fn_name, receiver): (&str, Option<&'static str>) = if is_init {
         ("new", None)
     } else if is_static {
-        (sanitized.as_str(), None)
+        (static_helper_name.as_str(), None)
     } else {
         (sanitized.as_str(), Some(render_self_receiver(mutates_self)))
     };
@@ -484,51 +507,51 @@ pub(super) fn emit_instance_method(
     } else {
         render_return(m)
     };
-    writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
+    let visibility = if is_static { "pub(crate)" } else { "pub" };
+    writeln!(out, "{visibility} fn {fn_name}{params}{ret_clause} {{").unwrap();
     // Thread the method's RBS-declared return type through to the
     // Return arm in `emit_expr` so `return nil` in a method typed
     // `-> T?` emits as `return None` instead of bare `return` (the
     // latter is E0069 in non-Unit-returning functions).
-    let return_ty = match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
-        _ => None,
-    };
+    let return_ty = method_return_ty(m);
     // Build the param-name → declared-Ty map for the String coercion
     // logic in `emit_assign`. The body-typer doesn't always propagate
     // Option-ness from RBS to Var reads inside the body, so this is
     // the authoritative source for "is this param Option-typed".
     let param_types = collect_param_types(m);
-    let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty.clone(), || super::expr::with_method_scope(&m.body, || {
-        if is_init {
-            let fields: Vec<String> = ivars.iter().map(|(n, _)| n.clone()).collect();
-            // Constructor mode renders field writes as `let` bindings
-            // feeding the final `Self { … }` literal — a conditional
-            // field write can't be expressed (an If would emit a
-            // shadow-and-drop `let` inside its own block). Strip the
-            // synthesized nil-guarded writer routes (temporal
-            // normalize / association-object fk / secure-password:
-            // `self.<x> = … unless attrs[:k].nil?`) — rust callers
-            // keep the flat default inits, the pre-existing honest
-            // subset. Matched narrowly (If whose then-branch is a
-            // self-writer Send) so user-written initialize logic is
-            // untouched.
-            let body = strip_guarded_writer_routes(&m.body);
-            super::expr::with_constructor_mode(fields, || emit_expr(&body))
-        } else {
-            // Body root is a function return position — let the
-            // `Ivar` arm see `IN_RETURN_TAIL=true` so a getter shaped
-            // `def field; @field; end` emits as `self.field.clone()`
-            // for non-Copy field types. `emit_expr_tail` is the
-            // flag-preserving variant; the plain `emit_expr` would
-            // clear the flag at entry.
-            super::expr::with_return_tail(true, || {
-                super::expr::emit_expr_tail(&m.body)
+    let body = super::expr::with_param_types(param_types, || {
+        super::expr::with_current_return_ty(return_ty.clone(), || {
+            super::expr::with_method_scope(&m.body, || {
+                if is_init {
+                    let fields: Vec<String> = ivars.iter().map(|(n, _)| n.clone()).collect();
+                    // Constructor mode renders field writes as `let` bindings
+                    // feeding the final `Self { … }` literal — a conditional
+                    // field write can't be expressed (an If would emit a
+                    // shadow-and-drop `let` inside its own block). Strip the
+                    // synthesized nil-guarded writer routes (temporal
+                    // normalize / association-object fk / secure-password:
+                    // `self.<x> = … unless attrs[:k].nil?`) — rust callers
+                    // keep the flat default inits, the pre-existing honest
+                    // subset. Matched narrowly (If whose then-branch is a
+                    // self-writer Send) so user-written initialize logic is
+                    // untouched.
+                    let body = strip_guarded_writer_routes(&m.body);
+                    super::expr::with_constructor_mode(fields, || emit_expr(&body))
+                } else {
+                    // Body root is a function return position — let the
+                    // `Ivar` arm see `IN_RETURN_TAIL=true` so a getter shaped
+                    // `def field; @field; end` emits as `self.field.clone()`
+                    // for non-Copy field types. `emit_expr_tail` is the
+                    // flag-preserving variant; the plain `emit_expr` would
+                    // clear the flag at entry.
+                    super::expr::with_return_tail(true, || super::expr::emit_expr_tail(&m.body))
+                }
             })
-        }
-    })));
+        })
+    });
     // Function-tail Some(...) wrap: if the method returns Option<T>
     // and the body's tail expression is T-typed (non-Option), wrap
-    // the last line in `Some(...)`. The Ruby idiom returns the last
+    // the function-body block in `Some(...)`. The Ruby idiom returns the last
     // expression's value; the body-typer carries the per-expression
     // type but doesn't insert Option-wrapping itself — that's emit
     // work. Distinct from `Return { Lit::Nil }` (already handled in
@@ -542,16 +565,17 @@ pub(super) fn emit_instance_method(
     // `wrap_last_expression_with_some` operates on the multi-line
     // match's closing brace.
     let is_setter = m.name.as_str().ends_with('=');
-    let body = if !is_init && !is_setter && needs_function_tail_some_wrap(&m.body, return_ty.as_ref()) {
-        wrap_last_expression_with_some(&body)
-    } else if !is_init && needs_function_tail_self_clone(&m.body, return_ty.as_ref()) {
-        // `def reload; ...; self; end` returning Base — `self` is
-        // `&self` / `&mut self`, but the return type is the owned
-        // `Base`. Clone the tail self to satisfy the owned shape.
-        clone_last_self_expression(&body)
-    } else {
-        body
-    };
+    let body =
+        if !is_init && !is_setter && needs_function_tail_some_wrap(&m.body, return_ty.as_ref()) {
+            wrap_function_body_in_some(&body)
+        } else if !is_init && needs_function_tail_self_clone(&m.body, return_ty.as_ref()) {
+            // `def reload; ...; self; end` returning Base — `self` is
+            // `&self` / `&mut self`, but the return type is the owned
+            // `Base`. Clone the tail self to satisfy the owned shape.
+            clone_last_self_expression(&body)
+        } else {
+            body
+        };
     let body = if !is_init {
         synthesize_default_body_if_empty(body, return_ty.as_ref())
     } else {
@@ -580,8 +604,7 @@ pub(super) fn emit_instance_method(
         // Skips the case where the tail is already a block-shaped
         // expression (closes with `}`) since those are statements
         // with no value, or a return statement.
-        let returns_unit = !is_init
-            && matches!(return_ty.as_ref(), Some(Ty::Nil) | None);
+        let returns_unit = !is_init && matches!(return_ty.as_ref(), Some(Ty::Nil) | None);
         let needs_unit_terminator = returns_unit
             && i == last_idx
             && !line.trim_end().ends_with(';')
@@ -612,23 +635,50 @@ pub(super) fn emit_instance_method(
         // the request dispatcher) — would otherwise reference
         // undeclared locals at the Self literal site. Emit a default-
         // initialized let binding for each so the literal compiles.
-        let assigned: std::collections::HashSet<String> =
-            collect_ivars_assigned_in_body(&m.body);
+        let assigned: std::collections::HashSet<String> = collect_ivars_assigned_in_body(&m.body);
         for (fname, fty) in ivars {
             if !assigned.contains(fname) {
+                let field = super::expr::util::escape_rust_keyword(fname);
                 writeln!(
                     out,
-                    "    let {fname}: {} = {};",
+                    "    let {field}: {} = {};",
                     super::ty::rust_ty(fty),
                     default_value_for_ty(fty),
                 )
                 .unwrap();
             }
         }
-        let fields: Vec<&str> = ivars.iter().map(|(n, _)| n.as_str()).collect();
+        let fields: Vec<String> = ivars
+            .iter()
+            .map(|(n, _)| super::expr::util::escape_rust_keyword(n))
+            .collect();
         writeln!(out, "    Self {{ {} }}", fields.join(", ")).unwrap();
     }
     out.push_str("}\n");
+    if is_static {
+        let wrapper_params = render_instance_params(m, Some("&self"), block_param.as_deref());
+        let mut forwarded_args = m
+            .params
+            .iter()
+            .map(|param| super::expr::util::escape_rust_keyword(param.name.as_str()))
+            .collect::<Vec<_>>();
+        if block_param.is_some() {
+            forwarded_args.push(
+                m.block_param
+                    .as_ref()
+                    .map(|param| super::expr::util::escape_rust_keyword(param.name.as_str()))
+                    .unwrap_or_else(|| "f".to_string()),
+            );
+        }
+        writeln!(out, "\npub fn {sanitized}{wrapper_params}{ret_clause} {{").unwrap();
+        writeln!(
+            out,
+            "    Self::{static_helper_name}({})",
+            forwarded_args.join(", ")
+        )
+        .unwrap();
+        out.push_str("}\n");
+    }
     Ok(out)
 }
 
@@ -641,7 +691,10 @@ fn collect_ivars_assigned_in_body(body: &crate::expr::Expr) -> std::collections:
     use crate::expr::{ExprNode, LValue};
     fn walk(e: &crate::expr::Expr, out: &mut std::collections::HashSet<String>) {
         match &*e.node {
-            ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            ExprNode::Assign {
+                target: LValue::Ivar { name },
+                value,
+            } => {
                 out.insert(name.as_str().to_string());
                 walk(value, out);
             }
@@ -664,11 +717,15 @@ fn collect_ivars_assigned_in_body(body: &crate::expr::Expr) -> std::collections:
             // the default-init pass in `emit_instance_method` skips
             // these fields — the `Send` emit in `expr.rs` rewrites
             // them to `let <field> = …` in constructor context.
-            ExprNode::Send { recv: Some(r), method, args, .. }
-                if matches!(&*r.node, ExprNode::SelfRef)
-                    && args.len() == 1
-                    && method.as_str().ends_with('=')
-                    && !method.as_str().starts_with('[') =>
+            ExprNode::Send {
+                recv: Some(r),
+                method,
+                args,
+                ..
+            } if matches!(&*r.node, ExprNode::SelfRef)
+                && args.len() == 1
+                && method.as_str().ends_with('=')
+                && !method.as_str().starts_with('[') =>
             {
                 let raw = method.as_str();
                 out.insert(raw[..raw.len() - 1].to_string());
@@ -677,7 +734,11 @@ fn collect_ivars_assigned_in_body(body: &crate::expr::Expr) -> std::collections:
                 }
             }
             ExprNode::Seq { exprs } => exprs.iter().for_each(|e| walk(e, out)),
-            ExprNode::If { cond, then_branch, else_branch } => {
+            ExprNode::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 walk(cond, out);
                 walk(then_branch, out);
                 walk(else_branch, out);
@@ -686,10 +747,16 @@ fn collect_ivars_assigned_in_body(body: &crate::expr::Expr) -> std::collections:
                 walk(cond, out);
                 walk(body, out);
             }
-            ExprNode::Send { recv, args, block, .. } => {
-                if let Some(r) = recv { walk(r, out); }
+            ExprNode::Send {
+                recv, args, block, ..
+            } => {
+                if let Some(r) = recv {
+                    walk(r, out);
+                }
                 args.iter().for_each(|a| walk(a, out));
-                if let Some(b) = block { walk(b, out); }
+                if let Some(b) = block {
+                    walk(b, out);
+                }
             }
             ExprNode::Return { value } => walk(value, out),
             _ => {}
@@ -809,17 +876,25 @@ fn render_instance_params(
 fn find_yield_signature(body: &crate::expr::Expr) -> Option<Vec<Ty>> {
     use crate::expr::ExprNode;
     match &*body.node {
-        ExprNode::Yield { args } => {
-            Some(args.iter().map(|a| a.ty.clone().unwrap_or(Ty::Untyped)).collect())
-        }
+        ExprNode::Yield { args } => Some(
+            args.iter()
+                .map(|a| a.ty.clone().unwrap_or(Ty::Untyped))
+                .collect(),
+        ),
         ExprNode::Seq { exprs } => exprs.iter().find_map(find_yield_signature),
-        ExprNode::If { cond, then_branch, else_branch } => find_yield_signature(cond)
+        ExprNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => find_yield_signature(cond)
             .or_else(|| find_yield_signature(then_branch))
             .or_else(|| find_yield_signature(else_branch)),
         ExprNode::While { cond, body, .. } => {
             find_yield_signature(cond).or_else(|| find_yield_signature(body))
         }
-        ExprNode::Send { recv, args, block, .. } => recv
+        ExprNode::Send {
+            recv, args, block, ..
+        } => recv
             .as_ref()
             .and_then(find_yield_signature)
             .or_else(|| args.iter().find_map(find_yield_signature))
@@ -852,6 +927,15 @@ mod tests {
 
     fn empty_body() -> Expr {
         Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] })
+    }
+
+    #[test]
+    fn option_return_wrap_keeps_multiline_expression_delimiters_intact() {
+        let body = "StringIO::new().tap(|body| {\n    body.push_str(\"x\");\n}).string()";
+        let wrapped = wrap_function_body_in_some(body);
+        assert!(wrapped.starts_with("Some({\n"), "{wrapped}");
+        assert!(wrapped.contains("}).string()\n}"), "{wrapped}");
+        assert!(wrapped.ends_with("})"), "{wrapped}");
     }
 
     fn base_module_method(name: &str) -> MethodDef {
@@ -1012,7 +1096,10 @@ mod tests {
                 args: vec![],
                 block: Some(Expr::new(
                     Span::synthetic(),
-                    ExprNode::Var { id: crate::ident::VarId(0), name: blk.clone() },
+                    ExprNode::Var {
+                        id: crate::ident::VarId(0),
+                        name: blk.clone(),
+                    },
                 )),
                 parenthesized: true,
             },

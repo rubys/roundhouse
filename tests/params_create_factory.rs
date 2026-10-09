@@ -299,3 +299,58 @@ end
     assert!(body.contains("name"), "{body}");
     assert!(!body.contains("name_provided"), "presence gated — update the note: {body}");
 }
+
+#[test]
+fn rust_params_readers_and_attribute_hash_clone_shared_string_fields() {
+    let mut app = app_with(vec![(
+        "app/controllers/users_controller.rb",
+        r#"class UsersController < ApplicationController
+  def create
+    User.create!(user_params.to_attrs)
+  end
+
+  private
+    def user_params
+      params.require(:user).permit(:name, :avatar)
+    end
+end
+"#,
+    )]);
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let files = roundhouse::emit::rust::emit(&app);
+    let source = &files
+        .iter()
+        .find(|file| file.path.ends_with("user_params.rs"))
+        .expect("generated UserParams Rust module")
+        .content;
+
+    for field in ["name", "avatar"] {
+        let getter = format!("pub fn {field}(&self) -> String {{\n        self.{field}.clone()");
+        assert!(
+            source.contains(&getter),
+            "getter must clone its shared String field:\n{source}"
+        );
+        let insertion = format!("serde_json::Value::from(self.{field}.clone())");
+        assert!(
+            source.contains(&insertion),
+            "to_attrs must not move {field} out of &self:\n{source}"
+        );
+    }
+
+    // The ownership adjustment is Rust-only: the lowered Ruby meaning of
+    // the synthesized reader remains a direct ivar read.
+    let specs = roundhouse::lower::controller_to_library::params::collect_specs(&app.controllers);
+    let lcs = roundhouse::lower::controller_to_library::params::synthesize_params_classes(&specs);
+    let params = lcs
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "UserParams")
+        .unwrap();
+    let reader = params
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "name")
+        .unwrap();
+    assert!(
+        matches!(&*reader.body.node, roundhouse::expr::ExprNode::Ivar { name } if name.as_str() == "name")
+    );
+}

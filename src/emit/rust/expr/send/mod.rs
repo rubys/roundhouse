@@ -35,6 +35,13 @@ pub(super) fn emit_send(
     args: &[Expr],
     outer_ty: Option<&crate::ty::Ty>,
 ) -> String {
+    // Bare Rails view helpers are resolved through the ViewHelpers
+    // registry below. Let the concrete-model dom_id peephole see that
+    // same shape before registry dispatch turns it into a generic call
+    // (and passes the model to the runtime's Base-only signature).
+    if let Some(s) = try_view_helpers_dom_id(recv, method, args) {
+        return s;
+    }
     // Ruby implicit-self resolves a bare identifier to the enclosing
     // method's parameter when one shares the name (e.g. view partial
     // `def self.article(article, ...)` body references `article` as
@@ -253,6 +260,92 @@ pub(super) fn emit_send(
         if method == "raise" && args.len() == 1 {
             return format!("panic!(\"{{}}\", {})", args_s[0]);
         }
+        // An implicit send in `def self.foo` has the class as its Ruby
+        // receiver. A same-named instance method is not a valid target there.
+        if !in_class_method() && super::is_instance_method(method) {
+            let method_args = current_class_method_param_tys(method)
+                .map(|param_tys| {
+                    args.iter()
+                        .enumerate()
+                        .map(|(index, arg)| {
+                            param_tys
+                                .get(index)
+                                .map(|param_ty| coerce_arg_for_param_ty(arg, param_ty))
+                                .unwrap_or_else(|| emit_expr(arg))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| args_s.clone());
+            if super::is_static_method(method) && super::in_constructor() {
+                let helper = format!("__rh_static_{}", super::util::sanitize_ident(method));
+                return format!("Self::{helper}({})", method_args.join(", "));
+            }
+            if !in_class_method() {
+                return format!("self.{rewritten_method}({})", method_args.join(", "));
+            }
+        }
+        // Rails view helpers are instance-style Ruby calls in templates
+        // (`image_tag`, `dom_id`, etc.), but their Rust implementations
+        // live as associated functions on the generated ViewHelpers type.
+        // Resolve only methods present in that class registry so unrelated
+        // bare calls keep their existing free-function behavior.
+        if let Some(param_tys) =
+            super::global_class_method_param_tys("ViewHelpers", &effective_method)
+        {
+            let mut helper_args: Vec<String> = args
+                .iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                    param_tys
+                        .get(i)
+                        .map(|param_ty| coerce_arg_for_param_ty(arg, param_ty))
+                        .unwrap_or_else(|| emit_expr(arg))
+                })
+                .collect();
+            for i in helper_args.len()..param_tys.len() {
+                let default =
+                    super::global_class_method_param_default("ViewHelpers", &effective_method, i)
+                        .or_else(|| param_tys.get(i).and_then(synth_default_for_ty));
+                match default {
+                    Some(value) => helper_args.push(value),
+                    None => break,
+                }
+            }
+            return format!(
+                "ViewHelpers::{rewritten_method}({})",
+                helper_args.join(", ")
+            );
+        }
+        if let Some(helper) = super::global_helper_method(&effective_method) {
+            let mut helper_args: Vec<String> = args
+                .iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                    helper
+                        .params
+                        .get(i)
+                        .map(|param_ty| coerce_arg_for_param_ty(arg, param_ty))
+                        .unwrap_or_else(|| emit_expr(arg))
+                })
+                .collect();
+            for i in helper_args.len()..helper.params.len() {
+                let default = helper
+                    .defaults
+                    .get(i)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| helper.params.get(i).and_then(synth_default_for_ty));
+                match default {
+                    Some(value) => helper_args.push(value),
+                    None => break,
+                }
+            }
+            return format!(
+                "{}::{rewritten_method}({})",
+                helper.path,
+                helper_args.join(", ")
+            );
+        }
         return format!("{}({})", rewritten_method, args_s.join(", "));
     }
     let r = recv.unwrap();
@@ -320,17 +413,13 @@ pub(super) fn emit_send(
             );
         }
     }
-    // Static-method routing: `self.method(args)` where `method` was
-    // classified as not-reading-self emits as `Self::method(args)`.
-    // Required inside `pub fn new` (no instance yet), and also a
-    // valid choice elsewhere for inherently-static helpers — Rust
-    // accepts both `obj.foo()` and `T::foo(...)` when `foo` doesn't
-    // take a receiver, but the static form is unambiguous.
-    //
-    // The same routing applies unconditionally inside class methods
-    // (`def self.X` bodies): Ruby's `self` *is* the class there, so
-    // every `self.method(args)` is class-level dispatch.
-    if matches!(&*r.node, ExprNode::SelfRef) && (is_static_method(method) || in_class_method()) {
+    // A static-safe instance method keeps its instance-facing wrapper;
+    // only a constructor (which has no Rust `self` yet) calls the private
+    // associated implementation. In class methods, route class-level
+    // calls normally, but never reinterpret an instance method as one.
+    let constructor_static_call = in_constructor() && is_static_method(method);
+    let class_method_call = in_class_method() && !super::is_instance_method(method);
+    if matches!(&*r.node, ExprNode::SelfRef) && (constructor_static_call || class_method_call) {
         // Callee-back-propagation: when the callee's declared param[i]
         // is `Hash<K, V>` and the arg expression is a Var whose
         // `local_var_ty` is a different `Hash<K', V'>` (or
@@ -365,10 +454,15 @@ pub(super) fn emit_send(
                 }
             }
         }
+        let target_method = if constructor_static_call {
+            format!("__rh_static_{}", super::util::sanitize_ident(method))
+        } else {
+            rewritten_method
+        };
         if coerced.is_empty() {
-            return format!("Self::{rewritten_method}()");
+            return format!("Self::{target_method}()");
         }
-        return format!("Self::{rewritten_method}({})", coerced.join(", "));
+        return format!("Self::{target_method}({})", coerced.join(", "));
     }
     // Callee-back-propagation for two recv shapes:
     //
@@ -649,10 +743,17 @@ fn try_view_helpers_dom_id(recv: Option<&Expr>, method: &str, args: &[Expr]) -> 
     if method != "dom_id" {
         return None;
     }
-    let r = recv?;
-    let ExprNode::Const { path } = &*r.node else { return None };
-    if path.last().map(|s| s.as_str()) != Some("ViewHelpers") {
-        return None;
+    match recv {
+        Some(r) => {
+            let ExprNode::Const { path } = &*r.node else {
+                return None;
+            };
+            if path.last().map(|s| s.as_str()) != Some("ViewHelpers") {
+                return None;
+            }
+        }
+        None if super::global_class_method_param_tys("ViewHelpers", method).is_some() => {}
+        None => return None,
     }
     if args.is_empty() || args.len() > 2 {
         return None;
@@ -824,4 +925,87 @@ pub(crate) fn is_array_index_read(arg: &Expr) -> bool {
         && args.len() == 1
         && matches!(r.ty.as_ref(), Some(Ty::Array { .. }))
         && matches!(args[0].ty.as_ref(), Some(Ty::Int))
+}
+
+#[cfg(test)]
+mod helper_dispatch_tests {
+    use super::emit_send;
+    use crate::emit::rust::ctx::{EmitCtx, GlobalHelperMethod};
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::ident::{ClassId, Symbol, VarId};
+    use crate::span::Span;
+    use crate::ty::{Param, ParamKind, Ty};
+
+    #[test]
+    fn a_unique_app_helper_bare_call_uses_its_emitted_owner() {
+        let mut ctx = EmitCtx::default();
+        ctx.global_helper_methods.insert(
+            "translation_button".to_string(),
+            GlobalHelperMethod {
+                path: "crate::app_classes::TranslationsHelper".to_string(),
+                params: vec![],
+                defaults: vec![],
+                return_ty: None,
+            },
+        );
+        crate::emit::rust::expr::with_emit_ctx(ctx, || {
+            assert_eq!(
+                emit_send(None, "translation_button", &[], None),
+                "crate::app_classes::TranslationsHelper::translation_button()",
+            );
+        });
+    }
+
+    #[test]
+    fn bare_dom_id_of_a_concrete_model_uses_its_model_id() {
+        let mut ctx = EmitCtx::default();
+        ctx.global_class_methods.insert(
+            "ViewHelpers".to_string(),
+            std::collections::HashMap::from([(
+                "dom_id".to_string(),
+                vec![
+                    Param {
+                        name: Symbol::from("record"),
+                        ty: Ty::Class {
+                            id: ClassId(Symbol::from("Base")),
+                            args: Vec::new(),
+                        },
+                        kind: ParamKind::Required,
+                    },
+                    Param {
+                        name: Symbol::from("prefix"),
+                        ty: Ty::Union {
+                            variants: vec![Ty::Sym, Ty::Nil],
+                        },
+                        kind: ParamKind::Optional,
+                    },
+                ],
+            )]),
+        );
+        let mut record = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var {
+                id: VarId(0),
+                name: Symbol::from("message"),
+            },
+        );
+        record.ty = Some(Ty::Class {
+            id: ClassId(Symbol::from("Message")),
+            args: Vec::new(),
+        });
+        let prefix = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Sym {
+                    value: Symbol::from("edit"),
+                },
+            },
+        );
+        crate::emit::rust::expr::with_emit_ctx(ctx, || {
+            assert_eq!(
+                emit_send(None, "dom_id", &[record, prefix], None),
+                "format!(\"edit_message_{}\", message.clone().id())",
+            );
+        });
+    }
 }
