@@ -20,10 +20,37 @@ pub struct SupportModule {
     pub constant: &'static str,
     /// Module file stem under `src/`.
     pub stem: &'static str,
-    pub source: &'static str,
+    /// Hand-written module text, or `None` when the module is a
+    /// transpiled runtime file (`runtime_loader::RUST_RUNTIME`) that is
+    /// already among the emitted files when the app needs it.
+    pub source: Option<&'static str>,
 }
 
-pub const SUPPORT_MODULES: &[SupportModule] = &[];
+pub const SUPPORT_MODULES: &[SupportModule] = &[SupportModule {
+    constant: "BrowserBlocker",
+    stem: "browser_blocker",
+    source: None,
+}, SupportModule {
+    constant: "SecureRandom",
+    stem: "secure_random",
+    source: Some(include_str!("../../../runtime/rust/secure_random.rs")),
+}, SupportModule {
+    constant: "SchematizedJson",
+    stem: "schematized_json",
+    source: Some(include_str!("../../../runtime/rust/schematized_json.rs")),
+}, SupportModule {
+    constant: "ActiveJob",
+    stem: "active_job",
+    source: Some(include_str!("../../../runtime/rust/active_job.rs")),
+}, SupportModule {
+    constant: "TokenFor",
+    stem: "token_for",
+    source: Some(include_str!("../../../runtime/rust/token_for.rs")),
+}, SupportModule {
+    constant: "ActiveSupport",
+    stem: "active_support",
+    source: Some(include_str!("../../../runtime/rust/active_support.rs")),
+}];
 
 /// Adds each used support module and its import. Run before
 /// `emit_lib_rs` so `lib.rs` declares the new modules.
@@ -34,6 +61,9 @@ pub fn apply(files: &mut Vec<EmittedFile>) {
             "#[allow(unused_imports)]\nuse crate::{}::{};\n",
             module.stem, module.constant
         );
+        if module.source.is_none() && !files.iter().any(|f| f.path == module_path) {
+            continue;
+        }
         let needle = format!("{}::", module.constant);
         let mut used = false;
         for file in files.iter_mut() {
@@ -46,11 +76,13 @@ pub fn apply(files: &mut Vec<EmittedFile>) {
             file.content = insert_import(&file.content, &import);
             used = true;
         }
-        if used && !files.iter().any(|f| f.path == module_path) {
-            files.push(EmittedFile {
-                path: module_path,
-                content: module.source.to_string(),
-            });
+        if let (true, Some(source)) = (used, module.source) {
+            if !files.iter().any(|f| f.path == module_path) {
+                files.push(EmittedFile {
+                    path: module_path,
+                    content: source.to_string(),
+                });
+            }
         }
     }
 }
