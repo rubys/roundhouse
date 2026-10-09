@@ -173,6 +173,8 @@ use crate::app_classes::*;
 /// imports)]` discipline as MODEL_IMPORTS / VIEW_IMPORTS.
 const CONTROLLER_IMPORTS: &str = "\
 #[allow(unused_imports)]
+use crate::db::CollectionRows;
+#[allow(unused_imports)]
 use crate::action_controller_base::{self, Base};
 #[allow(unused_imports)]
 use crate::flash::Flash;
@@ -211,6 +213,8 @@ use crate::app_classes::*;
 ";
 
 const MODEL_IMPORTS: &str = "\
+#[allow(unused_imports)]
+use crate::db::CollectionRows;
 #[allow(unused_imports)]
 use crate::param_value::ParamValue;
 #[allow(unused_imports)]

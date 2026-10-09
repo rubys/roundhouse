@@ -280,6 +280,64 @@ impl<T: SqlLiteral + ?Sized> SqlLiteral for &T {
     }
 }
 
+/// A model row readable by column name, so association collections
+/// (`Vec<Model>`, already loaded) answer `find_by` / `find_by!` /
+/// `destroy_all` in memory with the same literal comparison the SQL
+/// `where_clause` would make.
+pub trait AttrRow {
+    /// `None` for an unknown column; `Some(None)` for a nil value.
+    fn attr_literal(&self, col: &str) -> Option<Option<String>>;
+    fn destroy_record(&mut self);
+}
+
+fn row_matches<T: AttrRow, K: AsRef<str>, V: SqlLiteral>(
+    row: &T,
+    conditions: &[(K, V)],
+) -> bool {
+    conditions.iter().all(|(k, v)| {
+        row.attr_literal(k.as_ref())
+            .unwrap_or_else(|| panic!("unknown column {}", k.as_ref()))
+            == v.sql_literal()
+    })
+}
+
+/// Collection-side finders for association results.
+pub trait CollectionRows<T: AttrRow + Clone> {
+    fn find_by<K: AsRef<str>, V: SqlLiteral>(
+        &self,
+        conditions: impl IntoIterator<Item = (K, V)>,
+    ) -> Option<T>;
+    fn find_by_bang<K: AsRef<str>, V: SqlLiteral>(
+        &self,
+        conditions: impl IntoIterator<Item = (K, V)>,
+    ) -> T;
+    fn destroy_all(&self) -> Vec<T>;
+}
+
+impl<T: AttrRow + Clone> CollectionRows<T> for Vec<T> {
+    fn find_by<K: AsRef<str>, V: SqlLiteral>(
+        &self,
+        conditions: impl IntoIterator<Item = (K, V)>,
+    ) -> Option<T> {
+        let conditions: Vec<(K, V)> = conditions.into_iter().collect();
+        self.iter().find(|r| row_matches(*r, &conditions)).cloned()
+    }
+    fn find_by_bang<K: AsRef<str>, V: SqlLiteral>(
+        &self,
+        conditions: impl IntoIterator<Item = (K, V)>,
+    ) -> T {
+        self.find_by(conditions).expect("record not found")
+    }
+    fn destroy_all(&self) -> Vec<T> {
+        let mut out = Vec::with_capacity(self.len());
+        for mut r in self.iter().cloned() {
+            r.destroy_record();
+            out.push(r);
+        }
+        out
+    }
+}
+
 impl Db {
     /// The `WHERE` condition for `find_by(col: value, …)` / `where(…)`:
     /// `"col" = value` joined by `AND`, `"col" IS NULL` for nil

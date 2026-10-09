@@ -338,6 +338,40 @@ fn emit_library_class_inner(
     }
     out.push_str("}\n\n");
 
+    // Models read their columns by name so association collections can
+    // answer `find_by` / `find_by!` / `destroy_all` in memory.
+    if class.methods.iter().any(|m| m.name.as_str() == "_adapter_all") {
+        writeln!(out, "impl crate::db::AttrRow for {name} {{").unwrap();
+        writeln!(
+            out,
+            "    fn attr_literal(&self, col: &str) -> Option<Option<String>> {{"
+        )
+        .unwrap();
+        writeln!(out, "        match col {{").unwrap();
+        for (fname, ty) in &ivars {
+            let rt = rust_ty(ty);
+            let plain = matches!(
+                rt.as_str(),
+                "i64" | "String" | "bool" | "f64" | "Option<i64>" | "Option<String>"
+                    | "Option<bool>" | "Option<f64>"
+            );
+            if !plain {
+                continue;
+            }
+            let field = super::expr::util::escape_rust_keyword(fname);
+            let col = fname.strip_suffix("_raw").unwrap_or(fname);
+            writeln!(
+                out,
+                "            {col:?} => Some(crate::db::SqlLiteral::sql_literal(&self.{field})),"
+            )
+            .unwrap();
+        }
+        writeln!(out, "            _ => None,").unwrap();
+        writeln!(out, "        }}\n    }}").unwrap();
+        writeln!(out, "    fn destroy_record(&mut self) {{ self.destroy(); }}").unwrap();
+        writeln!(out, "}}\n").unwrap();
+    }
+
     // Impl block. Each method renders independently; `initialize`
     // routes through the constructor variant of `emit_instance_method`.
     // `def self.X` class methods emit as `pub fn name(...)` (no
