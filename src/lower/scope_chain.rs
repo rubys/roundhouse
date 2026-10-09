@@ -4027,8 +4027,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             // `Array#first(n)` (lobsters' `split.first(words * 2)`),
             // which is the hazard `counted_terminal`'s own note names.
             if let Some(counted) = counted_terminal(&method, &args, block.as_ref()) {
+                // A scope proved to answer something else (a `Page`)
+                // names no relation, wherever it sits.
                 let names_a_scope = matches!(&*r.node, ExprNode::Send { method: rname, .. }
-                    if ctx.sole_scope_owner(rname).is_some());
+                    if ctx.sole_scope_owner(rname).is_some_and(|owner| ctx.scope_keeps_relation(owner, rname)));
                 if names_a_scope {
                     *expr = put(span, Some(r), counted, args, block, parenthesized);
                     return None;

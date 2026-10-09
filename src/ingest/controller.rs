@@ -351,7 +351,25 @@ fn ingest_controller_body_item(
                 message: "controller singleton methods are not supported; finite Concern configuration is expanded separately".to_string(),
             });
         }
-        super::forwarding::reject_entrypoint(&def, file, "controller method")?;
+        // `Action` carries required, optional, `*rest`, keyword,
+        // `**rest`, anonymous `**` / `...` and `&block` formals
+        // (`Action::formal_params`). What it cannot carry is refused
+        // here rather than dropped: a dropped formal emits a `def` the
+        // call sites no longer match.
+        let formals = super::forwarding::parse(&def);
+        if let Some(formal) = formals.unsupported {
+            return Err(IngestError::Unsupported {
+                file: file.to_string(),
+                message: format!("controller method parameter declaration: {}", formal.description()),
+            });
+        }
+        if def.parameters().is_some_and(|pn| pn.posts().iter().next().is_some()) {
+            return Err(IngestError::Unsupported {
+                file: file.to_string(),
+                message: "required parameters after a positional rest on a controller method are not preserved yet"
+                    .to_string(),
+            });
+        }
         let action_name = constant_id_str(&def.name()).to_string();
         let body_expr = match def.body() {
             Some(b) => ingest_expr(&b, file)?,
@@ -378,14 +396,15 @@ fn ingest_controller_body_item(
         // seed their types from call sites — so a body like
         // `query.where(...)` never resolves and the method's return
         // type is lost. Value types are placeholders (`Untyped`); the
-        // real types come from the inferred-params table. Optional /
-        // keyword / rest params need richer modeling and stay
-        // unhandled for now.
+        // real types come from the inferred-params table. The other
+        // kinds follow below; `Action::formal_params` puts them back in
+        // declaration order.
         let mut params = Row::closed();
         let mut opt_params: Vec<(Symbol, Expr)> = Vec::new();
         let mut kw_params: Vec<(Symbol, Option<Expr>)> = Vec::new();
         let mut block_param: Option<Symbol> = None;
         let mut kwrest_param: Option<Symbol> = None;
+        let mut rest_param: Option<Symbol> = None;
         if let Some(pn) = def.parameters() {
             for req in pn.requireds().iter() {
                 if let Some(rp) = req.as_required_parameter_node() {
@@ -395,8 +414,7 @@ fn ingest_controller_body_item(
                 }
             }
             // Optional positionals (`opts = {}`) — keep the name + default
-            // so the emitted signature round-trips. Rest / post params
-            // still need richer modeling and stay unhandled.
+            // so the emitted signature round-trips.
             for opt in pn.optionals().iter() {
                 if let Some(op) = opt.as_optional_parameter_node() {
                     let name = Symbol::from(constant_id_str(&op.name()));
@@ -417,6 +435,14 @@ fn ingest_controller_body_item(
                     let default = ingest_expr(&opt.value(), file)?;
                     kw_params.push((name, Some(default)));
                 }
+            }
+            if let Some(rest) = pn.rest().and_then(|r| r.as_rest_parameter_node()) {
+                rest_param = match rest.name() {
+                    Some(n) => Some(Symbol::from(constant_id_str(&n))),
+                    // An unforwarded `*` (a forwarded one was refused
+                    // above): see `forwarding`'s module doc.
+                    None => formals.anonymous_rest_name.clone(),
+                };
             }
             if let Some(krest) = pn.keyword_rest() {
                 if let Some(krp) = krest.as_keyword_rest_parameter_node() {
@@ -447,6 +473,8 @@ fn ingest_controller_body_item(
                 kw_params,
                 kwrest_param,
                 block_param,
+                rest_param,
+                anonymous_formal: formals.anonymous,
                 body: body_expr,
                 renders,
                 effects: EffectSet::pure(),

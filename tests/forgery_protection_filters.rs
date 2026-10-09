@@ -177,3 +177,39 @@ fn bare_protect_from_forgery_still_registers_the_check() {
     let rooms = get(&files, "rooms_controller.rb");
     assert!(rooms.contains("verify_authenticity_token"), "{rooms}");
 }
+
+/// A forgery declaration the filter parse does not model — `prepend:
+/// true`, which Rails runs ahead of every other filter — inside a
+/// concern's `included do` was dropped without a trace, while the same
+/// line in a controller is a survey gap. It must be named the same way,
+/// and must not register a filter as if it were the token check.
+#[test]
+fn an_unmodeled_forgery_option_in_a_concern_is_a_survey_gap() {
+    use roundhouse::ingest::survey;
+    let concern = AUTHENTICATION.replace(
+        "protect_from_forgery with: :exception",
+        "protect_from_forgery prepend: true, with: :exception",
+    );
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"rooms\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n"),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+        ("app/controllers/concerns/authentication.rb", concern.as_str()),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  include Authentication\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let result = ingest_app_from_tree(tree);
+    let gaps = survey::drain();
+    let app = result.expect("survey ingest");
+    assert!(
+        gaps.iter().any(|g| g.to_string().contains("controller concern macro not recognized: `protect_from_forgery`")),
+        "{gaps:?}"
+    );
+    let guarded = app.concern_filters.values().flatten().any(|f| f.unless_cond_expr.is_some());
+    assert!(!guarded, "the unmodeled declaration must not register its guarded filter");
+}

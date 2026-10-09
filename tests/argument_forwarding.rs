@@ -564,13 +564,18 @@ fn declaration_only_forwarders_are_gated_on_unverified_targets() {
     }
 }
 
+/// A controller method keeps its `...` / `**` (`Action::anonymous_formal`);
+/// a test entrypoint, which nothing calls with arguments, still refuses.
 #[test]
-fn unpreserved_controller_and_test_entry_declarations_are_rejected() {
-    for formal in ["...", "**"] {
+fn controller_declarations_are_kept_and_test_entry_declarations_are_rejected() {
+    use roundhouse::dialect::AnonymousFormal;
+    for (formal, kept) in [("...", AnonymousFormal::Forwarding), ("**", AnonymousFormal::KeywordRest)] {
         let source = format!("class ProbeController < ApplicationController\n def call({formal})\n 11\n end\nend");
         let controller = roundhouse::ingest::ingest_controller(source.as_bytes(), "probe_controller.rb")
-            .expect_err("controller forwarding is outside this slice");
-        assert!(controller.to_string().contains("forwarding declaration"));
+            .expect("a controller method keeps its anonymous formal")
+            .expect("one controller");
+        let call = controller.actions().find(|a| a.name.as_str() == "call").expect("call");
+        assert_eq!(call.anonymous_formal, Some(kept), "{formal}");
         for name in ["setup", "test_forwarding"] {
             let source = format!("class ProbeTest < ActiveSupport::TestCase\n def {name}({formal})\n 11\n end\nend");
             let err = roundhouse::ingest::ingest_test_file(source.as_bytes(), "probe_test.rb")

@@ -3337,6 +3337,20 @@ pub fn ingest_concern_filters(
                     filters.extend(fs);
                 } else if let Some(f) = block_form_concern_filter(&inner, file) {
                     filters.push(f);
+                } else if let Some(name) = forgery_macro_name(&inner) {
+                    // A forgery declaration `parse_filter_call` does not
+                    // model (`prepend:`, a custom `store:`, an unknown
+                    // `with:`) changes how every
+                    // includer checks requests. The `included` block is
+                    // otherwise dropped, so it would vanish without a
+                    // trace where the same line in a controller is a
+                    // survey gap; name it the same way.
+                    super::survey::record(&super::IngestError::Unsupported {
+                        file: file.to_string(),
+                        message: format!(
+                            "controller concern macro not recognized: `{name}` (its effect is dropped from the output)"
+                        ),
+                    });
                 }
             }
         }
@@ -3345,6 +3359,19 @@ pub fn ingest_concern_filters(
         }
     }
     out
+}
+
+/// `protect_from_forgery` / `skip_forgery_protection`, receiverless.
+fn forgery_macro_name(stmt: &ruby_prism::Node<'_>) -> Option<&'static str> {
+    let call = stmt.as_call_node()?;
+    if call.receiver().is_some() {
+        return None;
+    }
+    match constant_id_str(&call.name()) {
+        "protect_from_forgery" => Some("protect_from_forgery"),
+        "skip_forgery_protection" => Some("skip_forgery_protection"),
+        _ => None,
+    }
 }
 
 /// A block-form filter in a concern's `included do` — campfire's

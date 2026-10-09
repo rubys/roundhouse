@@ -1241,6 +1241,29 @@ fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String
     Ok(())
 }
 
+/// An `ActiveStorage::FixtureSet.blob` row loads by reading the file
+/// under `test/fixtures/files` and uploading it to a storage service.
+/// Only the ruby family has one (`runtime/spinel/active_storage_disk.rb`);
+/// elsewhere the shared runtime's service raises, and the native fixture
+/// emitters have no loader for the row. Refuse rather than load a set
+/// without it.
+fn reject_file_blob_fixtures(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        return Ok(());
+    }
+    if let Some((fixture, label)) = app.fixtures.iter()
+        .find_map(|f| f.file_blobs.keys().next().map(|label| (f, label)))
+    {
+        return Err(format!(
+            "{}: fixture `test/fixtures/{}.yml` record `{}` is an `ActiveStorage::FixtureSet.blob` row; file-fixture blobs load only on the Ruby targets",
+            target.as_str(),
+            fixture.path.as_str(),
+            label.as_str(),
+        ));
+    }
+    Ok(())
+}
+
 /// Keep admitted Data factories outside unverified target emitters.
 fn reject_unsupported_data_factories(app: &App, target: BuildTarget) -> Result<(), String> {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel) {
@@ -1533,6 +1556,7 @@ pub fn target_files(
     // errors than the app has.
     report_unsupported_bundled_constants(app, target);
     reject_unsupported_pattern_matches(app, target)?;
+    reject_file_blob_fixtures(app, target)?;
     reject_unsupported_data_factories(app, target)?;
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
@@ -1557,10 +1581,17 @@ pub fn target_files(
             }
         }
     }
-    for (_, method) in crate::analyze::forwarding::methods(app) {
+    // Controller actions too: their `*rest`, `**` and `...` reach the
+    // emitted `def` through the same `Param`s (`Action::formal_params`).
+    let actions = crate::analyze::forwarding::controller_defs(app);
+    for method in crate::analyze::forwarding::methods(app)
+        .map(|(_, m)| m)
+        .chain(actions.iter().map(|(_, m)| m))
+    {
         if target != BuildTarget::Blog && let Some(formal) = method.unsupported_formals {
             crate::emit::diagnostics::report_unsupported(method.name_span, target.as_str(), "parameter declaration", formal.description());
         }
+        report_positional_rest_param(method, target);
         if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
             let keyword_rest = method
                 .params
@@ -4269,6 +4300,48 @@ pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, Strin
 /// the call site beside it passes them by name, so the two agree.
 /// Everywhere else the def renders positionally while the call renders
 /// a hash, and nothing in the emitted tree says so.
+/// A positional rest (`def f(*args)`, and the anonymous `def f(*)`)
+/// is carried by the ruby family alone. Every other emitter renders it
+/// as ONE plain parameter (`Param::rest`'s doc), so `f()` and
+/// `f(a, b)` stop matching the declaration and `f(a)` hands the body
+/// `a` where Ruby hands it `[a]` — an arity and value change that
+/// `check` cannot see. Until a target maps it onto its own variadics,
+/// say so instead of emitting the narrowed signature.
+///
+/// Full `...` forwarding and keyword rests are reported by the
+/// forwarding gate beside the call; a `**rest` that ingest flattened
+/// (`from_kwrest`) is a keyword bundle, not a positional rest.
+fn report_positional_rest_param(method: &crate::dialect::MethodDef, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda
+    ) {
+        return;
+    }
+    let Some(param) = method
+        .params
+        .iter()
+        .find(|p| p.rest && !p.keyword && !p.forwarding && !p.from_kwrest)
+    else {
+        return;
+    };
+    let name = if param.name.as_str().is_empty() || param.name.as_str().starts_with("__anon_rest") {
+        "*".to_string()
+    } else {
+        format!("*{}", param.name.as_str())
+    };
+    crate::emit::diagnostics::report_unsupported(
+        method.name_span,
+        target.as_str(),
+        "rest parameter",
+        format!(
+            "`{name}` on `{}` — this target renders a rest parameter as one positional, \
+             which changes the method's arity",
+            method.name.as_str()
+        ),
+    );
+}
+
 fn report_keyword_params(app: &App, target: &str) {
     // Read from the controllers rather than from `library_classes`:
     // the lowered helper is built inside each target's emit and never
@@ -5155,6 +5228,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     let public = fixture.join("public");
     if public.exists() {
         walk_dir_into(&public, "public/", &mut files)?;
+    }
+    // `test/fixtures/files` — `file_fixture_path`, which `file_fixture`,
+    // `fixture_file_upload` and an `ActiveStorage::FixtureSet.blob`
+    // fixture row read. The same blind spot again: the binary files
+    // arrive through `collect_binary_assets`, a `.txt` or `.csv` did not,
+    // and a blob row naming one loaded nothing.
+    let file_fixtures = fixture.join("test/fixtures/files");
+    if file_fixtures.exists() {
+        walk_dir_into(&file_fixtures, "test/fixtures/files/", &mut files)?;
     }
 
     let mut files = dedupe_last_wins(files);
@@ -7859,6 +7941,7 @@ mod tests {
             match root {
                 0 | 1 => app.fixtures.push(Fixture {
                     name: Symbol::new("probes"), path: Symbol::new("probes"), model_class: None,
+                    file_blobs: Default::default(),
                     preamble: if root == 0 { vec![constant.clone()] } else { vec![] },
                     records: if root == 1 {
                         [(Symbol::new("one"), [(Symbol::new("value"), FixtureValue::Ruby(constant))].into_iter().collect())].into_iter().collect()

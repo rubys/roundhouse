@@ -119,13 +119,7 @@ fn param_names(params: &[crate::dialect::Param]) -> Vec<Symbol> {
 }
 
 fn action_param_names(action: &crate::dialect::Action) -> Vec<Symbol> {
-    let mut names: Vec<Symbol> = action.params.fields.keys().cloned().collect();
-    names.extend(action.opt_params.iter().map(|(n, _)| n.clone()));
-    names.extend(action.kw_params.iter().map(|(n, _)| n.clone()));
-    if let Some(rest) = &action.kwrest_param {
-        names.push(rest.clone());
-    }
-    names
+    param_names(&action.formal_params())
 }
 
 fn rewrite_method(body: &mut Expr, params: Vec<Symbol>) {

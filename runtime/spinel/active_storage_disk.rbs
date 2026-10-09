@@ -17,6 +17,10 @@ module ActiveStorage
     def self.from_io_hash: (untyped value) -> ActiveStorage::Blob?
   end
 
+  class FixtureSet
+    def self.load_blob!: (Integer id, String filename, String service_name, String content_type) -> nil
+  end
+
   class ImageAnalyzer
     def self.dimensions: (String data, String content_type) -> Array[Integer]
     def self.be16: (String data, Integer at) -> Integer

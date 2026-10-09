@@ -2350,6 +2350,7 @@ impl Analyzer {
                         &action.params,
                         &action.kw_params,
                         action.block_param.as_ref(),
+                        action.rest_param.as_ref(),
                     );
                     self.body_typer().analyze_expr(&mut action.body, &mctx);
                 }
@@ -2900,6 +2901,7 @@ impl Analyzer {
                             &action.params,
                             &action.kw_params,
                             action.block_param.as_ref(),
+                            action.rest_param.as_ref(),
                         );
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                     }
@@ -3418,6 +3420,7 @@ impl Analyzer {
                         &action.params,
                         &action.kw_params,
                         action.block_param.as_ref(),
+                        action.rest_param.as_ref(),
                     );
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                 }
@@ -4274,6 +4277,7 @@ impl Analyzer {
         params: &Row,
         kw_params: &[(Symbol, Option<crate::expr::Expr>)],
         block_param: Option<&Symbol>,
+        rest_param: Option<&Symbol>,
     ) -> Ctx {
         let own = self.inferred_params.get(&(class_id.clone(), action_name.clone(), MethodReceiver::Instance));
         let from_origin = origin
@@ -4316,6 +4320,13 @@ impl Analyzer {
         }
         if let Some(bp) = block_param {
             ctx.local_bindings.insert(bp.clone(), captured_block_ty());
+        }
+        // `*rest` is always an Array. Its elements stay untyped: call
+        // sites record argument types by position, and only the first
+        // vararg lands on the rest's position (see the signature stamp).
+        if let Some(rest) = rest_param {
+            ctx.local_bindings
+                .insert(rest.clone(), Ty::Array { elem: Box::new(Ty::Untyped) });
         }
         ctx
     }
@@ -5594,7 +5605,7 @@ impl Analyzer {
         // without its shape, `describe(name: "gear", count: 2)` against
         // `def describe(name:, count:)` typed the first slot with the
         // whole kwargs Hash. Same slot order the controller lowering
-        // builds: positionals, optionals, keywords, `**rest`.
+        // builds (`Action::formal_params`).
         for controller in &app.controllers {
             // Copied Concern class methods keep their source keywords
             // (`ingest::class_attribute`), so a key binds by kind too.
@@ -5612,15 +5623,8 @@ impl Analyzer {
                     .or_insert(Some(shape));
             }
             for a in controller.actions() {
-                let mut shape: Vec<(Symbol, ParamKind)> =
-                    a.params.fields.iter().map(|(n, _)| (n.clone(), ParamKind::Required)).collect();
-                shape.extend(a.opt_params.iter().map(|(n, _)| (n.clone(), ParamKind::Optional)));
-                shape.extend(
-                    a.kw_params.iter().map(|(n, d)| (n.clone(), ParamKind::Keyword { required: d.is_none() })),
-                );
-                if let Some(n) = &a.kwrest_param {
-                    shape.push((n.clone(), ParamKind::KeywordRest));
-                }
+                let shape: Vec<(Symbol, ParamKind)> =
+                    a.formal_params().iter().map(|p| (p.name.clone(), p.ty_kind())).collect();
                 // Controller lowering keeps every keyword a keyword, so a
                 // key binds by kind here, never to a same-named positional.
                 let shape = ParamShape { slots: shape, keywords_by_kind: true };

@@ -530,7 +530,10 @@ module Cable
     # site is refused with Rails' own 404 before the app's `connect`
     # runs, and the CRuby overlay's config.ru answers it the same way.
     unless ActionController::RequestForgeryProtection.cable_origin_allowed?(
-        req.req_headers.fetch("origin", ""), req.req_headers.fetch("host", ""),
+        req.req_headers.fetch("origin", ""),
+        ActionController::RequestForgeryProtection.base_url_for(
+          req.req_headers.fetch("host", ""), "",
+          req.req_headers.fetch("x-forwarded-proto", "")),
         Rails.env.development?)
       res.status = 404
       res.body = "Page not found"

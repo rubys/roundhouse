@@ -282,6 +282,8 @@ fn action(name: &str, body: Expr) -> roundhouse::dialect::Action {
         opt_params: vec![],
         kw_params: vec![],
         kwrest_param: None,
+        rest_param: None,
+        anonymous_formal: None,
         block_param: None,
         body,
         renders: RenderTarget::Inferred,

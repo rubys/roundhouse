@@ -26,7 +26,7 @@ module ActionController
       verb = req.request_method
       return true if verb == "GET" || verb == "HEAD"
       return false unless RequestForgeryProtection.valid_origin?(
-        req.env.fetch("HTTP_ORIGIN", "").to_s, req.host.to_s)
+        req.env.fetch("HTTP_ORIGIN", "").to_s, req.base_url)
       # Rails main's Fetch Metadata check, ahead of any token: the
       # browser's own `Sec-Fetch-Site` vouches for a same-origin or
       # same-site request, and a cross-site one is refused (Rails admits
@@ -52,15 +52,27 @@ module ActionController
   end
 
   module RequestForgeryProtection
-    # An absent Origin passes (some agents omit it); `null` — a sandboxed
-    # frame, a privacy redirect — does not. Otherwise the header's host
-    # must be the request's own Host.
-    def self.valid_origin?(origin, host)
+    # actionpack's `valid_request_origin?`: an absent Origin passes (some
+    # agents omit it); `null` — a sandboxed frame, a privacy redirect —
+    # does not. Otherwise the header must BE the request's base URL,
+    # scheme included: `http://chat.example.com` posting to the https
+    # site is another origin, which a host-only comparison let through.
+    def self.valid_origin?(origin, base_url)
       return true if origin.empty?
       return false if origin == "null"
-      at = origin.index("://")
-      return false if at.nil?
-      origin[at + 3, origin.length].to_s == host
+      origin == base_url
+    end
+
+    # The base URL a request arrived on, from its Host header and the
+    # same TLS evidence `ActionDispatch::Request#ssl?` reads (`HTTPS=on`
+    # from the server, or `X-Forwarded-Proto` from a proxy that
+    # terminated TLS in front of it), the scheme's standard port dropped
+    # as `Request#base_url` drops it.
+    def self.base_url_for(host, https, forwarded_proto)
+      tls = https == "on" || forwarded_proto.split(",").first.to_s.strip.downcase == "https"
+      default = tls ? ":443" : ":80"
+      bare = host.end_with?(default) ? host[0, host.length - default.length].to_s : host
+      (tls ? "https://" : "http://") + bare
     end
 
     # Action Cable's `allow_request_origin?`, the check a `/cable`
@@ -68,8 +80,9 @@ module ActionController
     # (`allow_same_origin_as_host` true, and `allowed_request_origins`
     # set to `/https?:\/\/localhost:\d+/` in development only):
     #
-    # * the Origin must name the request's own Host -- compared by host,
-    #   as `valid_origin?` above is, and for its reason;
+    # * the Origin must be the request's own base URL --
+    #   `"#{proto}://#{env['HTTP_HOST']}" == env["HTTP_ORIGIN"]`, scheme
+    #   included, as `valid_origin?` above compares it;
     # * in development, any `localhost` port is allowed besides;
     # * an ABSENT Origin is refused. This is where the socket check and
     #   the form check differ in Rails too: `env["HTTP_ORIGIN"]` is nil,
@@ -80,9 +93,9 @@ module ActionController
     # reads no `config.action_cable` key). The localhost pattern is
     # anchored, where Rails' `===` is not, so `http://localhost:1.evil`
     # passes Rails in development and fails here.
-    def self.cable_origin_allowed?(origin, host, development)
+    def self.cable_origin_allowed?(origin, base_url, development)
       return false if origin.empty?
-      return true if valid_origin?(origin, host)
+      return true if valid_origin?(origin, base_url)
       development && origin.match?(/\Ahttps?:\/\/localhost:\d+\z/)
     end
 

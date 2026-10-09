@@ -26,7 +26,7 @@ use std::path::Path;
 use indexmap::IndexMap;
 
 use crate::Symbol;
-use crate::dialect::{Fixture, FixtureValue};
+use crate::dialect::{Fixture, FixtureFileBlob, FixtureValue};
 use crate::expr::Expr;
 
 use super::{IngestError, IngestResult};
@@ -169,6 +169,7 @@ pub fn ingest_fixture_file(source: &[u8], path: &Path, root: &Path) -> IngestRes
     let mut model_class: Option<Symbol> = None;
     let mut ignored: Vec<String> = Vec::new();
     let mut records: IndexMap<Symbol, IndexMap<Symbol, FixtureValue>> = IndexMap::new();
+    let mut file_blobs: IndexMap<Symbol, FixtureFileBlob> = IndexMap::new();
     for (label, fields) in top {
         let label = yaml_scalar_as_string(&label).unwrap_or_default();
         // `_fixture:` is the file's configuration, not a row: the model
@@ -187,6 +188,18 @@ pub fn ingest_fixture_file(source: &[u8], path: &Path, root: &Path) -> IngestRes
                 None => {}
             }
             continue;
+        }
+        // `label: <%= ActiveStorage::FixtureSet.blob filename: "x.webp" %>`
+        // — the tag renders the whole row (as JSON, which YAML reads as
+        // a mapping), so the row is the call's arguments.
+        if let serde_yaml_ng::Value::String(s) = &fields {
+            if let SlotMatch::Whole(expr) = resolve_slot(s, &values) {
+                if let Some(blob) = fixture_set_blob(&expr) {
+                    records.insert(Symbol::from(label.as_str()), IndexMap::new());
+                    file_blobs.insert(Symbol::from(label.as_str()), blob);
+                    continue;
+                }
+            }
         }
         let fields = match fields {
             serde_yaml_ng::Value::Mapping(m) => m,
@@ -233,6 +246,7 @@ pub fn ingest_fixture_file(source: &[u8], path: &Path, root: &Path) -> IngestRes
     // After merging, so a row that merges an ignored one still has its fields.
     for label in &ignored {
         records.shift_remove(&Symbol::from(label.as_str()));
+        file_blobs.shift_remove(&Symbol::from(label.as_str()));
     }
 
     Ok(Fixture {
@@ -241,7 +255,67 @@ pub fn ingest_fixture_file(source: &[u8], path: &Path, root: &Path) -> IngestRes
         records,
         preamble,
         model_class,
+        file_blobs,
     })
+}
+
+/// `ActiveStorage::FixtureSet.blob(filename: "…", **attributes)` with
+/// literal arguments, as the row it describes. Rails' own definition
+/// (activestorage/lib/active_storage/fixture_set.rb): build a blob with
+/// that filename and a fresh key, `unfurl` the file under
+/// `test/fixtures/files` (checksum, detected content type, byte size),
+/// `assign_attributes(attributes)`, upload the bytes, and render the
+/// row as JSON.
+///
+/// The attributes modeled are the ones a loader can pass through
+/// unchanged: `service_name` and `content_type`. Anything else (a
+/// `metadata:` hash, a computed filename) answers `None`, and the row
+/// stays the ingest gap it was rather than loading without it.
+fn fixture_set_blob(expr: &Expr) -> Option<FixtureFileBlob> {
+    use crate::expr::{ExprNode, Literal};
+    let expr = match &*expr.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+        _ => expr,
+    };
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
+        return None;
+    };
+    let ExprNode::Const { path } = &*recv.node else { return None };
+    let path: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+    if method.as_str() != "blob"
+        || !matches!(path.as_slice(), ["ActiveStorage", "FixtureSet"] | ["", "ActiveStorage", "FixtureSet"])
+        || args.len() != 1
+    {
+        return None;
+    }
+    let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
+    let mut blob = FixtureFileBlob { filename: String::new(), service_name: None, content_type: None };
+    let mut has_filename = false;
+    for (k, v) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return None };
+        let value = match &*v.node {
+            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+            _ => return None,
+        };
+        match key.as_str() {
+            "filename" => {
+                has_filename = true;
+                blob.filename = value;
+            }
+            "service_name" => blob.service_name = Some(value),
+            "content_type" => blob.content_type = Some(value),
+            _ => return None,
+        }
+    }
+    // A path that leaves `test/fixtures/files` is not a file fixture.
+    if !has_filename
+        || blob.filename.is_empty()
+        || blob.filename.split('/').any(|seg| seg == ".." || seg.is_empty())
+    {
+        return None;
+    }
+    Some(blob)
 }
 
 enum SlotMatch {
