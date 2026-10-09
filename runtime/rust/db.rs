@@ -282,7 +282,8 @@ impl<T: SqlLiteral + ?Sized> SqlLiteral for &T {
 
 impl Db {
     /// The `WHERE` condition for `find_by(col: value, …)` / `where(…)`:
-    /// `col = value` joined by `AND`, `col IS NULL` for nil. Column
+    /// `"col" = value` joined by `AND`, `"col" IS NULL` for nil
+    /// (quoted, so a column named like an SQL keyword still parses). Column
     /// names are identifiers by construction (hash keys in app source);
     /// anything else is refused rather than spliced into SQL.
     pub fn where_clause<K: AsRef<str>, V: SqlLiteral>(
@@ -298,8 +299,8 @@ impl Db {
                     "invalid column name in conditions: {column:?}"
                 );
                 match value.sql_literal() {
-                    Some(literal) => format!("{column} = {literal}"),
-                    None => format!("{column} IS NULL"),
+                    Some(literal) => format!("\"{column}\" = {literal}"),
+                    None => format!("\"{column}\" IS NULL"),
                 }
             })
             .collect();
@@ -659,14 +660,14 @@ mod where_clause_tests {
     #[test]
     fn conditions_become_a_quoted_clause() {
         let clause = Db::where_clause([("token", "o'brien")]);
-        assert_eq!(clause, "token = 'o''brien'");
+        assert_eq!(clause, "\"token\" = 'o''brien'");
         let clause = Db::where_clause([("user_id", 7_i64)]);
-        assert_eq!(clause, "user_id = 7");
+        assert_eq!(clause, "\"user_id\" = 7");
         let none: Option<String> = None;
-        assert_eq!(Db::where_clause([("ip", none)]), "ip IS NULL");
+        assert_eq!(Db::where_clause([("ip", none)]), "\"ip\" IS NULL");
         assert_eq!(
             Db::where_clause([("a", serde_json::Value::Null)]),
-            "a IS NULL"
+            "\"a\" IS NULL"
         );
         assert_eq!(Db::where_clause(Vec::<(&str, i64)>::new()), "1 = 1");
     }

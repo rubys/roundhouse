@@ -1763,7 +1763,13 @@ fn adapter_where_shim(lc: &crate::dialect::LibraryClass) -> String {
             .for_each_child(&mut |c| found = found.take().or_else(|| select_literal(c)));
         found
     }
-    let defines = |n: &str| lc.methods.iter().any(|m| m.name.as_str() == n);
+    // Only a CLASS-side method displaces a class finder; an instance
+    // method of the same name is a different call surface.
+    let defines = |n: &str| {
+        lc.methods
+            .iter()
+            .any(|m| m.name.as_str() == n && m.receiver == crate::dialect::MethodReceiver::Class)
+    };
     let Some(select) = lc
         .methods
         .iter()
@@ -1794,7 +1800,7 @@ fn adapter_where_shim(lc: &crate::dialect::LibraryClass) -> String {
     }
     if !defines("find_by_bang") {
         out.push_str(&format!(
-            "pub fn find_by_bang<K: AsRef<str>, V: crate::db::SqlLiteral>(conditions: impl IntoIterator<Item = (K, V)>) -> {name} {{ Self::find_by(conditions).expect(\"record not found\") }}\n"
+            "pub fn find_by_bang<K: AsRef<str>, V: crate::db::SqlLiteral>(conditions: impl IntoIterator<Item = (K, V)>) -> {name} {{ Self::_adapter_where(&format!(\"{{}} LIMIT 1\", Db::where_clause(conditions))).into_iter().next().expect(\"record not found\") }}\n"
         ));
     }
     out
