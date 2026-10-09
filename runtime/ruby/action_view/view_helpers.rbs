@@ -23,6 +23,7 @@ module ActionView
 
     # `content_for?(:slot)` — has the slot been populated?
     def self.content_for?: (Symbol slot) -> bool
+    def self.capture: () { () -> untyped } -> String
     def self.get_slot: (Symbol slot) -> String
     def self.get_yield: () -> String
     def self.set_yield: (String content) -> void

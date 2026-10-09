@@ -98,6 +98,15 @@ module ActionView
       @slots[:__body__] = content
       nil
     end
+
+    # Rails' CaptureHelper returns the block's String result, otherwise
+    # the empty buffer. Keep this in the strict shared runtime: helpers
+    # can forward a block across runtime boundaries, where literal-block
+    # inlining cannot see its body.
+    def self.capture
+      value = yield
+      value.is_a?(String) ? value.to_s : ""
+    end
   
     # ── escaping / formatting ────────────────────────────────────────
   
