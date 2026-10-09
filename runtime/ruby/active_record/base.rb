@@ -975,38 +975,8 @@ module ActiveRecord
     # runtime keeps the Rails signature — `lock` may be `true` or a
     # String locking clause (`lock!("FOR UPDATE NOWAIT")`) — but
     # doesn't need either under SQLite; both are accepted and ignored.
-    def lock!(lock = true)
+    def lock!(lock = nil)
       reload
-    end
-
-    # `#with_lock` (`ActiveRecord::Locking::Pessimistic#with_lock`) —
-    # locks the record, then runs the block inside a transaction,
-    # answering the block's value. Dispatches through
-    # `self.class.transaction` (same `self.class.` pattern as
-    # `schema_columns` elsewhere in this file) rather than a bare
-    # `transaction`: Base has no instance-level transaction delegator
-    # like Rails' `ActiveRecord::Transactions#transaction`, only the
-    # class one in connection.rb. An exception raised in the block
-    # rolls the transaction back and re-raises, same as `transaction`
-    # itself.
-    #
-    # Rails' own shape (`ActiveRecord::Locking::Pessimistic#with_lock`)
-    # is `args.extract_options!` for the trailing transaction-options
-    # Hash, then the lock clause (`true` when nothing is left).
-    # `extract_options!` itself is an ActiveSupport `Array` extension
-    # this runtime doesn't carry, so the same split is spelled out by
-    # hand: pop a trailing Hash, default the rest to `true`.
-    def with_lock(*args)
-      transaction_opts = args.last.is_a?(Hash) ? args.pop : {}
-      lock = args.empty? ? true : args.first
-      self.class.transaction(
-        isolation: transaction_opts[:isolation],
-        requires_new: transaction_opts[:requires_new],
-        joinable: transaction_opts.key?(:joinable) ? transaction_opts[:joinable] : true
-      ) do
-        lock!(lock)
-        yield
-      end
     end
 
     # ---- Lifecycle hooks (no-ops; subclasses override) --------------

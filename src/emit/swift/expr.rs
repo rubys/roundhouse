@@ -2658,6 +2658,11 @@ fn emit_send(
     if let (Some(r), 1) = (recv, args.len()) {
         if method.ends_with('=') && !matches!(method, "==" | "!=" | "<=" | ">=") {
             let base = &method[..method.len() - 1];
+            // A custom writer (`def foo=(v)`) is a method (`fooSet`) on the
+            // receiver's class or an ancestor, not a property to assign.
+            if is_known_instance_method(r, method) {
+                return format!("{}.{}({})", emit_expr(r), camel(method), args_s[0]);
+            }
             let sn = camel(base);
             let val = coerce_for_prop_assign(r, &sn, &args[0], args_s[0].clone());
             return format!("{}.{sn} = {}", emit_expr(r), val);

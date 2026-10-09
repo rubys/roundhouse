@@ -394,6 +394,7 @@ fn rewrite_mid_node(
         super::has_json::rewrite_node(e, json_map);
     }
     super::assoc_loaded::rewrite_node(e, enclosing, sole_includer, by_model, readers, flat_loaded);
+    super::arel_sql_order::rewrite_node(e);
 }
 
 fn apply_route_url_followups(

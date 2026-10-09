@@ -1663,6 +1663,17 @@ module RequestDispatch
     @__host
   end
 
+  # `https!(flag = true)` — Rails' integration session: every later
+  # request in this test arrives over TLS (`request.ssl?`, and so the
+  # `https://` its absolute URLs carry).
+  def https!(flag = true)
+    @__https = flag
+  end
+
+  def https?
+    @__https == true
+  end
+
   def dispatch_request(method, path, params, headers = {}, as = nil)
     require_relative "../config/routes"
     # Controllers load on demand (the CRuby target's routes.rb no longer
@@ -1794,6 +1805,7 @@ module RequestDispatch
       "HTTP_USER_AGENT" => "Roundhouse Test",
     }
     headers.each { |k, v| env[env_key(k.to_s)] = v.to_s }
+    env["HTTPS"] = "on" if https?
     env["CONTENT_TYPE"] = "application/json" if as == :json
     env["REQUEST_METHOD"] = method
     env["PATH_INFO"]      = request_path

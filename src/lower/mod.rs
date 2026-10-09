@@ -142,6 +142,7 @@ pub mod byte_size;
 pub mod numeric_unary;
 pub mod tag_builder;
 pub mod kwsplat;
+pub mod arel_sql_order;
 pub mod literal_append;
 pub mod html_safe;
 pub mod rails_cache;

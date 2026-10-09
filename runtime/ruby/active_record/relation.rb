@@ -307,6 +307,24 @@ module ActiveRecord
       self
     end
 
+    # `order(Arel.sql("…"))` — a caller-authored ordering fragment, kept
+    # as written (Rails takes an `Arel.sql` literal past its column-name
+    # check; campfire's `reorder(Arel.sql("+messages.created_at"))`
+    # keeps SQLite off an index). `lower::arel_sql_order` renames the
+    # call; the bare String `order` still validates. A loaded relation
+    # reads again rather than guess at a fragment's sort.
+    def order_sql(fragment)
+      own_lists
+      @orders << fragment
+      @records = nil
+      self
+    end
+
+    def reorder_sql(fragment)
+      @orders = []
+      order_sql(fragment)
+    end
+
     # `reorder(*parts)` — Rails' "replace the ordering": drop every term
     # gathered so far, then order by these. Same in-memory resort as
     # `order` when the records are already loaded.

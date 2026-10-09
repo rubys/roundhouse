@@ -30,3 +30,31 @@ fn a_json_body_is_wrapped_natively() {
     assert!(created.body.contains(r#""title":"Echoed""#), "{}", created.body);
 }
 
+
+/// The native half of
+/// `emit_and_run::a_wrapped_empty_body_does_not_satisfy_a_standalone_require`:
+/// a JSON body with nothing to wrap is wrapped as `article => {}`, and a
+/// standalone `params.require(:article)` refuses that blank value with
+/// 400, as Rails 8.1 does, instead of letting `create` run.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn a_wrapped_empty_body_is_refused_natively() {
+    const JSON: &str = "application/json";
+    let (tree, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @article = Article.new(article_params)\n",
+            "    params.require(:article)\n    @article = Article.new(title: \"Guarded only by require\", body: \"A body long enough\")\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:?}");
+    native_http::build(&tree);
+    let mut server = native_http::Server::start(&tree);
+    server.take_session("/articles/new");
+    for (name, body) in [("empty body", ""), ("{}", "{}"), ("article: {}", r#"{"article":{}}"#)] {
+        let response = server.post("/articles.json", JSON, body);
+        assert_eq!(response.status, 400, "{name}: {}\n{}", response.body, server.log());
+    }
+    let nested = server.post("/articles.json", JSON, r#"{"article":{"title":"x"}}"#);
+    assert_eq!(nested.status, 201, "{}\n{}", nested.body, server.log());
+}

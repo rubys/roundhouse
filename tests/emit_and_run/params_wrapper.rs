@@ -68,3 +68,49 @@ puts "wrap_parameters false OK"
         ))
         .assert_passes();
 }
+
+/// Wrapping a JSON body that carries nothing to wrap still sets the key:
+/// Rails 8.1 answers `params` = `{"article" => {}}` for an empty body or
+/// `{}` sent as JSON, and for `{"foo":1}` when the model has no `foo`
+/// attribute. `params.require(:article)` then raises `ParameterMissing`
+/// (400) because Rails' `require` refuses a BLANK value, and `{}` is
+/// blank. A controller whose only guard is a standalone `require` must
+/// not go on to create anything. Measured on Rails 8.1.3 with a
+/// `load_defaults 8.1` `ActionController::API` app: 400 for every body
+/// below except the nested one, which passes (201 here).
+#[test]
+fn a_wrapped_empty_body_does_not_satisfy_a_standalone_require() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @article = Article.new(article_params)\n",
+            "    params.require(:article)\n    @article = Article.new(title: \"Guarded only by require\", body: \"A body long enough\")\n",
+        )
+        .run_ruby(&format!(
+            r#"{POST_JSON}
+def post_raw(path, body)
+  env = {{
+    "REQUEST_METHOD" => "POST", "PATH_INFO" => path, "QUERY_STRING" => "",
+    "CONTENT_TYPE" => "application/json", "CONTENT_LENGTH" => body.bytesize.to_s,
+    "HTTP_ACCEPT" => "application/json"
+  }}
+  status, _body = Main.dispatch_core(env, StringIO.new(body))
+  status
+end
+results = {{
+  "empty body" => post_raw("/articles.json", ""),
+  "{{}}" => post_json("/articles.json", {{}}),
+  "unrelated key" => post_json("/articles.json", {{ "foo" => 1 }}),
+  "article: {{}}" => post_json("/articles.json", {{ "article" => {{}} }}),
+}}
+created = Article.where(title: "Guarded only by require").count
+bad = results.reject {{ |_k, s| s == 400 }}
+raise "expected 400 for each, as Rails answers; got #{{results.inspect}} (#{{created}} rows written)" unless bad.empty?
+raise "a refused request wrote #{{created}} rows" unless created == 0
+status = post_json("/articles.json", {{ "article" => {{ "title" => "x" }} }})
+raise "expected 201 for a nested article, got #{{status.inspect}}" unless status == 201
+puts "standalone require OK"
+"#
+        ))
+        .assert_passes();
+}

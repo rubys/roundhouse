@@ -75,6 +75,8 @@ module ActiveRecord
     def or: (Relation other) -> Relation
     def add_condition: (Hash[String | Symbol, untyped] | String | nil condition, Array[untyped] args, bool negate) -> bool
     def order: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
+    def order_sql: (String fragment) -> Relation
+    def reorder_sql: (String fragment) -> Relation
     # In-memory sort of a LOADED relation. Records are `Base` (same
     # interim as first/take); `preloaded` stays bare for Spinel integer
     # seeds, but the loaded cache itself is a record array.

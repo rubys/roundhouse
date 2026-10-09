@@ -440,6 +440,33 @@ module ActiveRecord
       end
     end
 
+    # `#with_lock` (`ActiveRecord::Locking::Pessimistic#with_lock`) —
+    # locks the record, then runs the block inside a transaction,
+    # answering the block's value. Dispatches through
+    # `self.class.transaction` (same `self.class.` pattern as
+    # `schema_columns` elsewhere in this file) rather than a bare
+    # `transaction`: Base has no instance-level transaction delegator
+    # like Rails' `ActiveRecord::Transactions#transaction`, only the
+    # class one in connection.rb. An exception raised in the block
+    # rolls the transaction back and re-raises, same as `transaction`
+    # itself.
+    #
+    # Rails spells the trailing transaction options as a Hash
+    # (`args.extract_options!`); here they are the same three keywords
+    # `transaction` takes, and the lock clause is the optional
+    # positional. Lives in this ruby-family reopen, not base.rb, because
+    # it leans on `Base.transaction` (see the note in base.rb).
+    def with_lock(lock = nil, isolation: nil, requires_new: nil, joinable: true)
+      self.class.transaction(
+        isolation: isolation,
+        requires_new: requires_new,
+        joinable: joinable
+      ) do
+        lock!(lock)
+        yield
+      end
+    end
+
     # `Model.delete_all` for a model without the lowerer-emitted
     # override: the rows the DELETE removed, read off the statement
     # rather than counted beforehand. Ruby-family-only because

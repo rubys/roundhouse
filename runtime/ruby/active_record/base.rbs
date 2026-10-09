@@ -230,14 +230,13 @@ module ActiveRecord
     def destroy: () -> Base
     def destroy!: () -> Base
     def reload: () -> Base
-    # `lock!` reloads (see the note on the body); `with_lock` runs the
+    # `lock!` reloads (see the note on the body); `with_lock` (connection.rbs) runs the
     # block in a transaction and answers its value, same gradual
     # `untyped` escape as `self.transaction` in connection.rbs. The
     # `lock` argument is Rails' own union — `true` for the default
     # clause or a String for a database-specific one (`"FOR UPDATE
     # NOWAIT"`); both are accepted and ignored under SQLite.
-    def lock!: (?(bool | String) lock) -> Base
-    def with_lock: (*untyped args) { () -> untyped } -> untyped
+    def lock!: (?(bool | String)? lock) -> Base
     # `touch` is no-arg on purpose; see the note on the body.
     def touch: () -> bool
 
