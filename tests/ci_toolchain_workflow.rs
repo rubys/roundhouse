@@ -10,7 +10,7 @@ fn mri_jobs_and_oracle_caches_use_the_central_ruby_line() {
     assert_eq!(workflow["env"]["MRI_RUBY"].as_str(), Some(minimum.trim()));
     let next = workflow["env"]["MRI_RUBY_NEXT"].as_str().expect("MRI_RUBY_NEXT");
     assert_ne!(next, minimum.trim(), "the next-line lane must not repeat the minimum");
-    let (mut mri, mut mri_next, mut jruby, mut oracles) = (0, 0, 0, 0);
+    let (mut mri, mut mri_next, mut campfire_app, mut jruby, mut oracles) = (0, 0, 0, 0, 0);
     for (name, job) in workflow["jobs"].as_mapping().unwrap() {
         assert!(job["env"].get("MRI_RUBY").is_none(), "{name:?} shadows MRI");
         for step in job["steps"].as_sequence().unwrap() {
@@ -31,6 +31,13 @@ fn mri_jobs_and_oracle_caches_use_the_central_ruby_line() {
                         mri_next += 1;
                     }
                     Some("jruby-10.0") => jruby += 1,
+                    // campfire-latest runs the Ruby that campfire main's own
+                    // `.ruby-version` names, read from the fetched app.
+                    Some("default") => {
+                        assert_eq!(name.as_str(), Some("campfire-latest"), "only campfire-latest follows the app's Ruby");
+                        assert_eq!(step["with"]["working-directory"].as_str(), Some("campfire-latest"));
+                        campfire_app += 1;
+                    }
                     version => panic!("{name:?} bypasses the MRI selector: {version:?}"),
                 }
             }
@@ -41,7 +48,7 @@ fn mri_jobs_and_oracle_caches_use_the_central_ruby_line() {
             }
         }
     }
-    assert!(mri > 0 && mri_next == 1 && jruby > 0 && oracles > 0);
+    assert!(mri > 0 && mri_next == 1 && campfire_app == 1 && jruby > 0 && oracles > 0);
 }
 
 /// Active Node work uses one current major. A leftover Node 20 pin

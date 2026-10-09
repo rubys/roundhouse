@@ -111,6 +111,7 @@ class ActionResponse
   def flash: () -> ActionDispatch::Flash
   def cookies: () -> ActionController::CookieJar
   def content_type: () -> String
+  def media_type: () -> String
   # Rails' mixed `{max_age: Integer, ?public: true}` — the one bag in
   # the harness, and deliberately not in the shared runtime (see
   # ActionController::Base's two typed readers).

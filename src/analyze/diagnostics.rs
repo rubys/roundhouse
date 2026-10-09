@@ -78,6 +78,15 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
                 out.push(Diagnostic::unsupported(expr.span, target.clone(), construct.as_str(), detail.clone()));
             }
         }
+        // Not dropped with the policy's other misses: the typer stamps it only in place of an Object-extension refusal.
+        if let Some(kind @ DiagnosticKind::SendDispatchFailed { method, recv_ty }) = &expr.diagnostic {
+            out.push(Diagnostic {
+                span: expr.span,
+                severity: Diagnostic::default_severity(kind),
+                kind: kind.clone(),
+                message: format!("no known method `{}` on {}", method.as_str(), render_ty(recv_ty)),
+            });
+        }
         expr.node.for_each_child(&mut |child| collect_constants(child, out));
     }
     // Declaration DSL arguments are handled by the class-body ledger;

@@ -75,3 +75,66 @@ fn the_sidecar_declares_it_as_a_keyword_rest() {
     assert!(rbs.contains("**untyped arguments"), "{rbs}");
     assert!(!rbs.contains("?Hash[untyped, untyped] arguments"), "{rbs}");
 }
+
+const POST: &str = r#"class Post < ApplicationRecord
+  def opts(name:, **rest)
+    rest[:x]
+  end
+end
+"#;
+
+const POSTS_SCHEMA: &str = r#"ActiveRecord::Schema.define do
+  create_table "posts", force: :cascade do |t|
+    t.string "title"
+  end
+end
+"#;
+
+/// The spinel tree for the model-path case (#388): `Post` is a real
+/// ActiveRecord model, so its methods take `ingest::model`'s parameter
+/// path, not `ingest::library_class`'s.
+fn model_files() -> Vec<(String, String)> {
+    model_files_with(POST)
+}
+
+fn model_files_with(post: &str) -> Vec<(String, String)> {
+    spinel(&[
+        ("app/models/post.rb", post),
+        ("db/schema.rb", POSTS_SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ])
+}
+
+/// `def opts(name:, **rest)` on a model was flattened to `def
+/// opts(name:, rest = {})` — a positional after a keyword, which CRuby
+/// refuses to parse. The model path keeps every keyword as a keyword,
+/// so beside ANY keyword the slot must stay a real `**kwrest`.
+#[test]
+fn a_model_method_keeps_the_keyword_rest() {
+    let files = model_files();
+    assert_parses(&files, "app/models/post.rb");
+    let emitted = file(&files, "app/models/post.rb");
+    assert!(emitted.contains("def opts(name:, **rest)"), "{emitted}");
+}
+
+/// The RBS sidecar follows the `def`: a kept `**rest` declares
+/// `**untyped rest`, not the flattened optional-Hash positional.
+#[test]
+fn a_model_sidecar_declares_the_keyword_rest() {
+    let files = model_files();
+    let rbs = file(&files, "app/models/post.rbs");
+    assert!(rbs.contains("**untyped rest"), "{rbs}");
+    assert!(!rbs.contains("Hash[untyped, untyped] rest"), "{rbs}");
+}
+
+/// A scalar return takes `backfill_scalar_signature`'s path, which
+/// declared the kept `**rest` as a positional `*untyped rest` — RBS
+/// neither the `rbs` gem nor Spinel's reader parses.
+#[test]
+fn a_model_sidecar_with_a_scalar_return_declares_the_keyword_rest() {
+    let files = model_files_with(
+        "class Post < ApplicationRecord\n  def tag(name:, **rest) = \"#{name}:#{rest[:x]}\"\nend\n",
+    );
+    let rbs = file(&files, "app/models/post.rbs");
+    assert!(rbs.contains("def tag: (name: untyped, **untyped rest) -> String"), "{rbs}");
+}

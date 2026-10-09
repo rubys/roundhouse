@@ -2503,6 +2503,9 @@ pub(super) fn ingest_library_method(
                     if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
                         params.push(Param::rest(Symbol::from(s)));
                     }
+                } else if let Some(name) = &formals.anonymous_rest_name {
+                    // An unforwarded `*`: see `forwarding`'s module doc.
+                    params.push(Param::rest(name.clone()));
                 }
             }
         }

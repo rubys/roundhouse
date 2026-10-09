@@ -599,11 +599,6 @@ fn anonymous_keyword_forwarding_refuses_unverified_keyword_abis() {
 fn unrepresented_formals_never_admit_a_forwarding_contract() {
     for (source, call, expected) in [
         (
-            "class Probe; def target(*); 7; end; def call(...); target(...); end; end",
-            "Probe.new.call(1)",
-            "7",
-        ),
-        (
             "class Probe; def target((a,b)); 7; end; def call(...); target(...); end; end",
             "Probe.new.call([11,4])",
             "7",
@@ -643,6 +638,67 @@ fn unrepresented_formals_never_admit_a_forwarding_contract() {
             "{source}: {errors:?}"
         );
     }
+}
+
+/// An unforwarded anonymous `*` binds to a generated name (see
+/// `ingest::forwarding`), so it is a represented formal: a `...` caller
+/// forwards into it and the emitted program answers what Ruby answers.
+#[test]
+fn an_unforwarded_anonymous_rest_is_a_represented_formal() {
+    let source = "class Probe; def target(*); 7; end; def call(...); target(...); end; end";
+    let script = "puts Probe.new.call(1); puts Probe.new.target; puts Probe.new.target(1, 2, 3)";
+    let native = Command::new("ruby")
+        .args(["-e", &format!("{source}; {script}")])
+        .output()
+        .unwrap();
+    assert!(native.status.success());
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "7\n7\n7\n");
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", source)
+        .run_ruby(script);
+    run.assert_passes();
+    assert_eq!(run.stdout, "7\n7\n7\n");
+}
+
+/// A nested `def` binds its own parameters, so a bare `*` inside it
+/// forwards its own rest and does not make the outer `*` forwarded.
+#[test]
+fn a_nested_def_forwarding_its_own_rest_leaves_the_outer_rest_represented() {
+    let source = "class Probe; def target(*); def nested(*) = inner(*); 7; end; def inner(*a) = a.size; end";
+    let script = "puts Probe.new.target; puts Probe.new.target(1, 2, 3)";
+    let native = Command::new("ruby")
+        .args(["-e", &format!("{source}; {script}")])
+        .output()
+        .unwrap();
+    assert!(native.status.success());
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "7\n7\n");
+    let errors: Vec<_> = diagnose(&analyzed(source))
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", source)
+        .run_ruby(script);
+    run.assert_passes();
+    assert_eq!(run.stdout, "7\n7\n");
+}
+
+/// A body that forwards the anonymous rest (`g(*)`) keeps the recorded
+/// fact: the bare splat would ingest as `*nil`, and forwarding it is not
+/// modeled yet.
+#[test]
+fn a_forwarded_anonymous_rest_stays_unsupported() {
+    let source = "class Probe; def target(*); inner(*); end; def inner(*a); a.size; end; end";
+    let app = analyzed(source);
+    let errors: Vec<_> = diagnose(&app)
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors.iter().any(|d| d.message.contains("anonymous positional rest")),
+        "{errors:?}"
+    );
 }
 
 #[test]

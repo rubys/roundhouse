@@ -84,6 +84,7 @@ module ActionController
     def response_body=: (String? value) -> String
     def location: () -> String?
     def content_type: () -> String
+    def media_type: () -> String
     def content_type=: (String value) -> String
 
     # True once render/redirect_to/head has produced a response — the

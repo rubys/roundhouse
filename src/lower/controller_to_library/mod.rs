@@ -2261,11 +2261,13 @@ fn can_respond_within(
         if *found {
             return;
         }
+        if crate::lower::controller::is_response_terminal(e) {
+            *found = true;
+            return;
+        }
         if let ExprNode::Send { recv, method, .. } = &*e.node {
-            if matches!(
-                method.as_str(),
-                "render" | "redirect_to" | "redirect_back_or_to" | "head" | "render_404"
-            ) || crate::lower::controller::HTTP_AUTH_CHALLENGES.contains(&method.as_str())
+            if method.as_str() == "render_404"
+                || crate::lower::controller::HTTP_AUTH_CHALLENGES.contains(&method.as_str())
             {
                 *found = true;
                 return;
@@ -2366,6 +2368,24 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     info.instance_methods
         .entry(Symbol::from("performed?"))
         .or_insert_with(|| fn_sig(vec![], Ty::Bool));
+
+    // Rails' response surface on the controller, which IS the response
+    // in the shared runtime: `self.response_body = body` serves a page
+    // rendered to a string (campfire's MessagesController and
+    // CachedResponses), and `media_type` is the content type without
+    // its parameters. `runtime/ruby/action_controller/base.rb` defines
+    // all three; without these entries a strict target cannot resolve
+    // the sends that reach them.
+    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    info.instance_methods
+        .entry(Symbol::from("response_body"))
+        .or_insert_with(|| fn_sig(vec![], Ty::Str));
+    info.instance_methods
+        .entry(Symbol::from("response_body="))
+        .or_insert_with(|| fn_sig(vec![(Symbol::from("value"), str_or_nil)], Ty::Str));
+    info.instance_methods
+        .entry(Symbol::from("media_type"))
+        .or_insert_with(|| fn_sig(vec![], Ty::Str));
 
     // Rails' implicit `protect_from_forgery` heads every chain; the
     // preamble emits a bare `verify_authenticity_token` send that must

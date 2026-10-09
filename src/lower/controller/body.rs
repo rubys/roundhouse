@@ -1013,14 +1013,49 @@ pub const HTTP_AUTH_CHALLENGES: &[&str] = &[
     "request_http_token_authentication",
 ];
 
+/// One statement that writes this controller's response: a send in
+/// `RESPONSE_TERMINALS`, or an assignment to `self.response_body` (Rails
+/// counts an assigned body as performed; campfire's MessagesController
+/// and CachedResponses serve a prebuilt page that way). Shared by the
+/// implicit-render guard here and the filter halting check in
+/// `controller_to_library`, so the two cannot disagree about what a
+/// response is.
+pub fn is_response_terminal(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Send { recv: None, method, .. } => RESPONSE_TERMINALS.contains(&method.as_str()),
+        // `self.render …` / `self.redirect_to …` are the same terminals.
+        ExprNode::Send { recv: Some(r), method, args, .. } => {
+            matches!(&*r.node, ExprNode::SelfRef)
+                && (RESPONSE_TERMINALS.contains(&method.as_str())
+                    || (method.as_str() == "response_body="
+                        && !args.first().is_some_and(is_nil_literal)))
+        }
+        // `self.response_body = nil` clears the body and performs
+        // nothing, so the action's implicit render still runs.
+        ExprNode::Assign { target: crate::expr::LValue::Attr { recv, name }, value } => {
+            matches!(&*recv.node, ExprNode::SelfRef)
+                && name.as_str() == "response_body"
+                && !is_nil_literal(value)
+        }
+        _ => false,
+    }
+}
+
+fn is_nil_literal(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+}
+
 fn contains_terminal(body: &Expr) -> bool {
     fn walk(e: &Expr, found: &mut bool) {
         if *found {
             return;
         }
+        if is_response_terminal(e) {
+            *found = true;
+            return;
+        }
         if let ExprNode::Send { recv: None, method, block, .. } = &*e.node {
-            if RESPONSE_TERMINALS.contains(&method.as_str())
-                || HTTP_AUTH_CHALLENGES.contains(&method.as_str())
+            if HTTP_AUTH_CHALLENGES.contains(&method.as_str())
                 || (method.as_str() == "respond_to" && block.is_some())
             {
                 *found = true;
@@ -1043,14 +1078,12 @@ fn contains_terminal(body: &Expr) -> bool {
 pub fn has_toplevel_terminal(body: &Expr) -> bool {
     match &*body.node {
         ExprNode::Seq { exprs } => exprs.last().map_or(false, has_toplevel_terminal),
-        ExprNode::Send { recv: None, method, block, .. } => {
-            RESPONSE_TERMINALS.contains(&method.as_str())
-                || (method.as_str() == "respond_to" && block.is_some())
-        }
+        ExprNode::Send { recv: None, method, block, .. }
+            if method.as_str() == "respond_to" && block.is_some() => true,
         ExprNode::If { then_branch, else_branch, .. } => {
             has_toplevel_terminal(then_branch) && has_toplevel_terminal(else_branch)
         }
-        _ => false,
+        _ => is_response_terminal(body),
     }
 }
 

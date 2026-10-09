@@ -743,6 +743,12 @@ class ActionResponse
   # Rails hands a test: campfire's logo test reads
   # `@response.headers["content-type"]`, and against a Hash keyed the
   # way the header is spelled on the wire that read is nil.
+  # Rails' `response.media_type`: the content type without its
+  # parameters (`text/html`, not `text/html; charset=utf-8`).
+  def media_type
+    @content_type.split(";").first.to_s.strip
+  end
+
   def headers
     out = {}
     @extra_headers.each { |k, v| out[k.to_s.downcase] = v }

@@ -70,6 +70,7 @@ module ActionDispatch
     def original_fullpath: () -> String
     def ssl?: () -> bool
     def protocol: () -> String
+    def optional_port: () -> Integer?
     def base_url: () -> String
     def original_url: () -> String
     def url: () -> String

@@ -604,7 +604,45 @@ pub fn gem_owning_constant_with<'a>(census: &'a GemCensus, constant_path: &str, 
     (owners.len() == 1).then(|| owners[0])
 }
 
+// Not left to the head match, which hands a framework's namespace to the framework.
+const PARKED: &[(&str, &str)] = &[
+    ("active_model_serializers", "ActiveModel::Serializer"),
+    ("active_model_serializers", "ActiveModel::ArraySerializer"),
+];
+
+fn gems_parking_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Vec<&'a str> {
+    let path = constant_path.trim_start_matches("::");
+    census
+        .unknown()
+        .filter(|g| {
+            g.version.is_some()
+                && PARKED.iter().any(|(gem, base)| {
+                    *gem == g.name && path.strip_prefix(base).is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+                })
+        })
+        .map(|g| g.name.as_str())
+        .collect()
+}
+
+// Not the namespace tiers: an app class nested in a gem's namespace (`Twilio::IncomingMessageService`) is the app's own.
+pub fn gem_defining_constant<'a>(census: &'a GemCensus, constant_path: &str) -> Option<&'a str> {
+    let path = constant_path.trim_start_matches("::");
+    let owners: Vec<_> = census
+        .unknown()
+        .filter(|g| {
+            g.version.is_some()
+                && (namespace_of(&g.name) == path || PARKED.iter().any(|(gem, base)| *gem == g.name && *base == path))
+        })
+        .map(|g| g.name.as_str())
+        .collect();
+    (owners.len() == 1).then(|| owners[0])
+}
+
 pub(crate) fn gems_owning_constant_with<'a>(census: &'a GemCensus, constant_path: &str, declares: &dyn Fn(&str, &str) -> Option<bool>) -> Vec<&'a str> {
+    let parked = gems_parking_constant(census, constant_path);
+    if !parked.is_empty() {
+        return parked;
+    }
     let head = constant_path.trim_start_matches("::").split("::").next().unwrap_or(constant_path);
     let exact: Vec<_> = census
         .unknown()
@@ -733,6 +771,31 @@ BUNDLED WITH
         let lock = Lockfile::parse(LOCK);
         assert_eq!(gem_claiming_method(&lock, "policy_scope"), Some("pundit"));
         assert_eq!(gem_claiming_method(&lock, "friendly_id"), None, "friendly_id is not in this lock");
+    }
+
+    #[test]
+    fn a_gem_parked_under_a_framework_namespace_owns_its_base() {
+        let lock = "\
+GEM
+  remote: https://rubygems.org/
+  specs:
+    active_model_serializers (0.10.14)
+    rails (8.0.2)
+    sanitize (7.0.0)
+
+DEPENDENCIES
+  active_model_serializers
+  rails
+  sanitize
+";
+        let census = GemCensus::of(&Lockfile::parse(lock));
+        assert_eq!(gem_owning_constant(&census, "ActiveModel::Serializer"), Some("active_model_serializers"));
+        assert_eq!(gem_owning_constant(&census, "ActiveModel::Serializer::CollectionSerializer"), Some("active_model_serializers"));
+        assert_eq!(gem_owning_constant(&census, "ActiveModel::Errors"), None, "the rest of the namespace stays the framework's");
+        assert_eq!(gem_defining_constant(&census, "ActiveModel::Serializer"), Some("active_model_serializers"));
+        assert_eq!(gem_defining_constant(&census, "ActiveModel::Serializer::Mine"), None);
+        assert_eq!(gem_defining_constant(&census, "Sanitize"), Some("sanitize"));
+        assert_eq!(gem_defining_constant(&census, "Sanitize::AppConfig"), None, "an app class nested in a gem's namespace is the app's");
     }
 
     #[test]

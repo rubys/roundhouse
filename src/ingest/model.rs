@@ -1875,6 +1875,9 @@ pub(super) fn ingest_method(
         if let Some(rest) = pn.rest() {
             if let Some(loc) = rest.as_rest_parameter_node().and_then(|rp| rp.name()) {
                 params.push(crate::dialect::Param::rest(Symbol::from(constant_id_str(&loc))));
+            } else if let Some(name) = &formals.anonymous_rest_name {
+                // An unforwarded `*`: see `forwarding`'s module doc.
+                params.push(crate::dialect::Param::rest(name.clone()));
             }
         }
         for post in pn.posts().iter() {

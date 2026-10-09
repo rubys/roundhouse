@@ -40,7 +40,8 @@ pub use actions::{
     lower_action, resolve_before_actions, split_public_private, ActionKind, LoweredAction,
 };
 pub use body::{
-    has_toplevel_terminal, is_empty_body, HTTP_AUTH_CHALLENGES, normalize_action_body,
+    has_toplevel_terminal, is_empty_body, is_response_terminal, HTTP_AUTH_CHALLENGES,
+    normalize_action_body,
     synthesize_deferred_implicit_render, synthesize_implicit_render,
     unwrap_respond_to,
 };

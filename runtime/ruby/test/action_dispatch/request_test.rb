@@ -74,6 +74,19 @@ class ActionDispatchRequestTest < Minitest::Test
   end
 
   # A proxy chain lists one scheme per hop; the first is the client's.
+  def test_optional_port_is_nil_at_the_schemes_standard_port
+    assert_nil ActionDispatch::Request.for({ "HTTP_HOST" => "chat.test" }).optional_port
+    assert_nil ActionDispatch::Request.for({ "HTTP_HOST" => "chat.test:80" }).optional_port
+    assert_nil ActionDispatch::Request.for({ "HTTP_HOST" => "chat.test:443", "HTTPS" => "on" }).optional_port
+    assert_nil ActionDispatch::Request.for({ "HTTP_HOST" => "[::1]" }).optional_port
+  end
+
+  def test_optional_port_is_any_other_port
+    assert_equal 3000, ActionDispatch::Request.for({ "HTTP_HOST" => "chat.test:3000" }).optional_port
+    assert_equal 443, ActionDispatch::Request.for({ "HTTP_HOST" => "chat.test:443" }).optional_port
+    assert_equal 8080, ActionDispatch::Request.for({ "HTTP_HOST" => "[::1]:8080" }).optional_port
+  end
+
   def test_the_first_forwarded_scheme_is_the_clients
     assert ActionDispatch::Request.for({ "HTTP_X_FORWARDED_PROTO" => "https, http" }).ssl?
     assert ActionDispatch::Request.for({ "HTTPS" => "on" }).ssl?

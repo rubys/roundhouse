@@ -1367,7 +1367,13 @@ fn method_def_from(
         MethodReceiver::Instance
     };
 
-    let formals = crate::ingest::forwarding::parse(def);
+    let mut formals = crate::ingest::forwarding::parse(def);
+    // The typed runtime keeps the strict rule: an anonymous `*` (even an
+    // unforwarded one, which app ingest binds to a generated name) has
+    // no business in a runtime method and stays a recorded fact.
+    if formals.anonymous_rest_name.is_some() && formals.unsupported.is_none() {
+        formals.unsupported = Some(crate::dialect::UnsupportedFormal::AnonymousRest);
+    }
     if formals.anonymous == Some(crate::ingest::forwarding::AnonymousFormal::Forwarding) {
         return Err(format!("method `{name}`: full forwarding is outside the typed runtime-source subset"));
     }

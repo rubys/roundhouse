@@ -256,6 +256,20 @@ module ActionDispatch
       forwarded.split(",").first.to_s.strip.downcase == "https"
     end
 
+    # Rails' `request.optional_port`: the port, unless it is the
+    # scheme's standard one (80, or 443 over TLS) — then nil, so a URL
+    # built from it carries no `:port`. `@host` is the Host header,
+    # port included, which is how `base_url` uses it. campfire's
+    # `default_url_options` passes it as `port:`.
+    def optional_port
+      sep = @host.rindex(":")
+      return nil if sep.nil? || @host.end_with?("]")
+      port = @host[(sep + 1)..].to_s.to_i
+      return nil if port == 0
+      return nil if port == (ssl? ? 443 : 80)
+      port
+    end
+
     # `request.protocol` — the scheme WITH its `://`, as Rails spells it.
     def protocol
       ssl? ? "https://" : "http://"

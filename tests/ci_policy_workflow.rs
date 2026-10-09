@@ -334,6 +334,97 @@ fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
     );
 }
 
+/// The strict-emit ceiling counts `error[` lines. An ingest abort prints
+/// none and exits nonzero, so the step must fail on the exit status too;
+/// a clean emit inside the ceiling must still pass.
+#[test]
+#[cfg(unix)]
+fn strict_emit_ceiling_fails_an_ingest_abort_that_prints_no_error_line() {
+    use std::os::unix::fs::PermissionsExt;
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let run = ci["jobs"]["campfire-conformance"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Enforce the strict-emit ceiling"))
+        .and_then(|step| step["run"].as_str())
+        .expect("strict-emit ceiling")
+        .to_owned();
+    let dir = std::env::temp_dir().join(format!("roundhouse-ceiling-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let step = |bin_body: &str| {
+        let bin = dir.join("roundhouse");
+        fs::write(&bin, format!("#!/bin/sh\n{bin_body}\n")).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        std::process::Command::new("bash")
+            .args(["-c", &run])
+            .env("ROUNDHOUSE_BIN", &bin)
+            .env("CEILING_ERRORS", "0")
+            .output()
+            .unwrap()
+    };
+    let aborted = step("echo 'roundhouse: ingest app: unsupported construct in app/models/x.rb'; exit 1");
+    assert!(!aborted.status.success(), "an ingest abort passed the ceiling");
+    assert!(String::from_utf8_lossy(&aborted.stdout).contains("ingest stopped before analysis"));
+    let clean = step("echo 'roundhouse: emitted 3 files'; exit 0");
+    assert!(clean.status.success(), "{}", String::from_utf8_lossy(&clean.stdout));
+    let over = step("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1");
+    assert!(!over.status.success(), "an error over the ceiling passed");
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// campfire-latest's survey: a recorded gap count wins; no survey line
+/// after a run that finished or stopped at counted errors is zero gaps;
+/// a crash with neither is `unknown`, which keeps the suite from running.
+#[test]
+#[cfg(unix)]
+fn campfire_latest_survey_tells_zero_gaps_from_an_unknown_result() {
+    use std::os::unix::fs::PermissionsExt;
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let job = &ci["jobs"]["campfire-latest"];
+    let steps = job["steps"].as_sequence().unwrap();
+    let run = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("survey"))
+        .and_then(|step| step["run"].as_str())
+        .expect("survey step")
+        .to_owned();
+    let suite_if = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("suite"))
+        .and_then(|step| step["if"].as_str())
+        .expect("suite step condition");
+    assert_eq!(suite_if, "${{ steps.survey.outputs.gaps == '0' }}");
+    let dir = std::env::temp_dir().join(format!("roundhouse-survey-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let gaps = |bin_body: &str| {
+        let bin = dir.join("roundhouse");
+        fs::write(&bin, format!("#!/bin/sh\n{bin_body}\n")).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let out = dir.join("output");
+        fs::write(&out, "").unwrap();
+        let status = std::process::Command::new("bash")
+            .args(["-c", &run])
+            .env("ROUNDHOUSE_BIN", &bin)
+            .env("GITHUB_OUTPUT", &out)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the survey step itself never fails");
+        fs::read_to_string(&out)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("gaps=").map(str::to_owned))
+            .expect("gaps output")
+    };
+    assert_eq!(gaps("echo '── Survey: 2 ingest gap(s), 2 distinct kind(s) ──'; exit 1"), "2");
+    assert_eq!(gaps("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1"), "0");
+    assert_eq!(gaps("echo 'emitted 3 files'; exit 0"), "0");
+    assert_eq!(gaps("echo 'thread main panicked'; exit 101"), "unknown");
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 #[cfg(all(target_os = "linux", debug_assertions))]
 fn test_backtraces_retain_library_and_integration_source_locations() {

@@ -63,6 +63,11 @@ class ActionControllerBaseTest < Minitest::Test
     assert_equal "text/vnd.turbo-stream.html", @controller.content_type
   end
 
+  def test_media_type_drops_the_content_type_parameters
+    @controller.response.content_type = "text/html; charset=utf-8"
+    assert_equal "text/html", @controller.media_type
+  end
+
   def test_response_body_can_be_assigned
     @controller.response.response_body = "<p>body</p>"
     assert_equal "<p>body</p>", @controller.body
