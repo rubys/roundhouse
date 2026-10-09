@@ -2339,15 +2339,7 @@ fn backfill_scalar_signature(method: &mut MethodDef, body_ty: Ty) {
         .map(|p| crate::ty::Param {
             name: p.name.clone(),
             ty: Ty::Untyped,
-            kind: if p.rest {
-                crate::ty::ParamKind::Rest
-            } else if p.keyword {
-                crate::ty::ParamKind::Keyword { required: p.default.is_none() }
-            } else if p.default.is_some() {
-                crate::ty::ParamKind::Optional
-            } else {
-                crate::ty::ParamKind::Required
-            },
+            kind: p.ty_kind(),
         })
         .collect();
     method.signature = Some(Ty::Fn {

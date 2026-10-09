@@ -14,7 +14,11 @@ fn params_of(files: &[(&str, &str)], class: &str, method: &str) -> Vec<Ty> {
     let mut app = ingest_app_from_tree(tree).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
     let owner = app.library_classes.iter().find(|c| c.name.0.as_str() == class).expect("class");
-    let def = owner.methods.iter().find(|m| m.name.as_str() == method).expect("method");
+    let def = owner
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == method && m.receiver == roundhouse::dialect::MethodReceiver::Instance)
+        .expect("method");
     let Some(Ty::Fn { params, .. }) = &def.signature else { panic!("typed: {:?}", def.signature) };
     params.iter().map(|p| p.ty.clone()).collect()
 }

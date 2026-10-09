@@ -36,10 +36,18 @@ mod delegate_association;
 mod io_process_constants_contract;
 #[path = "emit_and_run/io_process_constants.rs"]
 mod io_process_constants;
+#[path = "emit_and_run/helper_anonymous_rest.rs"]
+mod helper_anonymous_rest;
+#[path = "emit_and_run/controller_response_body.rs"]
+mod controller_response_body;
+#[path = "emit_and_run/render_to_string_partial_ivar.rs"]
+mod render_to_string_partial_ivar;
 #[path = "emit_and_run/request_optional_port.rs"]
 mod request_optional_port;
 #[path = "emit_and_run/controller_url_helpers.rs"]
 mod controller_url_helpers;
+#[path = "emit_and_run/assoc_pluck_typed.rs"]
+mod assoc_pluck_typed;
 #[path = "emit_and_run/sti_global_id.rs"]
 mod sti_global_id;
 

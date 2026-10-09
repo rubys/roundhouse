@@ -3200,16 +3200,37 @@ fn expand_class_body_macros(app: &mut App) {
                 }
             }
             let body = substitute_params(&macro_def, args);
-            match filters_from_macro_body(&body, &module) {
-                Some(filters) => {
+            match expand_macro_filters(&body, &module) {
+                Some(items) => {
                     let mut comments = leading_comments.clone();
                     let mut blank = *leading_blank_line;
-                    for filter in filters {
-                        expanded.push(ControllerBodyItem::Filter {
-                            filter,
-                            leading_comments: std::mem::take(&mut comments),
-                            leading_blank_line: std::mem::take(&mut blank),
-                        });
+                    for macro_item in items {
+                        match macro_item {
+                            MacroFilterItem::Filter(filter) => {
+                                expanded.push(ControllerBodyItem::Filter {
+                                    filter,
+                                    leading_comments: std::mem::take(&mut comments),
+                                    leading_blank_line: std::mem::take(&mut blank),
+                                });
+                            }
+                            // A block-form filter the macro body wraps —
+                            // reconstructed in exactly the shape a
+                            // hand-written `before_action(...) { ... }`
+                            // would ingest as, so it stays `Unknown` and
+                            // rides the SAME path through
+                            // `build_filter_preamble` /
+                            // `report_unrecognized_controller_macros` that
+                            // a literal one takes (both read it via
+                            // `lambda_filter_target`). No separate
+                            // lowering to keep in step with that one.
+                            MacroFilterItem::Block(expr) => {
+                                expanded.push(ControllerBodyItem::Unknown {
+                                    expr,
+                                    leading_comments: std::mem::take(&mut comments),
+                                    leading_blank_line: std::mem::take(&mut blank),
+                                });
+                            }
+                        }
                     }
                 }
                 None => {
@@ -3413,7 +3434,20 @@ fn substitute_params(
                     _ => a.clone(),
                 },
                 None if p.default.is_some() => p.default.clone().expect("checked"),
-                None if p.rest => crate::expr::Expr::new(
+                // `p.rest` alone doesn't say which: `library_class`'s
+                // `body_forwards_rest` keeps a literally-forwarded
+                // `**kwrest` as `Param::keyword(name, None); p.rest =
+                // true` (NOT flattened to the `from_kwrest`
+                // positional-with-`{}`-default this match's `None =>`
+                // arm below exists for) when the def's own source calls
+                // `(**name)`/`, **name)` — exactly the
+                // `before_action(**kwargs) { ... }` shape a block-form
+                // filter macro forwards through. `p.keyword` is what
+                // tells the two apart: only a plain `*rest` (`keyword:
+                // false`) binds an empty Array when the caller omits
+                // it; a kept `**kwrest` (`keyword: true`) means `{}`,
+                // same as the flattened/defaulted shape just below.
+                None if p.rest && !p.keyword => crate::expr::Expr::new(
                     span,
                     ExprNode::Array { elements: vec![], style: Default::default() },
                 ),
@@ -3584,6 +3618,422 @@ fn filter_from_send(
             })
             .collect(),
     )
+}
+
+/// One macro-body statement's expansion, in declaration order: a
+/// Symbol-target filter `filter_from_send` already reads, or a
+/// block-form filter `block_filter_from_macro_stmt` folded one down to.
+/// Kept as two cases (not flattened to `Filter` alone) so a macro body
+/// mixing both kinds — a `skip_before_action :x` beside a
+/// `before_action(**kwargs) { ... }` — expands each statement to its own
+/// shape without either one pretending to be the other.
+enum MacroFilterItem {
+    Filter(crate::dialect::Filter),
+    Block(crate::expr::Expr),
+}
+
+/// Every statement of a (parameter-substituted) macro body, expanded to a
+/// `MacroFilterItem`, or `None` if any statement is neither a Symbol-target
+/// filter nor a recognized block-form one — the all-or-nothing contract
+/// `expand_class_body_macros` relies on to decide whether to expand the
+/// whole macro or keep it whole and ledgered.
+fn expand_macro_filters(
+    body: &crate::expr::Expr,
+    module: &crate::ident::ClassId,
+) -> Option<Vec<MacroFilterItem>> {
+    use crate::expr::ExprNode;
+
+    let mut out = Vec::new();
+    let statements: Vec<&crate::expr::Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![body],
+    };
+    for stmt in statements {
+        if let Some(filters) = filter_from_send(stmt, module) {
+            out.extend(filters.into_iter().map(MacroFilterItem::Filter));
+            continue;
+        }
+        if let Some(block) = block_filter_from_macro_stmt(stmt) {
+            out.push(MacroFilterItem::Block(block));
+            continue;
+        }
+        return None;
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// Try a macro-body statement (already parameter-substituted) as a
+/// BLOCK-FORM `before_action` / `after_action` / `prepend_before_action` —
+/// the shape `filter_from_send` cannot read (it accepts only a Symbol
+/// target), but which `ingest::controller::lambda_filter_target` already
+/// recognizes on a hand-written controller body. Mastodon's `vary_by`
+/// (and this crate's reduced fixture, `stamp_header`) write exactly this
+/// idiom in a concern's `class_methods do`, to let the macro accept either
+/// a literal value or a lambda evaluated against the controller:
+///
+/// ```text
+/// def stamp_header(value, **kwargs)
+///   before_action(**kwargs) do |controller|
+///     response.headers['X-Stamp'] =
+///       value.respond_to?(:call) ? controller.instance_exec(&value) : value
+///   end
+/// end
+/// ```
+///
+/// After `substitute_params`, `value` is a literal or a `Lambda` — never a
+/// free variable — so `value.respond_to?(:call)` is statically decidable.
+/// Folding it collapses the ternary to one branch; when that branch is the
+/// `instance_exec` one, inlining a zero-param, control-flow-free lambda's
+/// body in its place leaves an ordinary block-form filter. It is
+/// reconstructed in the exact shape `lambda_filter_target` reads off a
+/// hand-written one, so it rides the SAME path through
+/// `build_filter_preamble` (and is excluded from
+/// `report_unrecognized_controller_macros` the same way) — no separate
+/// lowering for this one to fall out of step with.
+///
+/// A block declaring its own `|controller|` parameter is folded to use
+/// `self` instead: Rails runs an arity-1 filter block as
+/// `instance_exec(controller)`, which rebinds `self` to the controller
+/// AND passes it as the block's first argument — the same value twice.
+/// `ir_lambda_body` (which every consumer of a block-form filter's body
+/// reads it through) keeps only the body, discarding the declared
+/// parameter list entirely, so a reference to that parameter by name has
+/// to become a `self`-based one or it would dangle.
+///
+/// A folded-away `nil` (the lambda guard returns false, so the ternary's
+/// literal `value` — not the lambda — would have run, except here the
+/// LAMBDA branch is the one that ran, and ITS body returned nil) means
+/// the filter sets the header to nil. The runtime's HeaderStore drops a
+/// nil-valued header, where Rails/Puma would still send an (empty-valued)
+/// one; accepted here as a pre-existing runtime gap, not something this
+/// expansion introduces or could reasonably paper over.
+///
+/// ALL-OR-NOTHING, same direction as `filters_from_macro_body`: `None` on
+/// a block declaring 2+ params or a rest/block param (no
+/// `instance_exec(controller, ...)` convention to fall back on), on a
+/// `respond_to?(:call)` whose receiver isn't statically a literal or a
+/// `Lambda` (can't fold it, so the ternary can't collapse, so there is no
+/// safe single filter body to emit), or on an `instance_exec` that isn't
+/// this exact zero-param / `return`-`next`-`break`-free shape (those exit
+/// the ENCLOSING macro method in source, not the filter — inlining the
+/// body would change what they do).
+fn block_filter_from_macro_stmt(stmt: &crate::expr::Expr) -> Option<crate::expr::Expr> {
+    use crate::expr::{Expr, ExprNode, Literal};
+
+    let ExprNode::Send { recv: None, method, args, block: Some(blk), parenthesized } = &*stmt.node
+    else {
+        return None;
+    };
+    if !super::controller::is_lambda_filter_macro(method.as_str()) {
+        return None;
+    }
+    let ExprNode::Lambda { params, rest_param, block_param, body, block_style } = &*blk.node else {
+        return None;
+    };
+    // Only options may ride beside a block target, and only options
+    // `lambda_filter_target` can actually read back off the expanded
+    // block-form filter it reconstructs below. A positional arg that is
+    // neither a bare options Hash nor a `**`-splatted one is a shape
+    // `before_action`'s block form never takes; refused outright.
+    //
+    // Beyond the Hash shape, every ENTRY is checked too — this is the
+    // difference from `filter_from_send`'s Symbol-target path, which
+    // never had this gap because `lambda_filter_target` only loosely
+    // parses `only:`/`except:`/`if:`/`unless:` (and silently ignores any
+    // other key): a value shape it can't read back doesn't fail, it
+    // just quietly becomes "no scope"/"no guard", which would make the
+    // expanded filter run with the WRONG scope or guard instead of not
+    // expanding — a correctness regression the all-or-nothing contract
+    // exists to prevent. So refuse here, unexpanded, unless every entry
+    // is one `lambda_filter_target` is known to read faithfully:
+    //   * key is a Symbol literal in {only, except, if, unless};
+    //   * only/except: a Symbol literal, or an Array of Symbol literals;
+    //   * if/unless: a Symbol literal, or exactly the lambda shapes
+    //     `ir_lambda_body` reads (`-> { … }` / `lambda { … }` /
+    //     `proc { … }`).
+    // `lambda_filter_target` itself keeps its existing loose parsing —
+    // that's the pre-existing gap for a HAND-WRITTEN
+    // `before_action(if: 'cond') { … }`, a separate issue.
+    for a in args {
+        let unwrapped = match &*a.node {
+            ExprNode::KeywordSplat { value } => value,
+            _ => a,
+        };
+        let ExprNode::Hash { entries, .. } = &*unwrapped.node else {
+            return None;
+        };
+        for (k, v) in entries {
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                return None;
+            };
+            let shape_ok = match key.as_str() {
+                "only" | "except" => is_symbol_or_symbol_array(v),
+                "if" | "unless" => {
+                    super::controller::ir_symbol(v).is_some()
+                        || super::controller::ir_lambda_body(v).is_some()
+                }
+                _ => false,
+            };
+            if !shape_ok {
+                return None;
+            }
+        }
+    }
+    if rest_param.is_some() || block_param.is_some() || params.len() > 1 {
+        return None;
+    }
+
+    let mut body = body.clone();
+    if let [self_param] = params.as_slice() {
+        // `rewrite_var_to_self_ref` is a blind full-tree rewrite: it
+        // turns every `Var` read matching `self_param`'s name into
+        // `SelfRef`, with no notion of scope. Refused, rather than
+        // risked, whenever `body_shadows_param` finds either a nested
+        // block/lambda that redeclares the same name as its own
+        // parameter (`items.map { |controller| controller.name }`
+        // would wrongly become `items.map { |controller| self.name }`)
+        // or a plain reassignment of that name anywhere in the body
+        // (`controller = nil`, or a block-local's first write, which is
+        // all that's left to see of a block-local once ingestion has
+        // already dropped its declaration) — no scope-aware rewrite
+        // exists here to tell any of those apart from a genuine read of
+        // the filter block's own parameter.
+        if body_shadows_param(&body, self_param) {
+            return None;
+        }
+        rewrite_var_to_self_ref(&mut body, self_param);
+    }
+
+    let mut ok = true;
+    // Three SEPARATE full-tree passes, strictly in this order. Folding
+    // `respond_to?(:call)` first, then collapsing the now-literal-cond
+    // `If`, means a dead branch's `instance_exec` is physically gone from
+    // the tree before the instance_exec pass ever looks at it — the
+    // literal-value case's `value.instance_exec(&"a string")`-shaped
+    // dead code never has to be (and cannot be) folded, only discarded.
+    fold_respond_to_call(&mut body, &mut ok);
+    fold_literal_if(&mut body);
+    fold_self_instance_exec(&mut body, &mut ok);
+    if !ok {
+        return None;
+    }
+
+    Some(Expr::new(
+        stmt.span,
+        ExprNode::Send {
+            recv: None,
+            method: method.clone(),
+            args: args.clone(),
+            block: Some(Expr::new(
+                blk.span,
+                ExprNode::Lambda {
+                    params: vec![],
+                    rest_param: None,
+                    block_param: None,
+                    body,
+                    block_style: block_style.clone(),
+                },
+            )),
+            parenthesized: *parenthesized,
+        },
+    ))
+}
+
+/// `only:`/`except:` shape `lambda_filter_target` reads faithfully via
+/// `ir_symbol_list`: a bare Symbol literal, or an Array whose elements
+/// are ALL Symbol literals. Stricter than `ir_symbol_list` itself, which
+/// silently drops any element that isn't one (so `only: ['index']`
+/// would read back as an EMPTY list, scoping the filter to no actions
+/// at all rather than refusing) — exactly the loose-parsing gap this
+/// function exists to keep `block_filter_from_macro_stmt` out of.
+fn is_symbol_or_symbol_array(e: &crate::expr::Expr) -> bool {
+    use crate::expr::ExprNode;
+    match &*e.node {
+        ExprNode::Array { elements, .. } => {
+            elements.iter().all(|el| super::controller::ir_symbol(el).is_some())
+        }
+        _ => super::controller::ir_symbol(e).is_some(),
+    }
+}
+
+/// `true` if `expr` holds, ANYWHERE at any depth, either of two things
+/// that make rewriting every `name`-named `Var` read to `self` unsafe:
+///
+///   * a Lambda node — a nested block or a nested `->`/`lambda`/`proc`
+///     literal — that redeclares `name` as one of its own parameters
+///     (required, rest, or block-capture). That nested scope shadows
+///     the outer binding of the same name, so its body's reads of
+///     `name` mean ITS OWN parameter, not the filter block's.
+///   * an assignment (`Assign`, `OpAssign`, or a `MultiAssign` target)
+///     whose target is a local variable named `name`. Even a PLAIN
+///     reassignment in the SAME scope (`controller = nil`) means every
+///     read after that point is of whatever was assigned, not the
+///     filter block's own parameter — rewriting it to `self` would be
+///     just as wrong as the lambda-shadowing case, only without a new
+///     scope to blame.
+///
+/// Both are checked by one scan, because a block-local (`|x; name|`)
+/// shadows exactly like a declared parameter does but ISN'T checked
+/// directly: the IR doesn't represent block-locals at all (ingestion
+/// already drops them — see `block_param_names` in `ingest/expr.rs`),
+/// so there is no declaration left to see by the time this runs. What
+/// IS still visible is the ASSIGNMENT such a block almost always needs
+/// to give its local a value (`controller = x.name`) — so the
+/// assignment check below catches a block-local shadow indirectly,
+/// through its first write, even though the declaration itself is
+/// invisible.
+///
+/// See `block_filter_from_macro_stmt`'s call site for why this refuses
+/// rather than rewriting scope-aware — no scope-aware rewrite exists
+/// here to tell a shadowed/reassigned binding from the filter block's
+/// own parameter.
+fn body_shadows_param(expr: &crate::expr::Expr, name: &crate::ident::Symbol) -> bool {
+    use crate::expr::{ExprNode, LValue};
+    match &*expr.node {
+        ExprNode::Lambda { params, rest_param, block_param, .. } => {
+            if params.iter().any(|p| p == name)
+                || rest_param.as_ref() == Some(name)
+                || block_param.as_ref() == Some(name)
+            {
+                return true;
+            }
+        }
+        ExprNode::Assign { target: LValue::Var { name: n, .. }, .. }
+        | ExprNode::OpAssign { target: LValue::Var { name: n, .. }, .. }
+            if n == name =>
+        {
+            return true;
+        }
+        ExprNode::MultiAssign { targets, .. }
+            if targets.iter().any(|t| matches!(t, LValue::Var { name: n, .. } if n == name)) =>
+        {
+            return true;
+        }
+        _ => {}
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |c| {
+        if !found && body_shadows_param(c, name) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Rewrite every read of `name` (a block's own declared parameter) to
+/// `SelfRef` — see `block_filter_from_macro_stmt`'s doc comment for why.
+fn rewrite_var_to_self_ref(expr: &mut crate::expr::Expr, name: &crate::ident::Symbol) {
+    use crate::expr::ExprNode;
+    if let ExprNode::Var { name: n, .. } = &*expr.node {
+        if n == name {
+            *expr = crate::expr::Expr::new(expr.span, ExprNode::SelfRef);
+            return;
+        }
+    }
+    expr.node.for_each_child_mut(&mut |c| rewrite_var_to_self_ref(c, name));
+}
+
+/// `<X>.respond_to?(:call)` → `true`/`false` when `X` is statically
+/// knowable (a `Lambda`, or any other literal-ish value a lambda never
+/// is); leaves it alone and sets `*ok = false` otherwise. Receiver
+/// shapes besides `Lambda` (a `Var`, another `Send`, a `Const`, ...)
+/// can't be judged without running the program, so the whole macro is
+/// refused rather than guessed at.
+fn fold_respond_to_call(expr: &mut crate::expr::Expr, ok: &mut bool) {
+    use crate::expr::{ExprNode, Literal};
+    expr.node.for_each_child_mut(&mut |c| fold_respond_to_call(c, ok));
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node else {
+        return;
+    };
+    if method.as_str() != "respond_to?" {
+        return;
+    }
+    let [sym] = args.as_slice() else { return };
+    let ExprNode::Lit { value: Literal::Sym { value } } = &*sym.node else { return };
+    if value.as_str() != "call" {
+        return;
+    }
+    let callable = match &*r.node {
+        ExprNode::Lambda { .. } | ExprNode::MethodRef { .. } => true,
+        ExprNode::Lit { .. } | ExprNode::Array { .. } | ExprNode::Hash { .. } | ExprNode::StringInterp { .. } => {
+            false
+        }
+        _ => {
+            *ok = false;
+            return;
+        }
+    };
+    *expr = crate::expr::Expr::new(expr.span, ExprNode::Lit { value: Literal::Bool { value: callable } });
+}
+
+/// `If { cond: Lit::Bool(b), then_branch, else_branch }` → whichever
+/// branch `b` selects. Bottom-up so a nested `If` this same fold already
+/// collapsed is visible to its parent.
+fn fold_literal_if(expr: &mut crate::expr::Expr) {
+    use crate::expr::{ExprNode, Literal};
+    expr.node.for_each_child_mut(&mut |c| fold_literal_if(c));
+    let ExprNode::If { cond, then_branch, else_branch } = &*expr.node else {
+        return;
+    };
+    let ExprNode::Lit { value: Literal::Bool { value } } = &*cond.node else {
+        return;
+    };
+    *expr = if *value { then_branch.clone() } else { else_branch.clone() };
+}
+
+/// `self.instance_exec(&<lambda>)` (receiver `SelfRef`, or implicit self)
+/// → the lambda's body, when the lambda takes no parameters and its body
+/// has no `return`/`next`/`break` (those would exit the enclosing macro
+/// METHOD in the original source, not this filter, so inlining them
+/// would change what they do). Sets `*ok = false` on any other
+/// `instance_exec` shape — a non-self receiver is left alone (not this
+/// pattern), everything else means the call survived folding and cannot
+/// be executed symbolically.
+fn fold_self_instance_exec(expr: &mut crate::expr::Expr, ok: &mut bool) {
+    use crate::expr::ExprNode;
+    expr.node.for_each_child_mut(&mut |c| fold_self_instance_exec(c, ok));
+    let ExprNode::Send { recv, method, args, block: Some(blk), .. } = &*expr.node else {
+        return;
+    };
+    if method.as_str() != "instance_exec" || !args.is_empty() {
+        return;
+    }
+    let recv_is_self = match recv {
+        None => true,
+        Some(r) => matches!(&*r.node, ExprNode::SelfRef),
+    };
+    if !recv_is_self {
+        return;
+    }
+    let ExprNode::Lambda { params, rest_param, block_param, body: lam_body, .. } = &*blk.node else {
+        *ok = false;
+        return;
+    };
+    if !params.is_empty() || rest_param.is_some() || block_param.is_some() {
+        *ok = false;
+        return;
+    }
+    if contains_return_next_break(lam_body) {
+        *ok = false;
+        return;
+    }
+    *expr = lam_body.clone();
+}
+
+/// Deep scan for `return`/`next`/`break` anywhere in `expr` — see
+/// `fold_self_instance_exec`.
+fn contains_return_next_break(expr: &crate::expr::Expr) -> bool {
+    use crate::expr::ExprNode;
+    if matches!(&*expr.node, ExprNode::Return { .. } | ExprNode::Next { .. } | ExprNode::Break { .. }) {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |c| {
+        if !found && contains_return_next_break(c) {
+            found = true;
+        }
+    });
+    found
 }
 
 /// Copy each concern's `enum` columns onto the models that include it,

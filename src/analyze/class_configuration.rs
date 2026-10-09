@@ -87,7 +87,7 @@ impl Analyzer {
                 {
                     if let Some(ty @ Ty::Hash { .. }) = self
                         .inferred_params
-                        .get(&(key.0.clone(), method.name.clone()))
+                        .get(&(key.0.clone(), method.name.clone(), crate::dialect::MethodReceiver::Class))
                         .and_then(|params| params.first())
                     {
                         types

@@ -710,6 +710,9 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     for m in ["blank?", "empty?", "present?"] {
         content.instance_methods.insert(Symbol::from(m), Ty::Bool);
     }
+    // The element view the runtime's `Content#fragment` builds
+    // (campfire's `Message#plain_text_body` asks it for attachments).
+    content.instance_methods.insert(Symbol::from("fragment"), fragment_ty.clone());
     content
         .instance_methods
         .insert(Symbol::from("links"), Ty::Array { elem: Box::new(Ty::Str) });

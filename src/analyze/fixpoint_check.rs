@@ -425,9 +425,10 @@ impl Analyzer {
         for (decl, t) in &self.typed_constants {
             put("constants", format!("decl {decl:?}"), type_hash(t));
         }
-        for ((id, m), row) in &self.inferred_params {
+        for ((id, m, side), row) in &self.inferred_params {
             let row: Vec<u64> = row.iter().map(type_hash).collect();
-            put("params", format!("{}#{}", id.0.as_str(), m.as_str()), hash_of(row));
+            let sep = if *side == crate::dialect::MethodReceiver::Class { "." } else { "#" };
+            put("params", format!("{}{sep}{}", id.0.as_str(), m.as_str()), hash_of(row));
         }
         for ((id, m), bindings) in &self.refined_action_bindings {
             put(
@@ -505,7 +506,7 @@ impl Analyzer {
         app: &mut App,
         inputs: &RoundInputs<'_>,
         which: Loop,
-        snapshot: Option<&mut HashMap<(ClassId, Symbol), Vec<Ty>>>,
+        snapshot: Option<&mut HashMap<super::ParamKey, Vec<Ty>>>,
     ) {
         let before = self.state_fp(app);
         match which {

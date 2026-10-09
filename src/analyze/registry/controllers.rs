@@ -176,6 +176,11 @@ pub(in crate::analyze) fn register(
         app_ctrl.class_methods.insert(Symbol::from("session"), Ty::Class { id: session_id, args: vec![] });
     }
     app_ctrl.class_methods.insert(Symbol::from("render"), Ty::Nil);
+    // Rails answers the rendered String and writes no response; the
+    // lowerer turns the call into the bare `Views::…` call, which is
+    // that String. Typing it lets the ivar an action stores it in reach
+    // a template (campfire's `@message_html`).
+    app_ctrl.class_methods.insert(Symbol::from("render_to_string"), Ty::Str);
     app_ctrl.class_methods.insert(Symbol::from("redirect_to"), Ty::Nil);
     app_ctrl.class_methods.insert(Symbol::from("redirect_back_or_to"), Ty::Nil);
     app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
@@ -392,6 +397,12 @@ pub(in crate::analyze) fn register(
         app_ctrl.class_methods.insert(Symbol::from(m), Ty::Nil);
     }
     app_ctrl.class_methods.insert(Symbol::from("response"), Ty::Untyped);
+    // The response surface the shared runtime's Base defines on the
+    // controller itself: `self.response_body = body` (campfire's
+    // MessagesController / CachedResponses) and `media_type`.
+    for m in ["response_body", "response_body=", "media_type"] {
+        app_ctrl.class_methods.insert(Symbol::from(m), Ty::Str);
+    }
     app_ctrl.class_methods.insert(Symbol::from("logger"), Ty::Untyped);
     // `cookies` is the cookie jar: string values in and out,
     // `signed`/`permanent`/`encrypted` are the same jar with a codec

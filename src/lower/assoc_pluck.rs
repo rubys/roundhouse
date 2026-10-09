@@ -208,20 +208,34 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
 
     let span = expr.span;
     let var = Symbol::from("__pluck");
+    // The row a block sees is the receiver's element; one column's
+    // value is the element of what `pluck` answered.
+    let row_ty = match &recv.ty {
+        Some(crate::ty::Ty::Array { elem }) => Some((**elem).clone()),
+        _ => None,
+    };
+    let col_ty = match (&expr.ty, cols.len()) {
+        (Some(crate::ty::Ty::Array { elem }), 1) => Some((**elem).clone()),
+        _ => None,
+    };
     let read = |col: &Symbol| {
-        Expr::new(
+        let mut row = Expr::new(
+            span,
+            ExprNode::Var { id: crate::ident::VarId(0), name: var.clone() },
+        );
+        row.ty = row_ty.clone();
+        let mut send = Expr::new(
             span,
             ExprNode::Send {
-                recv: Some(Expr::new(
-                    span,
-                    ExprNode::Var { id: crate::ident::VarId(0), name: var.clone() },
-                )),
+                recv: Some(row),
                 method: col.clone(),
                 args: vec![],
                 block: None,
                 parenthesized: false,
             },
-        )
+        );
+        send.ty = col_ty.clone();
+        send
     };
     // Rails answers an Array of VALUES for one column and an Array of
     // Arrays for several, and a caller that indexes the result is
@@ -251,6 +265,10 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
         },
     );
     let recv = recv.clone();
+    // The projection answers what `pluck` answered, and the analyzer
+    // already typed that: keep it, or a typed receiver (`comments` in
+    // the model that declares it) leaves an untyped `map` behind.
+    let ty = expr.ty.clone();
     *expr = Expr::new(
         span,
         ExprNode::Send {
@@ -261,6 +279,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
             parenthesized: false,
         },
     );
+    expr.ty = ty;
 }
 
 /// Does this chain bottom out at a model constant?

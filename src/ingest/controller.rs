@@ -797,7 +797,7 @@ impl LambdaFilterTarget {
 /// receiverless `Send` to that name carrying the block, itself a
 /// `Lambda`). The IR-level twin of `lambda_body_expr` above, one stage
 /// later and returning the body rather than re-ingesting it.
-fn ir_lambda_body(e: &Expr) -> Option<Expr> {
+pub(super) fn ir_lambda_body(e: &Expr) -> Option<Expr> {
     match &*e.node {
         ExprNode::Lambda { body, .. } => Some(body.clone()),
         ExprNode::Send { recv: None, method, args, block: Some(b), .. }
@@ -812,7 +812,7 @@ fn ir_lambda_body(e: &Expr) -> Option<Expr> {
     }
 }
 
-fn ir_symbol(e: &Expr) -> Option<Symbol> {
+pub(super) fn ir_symbol(e: &Expr) -> Option<Symbol> {
     match &*e.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
         _ => None,
@@ -872,6 +872,17 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
     let mut if_cond_expr: Option<Expr> = None;
     let mut unless_cond_expr: Option<Expr> = None;
     for a in option_args {
+        // A concern macro's `before_action(**kwargs) { ... }` substitutes
+        // the call's options Hash under a `**` splat rather than the
+        // bare trailing Hash literal a hand-written filter uses — unwrap
+        // it the same way `filter_from_send` does, so a macro's expanded
+        // block-form filter (`ingest::app::block_filter_from_macro_stmt`)
+        // carries `only:`/`except:`/`if:`/`unless:` exactly as a
+        // hand-written one would.
+        let a = match &*a.node {
+            ExprNode::KeywordSplat { value } => value,
+            _ => a,
+        };
         let ExprNode::Hash { entries, .. } = &*a.node else { continue };
         for (k, v) in entries {
             let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
