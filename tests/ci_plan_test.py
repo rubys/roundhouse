@@ -511,6 +511,7 @@ class Routing(unittest.TestCase):
                 self.assertEqual(plan["spinel_tests"], [binary])
                 self.assertEqual(
                     self.extras(plan), set(ci.CORE) | {"spinel-framework"}
+                    | ({"compare-jruby"} if binary in {"param_binds_values", "param_binds_cleanup"} else set()),
                 )
 
     def test_param_binds_owns_lowering_drivers_and_database_runtime(self):
@@ -543,7 +544,9 @@ class Routing(unittest.TestCase):
                     expected,
                 )
                 self.assertEqual(
-                    self.extras(plan), set(ci.CORE) | {"spinel-framework"}
+                    self.extras(plan),
+                    set(ci.CORE) | {"spinel-framework"}
+                    | ({"compare-jruby"} if path in ci.JRUBY_BIND_INPUTS else set()),
                 )
         # Generated-read ensure/finalize lives in the Ruby emitter.
         # Native core already runs for this path; the bind cleanup suite
@@ -662,6 +665,22 @@ class Routing(unittest.TestCase):
                     plan = ci.select(["tests/" + suite + suffix])
                     self.assertEqual(plan["spinel_tests"], [suite])
                     self.assertIn("spinel-framework", plan["jobs"])
+
+    def test_jdbc_bind_inputs_select_the_jruby_contract_job(self):
+        for path in [
+            "tests/param_binds_jruby.rb",
+            "tests/support/jdbc_value_semantics.rb",
+            "tests/support/jdbc_cleanup_failures.rb",
+            "tests/param_binds_runtime.rb",
+            "tests/param_binds_nil.rb",
+            "runtime/spinel/test/statement_cache_cases.rb",
+            "tests/param_binds_values.rs",
+            "tests/param_binds_values.rb",
+            "tests/param_binds_cleanup.rs",
+            "tests/param_binds_cleanup.rb",
+        ]:
+            with self.subTest(path=path):
+                self.assertIn("compare-jruby", ci.select([path])["jobs"])
 
     def test_runtime_owners_choose_asymmetric_focused_binaries(self):
         cases = {

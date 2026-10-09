@@ -14,6 +14,9 @@
 #   Db.close                   — close all connections
 #   Db.exec(sql)               — run DDL / INSERT / UPDATE / DELETE
 #   Db.prepare(sql)            — prepare a SELECT, returns a stmt handle
+#   Db.bind_int(stmt, i, value) — bind an integer at a one-based position
+#   Db.bind_text(stmt, i, value) — bind text at a one-based position
+#   Db.bind_bool(stmt, i, value) — bind a boolean as SQLite's 0/1
 #   Db.step?(stmt)             — advance, returns true if a row arrived
 #   Db.column_int(stmt, i)     — read int column at zero-based index
 #   Db.column_text(stmt, i)    — read text column at zero-based index
@@ -35,10 +38,8 @@
 # no lock either — same invariant db_cruby.rb relies on.
 #
 # JDBC notes: column indices are 1-based (we add 1 to the zero-based
-# contract index). `column_count`/`column_name` read the
-# PreparedStatement's metadata, which the sqlite-jdbc driver resolves at
-# prepare time — `sqlite_adapter.rb` calls `column_count` before the
-# first `step?`, so we must not depend on a ResultSet existing yet.
+# contract index). Execution is deferred until `step?` or a metadata
+# read so all parameters can be bound after `prepare` returns.
 
 require "jdbc/sqlite3"
 Jdbc::SQLite3.load_driver
@@ -58,7 +59,7 @@ module Db
   STMT_CACHE_CAP = 128
 
   # A pooled connection plus its prepared-statement cache. The cache is
-  # keyed by composed SQL (the lowerer inlines literals) → JDBC
+  # keyed by SQL (including placeholders for bound values) → JDBC
   # PreparedStatement. Because `with_connection` leases a Conn to exactly
   # one thread for a request's duration, the cache needs no lock.
   class Conn
@@ -388,9 +389,8 @@ module Db
   # resets the cursor before execution; release clears old parameters.
   # `finalize` closes the ResultSet and keeps the cached statement. Busy
   # hits and over-cap statements are transient, closed on finalize.
-  # Key is the composed SQL — inlined
-  # literals key id-bearing queries per-id (fine for the bench;
-  # STMT_CACHE_CAP bounds growth).
+  # Placeholder queries reuse one cached statement across bound values;
+  # STMT_CACHE_CAP bounds growth for other SQL shapes.
   def self.prepare(sql)
     # A `?`-bearing SQL string is a placeholder query (roundhouse#12):
     # its result depends on binds set after prepare, which are not in
@@ -631,7 +631,7 @@ module Db
   # a partial one (eof false): the next identical SELECT replays the
   # consumed prefix and promotes past it only if it wants more. Then
   # close the ResultSet (if a query ran); a cached PreparedStatement
-  # stays open for reuse, a transient one is closed.
+  # stays open with no bound values for reuse, a transient one is closed.
   def self.finalize(stmt)
     return nil if stmt.pstmt.nil?
     if (c = stmt.capture)
@@ -714,13 +714,8 @@ module Db
     raise error
   end
 
-  # Non-optional integer binds share the JDBC setter with the optional
-  # path; the lowerer emits `bind_int` for required columns.
-  def self.bind_int(handle, idx, value)
-    bind_int_opt(handle, idx, value)
-  end
-
-  # Optional read predicates occupy one slot whether nil or present.
+  # Optional primitives preserve nil for callers binding a SQL NULL.
+  # Generated nullable equality uses IS NULL without a slot, or = ? with a slot.
   def self.bind_int_opt(handle, idx, value)
     ps = handle.pstmt
     raise "statement is not bindable" if ps.nil? || handle.executed
@@ -746,23 +741,25 @@ module Db
   end
 
   def self.bind_bool_opt(handle, idx, value)
-    ps = handle.pstmt
-    raise "statement is not bindable" if ps.nil? || handle.executed
-    if value.nil?
-      ps.set_null(idx, Java::JavaSql::Types::INTEGER)
-    else
-      ps.set_long(idx, value ? 1 : 0)
-    end
-  rescue StandardError => error
-    statement_failed(handle, "bind", error)
+    bind_bool(handle, idx, value)
   end
 
-  # Match this shim's inline writer, including ASCII-only BINARY strings
-  # remaining TEXT. set_bytes keeps NUL and non-ASCII binary data out of
-  # Java String decoding; both JDBC setters copy the Ruby value at bind time.
+  # Bind positions are one-based. Keep the full SQLite integer width.
+  def self.bind_int(stmt, idx, value)
+    raise "statement is not bindable" if stmt.pstmt.nil? || stmt.executed
+    if value.nil?
+      stmt.pstmt.set_null(idx, Java::JavaSql::Types::INTEGER)
+    else
+      stmt.pstmt.set_long(idx, value)
+    end
+  rescue StandardError => error
+    statement_failed(stmt, "bind", error)
+  end
+
+  # Match the inline writer, including ASCII-only BINARY strings as TEXT.
   def self.bind_text(stmt, idx, value)
     pstmt = stmt.pstmt
-    return nil if pstmt.nil?
+    raise "statement is not bindable" if pstmt.nil? || stmt.executed
     value = value.to_s
     if value.include?("\0") || (value.encoding == Encoding::BINARY && !value.ascii_only?)
       pstmt.set_bytes(idx, value.to_java_bytes)
@@ -776,12 +773,14 @@ module Db
   # SQLite boolean values are integers, with NULL distinct from false/0.
   def self.bind_bool(stmt, idx, value)
     pstmt = stmt.pstmt
-    return nil if pstmt.nil?
+    raise "statement is not bindable" if pstmt.nil? || stmt.executed
     if value.nil?
       pstmt.set_null(idx, Java::JavaSql::Types::INTEGER)
     else
       pstmt.set_int(idx, value ? 1 : 0)
     end
+  rescue StandardError => error
+    statement_failed(stmt, "bind", error)
   end
 
   def self.last_insert_rowid
@@ -824,10 +823,9 @@ module Db
     @query_log.push(sql) unless @query_log.nil?
   end
 
-  # SQL-value escaping primitives — copied verbatim from db_cruby.rb. The
-  # contract across all shims is "inline values into SQL" (the FFI shim
-  # can't construct SQLITE_TRANSIENT for bind params), and the lowerer
-  # controls every string that flows here.
+  # SQL-value escaping primitives — copied verbatim from db_cruby.rb.
+  # Writes and queries without bound parameters inline their values;
+  # the lowerer controls every string that flows here.
   # BYTES go out as a hex BLOB literal, `X'…'`. A NUL cannot ride a
   # quoted literal at all (it ends the SQL text: "unrecognized token"),
   # and a binary value stored as TEXT sorts before every BLOB, so a
