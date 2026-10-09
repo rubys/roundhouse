@@ -24,6 +24,10 @@ mod runtime_block_signature;
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_actions.rs"]
+mod cable_actions_contract;
+#[path = "emit_and_run/cable_actions.rs"]
+mod cable_actions;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
 #[path = "support/delegate_association.rs"]

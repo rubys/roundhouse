@@ -3314,6 +3314,240 @@ fn apply_cable_channels(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// `Channel::Base`'s own public instance methods (actioncable 8.1:
+/// `Base.public_instance_methods(true) - Object.public_instance_methods`).
+/// Rails takes them out of `action_methods`, so a client cannot
+/// `perform("stream_from")`; an app ancestor's method of the same name
+/// is taken out with them.
+const CABLE_BASE_PUBLIC_METHODS: &[&str] = &[
+    "__callbacks", "_run_subscribe_callbacks", "_run_subscribe_callbacks!",
+    "_run_unsubscribe_callbacks", "_run_unsubscribe_callbacks!", "_subscribe_callbacks",
+    "_unsubscribe_callbacks", "broadcast_to", "broadcasting_for", "channel_name",
+    "connection", "handler_for_rescue", "identifier", "logger", "params", "perform_action",
+    "periodic_timers=", "pubsub", "rescue_handlers", "rescue_handlers=", "rescue_handlers?",
+    "rescue_with_handler", "run_callbacks", "stop_all_streams", "stop_stream_for",
+    "stop_stream_from", "stream_for", "stream_from", "stream_or_reject_for",
+    "subscribe_to_channel", "unsubscribe_from_channel", "unsubscribed?",
+];
+
+/// Methods this pipeline writes INTO every channel class
+/// (`ingest::channel_callbacks`): the `on_subscribe`/`on_unsubscribe`
+/// chains and the literal `channel_name`. In Rails they are class-level
+/// machinery, never instance methods a client could name, so they are
+/// never actions - even though, here, the channel itself defines them.
+const CABLE_SYNTHESIZED_METHODS: &[&str] = &["after_subscribe", "after_unsubscribe", "channel_name"];
+
+/// How one action is called, decided from its formals the way Rails'
+/// `dispatch_action` decides it from `method(action).arity`.
+enum CableActionCall {
+    /// Arity exactly 1: one required positional, nothing else.
+    WithData,
+    /// Callable with no arguments (every formal optional, or none).
+    Bare,
+    /// Neither: Rails calls it with no arguments and Ruby raises.
+    Raises(String),
+}
+
+fn cable_action_call(method: &crate::dialect::MethodDef) -> CableActionCall {
+    let params = &method.params;
+    let keywordish = |p: &crate::dialect::Param| p.keyword || p.from_keyword || p.from_kwrest;
+    let required_positional = params
+        .iter()
+        .filter(|p| !keywordish(p) && !p.rest && !p.forwarding && p.default.is_none())
+        .count();
+    let required_keywords: Vec<&str> = params
+        .iter()
+        .filter(|p| p.keyword && p.default.is_none() && !p.rest)
+        .map(|p| p.name.as_str())
+        .collect();
+    if params.len() == 1 && required_positional == 1 {
+        return CableActionCall::WithData;
+    }
+    if required_positional > 0 {
+        return CableActionCall::Raises(format!(
+            "wrong number of arguments (given 0, expected {required_positional})"
+        ));
+    }
+    if !required_keywords.is_empty() {
+        let names: Vec<String> = required_keywords.iter().map(|k| format!(":{k}")).collect();
+        let noun = if names.len() == 1 { "keyword" } else { "keywords" };
+        return CableActionCall::Raises(format!("missing {noun}: {}", names.join(", ")));
+    }
+    CableActionCall::Bare
+}
+
+/// Write `ActionCable::Channel.perform(channel, action, data)` - the
+/// dispatch for the client's `subscription.perform(action, data)` (#71
+/// item 6) - into the Spinel lane's `runtime/action_cable.rb`.
+///
+/// Rails finds the method by reflection: `action_methods` is the
+/// channel's public instance methods with its ancestors', less
+/// `Channel::Base`'s, plus those the class defines itself; then
+/// `public_send`. A strict target has neither, so the same set is
+/// worked out here, per channel, from the ingested classes:
+///
+/// - the channel's own public methods, then its mixins and its app
+///   ancestors' with theirs, in Ruby's lookup order - modules a
+///   `config/initializers/` file prepends or includes (`app.module_mixins`)
+///   take their place in it - and the first definition of a name decides,
+///   so a subclass that makes an inherited method private takes it out;
+/// - a method the channel class itself defines publicly stays an action
+///   even when a prepended module makes it private, as in Rails; its arm
+///   raises the NoMethodError `public_send` raises there;
+/// - an inherited name `Channel::Base` also answers is not an action
+///   (`CABLE_BASE_PUBLIC_METHODS`); the methods this pipeline writes
+///   into channels never are (`CABLE_SYNTHESIZED_METHODS`).
+///
+/// ONE ARM PER CHANNEL CLASS, most derived first: the arm is an
+/// `is_a?`, and a parent's arm would otherwise answer for its
+/// subclasses with the parent's set. Each arm repeats the inherited
+/// actions, so no arm needs another's.
+///
+/// The CRuby overlay does not read this: it has reflection, and runs
+/// Rails' own algorithm in its `Channel::Base#perform_action`.
+fn apply_cable_actions(files: &mut [(String, String)], app: &App) {
+    use crate::app::MixinKind;
+    use crate::dialect::{MethodReceiver, MethodVisibility};
+    const HEAD: &str = "    # >>> generated: cable-actions\n";
+    const TAIL: &str = "    # <<< generated: cable-actions\n";
+    const ROOT: &str = "ActionCable::Channel::Base";
+
+    let class_named = |name: &str| app.library_classes.iter().find(|lc| lc.name.0.as_str() == name);
+    // `X.include M` / `X.prepend M` from config/initializers, in registration order.
+    let initializer_mixins = |target: &str, kind: MixinKind| -> Vec<&crate::dialect::LibraryClass> {
+        app.module_mixins
+            .iter()
+            .filter(|m| m.kind == kind && m.target.as_str().trim_start_matches("::") == target)
+            .filter_map(|m| class_named(m.module.as_str().trim_start_matches("::")))
+            .collect()
+    };
+
+    // (depth, name) for every class descending from Base: the same
+    // transitive descent `apply_cable_channels` does, keeping the depth.
+    let mut channels: Vec<(usize, &str)> = Vec::new();
+    let mut known: Vec<(&str, usize)> = vec![(ROOT, 0)];
+    loop {
+        let before = known.len();
+        for lc in &app.library_classes {
+            let name = lc.name.0.as_str();
+            if lc.is_module || known.iter().any(|(k, _)| *k == name) {
+                continue;
+            }
+            let Some(parent) = &lc.parent else { continue };
+            if let Some(&(_, depth)) = known.iter().find(|(k, _)| *k == parent.0.as_str()) {
+                known.push((name, depth + 1));
+                channels.push((depth + 1, name));
+            }
+        }
+        if known.len() == before {
+            break;
+        }
+    }
+    channels.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+
+    let mut generated = String::from(HEAD);
+    generated.push_str("    def self.perform(channel, action, data)\n");
+    for &(_, channel) in &channels {
+        // Ruby's lookup order, up to Base: for each class, the modules an
+        // initializer prepends onto it (newest first), the class, the
+        // modules an initializer includes into it (newest first, so ahead of
+        // the class body's), its own `include`s (last first); then the parent.
+        let mut order: Vec<(&crate::dialect::LibraryClass, bool)> = Vec::new();
+        let mut current = class_named(channel);
+        let mut own = true;
+        while let Some(lc) = current {
+            if lc.name.0.as_str() == ROOT {
+                break;
+            }
+            let class = lc.name.0.as_str();
+            for module in initializer_mixins(class, MixinKind::Prepend).into_iter().rev() {
+                order.push((module, false));
+            }
+            order.push((lc, own));
+            for module in initializer_mixins(class, MixinKind::Include).into_iter().rev() {
+                order.push((module, false));
+            }
+            for include in lc.includes.iter().rev() {
+                if let Some(module) = class_named(include.0.as_str()) {
+                    order.push((module, false));
+                }
+            }
+            own = false;
+            current = lc.parent.as_ref().and_then(|p| class_named(p.0.as_str()));
+        }
+
+        // The definition each name resolves to (the first in that order),
+        // and the names the channel class itself defines publicly: Rails
+        // adds those to `action_methods` even when a prepended module
+        // shadows them, and `public_send` then meets the shadowing method.
+        let mut effective: Vec<(&str, &crate::dialect::MethodDef, bool)> = Vec::new();
+        let mut own_public: Vec<&str> = Vec::new();
+        for (lc, own) in order {
+            for method in &lc.methods {
+                let name = method.name.as_str();
+                if method.receiver != MethodReceiver::Instance {
+                    continue;
+                }
+                if own && method.visibility == MethodVisibility::Public {
+                    own_public.push(name);
+                }
+                if !effective.iter().any(|(n, _, _)| *n == name) {
+                    effective.push((name, method, own));
+                }
+            }
+        }
+
+        let mut arms = String::new();
+        for (name, method, own) in effective {
+            if CABLE_SYNTHESIZED_METHODS.contains(&name) {
+                continue;
+            }
+            let call = if method.visibility == MethodVisibility::Public {
+                let base_name = !own && !own_public.contains(&name) && CABLE_BASE_PUBLIC_METHODS.contains(&name);
+                if method.unsupported_formals.is_some() || base_name {
+                    continue;
+                }
+                match cable_action_call(method) {
+                    CableActionCall::WithData => format!("channel.{name}(data)"),
+                    CableActionCall::Bare => format!("channel.{name}"),
+                    // The message is built from a count and identifiers only,
+                    // so it needs no escaping inside the double quotes.
+                    CableActionCall::Raises(message) => format!("raise ArgumentError, \"{message}\""),
+                }
+            } else if own_public.contains(&name) {
+                // Rails: an action (the class defines it publicly) whose call
+                // `public_send` refuses, since a prepended module made it
+                // private or protected.
+                let kind = if method.visibility == MethodVisibility::Private { "private" } else { "protected" };
+                format!("raise NoMethodError, \"{kind} method '{name}' called for an instance of {channel}\"")
+            } else {
+                continue;
+            };
+            arms.push_str(&format!(
+                "        if action == \"{name}\"\n\
+                 \x20         {call}\n\
+                 \x20         return true\n\
+                 \x20       end\n",
+            ));
+        }
+        // An arm even with no actions in it: a channel that made every
+        // inherited action private must not fall through to its parent's arm.
+        generated.push_str(&format!("      if channel.is_a?({channel})\n{arms}        return false\n      end\n"));
+    }
+    generated.push_str("      false\n    end\n");
+    generated.push_str(TAIL);
+
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("/action_cable.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
 /// Write one `GlobalID::Locator.locate_<model>` entry point into
 /// `runtime/global_id_locator.rb` for every model class an `only:`
 /// names, with the finder spelled as a LITERAL constant.
@@ -5028,6 +5262,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     // `cable.rb`, which has its own identity path and its own test.
     apply_cable_connection(&mut files, app);
     apply_cable_channels(&mut files, app);
+    apply_cable_actions(&mut files, app);
     apply_content_layout(&mut files, app);
     apply_content_helper_attributes(&mut files, app);
     // The `only:`-as-finder specializations, also in the shared base:

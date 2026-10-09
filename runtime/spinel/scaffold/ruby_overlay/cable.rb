@@ -358,6 +358,18 @@ module Cable
       warn "[cable] #{channel.class}#unsubscribed raised: #{e.class}: #{e.message}"
       nil
     end
+
+    # A `message` frame's action (#71 item 6), on the channel object the
+    # subscription holds. Same posture as `subscribe`: a raise is
+    # reported, not propagated - the worker that ran it must survive,
+    # and the client has nothing to be told.
+    def self.perform(channel, data)
+      channel.perform_action(data)
+      nil
+    rescue StandardError => e
+      warn "[cable] #{channel.class}#perform_action raised: #{e.class}: #{e.message}"
+      nil
+    end
   end
 
   # The `Broadcasts` transport: stream name → subscribed connections.
@@ -610,10 +622,34 @@ module Cable
       case message["command"]
       when "subscribe"   then begin_subscribe(identifier_json)
       when "unsubscribe" then begin_unsubscribe(identifier_json)
+      when "message"     then begin_perform(identifier_json, message["data"])
       else nil
       end
     rescue JSON::ParserError
       nil
+    end
+
+    # Reactor thread: find the subscription the frame names and hand the
+    # action to a worker, as `subscribe` does. Rails runs every command on
+    # its worker pool too, so two actions from one client may run at
+    # once, as they may there.
+    #
+    # An identifier with no confirmed subscription (none, or still
+    # pending) is logged and dropped - Rails' "Unable to find
+    # subscription". `data` is decoded with its JSON types kept, as Rails
+    # decodes it; one that is not a JSON object is logged and dropped.
+    def begin_perform(identifier_json, data_json)
+      channel = @channels[identifier_json]
+      if channel.nil? || channel == :pending
+        warn "[cable] Unable to find subscription with identifier: #{identifier_json}"
+        return nil
+      end
+      data = JSON.parse(data_json.to_s)
+      unless data.is_a?(Hash)
+        warn "[cable] Unable to process a message whose data is not a JSON object"
+        return nil
+      end
+      Workers.post { Db.with_connection { Dispatch.perform(channel, data) } }
     end
 
     # Reactor thread: resolve the channel class and hand the app's code

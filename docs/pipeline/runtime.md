@@ -1984,6 +1984,62 @@ channel "verifies only the signature on the stream name. That name
 carries no expiry and no binding to a user." Both ends of that need
 closing; **neither lane signs**, and that half is the entry below.
 
+### A client's channel action runs on the ruby family
+
+A `{"command":"message"}` frame - the client's
+`subscription.perform(action, data)`: campfire's typing indicator
+(`TypingNotificationsChannel#start`/`#stop`) and its presence `refresh`,
+which a browser sends every 50 seconds so a tab open longer than
+`CONNECTION_TTL` keeps counting as present (rubys/roundhouse#71 item 6).
+Both lanes used to drop it; both now run it on the channel object the
+subscription holds, so whatever `subscribed` left in its ivars is there.
+
+**Rails' rules, on both lanes** (pinned by
+`emit_and_run::a_cable_action_runs_with_rails_rules` and its native twin
+in `spinel_toolchain`, against actioncable 8.1.4's own output):
+
+- An action is a public method of the channel, its app ancestors or its
+  mixins, less `Channel::Base`'s; a private method, a framework method
+  and an unknown name run nothing and are logged.
+- A method of arity exactly 1 is passed `data`, with its `"action"` key
+  still in it; anything else is called with no arguments, so
+  `def optional(data = {})` gets `{}` and `def kw(data, k: 1)` raises the
+  ArgumentError Rails raises.
+- A frame without an action, or with an empty one, is `receive`.
+- `data` keeps its JSON types: `false` stays false. Channel `params`, by
+  contrast, read every value as a String (`ActionCable::Channel::Parameters`);
+  `data` does not follow them, because an action that tests a boolean
+  would otherwise take `"false"` as true.
+- A rejected subscription runs nothing.
+- An action that raises is reported on stderr and contained.
+
+**How each lane finds the method.** The CRuby overlay runs Rails' own
+algorithm in `Channel::Base#perform_action` - `action_methods` by
+reflection, then `public_send`. Spinel has no reflection, so
+`project::apply_cable_actions` writes `ActionCable::Channel.perform`: one
+`is_a?` arm per channel class, most derived first, with one arm per
+action and the arity decided at build time. The lists of Rails' base
+methods the two lanes exclude are the same list, kept in both files.
+
+**Where it differs from Rails, and why:**
+
+- **The methods this pipeline writes into a channel are never actions.**
+  `after_subscribe`, `after_unsubscribe` and `channel_name` are Rails
+  class machinery that `ingest::channel_callbacks` turns into instance
+  methods; a channel that defines one of those names itself loses it as
+  an action too.
+- **Frame order on spinel is strict.** The socket's own green thread
+  runs one frame after another, so a client's actions run in the order
+  sent. Rails, and the CRuby overlay, run commands on a worker pool and
+  two actions from one client may overlap. The overlay's pool is sized
+  by `CABLE_WORKERS` / `RAILS_MAX_THREADS`, not by
+  `config.action_cable.worker_pool_size`; an app that sets the pool to 1
+  to keep a client's actions in order does not get that on the overlay.
+- **`unsubscribe` frames are still ignored on spinel** (the overlay
+  handles them). A subscription ends when its socket closes.
+- **The strict targets** (Go, Rust, TypeScript, ...) do not run actions;
+  their cable glue drops the frame, as before.
+
 ### An open socket outlives the authorization that opened it
 
 `ActionCable.server.remote_connections.where(current_user: user)

@@ -39,6 +39,10 @@ mod class_attribute;
 mod class_configuration;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_actions.rs"]
+mod cable_actions_contract;
+#[path = "spinel_toolchain/cable_actions.rs"]
+mod cable_actions;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
 #[path = "support/native_http.rs"]
