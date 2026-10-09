@@ -1146,6 +1146,27 @@ fn walk_collect_ivars(
             record(name.as_str(), ty, order, observed);
             walk_collect_ivars(value, order, observed);
         }
+        // `@a, @b = a, b` — each ivar takes its positional element's
+        // type (the literal's element, or the tuple's slot). Anything
+        // else (splat, a call returning a pair) is observed as unknown.
+        ExprNode::MultiAssign { targets, value } => {
+            let elems: Option<Vec<Ty>> = match &*value.node {
+                ExprNode::Array { elements, .. } if elements.len() == targets.len() => {
+                    Some(elements.iter().map(|el| el.ty.clone().unwrap_or(Ty::Untyped)).collect())
+                }
+                _ => match &value.ty {
+                    Some(Ty::Tuple { elems }) if elems.len() == targets.len() => Some(elems.clone()),
+                    _ => None,
+                },
+            };
+            for (i, target) in targets.iter().enumerate() {
+                if let LValue::Ivar { name } = target {
+                    let ty = elems.as_ref().map(|t| t[i].clone()).unwrap_or(Ty::Untyped);
+                    record(name.as_str(), ty, order, observed);
+                }
+            }
+            walk_collect_ivars(value, order, observed);
+        }
         ExprNode::OpAssign {
             target: LValue::Ivar { name },
             op,
