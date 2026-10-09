@@ -100,4 +100,45 @@ class RequestForgeryProtectionTest < Minitest::Test
     refute rfp.cable_origin_allowed?("http://localhost:3000.evil.example", host, true)
     refute rfp.cable_origin_allowed?("", host, true)
   end
+
+  # Rails main's Fetch Metadata rule, ahead of the token.
+  # `Rails.application` is a fresh object per call, so the override
+  # goes on the class (as ingest's lift does) and is put back after.
+  def with_strategy(name)
+    klass = Rails::Application
+    original = klass.instance_method(:forgery_protection_verification_strategy)
+    klass.define_method(:forgery_protection_verification_strategy) { name }
+    yield
+  ensure
+    klass.define_method(:forgery_protection_verification_strategy, original)
+  end
+
+  def test_a_same_origin_or_same_site_header_passes_without_a_token
+    %w[same-origin same-site SAME-ORIGIN].each do |site|
+      assert controller(method: "POST", headers: { "HTTP_SEC_FETCH_SITE" => site }).verified_request?
+    end
+  end
+
+  def test_a_cross_site_header_is_refused_even_with_the_token
+    secret = minted
+    refute controller(method: "POST", params: { "authenticity_token" => secret },
+                      headers: { "HTTP_SEC_FETCH_SITE" => "cross-site" }, session_token: secret).verified_request?
+  end
+
+  def test_header_or_legacy_token_falls_back_to_the_token
+    secret = minted
+    refute controller(method: "POST", headers: { "HTTP_SEC_FETCH_SITE" => "none" }).verified_request?
+    assert controller(method: "POST", params: { "authenticity_token" => secret },
+                      headers: { "HTTP_SEC_FETCH_SITE" => "none" }, session_token: secret).verified_request?
+  end
+
+  def test_header_only_passes_a_missing_header_on_plain_http_only
+    with_strategy("header_only") do
+      assert controller(method: "POST").verified_request?
+      refute controller(method: "POST", headers: { "HTTP_X_FORWARDED_PROTO" => "https" }).verified_request?
+      secret = minted
+      refute controller(method: "POST", params: { "authenticity_token" => secret },
+                        headers: { "HTTP_SEC_FETCH_SITE" => "none" }, session_token: secret).verified_request?
+    end
+  end
 end

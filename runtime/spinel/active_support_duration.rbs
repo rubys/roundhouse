@@ -31,6 +31,9 @@ module ActiveSupport
     def since: () -> Time
     def to_i: () -> Integer
     def to_f: () -> Float
+    def zero?: () -> bool
+    def positive?: () -> bool
+    def negative?: () -> bool
     def to_s: () -> String
     def seconds: () -> Integer
     def ==: (untyped other) -> bool

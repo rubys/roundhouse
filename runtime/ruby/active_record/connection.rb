@@ -199,6 +199,12 @@ module ActiveRecord
       ActiveRecord.adapter.select_rows(sql).map { |row| row.values }
     end
 
+    # `select_value(sql)` — the first column of the first row, or nil
+    # (campfire's room test counts FTS rows this way).
+    def select_value(sql)
+      select_rows(sql).dig(0, 0)
+    end
+
     def exec_query(sql)
       execute(sql)
     end
@@ -396,6 +402,18 @@ module ActiveRecord
     # raise the Bar B untyped residual via Hash[untyped] walks).
     def self.sanitize_sql_array(statement)
       sanitize_sql(statement)
+    end
+
+    # Rails' `uncached { }`: the block's reads go to the database, not
+    # the per-request replay cache, which comes back on after it.
+    def self.uncached
+      was = Db.query_cache_enabled?
+      Db.query_cache_end if was
+      begin
+        yield
+      ensure
+        Db.query_cache_begin if was
+      end
     end
 
     # `Model.transaction { ... }` — the block inside BEGIN/COMMIT, with

@@ -161,6 +161,7 @@ module ActiveRecord
     def ==: (untyped other) -> bool
     def filter: () { (Base) -> bool } -> Array[Base]
     def map: () { (Base) -> untyped } -> untyped
+    def to_h: () { (Base) -> Array[untyped] } -> Hash[untyped, untyped]
     def collect: () { (Base) -> untyped } -> untyped
     # `other` is `untyped`, NOT `Array[untyped]`, on all four set
     # operators: each body only hands the argument on to Array's own

@@ -1074,6 +1074,13 @@ module ActiveRecord
       loaded_records.map { |x| yield x }
     end
 
+    # Enumerable's `to_h { |rec| [k, v] }` over the materialized rows
+    # (campfire's push pool test keys each subscription's badge by its
+    # endpoint this way).
+    def to_h
+      loaded_records.to_h { |x| yield x }
+    end
+
     # `collect` is Enumerable's second name for `map`, and Rails
     # relations answer it because they delegate the whole of Enumerable
     # to `to_a`. campfire's membership extension reaches it

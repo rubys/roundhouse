@@ -54,7 +54,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 2393f01ba2540ec245e772941e3b6cc7a3ee2c69
+  CAMPFIRE_SHA: 32b4144b5206304fa8d4c67455a753e2d3c16635
   WRITEBOOK_SHA: f3fadd21907ad9b18cb23800d971c2cc25045e2a
   # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
@@ -1903,6 +1903,21 @@ jobs:
       # locally after it: that number includes `to_gid`, which lands in
       # THIS commit and whose runner figure is not in yet — same rule
       # as last time.
+      #
+      # `32b4144b` (2026-10-06) is the Rails main bump (#314, rails
+      # e3d5c569 with the 8.2 defaults live) and the PRs merged before it.
+      # Three shapes it needed: the 8.2 default forgery strategy,
+      # `:header_only` (Sec-Fetch-Site decides before any token, and a
+      # header-less POST passes on plain http — the cable walk's forged
+      # posts now send what a browser sends from another site); Lexxy
+      # rendering through Rails' `ActionText::Editor` adapter, which drops
+      # the `input` attribute; and `Message::Pagination::Page`, a scope
+      # that answers an Array subclass, so `page.first(2)` is Array's.
+      # Measured locally on the ruby lane: 418 of 419, 69 of 70 files;
+      # campfire-compare and the DB differential green; strict emit 0.
+      # The one unpassed test is `RichText#embeds`
+      # (`presentation-preload-introspection`). The floor is left to this
+      # runner's notice.
       #
       # `2393f01b` (2026-10-05) is the last upstream main before the next
       # two shapes outside the subset: `WebPush::Connections`

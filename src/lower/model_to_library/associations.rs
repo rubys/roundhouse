@@ -137,6 +137,15 @@ pub(super) fn push_association_methods(
                     loaded_ivar(name),
                     Ty::Bool,
                 ));
+                {
+                    // `reload_<name>` — Rails' `owner.<name>.reload`
+                    // (`assoc_loaded` rewrites onto it): forget a
+                    // preloaded cache and read the rows again.
+                    let reload = Symbol::from(format!("reload_{}", name.as_str()));
+                    if !model_defines_instance_method(model, &reload) {
+                        methods.push(synth_has_many_reload(owner, name, target));
+                    }
+                }
                 methods.push(synth_cache_reader(
                     owner,
                     Symbol::from(format!("{}_target", name.as_str())),
@@ -332,6 +341,7 @@ pub(super) fn push_association_methods(
                 {
                     methods.push(synth_belongs_to_writer(owner, name, target, foreign_key, sentinel));
                 }
+                push_singular_loaded_reader(methods, model, owner, name);
             }
             Association::HasOne {
                 name,
@@ -351,6 +361,7 @@ pub(super) fn push_association_methods(
                     scope.as_ref(),
                 ));
                 methods.push(synth_has_one_preload_setter(owner, name, target));
+                push_singular_loaded_reader(methods, model, owner, name);
                 // Writer + after_save only when `autosave: true`. A cache-only
                 // writer on plain `has_one` would accept `owner.child = …`
                 // then drop the child on save (silent data loss vs Rails /
@@ -1102,6 +1113,58 @@ fn synth_has_one_autosave(
 
 /// `def <name>; @<ivar>; end` — a plain read of one has_many cache ivar,
 /// typed as the ivar is (see the call site for why these exist).
+/// `<name>_loaded?` for a singular (belongs_to / has_one) association:
+/// the flat spelling of Rails' `association(:name).loaded?`, which
+/// `assoc_loaded` rewrites onto it. Reads the same `@<name>_loaded`
+/// flag the reader sets; a model that defines the name itself wins.
+fn push_singular_loaded_reader(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    owner: &ClassId,
+    name: &Symbol,
+) {
+    let flat = Symbol::from(format!("{}_loaded?", name.as_str()));
+    if model_defines_instance_method(model, &flat)
+        || methods.iter().any(|m| m.name == flat && m.receiver == MethodReceiver::Instance)
+    {
+        return;
+    }
+    methods.push(synth_cache_reader(owner, flat, loaded_ivar(name), Ty::Bool));
+}
+
+/// `def reload_<name>; @<name>_loaded = false; <name>; end`.
+fn synth_has_many_reload(owner: &ClassId, name: &Symbol, target: &ClassId) -> MethodDef {
+    let ret = Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) };
+    let reset = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Ivar { name: loaded_ivar(name) },
+            value: lit_bool(false),
+        },
+    );
+    let read = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send { recv: None, method: name.clone(), args: vec![], block: None, parenthesized: false },
+    );
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from(format!("reload_{}", name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![reset, read] }),
+        signature: Some(super::fn_sig(vec![], ret)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    }
+}
+
 fn synth_cache_reader(owner: &ClassId, name: Symbol, ivar: Symbol, ty: Ty) -> MethodDef {
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -1168,6 +1231,11 @@ pub(in crate::lower::model_to_library) fn assoc_cache_ivar_bindings(
                         ],
                     },
                 ));
+                out.push((loaded_ivar(name), Ty::Bool));
+            }
+            // The belongs_to reader's own load-once flag, which its
+            // `<name>_loaded?` reads (`push_singular_loaded_reader`).
+            Association::BelongsTo { name, polymorphic: false, .. } => {
                 out.push((loaded_ivar(name), Ty::Bool));
             }
             _ => {}

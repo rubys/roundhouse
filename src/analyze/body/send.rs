@@ -641,9 +641,18 @@ impl<'a> BodyTyper<'a> {
         else {
             return None;
         };
-        if !args.is_empty() {
+        // `association(:name).loaded?` — the reflection spelling of the
+        // same question, for any association with a flat predicate.
+        let assoc = if assoc.as_str() == "association" && args.len() == 1 {
+            match &*args[0].node {
+                ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value,
+                _ => return None,
+            }
+        } else if args.is_empty() {
+            assoc
+        } else {
             return None;
-        }
+        };
         let flat = Symbol::from(format!("{}_loaded?", assoc.as_str()));
         let has_flat = |id: &ClassId| -> bool {
             let mut current = Some(id);

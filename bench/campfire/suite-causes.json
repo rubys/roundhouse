@@ -42,11 +42,11 @@
   "causes": [
     {
       "slug": "presentation-preload-introspection",
-      "title": "`ActionText::RichText#embeds` and `record.association(:name).loaded?` — the presentation-preload tests read Rails' association internals",
+      "title": "`ActionText::RichText#embeds` — a presentation-preload test walks the rich text's attached blobs",
       "owner": "compiler",
-      "match": "undefined method '(embeds' for an instance of ActionText::RichText|association' for an instance of Message)",
+      "match": "undefined method 'embeds' for an instance of ActionText::RichText",
       "match_test": "MessageTest#test_presentation_",
-      "note": "campfire 2393f01 (2026-10-05) added two `MessageTest` cases for `Message.with_presentation` and `Message::Pagination::Page#preload_associations`: one walks `message.body.embeds` under `assert_no_queries`, the other asserts `message.association(:rich_text_body).loaded?` before and after a page preloads only the rendered rows. The runtime's `ActionText::RichText` has no `embeds` (the rich text's attached blobs), and a hydrated record has no association-proxy object to ask `loaded?` — associations are readers that hydrate, so there is no per-association loaded state to report. The app path itself emits with zero errors; only these two introspection tests are unpassed. Arrived with the CAMPFIRE_SHA bump 90b3300 -> 2393f01."
+      "note": "campfire 2393f01 (2026-10-05) added two `MessageTest` cases for `Message.with_presentation` and `Message::Pagination::Page#preload_associations`. The second (`association(:rich_text_body).loaded?` before and after a page preloads only the rendered rows) passes since `association(:name).loaded?` lowers onto each association's flat `<name>_loaded?` reader. The first walks `message.body.embeds` under `assert_no_queries`: the runtime's `ActionText::RichText` has no `embeds` (Rails' `has_many_attached :embeds`, filled on save from the content's blob attachables and preloaded by `with_rich_text_body_and_embeds`). Arrived with the CAMPFIRE_SHA bump 90b3300 -> 2393f01."
     },
     {
       "slug": "turbo-signed-stream-name",

@@ -539,6 +539,11 @@ module Db
     Fiber[:rh_qcache] = nil
   end
 
+  # Is the replay cache on for this fiber? (`ActiveRecord::Base.uncached`)
+  def self.query_cache_enabled?
+    !Fiber[:rh_qcache].nil?
+  end
+
   # The request read snapshot and background checkpoints are
   # implemented in the CRuby and Spinel shims (db_cruby.rb, db.rb), not
   # yet in this one. Here they

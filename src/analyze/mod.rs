@@ -769,6 +769,20 @@ impl Analyzer {
                     cls.instance_methods
                         .entry(Symbol::from(format!("{}_loaded?", name.as_str())))
                         .or_insert(Ty::Bool);
+                    cls.instance_methods
+                        .entry(Symbol::from(format!("reload_{}", name.as_str())))
+                        .or_insert(ty.clone());
+                }
+                // The singular readers' flat `<name>_loaded?` (Rails'
+                // `association(:name).loaded?`), synthesized beside them.
+                if matches!(
+                    assoc,
+                    crate::dialect::Association::HasOne { .. }
+                        | crate::dialect::Association::BelongsTo { polymorphic: false, .. }
+                ) {
+                    cls.instance_methods
+                        .entry(Symbol::from(format!("{}_loaded?", name.as_str())))
+                        .or_insert(Ty::Bool);
                 }
                 cls.instance_methods.insert(name, ty.clone());
                 cls.instance_methods.entry(writer).or_insert(ty);
@@ -8190,6 +8204,7 @@ fn register_has_rich_text(model: &crate::dialect::Model, methods: &mut HashMap<S
             methods.entry(Symbol::from(name)).or_insert(record.clone());
         }
         methods.entry(Symbol::from(format!("{a}?"))).or_insert(Ty::Bool);
+        methods.entry(Symbol::from(format!("rich_text_{a}_loaded?"))).or_insert(Ty::Bool);
         methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::Untyped);
     }
 }

@@ -8726,3 +8726,134 @@ end
         .run_test("test/models/article_delete_all_test.rb")
         .assert_passes();
 }
+
+/// Destructured block parameters and nested multi-write targets bind
+/// every name. campfire's `|(host, secure, origin), index|` was emitted
+/// as `|index|`, and its body read three names nothing bound.
+#[test]
+fn nested_destructuring_binds_every_name() {
+    const SOURCE: &str = r#"class NestedDestructureProbe
+  def self.block_params
+    out = []
+    [[1, 2, 3], [4, 5, 6]].each_with_index do |(a, b, c), index|
+      out << [a, b, c, index]
+    end
+    out
+  end
+  def self.deep_block
+    [[1, [2, 3]]].map { |(a, (b, c))| [a, b, c] }
+  end
+  def self.lambda_param
+    adder = ->((a, b)) { a + b }
+    adder.call([20, 22])
+  end
+  def self.multi_write
+    _, (_, removed) = [1, [2, 3]]
+    removed
+  end
+  def self.deep_multi_write
+    a, (b, (c, d)) = [1, [2, [3, 4]]]
+    [a, b, c, d]
+  end
+  def self.expression
+    (a, (b, c) = [1, [2, 3]])
+  end
+end
+"#;
+    const ASSERTIONS: &str = r##"
+expected = {block_params: [[1, 2, 3, 0], [4, 5, 6, 1]], deep_block: [[1, 2, 3]], lambda_param: 42, multi_write: 3, deep_multi_write: [1, 2, 3, 4], expression: [1, [2, 3]]}
+expected.each do |method, want|
+  got = NestedDestructureProbe.public_send(method)
+  raise "#{method}: #{got.inspect}, expected #{want.inspect}" unless got == want
+end
+"##;
+    let native = std::process::Command::new("ruby").arg("-e")
+        .arg(format!("{SOURCE}\n{ASSERTIONS}"))
+        .output().expect("CRuby control");
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    emit_and_run::real_blog()
+        .write("app/services/nested_destructure_probe.rb", SOURCE)
+        .run_ruby(ASSERTIONS).assert_passes();
+}
+
+/// `recv.m(**payload, badge: b)` where nothing types `recv`: the app's
+/// one `m` takes `**rest`, so the `**` the ingest desugar erased is put
+/// back (campfire's `WebPush::Pool#deliver_later`). Passed positionally
+/// it is Ruby 3's `wrong number of arguments (given 1, expected 0)`.
+#[test]
+fn a_keyword_splat_to_an_untyped_receiver_keeps_its_double_splat() {
+    emit_and_run::real_blog()
+        // A MODEL method, as campfire's `Push::Subscription#notification`
+        // is: models keep `badge:` a keyword beside `**params`.
+        .edit("app/models/comment.rb", "  validates :commenter", r#"  def kwsplat_probe_note(badge: 0, **params)
+    KwSplatNote.new(**params, badge: badge)
+  end
+
+  validates :commenter"#)
+        .write("app/services/kwsplat_probe.rb", r#"class KwSplatNote
+  attr_reader :title, :badge
+
+  def initialize(title:, badge:)
+    @title, @badge = title, badge
+  end
+end
+
+class KwSplatCaller
+  def self.call(items, payload)
+    items.map { |item| item.kwsplat_probe_note(**payload, badge: 3) }
+  end
+end
+"#)
+        .run_ruby(r#"
+article = Article.create!(title: "Splat title", body: "A sufficiently long article body.")
+comment = Comment.create!(article: article, commenter: "Reader", body: "Comment body")
+got = KwSplatCaller.call([comment], { title: "t" }).map { |n| [n.title, n.badge] }
+raise "keyword splat lost: #{got.inspect}" unless got == [["t", 3]]
+"#)
+        .assert_passes();
+}
+
+/// Rails' `association(:name).loaded?` on a belongs_to: false until the
+/// reader runs, true after — the question campfire's presentation tests
+/// ask of a page of messages.
+#[test]
+fn association_loaded_answers_for_a_belongs_to() {
+    emit_and_run::real_blog()
+        .write("app/services/loaded_probe.rb", r#"class LoadedProbe
+  def self.flags(comment)
+    before = comment.association(:article).loaded?
+    comment.article
+    [before, comment.association(:article).loaded?]
+  end
+end
+"#)
+        .run_ruby(r#"
+article = Article.create!(title: "Loaded title", body: "A sufficiently long article body.")
+comment = Comment.create!(article: article, commenter: "Reader", body: "Comment body")
+got = LoadedProbe.flags(Comment.find(comment.id))
+raise "association(:article).loaded? answered #{got.inspect}" unless got == [false, true]
+"#)
+        .assert_passes();
+}
+
+/// `owner.<has_many>.reload` reads the rows again (campfire's rooms
+/// test: `assert_empty room.memberships.reload`).
+#[test]
+fn has_many_reload_reads_the_rows_again() {
+    emit_and_run::real_blog()
+        .write("app/services/reload_probe.rb", r#"class ReloadProbe
+  def self.counts(article)
+    before = article.comments.size
+    Comment.create!(article_id: article.id, commenter: "Late", body: "Arrived later")
+    [before, article.comments.reload.size]
+  end
+end
+"#)
+        .run_ruby(r#"
+article = Article.create!(title: "Reload title", body: "A sufficiently long article body.")
+Comment.create!(article: article, commenter: "Reader", body: "Comment body")
+got = ReloadProbe.counts(Article.find(article.id))
+raise "reload answered #{got.inspect}" unless got == [1, 2]
+"#)
+        .assert_passes();
+}

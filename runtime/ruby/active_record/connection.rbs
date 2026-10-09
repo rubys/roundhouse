@@ -31,6 +31,7 @@ module ActiveRecord
     def quote_string: (String str) -> String
     def execute: (String sql) -> Result
     def select_rows: (String sql) -> Array[Array[untyped]]
+    def select_value: (String sql) -> untyped
     def exec_query: (String sql) -> Result
     def select_all: (String sql) -> Result
     def exec_update: (String sql, ?String? name, ?Array[String | Integer | Float | bool | nil] binds) -> Integer
@@ -50,6 +51,7 @@ module ActiveRecord
     def self.connection: () -> Connection
     def self.sanitize_sql: (Array[untyped] statement) -> String
     def self.sanitize_sql_array: (Array[untyped] statement) -> String
+    def self.uncached: () { () -> untyped } -> untyped
     def self.transaction: (?isolation: untyped, ?requires_new: untyped, ?joinable: bool) { () -> untyped } -> untyped
     def self.delete_all: () -> Integer
     def self.update_counters: (Integer | String id, Hash[Symbol, untyped] counters) -> Integer

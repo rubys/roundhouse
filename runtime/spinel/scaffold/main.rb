@@ -456,6 +456,8 @@ module Main
     # posts, and the Origin it compares with the Host.
     request_obj.env["HTTP_X_CSRF_TOKEN"] = req.req_headers.fetch("x-csrf-token", "")
     request_obj.env["HTTP_ORIGIN"] = req.req_headers.fetch("origin", "")
+    # Rails main's Fetch Metadata check reads this before any token.
+    request_obj.env["HTTP_SEC_FETCH_SITE"] = req.req_headers.fetch("sec-fetch-site", "")
     # The credentials the HTTP Token/Basic helpers parse
     # (runtime/http_authentication.rb).
     request_obj.env["HTTP_AUTHORIZATION"] = req.req_headers.fetch("authorization", "")

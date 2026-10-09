@@ -671,6 +671,10 @@ class DbConn
   #
   # Only non-parameterized SQL participates: a `?`-bearing string's
   # result depends on binds set after prepare, which are not in the key.
+  def qc_on?
+    @qc_on
+  end
+
   def qc_begin
     @qc_on = true
     @qc_by_sql = {}
@@ -1362,6 +1366,12 @@ module Db
 
   def self.query_cache_end
     current_conn.qc_end
+  end
+
+  # Is the replay cache on for this connection? `ActiveRecord::Base.
+  # uncached` turns it off for a block and back on after.
+  def self.query_cache_enabled?
+    current_conn.qc_on?
   end
 
   # ── The request read snapshot ──

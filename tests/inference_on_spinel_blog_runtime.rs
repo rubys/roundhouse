@@ -311,7 +311,11 @@ fn untyped_subexpressions_baseline() {
     // Relation#find(nil)'s "without an ID" raise (#689 review):
     // 540 -> 541, MEASURED. The one new site is the `id.nil?` guard's
     // read of the unseeded `id`.
-    const CEILING: usize = 541;
+    // `Base.uncached` (campfire's push pool test): 541 -> 547, MEASURED.
+    // The six new sites are its `Db.query_cache_*` calls and the block
+    // value, read here without the Db contract — the same escape
+    // `self.transaction`'s `Db.exec` calls already take.
+    const CEILING: usize = 547;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\
