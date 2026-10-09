@@ -283,6 +283,15 @@ pub(super) fn try_recv_typed_method(
         ));
     }
     if method == "[]=" && args.len() == 2 {
+        // `response.headers[k] = v` — see the LValue::Index arm in
+        // `assign.rs`; the Send spelling of the same write.
+        if super::super::assign::is_response_headers(r) {
+            return Some(format!(
+                "crate::http::ResponseHandle.set_header(&({}), ({}).to_string())",
+                emit_expr(&args[0]),
+                emit_expr(&args[1]),
+            ));
+        }
         // Module-singleton Ivar `[]=`: `@slots[k] = v` in a
         // `def self.foo` body needs to mutate the static
         // `Mutex<Option<HashMap>>` slot through

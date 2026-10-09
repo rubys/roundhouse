@@ -638,55 +638,32 @@ pub fn response_set_head(status_name: &str, content_type: Option<String>) {
 pub struct ResponseHandle;
 
 impl ResponseHandle {
-    pub fn headers(&self) -> ResponseHeaders {
-        ResponseHeaders::load()
-    }
-}
-
-/// `response.headers`: a snapshot of the headers set so far, writable
-/// through `[]=`. The edits land back in the thread-local when the
-/// value is dropped — which is the end of the `response.headers[k] = v`
-/// statement, the only way Ruby code holds one.
-#[derive(Debug, Default)]
-pub struct ResponseHeaders {
-    entries: Vec<(String, String)>,
-}
-
-impl ResponseHeaders {
-    fn load() -> Self {
-        Self { entries: RESPONSE.with(|r| r.borrow().headers.clone()) }
-    }
-}
-
-impl std::ops::Index<&str> for ResponseHeaders {
-    type Output = String;
-    fn index(&self, name: &str) -> &String {
-        static MISSING: String = String::new();
-        self.entries
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v)
-            .unwrap_or(&MISSING)
-    }
-}
-
-impl std::ops::IndexMut<&str> for ResponseHeaders {
-    fn index_mut(&mut self, name: &str) -> &mut String {
-        let at = match self.entries.iter().position(|(k, _)| k.eq_ignore_ascii_case(name)) {
-            Some(at) => at,
-            None => {
-                self.entries.push((name.to_string(), String::new()));
-                self.entries.len() - 1
+    /// `response.headers[name] = value`. Header names are
+    /// case-insensitive, so a later write replaces an earlier one.
+    /// Answers the value written, as Ruby's `h[k] = v` does — the write
+    /// is often a method's last expression.
+    pub fn set_header(&self, name: &str, value: String) -> serde_json::Value {
+        let written = serde_json::Value::String(value.clone());
+        RESPONSE.with(|r| {
+            let mut resp = r.borrow_mut();
+            match resp.headers.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+                Some(slot) => slot.1 = value,
+                None => resp.headers.push((name.to_string(), value)),
             }
-        };
-        &mut self.entries[at].1
+        });
+        written
     }
-}
 
-impl Drop for ResponseHeaders {
-    fn drop(&mut self) {
-        let entries = std::mem::take(&mut self.entries);
-        RESPONSE.with(|r| r.borrow_mut().headers = entries);
+    /// `response.headers[name]`: the value set so far, "" when unset.
+    pub fn header(&self, name: &str) -> String {
+        RESPONSE.with(|r| {
+            r.borrow()
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        })
     }
 }
 
@@ -862,5 +839,27 @@ fn status_name_to_code(name: &str) -> u16 {
         "unprocessable_entity" | "unprocessable_content" => 422,
         "internal_server_error" => 500,
         _ => 200,
+    }
+}
+
+#[cfg(test)]
+mod response_headers_tests {
+    use super::{ResponseHandle, response_clear, response_take};
+
+    #[test]
+    fn header_writes_land_in_the_response_and_replace_case_insensitively() {
+        response_clear();
+        ResponseHandle.set_header("X-Version", "1".to_string());
+        ResponseHandle.set_header("x-version", "2".to_string());
+        ResponseHandle.set_header("X-Rev", "abc".to_string());
+        assert_eq!(ResponseHandle.header("X-Version"), "2");
+        let response = response_take();
+        assert_eq!(
+            response.headers,
+            vec![
+                ("X-Version".to_string(), "2".to_string()),
+                ("X-Rev".to_string(), "abc".to_string())
+            ]
+        );
     }
 }
