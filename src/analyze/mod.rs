@@ -769,6 +769,20 @@ impl Analyzer {
                     cls.instance_methods
                         .entry(Symbol::from(format!("{}_loaded?", name.as_str())))
                         .or_insert(Ty::Bool);
+                    cls.instance_methods
+                        .entry(Symbol::from(format!("reload_{}", name.as_str())))
+                        .or_insert(ty.clone());
+                }
+                // The singular readers' flat `<name>_loaded?` (Rails'
+                // `association(:name).loaded?`), synthesized beside them.
+                if matches!(
+                    assoc,
+                    crate::dialect::Association::HasOne { .. }
+                        | crate::dialect::Association::BelongsTo { polymorphic: false, .. }
+                ) {
+                    cls.instance_methods
+                        .entry(Symbol::from(format!("{}_loaded?", name.as_str())))
+                        .or_insert(Ty::Bool);
                 }
                 cls.instance_methods.insert(name, ty.clone());
                 cls.instance_methods.entry(writer).or_insert(ty);
@@ -2664,11 +2678,22 @@ impl Analyzer {
             // `Account | untyped` under the looser gate, which the IDE
             // smoke reads as a hover regression. This can add an answer,
             // never take one away.
+            //
+            // An override that calls `super` runs the overridden body
+            // too, so its writes (`@message` in `MessagesController#create`
+            // under `Messages::ByBotsController#create; super; ...`) stay
+            // in the entry beside the override's own.
             let layer = |dst: &mut HashMap<Symbol, HashMap<Symbol, Ty>>,
                              owner: &ClassId,
                              name: &Symbol,
-                             ivars: &HashMap<Symbol, Ty>| {
-                let mut merged = ivars.clone();
+                             ivars: &HashMap<Symbol, Ty>,
+                             calls_super: bool| {
+                let mut merged = if calls_super {
+                    dst.remove(name).unwrap_or_default()
+                } else {
+                    HashMap::new()
+                };
+                merged.extend(ivars.iter().map(|(k, v)| (k.clone(), v.clone())));
                 if let Some(refined) =
                     self.refined_action_bindings.get(&(owner.clone(), name.clone()))
                 {
@@ -2680,13 +2705,18 @@ impl Analyzer {
                 }
                 dst.insert(name.clone(), merged);
             };
+            let body_calls_super = |bodies: &HashMap<Symbol, Expr>, name: &Symbol| {
+                bodies.get(name).is_some_and(expr_calls_super)
+            };
             for (aid, ancestor) in ancestors.iter().rev() {
                 for (name, ivars) in &ancestor.action_bindings {
-                    layer(&mut chained_bindings, aid, name, ivars);
+                    let sup = body_calls_super(&ancestor.action_bodies, name);
+                    layer(&mut chained_bindings, aid, name, ivars, sup);
                 }
             }
             for (name, ivars) in &meta.action_bindings {
-                layer(&mut chained_bindings, &ctrl_name, name, ivars);
+                let sup = body_calls_super(&meta.action_bodies, name);
+                layer(&mut chained_bindings, &ctrl_name, name, ivars, sup);
             }
 
             // Body-carrying twin of `chained_bindings`, same flat
@@ -2730,7 +2760,14 @@ impl Analyzer {
                     if ivars.is_empty() {
                         continue;
                     }
-                    chained_bindings.insert(name.clone(), ivars);
+                    // An override calling `super` keeps the overridden
+                    // body's writes layered above; only its own are
+                    // re-folded here.
+                    if expr_calls_super(body) {
+                        chained_bindings.entry(name.clone()).or_default().extend(ivars);
+                    } else {
+                        chained_bindings.insert(name.clone(), ivars);
+                    }
                 }
             }
 
@@ -3085,6 +3122,19 @@ impl Analyzer {
                     }
                     if let Some(hivars) = chained_bindings.get(method) {
                         for (k, v) in hivars {
+                            if v.is_open() {
+                                continue;
+                            }
+                            ivars.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+                // An override calling `super` renders with what the
+                // overridden action wrote too (its entry in
+                // `chained_bindings` keeps both layers).
+                if expr_calls_super(&action.body) {
+                    if let Some(inherited) = chained_bindings.get(&action.name) {
+                        for (k, v) in inherited {
                             if v.is_open() {
                                 continue;
                             }
@@ -8209,6 +8259,7 @@ fn register_has_rich_text(model: &crate::dialect::Model, methods: &mut HashMap<S
             methods.entry(Symbol::from(name)).or_insert(record.clone());
         }
         methods.entry(Symbol::from(format!("{a}?"))).or_insert(Ty::Bool);
+        methods.entry(Symbol::from(format!("rich_text_{a}_loaded?"))).or_insert(Ty::Bool);
         methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::Untyped);
     }
 }
@@ -8847,4 +8898,11 @@ mod keyword_splat_tests {
             .expect("placed");
         assert_eq!(unsplatted[0], Ty::Sym, "without a splat the literal stands alone");
     }
+}
+
+/// Does `body` call `super` anywhere (bare or with arguments)?
+fn expr_calls_super(body: &Expr) -> bool {
+    let mut found = matches!(&*body.node, ExprNode::Super { .. });
+    body.node.for_each_child(&mut |c| found = found || expr_calls_super(c));
+    found
 }

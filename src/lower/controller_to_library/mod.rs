@@ -290,6 +290,14 @@ pub struct LowerControllerOptions<'a> {
     /// for every controller. Read only when the tree
     /// `FormatBreadth::wraps_json_params`.
     pub wrap_parameters_by_default: bool,
+    /// `App::concern_spliced_actions`: per controller, the methods the
+    /// ingest copied in from included modules. They count as defined
+    /// for the missing-action check (`missing_action_check`). `None`
+    /// (the default) leaves the check off, which is what every caller
+    /// without routes gets anyway.
+    pub concern_spliced_actions: Option<
+        &'a std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, ClassId>>,
+    >,
 }
 
 pub fn lower_controllers_with_arel_views_assocs_and_routes(
@@ -311,6 +319,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         models,
         view_visible_controller_methods,
         wrap_parameters_by_default,
+        concern_spliced_actions,
     } = opts;
     // `None` (every wrapper's default) means the projection stays
     // purely shape-directed — what it was before this table existed.
@@ -360,7 +369,13 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             } else {
                 None
             };
-            let methods = build_methods(controller, controllers, &params_specs, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, inferred_returns, wrapper.as_ref());
+            let action_check = missing_action_check(
+                controller,
+                controllers,
+                library_classes,
+                concern_spliced_actions,
+            );
+            let methods = build_methods(controller, controllers, &params_specs, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, inferred_returns, wrapper.as_ref(), action_check.as_ref());
             all_methods.push((methods, controller));
         }
         if view_visible_controller_methods.is_some() {
@@ -718,6 +733,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         None,
         None,
         None,
+        None,
     );
     methods.extend(collect_attr_accessor_methods(controller));
     apply_alias_methods(controller, &mut methods);
@@ -866,13 +882,15 @@ fn collect_attr_accessor_methods(controller: &Controller) -> Vec<MethodDef> {
 /// exist, an ordering this pass (which only ever sees one controller's
 /// own `methods`) doesn't have access to. Ledgered rather than
 /// dropped so the survey names exactly which alias didn't resolve.
-fn apply_alias_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {
+/// The `alias_method :new, :old` pairs in a controller's class body, in
+/// declaration order, as `(new, old)`.
+fn alias_method_pairs(controller: &Controller) -> Vec<(Symbol, Symbol)> {
     use crate::expr::Literal;
     let sym = |e: &Expr| match &*e.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
         _ => None,
     };
-    let aliases: Vec<(Symbol, Symbol)> = controller
+    controller
         .body
         .iter()
         .filter_map(|item| {
@@ -887,8 +905,11 @@ fn apply_alias_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {
             let old_name = sym(args.get(1)?)?;
             Some((new_name, old_name))
         })
-        .collect();
-    for (new_name, old_name) in aliases {
+        .collect()
+}
+
+fn apply_alias_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {
+    for (new_name, old_name) in alias_method_pairs(controller) {
         let Some(old) = methods.iter().find(|m| m.name == old_name).cloned() else {
             crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
                 file: controller.name.0.as_str().to_string(),
@@ -1148,6 +1169,43 @@ fn subclass_template_hooks(
     }
 }
 
+/// The input to the missing-action check in `build_methods`: the
+/// names a controller gets from included modules, which count as
+/// defined beside its own and inherited public methods. These are the
+/// methods the ingest spliced in from a module it could read
+/// (`App::concern_spliced_actions`), on this controller and on every
+/// ancestor.
+///
+/// `None` skips the check for this controller: its OWN class body
+/// includes a module that is not among the app's library classes (a
+/// gem's, or one the ingest did not read), so a routed name may be an
+/// action defined there. Its unknown actions then fall through the
+/// dispatcher as before. An ancestor's unreadable include does not
+/// skip the check, so an action that comes ONLY from a module that
+/// ApplicationController (or another ancestor) includes, and that the
+/// ingest could not read, still answers 404 here where Rails would
+/// dispatch it. That is the residual risk of this rule.
+fn missing_action_check(
+    controller: &Controller,
+    all_controllers: &[Controller],
+    library_classes: &[LibraryClass],
+    spliced: Option<&std::collections::HashMap<ClassId, std::collections::HashMap<Symbol, ClassId>>>,
+) -> Option<std::collections::HashSet<Symbol>> {
+    let spliced = spliced?;
+    let readable = |m: &ClassId| library_classes.iter().any(|lc| &lc.name == m);
+    if crate::analyze::controller_include_groups(controller).iter().flatten().any(|m| !readable(m)) {
+        return None;
+    }
+    let mut names = std::collections::HashSet::new();
+    let chain = std::iter::once(controller).chain(ancestor_chain(controller, all_controllers));
+    for c in chain {
+        if let Some(methods) = spliced.get(&c.name) {
+            names.extend(methods.keys().cloned());
+        }
+    }
+    Some(names)
+}
+
 fn build_methods(
     controller: &Controller,
     all_controllers: &[Controller],
@@ -1169,6 +1227,7 @@ fn build_methods(
     inferred_returns: Option<&std::collections::HashMap<(ClassId, Symbol), Ty>>,
     // Rails' ParamsWrapper for this controller, when its requests get one.
     wrapper: Option<&self::params_wrapper::WrapperSpec>,
+    action_check: Option<&std::collections::HashSet<Symbol>>,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = controller.class_methods().cloned().collect();
 
@@ -1340,6 +1399,35 @@ fn build_methods(
     }
     inherited.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
+    // Routed actions nothing defines: no public method on this
+    // controller or an ancestor (a template-only action already has a
+    // synthesized method by now) and no method spliced in from an
+    // included module (`missing_action_check`). Rails answers these
+    // with `AbstractController::ActionNotFound` (404), which the
+    // dispatcher raises and the server maps to 404. `None` skips the
+    // check: the controller includes a module the ingest could not
+    // read, so a routed name may be an action it cannot see.
+    let mut missing: Vec<Symbol> = Vec::new();
+    if let (Some(routed), Some(spliced)) = (routed, action_check) {
+        let mut defined: std::collections::HashSet<Symbol> = publics_inlined
+            .iter()
+            .map(|a| a.name.clone())
+            .chain(inherited.iter().cloned())
+            .chain(spliced.iter().cloned())
+            .collect();
+        // `alias_method :index, :show` makes `index` a public action
+        // when `show` is one. `apply_alias_methods` writes the copy
+        // only after this point, so count it here. An alias of an
+        // alias resolves in declaration order, as Ruby does.
+        for (new_name, old_name) in alias_method_pairs(controller) {
+            if defined.contains(&old_name) {
+                defined.insert(new_name);
+            }
+        }
+        missing = routed.iter().filter(|a| !defined.contains(*a)).cloned().collect();
+        missing.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    }
+
     // Actions whose default render belongs in the dispatcher because a
     // subclass reaches this body with `super`. Empty for every
     // controller nobody subclasses that way, which is all of them
@@ -1348,7 +1436,7 @@ fn build_methods(
     let deferred_renders = actions_reached_by_super(controller, all_controllers);
     let mut pending_dispatcher: Option<(Vec<PreambleStmt>, process_action::WrapFilters)> = None;
 
-    if !publics_inlined.is_empty() || !inherited.is_empty() {
+    if !publics_inlined.is_empty() || !inherited.is_empty() || !missing.is_empty() {
         // The before_action preamble: everything the body-inlining above
         // can't reach — inherited filters (ApplicationController's
         // `authenticate_user` firing for subclass actions), own filters
@@ -1409,6 +1497,7 @@ fn build_methods(
                 &rescues,
                 &wraps,
                 reads,
+                &missing,
             ),
         );
     }

@@ -41,6 +41,10 @@ fi
 export CAMPFIRE_SOURCE_SHA="$SOURCE_SHA"
 export SECRET_KEY_BASE="campfire-route-inventory-not-a-deployment-secret"
 export RAILS_ENV=production
+# Campfire's production logger writes to STDOUT, which is where the JSON
+# goes; boot-time warnings (a route naming a missing controller) would
+# land in front of it.
+export RAILS_LOG_LEVEL=error
 
 if [[ "$OUTPUT" == - ]]; then
     (cd "$APP" && bundle exec rails runner "$REPO_ROOT/scripts/campfire-route-inventory.rb")

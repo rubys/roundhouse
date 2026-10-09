@@ -125,6 +125,7 @@ module Db
   def self.checkpoint_in_background!: () -> nil
   def self.query_cache_begin: () -> nil
   def self.query_cache_end: () -> nil
+  def self.query_cache_enabled?: () -> bool
   def self.seed_from_file: (String src_path) -> bot
   def self.ran_stmt: (Integer stmt) -> PgStmt
   def self.column_count: (Integer stmt) -> Integer

@@ -2953,6 +2953,7 @@ fn ruby_family_runtime_files(
     // base's eagerly-rewritten one at dedupe) and strips routes.rb's eager
     // controller-require header.
     apply_controller_dispatch(&mut files, app, true);
+    apply_cruby_test_support(&mut files);
     apply_route_table_root(&mut files, app);
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list_stems(&mut files, &test_stems);
@@ -3963,6 +3964,26 @@ fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
 /// pass's shape while main.rb moved on — and on a lazy tree, where
 /// routes.rb's eager requires have been stripped, that means nothing
 /// requires controllers at all.
+/// Load the overlay's `test/test_support_cruby.rb` (helpers only CRuby
+/// can run — `stub_const`) at the END of the ruby tree's test helper,
+/// after `TestBase` exists. The spinel tree never gets the file, so a
+/// test calling one fails there as the gap it is.
+fn apply_cruby_test_support(files: &mut [(String, String)]) {
+    if !files.iter().any(|(p, _)| p == "test/test_support_cruby.rb") {
+        return;
+    }
+    let line = "require_relative \"test_support_cruby\"";
+    if let Some((_, helper)) = files.iter_mut().find(|(p, _)| p == "test/test_helper.rb") {
+        if !helper.contains(line) {
+            if !helper.ends_with('\n') {
+                helper.push('\n');
+            }
+            helper.push_str(line);
+            helper.push('\n');
+        }
+    }
+}
+
 fn patch_harness_dispatch(content: &mut String, generated: &str) {
     const HEAD: &str = "    controller = case matched.controller\n";
     const TAIL: &str = "                 end";
@@ -4275,6 +4296,7 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActionController::UnpermittedParameters",
     "ActionController::UnknownFormat",
     "ActionController::RoutingError",
+    "AbstractController::ActionNotFound",
     "ActionView::MissingTemplate",
 ];
 

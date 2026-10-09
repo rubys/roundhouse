@@ -1,7 +1,15 @@
 module ActiveRecord
   # Raised by `Base.find` when no row matches the given id.
   class RecordNotFound < StandardError
-    def initialize: (?String message) -> void
+    # `id` is the value passed to `find`: a String from params, an
+    # Integer or a Float (the inputs `find` accepts), or an Array for
+    # `find([...])`; nil for `find_by!` and the other bang finders. A
+    # flat union with `nil`, not `untyped`: Crystal renders `untyped` as
+    # `String`, which a nil does not fit.
+    def model: () -> String?
+    def primary_key: () -> String?
+    def id: () -> (String | Integer | Float | Array[String | Integer | Float] | nil)
+    def initialize: (?String message, ?String? model, ?String? primary_key, ?(String | Integer | Float | Array[String | Integer | Float] | nil) id) -> void
   end
 
   # Raised when a value exceeds its column's declared limit.

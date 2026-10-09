@@ -499,7 +499,7 @@ fn rewrite_becomes(
     bases: &HashMap<ClassId, ClassId>,
     recast: &mut HashSet<ClassId>,
 ) -> bool {
-    let ExprNode::Send { recv: Some(_), method, args, block, .. } = &*expr.node else {
+    let ExprNode::Send { method, args, block, .. } = &*expr.node else {
         return false;
     };
     if method.as_str() != "becomes!" || args.len() != 1 || block.is_some() {
@@ -513,7 +513,9 @@ fn rewrite_becomes(
     let span = expr.span;
     let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
     let ExprNode::Send { recv, .. } = node else { unreachable!() };
-    let source = recv.expect("checked above");
+    // Implicit self — campfire's `Room#destroy_later` writes
+    // `becomes!(Rooms::Closed)` on the record itself.
+    let source = recv.unwrap_or_else(|| Expr::new(span, ExprNode::SelfRef));
     recast.insert(named.clone());
     *expr = Expr::new(
         span,

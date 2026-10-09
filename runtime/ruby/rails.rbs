@@ -61,6 +61,7 @@ module Rails
 
   class Application
     def session_cookie_key: () -> String
+    def forgery_protection_verification_strategy: () -> String
     def global_id_app: () -> String
     def secret_key_base: () -> String
     def domain: () -> String

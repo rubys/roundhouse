@@ -1802,7 +1802,8 @@ fn emit_rich_text_area(
 /// The ORDER is the gem's, traced from its option hash: the call's
 /// options as written (the two upload URLs appended into its `data:`),
 /// then `id` and `input` (`add_default_name_and_id`, the Trix-era input
-/// name kept), then `name`, then `value`, `class` and `data` only when
+/// name kept — absent under Rails' `ActionText::Editor` adapter, see
+/// `lexxy_uses_editor_adapter`), then `name`, then `value`, `class` and `data` only when
 /// the call did not give them — each a `||=` onto the hash. Measured
 /// against campfire's room page under Rails.
 ///
@@ -1902,9 +1903,14 @@ fn emit_lexxy_editor(
 
     let mut parts: Vec<InterpPart> = vec![InterpPart::Text { value: "<lexxy-editor".to_string() }];
     append_attr_parts(&mut parts, &opts);
-    parts.push(InterpPart::Text { value: format!(" id=\"{editor_id}\" input=\"") });
-    parts.push(input_id);
-    parts.push(InterpPart::Text { value: format!("\" name=\"{name}\"") });
+    // The Editor adapter (`ctx.lexxy_editor_adapter`) writes no `input`.
+    if ctx.lexxy_editor_adapter {
+        parts.push(InterpPart::Text { value: format!(" id=\"{editor_id}\" name=\"{name}\"") });
+    } else {
+        parts.push(InterpPart::Text { value: format!(" id=\"{editor_id}\" input=\"") });
+        parts.push(input_id);
+        parts.push(InterpPart::Text { value: format!("\" name=\"{name}\"") });
+    }
     if let Some(value) = value {
         parts.push(InterpPart::Expr { expr: view_helpers_call("optional_value_attr", vec![value]) });
     }

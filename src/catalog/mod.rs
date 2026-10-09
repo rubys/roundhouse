@@ -1606,6 +1606,13 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         return_kind: Some(ReturnKind::ArrayOfInt),
     },
     CatalogedMethod {
+        name: "to_sql",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::Pure,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::Str),
+    },
+    CatalogedMethod {
         name: "pluck",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,

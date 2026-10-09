@@ -441,6 +441,19 @@ fn push_owner_methods(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol
         true,
     );
 
+    // `rich_text_<attr>_loaded?` — the flat spelling of Rails'
+    // `association(:rich_text_<attr>).loaded?` (see `assoc_loaded`).
+    push(
+        methods,
+        model,
+        Symbol::from(format!("rich_text_{}_loaded?", attr.as_str())),
+        Vec::new(),
+        ivar(loaded.as_str()),
+        Some(fn_sig(vec![], Ty::Bool)),
+        AccessorKind::Method,
+        false,
+    );
+
     // `build_rich_text_<attr>` — a new record already pointed at this
     // owner, and (as in Rails) installed as the association's target so
     // the next read returns it rather than re-querying.

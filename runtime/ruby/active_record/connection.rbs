@@ -31,6 +31,7 @@ module ActiveRecord
     def quote_string: (String str) -> String
     def execute: (String sql) -> Result
     def select_rows: (String sql) -> Array[Array[untyped]]
+    def select_value: (String sql) -> untyped
     def exec_query: (String sql) -> Result
     def select_all: (String sql) -> Result
     def exec_update: (String sql, ?String? name, ?Array[String | Integer | Float | bool | nil] binds) -> Integer
@@ -44,11 +45,13 @@ module ActiveRecord
     def _await_preload: () -> nil
     # Request values stay intact until the schema-selected scalar adapter.
     def self.find: (Integer | Float | String | nil id) -> Base
+    def self.find_by!: (Hash[String | Symbol, untyped] conditions) -> Base
     def self._find_primary_key_input: (Integer | Float | String | nil id) -> Base?
     def self._cast_primary_key: (Integer | Float | String | nil id) -> (Integer | String | nil)
     def self.connection: () -> Connection
     def self.sanitize_sql: (Array[untyped] statement) -> String
     def self.sanitize_sql_array: (Array[untyped] statement) -> String
+    def self.uncached: () { () -> untyped } -> untyped
     def self.transaction: (?isolation: untyped, ?requires_new: untyped, ?joinable: bool) { () -> untyped } -> untyped
     def self.delete_all: () -> Integer
     def self.update_counters: (Integer | String id, Hash[Symbol, untyped] counters) -> Integer

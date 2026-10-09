@@ -53,3 +53,14 @@ module ActionController
     end
   end
 end
+
+# Raised by the emitted `process_action` when a route names an action
+# the controller does not define (no method here or on an ancestor, and
+# no template). Rails raises it from `AbstractController::Base#process`
+# before the callback chain and outside `rescue_from`, and
+# `ActionDispatch::ExceptionWrapper` maps it to 404; the ruby-family and
+# spinel dispatchers rescue it beside `ActionController::RoutingError`.
+module AbstractController
+  class ActionNotFound < StandardError
+  end
+end

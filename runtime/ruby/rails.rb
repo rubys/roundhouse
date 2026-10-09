@@ -384,6 +384,16 @@ module Rails
       "_session"
     end
 
+    # `config.action_controller.forgery_protection_verification_strategy`,
+    # as the forgery check reads it (runtime/spinel/
+    # request_forgery_protection.rb). Rails' class default; ingest lifts
+    # `load_defaults 8.2` (`:header_only`) or an app's own
+    # `protect_from_forgery using:` into an override on the app's
+    # reopen, the same shape as `session_cookie_key`.
+    def forgery_protection_verification_strategy
+      "header_or_legacy_token"
+    end
+
     # `GlobalID.app` — the first segment of every `gid://<app>/<Model>/
     # <id>` URI this runtime mints. Rails derives it from the
     # application's railtie name (`campfire_application` minus the

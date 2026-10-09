@@ -42,6 +42,14 @@ fn multi_write_target(node: &Node<'_>, file: &str) -> IngestResult<crate::expr::
             id: crate::ident::VarId(0),
             name: Symbol::from(constant_id_str(&lvt.name())),
         })
+    } else if let Some(rp) = node.as_required_parameter_node() {
+        // A destructured BLOCK parameter's names (`|(host, secure), i|`)
+        // arrive as parameters, not variable targets; they bind locals
+        // all the same (`destructure_target`).
+        Ok(crate::expr::LValue::Var {
+            id: crate::ident::VarId(0),
+            name: Symbol::from(constant_id_str(&rp.name())),
+        })
     } else if let Some(ivt) = node.as_instance_variable_target_node() {
         let raw = constant_id_str(&ivt.name());
         let name = raw.strip_prefix('@').unwrap_or(raw);
@@ -84,6 +92,60 @@ fn multi_write_target(node: &Node<'_>, file: &str) -> IngestResult<crate::expr::
     }
 }
 
+/// A parenthesized destructuring target — `(b, c)` in `a, (b, c) = x`
+/// or in a block's `|(host, secure), index|` — as statements that bind
+/// it from `source`: one flat `MultiAssign`, with any target nested
+/// further bound through a temp and destructured after it, in order.
+/// Ruby's own semantics for each level are the flat multi-write's (the
+/// value is splatted with `to_ary`), which every consumer of
+/// `MultiAssign` already implements.
+///
+/// A splat or post-splat target inside the parentheses is refused
+/// rather than dropped: the flat rest desugar in `ingest_multi_write`
+/// needs an array-literal RHS this source never has.
+fn destructure_target(
+    mt: &ruby_prism::MultiTargetNode<'_>,
+    source: Expr,
+    span: Span,
+    file: &str,
+) -> IngestResult<Vec<Expr>> {
+    if mt.rest().is_some() || !mt.rights().is_empty() {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "splat inside a nested destructuring target is not supported".into(),
+        });
+    }
+    let mut targets: Vec<crate::expr::LValue> = Vec::new();
+    let mut nested: Vec<Expr> = Vec::new();
+    for left in mt.lefts().iter() {
+        if let Some(inner) = left.as_multi_target_node() {
+            let tmp = nested_temp(&left, span);
+            targets.push(crate::expr::LValue::Var { id: crate::ident::VarId(0), name: tmp.clone() });
+            let read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: tmp });
+            nested.extend(destructure_target(&inner, read, span, file)?);
+        } else {
+            targets.push(multi_write_target(&left, file)?);
+        }
+    }
+    let mut out = vec![Expr::new(span, ExprNode::MultiAssign { targets, value: source })];
+    out.extend(nested);
+    Ok(out)
+}
+
+/// A fresh local for one nested destructuring level, unique by the
+/// node's offset and clear of every name the source already uses.
+fn nested_temp(node: &Node<'_>, _span: Span) -> Symbol {
+    let loc = node.location();
+    let stem = format!("__mt_{}", loc.start_offset());
+    let mut name = stem.clone();
+    let mut suffix = 0;
+    while super::sources::generated_local_is_reserved(&loc, &name) {
+        suffix += 1;
+        name = format!("{stem}_{suffix}");
+    }
+    Symbol::from(name)
+}
+
 /// Ingest a `MultiWriteNode` (`a, b = …`, `a, *rest = …`). Split out of
 /// the giant `ingest_expr_strict` match so its locals live in a frame
 /// entered only for multi-writes, not on every deep recursive descent.
@@ -92,6 +154,37 @@ fn ingest_multi_write(
     span: Span,
     file: &str,
 ) -> IngestResult<ExprNode> {
+    // `a, (b, c) = x` — a nested target binds a temp here and is
+    // destructured from it after the flat assignment. The whole
+    // expression still answers the RHS, as Ruby's does.
+    if mw.rest().is_none() && mw.lefts().iter().any(|l| l.as_multi_target_node().is_some()) {
+        let rhs = nested_temp(&mw.as_node(), span);
+        let rhs_read =
+            || Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: rhs.clone() });
+        let mut exprs = vec![Expr::new(
+            span,
+            ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: rhs.clone() },
+                value: ingest_expr(&mw.value(), file)?,
+            },
+        )];
+        let mut targets: Vec<crate::expr::LValue> = Vec::new();
+        let mut nested: Vec<Expr> = Vec::new();
+        for left in mw.lefts().iter() {
+            if let Some(inner) = left.as_multi_target_node() {
+                let tmp = nested_temp(&left, span);
+                targets.push(crate::expr::LValue::Var { id: crate::ident::VarId(0), name: tmp.clone() });
+                let read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: tmp });
+                nested.extend(destructure_target(&inner, read, span, file)?);
+            } else {
+                targets.push(multi_write_target(&left, file)?);
+            }
+        }
+        exprs.push(Expr::new(span, ExprNode::MultiAssign { targets, value: rhs_read() }));
+        exprs.extend(nested);
+        exprs.push(rhs_read());
+        return Ok(ExprNode::Seq { exprs });
+    }
     let mut targets: Vec<crate::expr::LValue> = Vec::new();
     for left in mw.lefts().iter() {
         targets.push(multi_write_target(&left, file)?);
@@ -1036,6 +1129,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 Some(b) => ingest_expr(&b, file)?,
                 None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
             };
+            let body = destructure_block_params(l.parameters(), body, file)?;
             let body = desugar_post_params(&mut rest_param, block_post_params(l.parameters()), body);
             // `->(x) { body }` literals always use brace form (Prism's
             // opening_loc is `{`); `->(x) do body end` exists but isn't
@@ -2854,6 +2948,7 @@ fn ingest_call_block(
                     Some(body) => ingest_expr(&body, file)?,
                     None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
                 };
+                let body = destructure_block_params(lam.parameters(), body, file)?;
                 let body = desugar_post_params(&mut rest_param, block_post_params(lam.parameters()), body);
                 let block_style = block_style_from_opening(lam.opening_loc().as_slice());
                 return Ok(Some(Expr::new(
@@ -2921,6 +3016,7 @@ fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str) -> Ing
         Some(body) => ingest_expr(&body, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
+    let body = destructure_block_params(b.parameters(), body, file)?;
     let body = desugar_post_params(&mut rest_param, block_post_params(b.parameters()), body);
     let block_style = block_style_from_opening(b.opening_loc().as_slice());
     Ok(Expr::new(
@@ -2991,9 +3087,51 @@ fn block_param_names(params_node: Option<Node<'_>>) -> Vec<Symbol> {
     let Some(pn) = bpn.parameters() else { return vec![] };
     pn.requireds()
         .iter()
-        .filter_map(|req| req.as_required_parameter_node())
-        .map(|rp| Symbol::from(constant_id_str(&rp.name())))
+        .filter_map(|req| {
+            if let Some(rp) = req.as_required_parameter_node() {
+                return Some(Symbol::from(constant_id_str(&rp.name())));
+            }
+            // `|(host, secure), index|` — the destructured slot is a
+            // temp the body unpacks first (`destructure_block_params`).
+            req.as_multi_target_node().map(|_| nested_temp(&req, Span::synthetic()))
+        })
         .collect()
+}
+
+/// The statements that unpack a block's destructured parameters
+/// (`|(host, secure, origin), index|`) from the temps
+/// `block_param_names` named for them, ahead of the body. Dropping the
+/// slot instead left the body reading `host` / `secure` with nothing
+/// bound — a NameError far from its cause.
+fn destructure_block_params(params_node: Option<Node<'_>>, body: Expr, file: &str) -> IngestResult<Expr> {
+    let Some(pn) = params_node
+        .as_ref()
+        .and_then(|n| n.as_block_parameters_node())
+        .and_then(|b| b.parameters())
+    else {
+        return Ok(body);
+    };
+    let mut prelude: Vec<Expr> = Vec::new();
+    for req in pn.requireds().iter() {
+        let Some(mt) = req.as_multi_target_node() else { continue };
+        let loc = req.location();
+        let span = Span {
+            file: super::sources::file_id(file),
+            start: loc.start_offset() as u32,
+            end: loc.end_offset() as u32,
+        };
+        let tmp = nested_temp(&req, span);
+        let read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: tmp });
+        prelude.extend(destructure_target(&mt, read, span, file)?);
+    }
+    if prelude.is_empty() {
+        return Ok(body);
+    }
+    match *body.node {
+        ExprNode::Seq { exprs } => prelude.extend(exprs),
+        other => prelude.push(Expr { node: Box::new(other), ..body }),
+    }
+    Ok(Expr::new(Span::synthetic(), ExprNode::Seq { exprs: prelude }))
 }
 
 /// The block's REST parameter (`|*args|`), without its sigil.

@@ -27,6 +27,22 @@ module ActionController
       return true if verb == "GET" || verb == "HEAD"
       return false unless RequestForgeryProtection.valid_origin?(
         req.env.fetch("HTTP_ORIGIN", "").to_s, req.host.to_s)
+      # Rails main's Fetch Metadata check, ahead of any token: the
+      # browser's own `Sec-Fetch-Site` vouches for a same-origin or
+      # same-site request, and a cross-site one is refused (Rails admits
+      # it only from `forgery_protection_trusted_origins`, which is not
+      # modeled — empty, Rails' default). What a MISSING or other value
+      # means is the strategy's: `header_only` (the 8.2 default) passes
+      # a missing header on plain http only, `header_or_legacy_token`
+      # falls back to the token below. Not modeled: `force_ssl`'s
+      # `secure_protocol`, which also refuses a missing header on http;
+      # such an app redirects plain http before it gets here.
+      site = req.env.fetch("HTTP_SEC_FETCH_SITE", "").to_s.downcase
+      return true if site == "same-origin" || site == "same-site"
+      return false if site == "cross-site"
+      if Rails.application.forgery_protection_verification_strategy == "header_only"
+        return site == "" && !req.ssl?
+      end
       expected = session[:_csrf_token].to_s
       return true if AuthenticityToken.valid?(
         Params.str(params, "authenticity_token", ""), expected)

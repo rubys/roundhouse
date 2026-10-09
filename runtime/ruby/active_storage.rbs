@@ -31,6 +31,7 @@ module ActiveStorage
     def []: (Symbol key) -> Integer?
     def width: () -> Integer
     def height: () -> Integer
+    def values_at: (*Symbol keys) -> Array[Integer?]
     def to_json: () -> String
     def self.int_field: (String json, String name) -> Integer
     def self.parse: (String json) -> ActiveStorage::BlobMetadata

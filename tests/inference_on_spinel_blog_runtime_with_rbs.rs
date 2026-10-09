@@ -45,6 +45,8 @@ const DEPENDENCY_RBS: &[&str] = &[
     "runtime/ruby/rails.rbs",
     "runtime/ruby/action_controller/message_verifier.rbs",
     "runtime/ruby/active_support_time_parsing.rbs",
+    // `Inflector.pluralize_word`, for the multi-id RecordNotFound message.
+    "runtime/ruby/inflector_ext.rbs",
 ];
 
 /// Walk a typed expression tree, collecting every node whose `ty` is

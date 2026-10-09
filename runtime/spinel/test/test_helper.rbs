@@ -193,7 +193,8 @@ class TestBase
   # convenience — declaring it required would misdescribe every
   # blockless call the corpus makes.
   def travel_to: (untyped target) ?{ () -> void } -> void
-  def travel: (untyped duration) -> void
+  def travel: (untyped duration) ?{ () -> void } -> void
+  def freeze_time: () ?{ () -> void } -> void
   def travel_back: () -> void
 
   # `assert_difference -> { Model.count }, +1 do … end`. The expression

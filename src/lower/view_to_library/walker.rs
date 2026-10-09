@@ -1698,6 +1698,7 @@ mod tests {
             form_wrappers: Default::default(),
             stylesheets: Vec::new(),
             lexxy: false,
+            lexxy_editor_adapter: false,
             partial_ivars: Default::default(),
             partial_helpers: Default::default(),
             multipart_partials: Default::default(),

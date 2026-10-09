@@ -801,6 +801,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         form_wrappers: lx.form_wrappers.clone(),
         stylesheets: app.stylesheets.clone(),
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
+        lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
         partial_ivars: closures.clone(),
         partial_helpers: lx.controller_helpers.clone(),
         dyn_pools: dyn_pools.clone(),
@@ -1008,9 +1009,19 @@ pub fn insert_db_stub(classes: &mut std::collections::HashMap<ClassId, crate::an
         Symbol::from("configure"),
         fn_sig(vec![(Symbol::from("path"), Ty::Str)], Ty::Nil),
     );
-    db_info
-        .class_methods
-        .insert(Symbol::from("close"), fn_sig(vec![], Ty::Nil));
+    db_info.class_methods.insert(
+        Symbol::from("close"),
+        fn_sig(vec![], Ty::Nil),
+    );
+    // The per-request replay cache, which `ActiveRecord::Base.uncached`
+    // (active_record/connection.rb, ruby family) suspends for a block.
+    for (name, ret) in [
+        ("query_cache_begin", Ty::Nil),
+        ("query_cache_end", Ty::Nil),
+        ("query_cache_enabled?", Ty::Bool),
+    ] {
+        db_info.class_methods.insert(Symbol::from(name), fn_sig(vec![], ret));
+    }
     db_info.class_methods.insert(
         Symbol::from("exec"),
         fn_sig(vec![(Symbol::from("sql"), Ty::Str)], Ty::Nil),
@@ -4624,6 +4635,10 @@ pub(super) struct ViewCtx {
     /// hidden input beside an empty `<trix-editor>` (the gem swaps the
     /// helper; `form_builder::emit_rich_text_area` follows it).
     pub(super) lexxy: bool,
+    /// Lexxy renders through Rails' `ActionText::Editor` adapter, which
+    /// drops the Trix-era `input="…_trix_input…"` attribute (see
+    /// [`lexxy_uses_editor_adapter`]).
+    pub(super) lexxy_editor_adapter: bool,
     /// Render-tree ivar closure (`view_ivar_closures`), shared across this
     /// view's scopes. `emit_render_partial` looks up a rendered partial's
     /// needed ivars here and passes them as call-site args (the caller's
@@ -5231,4 +5246,33 @@ mod tests {
             Ty::Class { id: ClassId(Symbol::from("User")), args: vec![] }
         );
     }
+}
+
+/// Does Lexxy render through Rails' `ActionText::Editor` adapter?
+///
+/// The gem decides at boot (`Lexxy.supports_editor_adapter?`): it uses
+/// the adapter when `ActionText::Editor#editor_tag` takes a block, which
+/// is rails/rails#56926, and otherwise its own `action_text_tag.rb`
+/// (the one that writes `input="<id>_trix_input_<record>"`). Ingest
+/// sees no gem source, so the lockfile stands in: Lexxy 0.9.24 or later
+/// (the first with the adapter) over Action Text 8.2 or later. That is
+/// exact for every released Rails; the one window it misreads is a
+/// Rails main revision between the 8.2.0.alpha bump and #56926 (campfire
+/// 90b33002's rails 1a02651), which renders the old tag.
+pub(crate) fn lexxy_uses_editor_adapter(lock: &crate::gems::Lockfile) -> bool {
+    fn at_least(version: Option<&str>, min: &[u64]) -> bool {
+        let Some(v) = version else { return false };
+        let parts: Vec<u64> = v
+            .split(|c: char| c == '.' || c == '-')
+            .map_while(|p| p.parse().ok())
+            .collect();
+        for (i, want) in min.iter().enumerate() {
+            let got = parts.get(i).copied().unwrap_or(0);
+            if got != *want {
+                return got > *want;
+            }
+        }
+        true
+    }
+    at_least(lock.version_of("lexxy"), &[0, 9, 24]) && at_least(lock.version_of("actiontext"), &[8, 2])
 }

@@ -124,6 +124,21 @@ module ActiveSupport
       @seconds.to_f
     end
 
+    # Numeric predicates Rails' Duration answers by delegating to its
+    # value — net/http asks `zero?` of a timeout, and campfire passes
+    # `7.seconds` as one (Opengraph::Fetch).
+    def zero?
+      @seconds == 0
+    end
+
+    def positive?
+      @seconds > 0
+    end
+
+    def negative?
+      @seconds < 0
+    end
+
     # Rails parity: Duration#to_s is the seconds VALUE's to_s
     # (`30.minutes.to_s == "1800"`). Also what string interpolation
     # calls — lobsters' cache keys embed durations

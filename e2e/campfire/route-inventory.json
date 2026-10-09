@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "source": {
-    "campfire_sha": "90b330024dec3e757c79b6a7e6568f93da8e3148",
+    "campfire_sha": "32b4144b5206304fa8d4c67455a753e2d3c16635",
     "rails_version": "8.2.0.alpha",
-    "rails_revision": "1a02651ac37fb64b4de2a2b73461d86acf9c98fb",
+    "rails_revision": "e3d5c569d217c56c022b04acb127a8c24dbe9685",
     "routes_sha256": "566178b1d7d9ad736f249f1836dd734d412920ebd1ca7b3f768769894ff4ecb7",
-    "gemfile_lock_sha256": "3b5503a7cf5a01770d5933dcbd1f5438752996a2290ba910d5f312477b083a84"
+    "gemfile_lock_sha256": "fb219391217fc7daf227e437b7bd7fcc0544c5c26ee08af5a8ac9d6f15b88be6"
   },
   "counts": {
     "action_cable": 1,
