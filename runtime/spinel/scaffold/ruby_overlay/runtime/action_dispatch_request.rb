@@ -112,7 +112,9 @@ module ActionDispatch
     # X-Forwarded-Proto, which Rack honors unconfigured.
     def ssl?
       return true if @env["HTTPS"] == "on"
-      @env["HTTP_X_FORWARDED_PROTO"].to_s.split(",").first.to_s.strip.downcase == "https"
+      forwarded = @env["HTTP_X_FORWARDED_PROTO"].to_s.split(",").first.to_s.strip.downcase
+      return forwarded == "https" unless forwarded.empty?
+      @env["rack.url_scheme"].to_s.downcase == "https"
     end
 
     def protocol

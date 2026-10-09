@@ -252,8 +252,11 @@ module ActionDispatch
     # an https page, and the browser blocked the fetch.
     def ssl?
       return true if @env.fetch("HTTPS", "").to_s == "on"
-      forwarded = @env.fetch("HTTP_X_FORWARDED_PROTO", "").to_s
-      forwarded.split(",").first.to_s.strip.downcase == "https"
+      forwarded = @env.fetch("HTTP_X_FORWARDED_PROTO", "").to_s.split(",").first.to_s.strip.downcase
+      return forwarded == "https" unless forwarded.empty?
+      # No proxy header: the scheme Rack itself reports, the one key the
+      # Rack spec requires (`Rack::Request#scheme`'s last resort).
+      @env.fetch("rack.url_scheme", "").to_s.downcase == "https"
     end
 
     # Rails' `request.optional_port`: the port, unless it is the

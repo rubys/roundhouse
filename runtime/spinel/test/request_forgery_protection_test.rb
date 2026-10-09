@@ -89,6 +89,9 @@ class RequestForgeryProtectionTest < Minitest::Test
     refute controller(method: "POST", params: ok, headers: tls.merge("HTTP_ORIGIN" => "http://chat.example.com"), session_token: secret).verified_request?
     refute controller(method: "POST", params: ok, headers: { "HTTP_ORIGIN" => "https://chat.example.com" }, session_token: secret).verified_request?
     refute controller(method: "POST", params: ok, headers: { "HTTP_ORIGIN" => "http://chat.example.com:8080" }, session_token: secret).verified_request?
+    rack_https = { "rack.url_scheme" => "https", "HTTP_ORIGIN" => "https://chat.example.com" }
+    assert controller(method: "POST", params: ok, headers: rack_https, session_token: secret).verified_request?
+    refute controller(method: "POST", params: ok, headers: rack_https.merge("HTTP_ORIGIN" => "http://chat.example.com"), session_token: secret).verified_request?
     proxied = { "HTTP_X_FORWARDED_PROTO" => "https", "HTTP_ORIGIN" => "https://chat.example.com" }
     assert controller(method: "POST", params: ok, headers: proxied, session_token: secret).verified_request?
     # A Host header naming the scheme's standard port is the same origin
@@ -101,25 +104,29 @@ class RequestForgeryProtectionTest < Minitest::Test
   # development; an absent Origin is refused, unlike the form check.
   def test_a_cable_handshake_must_come_from_its_own_host
     rfp = ActionController::RequestForgeryProtection
-    base = rfp.base_url_for("chat.example.com:3000", "", "")
+    base = rfp.base_url_for("chat.example.com:3000", "", "", "")
     assert rfp.cable_origin_allowed?("http://chat.example.com:3000", base, false)
     refute rfp.cable_origin_allowed?("https://chat.example.com:3000", base, false)
     refute rfp.cable_origin_allowed?("https://evil.example", base, false)
     refute rfp.cable_origin_allowed?("http://chat.example.com:4000", base, false)
     refute rfp.cable_origin_allowed?("", base, false)
     refute rfp.cable_origin_allowed?("null", base, false)
-    tls = rfp.base_url_for("chat.example.com", "", "https")
+    tls = rfp.base_url_for("chat.example.com", "", "https", "")
     assert rfp.cable_origin_allowed?("https://chat.example.com", tls, false)
     refute rfp.cable_origin_allowed?("http://chat.example.com", tls, false)
-    assert_equal "https://chat.example.com", rfp.base_url_for("chat.example.com", "on", "")
-    assert_equal "https://chat.example.com", rfp.base_url_for("chat.example.com:443", "", "https")
-    assert_equal "http://chat.example.com", rfp.base_url_for("chat.example.com:80", "", "")
-    assert_equal "http://chat.example.com:443", rfp.base_url_for("chat.example.com:443", "", "")
+    assert_equal "https://chat.example.com", rfp.base_url_for("chat.example.com", "on", "", "")
+    assert_equal "https://chat.example.com", rfp.base_url_for("chat.example.com:443", "", "https", "")
+    assert_equal "http://chat.example.com", rfp.base_url_for("chat.example.com:80", "", "", "")
+    assert_equal "http://chat.example.com:443", rfp.base_url_for("chat.example.com:443", "", "", "")
+    # Rack's own scheme counts when nothing else says TLS: a server that
+    # sets only `rack.url_scheme` is still https. A proxy header wins.
+    assert_equal "https://chat.example.com", rfp.base_url_for("chat.example.com:443", "", "", "https")
+    assert_equal "http://chat.example.com", rfp.base_url_for("chat.example.com", "", "http", "https")
   end
 
   def test_development_also_allows_any_localhost_port
     rfp = ActionController::RequestForgeryProtection
-    base = rfp.base_url_for("chat.example.com", "", "")
+    base = rfp.base_url_for("chat.example.com", "", "", "")
     refute rfp.cable_origin_allowed?("http://localhost:3000", base, false)
     assert rfp.cable_origin_allowed?("http://localhost:3000", base, true)
     assert rfp.cable_origin_allowed?("https://localhost:8443", base, true)

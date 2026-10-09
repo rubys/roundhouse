@@ -257,7 +257,7 @@ fn build_fixture_class(
     // the DB by `<Class>.new({...attrs...}).save`. Inserts happen in
     // 1-indexed file order so the autoincrement column matches the
     // ids the label methods look up. Body is a Seq of Sends.
-    let load_body = build_load_method_body(&f.class, &f.records, &f.preamble, all, defaults);
+    let load_body = build_load_method_body(&f.class, &f.records, &f.preamble, &f.file_blobs, all, defaults);
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -399,6 +399,7 @@ fn build_load_method_body(
     cls: &ClassId,
     records: &[LoweredFixtureRecord],
     preamble: &[Expr],
+    file_blobs: &indexmap::IndexMap<Symbol, crate::dialect::FixtureFileBlob>,
     all: &LoweredFixtureSet,
     defaults: &[&Column],
 ) -> Expr {
@@ -414,6 +415,10 @@ fn build_load_method_body(
 
     for (idx, r) in records.iter().enumerate() {
         let id = (idx + 1) as i64;
+        if let Some(blob) = file_blobs.get(&r.label) {
+            exprs.push(load_file_blob(id, blob));
+            continue;
+        }
         // instance = <Class>.new
         let class_const = with_ty(
             Expr::new(
@@ -576,6 +581,39 @@ fn build_load_method_body(
         ));
     }
     Expr::new(Span::synthetic(), ExprNode::Seq { exprs })
+}
+
+/// `ActiveStorage::FixtureSet.load_blob!(<id>, "reading.webp", "test", "")`
+/// for a row Rails renders with `ActiveStorage::FixtureSet.blob`. The
+/// runtime half (the ruby family's disk service) reads the file under
+/// `test/fixtures/files`, uploads it and inserts the row under `id`;
+/// an empty string is an argument the call did not pass.
+fn load_file_blob(id: i64, blob: &crate::dialect::FixtureFileBlob) -> Expr {
+    let recv = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![Symbol::from("ActiveStorage"), Symbol::from("FixtureSet")] },
+        ),
+        Ty::Class { id: ClassId(Symbol::from("ActiveStorage::FixtureSet")), args: vec![] },
+    );
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from("load_blob!"),
+                args: vec![
+                    lit_int(id),
+                    lit_str(blob.filename.clone()),
+                    lit_str(blob.service_name.clone().unwrap_or_default()),
+                    lit_str(blob.content_type.clone().unwrap_or_default()),
+                ],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        Ty::Nil,
+    )
 }
 
 /// YAML-string values come through as raw strings; cast to the

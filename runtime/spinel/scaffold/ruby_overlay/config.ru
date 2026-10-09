@@ -106,7 +106,8 @@ app = lambda do |env|
     unless ActionController::RequestForgeryProtection.cable_origin_allowed?(
         env["HTTP_ORIGIN"].to_s,
         ActionController::RequestForgeryProtection.base_url_for(
-          env["HTTP_HOST"].to_s, env["HTTPS"].to_s, env["HTTP_X_FORWARDED_PROTO"].to_s),
+          env["HTTP_HOST"].to_s, env["HTTPS"].to_s, env["HTTP_X_FORWARDED_PROTO"].to_s,
+          env["rack.url_scheme"].to_s),
         Rails.env.development?)
       return [404, { "content-type" => "text/plain" }, ["Page not found"]]
     end
