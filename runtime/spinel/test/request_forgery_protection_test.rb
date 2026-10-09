@@ -73,32 +73,58 @@ class RequestForgeryProtectionTest < Minitest::Test
   def test_a_foreign_or_null_origin_is_refused_even_with_the_token
     secret = minted
     ok = { "authenticity_token" => secret }
-    assert controller(method: "POST", params: ok, headers: { "HTTP_ORIGIN" => "https://chat.example.com" }, session_token: secret).verified_request?
+    assert controller(method: "POST", params: ok, headers: { "HTTP_ORIGIN" => "http://chat.example.com" }, session_token: secret).verified_request?
     refute controller(method: "POST", params: ok, headers: { "HTTP_ORIGIN" => "https://evil.example" }, session_token: secret).verified_request?
     refute controller(method: "POST", params: ok, headers: { "HTTP_ORIGIN" => "null" }, session_token: secret).verified_request?
+  end
+
+  # actionpack compares the Origin with `request.base_url`, scheme and
+  # port included: the same host over the other scheme, or on another
+  # port, is another origin.
+  def test_the_origin_must_be_the_request_base_url_scheme_included
+    secret = minted
+    ok = { "authenticity_token" => secret }
+    tls = { "HTTPS" => "on" }
+    assert controller(method: "POST", params: ok, headers: tls.merge("HTTP_ORIGIN" => "https://chat.example.com"), session_token: secret).verified_request?
+    refute controller(method: "POST", params: ok, headers: tls.merge("HTTP_ORIGIN" => "http://chat.example.com"), session_token: secret).verified_request?
+    refute controller(method: "POST", params: ok, headers: { "HTTP_ORIGIN" => "https://chat.example.com" }, session_token: secret).verified_request?
+    refute controller(method: "POST", params: ok, headers: { "HTTP_ORIGIN" => "http://chat.example.com:8080" }, session_token: secret).verified_request?
+    proxied = { "HTTP_X_FORWARDED_PROTO" => "https", "HTTP_ORIGIN" => "https://chat.example.com" }
+    assert controller(method: "POST", params: ok, headers: proxied, session_token: secret).verified_request?
+    # A Host header naming the scheme's standard port is the same origin
+    # a browser writes without it.
+    explicit = tls.merge("HTTP_HOST" => "chat.example.com:443", "HTTP_ORIGIN" => "https://chat.example.com")
+    assert controller(method: "POST", params: ok, headers: explicit, session_token: secret).verified_request?
   end
 
   # Action Cable's handshake check: same host, or any localhost port in
   # development; an absent Origin is refused, unlike the form check.
   def test_a_cable_handshake_must_come_from_its_own_host
     rfp = ActionController::RequestForgeryProtection
-    host = "chat.example.com:3000"
-    assert rfp.cable_origin_allowed?("http://chat.example.com:3000", host, false)
-    assert rfp.cable_origin_allowed?("https://chat.example.com:3000", host, false)
-    refute rfp.cable_origin_allowed?("https://evil.example", host, false)
-    refute rfp.cable_origin_allowed?("http://chat.example.com:4000", host, false)
-    refute rfp.cable_origin_allowed?("", host, false)
-    refute rfp.cable_origin_allowed?("null", host, false)
+    base = rfp.base_url_for("chat.example.com:3000", "", "")
+    assert rfp.cable_origin_allowed?("http://chat.example.com:3000", base, false)
+    refute rfp.cable_origin_allowed?("https://chat.example.com:3000", base, false)
+    refute rfp.cable_origin_allowed?("https://evil.example", base, false)
+    refute rfp.cable_origin_allowed?("http://chat.example.com:4000", base, false)
+    refute rfp.cable_origin_allowed?("", base, false)
+    refute rfp.cable_origin_allowed?("null", base, false)
+    tls = rfp.base_url_for("chat.example.com", "", "https")
+    assert rfp.cable_origin_allowed?("https://chat.example.com", tls, false)
+    refute rfp.cable_origin_allowed?("http://chat.example.com", tls, false)
+    assert_equal "https://chat.example.com", rfp.base_url_for("chat.example.com", "on", "")
+    assert_equal "https://chat.example.com", rfp.base_url_for("chat.example.com:443", "", "https")
+    assert_equal "http://chat.example.com", rfp.base_url_for("chat.example.com:80", "", "")
+    assert_equal "http://chat.example.com:443", rfp.base_url_for("chat.example.com:443", "", "")
   end
 
   def test_development_also_allows_any_localhost_port
     rfp = ActionController::RequestForgeryProtection
-    host = "chat.example.com"
-    refute rfp.cable_origin_allowed?("http://localhost:3000", host, false)
-    assert rfp.cable_origin_allowed?("http://localhost:3000", host, true)
-    assert rfp.cable_origin_allowed?("https://localhost:8443", host, true)
-    refute rfp.cable_origin_allowed?("http://localhost:3000.evil.example", host, true)
-    refute rfp.cable_origin_allowed?("", host, true)
+    base = rfp.base_url_for("chat.example.com", "", "")
+    refute rfp.cable_origin_allowed?("http://localhost:3000", base, false)
+    assert rfp.cable_origin_allowed?("http://localhost:3000", base, true)
+    assert rfp.cable_origin_allowed?("https://localhost:8443", base, true)
+    refute rfp.cable_origin_allowed?("http://localhost:3000.evil.example", base, true)
+    refute rfp.cable_origin_allowed?("", base, true)
   end
 
   # Rails main's Fetch Metadata rule, ahead of the token.

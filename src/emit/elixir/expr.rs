@@ -2218,7 +2218,7 @@ mod tests {
     }
 
     fn block_send(recv: &str, method: &str, params: &[&str], body: Expr) -> Expr {
-        let lambda = Expr::new(crate::span::Span::synthetic(), ExprNode::Lambda { rest_param: None,
+        let lambda = Expr::new(crate::span::Span::synthetic(), ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: params.iter().map(|p| Symbol::from(*p)).collect(),
             block_param: None,
             body,

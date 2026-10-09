@@ -217,6 +217,9 @@ impl<'a> BodyTyper<'a> {
         block: &Expr,
     ) -> Ctx {
         let mut new_ctx = outer.clone();
+        // Required parameters come first, so the extra ones (optional,
+        // keyword, keyword rest) leave their positions alone; the Lambda
+        // arm binds the extras themselves from their defaults.
         let ExprNode::Lambda { params, .. } = &*block.node else {
             return new_ctx;
         };
@@ -350,6 +353,21 @@ impl<'a> BodyTyper<'a> {
         // is unbound and every read through it goes unresolved.
         if matches!(method.as_str(), "then" | "yield_self" | "tap") {
             return Some(vec![recv_ty.clone()]);
+        }
+        if method.as_str() == "in_batches" {
+            let is_model = |id: &ClassId| self.classes().get(id).is_some_and(|c| c.table.is_some());
+            let of = match recv_ty {
+                Ty::Relation { of } => Some(of.clone()),
+                Ty::Array { elem } => match &**elem {
+                    Ty::Class { id, .. } if is_model(id) => Some(id.clone()),
+                    _ => None,
+                },
+                Ty::Class { id, .. } if class_object_receiver && is_model(id) => Some(id.clone()),
+                _ => None,
+            };
+            if let Some(of) = of {
+                return Some(vec![Ty::Relation { of }]);
+            }
         }
         if let Ty::Tuple { elems } = recv_ty {
             let as_array = Ty::Array {

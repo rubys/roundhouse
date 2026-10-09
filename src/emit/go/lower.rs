@@ -135,9 +135,9 @@ pub mod nil_check_to_comma_ok {
                 });
                 new_e
             }
-            ExprNode::Lambda { rest_param, params, block_param, body, block_style } => {
+            ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => {
                 let mut new_e = e.clone();
-                new_e.node = Box::new(ExprNode::Lambda { rest_param: rest_param.clone(),
+                new_e.node = Box::new(ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
                     params: params.clone(),
                     block_param: block_param.clone(),
                     body: transform(body),
@@ -237,7 +237,7 @@ pub mod nil_check_to_comma_ok {
 
         let lambda = Expr::new(
             Span::synthetic(),
-            ExprNode::Lambda { rest_param: None,
+            ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                 params: vec![var_name.clone()],
                 block_param: None,
                 body: then_branch,
@@ -426,9 +426,9 @@ pub mod nil_to_zero_for_string_fields {
                 });
                 new_e
             }
-            ExprNode::Lambda { rest_param, params, block_param, body, block_style } => {
+            ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => {
                 let mut new_e = e.clone();
-                new_e.node = Box::new(ExprNode::Lambda { rest_param: rest_param.clone(),
+                new_e.node = Box::new(ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
                     params: params.clone(),
                     block_param: block_param.clone(),
                     body: transform(body, fields),

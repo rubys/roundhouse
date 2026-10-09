@@ -120,6 +120,10 @@ pub(in crate::analyze) fn register(
         // (`%div{opengraph_tags}` → `render_attrs(…)`, see
         // src/haml.rs) — renders an attribute string.
         "render_attrs",
+        // Our own HAML lowering's shortcut-class merge helper
+        // (`.g{ class: k }` → `render_attrs({ class: haml_class("g", k)
+        // })`, see src/haml.rs) — renders the merged class string.
+        "haml_class",
         // dom / rendering / capture
         "dom_id", "dom_class", "render", "render_to_string", "capture",
         "content_for", "provide", "escape_javascript", "j",

@@ -471,6 +471,35 @@ impl Ty {
     pub(crate) fn canonicalize_variants(variants: &mut [Ty]) {
         variants.sort_by(cmp_ty_nil_last);
     }
+
+    /// Of two `==` types, the one canonical order puts first. They can
+    /// differ only in the field order of a record somewhere inside;
+    /// picking by order instead of by arrival keeps a join's stored
+    /// form independent of the order its inputs came in.
+    pub(crate) fn canonical_min(a: Ty, b: Ty) -> Ty {
+        if !a.holds_record() || cmp_ty(&b, &a) != std::cmp::Ordering::Less {
+            a
+        } else {
+            b
+        }
+    }
+
+    fn holds_record(&self) -> bool {
+        match self {
+            Ty::Record { .. } => true,
+            Ty::Array { elem } => elem.holds_record(),
+            Ty::Hash { key, value } => key.holds_record() || value.holds_record(),
+            Ty::Tuple { elems } | Ty::Union { variants: elems } | Ty::Class { args: elems, .. } => {
+                elems.iter().any(Ty::holds_record)
+            }
+            Ty::Fn { params, block, ret, .. } => {
+                params.iter().any(|p| p.ty.holds_record())
+                    || block.as_ref().is_some_and(|b| b.holds_record())
+                    || ret.holds_record()
+            }
+            _ => false,
+        }
+    }
 }
 
 fn cmp_ty_nil_last(a: &Ty, b: &Ty) -> std::cmp::Ordering {
@@ -547,19 +576,32 @@ fn cmp_ty_slice(a: &[Ty], b: &[Ty]) -> std::cmp::Ordering {
     })
 }
 
+/// Rows compare by their fields sorted by name, then `rest`, so the
+/// order agrees with derived `==` (an `IndexMap` compares without
+/// regard to insertion order) and a union of records sorts the same
+/// whatever field order each arrived in (#617). Only rows that are
+/// `==` are then told apart by field order, so a total order still
+/// picks one stored form among them (see [`Ty::canonical_min`]);
+/// stored rows keep a source order and are never re-sorted.
 fn cmp_row(a: &Row, b: &Row) -> std::cmp::Ordering {
+    fn sorted(r: &Row) -> Vec<(&Symbol, &Ty)> {
+        let mut fields: Vec<(&Symbol, &Ty)> = r.fields.iter().collect();
+        fields.sort_by(|x, y| x.0.cmp(y.0));
+        fields
+    }
     a.fields
         .len()
         .cmp(&b.fields.len())
         .then_with(|| {
-            a.fields
-                .iter()
-                .zip(b.fields.iter())
+            sorted(a)
+                .into_iter()
+                .zip(sorted(b))
                 .map(|((ka, va), (kb, vb))| ka.cmp(kb).then_with(|| cmp_ty(va, vb)))
                 .find(|o| *o != std::cmp::Ordering::Equal)
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .then_with(|| a.rest.cmp(&b.rest))
+        .then_with(|| a.fields.keys().cmp(b.fields.keys()))
 }
 
 fn cmp_params(a: &[Param], b: &[Param]) -> std::cmp::Ordering {

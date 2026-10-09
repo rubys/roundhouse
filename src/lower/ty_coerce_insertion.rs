@@ -262,7 +262,16 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
             left: rewrite_expr(left, registry, class_name),
             right: rewrite_expr(right, registry, class_name),
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+            // Defaults are call sites like the body: same coercion.
+            extra_params: extra_params
+                .iter()
+                .map(|p| {
+                    let mut p = p.clone();
+                    p.default = p.default.as_ref().map(|d| rewrite_expr(d, registry, class_name));
+                    p
+                })
+                .collect(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_expr(body, registry, class_name),
@@ -627,5 +636,57 @@ fn wrap_in_cast(arg: &Expr, target_ty: &Ty) -> Expr {
         diagnostic: None,
         hint: None,
         decisions: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dialect::Param;
+    use crate::ident::Symbol;
+    use crate::span::Span;
+
+    fn call_take() -> Expr {
+        let arg = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: "x".into() } });
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("take"),
+                args: vec![arg],
+                block: None,
+                parenthesized: true,
+            },
+        )
+    }
+
+    fn first_arg_is_cast(e: &Expr) -> bool {
+        matches!(&*e.node, ExprNode::Send { args, .. } if matches!(&*args[0].node, ExprNode::Cast { .. }))
+    }
+
+    /// A lambda's parameter default is a call site like its body, so a
+    /// `take("x")` against `take(String?)` gets the same Some-wrap in both.
+    #[test]
+    fn a_lambda_default_gets_the_coercion_its_body_gets() {
+        let mut registry: CalleeRegistry = HashMap::new();
+        registry.entry("Foo".into()).or_default().insert(
+            "take".into(),
+            vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil] }],
+        );
+        let lambda = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                params: vec![],
+                rest_param: None,
+                extra_params: vec![Param::keyword(Symbol::from("label"), Some(call_take()))],
+                block_param: None,
+                body: call_take(),
+                block_style: Default::default(),
+            },
+        );
+        let out = rewrite_expr(&lambda, &registry, "Foo");
+        let ExprNode::Lambda { extra_params, body, .. } = &*out.node else { panic!("lambda") };
+        assert!(first_arg_is_cast(body), "body: {body:?}");
+        assert!(first_arg_is_cast(extra_params[0].default.as_ref().unwrap()), "default: {extra_params:?}");
     }
 }

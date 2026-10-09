@@ -2704,7 +2704,7 @@ fn collect_rescue_handlers(
                     )
                 }
                 (None, Some(b)) => match &*b.node {
-                    ExprNode::Lambda { params, body, .. } => {
+                    ExprNode::Lambda { params, extra_params, body, .. } if extra_params.is_empty() => {
                         // A block parameter names the exception; rewrite
                         // the reads to the rescue binding rather than
                         // renaming the binding, which would collide with
@@ -2797,37 +2797,18 @@ fn action_to_method(
     deferred_out: &mut std::collections::HashMap<Symbol, Expr>,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
-    // Required positionals first, then optional positionals with their
-    // defaults — so `def get_from_cache(opts = {})` round-trips instead of
-    // emitting `def get_from_cache` and crashing the body that reads `opts`.
-    let mut params: Vec<Param> = a
-        .params
-        .fields
-        .iter()
-        .map(|(n, _)| Param::positional(n.clone()))
-        .collect();
-    for (n, default) in &a.opt_params {
-        params.push(Param::with_default(n.clone(), default.clone()));
-    }
-    // Then the keyword params. The call sites in this very controller
-    // pass them by name, so emitting the `def` without them left every
-    // such helper raising `ArgumentError` the first time its action
-    // ran — the same failure the optional positionals above were added
-    // for, one parameter kind over.
+    // Required positionals, optionals (so `def get_from_cache(opts = {})`
+    // round-trips instead of emitting `def get_from_cache` and crashing
+    // the body that reads `opts`), `*rest`, the keywords, `**rest`, and
+    // the anonymous `**` / `...` — `Action::formal_params`. The call sites
+    // in this very controller pass all of them, so a `def` without one
+    // raises `ArgumentError` the first time its action runs.
     //
-    // Carried, not converted: ruby has keyword arguments, and turning
-    // them into positionals would lose the two things that make them
-    // keywords — any order, and skipping an optional one. A target
-    // that cannot express them says so instead (see the emit).
-    for (n, default) in &a.kw_params {
-        params.push(Param::keyword(n.clone(), default.clone()));
-    }
-    // `**rest` last, the only position Ruby accepts it in.
-    if let Some(n) = &a.kwrest_param {
-        let mut p = Param::keyword(n.clone(), None);
-        p.rest = true;
-        params.push(p);
-    }
+    // Keywords are carried, not converted: ruby has keyword arguments,
+    // and turning them into positionals would lose the two things that
+    // make them keywords — any order, and skipping an optional one. A
+    // target that cannot express a kind says so instead (see the emit).
+    let params: Vec<Param> = a.formal_params();
     // Order matters: turbo_stream is tested before json, so an action
     // with both templates picks the one the request actually asked for.
     let mut variants: Vec<&str> = Vec::new();
@@ -3320,7 +3301,7 @@ fn flatten_seqs(expr: &Expr) -> Expr {
                 args: args.iter().map(flatten).collect(),
                 block: block.as_ref().map(flatten),
             },
-            ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+            ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
                 params: params.clone(),
                 block_param: block_param.clone(),
                 body: flatten(body),

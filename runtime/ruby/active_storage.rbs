@@ -240,9 +240,14 @@ module ActiveStorage
     @record_type: String
     @record_id: Integer
     @name: String
+    @rows: Array[ActiveStorage::ManyAttachment]
+    @rows_loaded: bool
     def initialize: (String record_type, Integer record_id, String name) -> void
     def attached?: () -> bool
     def attachments: () -> Array[ActiveStorage::ManyAttachment]
+    def _preload_rows: (Array[ActiveStorage::ManyAttachment] rows) -> nil
+    def each: () { (ActiveStorage::ManyAttachment) -> untyped } -> Array[ActiveStorage::ManyAttachment]
+    def _sync_blob_ids: (Array[Integer] blob_ids) -> nil
     def attach_blob: (ActiveStorage::Blob blob) -> nil
     def attach: (String data, String filename, String content_type) -> nil
     def purge: () -> nil

@@ -345,7 +345,7 @@ fn emit_named_collection_each(
     let inner = accumulator_append_call(render_call, ctx);
     let block_lambda = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda {
+        ExprNode::Lambda { extra_params: Vec::new(),
             rest_param: None,
             params: vec![var_name],
             block_param: None,
@@ -498,7 +498,7 @@ fn wrap_cached_collection(
     let append_version = send(Some(append_slash), "<<", vec![version], None, false);
     let key_lambda = Expr::new(
         span,
-        ExprNode::Lambda {
+        ExprNode::Lambda { extra_params: Vec::new(),
             rest_param: None,
             params: vec![rec_name],
             block_param: None,
@@ -742,7 +742,7 @@ fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
     let inner = accumulator_append_call(render_call, ctx);
     let block_lambda = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![var_name],
             block_param: None,
             body: inner,
@@ -932,9 +932,12 @@ pub(super) fn emit_layout_block(
     block: &Expr,
     ctx: &ViewCtx,
 ) -> Option<Vec<Expr>> {
-    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else {
         return None;
     };
+    if !extra_params.is_empty() {
+        return None;
+    }
     let cap = "_layout_body";
     let cap_ctx = ViewCtx {
         accumulator: cap.to_string(),

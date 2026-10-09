@@ -1436,6 +1436,8 @@ module ActiveStorage
       @record_type = record_type
       @record_id = record_id
       @name = name
+      @rows = []
+      @rows_loaded = false
     end
 
     def attached?
@@ -1445,7 +1447,12 @@ module ActiveStorage
     # Every join row for this name on this record — Rails'
     # `Attached::Many#attachments`. Raw SQL (not Relation over the
     # synthesized Attachment MODEL) so the body stays fully typed.
+    #
+    # A preloaded proxy (`with_attached_<attr>`, or the rich-text
+    # `_and_embeds` scope) answers the rows its batch installed through
+    # `_preload_rows` without a query; any write below drops them.
     def attachments
+      return @rows if @rows_loaded
       sql = "SELECT a.id AS attachment_id, " + Blob.columns("b") +
             " FROM active_storage_attachments a " +
             "JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = " +
@@ -1453,15 +1460,65 @@ module ActiveStorage
             " AND a.record_id = " + ActiveRecord.adapter.escape_value(@record_id) +
             " AND a.name = " + ActiveRecord.adapter.escape_value(@name)
       out = []
-      ActiveRecord.adapter.select_rows(sql).each do |row|
+      ActiveRecord.adapter.select_rows(sql + " ORDER BY a.id").each do |row|
         out.push(ManyAttachment.new(row["attachment_id"].to_i, Blob.from_row(row)))
       end
       out
     end
 
+    # The batch loader's setter: the rows one `IN` query found for this
+    # record, in attachment order.
+    def _preload_rows(rows)
+      @rows = rows
+      @rows_loaded = true
+      nil
+    end
+
+    # Rails' `Attached::Many` hands every Enumerable call to
+    # `attachments` (`delegate_missing_to`); `each` is the one the
+    # corpus makes — campfire's `message.body.embeds.each(&:filename)`.
+    def each
+      rows = attachments
+      i = 0
+      n = rows.length
+      while i < n
+        yield rows[i]
+        i += 1
+      end
+      rows
+    end
+
+    # `self.embeds = blobs` for blob ids, in order: Rails' replace on
+    # assign to a `has_many_attached`. A row whose blob is not listed
+    # is detached; a listed blob not yet attached is attached once; an
+    # id naming no blob (a stale reference in stored markup) is
+    # skipped. Detaching leaves the blob, where Rails would
+    # `purge_later` it once nothing else references it.
+    def _sync_blob_ids(blob_ids)
+      @rows_loaded = false
+      kept = []
+      attachments.each do |att|
+        b = att.blob
+        bid = b.nil? ? 0 : b.id
+        if blob_ids.include?(bid) && !kept.include?(bid)
+          kept.push(bid)
+        else
+          ActiveRecord.adapter.delete("active_storage_attachments", att.id)
+        end
+      end
+      blob_ids.each do |bid|
+        next if kept.include?(bid)
+        kept.push(bid)
+        blob = Blob.find(bid)
+        attach_blob(blob) unless blob.nil?
+      end
+      nil
+    end
+
     # APPEND — prior attachments under `@name` stay. One's `attach_blob`
     # purges first; Many must not.
     def attach_blob(blob)
+      @rows_loaded = false
       ActiveRecord.adapter.insert("active_storage_attachments", {
         "name" => @name,
         "record_type" => @record_type,
@@ -1484,6 +1541,7 @@ module ActiveStorage
         ActiveRecord.adapter.delete("active_storage_attachments", att.id)
         blob.purge unless blob.nil?
       end
+      @rows_loaded = false
       nil
     end
 

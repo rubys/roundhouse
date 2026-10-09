@@ -156,7 +156,7 @@ pub fn synthesize_record_model(app: &mut App) {
     // so `rich_text.record` stays un-synthesized and typed gradual —
     // honest for a column that can name any owner. Storage uses the raw
     // `record_id` / `record_type` columns.
-    let body = vec![ModelBodyItem::Association {
+    let mut body = vec![ModelBodyItem::Association {
         assoc: Association::BelongsTo {
             name: Symbol::from("record"),
             target: ClassId(Symbol::from("Record")),
@@ -173,6 +173,41 @@ pub fn synthesize_record_model(app: &mut App) {
         leading_blank_line: false,
         span: Span::synthetic(),
     }];
+    // `has_many_attached :embeds` — Rails' record class declares it, and
+    // fills it before every save from the blobs the body's attachment
+    // nodes name (`self.embeds = body.attachables.grep(Blob).uniq`).
+    // Declared as the macro itself so the attachment pass expands the
+    // reader, its preload setter and the analyzer's typing exactly as it
+    // does for an app's own `has_many_attached`; the fill is
+    // `push_record_methods`' `_sync_embeds`. Only with Active Storage
+    // installed: without its tables there is nothing to attach to.
+    if embeds_modeled(&app.schema) {
+        body.push(ModelBodyItem::Unknown {
+            expr: Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("has_many_attached"),
+                    args: vec![lit_sym(Symbol::from(EMBEDS))],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            leading_comments: Vec::new(),
+            leading_blank_line: false,
+        });
+        body.push(ModelBodyItem::Callback {
+            callback: crate::dialect::Callback {
+                hook: crate::dialect::CallbackHook::AfterSave,
+                targets: vec![Symbol::from(SYNC_EMBEDS)],
+                on: None,
+                condition: None,
+            },
+            leading_comments: Vec::new(),
+            leading_blank_line: false,
+            span: Span::synthetic(),
+        });
+    }
     app.models.push(Model {
         sti_subclass_names: Vec::new(),
         name: class,
@@ -188,6 +223,23 @@ pub fn synthesize_record_model(app: &mut App) {
         class_attr_defaults: indexmap::IndexMap::new(),
         lexical_json_shadow: false,
     });
+}
+
+/// The attachment name Rails' record class declares for the blobs its
+/// body embeds.
+pub const EMBEDS: &str = "embeds";
+
+/// The record class's after-save fill of [`EMBEDS`].
+const SYNC_EMBEDS: &str = "_sync_embeds";
+
+/// Is `embeds` modeled for this app? It is an Active Storage
+/// attachment, so it needs Active Storage's two tables.
+pub fn embeds_modeled(schema: &crate::schema::Schema) -> bool {
+    schema.tables.contains_key(&Symbol::from(RECORD_TABLE))
+        && schema
+            .tables
+            .contains_key(&Symbol::from(crate::lower::attachment_model::RECORD_TABLE))
+        && schema.tables.contains_key(&Symbol::from("active_storage_blobs"))
 }
 
 /// Synthesize the Action Text method surface onto `model`.
@@ -231,6 +283,71 @@ pub(crate) fn push_rich_text_methods(methods: &mut Vec<MethodDef>, model: &Model
 fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     let body_col = Symbol::from("body");
     let content_ty = Ty::Class { id: content_class(), args: vec![] };
+
+    // def _sync_embeds
+    //   embeds._sync_blob_ids(body.attachable_ids("ActiveStorage::Blob")) unless @body.to_s.strip.empty?
+    //   nil
+    // end
+    //
+    // Rails' `before_save { self.embeds = body.attachables.grep(
+    // ActiveStorage::Blob).uniq if body.present? }`, run after the save
+    // here because an attachment row needs the record's id, which a
+    // create only has afterwards. `present?` is the Content's, which
+    // reads the markup (a body that is one image is present), hence the
+    // raw column rather than the plain-text `blank?` below.
+    if crate::lower::attached::many_attached_attrs(model)
+        .iter()
+        .any(|(_, a)| a.as_str() == EMBEDS)
+    {
+        let blob_ids = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(self_send(&body_col)),
+                method: Symbol::from("attachable_ids"),
+                args: vec![lit_str("ActiveStorage::Blob".to_string())],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let sync = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(self_send(&Symbol::from(EMBEDS))),
+                method: Symbol::from("_sync_blob_ids"),
+                args: vec![blob_ids],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let blank = no_arg_send(no_arg_send(no_arg_send(ivar("body"), "to_s"), "strip"), "empty?");
+        replace_or_push(
+            methods,
+            model,
+            MethodDef {
+                visibility: crate::dialect::MethodVisibility::Public,
+                unsupported_formals: None,
+                has_anonymous_block: false,
+                name_span: crate::span::Span::synthetic(),
+                name: Symbol::from(SYNC_EMBEDS),
+                receiver: MethodReceiver::Instance,
+                params: Vec::new(),
+                body: seq(vec![
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::If { cond: blank, then_branch: nil_lit(), else_branch: sync },
+                    ),
+                    nil_lit(),
+                ]),
+                signature: Some(fn_sig(vec![], Ty::Nil)),
+                effects: crate::effect::EffectSet::default(),
+                enclosing_class: Some(model.name.0.clone()),
+                kind: AccessorKind::Method,
+                is_async: false,
+                mutates_self: false,
+                block_param: None,
+            },
+        );
+    }
 
     // def body; ActionText::Content.new(@body); end
     replace_or_push(
@@ -716,7 +833,7 @@ fn each_destroy(rows: Expr) -> Expr {
     let var = Symbol::from("rich_text");
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda {
+        ExprNode::Lambda { extra_params: Vec::new(),
             params: vec![var.clone()],
             rest_param: None,
             block_param: None,
@@ -860,10 +977,11 @@ pub fn preload_scope_names(model: &Model) -> Vec<Symbol> {
 
 /// Each preload scope with the association it preloads: both
 /// `with_rich_text_body` and `with_rich_text_body_and_embeds` preload
-/// `rich_text_body` — embeds (the attachments inside a rich text) are
-/// not modeled, so the `_and_embeds` spelling buys the same one query.
-/// The emitter's relation delegate and the class-side body both read
-/// this, so they cannot disagree about what the scope does.
+/// `rich_text_body`; the `_and_embeds` spelling also preloads the
+/// record's own `embeds_attachments` beneath it (see
+/// [`preload_scope_nested`]). The emitter's relation delegate and the
+/// class-side body both read this, so they cannot disagree about what
+/// the scope does.
 pub fn preload_scopes(model: &Model) -> Vec<(Symbol, Symbol)> {
     let mut out = Vec::new();
     for (_span, attr) in rich_text_attrs(model) {
@@ -875,6 +993,20 @@ pub fn preload_scopes(model: &Model) -> Vec<(Symbol, Symbol)> {
         ));
     }
     out
+}
+
+/// What a preload scope loads BENEATH its association: Rails'
+/// `with_rich_text_<attr>_and_embeds` is `includes(rich_text_<attr>:
+/// { embeds_attachments: :blob })`, so the record class's
+/// `embeds_attachments` rides under the rich text — one more query for
+/// the page, none per message. The blob comes in the same row, as it
+/// does for `with_attached_<attr>`. An app without Active Storage has
+/// no `embeds` on the record class, and the record's preload dispatch
+/// passes over a name it does not carry.
+pub fn preload_scope_nested(scope: &Symbol) -> Option<Symbol> {
+    scope.as_str().ends_with("_and_embeds").then(|| {
+        crate::lower::attached::many_attachments_assoc_name(&Symbol::from(EMBEDS))
+    })
 }
 
 /// `_preload_rich_text_<attr>` — the setter the batch loader calls.
@@ -902,6 +1034,7 @@ pub fn preload_setter_name(attr: &Symbol) -> Symbol {
 pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     let rel = Symbol::from("__rel");
     for (name, assoc) in preload_scopes(model) {
+        let spec = preload_spec(&name, &assoc);
         if methods
             .iter()
             .any(|m| m.receiver == MethodReceiver::Class && m.name == name)
@@ -924,10 +1057,7 @@ pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &M
                 ExprNode::Send {
                     recv: Some(var_ref(rel.clone())),
                     method: Symbol::from("preload"),
-                    args: vec![Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Lit { value: Literal::Sym { value: assoc.clone() } },
-                    )],
+                    args: vec![spec],
                     block: None,
                     parenthesized: true,
                 },
@@ -949,6 +1079,22 @@ pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &M
             mutates_self: false,
             block_param: None,
         });
+    }
+}
+
+/// `:rich_text_body`, or `{ rich_text_body: :embeds_attachments }` for
+/// the `_and_embeds` scope.
+fn preload_spec(scope: &Symbol, assoc: &Symbol) -> Expr {
+    let assoc_lit = lit_sym(assoc.clone());
+    match preload_scope_nested(scope) {
+        None => assoc_lit,
+        Some(nested) => Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: vec![(assoc_lit, lit_sym(nested))],
+                kwargs: false,
+            },
+        ),
     }
 }
 

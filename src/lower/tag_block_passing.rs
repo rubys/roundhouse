@@ -364,9 +364,12 @@ fn try_rewrite(e: &mut Expr, acc: &str, variants: &HashMap<(String, String), Var
     if cargs.len() != variant.arity {
         return false;
     }
-    let ExprNode::Lambda { params: bparams, rest_param, block_param, body, .. } = &*blk.node else {
+    let ExprNode::Lambda { extra_params, params: bparams, rest_param, block_param, body, .. } = &*blk.node else {
         return false;
     };
+    if !extra_params.is_empty() {
+        return false;
+    }
     if !bparams.is_empty() || rest_param.is_some() || block_param.is_some() {
         return false;
     }

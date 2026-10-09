@@ -276,8 +276,13 @@ module ActionDispatch
     end
 
     # Scheme + host, no path — what Rails builds absolute URLs from.
+    # The scheme's standard port is dropped (`host_with_port` writes no
+    # `:443` over TLS or `:80` without it), so the CSRF check compares
+    # it with an Origin the way a browser serializes one.
     def base_url
-      protocol + @host
+      default = ssl? ? ":443" : ":80"
+      host = @host.end_with?(default) ? @host[0, @host.length - default.length].to_s : @host
+      protocol + host
     end
 
     # Absolute URL of this request. Feed templates interpolate it as

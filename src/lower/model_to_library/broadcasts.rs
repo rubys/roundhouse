@@ -35,7 +35,7 @@ pub(super) fn push_broadcasts_methods(methods: &mut Vec<MethodDef>, model: &Mode
         }
 
         let (channel_expr, self_param) = match &*args[0].node {
-            ExprNode::Lambda { body, params, .. } => (body.clone(), params.first().cloned()),
+            ExprNode::Lambda { body, params, extra_params, .. } if extra_params.is_empty() => (body.clone(), params.first().cloned()),
             ExprNode::Lit { value: Literal::Str { .. } } => (args[0].clone(), None),
             _ => continue,
         };

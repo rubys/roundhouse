@@ -555,6 +555,7 @@ mod tests {
         Expr::new(
             Span::synthetic(),
             ExprNode::Lambda {
+                extra_params: Vec::new(),
                 rest_param: None,
                 params: params.iter().copied().map(Symbol::from).collect(),
                 block_param: None,

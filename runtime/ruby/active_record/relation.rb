@@ -1085,6 +1085,12 @@ module ActiveRecord
       self
     end
 
+    # Not split into `of:`-row relations: one batch is the same answer at corpus sizes (as `find_in_batches`), so the block and the enumerator are this relation.
+    def in_batches(of: 1000, order: nil)
+      yield self if block_given?
+      self
+    end
+
     # Via loaded_records (not to_a): no shallow Array copy of the
     # memoized rows. to_a keeps its Rails dup contract for callers that
     # mutate the returned array.

@@ -632,7 +632,10 @@ pub fn attached_variations(model: &Model, attr: &Symbol) -> Vec<VariationDecl> {
         if value.as_str() != attr.as_str() {
             continue;
         }
-        let ExprNode::Lambda { params, body, .. } = &*block.node else { continue };
+        let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { continue };
+        if !extra_params.is_empty() {
+            continue;
+        }
         let Some(attachable) = params.first() else { continue };
         let stmts: Vec<&Expr> = match &*body.node {
             ExprNode::Seq { exprs } => exprs.iter().collect(),

@@ -1162,6 +1162,7 @@ mod string_borrow_tests {
                 block: Some(Expr::new(
                     Span::default(),
                     ExprNode::Lambda {
+                        extra_params: Vec::new(),
                         params: vec![],
                         rest_param: None,
                         block_param: None,

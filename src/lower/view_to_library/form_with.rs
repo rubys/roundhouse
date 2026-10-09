@@ -187,9 +187,21 @@ pub(super) fn emit_form_with_inline(
     block: &Expr,
     ctx: &ViewCtx,
 ) -> Vec<Expr> {
-    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else {
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
+    if !extra_params.is_empty() {
+        // A builder block with optional or keyword parameters has no
+        // lowering here, and a view has no dynamic path to fall back to:
+        // report it (the transpile fails) rather than render nothing.
+        crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+            block.span,
+            None,
+            crate::ident::Symbol::from("builder block with optional or keyword parameters"),
+            "a form or tag builder block takes only required parameters here",
+        ));
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    }
     let form_param = params
         .first()
         .cloned()
@@ -480,9 +492,21 @@ pub(super) fn emit_tag_builder_inline(
     block: &Expr,
     ctx: &ViewCtx,
 ) -> Vec<Expr> {
-    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else {
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
+    if !extra_params.is_empty() {
+        // A builder block with optional or keyword parameters has no
+        // lowering here, and a view has no dynamic path to fall back to:
+        // report it (the transpile fails) rather than render nothing.
+        crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+            block.span,
+            None,
+            crate::ident::Symbol::from("builder block with optional or keyword parameters"),
+            "a form or tag builder block takes only required parameters here",
+        ));
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    }
 
     // The builder's attributes come from the (single) trailing opts hash.
     let mut opts: Vec<(Expr, Expr)> = Vec::new();
@@ -1356,7 +1380,7 @@ pub(super) fn rewrite_errors_each_body(body: &Expr, var_name: &str) -> Expr {
                 })
                 .collect(),
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_errors_each_body(body, var_name),

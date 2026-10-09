@@ -12,27 +12,9 @@
 //! that bare splat into `*nil`, and forwarding is not modeled yet.
 
 use super::{IngestError, IngestResult};
-use crate::dialect::{Param, UnsupportedFormal};
+use crate::dialect::UnsupportedFormal;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AnonymousFormal {
-    Forwarding,
-    KeywordRest,
-}
-
-impl AnonymousFormal {
-    pub(super) fn into_param(self) -> Param {
-        match self {
-            Self::Forwarding => Param::forwarding(),
-            Self::KeywordRest => {
-                // Empty is a nameless declaration, never a legal binding.
-                let mut param = Param::keyword("".into(), None);
-                param.rest = true;
-                param
-            }
-        }
-    }
-}
+pub(crate) use crate::dialect::AnonymousFormal;
 
 #[derive(Default)]
 pub(crate) struct Formals {

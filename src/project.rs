@@ -1394,6 +1394,14 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
             ExprNode::ForwardKeywordsWithPairs { .. } if target == BuildTarget::Spinel => None,
             ExprNode::ForwardKeywordsWithPairs { .. } => Some("anonymous keyword forwarding"),
             ExprNode::Defined { .. } => Some("runtime defined? query"),
+            // The Ruby emitter (Spinel's and Roda's too) renders the whole
+            // signature; the other emitters read only the required names
+            // and would drop the rest, which the body still reads.
+            ExprNode::Lambda { extra_params, .. }
+                if !extra_params.is_empty() && !matches!(target, BuildTarget::Spinel | BuildTarget::Roda) =>
+            {
+                Some("lambda optional, keyword or keyword-rest parameters")
+            }
             ExprNode::Assign { target: LValue::Var { name, .. }, .. }
             | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
                 if name.as_str().starts_with("@@") => Some("class variable write"),
@@ -1549,10 +1557,17 @@ pub fn target_files(
             }
         }
     }
-    for (_, method) in crate::analyze::forwarding::methods(app) {
+    // Controller actions too: their `*rest`, `**` and `...` reach the
+    // emitted `def` through the same `Param`s (`Action::formal_params`).
+    let actions = crate::analyze::forwarding::controller_defs(app);
+    for method in crate::analyze::forwarding::methods(app)
+        .map(|(_, m)| m)
+        .chain(actions.iter().map(|(_, m)| m))
+    {
         if target != BuildTarget::Blog && let Some(formal) = method.unsupported_formals {
             crate::emit::diagnostics::report_unsupported(method.name_span, target.as_str(), "parameter declaration", formal.description());
         }
+        report_positional_rest_param(method, target);
         if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
             let keyword_rest = method
                 .params
@@ -4261,6 +4276,48 @@ pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, Strin
 /// the call site beside it passes them by name, so the two agree.
 /// Everywhere else the def renders positionally while the call renders
 /// a hash, and nothing in the emitted tree says so.
+/// A positional rest (`def f(*args)`, and the anonymous `def f(*)`)
+/// is carried by the ruby family alone. Every other emitter renders it
+/// as ONE plain parameter (`Param::rest`'s doc), so `f()` and
+/// `f(a, b)` stop matching the declaration and `f(a)` hands the body
+/// `a` where Ruby hands it `[a]` — an arity and value change that
+/// `check` cannot see. Until a target maps it onto its own variadics,
+/// say so instead of emitting the narrowed signature.
+///
+/// Full `...` forwarding and keyword rests are reported by the
+/// forwarding gate beside the call; a `**rest` that ingest flattened
+/// (`from_kwrest`) is a keyword bundle, not a positional rest.
+fn report_positional_rest_param(method: &crate::dialect::MethodDef, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda
+    ) {
+        return;
+    }
+    let Some(param) = method
+        .params
+        .iter()
+        .find(|p| p.rest && !p.keyword && !p.forwarding && !p.from_kwrest)
+    else {
+        return;
+    };
+    let name = if param.name.as_str().is_empty() || param.name.as_str().starts_with("__anon_rest") {
+        "*".to_string()
+    } else {
+        format!("*{}", param.name.as_str())
+    };
+    crate::emit::diagnostics::report_unsupported(
+        method.name_span,
+        target.as_str(),
+        "rest parameter",
+        format!(
+            "`{name}` on `{}` — this target renders a rest parameter as one positional, \
+             which changes the method's arity",
+            method.name.as_str()
+        ),
+    );
+}
+
 fn report_keyword_params(app: &App, target: &str) {
     // Read from the controllers rather than from `library_classes`:
     // the lowered helper is built inside each target's emit and never
