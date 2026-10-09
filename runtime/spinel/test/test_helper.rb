@@ -2056,8 +2056,11 @@ module RequestDispatch
     host!(url_host) unless url_host.empty?
     # The authority ends at the first `/` or `?`; with no path the
     # request is for the root, and keeps its query
-    # (`http://h?before=6` → `/?before=6`).
+    # (`http://h?before=6` → `/?before=6`). A `#fragment` never reaches
+    # the server, so it drops before the router sees the path.
     rest = path[ActionController.find_substr(path, "://") + 3, path.length].to_s
+    hash = ActionController.find_substr(rest, "#")
+    rest = rest[0, hash].to_s if hash >= 0
     slash = ActionController.find_substr(rest, "/")
     query = ActionController.find_substr(rest, "?")
     return "/" + rest[query, rest.length].to_s if query >= 0 && (slash < 0 || query < slash)

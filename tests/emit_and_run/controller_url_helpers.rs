@@ -77,6 +77,12 @@ class UrlsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "/?before=6", request.fullpath
   end
 
+  test "an absolute url's fragment does not reach the router" do
+    get "http://blog.test/urls?before=6#section"
+    assert_response :success
+    assert_equal "/urls?before=6", request.fullpath
+  end
+
   test "an https url is requested over https, and its redirect followed so" do
     get "https://blog.test/urls/away"
     assert_equal "https://blog.test/articles", response.location
