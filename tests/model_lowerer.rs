@@ -254,8 +254,10 @@ fn nullable_temporal_raw_reader_preserves_the_stored_slot_type() {
 
     let roundtrip = format!("{:?}", temporal_reader.body);
     assert!(
-        roundtrip.contains("method: Symbol(\"created_at_raw\")"),
-        "temporal reader must access the storage through its typed raw reader: {roundtrip}"
+        roundtrip.contains(
+            "Ivar { name: Symbol(\"created_at_raw\") }, ty: Some(Union { variants: [Str, Nil] })"
+        ),
+        "temporal reader must read the storage ivar typed as its stored slot: {roundtrip}"
     );
     assert!(
         roundtrip.contains("method: Symbol(\"parse_db_time\")"),
