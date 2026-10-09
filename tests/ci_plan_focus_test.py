@@ -98,6 +98,38 @@ class FocusLabels(unittest.TestCase):
         extras = ci.parse_coverage_labels(["ci:extras"])
         self.assertEqual(extras.focus_extras, tuple(ci.EXTRA_COMPARE_TARGETS))
 
+    def test_parse_compare_focus_labels(self):
+        parsed = ci.parse_coverage_labels(["ci:rust", "ci:typescript"])
+        self.assertEqual(parsed.focus_compare, ("rust", "typescript"))
+        self.assertEqual(ci.parse_coverage_labels(["ci:go"]).focus_compare, ())
+
+    def test_compare_focus_matches_path_owned_lane_and_is_required(self):
+        for lang, owned in (
+            ("rust", "src/emit/rust/mod.rs"),
+            ("typescript", "src/emit/typescript/mod.rs"),
+        ):
+            with self.subTest(lang=lang):
+                plan = ci.select(["src/emit/go.rs"], focus_compare=(lang,))
+                self.assertEqual(plan["jobs"], ci.select([owned])["jobs"])
+                self.assertEqual(plan["compare"], [lang])
+                self.assertEqual(plan["smoke"], [lang])
+                self.assertEqual(plan["extra_compare"], [])
+                self.assertIn("compare", plan["required"])
+                self.assertIn("smoke", plan["required"])
+                self.assertFalse(plan["spinel"])
+                self.assertFalse(set(ci.SPINEL11).intersection(plan["jobs"]))
+
+    def test_compare_focus_unions_with_extra_focus(self):
+        plan = ci.select([], focus_compare=("rust",), focus_extras=("go",))
+        self.assertEqual(plan["compare"], ["rust"])
+        self.assertEqual(plan["extra_compare"], ["go"])
+        self.assertEqual(len(plan["jobs"]), len(set(plan["jobs"])))
+        self.assertIn("smoke-extra", plan["required"])
+
+    def test_full_overrides_compare_focus(self):
+        plan = ci.select([], full=True, focus_compare=("rust",))
+        self.assertEqual(plan["compare"], ["rust", "typescript"])
+
     def test_single_lang_and_extras_focus_are_required(self):
         for lang in ci.EXTRA_COMPARE_TARGETS:
             with self.subTest(lang=lang):
