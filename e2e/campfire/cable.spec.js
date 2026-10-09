@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { signIn, watchForFailures, triage, report } from './helpers.js'
+import { watchForFailures, triage, report } from './helpers.js'
 
 // THE MILESTONE, IN A BROWSER: two tabs, one room, one live message.
 //
@@ -29,7 +29,7 @@ import { signIn, watchForFailures, triage, report } from './helpers.js'
 //
 //   walk check                                   | here
 //   ---------------------------------------------+-------------------------
-//   the account has a session cookie             | signIn's landing assertion
+//   the account has a session cookie             | the per-run storage state
 //   GET /rooms/1                                 | goto + response check
 //   the room page carries a stream source        | the locator below
 //   the page names the app's own channel         | the channel attribute
@@ -76,20 +76,17 @@ test('a message posted in one tab arrives live in another', async ({ browser }) 
   // jars and separate cable connections, which is what "a second
   // connection" means in the milestone. Two pages in one context can
   // share a connection and would prove less.
-  const contextA = await browser.newContext()
-  const contextB = await browser.newContext()
+  const storageState = process.env.CAMPFIRE_AUTH_STATE
+  const contextA = await browser.newContext({ baseURL: process.env.CAMPFIRE_BASE_URL, storageState })
+  const contextB = await browser.newContext({ baseURL: process.env.CAMPFIRE_BASE_URL, storageState })
   const pageA = await contextA.newPage()
   const pageB = await contextB.newPage()
 
   const findingsA = watchForFailures(pageA)
 
   try {
-    // Tab A signs in first: on a fresh archive database this is the
-    // /first_run POST that creates the account, the user and room 1, so
-    // it must complete before B tries to sign in.
-    await signIn(pageA)
-    await signIn(pageB)
-
+    // Both independent browser contexts load the per-run signed-in state,
+    // while retaining separate cookies and cable connections.
     const responseA = await pageA.goto('/rooms/1')
     expect(responseA?.status(), 'GET /rooms/1').toBe(200)
     await pageB.goto('/rooms/1')

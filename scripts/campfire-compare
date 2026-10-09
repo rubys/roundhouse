@@ -30,16 +30,14 @@
 # fragment-cache CSRF entry in runtime.md). The report→ledger→promote
 # ladder remains the path for any NEW artifact this harness grows.
 #
-# Usage:  scripts/campfire-compare [options]
+# Usage:  scripts/campfire-compare [options] [APP_PATH]
 #
-#   --reuse DIR   Skip transpiling; use an emit prepared earlier.
-#   --keep        Keep the emit + dumps and print their paths.
-#   --spinel      Drive the spinel BINARY as the emit lane (default: ruby).
-#                 A real gate since matz/spinel#4240 closed (fixed
-#                 c178fc15, the day it was filed): both frames
-#                 equivalent to Rails on the compiled binary. Needs
-#                 `spinel` >= that commit on PATH.
-#   --minor-gc    With --spinel: serve the binary under SPINEL_GC_MINOR=1,
+#   --target TARGET  ruby (default), spinel, or rust.
+#   --reuse DIR      Skip transpiling; use an emit prepared earlier.
+#   --keep           Keep the emit + dumps and print their paths.
+#   --spinel         Shorthand for --target spinel.
+#   --rust           Shorthand for --target rust.
+#   --minor-gc       With --spinel: serve under SPINEL_GC_MINOR=1,
 #                 spinel's generational collector (opt-in until it goes
 #                 default-on — matz/spinel#4260 asked for exactly this
 #                 leg, on every push, on our CI). Only the SERVED binary
@@ -60,7 +58,10 @@
 #                 it reports. A third leg beside --minor-gc, never a
 #                 replacement for it.
 #
-# EITHER WAY the emit's log is scanned for the runtime's own
+# The established Spinel lane has been a gate since matz/spinel#4240
+# closed (fixed c178fc15): its broadcast frames match Rails on the
+# compiled binary. It needs `spinel` >= that commit on PATH.
+# Only Spinel's emit log is scanned for the runtime's own
 # `GC generational check` lines and the run fails on them, keeping the
 # dumps: that output goes to the binary's STDERR, which lands in
 # $DUMPS/emit-server.log, which used to be deleted on success and never
@@ -70,8 +71,8 @@
 # Requires: the Rails oracle prepared at build/campfire-oracle
 # (scripts/campfire-oracle prepare), redis-server running (Action Cable's
 # adapter on the Rails side), cargo, ruby, and the puma / nio4r /
-# websocket-driver gems for the ruby lane (spinel + a C toolchain for
-# --spinel).
+# websocket-driver gems for the ruby lane, a C toolchain for spinel, or
+# the Rust toolchain for --target rust.
 
 set -euo pipefail
 
@@ -80,7 +81,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/scripts/lib/roundhouse-bin.sh"     # ROUNDHOUSE_BIN or cargo run
 APP="$HOME/git/once-campfire"
 ORACLE="$REPO_ROOT/build/campfire-oracle"
-LANE=ruby
+TARGET=ruby
 MINOR_GC=0
 VERIFY_GEN=0
 OUT=""
@@ -91,7 +92,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --reuse)  REUSE="$2"; shift 2 ;;
         --keep)   KEEP=1; shift ;;
-        --spinel) LANE=spinel; shift ;;
+        --target) TARGET="$2"; shift 2 ;;
+        --spinel) TARGET=spinel; shift ;;
+        --rust)   TARGET=rust; shift ;;
         --minor-gc) MINOR_GC=1; shift ;;
         # VERIFY_GEN implies the minor mark in the runtime
         # (lib/sp_gc.c's constructor sets sp_gc_minor_on), so this lane
@@ -107,14 +110,19 @@ ok()   { printf '\033[1;32mok\033[0m  %s\n' "$1"; }
 fail() { printf '\033[1;31m%s\033[0m\n' "$1"; }
 die()  { fail "$1"; exit 1; }
 
-if [[ $MINOR_GC -eq 1 && "$LANE" != spinel ]]; then
-    die "--minor-gc needs --spinel: SPINEL_GC_MINOR is read by the compiled binary, nothing on the ruby lane"
+case "$TARGET" in
+    ruby|spinel|rust) ;;
+    *) die "--target must be ruby, spinel, or rust (got $TARGET)" ;;
+esac
+
+if [[ $MINOR_GC -eq 1 && "$TARGET" != spinel ]]; then
+    die "--minor-gc is only valid with --target spinel"
 fi
-if [[ $VERIFY_GEN -eq 1 && "$LANE" != spinel ]]; then
-    die "--verify-gen needs --spinel: SPINEL_GC_VERIFY_GEN is read by the compiled binary, nothing on the ruby lane"
+if [[ $VERIFY_GEN -eq 1 && "$TARGET" != spinel ]]; then
+    die "--verify-gen is only valid with --target spinel"
 fi
 
-if [[ "$LANE" == spinel ]]; then
+if [[ "$TARGET" == spinel ]]; then
     # The emit names jemalloc and `spin` links it with no -L; on a mac that
     # is not on clang's search path. See the helper for the whole story.
     spinel_link_path
@@ -173,13 +181,13 @@ if [[ -n "$REUSE" ]]; then
     step "reusing emit at $OUT"
 else
     OUT="$(mktemp -d -t roundhouse-campfire-compare.XXXXXX)"
-    step "transpiling $APP → $OUT (target: $LANE)"
+    step "transpiling $APP → $OUT (target: $TARGET)"
     rm -rf "$OUT"
     roundhouse_run \
-        --target "$LANE" "$APP" -o "$OUT" --allow-unsupported 2>"$OUT.log" | tail -1
+        --target "$TARGET" "$APP" -o "$OUT" --allow-unsupported 2>"$OUT.log" | tail -1
 fi
 
-if [[ "$LANE" == ruby && ! -f "$OUT/.job-hold-spliced" ]]; then
+if [[ "$TARGET" == ruby && ! -f "$OUT/.job-hold-spliced" ]]; then
     # Same splice, same reason as scripts/campfire-cable-walk: the ruby
     # lane still runs perform_later inline, and the seeded rows reach
     # the web-push job on every POST.
@@ -196,10 +204,15 @@ PY
     touch "$OUT/.job-hold-spliced"
 fi
 
-if [[ "$LANE" == spinel && ! -x "$OUT/build/blog" ]]; then
-    step "building the binary"
+if [[ "$TARGET" == spinel && ! -x "$OUT/build/blog" ]]; then
+    step "building the Spinel binary"
     (cd "$OUT" && make build) >"$OUT/build.log" 2>&1 \
         || { tail -20 "$OUT/build.log"; die "spinel build failed"; }
+fi
+if [[ "$TARGET" == rust ]]; then
+    step "building the Rust application"
+    (cd "$OUT" && cargo build --release) >"$OUT/build.log" 2>&1 \
+        || { tail -40 "$OUT/build.log"; KEEP=1; die "Rust build failed (full log: $OUT/build.log)"; }
 fi
 
 step "staging the seeded rows into the emit"
@@ -218,15 +231,22 @@ step "booting the Rails oracle on :$ORACLE_PORT"
     > "$DUMPS/oracle-server.log" 2>&1 &
 ORACLE_PID=$!
 
-if [[ "$LANE" == spinel ]]; then
+if [[ "$TARGET" == spinel ]]; then
     # SPINEL_GC_MINOR is exported explicitly on BOTH settings: the default
     # lane's whole-heap mark is then an attestation, not an assumption
     # about the caller's environment (scripts/lobsters-spinel-driver.rb
     # learned this when the upstream default flipped under it).
-    step "booting the emit on :$EMIT_PORT (SPINEL_GC_MINOR=$MINOR_GC SPINEL_GC_VERIFY_GEN=$VERIFY_GEN)"
+    step "booting the Spinel binary on :$EMIT_PORT (SPINEL_GC_MINOR=$MINOR_GC SPINEL_GC_VERIFY_GEN=$VERIFY_GEN)"
     ( cd "$OUT" && BLOG_DB="$OUT/storage/development.sqlite3" PORT="$EMIT_PORT" \
         SPINEL_GC_MINOR="$MINOR_GC" SPINEL_GC_VERIFY_GEN="$VERIFY_GEN" \
         TEP_GC_STAT=1 exec ./build/blog ) > "$DUMPS/emit-server.log" 2>&1 &
+    EMIT_PID=$!
+elif [[ "$TARGET" == rust ]]; then
+    step "booting the Rust application on :$EMIT_PORT"
+    # Rust's emitted server defaults to storage/development.sqlite3 and
+    # reads PORT. Keep the same path used by its README and server runtime.
+    ( cd "$OUT" && PORT="$EMIT_PORT" exec ./target/release/app ) \
+        > "$DUMPS/emit-server.log" 2>&1 &
     EMIT_PID=$!
 else
     step "booting the emit on :$EMIT_PORT"
@@ -281,7 +301,7 @@ drive emit "$EMIT_PORT"
 # belongs in the scan below), and Tep.on_shutdown prints the collector's
 # attestation on its way out, which is no use in a log nobody reads
 # before deleting it.
-if [[ "$LANE" == spinel && -n "$EMIT_PID" ]]; then
+if [[ "$TARGET" == spinel && -n "$EMIT_PID" ]]; then
     step "stopping the emit and reading the collector's attestation"
     kill "$EMIT_PID" 2>/dev/null || true
     for _ in $(seq 1 15); do
@@ -311,7 +331,7 @@ if [[ "$LANE" == spinel && -n "$EMIT_PID" ]]; then
     fi
 fi
 
-if [[ "$LANE" == spinel ]]; then
+if [[ "$TARGET" == spinel ]]; then
     step "scanning the emit's log for the collector's generational check"
     if grep -q "GC generational check" "$DUMPS/emit-server.log"; then
         fail "the runtime's generational check FIRED -- a write barrier missed a store"

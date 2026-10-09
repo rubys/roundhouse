@@ -16,6 +16,7 @@ import { defineConfig, devices } from '@playwright/test'
 // one room and every spec is in it.
 export default defineConfig({
   testDir: '.',
+  globalSetup: './global-setup.js',
   fullyParallel: false,
   // The 90s timeout override that used to live here worked around the
   // ~30s second-client stall, since closed (docs/pipeline/runtime.md
@@ -31,6 +32,7 @@ export default defineConfig({
   reporter: process.env.CI ? [['github'], ['list']] : 'list',
   use: {
     baseURL: process.env.CAMPFIRE_BASE_URL || 'http://localhost:3000',
+    storageState: process.env.CAMPFIRE_AUTH_STATE,
     trace: 'on-first-retry',
     // Campfire's own system tests run 1400x1400; the room layout moves
     // its sidebar below a breakpoint and the composer is what most
