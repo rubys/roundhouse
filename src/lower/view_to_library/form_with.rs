@@ -934,16 +934,30 @@ fn classify_form_with_components(
     // `url:` beside `model:` overrides the resource-convention action
     // (Rails consults url first; lobsters' settings form has no
     // `setting_path` route for the convention to name). Fields still
-    // name under the model. Method: an explicit `method:` opt wins,
-    // else form_with's POST default.
+    // name under the model. Method: an explicit `method:` opt wins;
+    // else, for a record the view knows is a model, Rails' own
+    // `persisted? ? :patch : :post` (url: does not change the verb, so
+    // campfire's message edit form PATCHes); else form_with's POST.
     if let Some(url) = url_expr {
-        // `method:` steers the form verb (captured out of opts above);
-        // default POST like the url-only branch.
+        let method = method_expr.clone().unwrap_or_else(|| {
+            if is_known_model_record(&model, ctx) {
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond: send(Some(model.clone()), "persisted?", Vec::new(), None, false),
+                        then_branch: lit_sym(Symbol::from("patch")),
+                        else_branch: lit_sym(Symbol::from("post")),
+                    },
+                )
+            } else {
+                default_post()
+            }
+        });
         return Some(FormWithComponents {
             model_name: record_model_name(&model, ctx, &singular),
             model,
             action: route_helperize(url, &route_helpers, ctx),
-            method: method_expr.clone().unwrap_or_else(default_post),
+            method,
             opts_entries,
             id_prefix: namespace.clone().unwrap_or_default(),
         });
@@ -1042,6 +1056,21 @@ fn classify_form_with_components(
 /// falls back to the directory singular when the record's type isn't a
 /// known model — that fallback is the whole pre-existing behavior, so an
 /// untyped record is no worse off than before.
+/// The model expression is a record of a model the view's ivar-type map
+/// knows (an ivar, local or bare reader), so `persisted?` is defined on
+/// it. A constructed `X.new` is never persisted and form objects aren't
+/// known models, so both keep the POST default.
+fn is_known_model_record(model: &Expr, ctx: &ViewCtx) -> bool {
+    let name = match &*model.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.as_str(),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            method.as_str()
+        }
+        _ => return false,
+    };
+    ctx.ivar_models.contains_key(name)
+}
+
 fn record_model_name(model: &Expr, ctx: &ViewCtx, fallback: &str) -> String {
     // `model: Message.new` — a record CONSTRUCTED in the form call,
     // which is what a form for a not-yet-persisted resource looks like

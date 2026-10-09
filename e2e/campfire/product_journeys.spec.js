@@ -64,14 +64,15 @@ test('a member sends, boosts, edits, searches for, and deletes their message', a
   expect(new URLSearchParams(update.postData()).get('message[body]')).toContain(editedBody)
   const updateResponse = await update.response()
   const updateStatus = updateResponse?.status() ?? 0
-  const updateBody = (await updateResponse?.text())?.slice(0, 200) ?? ''
+  // A redirect (Rails' HTML answer to an update) carries no readable body.
+  const updateBody = updateStatus >= 400 ? ((await updateResponse?.text())?.slice(0, 200) ?? '') : ''
   expect(updateStatus, `message update ${update.url()} answered ${updateStatus}: ${updateBody}`).toBeLessThan(400)
   const editedMessage = page.locator('[id^="messages_"] .message').filter({ hasText: editedBody })
   await expect(editedMessage).toHaveCount(1)
 
   await page.goto('/searches')
   await page.getByRole('searchbox', { name: 'search' }).fill(editedBody)
-  await page.getByRole('button', { name: 'Search' }).click()
+  await page.getByRole('button', { name: 'Search', exact: true }).click()
   await expect(page.locator('#search-results .message').filter({ hasText: editedBody })).toHaveCount(1)
 
   await page.goto('/rooms/1')
@@ -83,7 +84,9 @@ test('a member sends, boosts, edits, searches for, and deletes their message', a
   await expect(page.locator('[id^="messages_"] .message').filter({ hasText: editedBody })).toHaveCount(0)
 })
 
-test('a member updates their profile and logs out', async ({ page }) => {
+// No logout here: it would end the shared signed-in session every later
+// spec starts from. auth_journey.spec.js covers logout in its own context.
+test('a member updates their profile', async ({ page }) => {
   await page.goto('/users/me/profile')
 
   const updatedName = `E2E Profile ${Date.now()}`
@@ -95,7 +98,4 @@ test('a member updates their profile and logs out', async ({ page }) => {
   await page.getByRole('button', { name: 'Save changes' }).click()
   await expect(page.locator('#user_name')).toHaveValue(updatedName)
   await expect(page.locator('#user_bio')).toHaveValue('Profile changes are visible after saving.')
-
-  await page.getByRole('button', { name: 'Log out' }).click()
-  await expect(page.locator('#email_address')).toBeVisible()
 })
