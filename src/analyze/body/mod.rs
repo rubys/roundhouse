@@ -2758,7 +2758,8 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
         return a;
     }
     if a == b {
-        return a;
+        // `==` ignores record field order; keep the canonical one.
+        return Ty::canonical_min(a, b);
     }
     // Structural join for same-shape generic containers — `Hash<A,B>
     // | Hash<C,D>` is more usefully expressed as `Hash<A|C, B|D>`
@@ -2841,11 +2842,56 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
             }
             out.push(Ty::Array { elem });
         }
-        other => {
-            if !out.contains(&other) {
-                out.push(other);
+        other => match out.iter_mut().find(|v| **v == other) {
+            // An equal variant can differ in record field order; keep
+            // the canonical one so the result doesn't depend on which
+            // arrived first.
+            Some(existing) => *existing = Ty::canonical_min(existing.clone(), other),
+            None => out.push(other),
+        },
+    }
+}
+
+/// The join for an ivar slot the fixpoint carries between rounds
+/// (`extract_ivar_assignments`' repeated writes and `[]=` widening).
+///
+/// [`union_of`] with a pending `Var` as the identity: a `Var` arm
+/// drops out wherever another arm sits beside it, at the top and
+/// inside Hash and Array spines, so `{}` (`Hash[Var, Var]`) joined
+/// with a `[]=` write gives the same Hash whichever arrived first, as
+/// `widen_hash_ivar_value` always meant (it replaced a `Var` value
+/// side). `Untyped` stays an arm: gradual absorption is unchanged
+/// (#617).
+pub(crate) fn join_ivar_slot(a: Ty, b: Ty) -> Ty {
+    drop_pending_arms(union_of(a, b))
+}
+
+/// Remove `Var` arms that sit beside a non-`Var` arm, in a union and
+/// inside Hash and Array spines. A union of `Var`s alone keeps the one
+/// with the smallest id (canonical order sorts them first), so every
+/// pending value is one element of the lattice. Expects `union_of`'s
+/// canonical form and returns it.
+pub(crate) fn drop_pending_arms(t: Ty) -> Ty {
+    match t {
+        Ty::Hash { key, value } => Ty::Hash {
+            key: Box::new(drop_pending_arms(*key)),
+            value: Box::new(drop_pending_arms(*value)),
+        },
+        Ty::Array { elem } => Ty::Array { elem: Box::new(drop_pending_arms(*elem)) },
+        Ty::Union { variants } => {
+            let mut variants: Vec<Ty> = variants.into_iter().map(drop_pending_arms).collect();
+            if variants.iter().any(|v| !matches!(v, Ty::Var { .. })) {
+                variants.retain(|v| !matches!(v, Ty::Var { .. }));
+            } else {
+                variants.truncate(1);
+            }
+            Ty::canonicalize_variants(&mut variants);
+            match variants.len() {
+                1 => variants.pop().unwrap(),
+                _ => Ty::Union { variants },
             }
         }
+        other => other,
     }
 }
 
@@ -4075,6 +4121,293 @@ mod tests {
             other => panic!("expected a union, got {other:?}"),
         };
         assert_eq!(spines, 1, "hash spines must merge, got {via_nil_first:?}");
+    }
+
+    fn record(fields: &[(&str, Ty)]) -> Ty {
+        Ty::Record {
+            row: Row {
+                fields: fields.iter().map(|(k, t)| (Symbol::from(*k), t.clone())).collect(),
+                rest: None,
+            },
+        }
+    }
+
+    fn field_order(t: &Ty) -> Vec<String> {
+        match t {
+            Ty::Record { row } => row.fields.keys().map(|k| k.as_str().to_string()).collect(),
+            other => panic!("expected a record, got {other:?}"),
+        }
+    }
+
+    /// Record rows are equal regardless of field order, so a union's
+    /// canonical variant order must not depend on it either.
+    #[test]
+    fn union_of_orders_records_regardless_of_field_order() {
+        let ab_int = record(&[("a", Ty::Int), ("b", Ty::Int)]);
+        let ba_int = record(&[("b", Ty::Int), ("a", Ty::Int)]);
+        let ab_str = record(&[("a", Ty::Str), ("b", Ty::Int)]);
+        assert_eq!(
+            union_of(ab_int.clone(), ab_str.clone()),
+            union_of(ab_str.clone(), ba_int.clone()),
+        );
+        for (x, y) in [(ab_int.clone(), ab_str.clone()), (ba_int.clone(), ab_str.clone())] {
+            check_record_laws(x, y);
+        }
+    }
+
+    fn check_record_laws(x: Ty, y: Ty) {
+        let universe = [x.clone(), y.clone(), Ty::Nil, Ty::Int, union_of(x, Ty::Nil), union_of(y, Ty::Str)];
+        for a in &universe {
+            for b in &universe {
+                assert_eq!(union_of(a.clone(), b.clone()), union_of(b.clone(), a.clone()), "{a:?} ⊔ {b:?}");
+                for c in &universe {
+                    assert_eq!(
+                        union_of(union_of(a.clone(), b.clone()), c.clone()),
+                        union_of(a.clone(), union_of(b.clone(), c.clone())),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Two arrivals of one record in different field orders keep one
+    /// of the source orders, and the same one whichever came first:
+    /// some targets emit fields in that order.
+    #[test]
+    fn union_of_keeps_one_source_field_order_for_equal_records() {
+        let ab = record(&[("a", Ty::Int), ("b", Ty::Str)]);
+        let ba = record(&[("b", Ty::Str), ("a", Ty::Int)]);
+        let one = union_of(ab.clone(), ba.clone());
+        let other = union_of(ba.clone(), ab.clone());
+        assert_eq!(field_order(&one), field_order(&other));
+        let nil_first = union_of(union_of(ba.clone(), Ty::Nil), ab.clone());
+        let nil_last = union_of(union_of(ab, Ty::Nil), ba);
+        let order = |t: &Ty| match t {
+            Ty::Union { variants } => field_order(&variants[0]),
+            other => panic!("expected a union, got {other:?}"),
+        };
+        assert_eq!(order(&nil_first), order(&nil_last));
+        assert_eq!(order(&nil_first), field_order(&one));
+    }
+
+    // Lattice laws for every join that feeds a slot the fixpoint carries
+    // from one round to the next (#617, "Any order"). A worklist that
+    // visits producers in another order joins the same observations in
+    // another order and grouping, so each carried-slot join has to be
+    // commutative, associative and idempotent, with pending (`Var`) as
+    // its identity. The universe is generated from `law_universe` plus
+    // the unknown-arm shapes the joins classify, normalized through the
+    // join under test (a carried slot only ever holds a join's output),
+    // and every law is checked over every pair and triple.
+
+    fn pending() -> Ty {
+        Ty::Var { var: TyVar(0) }
+    }
+
+    fn carried_slot_universe(join: fn(Ty, Ty) -> Ty) -> Vec<Ty> {
+        let mut raw = law_universe();
+        raw.extend([
+            Ty::Var { var: TyVar(2) },
+            Ty::Union { variants: vec![Ty::Str, Ty::Untyped] },
+            Ty::Union { variants: vec![Ty::Int, Ty::Var { var: TyVar(4) }] },
+            Ty::Union { variants: vec![Ty::Untyped, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Var { var: TyVar(5) }, Ty::Nil] },
+        ]);
+        let mut out: Vec<Ty> = Vec::new();
+        for t in raw {
+            let t = join(pending(), t);
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+        out
+    }
+
+    fn check_carried_slot_join_laws(name: &str, join: fn(Ty, Ty) -> Ty) {
+        let universe = carried_slot_universe(join);
+        for a in &universe {
+            assert_eq!(join(pending(), a.clone()), *a, "{name}: pending ⊔ {a:?}");
+            assert_eq!(join(a.clone(), pending()), *a, "{name}: {a:?} ⊔ pending");
+            assert_eq!(join(a.clone(), a.clone()), *a, "{name}: {a:?} ⊔ itself");
+            for b in &universe {
+                let ab = join(a.clone(), b.clone());
+                assert_eq!(ab, join(b.clone(), a.clone()), "{name}: {a:?} ⊔ {b:?} must commute");
+                for c in &universe {
+                    assert_eq!(
+                        join(ab.clone(), c.clone()),
+                        join(a.clone(), join(b.clone(), c.clone())),
+                        "{name}: ({a:?} ⊔ {b:?}) ⊔ {c:?} must associate",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ivar_slot_join_is_a_lattice_join() {
+        check_carried_slot_join_laws("join_ivar_slot", join_ivar_slot);
+    }
+
+    /// `@ivar = <ty>` with the value's type already stamped.
+    fn ivar_write(name: &str, ty: Ty) -> Expr {
+        let mut value = synth(ExprNode::Lit { value: Literal::Nil });
+        value.ty = Some(ty);
+        synth(ExprNode::Assign { target: LValue::Ivar { name: Symbol::from(name) }, value })
+    }
+
+    /// `@ivar[key] = <ty>`, the `[]=` Send form.
+    fn ivar_index_write(name: &str, ty: Ty) -> Expr {
+        let mut key = synth(ExprNode::Lit { value: Literal::Str { value: "k".to_string() } });
+        key.ty = Some(Ty::Str);
+        let mut value = synth(ExprNode::Lit { value: Literal::Nil });
+        value.ty = Some(ty);
+        synth(ExprNode::Send {
+            recv: Some(synth(ExprNode::Ivar { name: Symbol::from(name) })),
+            method: Symbol::from("[]="),
+            args: vec![key, value],
+            block: None,
+            parenthesized: false,
+        })
+    }
+
+    /// The ivar's harvested type after `stmts`, run in the order given.
+    fn harvested_ivar(name: &str, stmts: Vec<Expr>) -> Ty {
+        let mut out = HashMap::new();
+        crate::analyze::extract_ivar_assignments(&synth(ExprNode::Seq { exprs: stmts }), &mut out);
+        out.remove(&Symbol::from(name)).expect("ivar harvested")
+    }
+
+    fn empty_hash() -> Ty {
+        Ty::Hash { key: Box::new(Ty::Var { var: TyVar(0) }), value: Box::new(Ty::Var { var: TyVar(0) }) }
+    }
+
+    /// `@h = {}` and `@h[k] = v` give one type whichever is harvested
+    /// first: the `{}` literal's `Var`s are pending in both joins.
+    #[test]
+    fn empty_hash_seed_and_index_writes_join_in_any_order() {
+        let seed_first = harvested_ivar("h", vec![
+            ivar_write("h", empty_hash()),
+            ivar_index_write("h", Ty::Int),
+            ivar_index_write("h", Ty::Str),
+        ]);
+        let writes_first = harvested_ivar("h", vec![
+            ivar_index_write("h", Ty::Int),
+            ivar_index_write("h", Ty::Str),
+            ivar_write("h", empty_hash()),
+        ]);
+        let want = Ty::Hash {
+            key: Box::new(Ty::Str),
+            value: Box::new(Ty::Union { variants: vec![Ty::Int, Ty::Str] }),
+        };
+        assert_eq!(seed_first, want);
+        assert_eq!(writes_first, want);
+    }
+
+    /// A nullable Hash ivar (`@data = nil` on one path, `{}` on
+    /// another) still records its `[]=` writes. Ignoring them left
+    /// `Hash[Var, Var] | Nil` (or the first write's value type) after
+    /// a `String` and an `Integer` were stored, the shape of the
+    /// unsound `@data` typing on #617's soundness frontier.
+    #[test]
+    fn index_writes_widen_a_nullable_hash_ivar() {
+        let want = Ty::Union {
+            variants: vec![
+                Ty::Hash {
+                    key: Box::new(Ty::Str),
+                    value: Box::new(Ty::Union { variants: vec![Ty::Int, Ty::Str] }),
+                },
+                Ty::Nil,
+            ],
+        };
+        let seeded = harvested_ivar("data", vec![
+            ivar_write("data", Ty::Nil),
+            ivar_write("data", empty_hash()),
+            ivar_index_write("data", Ty::Str),
+            ivar_index_write("data", Ty::Int),
+        ]);
+        assert_eq!(seeded, want);
+        let written_first = harvested_ivar("data", vec![
+            ivar_index_write("data", Ty::Str),
+            ivar_write("data", Ty::Nil),
+            ivar_index_write("data", Ty::Int),
+            ivar_write("data", empty_hash()),
+        ]);
+        assert_eq!(written_first, want);
+    }
+
+    /// The widening still leaves an ivar holding a class instance (or
+    /// a nullable one) alone: that class's own `[]=` runs, not Hash's.
+    #[test]
+    fn index_writes_leave_a_class_instance_ivar_alone() {
+        let foo = Ty::Class { id: ClassId(Symbol::from("Foo")), args: vec![] };
+        let nullable_foo = Ty::Union { variants: vec![foo, Ty::Nil] };
+        let got = harvested_ivar("x", vec![
+            ivar_write("x", nullable_foo.clone()),
+            ivar_index_write("x", Ty::Int),
+        ]);
+        assert_eq!(got, nullable_foo);
+    }
+
+    /// Every order of `stmts`, for the order-independence checks below.
+    fn permutations(stmts: Vec<Expr>) -> Vec<Vec<Expr>> {
+        if stmts.len() <= 1 {
+            return vec![stmts];
+        }
+        let mut out = Vec::new();
+        for i in 0..stmts.len() {
+            let mut rest = stmts.clone();
+            let first = rest.remove(i);
+            for mut tail in permutations(rest) {
+                tail.insert(0, first.clone());
+                out.push(tail);
+            }
+        }
+        out
+    }
+
+    /// A `[]=` write harvested before the `{}` seed is kept, whatever
+    /// the slot holds when it arrives (nothing, `nil` or a pending
+    /// `Var`): the harvest gives one type in every statement order.
+    #[test]
+    fn index_writes_before_the_hash_seed_are_kept_in_any_order() {
+        let want_nullable = Ty::Union {
+            variants: vec![
+                Ty::Hash {
+                    key: Box::new(Ty::Str),
+                    value: Box::new(Ty::Union { variants: vec![Ty::Int, Ty::Str] }),
+                },
+                Ty::Nil,
+            ],
+        };
+        let stmts = vec![
+            ivar_write("data", Ty::Nil),
+            ivar_write("data", empty_hash()),
+            ivar_index_write("data", Ty::Str),
+            ivar_index_write("data", Ty::Int),
+        ];
+        for order in permutations(stmts) {
+            assert_eq!(harvested_ivar("data", order.clone()), want_nullable, "order {order:?}");
+        }
+        let want = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Int) };
+        let stmts = vec![
+            ivar_write("data", Ty::Var { var: TyVar(3) }),
+            ivar_write("data", empty_hash()),
+            ivar_index_write("data", Ty::Int),
+        ];
+        for order in permutations(stmts) {
+            assert_eq!(harvested_ivar("data", order.clone()), want, "order {order:?}");
+        }
+    }
+
+    /// A class instance's `[]=` is that class's, before or after the
+    /// instance is assigned.
+    #[test]
+    fn index_writes_leave_a_class_instance_ivar_alone_in_any_order() {
+        let foo = Ty::Class { id: ClassId(Symbol::from("Foo")), args: vec![] };
+        let nullable_foo = Ty::Union { variants: vec![foo, Ty::Nil] };
+        for order in permutations(vec![ivar_write("x", nullable_foo.clone()), ivar_index_write("x", Ty::Int)]) {
+            assert_eq!(harvested_ivar("x", order), nullable_foo);
+        }
     }
 
     #[test]

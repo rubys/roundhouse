@@ -339,7 +339,7 @@ pub(crate) fn harvest_ivar_set(
     };
     let ty = narrow_to_named_model(&name, ty, env.models_by_ivar);
     let merged = match out.remove(&name) {
-        Some(prev) => super::body::union_of(prev, ty),
+        Some(prev) => super::body::join_ivar_slot(prev, ty),
         None => ty,
     };
     out.insert(name, merged);

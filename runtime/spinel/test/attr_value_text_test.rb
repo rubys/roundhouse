@@ -19,6 +19,11 @@ class AttrValueTextTest < Minitest::Test
     assert_equal %(<a class="" href="/r">x</a>), ActionView::ViewHelpers.link_to("x", "/r", class: [])
   end
 
+  def test_a_literal_false_array_element_is_dropped_like_nil
+    assert_equal %(<a class="direct cold" href="/r">x</a>),
+      ActionView::ViewHelpers.link_to("x", "/r", class: ["direct", false, "cold"])
+  end
+
   def test_any_other_array_value_is_space_joined
     assert_equal %(<a rel="noopener noreferrer" href="/r">x</a>),
       ActionView::ViewHelpers.link_to("x", "/r", rel: ["noopener", "noreferrer"])

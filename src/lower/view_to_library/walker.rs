@@ -1575,6 +1575,22 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
             elements: elements.iter().map(|el| rewrite_helpers_in_expr(el, ctx)).collect(),
             style: *style,
         },
+        // A Hash literal's VALUES can carry a helper call the same way an
+        // Array element can — the HAML compiler's shortcut-class merge
+        // emits `render_attrs({ class: haml_class("g", k), … })`, where
+        // `render_attrs`'s own classify+emit (`RenderAttrs` in
+        // `helpers.rs`) clones its `attrs` Hash whole rather than
+        // threading each entry back through this walk, so a nested
+        // helper reaches emit here or not at all. Keys are threaded too,
+        // for the same reason Array elements all are, though a literal
+        // Hash key never carries one in practice.
+        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
+            entries: entries
+                .iter()
+                .map(|(k, v)| (rewrite_helpers_in_expr(k, ctx), rewrite_helpers_in_expr(v, ctx)))
+                .collect(),
+            kwargs: *kwargs,
+        },
         // Statement compounds: a form-builder map lambda hoisted into a
         // select-options loop is a `Seq` of local Assigns building the
         // option text (`html = "<strong>#{h(t.tag)}</strong>"`;

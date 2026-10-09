@@ -128,7 +128,19 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             let (name, channel) = view_stream_from(streamables, ctx)?;
             Some(view_helpers_call("turbo_stream_from", vec![name, channel]))
         }
-        RenderAttrs { attrs } => Some(view_helpers_call("render_attrs", vec![(*attrs).clone()])),
+        // `attrs` is a Hash literal whose VALUES can themselves be a
+        // helper call (the HAML compiler's shortcut-class merge emits
+        // `render_attrs({ class: haml_class("g", k), … })`) — thread it
+        // back through the walk first, so a nested helper reaches its
+        // own `ActionView::ViewHelpers.*` emit instead of surviving as a
+        // bare, unqualified call the Views module has no method for.
+        RenderAttrs { attrs } => {
+            Some(view_helpers_call("render_attrs", vec![rewrite_helpers_in_expr(attrs, ctx)]))
+        }
+        HamlClass { static_classes, value } => Some(view_helpers_call(
+            "haml_class",
+            vec![rewrite_helpers_in_expr(static_classes, ctx), rewrite_helpers_in_expr(value, ctx)],
+        )),
         DomId { record, prefix } => {
             let mut args = vec![(*record).clone()];
             if let Some(p) = prefix {
