@@ -573,6 +573,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
         }
+        retype_cross_method_ivar_reads(&mut methods, &classes, &framework_ivars);
         methods.extend(collect_attr_accessor_methods(controller));
         apply_alias_methods(controller, &mut methods);
         apply_undef_methods(controller, &mut methods);
@@ -621,6 +622,77 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     out.extend(params_lcs);
     });
     out
+}
+
+/// A `before_action` helper writes `@message`; the action and its
+/// sibling helpers read it. Each body is typed alone, so the reader saw
+/// an unbound ivar (`Var`) and every call on it went untyped — in Rust
+/// the struct field itself fell to `serde_json::Value`. After the
+/// first pass, take each ivar's type from the writes across the
+/// controller's methods (when every write is fully known) and retype
+/// the methods that read one the first pass left open.
+fn retype_cross_method_ivar_reads(
+    methods: &mut [MethodDef],
+    classes: &std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
+    framework_ivars: &std::collections::HashMap<Symbol, Ty>,
+) {
+    fn walk(
+        e: &Expr,
+        writes: &mut std::collections::HashMap<Symbol, Option<Ty>>,
+        open_reads: &mut std::collections::HashSet<Symbol>,
+    ) {
+        match &*e.node {
+            ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } => {
+                let known = value.ty.clone().filter(|t| !t.mentions_unknown() && !matches!(t, Ty::Bottom));
+                let slot = writes.entry(name.clone()).or_insert_with(|| known.clone());
+                *slot = match (slot.take(), known) {
+                    (Some(a), Some(b)) if a == b => Some(a),
+                    // `T` and `nil` across branches is the one mix that
+                    // is a faithful single type; any other disagreement
+                    // stays unbound.
+                    (Some(Ty::Nil), Some(b)) | (Some(b), Some(Ty::Nil))
+                        if !matches!(b, Ty::Union { .. }) =>
+                    {
+                        Some(Ty::Union { variants: vec![b, Ty::Nil] })
+                    }
+                    _ => None,
+                };
+            }
+            ExprNode::Ivar { name } if e.ty.as_ref().is_none_or(|t| t.mentions_unknown()) => {
+                open_reads.insert(name.clone());
+            }
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| walk(c, writes, open_reads));
+    }
+    let mut writes: std::collections::HashMap<Symbol, Option<Ty>> = Default::default();
+    let mut open_reads: std::collections::HashSet<Symbol> = Default::default();
+    for m in methods.iter() {
+        if m.receiver == MethodReceiver::Instance {
+            walk(&m.body, &mut writes, &mut open_reads);
+        }
+    }
+    let mut bindings = framework_ivars.clone();
+    let mut learned = false;
+    for (name, ty) in writes {
+        if let (Some(ty), true) = (ty, open_reads.contains(&name)) {
+            if !framework_ivars.contains_key(&name) {
+                bindings.insert(name, ty);
+                learned = true;
+            }
+        }
+    }
+    if !learned {
+        return;
+    }
+    for m in methods.iter_mut().filter(|m| m.receiver == MethodReceiver::Instance) {
+        let mut writes = Default::default();
+        let mut reads: std::collections::HashSet<Symbol> = Default::default();
+        walk(&m.body, &mut writes, &mut reads);
+        if reads.iter().any(|n| bindings.contains_key(n) && !framework_ivars.contains_key(n)) {
+            crate::lower::typing::type_method_body(m, classes, &bindings);
+        }
+    }
 }
 
 /// Single-controller entry point — kept for tests and call sites that
