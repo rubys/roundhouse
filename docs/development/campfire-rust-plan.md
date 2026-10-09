@@ -1,7 +1,9 @@
 # Campfire on Rust: compile-to-working plan
 
-**Status:** baseline not yet reproduced; plan established; feature work is gated
-on an exact, repeatable compiler-error inventory.
+**Status:** the pinned survey-build compiler inventory is captured; a repeat
+generation/fingerprint comparison and the complete output census are pending.
+Strict Rust project generation currently refuses the app. Root-cause triage and
+semantic implementation work remain open.
 
 **Scope:** the ONCE Campfire revision pinned below, emitted as a Rust project by
 Roundhouse. “Rust compiles” and “Campfire works” are deliberately separate
@@ -17,20 +19,30 @@ falling, or a test being selected is not completion evidence.
 
 | Input | Snapshot / status |
 |---|---|
-| Roundhouse PR | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), head `3b6d1b7576036382f82aa936fef8bcbd5b65272c` when this plan was authored |
-| Campfire | CI pin `32b4144b5206304fa8d4c67455a753e2d3c16635`; no checkout is present in the current orb |
-| Historical compiler-error estimate | ~2,468, previously reported, but **not verified** against the current pin/head; do not use as the baseline or progress denominator |
-| Rails oracle | Not prepared in the current orb. It is required for Rails equivalence, not for collecting rustc diagnostics |
-| Local Rust toolchain | `cargo` and `rustc` are installed; record full versions/host from the actual baseline run |
-| Current exact-head CI observation | Run [37986454230](https://github.com/rubys/roundhouse/actions/runs/37986454230), head `3b6d1b7576036382f82aa936fef8bcbd5b65272c`: Rust compare and Campfire compare/conformance passed in the last inspection; Rust smoke was still in progress; Campfire browser smoke was skipped by the focused selection. Recheck before relying on this snapshot |
-| Current end-to-end compiler inventory | Not available. Full strict generation and Cargo diagnostics have not yet been captured from the pinned app in this orb |
+| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688); keep Draft unless Thomas explicitly says otherwise |
+| Baseline implementation SHA | `3b6d1b7576036382f82aa936fef8bcbd5b65272c`; the first plan commit `609248bcf7f51c94d56f91fbdaaf6675dd5b71fe` changed docs only |
+| Campfire | CI pin and checked-out SHA `32b4144b5206304fa8d4c67455a753e2d3c16635` |
+| Strict analyzer | `roundhouse check --strict`: exit 0, 0 errors, 404 warnings |
+| Strict Rust project generation | Exit 1 before writing a project: 72 unsupported/syntax diagnostics and 109 type diagnostics (181 reported errors total). This is a generator refusal, not a rustc count |
+| Survey-only emitted Rust | `--survey --allow-unsupported` emitted 487 files; generated project had no `Cargo.lock`, so one was created with `cargo generate-lockfile` and preserved for these measurements |
+| Repeatability and output census | Two fresh `roundhouse --target rust --survey --allow-unsupported` generations each emitted 487 files; their normalized SHA-256 manifests are identical (`955ffa2ca632700fe2c0697c7346df29956299b97e964a6ec45a4e17e650c71b`). The repeat used `609248bc` whose only changes from baseline code SHA `3b6d1b7` are documentation. Each output, using the same captured lock, produced 2,496 errors / 2,252 fingerprints with identical fingerprints. Census: 376 Rust files; 116 app-class files containing 93 struct/enum declarations; 44 controller files; 43 model files; 37 view files; 92 public route-helper functions in one file; 90 generated Rust test files. The earlier 1,918-entry post-build hash list is not used as the emitted-file census |
+| Survey lib/bin compiler result | `cargo check --locked --lib --bin app`: exit 101, 2,496 errors in the generated `app` lib and 555 warnings; 2,252 stable diagnostic fingerprints. This is not strict production support because generation required `--allow-unsupported` |
+| Survey all-target/test results | `cargo check --locked --all-targets`: lib has the same 2,496 errors plus 165 lib-test errors (2,661 total). `cargo test --locked --no-run` reports the same lib/lib-test failure. Errors were reported for package `app`, not its dependencies |
+| Compiler diagnostic distribution (survey lib/bin) | E0308 819; E0599 575; E0425 470; E0433 255; E0609 73; E0277 56; E0061 50; E0423 49; other codes 149. Fingerprints are diagnostic groups, **not root causes** |
+| Historical estimate | ~2,468; current survey lib count is 2,496 (28 higher), broadly similar in magnitude but historical scope/method is unknown. Use 2,496 as this captured survey baseline, not 2,468 |
+| Environment | Debian 12, Linux x86_64; `rustc 1.98.1 (48a229cea 2026-09-01)`, host `x86_64-unknown-linux-gnu`; compiler binary SHA-256 `859254978c0a0402c32f949f6de0d99aee73be8d15f45aac00ae1448aac51e74`; Cargo 1.98.1 binary SHA-256 `da77c8b33849312255ccde3179198ada4c8deb370488d050286146b1d1b27e14`; Roundhouse root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a8e8a5981`; generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` |
+| Rails oracle | Not prepared. Required for Rails equivalence, not for compiler diagnostics |
+| Exact-head CI | `ci:rust` run [37986454230](https://github.com/rubys/roundhouse/actions/runs/37986454230) passed on code head `3b6d1b7576036382f82aa936fef8bcbd5b65272c`, including unit shards, Rust compare/smoke, Campfire compare/conformance, build, and summary. Campfire browser smoke and extra-target jobs were skipped. The current PR head adds documentation/tooling; verify its own checks separately |
+| Scratch evidence | Command outputs, generated files/hashes, lock, and Cargo JSON live under `/tmp/rh688-baseline` in the current orb; large scratch output is not committed |
 
 The PR already contains substantial Rust Campfire work, including app/helper
 class emission, namespace-aware controller structure, reachable inherited
 methods, request-context and `process_action` wiring, and explicit unsupported
 route handling. Treat historical labels such as “app classes missing,”
 “cookies,” “capture,” and “STI helper” as **questions to re-triage**, not as a
-current residual-error inventory.
+current residual-error inventory. The Oracle inspection confirmed that
+request/task metadata and `process_action` dispatch already exist; new work
+must extend the present lifecycle instead of rebuilding those foundations.
 
 ## Non-negotiable correctness rules
 
@@ -53,7 +65,7 @@ current residual-error inventory.
 
 ## Phase 0 — Freeze scope and establish inputs
 
-- [ ] **P0.1** Fetch/check out ONCE Campfire at exactly
+- [x] **P0.1** Fetch/check out ONCE Campfire at exactly
   `32b4144b5206304fa8d4c67455a753e2d3c16635`; verify `git rev-parse HEAD` (or
   verify the archive’s recorded pin and content manifest when there is no
   `.git`). Do not silently substitute Campfire `main`.
@@ -61,30 +73,37 @@ current residual-error inventory.
   version, host/target, OS, root and generated `Cargo.lock` hashes, compiler
   binary provenance/hash, relevant environment/feature flags, and the exact
   command line. Pin Rust to the PR’s declared **1.98.1** initially; any
-  intentional toolchain change is a separately reviewed plan update.
-- [ ] **P0.3** Record generated-file hashes and module/class/route/test census.
-  Keep credentials, session cookies, and authentication state out of logs and
-  committed artifacts.
+  intentional toolchain change is a separately reviewed plan update. The
+  repeated run’s OS and compiler binary hashes are now recorded; the original
+  baseline worktree’s clean/dirty state and its exact relevant environment /
+  feature-flag snapshot are not established. Leave this item open until those
+  baseline-specific details are captured or explicitly marked unrecoverable.
+- [x] **P0.3** Finish the generated-file, module/class/route/test census. The
+  repeatable 487-file pre-Cargo manifest and source/category counts are recorded
+  in the snapshot table. Keep credentials, session cookies, and authentication
+  state out of logs and committed artifacts.
 - [ ] **P0.4** Prepare the Rails oracle separately for comparison work. Record
   its Campfire pin and pristine database state. Do not block compiler-only
   inventory on Redis/oracle setup.
-- [ ] **P0.5** Run the production CLI path into fresh directories, separately:
-  strict `roundhouse check "$APP"`, strict Rust project generation, and (only
+- [x] **P0.5** Run the production CLI path into fresh directories, separately:
+  strict `roundhouse check --strict "$APP"`, strict Rust project generation, and (only
   for inspection) `--allow-unsupported` generation. Preserve the strict
   diagnostics. At this PR head `--allow-unsupported` changes diagnostic
   severities, so its warning count or exit status is not a zero-error proof.
-- [ ] **P0.6** If project generation refuses before producing the app, record
+- [x] **P0.6** If project generation refuses before producing the app, record
   that exact refusal and stop calling the result a rustc baseline. Do not
   bypass a project-level gate and present direct `rust::emit` output as the
   production CLI path.
-- [ ] **P0.7** Generate twice from the same inputs and compare normalized
-  diagnostic fingerprints and generated-file census. Explain any
-  nondeterminism before assigning feature work.
+- [x] **P0.7** Generate twice from the same pinned app and equivalent
+  Roundhouse code (the intervening commit was docs-only); compare normalized
+  Cargo diagnostic fingerprints and generated-file census. Both outputs had
+  identical 487-file manifests and 2,252 fingerprints for 2,496 errors. Keep
+  documenting any nondeterminism if later changes introduce it.
 
 ## Phase 1 — Build the rustc inventory
 
-- [ ] **P1.1** Run Cargo in the generated project against the preserved lockfile
-  and record each lane independently:
+- [x] **P1.1** Run Cargo in the survey-emitted project against the captured
+  generated lockfile and record each lane independently:
 
   ```sh
   cargo check --locked --lib --bin app --message-format=json
@@ -92,26 +111,39 @@ current residual-error inventory.
   cargo test --locked --no-run --message-format=json
   ```
 
-  Add `cargo build --locked --release` once check gates make it practical.
-- [ ] **P1.2** Parse Cargo JSON diagnostics (not rendered-text grep) into a
+  `cargo test --locked --no-run` also failed with the same 2,496 lib and 165
+  lib-test errors. Add `cargo build --locked --release` once check gates make
+  it practical. Strict production generation remains blocked before Cargo.
+- [x] **P1.2** Parse Cargo JSON diagnostics (not rendered-text grep) into a
   machine-readable inventory. Preserve full message, error code when present,
   package/target kind, generated path, enclosing item, primary and child spans,
-  expansion data, and useful source excerpt.
-- [ ] **P1.3** Define stable fingerprints using target kind, generated module /
+  expansion data, and useful source excerpt. The standard-library tool is
+  [`scripts/campfire-rust-diagnostics.py`](../../scripts/campfire-rust-diagnostics.py);
+  synthetic regressions are in
+  [`tests/campfire_rust_diagnostics_test.py`](../../tests/campfire_rust_diagnostics_test.py).
+- [x] **P1.3** Define stable fingerprints using target kind, generated module /
   enclosing item, compiler code, and normalized message/operation. Keep exact
   line numbers in raw evidence, but do not make line numbers the identity.
-  Normalize temp paths only; retain meaningful type and signature details.
-- [ ] **P1.4** Separate application errors from third-party/dependency/build
+  Normalize temp paths only; retain meaningful type and signature details. The
+  indexed output has 2,252 groups for 2,496 lib errors. Groups are not cause
+  clusters.
+- [x] **P1.4** Separate application errors from third-party/dependency/build
   environment failures; record whether compilation completed and its exit
   status so partial output, network failure, or termination cannot look like
-  improvement.
+  improvement. Cargo's own summary attributes these compile errors to the
+  generated `app` crate; other crates were dependency build steps, not reported
+  as error owners. Preserve each command's exit code with its capture.
 - [ ] **P1.5** Manually verify each cluster with representative generated code
   and trace it back through Ruby source → typed IR → lowered library IR → Rust
   signature/import/runtime. Mark causes **confirmed** or **suspected**; retain
   unclassified errors rather than forcing a category.
-- [ ] **P1.6** Publish baseline raw counts by lane plus root-cause cluster
-  membership. Do not report only total errors, since a foundation fix can
-  expose additional methods and increase the total while improving coverage.
+- [x] **P1.6a** Record raw counts by strict/survey lane and Cargo target scope.
+  Strict generation is blocked by 181 compiler-front-end diagnostics; survey
+  lib/bin has 2,496 rustc errors; `--all-targets` adds 165 lib-test errors.
+- [ ] **P1.6b** Manually assign root-cause cluster membership to the inventory.
+  The error-code distribution above is a prioritization hint, not a root-cause
+  classification. Do not report only totals: foundation fixes can expose
+  additional methods and increase counts while improving coverage.
 
 ## Phase 2 — Triage and dependency waves
 
@@ -120,70 +152,114 @@ prior work, not promises that they remain the dominant errors.
 
 | Wave | Work | Exit condition |
 |---|---|---|
-| 0 — evidence | Pinned input, strict CLI behavior, repeatable Cargo JSON inventory and source mapping | Baseline can be rerun and fingerprints compared |
-| 1 — structural producers | Project assembly, emitted modules/classes, namespace/import resolution, constructors, inherited dispatch, method registries | Representative producer failures fixed; downstream cascades re-inventoried |
-| 2 — independent semantic clusters | Rust value/coercion/ownership representation; remaining block/capture shapes; STI/polymorphic routes; cookies/session/auth only after request/class contracts are established | Each cluster has a verified cause, minimal repro, owner, semantic tests, and no overlapping central-file edits |
-| 3 — whole-project convergence | Remaining production and generated-test target errors; newly exposed clusters; removal of temporary diagnostics only when behavior is complete | Strict fresh generation, production Cargo check/build, and generated tests compile |
-| 4 — application acceptance | Native execution, Campfire tests, Rails differential, browser product journeys and security boundaries | Declared Rust Campfire workflows pass; remaining gaps are explicit and bounded |
+| 0 — evidence readiness | Pinned inputs; complete provenance; repeat generation/fingerprint comparison; generated module/class/route/test census; map the 181 strict generator refusals | Baseline can be rerun and compared; refusals have source-level owners, not just counts |
+| 1 — contracts and independent foundations | Typed Rails application/config contract; return-preserving forwarded-block ABI; request-owned cookie transport contract; Rails oracle and Rust translated-test lane preparation | Interfaces and ownership are frozen; small semantic repros prove the foundation without pretending dependent behavior is complete |
+| 2 — dependent semantics | Residual capture; signing and signed/permanent cookie views; session/login/logout; separately typed SignedId/InvalidSignature behavior; confirmed STI and narrow expression clusters | Each package meets its dependency contract and has executed semantic/security tests; fresh inventory is re-triaged |
+| 3 — whole-project convergence | Remaining strict-generation refusals and production/generated-test Cargo errors; reachable unsupported/panic/default/501 audit | Fresh strict generation, production Cargo check/build, and generated-test compile all pass without lost output |
+| 4 — application acceptance | Native execution, Campfire tests, Rails differential, browser journeys and security boundaries | Declared Rust Campfire workflows pass; remaining gaps are explicit and bounded |
 
-### Candidate clusters to re-validate
+### Confirmed first-wave clusters and dependency gates
 
-- [ ] **Triage app/Rails classes and runtime first.** The PR already emits
-  application classes; find exact missing or incorrectly typed symbols and
-  distinguish producer omissions from downstream import/type cascades.
-- [ ] **Triage authentication/cookies as a correctness and security cluster.**
-  Do not stub cookies, signing, secret-key configuration, or session lookup:
-  Campfire login depends on them. Validate malformed, tampered, expired and
-  cross-purpose credentials, CSRF rejection, and no-write-on-rejection.
-- [ ] **Triage capture/block failures from the actual residual forms.** Shared
-  capture/block lowerings already exist. Add only the semantics actually
-  missing; cover nested buffers, return/fallback behavior, output order,
-  escaping/safety, and exactly-once evaluation.
-- [ ] **Triage STI `link_to @record` against hydrated/persisted subtype
-  behavior.** The PR already has subtype-aware route work; identify whether any
-  remaining failure is route selection, model identity/hydration, helper
-  typing, or something else. Include namespace, new/edit, and routeless-subclass
-  cases as applicable.
-- [ ] Inventory reachable `todo!`, silent/default/no-op methods, 501 routes,
-  and un-emitted methods alongside compiler diagnostics. A green `cargo check`
-  is not completion if reachable accepted paths still panic, return fabricated
-  defaults, or refuse required routes.
+Counts below are from the captured survey inventory, not from strict
+production output. A confirmed missing generated symbol identifies a compiler
+root cause; it does not by itself establish the complete feature contract.
 
-### Parallel work package contract
+| Status | Cluster | Evidence and dependency decision |
+|---|---|---|
+| **Confirmed; split by API contract** | Rails namespace references: 119 E0433 references to `Rails` | The generated project exports no `Rails` root, but the references cover multiple services and must not be treated as one config bag: `Rails.application` and its source-backed app/VAPID config, routes and URL helpers; request-derived protocol/domain; `Rails.root`, `Rails.env`, `Rails.cache`, and `Rails.logger`; plus `Rails::HTML5::SafeListSanitizer`. The shared `runtime/ruby/rails.rb` and `.rbs` already define typed Env/AppPath/Cache/Logger and a deliberately limited Application, but that runtime is not integrated into the Rust output. First reuse/register the typed shared surface and make the app-specific configuration boundary explicit. Keep sanitizer and callback-bearing WebPush-pool work as separate contracts; never add an untyped catch-all Rails object. |
+| **Confirmed; ABI prerequisite** | Forwarded helper-block capture: 14 E0425 unresolved `capture` references | Literal `capture { ... }` lowering does not cover a forwarded helper block. Generated Rust erases closures to `Box<dyn FnOnce()>`, losing the block result and optional single-consumption contract. First preserve presence, arity, return type, ownership and forwarding across method boundaries; only then implement residual capture semantics. |
+| **Confirmed; transport and security contract open** | Controller cookies: 104 E0425 unresolved `cookies()` calls | These are callsites for a missing request-scoped jar/accessor and response Set-Cookie path, not 104 independent features. Plain, signed, permanent, and delete operations are represented. Signed behavior depends on a real secret/config boundary and Rails-compatible verification. Session APIs, SignedId/InvalidSignature names, and Rails encrypted `_campfire_session` are distinct; do not count or claim them as fixed by a cookie accessor. |
+| **Open; re-triage after producers** | STI/polymorphic routes and remaining E0308/E0599 groups | Prior estimates are questions, not work packages. Activate only on a current representative failure traced through model identity, lowering, route generation, or method signature. |
 
-Parallelize **confirmed root causes**, not arbitrary error codes or files.
-Before a worker starts, put the repro, verified cause, expected semantics,
-owned files, dependencies, focused checks, and integration check in the issue
-or this plan. One worker owns shared/central files such as
-`src/emit/rust.rs`, `src/emit/rust/expr/mod.rs`, `src/emit/rust/library.rs`,
-`src/runtime_loader.rs`, and `src/project.rs` at a time; other workers send a
-small proposed interface/change for that owner to integrate.
+Start mapping the 181 strict-generation refusals alongside rustc triage, rather
+than waiting for whole-project convergence. In every fresh build, inventory
+reachable `todo!`, silent/default/no-op methods, 501 routes, and omitted
+methods/modules. A green `cargo check` is not completion if accepted paths
+panic, fabricate defaults, or refuse required routes.
 
-Potential streams after Phase 1 (activate only if inventory supports them):
+### Dependency-linked work packages
 
-- [ ] **A — structural emission and project assembly:** one writer for Rust
-  project assembly/central emitter files; tests for every generated production
-  module and route reference.
-- [ ] **B — class/inheritance contracts:** class/lowering ownership such as
-  `src/lower/rust_inheritance.rs` plus its isolated tests, coordinated with A
-  before any shared registry/interface change.
-- [ ] **C — Rust expression representation:** a named non-overlapping subset
-  of `src/emit/rust/expr/`, type/ownership decisions, or method coercions,
-  based on the actual cluster—not all E0308/E0599 diagnostics as one package.
-- [ ] **D — shared capture/block behavior:** only after the residual syntax is
-  proven; own its `src/lower/`/`runtime/ruby/` files and semantic test files.
-- [ ] **E — route/STI behavior:** shared route/model lowering and dedicated
-  tests, coordinated at the integration boundary with A.
-- [ ] **F — cookies/auth behavior:** runtime and isolated native/request
-  boundary tests after A establishes the required request/app interface.
-- [ ] **G — independent test/oracle preparation:** pinned source, Rails oracle,
-  dependency/setup diagnosis and acceptance-test gap inventory; do not edit
-  A–F feature files.
+Do not activate a package until its prerequisite/interface is recorded here
+with a minimal reproducer, owned files, semantic checks, and integration check.
 
-For each integrated batch: run its focused semantic tests, Rust real-blog gate,
-`cargo check --locked --all-targets`, then fresh Campfire generation and
-fingerprint comparison. Update this plan and commit the batch before starting
-more work that depends on it.
+| Package | State | Scope and dependency | Completion evidence |
+|---|---|---|---|
+| **A0 — typed Rails namespace/application interface** | Source/API map prepared; contract and implementation pending | Integrate the existing typed shared `Rails::Env`, `AppPath`, `Cache`, and `Logger` behavior into Rust once; define a finite application/config contract for app-version fallback, optional git revision/VAPID credentials, routes, and request-vs-no-request protocol/domain. Keep route helpers owned by existing route lowering. No empty `Rails` class or invented defaults. Central generated-module wiring is integrated by the single integration owner. | Campfire source-to-generated mapping for every Rails-root fingerprint; tests for `APP_VERSION`/`GIT_REVISION` fallback, optional credential/VAPID values, request-derived URLs and no-request defaults, root/path behavior, cache behavior, and route access; then re-inventory newly exposed methods and separate sibling namespaces. |
+| **A1 — WebPush pool service** | Not started; separate follow-on | Separate from A0’s scalar/config interface: Campfire initializes a callback-bearing `WebPush::Pool`, mutates/replaces it in tests, and calls queue/shutdown. Requires a typed pool/callback/lifecycle contract, not a `Value` callback or dummy pool. | Emitted queue/delivery and invalid-subscription behavior, shutdown/replacement lifecycle, and Campfire push journeys; if deferred, retain an explicit unsupported boundary and do not claim push behavior. |
+| **D0 — forwarded-block ABI** | Blocked on a sound shared ABI design; two diagnosis attempts, no source edits | Preserve optional presence, arity, non-unit return type, ownership and single consumption across class/instance/helper method boundaries. The exact generated helpers pair a required `Box<dyn FnOnce()>` with a body that checks `.clone().is_none()`; method refinement does not currently provide the needed signature for these external forwarding calls. Do not make every block `String` or `Clone + 'static`. | Minimal emitted helper reproducer proves the returned value is observed, block runs once, non-Clone captures work, and absent-block checks do not consume/clone it; cover each method path actually emitted. |
+| **D1 — residual capture semantics** | Blocked on D0 | Implement only the actual forwarded-capture forms, preserving Rails output/buffer, return/fallback, nested behavior, ordering and escaping/safety semantics. | Executed emitted regression cases compare output and fallback behavior, including nested/evaluation-order cases where Campfire uses them; then re-inventory the 14 callsites rather than assuming all share the same semantics. |
+| **F0 — request cookie ownership/transport** | Root cause mapped read-only; request-lifecycle contract pending | Establish one request-owned jar shared by controller callbacks/helpers/views as required; parse request cookies; queue writes/deletes; append multiple `Set-Cookie` headers without overwriting flash/other headers. Decide lifecycle relative to outer layout middleware and response finalization. | Concurrent requests prove isolation; controller/layout access (if in scope) sees the same jar; response includes correct multiple cookies and attributes; rejection/unwind behavior is explicit. No process-global jar or per-await clone. |
+| **F1 — signing and secret boundary** | Blocked on A0 `secret_key_base` decision | Reuse shared Ruby semantics/verifier representation and native Rust crypto adapters; do not fork Rails cookie format or accept empty/missing production secrets. | Cross-language Rails-minted ↔ Rust-minted vectors, malformed/tampered/wrong-key/wrong-name/purpose/expiry rejection, missing-secret fail-closed behavior, and request isolation. |
+| **F2 — signed/permanent cookie views** | Blocked on F0 + F1 | Implement Campfire-used plain, signed, permanent, options, write, read and delete behavior over the same request jar. | Emitted app sends and consumes cookies across requests; attributes/expiry are asserted; a removed compiler diagnostic has passing behavioral coverage. |
+| **F3 — session and login/logout** | Blocked on F2 + separately typed session/model/error contracts | Rails encrypted `_campfire_session` is separate from `session_token`; scope it as its own package if Campfire requires it. | Login via Rails-compatible signed token, authenticated follow-up, invalid/tampered/expired rejection, logout invalidation, CSRF/no-write-on-rejection, and concurrent-user isolation. |
+| **F4 — SignedId/InvalidSignature** | Not started; separate from cookie transport | Requires actual model, purpose, expiry and error contracts. | Rails compatibility vectors plus emitted create/verify/reject execution for relevant Campfire models; distinct type/error behavior is tested. |
+| **E — STI/routes** | Not re-triaged on this survey; hold | Activate only for a verified remaining `link_to @record`/polymorphic route repro after checking persisted/hydrated subtype identity and route bridge. | New/edit/namespace/routeless-subclass cases as applicable, with emitted URL execution; don't infer success from a helper's type-check. |
+| **C — residual compiler clusters** | Not classified globally; inventory by source signature first | Assign narrow, confirmed E0308/E0599/etc. causes only; exclude central files owned by another package. | Before/after representative semantics and no missing modules/methods/tests in a fresh census. |
+
+### Oracle review and current decision
+
+The Oracle review on 2026-10-09 recommends an evidence-readiness batch first,
+then the narrow **D0 return-carrying block ABI** as the first feature batch.
+The 14 `capture` calls are downstream of a closure contract that currently
+erases a forwarded block to `Box<dyn FnOnce()>`; they cannot be repaired by a
+capture helper that returns empty text or guesses the block result. D0 is not
+completion of the Campfire capture callsites.
+
+For cookies, existing request/task metadata and `process_action` dispatch are
+already present. F0 must extend that request lifecycle and decide whether the
+same jar is available through outer layout rendering before deciding when
+pending writes are drained. F1 must reject missing secret configuration rather
+than accept an empty-key fallback. Rails’ encrypted `_campfire_session` is
+separate from the signed `session_token` cookie. This ordering allows a
+cookie-transport contract to be designed independently, while signed auth
+remains gated on A0’s typed secret/config decision and F1 compatibility tests.
+
+### Parallel ownership and batch protocol
+
+Use one integration owner for shared/central wiring. Parallelize design,
+isolated semantic tests, pinned oracle/test-lane preparation, and genuinely
+disjoint implementation; serialize edits to central interfaces.
+
+- **Integration owner:** `src/emit/rust.rs`, `src/project.rs`,
+  `src/runtime_loader.rs`, generated module exports, registries, and dependency
+  templates. No other worker edits these files during an active integration
+  batch.
+- **D0/D1 owner:** block analysis/refinement, `src/emit/rust/method.rs`,
+  narrowly named block/closure expression files and capture-specific tests.
+  Exclude those files from other active feature assignments.
+- **A0 contract owner:** trace Campfire callsites and propose typed contracts
+  and isolated behavior tests. Hand central emission/module wiring to the
+  integration owner; do not invent dynamic configuration placeholders.
+- **F0/F1/F2 owner:** shared cookie semantics plus request transport/ownership
+  and dedicated request/crypto tests. One owner controls `runtime/rust/http.rs`
+  and `runtime/rust/server.rs` during the cookie batch; no second request-state
+  implementation in parallel.
+- **G evidence owner:** repeatability/census, strict-refusal mapping, pinned
+  Rails oracle and Rust translated-test lane. No feature-file edits.
+- **E/C owners:** only after a current repro and explicit file ownership; do
+  not allocate all errors of a compiler code to one worker.
+
+**Batch 0 — evidence readiness:** complete P0.2/P0.3/P0.7, update the ledger,
+map the strict refusals and pin the oracle/test-lane gap. Keep the existing
+baseline intact; all fresh emissions go to fresh directories.
+
+**Batch 1 — D0 ABI foundation:** one bounded return-carrying forwarded-block
+feature, with the non-Clone, once-only, optional-presence and method-path
+checks above. A0/F0 contracts and G evidence preparation may run in parallel
+only in disjoint files. Do not mark capture, cookies, or Rails application
+support complete as a consequence of a D0 compile improvement.
+
+For each package, create a small tracking entry (issue or this plan) before
+dispatch: [ ] cause and fingerprint membership confirmed; [ ] dependencies and
+owned files frozen; [ ] minimal regression fails before and executes after;
+[ ] shared runtime is fully typed and removed errors have behavior evidence;
+[ ] focused semantic and applicable real-blog checks pass; [ ] fresh strict
+generation/refusals recorded; [ ] fresh survey lib/bin, all-targets and
+test-no-run inventories compared, with removed/retained/new fingerprints and
+census changes explained; [ ] claim boundary and remaining dependencies
+recorded. Early Campfire Cargo inventories are expected to remain red; they
+are measurements, not required green gates. Fresh generation must precede
+checking its generated project.
 
 ## Phase 3 — Acceptance ladder
 
@@ -235,7 +311,9 @@ review artifacts; avoid committing large generated projects or sensitive data.
 
 | Date | Roundhouse SHA | Campfire SHA | Toolchain / locks | Commands and executed scope | Result / artifact links | Checklist updated |
 |---|---|---|---|---|---|---|
-| 2026-10-09 | `3b6d1b7576036382f82aa936fef8bcbd5b65272c` | `32b4144b5206304fa8d4c67455a753e2d3c16635` | PR pin 1.98.1; generated lock/baseline not captured | Exact-head CI run `37986454230`: Rust compare, Campfire compare/conformance passed at last inspection; Rust smoke in progress; Campfire browser smoke skipped | No fresh Campfire rustc inventory; historical ~2,468 estimate remains unverified | P0–P4 open |
+| 2026-10-09 (pre-inventory CI observation) | `3b6d1b7576036382f82aa936fef8bcbd5b65272c` | `32b4144b5206304fa8d4c67455a753e2d3c16635` | PR pin 1.98.1; no local Cargo lock measurement yet | CI run [37986454230](https://github.com/rubys/roundhouse/actions/runs/37986454230): Rust compare, Campfire compare/conformance passed at last inspection; Campfire browser smoke and extra-target jobs were skipped | No local compiler inventory in that observation; superseded by the baseline row below | Historical only |
+| 2026-10-09 (survey baseline) | `3b6d1b7576036382f82aa936fef8bcbd5b65272c` | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1, host `x86_64-unknown-linux-gnu`; root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a8e8a5981`; generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` | Strict `roundhouse check --strict`: exit 0, 0 errors, 404 warnings. Strict Rust generation: exit 1 before project output (72 unsupported/syntax + 109 type diagnostics). Survey `--allow-unsupported` output: Cargo `check --locked --lib --bin app` exit 101, 2,496 errors/555 warnings; `check --all-targets` adds 165 lib-test errors; `test --no-run` fails on those targets. Full captures and exits in `/tmp/rh688-baseline` | 2,252 fingerprints for lib/bin; not strict production support. Generated survey project did not provide Cargo.lock; captured lock was generated and held constant. Repeat generation/census pending. | P0.1, P0.5–P0.6, P1.1–P1.4, P1.6a |
+| 2026-10-09 (repeatability check) | `609248bcf7f51c94d56f91fbdaaf6675dd5b71fe` (docs-only difference from baseline code SHA `3b6d1b7`) | `32b4144b5206304fa8d4c67455a753e2d3c16635` | Same captured generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55`; Roundhouse binary reported `2026.9.18 (609248bc)` | Two fresh survey generations with `--survey --allow-unsupported`; generated-file manifests compared before Cargo. Both then ran `cargo check --locked --lib --bin app --message-format=json` with a shared Cargo target cache | Both generated 487 files with identical manifest SHA-256 `955ffa2ca632700fe2c0697c7346df29956299b97e964a6ec45a4e17e650c71b`; both Cargo runs exit 101 with 2,496 errors, 2,252 groups and no malformed JSON; normalized fingerprint+count lists identical. Outputs/captures in `/tmp/rh688-repeat` | P0.3, P0.7 |
 
 ### Reproduction command template
 
@@ -245,7 +323,7 @@ artifact—not just this command template—before claiming a baseline:
 ```sh
 APP=/path/to/once-campfire-at-32b4144b5206304fa8d4c67455a753e2d3c16635
 OUT=/tmp/campfire-rust-<roundhouse-sha>
-roundhouse check "$APP"
+roundhouse check --strict "$APP"
 roundhouse --target rust "$APP" -o "$OUT"
 (cd "$OUT" && cargo check --locked --lib --bin app --message-format=json)
 (cd "$OUT" && cargo check --locked --all-targets --message-format=json)

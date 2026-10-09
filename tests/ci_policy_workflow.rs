@@ -478,6 +478,7 @@ fn resource_and_harness_helpers_preserve_failures_and_contracts() {
         "tests/ci_unit_tests_test.py",
         "tests/ci_apt_install_test.py",
         "tests/ci_campfire_optimization_test.py",
+        "tests/campfire_rust_diagnostics_test.py",
         "tests/ci_smoke_test.py",
     ] {
         let result = std::process::Command::new("python3")
