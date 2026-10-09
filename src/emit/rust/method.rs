@@ -143,21 +143,12 @@ fn render_params(m: &MethodDef, owner: Option<&str>) -> String {
     // this filter, `def self.form_with(model:, ...)` (5 params) +
     // RBS-block (6th sig param) trips the length-mismatch fallback
     // and renders every param as `()`.
-    let (sig_params_filtered, block_param): (
-        Option<Vec<&crate::ty::Param>>,
-        Option<&crate::ty::Param>,
-    ) = match m.signature.as_ref() {
-        Some(Ty::Fn { params, .. }) => {
-            let non_block: Vec<&crate::ty::Param> = params
-                .iter()
-                .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
-                .collect();
-            let block = params
-                .iter()
-                .find(|p| matches!(p.kind, crate::ty::ParamKind::Block));
-            (Some(non_block), block)
-        }
-        _ => (None, None),
+    let sig_params_filtered = non_block_signature_params(m);
+    let block_param = match m.signature.as_ref() {
+        Some(Ty::Fn { params, .. }) => params
+            .iter()
+            .find(|p| matches!(p.kind, crate::ty::ParamKind::Block)),
+        _ => None,
     };
 
     if m.params.is_empty() && block_param.is_none() && m.block_param.is_none() {
@@ -258,6 +249,21 @@ fn render_block_closure_param(name: &str, block_ty: &Ty) -> String {
         // a String (the common form-helper shape).
         format!("{name}: impl FnOnce(serde_json::Value) -> String")
     }
+}
+
+/// Return the method's ordinary signature parameters only when they
+/// align with the source-level positional/keyword parameter list.
+/// Block slots are carried separately by `MethodDef.block_param` and
+/// must not invalidate type information for ordinary parameters.
+fn non_block_signature_params(m: &MethodDef) -> Option<Vec<&crate::ty::Param>> {
+    let Ty::Fn { params, .. } = m.signature.as_ref()? else {
+        return None;
+    };
+    let params: Vec<_> = params
+        .iter()
+        .filter(|p| !matches!(p.kind, crate::ty::ParamKind::Block))
+        .collect();
+    (params.len() == m.params.len()).then_some(params)
 }
 
 /// `def x=` / `def []=` / `attr_writer`: an assignment writer, not a
@@ -846,13 +852,10 @@ fn default_value_for_ty(ty: &Ty) -> String {
 /// the authoritative source.
 fn collect_param_types(m: &MethodDef) -> std::collections::HashMap<String, Ty> {
     let mut out = std::collections::HashMap::new();
-    let Some(Ty::Fn { params, .. }) = m.signature.as_ref() else {
+    let Some(sig_params) = non_block_signature_params(m) else {
         return out;
     };
-    if params.len() != m.params.len() {
-        return out;
-    }
-    for (p, sig_p) in m.params.iter().zip(params.iter()) {
+    for (p, sig_p) in m.params.iter().zip(sig_params) {
         out.insert(p.name.as_str().to_string(), sig_p.ty.clone());
     }
     out
@@ -863,17 +866,14 @@ fn render_instance_params(
     receiver: Option<&'static str>,
     block_param: Option<&str>,
 ) -> String {
-    let sig_params = match m.signature.as_ref() {
-        Some(Ty::Fn { params, .. }) if params.len() == m.params.len() => Some(params),
-        _ => None,
-    };
+    let sig_params = non_block_signature_params(m);
     let mut parts: Vec<String> = Vec::new();
     if let Some(r) = receiver {
         parts.push(r.to_string());
     }
     for (i, p) in m.params.iter().enumerate() {
         let name = super::expr::util::escape_rust_keyword(p.name.as_str());
-        let rendered = match sig_params.and_then(|sp| sp.get(i)) {
+        let rendered = match sig_params.as_ref().and_then(|sp| sp.get(i)) {
             Some(sig_p) => format!("{name}: {}", rust_param_ty(&sig_p.ty)),
             None => format!("{name}: ()"),
         };
@@ -1003,6 +1003,51 @@ mod tests {
             mutates_self: false,
             block_param: None,
         }
+    }
+
+    #[test]
+    fn signature_parameter_mapping_ignores_the_separate_block_slot() {
+        use crate::ty::{Param as TyParam, ParamKind};
+
+        let mut method = base_module_method("render");
+        method.params = vec![Param::positional(Symbol::from("label"))];
+        let block_ty = Ty::Fn {
+            params: vec![],
+            block: None,
+            ret: Box::new(Ty::Str),
+            effects: EffectSet::pure(),
+        };
+        method.signature = Some(Ty::Fn {
+            params: vec![
+                TyParam {
+                    name: Symbol::from("label"),
+                    ty: Ty::Str,
+                    kind: ParamKind::Required,
+                },
+                TyParam {
+                    name: Symbol::from("block"),
+                    ty: block_ty.clone(),
+                    kind: ParamKind::Block,
+                },
+            ],
+            block: Some(Box::new(block_ty)),
+            ret: Box::new(Ty::Str),
+            effects: EffectSet::pure(),
+        });
+
+        assert_eq!(
+            collect_param_types(&method).get("label"),
+            Some(&Ty::Str),
+            "a block slot must not invalidate the ordinary parameter type map"
+        );
+        assert_eq!(
+            render_params(&method, None),
+            "(label: &str, f: impl FnOnce() -> String)"
+        );
+        assert_eq!(
+            render_instance_params(&method, Some("&self"), Some("blk: String")),
+            "(&self, label: &str, blk: String)"
+        );
     }
 
     #[test]
