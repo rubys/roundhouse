@@ -1641,6 +1641,18 @@ module RequestDispatch
     @__host
   end
 
+  # Rails' `https!` / `https?`: whether the session's requests arrive
+  # over TLS. Carried to the app as `HTTPS=on`, which is what
+  # `request.ssl?` reads, so `request.protocol` and every `_url` built
+  # from it answer `https://`.
+  def https!(flag = true)
+    @__https = flag
+  end
+
+  def https?
+    @__https == true
+  end
+
   def dispatch_request(method, path, params, headers = {}, as = nil)
     path = integration_request_path(path)
     require_relative "../config/routes"
@@ -1772,6 +1784,7 @@ module RequestDispatch
       "REMOTE_ADDR"     => "127.0.0.1",
       "HTTP_USER_AGENT" => "Roundhouse Test",
     }
+    env["HTTPS"] = "on" if https?
     headers.each { |k, v| env[env_key(k.to_s)] = v.to_s }
     env["CONTENT_TYPE"] = "application/json" if as == :json
     env["REQUEST_METHOD"] = method
@@ -2007,10 +2020,12 @@ module RequestDispatch
   # `get "http://blog.test/articles"` — Rails' integration session takes
   # an absolute url as readily as a path, and `follow_redirect!` hands
   # it one whenever the controller redirected to a `_url` helper. The
-  # authority becomes the session's host (Rails' `host!` from the url),
+  # scheme becomes the session's (Rails' `https!` from the url, so an
+  # `http://` url turns it back off), the authority its host (`host!`),
   # and the router sees the path.
   def integration_request_path(path)
     return path unless path.start_with?("http://") || path.start_with?("https://")
+    https!(path.start_with?("https://"))
     url_host = ActionController.location_host(path)
     host!(url_host) unless url_host.empty?
     rest = path[ActionController.find_substr(path, "://") + 3, path.length].to_s

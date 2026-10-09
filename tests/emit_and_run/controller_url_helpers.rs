@@ -63,6 +63,18 @@ class UrlsControllerTest < ActionDispatch::IntegrationTest
     get "/urls"
     assert_equal "http://blog.test/articles", response.body.split(" ").first
   end
+
+  test "an https url is requested over https, and its redirect followed so" do
+    get "https://blog.test/urls/away"
+    assert_equal "https://blog.test/articles", response.location
+    assert_redirected_to "/articles"
+    follow_redirect!
+    assert_response :success
+    get "/urls"
+    assert_equal "https://blog.test/articles", response.body.split(" ").first
+    get "http://blog.test/urls"
+    assert_equal "http://blog.test/articles", response.body.split(" ").first
+  end
 end
 "#,
     )
@@ -159,4 +171,38 @@ end
         )
         .run_test("test/controllers/article_json_urls_controller_test.rb")
         .assert_passes();
+}
+
+/// A key `default_url_options` names with a nil value removes the
+/// request's: `port: nil` drops the Host header's `:8080`, as Rails'
+/// `url_options` merge does.
+#[test]
+fn controller_url_helper_nil_option_removes_the_request_port() {
+    with_urls_controller(
+        r##"class UrlsController < ApplicationController
+  def show
+    render plain: articles_url
+  end
+
+  def away
+    head :ok
+  end
+
+  def default_url_options
+    { port: nil }
+  end
+end
+"##,
+        r#"require "test_helper"
+
+class UrlsControllerTest < ActionDispatch::IntegrationTest
+  test "port: nil drops the request's port" do
+    host! "blog.test:8080"
+    get "/urls"
+    assert_equal "http://blog.test/articles", response.body
+  end
+end
+"#,
+    )
+    .assert_passes();
 }
