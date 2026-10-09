@@ -836,7 +836,11 @@ fn every_runtime_method_body_concretely_typed() {
     // Rails itself leaves dynamic: `Connection#select_value` (one SQL cell, as
     // `select_rows`' rows are), `Base.uncached`'s block value (the
     // `Timeout.timeout` shape), and `Relation#to_h`'s yielded pairs.
-    const CEILING: usize = 316;
+    // `in_batches` adds 2, MEASURED: the `yield self` in
+    // `Relation#in_batches` and in the class-side fallback in
+    // connection.rb, whose value is the block's — gradual, as
+    // `find_in_batches`' `yield records` already is.
+    const CEILING: usize = 318;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -74,6 +74,7 @@ module ActiveRecord
     def self.all: () -> Relation
     def self.none: () -> Relation
     def self.page: (?(Integer | String | nil) num) -> Relation
+    def self.in_batches: (?of: Integer, ?order: Symbol?) ?{ (Relation) -> void } -> Relation
     def self.paginate: (?(Integer | String | nil) num, ?page: (Integer | String | nil), ?per_page: (Integer | String | nil)) -> Relation
     def self.any?: () -> bool
     def self.none?: () -> bool

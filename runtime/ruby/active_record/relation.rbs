@@ -186,6 +186,7 @@ module ActiveRecord
     def index_by: () { (Base) -> untyped } -> Hash[untyped, Base]
     def find_each: () { (Base) -> void } -> Relation
     def find_in_batches: () { (Array[Base]) -> void } -> Relation
+    def in_batches: (?of: Integer, ?order: Symbol?) ?{ (Relation) -> void } -> Relation
     # `map`/`collect` return `untyped`, NOT `Array[untyped]`: the result's
     # element type is whatever the BLOCK returns, which this RBS has no
     # type variable to say. `Array[untyped]` is a seed spinel TRUSTS, so

@@ -395,11 +395,14 @@ impl Analyzer {
                 // for chaining; `pluck`/`pick` project column values (column
                 // type unknowable from the name alone → `Array<Untyped>`);
                 // `ids` projects primary keys.
-                for batch in ["find_each", "find_in_batches", "in_batches"] {
+                for batch in ["find_each", "find_in_batches"] {
                     cls.class_methods
                         .entry(Symbol::from(batch))
                         .or_insert_with(|| array_of_self.clone());
                 }
+                cls.class_methods
+                    .entry(Symbol::from("in_batches"))
+                    .or_insert_with(|| relation_of_self.clone());
                 for proj in ["pluck", "pick"] {
                     cls.class_methods
                         .entry(Symbol::from(proj))
