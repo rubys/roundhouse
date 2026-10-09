@@ -9,6 +9,9 @@ require_relative "../../action_controller/rate_limiter"
 class RateLimiterTest < Minitest::Test
   def setup
     @cache = Rails::Cache.new
+    # Spinel stores the cache in process-wide shards, so clear it between
+    # test cases just as the Ruby cache's per-instance initialization does.
+    @cache.clear
   end
 
   def test_increment_counts_from_one_within_a_window
@@ -25,7 +28,6 @@ class RateLimiterTest < Minitest::Test
     # Leave a full second beyond the whole-second expiry boundary.
     sleep 3.1
     count = @cache.increment_str("rate-limit:t:a", 1)
-    puts "rate-limit expiry probe: count=#{count}, now=#{Time.now.to_i}"
     assert_equal 1, count, "expected the rate-limit window to expire by #{Time.now.to_i}; got #{count}"
   end
 
