@@ -256,7 +256,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
 
     let block = Expr::new(
         span,
-        ExprNode::Lambda {
+        ExprNode::Lambda { extra_params: Vec::new(),
             params: vec![var],
             rest_param: None,
             block_param: None,

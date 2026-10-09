@@ -248,7 +248,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                 block_body.ty = Some(Ty::Nil);
                 let block = Expr::new(
                     span,
-                    ExprNode::Lambda {
+                    ExprNode::Lambda { extra_params: Vec::new(),
                         params: Vec::new(),
                         rest_param: None,
                         block_param: None,

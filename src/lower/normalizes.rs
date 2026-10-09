@@ -63,8 +63,8 @@ pub(crate) fn normalizations(model: &Model) -> HashMap<Symbol, (Symbol, Expr)> {
                             continue;
                         };
                         match (key.as_str(), &*v.node) {
-                            ("with", ExprNode::Lambda { params, rest_param: None, body, .. })
-                                if params.len() == 1 =>
+                            ("with", ExprNode::Lambda { params, rest_param: None, extra_params, body, .. })
+                                if params.len() == 1 && extra_params.is_empty() =>
                             {
                                 with = Some((params[0].clone(), body.clone()));
                             }

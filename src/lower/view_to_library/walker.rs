@@ -381,7 +381,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             block: Some(block),
             ..
         } if method.as_str() == "each" && args.is_empty() => {
-            let ExprNode::Lambda { params, rest_param, body, block_style, .. } = &*block.node else {
+            let ExprNode::Lambda { params, rest_param, extra_params, body, block_style, .. } = &*block.node else {
                 return vec![todo_io_append("each block shape", stmt.span)];
             };
             let var_name = params
@@ -406,7 +406,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             };
             let block_lambda = Expr::new(
                 Span::synthetic(),
-                ExprNode::Lambda { rest_param: rest_param.clone(),
+                ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
                     params: params.clone(),
                     block_param: None,
                     body: inner_body,
@@ -883,13 +883,15 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             // one nested expression: the walker arms already return a
             // statement list, and a `Seq` in argument position renders as
             // newline-joined statements on the ruby family.
-            if let (1, Some(ExprNode::Lambda { params, body, .. })) =
+            if let (1, Some(ExprNode::Lambda { params, extra_params, body, .. })) =
                 (sa.len(), block.as_ref().map(|b| &*b.node))
             {
                 let cap = "_ts_cap";
                 let cap_ctx = ViewCtx {
                     accumulator: cap.to_string(),
-                    ..ctx.with_locals(params.iter().map(|p| p.as_str().to_string()))
+                    ..ctx.with_locals(
+                        params.iter().chain(extra_params.iter().map(|p| &p.name)).map(|p| p.as_str().to_string()),
+                    )
                 };
                 let mut out = vec![assign_accumulator_string_new(cap)];
                 out.extend(walk_body(body, &cap_ctx));
@@ -1148,8 +1150,8 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     } = &*inner.node
     {
         if matches!(method.as_str(), "button_to" | "link_to") && !ctx.is_local(method.as_str()) {
-            if let ExprNode::Lambda { params, body, .. } = &*block.node {
-                if block_body_is_template(body) {
+            if let ExprNode::Lambda { params, extra_params, body, .. } = &*block.node {
+                if block_body_is_template(body) && extra_params.is_empty() {
                     if let Some(stmts) =
                         emit_inline_helper_block(method.as_str(), sa, body, params, ctx)
                     {
@@ -1176,7 +1178,7 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         parenthesized,
     } = &*inner.node
     {
-        if let ExprNode::Lambda { rest_param, params, block_param, body, block_style } = &*block.node {
+        if let ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } = &*block.node {
             if block_body_is_template(body) {
                 // NESTED CAPTURES NEED DISTINCT NAMES. A block-with-block
                 // helper (campfire's rooms/show wraps `messages_tag` inside
@@ -1198,16 +1200,21 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 // that no app in the corpus nested one. campfire does.
                 let cap_owned = next_capture_name(&ctx.accumulator);
                 let cap = cap_owned.as_str();
+                // Every parameter the block binds is a local in its body, the
+                // optional and keyword ones too: a read of one is not a
+                // helper call.
                 let cap_ctx = ViewCtx {
                     accumulator: cap.to_string(),
-                    ..ctx.with_locals(params.iter().map(|p| p.as_str().to_string()))
+                    ..ctx.with_locals(
+                        params.iter().chain(extra_params.iter().map(|p| &p.name)).map(|p| p.as_str().to_string()),
+                    )
                 };
                 let mut cap_stmts = vec![assign_accumulator_string_new(cap)];
                 cap_stmts.extend(walk_body(body, &cap_ctx));
                 cap_stmts.push(accumulator_result_ref(cap));
                 let new_block = Expr::new(
                     block.span,
-                    ExprNode::Lambda { rest_param: rest_param.clone(),
+                    ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
                         params: params.clone(),
                         block_param: block_param.clone(),
                         body: seq(cap_stmts),
@@ -1347,7 +1354,7 @@ fn turbo_stream_collection_fragment(
         Vec::new(),
         Some(Expr::new(
             Span::synthetic(),
-            ExprNode::Lambda {
+            ExprNode::Lambda { extra_params: Vec::new(),
                 rest_param: None,
                 params: vec![var],
                 block_param: None,
@@ -1401,8 +1408,10 @@ fn emit_turbo_frame_tag(args: &[Expr], block: Option<&Expr>, ctx: &ViewCtx) -> O
         super::attr_parts::string_interp(parts),
         ctx,
     )];
-    if let Some(ExprNode::Lambda { params, body, .. }) = block.map(|b| &*b.node) {
-        let inner_ctx = ctx.with_locals(params.iter().map(|p| p.as_str().to_string()));
+    if let Some(ExprNode::Lambda { params, extra_params, body, .. }) = block.map(|b| &*b.node) {
+        let inner_ctx = ctx.with_locals(
+            params.iter().chain(extra_params.iter().map(|p| &p.name)).map(|p| p.as_str().to_string()),
+        );
         out.extend(walk_body(body, &inner_ctx));
     }
     out.push(accumulator_append_call(
@@ -1565,6 +1574,22 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
         ExprNode::Array { elements, style } => ExprNode::Array {
             elements: elements.iter().map(|el| rewrite_helpers_in_expr(el, ctx)).collect(),
             style: *style,
+        },
+        // A Hash literal's VALUES can carry a helper call the same way an
+        // Array element can — the HAML compiler's shortcut-class merge
+        // emits `render_attrs({ class: haml_class("g", k), … })`, where
+        // `render_attrs`'s own classify+emit (`RenderAttrs` in
+        // `helpers.rs`) clones its `attrs` Hash whole rather than
+        // threading each entry back through this walk, so a nested
+        // helper reaches emit here or not at all. Keys are threaded too,
+        // for the same reason Array elements all are, though a literal
+        // Hash key never carries one in practice.
+        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
+            entries: entries
+                .iter()
+                .map(|(k, v)| (rewrite_helpers_in_expr(k, ctx), rewrite_helpers_in_expr(v, ctx)))
+                .collect(),
+            kwargs: *kwargs,
         },
         // Statement compounds: a form-builder map lambda hoisted into a
         // select-options loop is a `Seq` of local Assigns building the
@@ -1738,7 +1763,7 @@ mod tests {
                 args,
                 block: Some(Expr::new(
                     Span::default(),
-                    ExprNode::Lambda {
+                    ExprNode::Lambda { extra_params: Vec::new(),
                         rest_param: None,
                         params: Vec::new(),
                         block_param: None,
@@ -1982,7 +2007,7 @@ mod tests {
     fn block_helper_call_with(method: &str, args: Vec<Expr>) -> Expr {
         let inner = Expr::new(
             Span::default(),
-            ExprNode::Lambda { rest_param: None,
+            ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                 params: Vec::new(),
                 block_param: None,
                 body: buf_append(str_lit("inner")),

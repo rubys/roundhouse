@@ -2,9 +2,11 @@
 # `tag_option` joins it with spaces, and for `class:` first runs
 # `build_tag_values` — its conditional-class form, where a String is
 # itself and a Hash contributes the keys whose value is truthy. MEASURED
-# against Rails 8.1: nil and "" are dropped, nothing is deduplicated
-# (`["direct", "direct"]` renders both), and an empty list is
-# `class=""`. The shared `ActionView::ViewHelpers.attr_value_text`
+# against Rails 8.1: nil, false and "" are dropped (`build_tag_values`
+# drops a falsy conditional element, e.g. `[cond && "hot"]` with `cond`
+# false), nothing is deduplicated (`["direct", "direct"]` renders both),
+# and an empty list is `class=""`. The shared
+# `ActionView::ViewHelpers.attr_value_text`
 # (runtime/ruby) renders every value with `to_s` and says why the rest
 # lives here: a walk over an untyped Array is not a shape every strict
 # emitter answers.
@@ -29,7 +31,7 @@ module ActionView
           item.each do |ik, iv|
             tokens << ik.to_s unless iv.nil? || iv.to_s == "false"
           end
-        elsif !item.nil?
+        elsif !item.nil? && item != false
           tokens << item.to_s unless item.to_s == ""
         end
       end

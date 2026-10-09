@@ -1207,6 +1207,28 @@ end
     );
 }
 
+#[test]
+fn a_rate_limit_key_lambda_with_a_parameter_is_not_inlined_unbound() {
+    // Rails calls `by:` without arguments. Inlining only the body as the
+    // limiter key would leave the default-bound `key` to the controller
+    // method scope, so the rate limit stays unlowered (a survey gap).
+    let controller = br#"class ProbeController < ApplicationController
+  rate_limit to: 5, within: 1.minute, by: ->(key = request.remote_ip) { key }
+  def show
+    head :ok
+  end
+end
+"#;
+    let tree = std::collections::HashMap::from([
+        (std::path::PathBuf::from("app/controllers/probe_controller.rb"), controller.to_vec()),
+        (std::path::PathBuf::from("config/routes.rb"), b"Rails.application.routes.draw do\n  get \"probe\" => \"probe#show\"\nend\n".to_vec()),
+    ]);
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let probe = app.controllers.iter().find(|c| c.name.0.as_str() == "ProbeController").expect("controller");
+    let shape = format!("{probe:?}");
+    assert!(!shape.contains("RateLimiter"), "the key lambda was inlined without its parameter:\n{shape}");
+}
+
 /// The `setup_mobile!` filters `call` expands to, as their `only` lists.
 /// `has_mobile_version(*actions)` peels its options with
 /// `extract_options!` and reads `options[:if]`.

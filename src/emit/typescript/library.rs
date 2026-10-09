@@ -1671,7 +1671,7 @@ fn rewrite_free(e: &Expr) -> Expr {
                 InterpPart::Expr { expr } => InterpPart::Expr { expr: rewrite_free(expr) },
             }).collect(),
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_free(body),
@@ -1936,7 +1936,7 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
                 })
                 .collect(),
         },
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite(body, super_method),

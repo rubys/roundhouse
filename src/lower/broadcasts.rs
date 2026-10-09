@@ -240,7 +240,7 @@ fn collect_broadcasts_to(out: &mut LoweredBroadcasts, args: &[Expr]) {
     };
     // Accept both lambda and bare-string forms for the channel.
     let (channel, self_param) = match &*stream_arg.node {
-        ExprNode::Lambda { body, params, .. } => {
+        ExprNode::Lambda { body, params, extra_params, .. } if extra_params.is_empty() => {
             (body.clone(), params.first().cloned())
         }
         ExprNode::Lit { value: Literal::Str { .. } } => (stream_arg.clone(), None),

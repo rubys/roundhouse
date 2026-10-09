@@ -411,7 +411,7 @@ fn each_destroy(rows: Expr) -> Expr {
     let var = Symbol::from("row");
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda {
+        ExprNode::Lambda { extra_params: Vec::new(),
             params: vec![var.clone()],
             rest_param: None,
             block_param: None,

@@ -242,7 +242,7 @@ pub(super) fn synthesize_process_action(
                 recv: None,
                 method: f.target.clone(),
                 args: vec![],
-                block: Some(syn(ExprNode::Lambda {
+                block: Some(syn(ExprNode::Lambda { extra_params: Vec::new(),
                     params: vec![],
                     rest_param: None,
                     block_param: None,

@@ -522,7 +522,7 @@ fn lower_assert_throws(span: Span, tag: &Expr, block: Option<&Expr>) -> Option<E
             args: vec![tag.clone()],
             block: Some(Expr::new(
                 span,
-                ExprNode::Lambda { rest_param: None,
+                ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                     params: vec![],
                     block_param: None,
                     body: caught_body,
