@@ -18,9 +18,40 @@
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 
+/// Text representation accepted by the temporal-column reader. A nullable
+/// temporal field is `Option<String>` in emitted Rust; a non-nullable field
+/// is `String`.
+pub trait StoredDbTimeText {
+    fn as_db_time_text(&self) -> Option<&str>;
+}
+
+impl StoredDbTimeText for str {
+    fn as_db_time_text(&self) -> Option<&str> {
+        Some(self)
+    }
+}
+
+impl StoredDbTimeText for String {
+    fn as_db_time_text(&self) -> Option<&str> {
+        Some(self.as_str())
+    }
+}
+
+impl StoredDbTimeText for Option<String> {
+    fn as_db_time_text(&self) -> Option<&str> {
+        self.as_deref()
+    }
+}
+
+impl<T: StoredDbTimeText + ?Sized> StoredDbTimeText for &T {
+    fn as_db_time_text(&self) -> Option<&str> {
+        (**self).as_db_time_text()
+    }
+}
+
 /// Parse a stored ISO-8601 value into a native UTC `DateTime`. Nil-safe:
-/// an empty stored value (SQL NULL hydrates as `""`, never a Rust
-/// `Option::None` at the ivar) → `None`. Handles the two forms
+/// an absent or empty stored value (SQL NULL) becomes `None`. Handles
+/// the two forms
 /// roundhouse ever stores:
 ///
 ///   * DB-dump / seed form — `"2026-05-15 21:14:56.300213"` (space
@@ -31,7 +62,8 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 /// A value that parses under neither returns `None` rather than
 /// panicking — a malformed stored timestamp shouldn't take down a read
 /// path.
-pub fn parse_db_time(s: &str) -> Option<DateTime<Utc>> {
+pub fn parse_db_time<S: StoredDbTimeText + ?Sized>(input: &S) -> Option<DateTime<Utc>> {
+    let s = input.as_db_time_text()?;
     if s.is_empty() {
         return None;
     }
@@ -122,5 +154,16 @@ impl EncodeDatetime for Option<String> {
             ms = padded[0..3].to_string();
         }
         format!("\"{date}T{time}.{ms}Z\"")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_db_time;
+
+    #[test]
+    fn parse_db_time_accepts_nullable_storage() {
+        assert!(parse_db_time(&None::<String>).is_none());
+        assert!(parse_db_time(&Some("2026-05-15 21:14:56.300213".to_string())).is_some());
     }
 }

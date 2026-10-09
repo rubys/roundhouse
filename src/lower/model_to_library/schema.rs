@@ -1071,14 +1071,28 @@ pub(crate) fn temporal_seam(col: &Column) -> (Ty, &'static str, &'static str) {
     }
 }
 
-/// Nil-safe native Date/Time parsing over the raw storage text. Dates
-/// have no zone; timestamps read zone-less storage as UTC. Backends
-/// without the selected native seam must report unsupported.
+/// Native Date/Time parsing over the raw storage accessor. The runtime
+/// parser accepts both stored strings and nilable stored strings, so a
+/// nullable column keeps its nil semantics without a target-specific
+/// guard. Dates have no zone; timestamps read zone-less storage as UTC.
+/// Backends without the selected native seam must report unsupported.
 fn temporal_reader_body(col: &Column) -> Expr {
-    let ivar = with_ty(
-        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }),
-        Ty::Str,
-    );
+    let stored_ty = super::ty_of_column_slot(col);
+    let raw_value = || {
+        with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(self_ref()),
+                    method: col_storage_name(col),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+            stored_ty.clone(),
+        )
+    };
     with_ty(
         Expr::new(
             Span::synthetic(),
@@ -1088,7 +1102,7 @@ fn temporal_reader_body(col: &Column) -> Expr {
                     ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
                 )),
                 method: Symbol::from(temporal_seam(col).1),
-                args: vec![ivar],
+                args: vec![raw_value()],
                 block: None,
                 parenthesized: true,
             },
@@ -1097,18 +1111,18 @@ fn temporal_reader_body(col: &Column) -> Expr {
     )
 }
 
-/// `<col>_raw` — the plain String reader over a temporal column's
-/// storage ivar. Together with its writer (`synth_attr_writer` names
-/// temporal writers `<col>_raw=`) this is an ordinary String accessor
-/// pair, so every target declares the backing field through its normal
-/// collapse path — no per-emitter storage redirect. It is also the
-/// uniform stored-text escape hatch (a target without a native `Time`
-/// seam can read/serialize the raw text honestly).
+/// `<col>_raw` — the reader over a temporal column's storage ivar.
+/// Together with its writer (`synth_attr_writer` names temporal writers
+/// `<col>_raw=`) this is an ordinary accessor pair, so every target
+/// declares the backing field through its normal collapse path — no
+/// per-emitter storage redirect. Its type follows the stored slot,
+/// including nil for nullable or generated columns.
 fn synth_raw_reader(owner: &ClassId, col: &Column) -> MethodDef {
     let name = col_storage_name(col);
+    let slot_ty = super::ty_of_column_slot(col);
     let body = with_ty(
         Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() }),
-        Ty::Str,
+        slot_ty.clone(),
     );
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -1119,7 +1133,7 @@ fn synth_raw_reader(owner: &ClassId, col: &Column) -> MethodDef {
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body,
-        signature: Some(fn_sig(vec![], Ty::Str)),
+        signature: Some(fn_sig(vec![], slot_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeReader,

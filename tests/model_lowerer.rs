@@ -17,6 +17,7 @@ use std::path::Path;
 use roundhouse::dialect::{LibraryClass, MethodReceiver};
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app;
+use roundhouse::ty::Ty;
 use roundhouse::lower::{
     class_info_from_library_class, lower_fixtures_to_library_classes,
     lower_model_to_library_class, lower_models_with_registry,
@@ -207,6 +208,62 @@ fn article_lowers_with_schema_methods() {
     assert!(
         !any_body.contains("COUNT(*)"),
         "_adapter_any? must not COUNT: {any_body}"
+    );
+}
+
+#[test]
+fn nullable_temporal_raw_reader_preserves_the_stored_slot_type() {
+    let mut app = ingest_app(fixture_path()).expect("ingest real-blog");
+    let articles = app
+        .schema
+        .tables
+        .get_mut(&Symbol::from("articles"))
+        .expect("articles schema");
+    let created_at = articles
+        .columns
+        .iter_mut()
+        .find(|column| column.name.as_str() == "created_at")
+        .expect("created_at column");
+    created_at.nullable = true;
+
+    let article = app
+        .models
+        .iter()
+        .find(|model| model.name.0.as_str() == "Article")
+        .expect("Article model");
+    let lowered = lower_model_to_library_class(article, &app.schema);
+    let raw_reader = lowered
+        .methods
+        .iter()
+        .find(|method| method.name.as_str() == "created_at_raw")
+        .expect("created_at_raw reader");
+    let temporal_reader = lowered
+        .methods
+        .iter()
+        .find(|method| method.name.as_str() == "created_at")
+        .expect("created_at reader");
+    let expected = Ty::Union {
+        variants: vec![Ty::Str, Ty::Nil],
+    };
+
+    assert_eq!(raw_reader.body.ty, Some(expected.clone()));
+    let Some(Ty::Fn { ret, .. }) = &raw_reader.signature else {
+        panic!("created_at_raw must have a function signature: {:?}", raw_reader.signature);
+    };
+    assert_eq!(ret.as_ref(), &expected);
+
+    let roundtrip = format!("{:?}", temporal_reader.body);
+    assert!(
+        roundtrip.contains("method: Symbol(\"created_at_raw\")"),
+        "temporal reader must access the storage through its typed raw reader: {roundtrip}"
+    );
+    assert!(
+        roundtrip.contains("method: Symbol(\"parse_db_time\")"),
+        "temporal parser missing: {roundtrip}"
+    );
+    assert!(
+        !matches!(&*temporal_reader.body.node, roundhouse::ExprNode::If { .. }),
+        "nil handling belongs to the shared typed parser: {roundtrip}"
     );
 }
 
