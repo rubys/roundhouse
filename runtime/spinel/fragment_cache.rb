@@ -123,9 +123,10 @@ module Rails
     # under the shard's lock, so two workers counting the same key do
     # not both see the same old value. The expiry is kept from the
     # first write in the window, as the shared version's note says.
+    # Counters remain active when fragment caching is disabled: they
+    # also back rate limiting and must not be bypassed by a renderer
+    # benchmark setting.
     def increment_str(key, ttl)
-      return 1 unless Rails.cache_enabled
-
       k = key.to_s
       s = shard_of(k)
       entries = SHARD_ENTRIES[s]

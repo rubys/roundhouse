@@ -80,8 +80,8 @@ module ActionController
     # `@status =`, `@body =`, `@location =` from render/redirect_to/head).
     def status: () -> Integer
     def body: () -> String
-    def response_body: () -> String
-    def response_body=: (String value) -> String
+    def response_body: () -> String?
+    def response_body=: (String? value) -> String?
     def location: () -> String?
     def content_type: () -> String
     def content_type=: (String value) -> String

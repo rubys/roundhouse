@@ -47,7 +47,7 @@ class CacheStrTest < Minitest::Test
     assert_equal "<p>hi</p>", @cache.write_str("views/fragment/a", "<p>hi</p>", 0)
     assert_nil @cache.read_str("views/fragment/a")
     assert_equal 1, @cache.increment_str("rate-limit", 60)
-    assert_equal 1, @cache.increment_str("rate-limit", 60)
+    assert_equal 2, @cache.increment_str("rate-limit", 60)
   ensure
     Rails.cache_enabled = true
   end

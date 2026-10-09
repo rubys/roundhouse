@@ -272,11 +272,19 @@ module Rails
     # the same). A whole-store flush at the cap resets every window;
     # that is the bound's shape, not a cost anything pays today.
     def increment_str(key, ttl)
-      return 1 unless Rails.cache_enabled
       k = key.to_s
-      hit = read_str(k)
+      hit = nil
+      if @entries.key?(k)
+        due = @expires_at[k]
+        hit = @entries[k] if due == 0 || due > Time.now.to_i
+      end
       if hit.nil?
-        write_str(k, "1", ttl)
+        @entries[k] = "1"
+        @expires_at[k] = ttl > 0 ? Time.now.to_i + ttl : 0
+        if @entries.size > MAX_ENTRIES
+          @entries.clear
+          @expires_at.clear
+        end
         1
       else
         n = hit.to_i + 1
