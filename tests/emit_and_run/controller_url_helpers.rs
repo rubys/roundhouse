@@ -64,6 +64,19 @@ class UrlsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "http://blog.test/articles", response.body.split(" ").first
   end
 
+  test "a standard port in the Host names the same redirect as none" do
+    host! "blog.test:80"
+    get "/urls/away"
+    assert_equal "http://blog.test/articles", response.location
+    assert_redirected_to "/articles"
+  end
+
+  test "an absolute url with a query and no path requests the root" do
+    get "http://blog.test?before=6"
+    assert_response :success
+    assert_equal "/?before=6", request.fullpath
+  end
+
   test "an https url is requested over https, and its redirect followed so" do
     get "https://blog.test/urls/away"
     assert_equal "https://blog.test/articles", response.location

@@ -770,11 +770,17 @@ module ActionController
 
     # Relative locations (`/path`, not `//host`) pass. An absolute URL
     # must name this request's host; a missing request refuses any host.
+    # The port does not count, as in Rails' `_url_host_allowed?`
+    # (`URI(url).host == request.host`): `redirect_to articles_url` from
+    # a `Host: blog.test:80` request names `http://blog.test/articles`,
+    # the standard port dropped, and is the same host.
     def same_host_location(loc)
       host = ActionController.location_host(loc)
       return loc if host.empty?
       req_host = request_host_for_redirect
-      if req_host.empty? || host != req_host.downcase
+      if req_host.empty? ||
+         ActionController.url_host_without_port(host) !=
+           ActionController.url_host_without_port(req_host.downcase)
         raise ArgumentError, "Unsafe redirect to \"" + loc + "\", pass allow_other_host: true to redirect anyway."
       end
       loc

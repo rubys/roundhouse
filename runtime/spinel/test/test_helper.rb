@@ -2009,12 +2009,16 @@ module RequestDispatch
     raise "expected redirect to #{expected_path.inspect}, got #{response.location.inspect}" unless expected == actual
   end
 
+  # A path resolved against the request, through the same builder a
+  # controller's `_url` uses, so the scheme's standard port drops out
+  # on both sides (`Host: blog.test:80` names `http://blog.test/…`).
   def redirection_url_for_assertion(location)
     return location unless location.start_with?("/")
     return location if location.start_with?("//")
     req = @__request
-    return "http://" + host + location if req.nil?
-    req.protocol + req.host + location
+    protocol = req.nil? ? "http://" : req.protocol
+    hostport = req.nil? ? host : req.host
+    ActionController.build_host_url(protocol, hostport, ActionController.url_port_of(hostport), location)
   end
 
   # `get "http://blog.test/articles"` — Rails' integration session takes
@@ -2028,8 +2032,13 @@ module RequestDispatch
     https!(path.start_with?("https://"))
     url_host = ActionController.location_host(path)
     host!(url_host) unless url_host.empty?
+    # The authority ends at the first `/` or `?`; with no path the
+    # request is for the root, and keeps its query
+    # (`http://h?before=6` → `/?before=6`).
     rest = path[ActionController.find_substr(path, "://") + 3, path.length].to_s
     slash = ActionController.find_substr(rest, "/")
+    query = ActionController.find_substr(rest, "?")
+    return "/" + rest[query, rest.length].to_s if query >= 0 && (slash < 0 || query < slash)
     slash < 0 ? "/" : rest[slash, rest.length].to_s
   end
 
