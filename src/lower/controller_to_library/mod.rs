@@ -271,6 +271,12 @@ pub struct LowerControllerOptions<'a> {
     /// existed.
     pub inferred_params:
         Option<&'a std::collections::HashMap<(ClassId, Symbol), Vec<crate::ty::Ty>>>,
+    /// The analyzer's converged return per controller method
+    /// (`App::inferred_method_returns`) — types a private helper's
+    /// return in the built signature. `None` (the default) leaves it
+    /// `untyped`.
+    pub inferred_returns:
+        Option<&'a std::collections::HashMap<(ClassId, Symbol), crate::ty::Ty>>,
     /// The app's models — read for `has_one_attached` declarations, so
     /// a permitted field that is one (`:avatar`) is typed as an
     /// uploaded file on the synthesized params class
@@ -301,6 +307,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         format_breadth,
         route_id_segments,
         inferred_params,
+        inferred_returns,
         models,
         view_visible_controller_methods,
         wrap_parameters_by_default,
@@ -353,7 +360,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             } else {
                 None
             };
-            let methods = build_methods(controller, controllers, &params_specs, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, wrapper.as_ref());
+            let methods = build_methods(controller, controllers, &params_specs, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, inferred_returns, wrapper.as_ref());
             all_methods.push((methods, controller));
         }
         if view_visible_controller_methods.is_some() {
@@ -636,6 +643,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         &partials,
         FormatBreadth::NARROW,
         &std::collections::HashMap::new(),
+        None,
         None,
         None,
     );
@@ -1086,6 +1094,7 @@ fn build_methods(
     format_breadth: FormatBreadth,
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
     inferred_params: Option<&std::collections::HashMap<(ClassId, Symbol), Vec<Ty>>>,
+    inferred_returns: Option<&std::collections::HashMap<(ClassId, Symbol), Ty>>,
     // Rails' ParamsWrapper for this controller, when its requests get one.
     wrapper: Option<&self::params_wrapper::WrapperSpec>,
 ) -> Vec<MethodDef> {
@@ -1306,7 +1315,7 @@ fn build_methods(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ true,
             params_specs, json_actions,
             text_format_actions, view_ivars,
-            partials, format_breadth, &shadows, route_id_segments, inferred_params,
+            partials, format_breadth, &shadows, route_id_segments, inferred_params, inferred_returns,
             &deferred_renders, &mut deferred_tails,
         ));
     }
@@ -1340,7 +1349,7 @@ fn build_methods(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ false,
             params_specs, json_actions,
             text_format_actions, view_ivars,
-            partials, format_breadth, &shadows, route_id_segments, inferred_params,
+            partials, format_breadth, &shadows, route_id_segments, inferred_params, inferred_returns,
             &no_deferred, &mut std::collections::HashMap::new(),
         ));
     }
@@ -1353,7 +1362,7 @@ fn build_methods(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ false,
             params_specs, json_actions,
             text_format_actions, view_ivars,
-            partials, format_breadth, &shadows, route_id_segments, inferred_params,
+            partials, format_breadth, &shadows, route_id_segments, inferred_params, inferred_returns,
             &no_deferred, &mut std::collections::HashMap::new(),
         ));
     }
@@ -2622,6 +2631,7 @@ fn action_to_method(
     shadows: &std::collections::HashSet<Symbol>,
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
     inferred_params: Option<&std::collections::HashMap<(ClassId, Symbol), Vec<Ty>>>,
+    inferred_returns: Option<&std::collections::HashMap<(ClassId, Symbol), Ty>>,
     deferred_renders: &std::collections::HashSet<Symbol>,
     deferred_out: &mut std::collections::HashMap<Symbol, Expr>,
 ) -> MethodDef {
@@ -2758,8 +2768,13 @@ fn action_to_method(
         // blanket Nil was a WRONG PIN the AOT trusted: spinel refused
         // `@a, @b = get_from_cache(...)` as a nil destructure (and the
         // massign repro matrix showed every honest shape passes).
-        // Untyped lets the compiler infer from the body instead.
-        Ty::Untyped
+        // The analyzer's converged return stands in when it is fully
+        // known (`find_session_by_cookie` → `Session | nil`); a body it
+        // left open stays `Untyped` and the compiler infers it.
+        inferred_returns
+            .and_then(|t| t.get(&(controller.name.clone(), a.name.clone())))
+            .cloned()
+            .unwrap_or(Ty::Untyped)
     };
     // Private-helper params take the analyzer's call-site-unified type
     // when one landed (campfire's `broadcast_create_room(room)` has one

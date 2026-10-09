@@ -682,6 +682,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     view_visible_controller_methods: Some(
                         &app.view_visible_controller_methods,
                     ),
+                    inferred_params: Some(&app.inferred_method_params),
+                    inferred_returns: Some(&app.inferred_method_returns),
                     ..Default::default()
                 },
             );
