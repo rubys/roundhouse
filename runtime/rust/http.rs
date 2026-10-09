@@ -149,6 +149,9 @@ pub struct ControllerResponse {
     /// Set when `redirect_to` fires; the wrapper emits a 3xx with
     /// this as the `Location` header instead of an HTML body.
     pub location: Option<String>,
+    /// Extra response headers the action set through
+    /// `response.headers[...] = …`, applied after the body headers.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Default for ControllerResponse {
@@ -158,6 +161,7 @@ impl Default for ControllerResponse {
             body: String::new(),
             content_type: "text/html; charset=utf-8".to_string(),
             location: None,
+            headers: Vec::new(),
         }
     }
 }
@@ -626,6 +630,66 @@ pub fn response_set_head(status_name: &str, content_type: Option<String>) {
     });
 }
 
+/// Rails' `response` as a controller action sees it. The response
+/// itself lives in the `RESPONSE` thread-local; this handle is the
+/// zero-sized door to it, so `response.headers[…] = …` has somewhere
+/// to stand.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResponseHandle;
+
+impl ResponseHandle {
+    pub fn headers(&self) -> ResponseHeaders {
+        ResponseHeaders::load()
+    }
+}
+
+/// `response.headers`: a snapshot of the headers set so far, writable
+/// through `[]=`. The edits land back in the thread-local when the
+/// value is dropped — which is the end of the `response.headers[k] = v`
+/// statement, the only way Ruby code holds one.
+#[derive(Debug, Default)]
+pub struct ResponseHeaders {
+    entries: Vec<(String, String)>,
+}
+
+impl ResponseHeaders {
+    fn load() -> Self {
+        Self { entries: RESPONSE.with(|r| r.borrow().headers.clone()) }
+    }
+}
+
+impl std::ops::Index<&str> for ResponseHeaders {
+    type Output = String;
+    fn index(&self, name: &str) -> &String {
+        static MISSING: String = String::new();
+        self.entries
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v)
+            .unwrap_or(&MISSING)
+    }
+}
+
+impl std::ops::IndexMut<&str> for ResponseHeaders {
+    fn index_mut(&mut self, name: &str) -> &mut String {
+        let at = match self.entries.iter().position(|(k, _)| k.eq_ignore_ascii_case(name)) {
+            Some(at) => at,
+            None => {
+                self.entries.push((name.to_string(), String::new()));
+                self.entries.len() - 1
+            }
+        };
+        &mut self.entries[at].1
+    }
+}
+
+impl Drop for ResponseHeaders {
+    fn drop(&mut self) {
+        let entries = std::mem::take(&mut self.entries);
+        RESPONSE.with(|r| r.borrow_mut().headers = entries);
+    }
+}
+
 /// Snapshot + reset — used by the per-action axum wrapper to read
 /// out the state immediately after the action returns. Returns
 /// owned value so the borrow on the thread-local is short.
@@ -645,6 +709,7 @@ pub fn response_into_axum(resp: ControllerResponse) -> axum::response::Response 
         if let Ok(hv) = axum::http::HeaderValue::from_str(&location) {
             response.headers_mut().insert(axum::http::header::LOCATION, hv);
         }
+        apply_extra_headers(&mut response, &resp.headers);
         return response;
     }
     let body = resp.body;
@@ -655,7 +720,19 @@ pub fn response_into_axum(resp: ControllerResponse) -> axum::response::Response 
             .headers_mut()
             .insert(axum::http::header::CONTENT_TYPE, hv);
     }
+    apply_extra_headers(&mut response, &resp.headers);
     response
+}
+
+fn apply_extra_headers(response: &mut axum::response::Response, headers: &[(String, String)]) {
+    for (name, value) in headers {
+        if let (Ok(n), Ok(v)) = (
+            axum::http::HeaderName::from_bytes(name.as_bytes()),
+            axum::http::HeaderValue::from_str(value),
+        ) {
+            response.headers_mut().insert(n, v);
+        }
+    }
 }
 
 /// Public alias for `status_name_to_code` — exposed for the AC::Base
