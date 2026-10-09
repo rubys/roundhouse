@@ -22,6 +22,12 @@ module ActionController
       r.host.to_s
     end
 
+    def request_protocol_for_url
+      r = @request
+      return "http://" if r.nil?
+      r.protocol
+    end
+
     def request_for_csrf
       @request
     end

@@ -7,6 +7,10 @@ module ActionController
   def self.strip_trailing_controls: (String s) -> String
   def self.location_host: (String url) -> String
   def self.find_substr: (String hay, String needle) -> Integer
+  def self.build_host_url: (String protocol, String host, String port, String path) -> String
+  def self.normalize_url_protocol: (String protocol) -> String
+  def self.url_host_without_port: (String hostport) -> String
+  def self.url_port_of: (String hostport) -> String
   def self.find_last: (String hay, String needle) -> Integer
   def self.forgery_flag: () -> bool
   def self.set_forgery_flag: (bool value) -> void
@@ -143,6 +147,9 @@ module ActionController
     def request_for_csrf: () -> untyped
     def same_host_location: (String loc) -> String
     def request_host_for_redirect: () -> String
+    def default_url_options: () -> Hash[Symbol, String]
+    def request_protocol_for_url: () -> String
+    def url_from_path: (String path) -> String
 
     # Monomorphic on Symbol — body looks up STATUS_CODES. Integer
     # pass-through was previously supported via `is_a?(Integer)`

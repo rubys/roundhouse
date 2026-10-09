@@ -181,6 +181,69 @@ module ActionController
     -1
   end
 
+  # The absolute URL a controller's `<x>_url` route helper answers:
+  # `protocol`, `host`, `:port` unless it is the scheme's standard one,
+  # then `path` — `ActionDispatch::Http::URL.build_host_url` with the
+  # options `ActionController::UrlFor#url_options` already merged.
+  #
+  # `protocol` is taken as Rails' `normalize_protocol` takes it: with or
+  # without the `://` (`"https"`, `"https:"`, `"https://"`), and `//` is
+  # protocol-relative. `host` may still carry a `scheme://` prefix and a
+  # `:port` suffix, which Rails' HOST_REGEXP splits off: the scheme only
+  # counts when no protocol was given, and the port never does here,
+  # because the merged options always name a `port:` (the request's
+  # `optional_port`, or the app's), and Rails reads the host's own port
+  # only when they do not.
+  def self.build_host_url(protocol, host, port, path)
+    h = host
+    proto = protocol
+    scheme_at = find_substr(h, "://")
+    if scheme_at >= 0
+      proto = h[0, scheme_at + 3].to_s if proto == ""
+      h = h[scheme_at + 3, h.length].to_s
+    end
+    h = url_host_without_port(h)
+    proto = normalize_url_protocol(proto)
+    standard = proto == "https://" ? "443" : "80"
+    if port == "" || (proto != "//" && port == standard)
+      proto + h + path
+    else
+      proto + h + ":" + port + path
+    end
+  end
+
+  def self.normalize_url_protocol(protocol)
+    return "http://" if protocol == ""
+    return "//" if protocol == "//"
+    p = protocol
+    p = p[0, p.length - 2].to_s if p.end_with?("//")
+    p = p[0, p.length - 1].to_s if p.end_with?(":")
+    p + "://"
+  end
+
+  # `host:port` → `host`. A bracketed IPv6 literal keeps its colons;
+  # only a run of digits after the last one is a port.
+  def self.url_host_without_port(hostport)
+    port = url_port_of(hostport)
+    return hostport if port == ""
+    hostport[0, hostport.length - port.length - 1].to_s
+  end
+
+  # The digits after `host:`, or "" when there are none.
+  def self.url_port_of(hostport)
+    return "" if hostport.end_with?("]")
+    sep = find_last(hostport, ":")
+    return "" if sep < 0
+    digits = hostport[sep + 1, hostport.length].to_s
+    return "" if digits == ""
+    i = 0
+    while i < digits.length
+      return "" unless "0123456789".include?(digits[i, 1].to_s)
+      i += 1
+    end
+    digits
+  end
+
   class HeaderStore
     def initialize
       @keys = []
@@ -713,6 +776,49 @@ module ActionController
 
     def request_host_for_redirect
       ""
+    end
+
+    # Rails' `ActionController::UrlFor#default_url_options`: the options
+    # every URL this controller builds starts from. None by default; an
+    # app overrides it (campfire's `{ port: request.optional_port }`, a
+    # `host:` for links in a mail-like body) and its keys win over the
+    # request's. Typed as Rails' values are used here: each is read
+    # back as a String, so an Integer `port:` reads as its digits and a
+    # nil one as none.
+    def default_url_options
+      {}
+    end
+
+    # The scheme of the request the URL is built against, `://`
+    # included. `current.rb` answers the real request's; with none in
+    # scope Rails' default is http.
+    def request_protocol_for_url
+      "http://"
+    end
+
+    # A `<x>_url` route helper, which the controller lowerer rewrites to
+    # `url_from_path(RouteHelpers.<x>_path(…))`. Rails'
+    # `url_options` is the request's host, `optional_port` and protocol
+    # with `default_url_options` merged over them, so each of the three
+    # keys the app names replaces the request's — and a key it names
+    # with a nil value (`port: nil`) removes it.
+    #
+    # With no host at all, neither the request's nor the app's, the
+    # path is the answer: Rails raises "Missing host to link to!", and
+    # a path is what a browser resolves against the page it is on.
+    def url_from_path(path)
+      options = default_url_options
+      req_host = request_host_for_redirect
+      protocol = request_protocol_for_url
+      host = ActionController.url_host_without_port(req_host)
+      port = ActionController.url_port_of(req_host)
+      standard = protocol == "https://" ? "443" : "80"
+      port = "" if port == standard
+      protocol = options.fetch(:protocol, nil).to_s if options.key?(:protocol)
+      host = options.fetch(:host, nil).to_s if options.key?(:host)
+      port = options.fetch(:port, nil).to_s if options.key?(:port)
+      return path if host == ""
+      ActionController.build_host_url(protocol, host, port, path)
     end
 
     # Monomorphic on Symbol — real-blog never passes a literal Integer

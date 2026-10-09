@@ -55,7 +55,7 @@ use self::rewrites::{
     rewrite_assoc_through_parent_typed, rewrite_destroy_bang,
     rewrite_model_new_to_from_params, rewrite_update_to_typed_variant, rewrite_params,
     rewrite_redirect_to, rewrite_render_location_kwarg, rewrite_render_to_views,
-    rewrite_route_helpers,
+    rewrite_controller_route_helpers,
 };
 use self::util::{ivars_in_scope, method_name_for_action, views_module_name};
 
@@ -2805,9 +2805,10 @@ fn mark_param_kinds(sig: Ty, params: &[Param]) -> Ty {
 ///    object; model constructors expect a plain Hash.
 /// 10. `rewrite_destroy_bang` — `<recv>.destroy!` → `<recv>.destroy`.
 ///    Spinel's runtime model has only one destroy variant.
-/// 11. `rewrite_route_helpers` — bare `<x>_path` → `RouteHelpers.<x>_path`
-///    (covers `articles_path` and the like that appear outside
-///    redirect_to's first arg).
+/// 11. `rewrite_controller_route_helpers` — bare `<x>_path` →
+///    `RouteHelpers.<x>_path` (covers `articles_path` and the like that
+///    appear outside redirect_to's first arg), and `<x>_url` →
+///    `url_from_path(RouteHelpers.<x>_path)`, the absolute URL.
 ///
 /// Run in this order because each pass leaves the IR in a shape the
 /// next pass expects: render-views needs the synthesized symbol-form
@@ -2970,7 +2971,8 @@ fn lower_action_body(
     // project_arel_compile_time_first.md.
     let with_destroy = rewrite_destroy_bang(&with_assoc);
     let with_destroy = rewrites::rewrite_request_format(&with_destroy);
-    let with_routes = rewrite_route_helpers(&with_destroy, shadows, route_id_segments);
+    let with_routes =
+        rewrite_controller_route_helpers(&with_destroy, shadows, route_id_segments);
     // Some rewrites (rewrite_assoc_through_parent in particular)
     // produce nested Seqs — `Seq { ..., Seq { stmts }, ... }`. The
     // body-typer's Seq walker only propagates ivar bindings from

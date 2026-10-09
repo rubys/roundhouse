@@ -2535,6 +2535,22 @@ has three filled cells and one empty one:
   accepts both spellings and we accept only the first.
   `x_url(…, only_path: true)` is Rails asking the URL spelling for a
   path, and gets one.
+
+  A hostless `_url` in a **controller** body is
+  `url_from_path(RouteHelpers.x_path(…))`
+  (`controller_to_library::rewrites::rewrite_controller_route_helpers`).
+  `ActionController::Base#url_from_path` is Rails' `url_options` merge:
+  the request's protocol, host and optional port, each replaced by the
+  key the controller's `default_url_options` names (a nil value removes
+  it), then `build_host_url` drops the scheme's standard port. So
+  `render plain: articles_url` in an integration test answers
+  `http://www.example.com/articles`, as Rails does; it used to answer
+  `/articles`. With no host at all it answers the path, where Rails
+  raises "Missing host to link to!". A TEST body's `_url` still renders
+  the path, and the harness meets Rails halfway: `assert_redirected_to`
+  compares both sides as absolute URLs, and `get`/`follow_redirect!`
+  accept an absolute one. Targets whose controller runtime has no
+  request (`request_host_for_redirect` is `""` there) keep the path.
 * **`anchor:`** is rendered, `#tag`, after the query string — the order
   `path_for` applies `add_params` and then `add_anchor` in.
 * **`format:`** is `lower::route_format_suffix`'s, which monomorphizes

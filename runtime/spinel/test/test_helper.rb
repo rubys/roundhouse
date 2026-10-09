@@ -1636,6 +1636,7 @@ module RequestDispatch
   end
 
   def dispatch_request(method, path, params, headers = {}, as = nil)
+    path = integration_request_path(path)
     require_relative "../config/routes"
     # Controllers load on demand (the CRuby target's routes.rb no longer
     # eager-requires them; they're lazy-loaded at dispatch). The blog's
@@ -1975,9 +1976,40 @@ module RequestDispatch
   # Two-argument form retained for hand-written spinel-blog tests
   # (`assert_redirected_to "/articles/1", res`); single-argument form
   # used by emitted tests pulls from the dispatch-stashed response.
+  #
+  # Both sides are compared as ABSOLUTE urls, as Rails'
+  # `normalize_argument_to_redirection` compares them: a path is
+  # resolved against the request (`http://www.example.com` + path). A
+  # controller's `redirect_to articles_url` answers the absolute form
+  # and the scaffold's `redirect_to @article` the path, and a test may
+  # spell its expectation either way.
   def assert_redirected_to(expected_path, response = @__response)
     raise "expected a redirect, got status=#{response.status} location=#{response.location.inspect}" unless response.redirect?
-    raise "expected redirect to #{expected_path.inspect}, got #{response.location.inspect}" unless expected_path == response.location
+    expected = redirection_url_for_assertion(expected_path.to_s)
+    actual = redirection_url_for_assertion(response.location.to_s)
+    raise "expected redirect to #{expected_path.inspect}, got #{response.location.inspect}" unless expected == actual
+  end
+
+  def redirection_url_for_assertion(location)
+    return location unless location.start_with?("/")
+    return location if location.start_with?("//")
+    req = @__request
+    return "http://" + host + location if req.nil?
+    req.protocol + req.host + location
+  end
+
+  # `get "http://blog.test/articles"` — Rails' integration session takes
+  # an absolute url as readily as a path, and `follow_redirect!` hands
+  # it one whenever the controller redirected to a `_url` helper. The
+  # authority becomes the session's host (Rails' `host!` from the url),
+  # and the router sees the path.
+  def integration_request_path(path)
+    return path unless path.start_with?("http://") || path.start_with?("https://")
+    url_host = ActionController.location_host(path)
+    host!(url_host) unless url_host.empty?
+    rest = path[ActionController.find_substr(path, "://") + 3, path.length].to_s
+    slash = ActionController.find_substr(rest, "/")
+    slash < 0 ? "/" : rest[slash, rest.length].to_s
   end
 
   # `assert_select` over the Dom primitive surface (defined above). The
