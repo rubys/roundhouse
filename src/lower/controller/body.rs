@@ -57,16 +57,23 @@ pub fn unwrap_respond_to(expr: &Expr) -> Expr {
 pub struct FormatBreadth {
     pub json_any: bool,
     pub rss: bool,
+    /// The tree raises `ActionController::ParameterMissing` from
+    /// `params.expect` / `params.require` and its dispatcher answers an
+    /// unrescued one with 400, as Rails does. Ruby family only: the
+    /// strict targets have no exception control flow and hand-written
+    /// `Params` primitives, so a missing resource reads as `{}` there
+    /// (ledgered in docs/pipeline/runtime.md).
+    pub raises_param_missing: bool,
 }
 
 impl FormatBreadth {
     /// html only (plus the simple-`render :sym` json arms) — the emit
     /// paths that don't recognize `request_format` at all.
-    pub const NARROW: Self = Self { json_any: false, rss: false };
+    pub const NARROW: Self = Self { json_any: false, rss: false, raises_param_missing: false };
     /// The spinel/AOT tree: rss dispatch, no JsonRender.
-    pub const RSS_ONLY: Self = Self { json_any: false, rss: true };
+    pub const RSS_ONLY: Self = Self { json_any: false, rss: true, raises_param_missing: true };
     /// The CRuby/JRuby trees, whose overlay answers the full surface.
-    pub const FULL: Self = Self { json_any: true, rss: true };
+    pub const FULL: Self = Self { json_any: true, rss: true, raises_param_missing: true };
 }
 
 /// Format-dispatching variant of `unwrap_respond_to`.

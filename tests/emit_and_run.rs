@@ -11,6 +11,8 @@ mod emit_and_run;
 mod class_attribute;
 #[path = "emit_and_run/integer_query_find_by.rs"]
 mod integer_query_find_by;
+#[path = "emit_and_run/strong_params.rs"]
+mod strong_params;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
@@ -8495,6 +8497,28 @@ fn an_ivar_rewritten_through_sort_by_to_h_runs() {
 counts = article.word_counts
 raise counts.inspect unless counts == { "b" => 3, "a" => 2, "c" => 1 }
 raise article.top_word.inspect unless article.top_word == "b"
+"#,
+        )
+        .assert_passes();
+}
+
+/// A class an initializer defines and the app reads only through `[]`
+/// (forem's `ApplicationConfig["KEY"]`) is the app's, as `X.` and `X::` are.
+#[test]
+fn an_initializer_class_read_through_brackets_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "config/initializers/app_settings.rb",
+            "class AppSettings\n  DEFAULTS = { \"BANNER\" => \"Welcome\" }.freeze\n\n  def self.[](key)\n    DEFAULTS.fetch(key, \"\")\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def banner\n    \"#{AppSettings[\"BANNER\"]}: #{title}\"\n  end\n",
+        )
+        .run_ruby(
+            r#"article = Article.create!(title: "Brackets", body: "Body text here")
+raise article.banner.inspect unless article.banner == "Welcome: Brackets"
 "#,
         )
         .assert_passes();

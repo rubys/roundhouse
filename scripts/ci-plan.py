@@ -67,6 +67,7 @@ SPINEL_TESTS = [
     "rails_compat_vectors_spinel",
     "spinel_pg_db",
     "generated_columns_spinel",
+    "postgres_json_types_spinel",
 ]
 # Inputs of the PostgreSQL Db gate (tests/spinel_pg_db.rs): the shim, its
 # RBS, the contract and time parsing it compiles with, and the cases.
@@ -103,6 +104,17 @@ NET_HTTP_INPUTS = {
     "runtime/spinel/tcp_socket_stub.rb",
     "runtime/spinel/tcp_socket_stub.rbs",
 }
+JSON_TYPES_SPINEL_INPUTS = {
+    "src/schema.rs",
+    "src/ingest/schema.rs",
+    "src/ingest/structure_sql.rs",
+    "src/ingest/model.rs",
+    "src/emit/shared/schema_sql.rs",
+    "src/lower/arel/ruby_values.rs",
+    "src/lower/model_to_library/mod.rs",
+    "src/lower/model_to_library/schema.rs",
+}
+
 SPINEL11 = [
     "spinel-build",
     "spinel-framework",
@@ -256,6 +268,8 @@ def native_coverage(path):
         or path.startswith("src/lower/model_to_library/adapter_emit/")
     ):
         suites.add("generated_columns_spinel")
+    if path in JSON_TYPES_SPINEL_INPUTS:
+        suites.add("postgres_json_types_spinel")
     # Gate drivers stay flat beside their Rust harness. Match the most
     # specific suite first (e.g. param_binds_values before param_binds).
     if path == "tests/param_binds_text_cleanup.rb":

@@ -105,7 +105,8 @@ fn emitted(suffix: &str) -> String {
 fn the_scalar_half_of_the_list_still_lowers() {
     let c = emitted("app/controllers/stories_controller.rb");
     assert!(
-        c.contains("StoryParams.from_raw(@params)"),
+        // Behind `require`'s refusal on the ruby family (400 when missing).
+        c.contains(r#"StoryParams.from_raw(Params.require_present(@params, "story"))"#),
         "the helper lowers to the synthesized record:\n{c}"
     );
     assert!(
@@ -191,7 +192,7 @@ fn a_hash_valued_key_does_not_sink_the_permit() {
         .map(|f| f.content.clone())
         .expect("emitted controller");
     assert!(
-        c.contains("AccountParams.from_raw(@params)"),
+        c.contains(r#"AccountParams.from_raw(Params.require_present(@params, "account"))"#),
         "the helper lowers to the synthesized record:\n{c}"
     );
     assert!(

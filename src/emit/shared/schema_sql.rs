@@ -233,6 +233,10 @@ pub fn render_schema_statements_for(schema: &Schema, dialect: Dialect) -> Result
 /// invokes this gate before emitting any files; the PostgreSQL renderer
 /// also checks it directly.
 pub fn validate_schema_for_dialect(schema: &Schema, dialect: Dialect) -> Result<(), String> {
+    let expression_dialect = match dialect {
+        Dialect::Sqlite => crate::schema::generated::GeneratedExpressionDialect::Portable,
+        Dialect::Postgres => crate::schema::generated::GeneratedExpressionDialect::Postgres,
+    };
     for table in schema.tables.values() {
         if let Some(vm) = &table.virtual_module {
             if dialect != Dialect::Sqlite {
@@ -243,7 +247,9 @@ pub fn validate_schema_for_dialect(schema: &Schema, dialect: Dialect) -> Result<
                 ));
             }
         }
-        for (column, reason) in crate::schema::generated::validate_table(table) {
+        for (column, reason) in
+            crate::schema::generated::validate_table_with_dialect(table, expression_dialect)
+        {
             return Err(format!("generated column unsupported: {}.{column}: {reason}", table.name.as_str()));
         }
         if dialect == Dialect::Postgres {
@@ -406,6 +412,7 @@ fn sqlite_type(ct: &ColumnType) -> &'static str {
         | ColumnType::DateTime
         | ColumnType::Time
         | ColumnType::Json
+        | ColumnType::Jsonb
         | ColumnType::Uuid => "TEXT",
         ColumnType::Reference { .. } => "INTEGER",
     }
@@ -415,9 +422,8 @@ fn sqlite_type(ct: &ColumnType) -> &'static str {
 /// creates for it (`NATIVE_DATABASE_TYPES`; `datetime` is Rails 7+'s
 /// `timestamp(6)`), in the spelling `pg_dump` prints.
 ///
-/// The IR is what ingest left: `jsonb` and `json` are both `Json`,
-/// which renders `jsonb` — the type Postgres apps use, and the one that
-/// has equality and a btree index; `timestamptz` is a `DateTime`, and
+/// Ingest preserves `json` and `jsonb` independently so PostgreSQL schema
+/// output retains the source type. `timestamptz` is a `DateTime`, and
 /// `citext` and the network types render as their text storage. A
 /// decimal scale without a precision, which Rails rejects, renders as a
 /// bare `numeric`.
@@ -437,7 +443,8 @@ fn postgres_type(ct: &ColumnType) -> String {
         ColumnType::DateTime => "timestamp(6) without time zone".into(),
         ColumnType::Time => "time without time zone".into(),
         ColumnType::Binary => "bytea".into(),
-        ColumnType::Json => "jsonb".into(),
+        ColumnType::Json => "json".into(),
+        ColumnType::Jsonb => "jsonb".into(),
         ColumnType::Uuid => "uuid".into(),
     }
 }
@@ -454,6 +461,7 @@ mod tests {
         render_schema_statements_for(&schema, dialect).expect("render")
     }
 
+    /// Builds a plain schema column without generated expressions or source-type provenance.
     fn column(name: &str, col_type: ColumnType, nullable: bool, primary_key: bool) -> Column {
         Column {
             name: Symbol::from(name),
@@ -463,6 +471,7 @@ mod tests {
             primary_key,
             generated: None,
             generated_text_compatible: None,
+            generated_int4_compatible: None,
         }
     }
 
@@ -781,8 +790,8 @@ end
             (ColumnType::DateTime, "timestamp(6) without time zone"),
             (ColumnType::Time, "time without time zone"),
             (ColumnType::Binary, "bytea"),
-            // Ingest folds `jsonb` and `json` into one `Json`.
-            (ColumnType::Json, "jsonb"),
+            (ColumnType::Json, "json"),
+            (ColumnType::Jsonb, "jsonb"),
             (ColumnType::Uuid, "uuid"),
             // Not something Rails emits (it rejects a scale without a
             // precision): the scale is dropped rather than a precision

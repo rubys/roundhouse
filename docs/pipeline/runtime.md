@@ -244,6 +244,23 @@ undocumented one reads as intent to the next session precisely because
 it is applied consistently, and the emit gives no signal that anyone
 weighed it.
 
+### A missing strong-params resource is `{}` on the strict targets, not 400
+
+Rails refuses `params.expect(article: [...])` when `article` is missing,
+blank, a scalar, an array, or a hash of only unpermitted keys, and
+`params.require(:article)` when it is missing or blank (a scalar reaches
+`permit` and is a 500): both raise `ActionController::ParameterMissing`,
+which an unrescued request answers with 400. The ruby family does the
+same: the typed factory is handed `Params.expect_present(@params, …)` /
+`Params.require_present(@params, …)` (`runtime/ruby/params.rb`), and both
+dispatchers answer an unrescued `ParameterMissing` with 400.
+
+The strict targets have no exception control flow and hand-written
+`Params` primitives, so their factory keeps reading `@params`: a missing
+resource is an empty one, the model's validation usually refuses it, and
+the request answers 422 where Rails says 400. The capability is
+`FormatBreadth::raises_param_missing` (`src/lower/controller/body.rs`).
+
 ### Spinel `Date` is a bounded runtime value
 
 The Spinel target defines a small `Date` class in

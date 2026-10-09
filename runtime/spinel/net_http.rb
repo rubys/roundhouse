@@ -108,7 +108,10 @@ module Net
     # finished, and `do_finish` is absent from packages before #8048.
     # `yield`, not the `&blk` `#request` needs: the package's own `start`
     # yields too, and every caller of it holds a typed `HTTP.new`.
+    # Like CRuby's, it raises on a session that is already open, before
+    # touching it, so a nested `start` can't finish the outer session.
     def start
+      raise IOError, "HTTP session already opened" if @started
       @started = true
       return self unless block_given?
       begin

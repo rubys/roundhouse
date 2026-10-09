@@ -41,6 +41,10 @@ mod class_configuration;
 mod rails_root_join;
 #[path = "support/anonymous_keywords.rs"]
 mod anonymous_keywords;
+#[path = "support/native_http.rs"]
+mod native_http;
+#[path = "spinel_toolchain/strong_params.rs"]
+mod strong_params;
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]

@@ -2916,7 +2916,8 @@ fn lower_action_body(
     // the typed factory `<Resource>Params.from_raw(@params)`. The
     // controller's `<resource>_params` helper body becomes that single
     // call; downstream call sites see a typed value, not a Hash.
-    let with_typed_params = self::params::rewrite_to_from_raw(&with_params, params_specs);
+    let with_typed_params =
+        self::params::rewrite_to_from_raw(&with_params, params_specs, format_breadth.raises_param_missing);
     let with_redirects = rewrite_redirect_to(&with_typed_params, route_id_segments);
     // Rewrite `<Model>.new(<resource>_params)` → `<Model>.from_params(<resource>_params)`
     // BEFORE the assoc-through-parent rewrite, so the build path picks

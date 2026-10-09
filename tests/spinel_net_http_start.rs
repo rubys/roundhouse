@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const CHECKS: usize = 15;
+const CHECKS: usize = 23;
 
 fn scratch_dir() -> PathBuf {
     let base = option_env!("CARGO_TARGET_TMPDIR")
@@ -63,6 +63,15 @@ fn the_lazy_start_yields_the_session_and_answers_the_blocks_value() {
     let run = Command::new(scratch.join("driver")).output().expect("run driver");
     let stdout = String::from_utf8_lossy(&run.stdout);
     let stderr = String::from_utf8_lossy(&run.stderr);
+    // A crash (e.g. a segfault mid-run) can still leave a prefix of
+    // passing `ok` lines on stdout with no `FAIL` among them; checking
+    // the exit status first is what catches that before the line checks
+    // below mistake a partial run for a clean one.
+    assert!(
+        run.status.success(),
+        "driver exited with {}\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}",
+        run.status
+    );
     // `done` is the last line; its absence means the binary died part
     // way, which an absence of FAIL lines alone would read as a pass.
     assert!(

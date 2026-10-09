@@ -151,7 +151,7 @@ fn ingests_tables_columns_indexes_fk_and_pk() {
     assert_eq!(col(widgets, "status").col_type, ColumnType::String { limit: None });
     assert_eq!(col(widgets, "price").col_type, ColumnType::Decimal { precision: None, scale: None });
     assert_eq!(col(widgets, "published_at").col_type, ColumnType::DateTime);
-    assert_eq!(col(widgets, "metadata").col_type, ColumnType::Json);
+    assert_eq!(col(widgets, "metadata").col_type, ColumnType::Jsonb);
     assert_eq!(col(widgets, "external_id").col_type, ColumnType::Uuid);
     assert_eq!(col(widgets, "company_id").col_type, ColumnType::BigInt);
     assert!(!col(widgets, "company_id").nullable);

@@ -94,6 +94,81 @@ module Params
     value
   end
 
+  # `params.expect(key => [fields])`'s refusal, answered before the
+  # typed factory reads the resource: `params` back unchanged, or
+  # `ParameterMissing` (400 when the app does not rescue it). Rails
+  # refuses unless the value is a Hash holding at least one permitted
+  # key with the kind of value its filter takes: a scalar under a scalar
+  # key (`:title`), an array of scalars under `tags: []`, a hash under
+  # `settings: [:theme]` or `settings: {}`, an array under
+  # `items: [[:name]]`. A missing key, nil, "", {}, a scalar, an array,
+  # and a hash of only unpermitted or mistyped keys all raise.
+  def self.expect_present(params, key, fields, scalar_array_fields, hash_fields, array_fields)
+    value = params.fetch(key, "")
+    if value.is_a?(Hash)
+      i = 0
+      while i < fields.length
+        field = fields[i]
+        if value.key?(field)
+          inner = value.fetch(field, "")
+          return params unless inner.is_a?(Hash) || inner.is_a?(Array)
+        end
+        i = i + 1
+      end
+      i = 0
+      while i < scalar_array_fields.length
+        field = scalar_array_fields[i]
+        if value.key?(field)
+          inner = value.fetch(field, "")
+          return params if inner.is_a?(Array) && Params.scalars_only(inner)
+        end
+        i = i + 1
+      end
+      i = 0
+      while i < hash_fields.length
+        field = hash_fields[i]
+        return params if value.key?(field) && value.fetch(field, "").is_a?(Hash)
+        i = i + 1
+      end
+      i = 0
+      while i < array_fields.length
+        field = array_fields[i]
+        return params if value.key?(field) && value.fetch(field, "").is_a?(Array)
+        i = i + 1
+      end
+    end
+    raise(ActionController::ParameterMissing.new(key))
+  end
+
+  # Does `items` hold only scalars - what `tags: []` permits?
+  def self.scalars_only(items)
+    i = 0
+    while i < items.length
+      item = items[i]
+      return false if item.is_a?(Hash) || item.is_a?(Array)
+      i = i + 1
+    end
+    true
+  end
+
+  # `params.require(key).permit(...)`'s refusal. Laxer than `expect`, as
+  # in Rails, whose `require` passes on a value that is `present?` or
+  # `false`: a blank one (missing, nil, a whitespace-only string, an empty
+  # array or hash) raises `ParameterMissing`; a hash of only unpermitted
+  # keys passes (the permit then yields nothing); any other value reaches
+  # `permit`, which only a hash has, so the request is a 500 there and here.
+  def self.require_present(params, key)
+    value = params.fetch(key, "")
+    if value.is_a?(Hash)
+      raise(ActionController::ParameterMissing.new(key)) if value.empty?
+      return params
+    end
+    if value != false && ActiveSupport.blank?(value)
+      raise(ActionController::ParameterMissing.new(key))
+    end
+    raise(NoMethodError.new("undefined method 'permit' for #{key}: not a Hash"))
+  end
+
   # One key of a top-level `params.permit(:a, :b)` — the Rails 8
   # authentication generator's `@user.update(params.permit(:password,
   # :password_confirmation))`. The permit lowers to a chain of these from

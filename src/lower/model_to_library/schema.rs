@@ -999,7 +999,10 @@ fn is_generic_json_col(col: &Column, model: &Model) -> bool {
     if crate::lower::serialize::json_serialize_columns(model).contains(&col.name) {
         return true;
     }
-    matches!(col.col_type, crate::schema::ColumnType::Json)
+    matches!(
+        col.col_type,
+        crate::schema::ColumnType::Json | crate::schema::ColumnType::Jsonb
+    )
         && !crate::lower::has_json::has_json_decls(&model.body)
             .iter()
             .any(|decl| decl.column == col.name)

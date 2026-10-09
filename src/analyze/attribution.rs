@@ -462,6 +462,109 @@ impl<'a> AttributionCtx<'a> {
 /// Recorded ancestry is evidence of missing coverage, NOT method ownership:
 /// even a typo on a gem-dependent receiver can be a note. Types and emitted
 /// methods remain unchanged; ambiguous ancestry does not claim a diagnostic.
+/// An unsupported constant that an initializer assigns (`::DB =
+/// MiniSqlMultisiteConnection.instance`, `ForemStatsClient = …`). Rails
+/// runs every initializer at boot, so the app's reads of it are sound,
+/// but a top-level assignment there has no home in the ingested tree yet:
+/// the reads are the tool's gap, not the app's errors. Matched by the
+/// declaration Rubydex resolves the reference to, so a namesake in
+/// another namespace stays an error, and so does one only a conditional
+/// assignment defines.
+pub fn attribute_initializer_constants(diags: &mut [Diagnostic], app: &App) {
+    if !diags.iter().any(|d| d.severity != Severity::Info && is_unsupported_constant(d)) {
+        return;
+    }
+    let root = app.root.trim_end_matches('/');
+    let mut assigned: HashMap<String, Vec<String>> = HashMap::new();
+    for f in &app.sources {
+        let rel = f.path.strip_prefix(root).unwrap_or(&f.path).trim_start_matches('/');
+        if !rel.starts_with("config/initializers/") {
+            continue;
+        }
+        for name in unconditional_constant_writes(&f.text) {
+            let paths = assigned.entry(name).or_default();
+            if !paths.iter().any(|p| p == rel) {
+                paths.push(rel.to_string());
+            }
+        }
+    }
+    if assigned.is_empty() {
+        return;
+    }
+    let resolver = app.const_resolver.for_sources(&app.sources);
+    for d in diags.iter_mut() {
+        if d.severity == Severity::Info || !is_unsupported_constant(d) {
+            continue;
+        }
+        let DiagnosticKind::Unsupported { detail, .. } = &d.kind else { continue };
+        let segments: Vec<crate::ident::Symbol> =
+            detail.trim_start_matches("::").split("::").map(crate::ident::Symbol::from).collect();
+        let Some(resolved) = resolver.declaration_name(d.span, &segments) else { continue };
+        let Some(paths) = assigned.get(resolved.trim_start_matches("::")) else { continue };
+        d.severity = Severity::Info;
+        d.message.push_str(&format!(
+            " — likely roundhouse coverage, not an app error (assigned in {}: a constant an initializer assigns is not ingested yet)",
+            paths.join(", ")
+        ));
+    }
+}
+
+/// The constants (fully qualified) a file assigns where the assignment
+/// always runs: at the top level, or in a class or module body. One inside
+/// an `if`, a block or a method may never run, and the read stays an error.
+fn unconditional_constant_writes(text: &str) -> Vec<String> {
+    fn id(id: &ruby_prism::ConstantId<'_>) -> String {
+        String::from_utf8_lossy(id.as_slice()).into_owned()
+    }
+    /// `A::B` as written, or None for a path that is not plain constants.
+    fn path(node: &ruby_prism::Node<'_>) -> Option<(bool, String)> {
+        if let Some(read) = node.as_constant_read_node() {
+            return Some((false, id(&read.name())));
+        }
+        let p = node.as_constant_path_node()?;
+        let last = id(&p.name()?);
+        match p.parent() {
+            None => Some((true, last)),
+            Some(parent) => path(&parent).map(|(rooted, head)| (rooted, format!("{head}::{last}"))),
+        }
+    }
+    fn qualify(namespace: &str, rooted: bool, name: &str) -> String {
+        if rooted || namespace.is_empty() { name.to_string() } else { format!("{namespace}::{name}") }
+    }
+    fn walk(stmts: Option<ruby_prism::StatementsNode<'_>>, namespace: &str, out: &mut Vec<String>) {
+        let Some(stmts) = stmts else { return };
+        for stmt in stmts.body().iter() {
+            if let Some(w) = stmt.as_constant_write_node() {
+                out.push(qualify(namespace, false, &id(&w.name())));
+            } else if let Some(w) = stmt.as_constant_path_write_node() {
+                if let Some((rooted, name)) = path(&w.target().as_node()) {
+                    out.push(qualify(namespace, rooted, &name));
+                }
+            } else if let Some(c) = stmt.as_class_node() {
+                if let Some((rooted, name)) = path(&c.constant_path()) {
+                    let inner = qualify(namespace, rooted, &name);
+                    walk(c.body().and_then(|b| b.as_statements_node()), &inner, out);
+                }
+            } else if let Some(m) = stmt.as_module_node() {
+                if let Some((rooted, name)) = path(&m.constant_path()) {
+                    let inner = qualify(namespace, rooted, &name);
+                    walk(m.body().and_then(|b| b.as_statements_node()), &inner, out);
+                }
+            }
+        }
+    }
+    let parsed = ruby_prism::parse(text.as_bytes());
+    let mut out = Vec::new();
+    if let Some(program) = parsed.node().as_program_node() {
+        walk(Some(program.statements()), "", &mut out);
+    }
+    out
+}
+
+fn is_unsupported_constant(d: &Diagnostic) -> bool {
+    matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "constant")
+}
+
 pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
     let Some(lock) = &app.gem_lock else { return };
     let census = crate::gems::GemCensus::of(lock);

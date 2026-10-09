@@ -16,6 +16,7 @@ use ruby_prism::Node;
 
 use indexmap::IndexMap;
 
+use crate::schema::generated::GeneratedExpressionDialect;
 use crate::schema::{Column, ColumnType, GeneratedColumn, GeneratedColumnStorage, Index, Schema, Table};
 use crate::{Symbol, TableRef};
 
@@ -25,7 +26,24 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+/// Ingest a Rails schema with the Portable generated-expression grammar.
+/// PostgreSQL-only casts require the explicit DDL-dialect entry point.
 pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
+    ingest_schema_with_generated_expression_dialect(
+        source,
+        file,
+        GeneratedExpressionDialect::Portable,
+    )
+}
+
+/// Ingest a Rails schema while validating generated expressions for an
+/// explicit DDL source dialect. Application ingestion continues to call
+/// [`ingest_schema`] and therefore retains the Portable default.
+pub fn ingest_schema_with_generated_expression_dialect(
+    source: &[u8],
+    file: &str,
+    dialect: GeneratedExpressionDialect,
+) -> IngestResult<Schema> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -39,7 +57,9 @@ pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
     walk_calls(&root, &mut |call| {
         match constant_id_str(&call.name()) {
             "create_table" => {
-                if let Some((name, table)) = table_from_create_table(call, file, &mut gaps) {
+                if let Some((name, table)) =
+                    table_from_create_table(call, file, &mut gaps, dialect)
+                {
                     schema.tables.insert(name, table);
                 }
             }
@@ -107,6 +127,22 @@ pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
 /// are ignored: migrations legitimately contain arbitrary Ruby (data
 /// backfills, `say`, …) that doesn't affect the schema.
 pub fn ingest_migration(source: &[u8], file: &str, schema: &mut Schema) -> IngestResult<()> {
+    ingest_migration_with_generated_expression_dialect(
+        source,
+        file,
+        schema,
+        GeneratedExpressionDialect::Portable,
+    )
+}
+
+/// Fold one migration using an explicit generated-expression grammar.
+/// The default [`ingest_migration`] remains Portable for application ingest.
+pub fn ingest_migration_with_generated_expression_dialect(
+    source: &[u8],
+    file: &str,
+    schema: &mut Schema,
+    dialect: GeneratedExpressionDialect,
+) -> IngestResult<()> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -141,7 +177,7 @@ pub fn ingest_migration(source: &[u8], file: &str, schema: &mut Schema) -> Inges
             return;
         }
         let verb = constant_id_str(&call.name()).to_string();
-        if let Err(e) = apply_migration_verb(&verb, call, file, schema) {
+        if let Err(e) = apply_migration_verb(&verb, call, file, schema, dialect) {
             err = Some(e);
         }
     });
@@ -149,7 +185,7 @@ pub fn ingest_migration(source: &[u8], file: &str, schema: &mut Schema) -> Inges
         Some(e) => Err(e),
         None => {
             for table in schema.tables.values() {
-                if let Some((column, reason)) = crate::schema::generated::validate_table(table).into_iter().next() {
+                if let Some((column, reason)) = crate::schema::generated::validate_table_with_dialect(table, dialect).into_iter().next() {
                     return Err(IngestError::Unsupported {
                         file: file.into(),
                         message: format!("generated column dropped: {}.{column}: {reason}", table.name),
@@ -174,11 +210,13 @@ const UNSUPPORTED_VERBS: &[&str] = &[
     "up_only",
 ];
 
+/// Apply one recognized schema-changing migration verb under the selected expression dialect.
 fn apply_migration_verb(
     verb: &str,
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     schema: &mut Schema,
+    dialect: GeneratedExpressionDialect,
 ) -> Result<(), IngestError> {
     if UNSUPPORTED_VERBS.contains(&verb) {
         return Err(IngestError::Unsupported {
@@ -199,7 +237,7 @@ fn apply_migration_verb(
     match verb {
         "create_table" => {
             let mut gaps: Vec<IngestError> = Vec::new();
-            let built = table_from_create_table(call, file, &mut gaps);
+            let built = table_from_create_table(call, file, &mut gaps, dialect);
             if let Some(gap) = gaps.into_iter().next() {
                 return Err(gap);
             }
@@ -304,7 +342,7 @@ fn apply_migration_verb(
                     if table.columns.iter().any(|column| column.generated.is_some())
                         || col.generated.is_some()
                     {
-                        validate_generated_migration_candidate(&candidate, verb, file)?;
+                        validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
                     }
                 }
                 // change_column replaces; add_column after a
@@ -323,7 +361,7 @@ fn apply_migration_verb(
                     if table.columns.iter().any(|column| column.generated.is_some()) {
                         let mut candidate = table.clone();
                         candidate.columns.retain(|column| column.name.as_str() != c);
-                        validate_generated_migration_candidate(&candidate, verb, file)?;
+                        validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
                     }
                 }
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
@@ -344,7 +382,7 @@ fn apply_migration_verb(
                                     column.name = Symbol::from(new.clone());
                                 }
                             }
-                            validate_generated_migration_candidate(&candidate, verb, file)?;
+                            validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
                         }
                     }
                 }
@@ -386,7 +424,7 @@ fn apply_migration_verb(
                                 col.default = default.clone();
                             }
                         }
-                        validate_generated_migration_candidate(&candidate, verb, file)?;
+                        validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
                     }
                 }
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
@@ -431,7 +469,7 @@ fn apply_migration_verb(
                         candidate
                             .columns
                             .retain(|column| column.name.as_str() != name);
-                        validate_generated_migration_candidate(&candidate, verb, file)?;
+                        validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
                     }
                 }
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
@@ -557,8 +595,9 @@ fn validate_generated_migration_candidate(
     table: &Table,
     verb: &str,
     file: &str,
+    dialect: GeneratedExpressionDialect,
 ) -> Result<(), IngestError> {
-    if let Some((column, reason)) = crate::schema::generated::validate_table(table)
+    if let Some((column, reason)) = crate::schema::generated::validate_table_with_dialect(table, dialect)
         .into_iter()
         .next()
     {
@@ -785,6 +824,7 @@ fn table_from_create_table(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     gaps: &mut Vec<IngestError>,
+    dialect: GeneratedExpressionDialect,
 ) -> Option<(Symbol, Table)> {
     let args = call.arguments()?;
     let first = args.arguments().iter().next();
@@ -870,7 +910,12 @@ fn table_from_create_table(
             Some("integer") if !id_default => (Some("integer"), None),
             other => (other, id_limit),
         };
-        let opts = ColumnOpts { nullable: Some(false), default: None, limit: key_limit };
+        let opts = ColumnOpts {
+            nullable: Some(false),
+            default: None,
+            limit: key_limit,
+            ..ColumnOpts::default()
+        };
         let key = match key_type {
             None | Some("bigint") | Some("primary_key") => Ok(Column {
                 name: Symbol::from(id_name.as_str()),
@@ -880,6 +925,7 @@ fn table_from_create_table(
                 primary_key: true,
                 generated: None,
                 generated_text_compatible: None,
+                generated_int4_compatible: None,
             }),
             Some(t) => column_with_type(t, id_name.clone(), &opts, &table_name, file),
         };
@@ -939,7 +985,7 @@ fn table_from_create_table(
         foreign_keys: vec![],
         virtual_module: None,
     };
-    let invalid_generated = crate::schema::generated::validate_table(&table);
+    let invalid_generated = crate::schema::generated::validate_table_with_dialect(&table, dialect);
     for (column, reason) in &invalid_generated {
         gaps.push(IngestError::Unsupported {
             file: file.into(),
@@ -990,6 +1036,7 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             primary_key: false,
             generated: None,
             generated_text_compatible: None,
+            generated_int4_compatible: None,
         })
         .collect();
     Some((
@@ -1091,6 +1138,7 @@ fn view_columns_from_sql(sql: &str, tables: &IndexMap<Symbol, Table>) -> Vec<Col
             primary_key: false,
             generated: None,
             generated_text_compatible: None,
+            generated_int4_compatible: None,
         });
     }
     columns
@@ -1157,6 +1205,7 @@ fn timestamp_columns() -> [Column; 2] {
         primary_key: false,
         generated: None,
         generated_text_compatible: None,
+        generated_int4_compatible: None,
     };
     [col("created_at"), col("updated_at")]
 }
@@ -1173,6 +1222,7 @@ fn reference_column(name: &str) -> Column {
         primary_key: false,
         generated: None,
         generated_text_compatible: None,
+        generated_int4_compatible: None,
     }
 }
 
@@ -1183,6 +1233,8 @@ struct ColumnOpts {
     nullable: Option<bool>,
     default: Option<String>,
     limit: Option<u32>,
+    /// A present array option is non-scalar unless explicitly false or nil.
+    array: bool,
 }
 
 // Not `string_value` alone: schema.rb dumps an integer, float or boolean default unquoted (`default: 0`, `default: true`).
@@ -1196,6 +1248,7 @@ fn default_value(node: &Node<'_>) -> Option<String> {
     bool_value(node).map(|b| b.to_string()).or_else(|| string_value(node))
 }
 
+/// Collect column options while retaining array metadata omitted by the normalized column type.
 fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> ColumnOpts {
     let mut opts = ColumnOpts::default();
     for node in nodes {
@@ -1213,6 +1266,12 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
                             opts.limit = Some(n as u32);
                         }
                     }
+                }
+                "array" => {
+                    opts.array = match bool_value(value) {
+                        Some(enabled) => enabled,
+                        None => value.as_nil_node().is_none(),
+                    };
                 }
                 _ => {}
             }
@@ -1392,7 +1451,8 @@ fn generated_column_from_options(
 
 /// A column-type name (`t.<type>` / `add_column …, :<type>`) to its
 /// `ColumnType`. The Postgres-only types map to their SQLite storage:
-/// `uuid` is its own variant (TEXT, typed String); `jsonb` is `json`;
+/// `uuid`, `json`, and `jsonb` retain distinct schema variants even when
+/// their shared SQLite/runtime representation uses text;
 /// `citext` is text; `timestamptz` is a datetime; the network types
 /// and a PG `enum` are strings. `timestamp` is Rails' own alias for
 /// `datetime` (`TableDefinition#timestamp`), which a MySQL-backed
@@ -1425,7 +1485,8 @@ fn column_with_type(
         "datetime" | "timestamp" | "timestamptz" => ColumnType::DateTime,
         "time" => ColumnType::Time,
         "binary" => ColumnType::Binary,
-        "json" | "jsonb" => ColumnType::Json,
+        "json" => ColumnType::Json,
+        "jsonb" => ColumnType::Jsonb,
         "uuid" => ColumnType::Uuid,
         "references" | "belongs_to" => {
             ColumnType::Reference { table: TableRef(Symbol::from(col_name.as_str())) }
@@ -1445,11 +1506,25 @@ fn column_with_type(
     // negative provenance needed by the generated-expression validator:
     // these source types do not have the portable text semantics of
     // Rails `string`/`text` columns.
-    let generated_text_compatible = (matches!(
+    let generated_text_compatible = (opts.array || matches!(
         type_name,
         "inet" | "cidr" | "macaddr" | "enum" | "citext"
     ) || (type_name == "text" && opts.limit.is_some()))
     .then_some(false);
+    // Rails' PostgreSQL adapter maps integer limits 1 and 2 to smallint,
+    // 3 and 4 to integer, and 5 through 8 to bigint. The shared ordinary
+    // IR keeps limits 1/2 as Integer, so preserve only the negative fact
+    // needed to reject them as generated int4 results. Invalid sizes also
+    // cannot be treated as exact int4; 5..=8 are already BigInt above.
+    let generated_int4_compatible = if type_name == "integer" {
+        match opts.limit {
+            Some(0 | 1 | 2) => Some(false),
+            Some(3 | 4) | None | Some(5..=8) => None,
+            Some(_) => Some(false),
+        }
+    } else {
+        None
+    };
 
     Ok(Column {
         name: Symbol::from(col_name),
@@ -1459,6 +1534,7 @@ fn column_with_type(
         primary_key: false,
         generated: None,
         generated_text_compatible,
+        generated_int4_compatible,
     })
 }
 

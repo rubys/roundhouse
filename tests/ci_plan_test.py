@@ -494,6 +494,30 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertNotIn("param_binds", ci.select([path])["spinel_tests"])
 
+    def test_json_types_spinel_owns_schema_and_runtime_inputs(self):
+        suite = "postgres_json_types_spinel"
+        paths = [
+            "tests/postgres_json_types_spinel.rs",
+            "src/schema.rs",
+            "src/ingest/schema.rs",
+            "src/ingest/structure_sql.rs",
+            "src/ingest/model.rs",
+            "src/emit/shared/schema_sql.rs",
+            "src/lower/arel/ruby_values.rs",
+            "src/lower/model_to_library/mod.rs",
+            "src/lower/model_to_library/schema.rs",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn(suite, plan["spinel_tests"])
+                self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
+                self.assertIn("spinel-framework", plan["jobs"])
+
+        shared = ci.select(["src/emit/shared/schema_sql.rs"])
+        self.assertEqual(shared["spinel_tests"], ci.SPINEL_TESTS)
+        self.assertIn(suite, ci.select([], full=True)["spinel_tests"])
+
     def test_generated_columns_spinel_owns_schema_support_and_lowering_inputs(self):
         suite = "generated_columns_spinel"
         paths = [

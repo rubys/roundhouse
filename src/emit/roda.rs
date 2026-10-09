@@ -229,8 +229,9 @@ fn sequel_column_type(ty: &ColumnType) -> (&'static str, &'static str) {
         ColumnType::DateTime => ("DateTime", ""),
         ColumnType::Time => ("Time", ""),
         ColumnType::Binary => ("File", ""),
-        // No 1:1 Sequel generic type; store as text and note it.
+        // No 1:1 Sequel generic type; store as text and note the source type.
         ColumnType::Json => ("String", ", text: true # was json"),
+        ColumnType::Jsonb => ("String", ", text: true # was jsonb"),
         ColumnType::Uuid => ("String", ", fixed: true, size: 36 # was uuid"),
         ColumnType::Reference { .. } => ("Integer", " # was t.references"),
     }

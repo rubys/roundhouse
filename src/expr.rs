@@ -34,6 +34,12 @@ pub const GENERATED_CONST_REF: u64 = 1 << 4;
 /// An admitted library-class Data factory with its exact declaration identity.
 pub const RESOLVED_DATA_FACTORY: u64 = 1 << 3;
 
+/// A `permit` Send that the source wrote as `params.expect(r: [...])`.
+/// `rewrite_params` respells `expect` as `require(:r).permit(...)`, and
+/// the two refuse a malformed request differently in Rails, so the
+/// strong-params lowering reads this to know which refusal to apply.
+pub const FROM_PARAMS_EXPECT: u64 = 1 << 8;
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by

@@ -1,26 +1,71 @@
 //! Validation for the deliberately small generated-column expression
-//! subset that Roundhouse can render to both SQLite and PostgreSQL.
+//! subsets that Roundhouse can render to SQLite and PostgreSQL.
 //!
 //! Keeping the original SQL on [`super::GeneratedColumn`] is important for
-//! schema round-trips. This parser is only a gate: it accepts string
-//! literals, references to ordinary text/string columns, `||`, and
-//! `coalesce(...)`. It does not rewrite expressions or guess at casts,
-//! JSON operators, arbitrary functions, or other database-specific SQL.
+//! schema round-trips. This parser is only a gate: the default portable
+//! subset accepts string literals, references to ordinary text/string
+//! columns, `||`, and `coalesce(...)`. An explicit PostgreSQL DDL path also
+//! accepts bounded text and int4 casts. It does not rewrite expressions or
+//! pass through arbitrary functions or database-specific SQL. The PostgreSQL
+//! DDL path also admits literal-key and int4-index JSON extraction from exact
+//! `json` and `jsonb` source columns; the original SQL is still emitted.
 
 use super::{Column, ColumnType, Table};
 
+/// Expression syntax admitted while ingesting generated-column schema
+/// metadata. This is a source-expression validation mode, not a project
+/// database selector. Application ingest uses [`Portable`](Self::Portable)
+/// so PostgreSQL-only syntax remains unsupported by current targets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GeneratedExpressionDialect {
+    /// The existing expression grammar shared by SQLite and PostgreSQL DDL.
+    #[default]
+    Portable,
+    /// The portable grammar plus bounded text/int4 casts and JSON extraction
+    /// used by the PostgreSQL schema-DDL renderer.
+    Postgres,
+}
+
 #[derive(Clone, Debug)]
 enum Expr {
-    String,
+    String(String),
     Column { name: String, quoted: bool },
     Concat(Box<Expr>, Box<Expr>),
     Coalesce(Vec<Expr>),
+    TextCast(Box<Expr>),
+    Int4Cast(Box<Expr>),
+    JsonExtract {
+        receiver: Box<Expr>,
+        operator: JsonExtractOperator,
+    },
 }
 
-/// Check the supported expression grammar and its referenced columns.
-/// The table is complete before this is called, so forward references
-/// cannot accidentally be mistaken for an untyped identifier.
-pub(crate) fn validate_column(table: &Table, column: &Column) -> Result<(), String> {
+#[derive(Clone, Copy, Debug)]
+enum JsonExtractOperator {
+    Json,
+    Text,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CastType {
+    Text,
+    Int4,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ValueType {
+    Text,
+    Json,
+    Jsonb,
+    Int4,
+}
+
+/// Check a generated column using an explicit source-expression grammar.
+pub(crate) fn validate_column_with_dialect(
+    table: &Table,
+    column: &Column,
+    dialect: GeneratedExpressionDialect,
+) -> Result<(), String> {
     let Some(generated) = &column.generated else {
         return Ok(());
     };
@@ -40,31 +85,57 @@ pub(crate) fn validate_column(table: &Table, column: &Column) -> Result<(), Stri
     if column.default.is_some() {
         return Err("generated columns cannot also have a default".into());
     }
-    if column.generated_text_compatible == Some(false) {
+    let text_result = is_text_type(&column.col_type);
+    let int4_result = matches!(&column.col_type, ColumnType::Integer);
+    if text_result && column.generated_text_compatible == Some(false) {
         return Err(
             "the original generated-column result type does not have portable text semantics"
                 .into(),
         );
     }
-    if !is_text_type(&column.col_type) {
+    if int4_result
+        && dialect == GeneratedExpressionDialect::Postgres
+        && column.generated_int4_compatible == Some(false)
+    {
+        return Err(
+            "the original generated-column result type is not an exact PostgreSQL int4"
+                .into(),
+        );
+    }
+    if !text_result && (!int4_result || dialect != GeneratedExpressionDialect::Postgres) {
         return Err(
             "the supported generated-column result types are unbounded string and text".into(),
         );
     }
 
-    let expression = Parser::new(&generated.expression).parse()?;
-    validate_expr(&expression, table)
+    let expression = Parser::new(&generated.expression, dialect).parse()?;
+    match validate_expr(&expression, table)? {
+        ValueType::Text if text_result => Ok(()),
+        ValueType::Int4 if int4_result => Ok(()),
+        ValueType::Json | ValueType::Jsonb => Err(
+            "generated JSON expressions must use `->>` at the end to produce text".into(),
+        ),
+        ValueType::Text => Err(
+            "PostgreSQL integer generated columns require an `integer` or `int4` cast of text"
+                .into(),
+        ),
+        ValueType::Int4 => Err(
+            "PostgreSQL int4 generated expressions require an integer result column".into(),
+        ),
+    }
 }
 
-/// All generated-column errors for a table, preserving the column name
-/// so callers can ledger every unsupported declaration in survey mode.
-pub(crate) fn validate_table(table: &Table) -> Vec<(String, String)> {
+/// Check every generated output under one source-expression grammar.
+pub(crate) fn validate_table_with_dialect(
+    table: &Table,
+    dialect: GeneratedExpressionDialect,
+) -> Vec<(String, String)> {
     let mut errors: Vec<(String, String)> = table
         .columns
         .iter()
         .filter(|column| column.generated.is_some())
         .filter_map(|column| {
-            validate_column(table, column)
+            validate_column_with_dialect(table, column, dialect)
                 .err()
                 .map(|message| (column.name.as_str().to_string(), message))
         })
@@ -95,9 +166,10 @@ fn is_text_type(col_type: &ColumnType) -> bool {
     )
 }
 
-fn validate_expr(expr: &Expr, table: &Table) -> Result<(), String> {
+/// Validate operand provenance and infer text, JSON, JSONB, or int4 so extraction chains and casts require exact input categories.
+fn validate_expr(expr: &Expr, table: &Table) -> Result<ValueType, String> {
     match expr {
-        Expr::String => Ok(()),
+        Expr::String(_) => Ok(ValueType::Text),
         Expr::Column { name, quoted } => {
             let resolved = if *quoted {
                 name.clone()
@@ -121,37 +193,84 @@ fn validate_expr(expr: &Expr, table: &Table) -> Result<(), String> {
                     "expression column `{resolved}` has non-portable text semantics from its original database type"
                 ));
             }
-            if !is_text_type(&column.col_type) {
-                return Err(format!(
-                    "expression column `{resolved}` has type {:?}; only text/string operands are supported",
-                    column.col_type
-                ));
+            match &column.col_type {
+                ColumnType::Text | ColumnType::String { limit: None } => Ok(ValueType::Text),
+                ColumnType::Json => Ok(ValueType::Json),
+                ColumnType::Jsonb => Ok(ValueType::Jsonb),
+                other => Err(format!(
+                    "expression column `{resolved}` has type {other:?}; only text/string or JSON/JSONB operands are supported"
+                )),
             }
-            Ok(())
         }
         Expr::Concat(left, right) => {
-            validate_expr(left, table)?;
-            validate_expr(right, table)
+            let left_type = validate_expr(left, table)?;
+            let right_type = validate_expr(right, table)?;
+            if left_type == ValueType::Text && right_type == ValueType::Text {
+                Ok(ValueType::Text)
+            } else {
+                Err("`||` in generated expressions requires text/string operands".into())
+            }
         }
         Expr::Coalesce(args) => {
             for arg in args {
-                validate_expr(arg, table)?;
+                if validate_expr(arg, table)? != ValueType::Text {
+                    return Err(
+                        "coalesce in generated expressions requires text/string arguments".into(),
+                    );
+                }
             }
-            Ok(())
+            Ok(ValueType::Text)
         }
+        Expr::TextCast(expression) => {
+            if validate_expr(expression, table)? != ValueType::Text {
+                return Err(
+                    "PostgreSQL text casts in generated expressions require a text/string operand"
+                        .into(),
+                );
+            }
+            Ok(ValueType::Text)
+        }
+        Expr::Int4Cast(expression) => {
+            if validate_expr(expression, table)? != ValueType::Text {
+                return Err(
+                    "PostgreSQL int4 casts in generated expressions require a text/string operand"
+                        .into(),
+                );
+            }
+            Ok(ValueType::Int4)
+        }
+        Expr::JsonExtract {
+            receiver,
+            operator,
+        } => match validate_expr(receiver, table)? {
+            ValueType::Json => match operator {
+                JsonExtractOperator::Json => Ok(ValueType::Json),
+                JsonExtractOperator::Text => Ok(ValueType::Text),
+            },
+            ValueType::Jsonb => match operator {
+                JsonExtractOperator::Json => Ok(ValueType::Jsonb),
+                JsonExtractOperator::Text => Ok(ValueType::Text),
+            },
+            ValueType::Text | ValueType::Int4 => Err(
+                "PostgreSQL JSON extraction requires a `json` or `jsonb` source column".into(),
+            ),
+        },
     }
 }
 
 struct Parser<'a> {
     source: &'a str,
     position: usize,
+    dialect: GeneratedExpressionDialect,
 }
 
 impl<'a> Parser<'a> {
-    fn new(source: &'a str) -> Self {
+    /// Create a parser whose explicit dialect controls admission of PostgreSQL-only cast syntax.
+    fn new(source: &'a str, dialect: GeneratedExpressionDialect) -> Self {
         Self {
             source,
             position: 0,
+            dialect,
         }
     }
 
@@ -168,7 +287,7 @@ impl<'a> Parser<'a> {
                 "replacement character U+FFFD in generated expressions is unsupported".into(),
             );
         }
-        let expression = self.parse_concat()?;
+        let expression = self.parse_operator_chain()?;
         self.skip_space();
         if self.position != self.source.len() {
             return Err(self.unsupported_at("unsupported SQL syntax"));
@@ -176,31 +295,132 @@ impl<'a> Parser<'a> {
         Ok(expression)
     }
 
-    fn parse_concat(&mut self) -> Result<Expr, String> {
-        let mut expression = self.parse_atom()?;
+    /// PostgreSQL puts `->`, `->>`, and `||` in the same left-associative
+    /// generic-operator tier. Casts remain tighter because parse_postfix
+    /// consumes them before this loop.
+    fn parse_operator_chain(&mut self) -> Result<Expr, String> {
+        let mut expression = self.parse_postfix()?;
         loop {
             self.skip_space();
-            if !self.consume("||") {
+            if self.source[self.position..].starts_with("->>") {
+                if self.dialect != GeneratedExpressionDialect::Postgres {
+                    return Err(self.unsupported_at("PostgreSQL JSON operators are unsupported"));
+                }
+                self.position += 3;
+                self.parse_json_selector()?;
+                expression = Expr::JsonExtract {
+                    receiver: Box::new(expression),
+                    operator: JsonExtractOperator::Text,
+                };
+            } else if self.source[self.position..].starts_with("->") {
+                if self.dialect != GeneratedExpressionDialect::Postgres {
+                    return Err(self.unsupported_at("PostgreSQL JSON operators are unsupported"));
+                }
+                self.position += 2;
+                self.parse_json_selector()?;
+                expression = Expr::JsonExtract {
+                    receiver: Box::new(expression),
+                    operator: JsonExtractOperator::Json,
+                };
+            } else if self.consume("||") {
+                let right = self.parse_postfix()?;
+                expression = Expr::Concat(Box::new(expression), Box::new(right));
+            } else {
                 return Ok(expression);
             }
-            let right = self.parse_atom()?;
-            expression = Expr::Concat(Box::new(expression), Box::new(right));
         }
     }
 
+    /// Accept only a literal string key, optionally text-cast, or a signed decimal int4 index.
+    fn parse_json_selector(&mut self) -> Result<(), String> {
+        self.skip_space();
+        if self.peek_char().is_some_and(|ch| ch.is_ascii_digit() || ch == '-') {
+            self.parse_json_index()?;
+            return Ok(());
+        }
+
+        // The only text selectors admitted are SQL string literals, optionally
+        // cast to an already-supported text type. This accepts Rails' common
+        // `'key'::text` dump form while rejecting dynamic columns/functions.
+        let expression = self.parse_postfix()?;
+        /// Unwrap supported text casts only when the selector AST still contains a string literal.
+        fn string_literal(expression: Expr) -> Option<String> {
+            match expression {
+                Expr::String(value) => Some(value),
+                Expr::TextCast(inner) => string_literal(*inner),
+                _ => None,
+            }
+        }
+        if string_literal(expression).is_some() {
+            Ok(())
+        } else {
+            Err(
+                "PostgreSQL JSON extraction selectors must be a string literal or signed int4 literal".into()
+            )
+        }
+    }
+
+    /// Parse a signed decimal selector within the int4 range, including the i32 minimum endpoint.
+    fn parse_json_index(&mut self) -> Result<i32, String> {
+        let negative = self.consume("-");
+        self.skip_space();
+        let start = self.position;
+        while self.peek_char().is_some_and(|ch| ch.is_ascii_digit()) {
+            self.position += 1;
+        }
+        if start == self.position {
+            return Err(self.unsupported_at("expected a signed decimal JSON array index"));
+        }
+        let magnitude = self.source[start..self.position]
+            .parse::<u64>()
+            .map_err(|_| "PostgreSQL JSON array index is outside the supported int4 range")?;
+        // PostgreSQL resolves the signed lower endpoint as int4 too. Bound
+        // the magnitude before converting, then negate in i64 so i32::MIN
+        // never overflows during validation.
+        let maximum = i32::MAX as u64 + u64::from(negative);
+        if magnitude > maximum {
+            return Err(
+                "PostgreSQL JSON array indexes must fit the supported signed int4 range".into(),
+            );
+        }
+        let magnitude = magnitude as i64;
+        Ok((if negative { -magnitude } else { magnitude }) as i32)
+    }
+
+    /// Parse a primary expression and its postfix casts; Portable mode rejects PostgreSQL casts.
+    fn parse_postfix(&mut self) -> Result<Expr, String> {
+        let mut expression = self.parse_atom()?;
+        loop {
+            self.skip_space();
+            if !self.source[self.position..].starts_with("::") {
+                return Ok(expression);
+            }
+            if self.dialect != GeneratedExpressionDialect::Postgres {
+                return Err(self.unsupported_at("PostgreSQL casts are unsupported"));
+            }
+            self.position += 2;
+            self.skip_space();
+            expression = match self.parse_cast_type()? {
+                CastType::Text => Expr::TextCast(Box::new(expression)),
+                CastType::Int4 => Expr::Int4Cast(Box::new(expression)),
+            };
+        }
+    }
+
+    /// Parse a string, column, parenthesized expression, `coalesce`, or enabled PostgreSQL `CAST` primary.
     fn parse_atom(&mut self) -> Result<Expr, String> {
         self.skip_space();
         match self.peek_char() {
             Some('(') => {
                 self.position += 1;
-                let expression = self.parse_concat()?;
+                let expression = self.parse_operator_chain()?;
                 self.skip_space();
                 if !self.consume(")") {
                     return Err(self.unsupported_at("expected `)`"));
                 }
                 Ok(expression)
             }
-            Some('\'') => self.read_string().map(|()| Expr::String),
+            Some('\'') => self.read_string().map(Expr::String),
             Some('"') => self
                 .read_quoted_identifier()
                 .map(|name| Expr::Column { name, quoted: true }),
@@ -208,6 +428,12 @@ impl<'a> Parser<'a> {
                 let name = self.read_identifier();
                 self.skip_space();
                 if self.peek_char() == Some('(') {
+                    if name.eq_ignore_ascii_case("cast")
+                        && self.dialect == GeneratedExpressionDialect::Postgres
+                    {
+                        self.position += 1;
+                        return self.parse_cast_function();
+                    }
                     if !name.eq_ignore_ascii_case("coalesce") {
                         return Err(format!(
                             "generated expression function `{name}` is unsupported"
@@ -233,10 +459,70 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse CAST(expr AS target) while preserving source SQL and enforcing the supported text or int4 target set.
+    fn parse_cast_function(&mut self) -> Result<Expr, String> {
+        let expression = self.parse_operator_chain()?;
+        self.skip_space();
+        if !self.consume_keyword("as") {
+            return Err(self.unsupported_at("expected `AS` in PostgreSQL CAST"));
+        }
+        self.skip_space();
+        let cast_type = self.parse_cast_type()?;
+        self.skip_space();
+        if !self.consume(")") {
+            return Err(self.unsupported_at("expected `)` after PostgreSQL CAST"));
+        }
+        Ok(match cast_type {
+            CastType::Text => Expr::TextCast(Box::new(expression)),
+            CastType::Int4 => Expr::Int4Cast(Box::new(expression)),
+        })
+    }
+
+    /// Accept only unmodified text, varchar, character varying, integer, or int4 targets; type modifiers remain unsupported.
+    fn parse_cast_type(&mut self) -> Result<CastType, String> {
+        let Some(ch) = self.peek_char() else {
+            return Err(self.unsupported_at("expected a supported PostgreSQL cast target"));
+        };
+        if !is_ident_start(ch) {
+            return Err(self.unsupported_at("expected a supported PostgreSQL cast target"));
+        }
+        let first = self.read_identifier();
+        match first.to_ascii_lowercase().as_str() {
+            "text" | "varchar" => {}
+            "character" => {
+                self.skip_space();
+                if !self.consume_keyword("varying") {
+                    return Err(
+                        "only unbounded text, varchar, or character varying casts are supported in PostgreSQL generated expressions".into(),
+                    );
+                }
+            }
+            "integer" | "int4" => {
+                self.skip_space();
+                if self.peek_char() == Some('(') {
+                    return Err(
+                        "type-modified casts are unsupported in PostgreSQL generated expressions".into(),
+                    );
+                }
+                return Ok(CastType::Int4);
+            }
+            _ => {
+                return Err(format!(
+                    "PostgreSQL generated-expression cast target `{first}` is unsupported; only unbounded text, varchar, character varying, integer, and int4 are supported"
+                ));
+            }
+        }
+        self.skip_space();
+        if self.peek_char() == Some('(') {
+            return Err("type-modified casts are unsupported in PostgreSQL generated expressions".into());
+        }
+        Ok(CastType::Text)
+    }
+
     fn parse_coalesce(&mut self) -> Result<Expr, String> {
         let mut args = Vec::new();
         loop {
-            args.push(self.parse_concat()?);
+            args.push(self.parse_operator_chain()?);
             self.skip_space();
             if self.consume(",") {
                 continue;
@@ -254,8 +540,10 @@ impl<'a> Parser<'a> {
         Ok(Expr::Coalesce(args))
     }
 
-    fn read_string(&mut self) -> Result<(), String> {
+    /// Return decoded SQL literal contents, collapsing doubled apostrophes and rejecting backslash escapes.
+    fn read_string(&mut self) -> Result<String, String> {
         self.position += 1; // opening apostrophe
+        let mut value = String::new();
         loop {
             let Some(ch) = self.peek_char() else {
                 return Err("unterminated string literal in generated expression".into());
@@ -264,14 +552,15 @@ impl<'a> Parser<'a> {
             match ch {
                 '\'' if self.peek_char() == Some('\'') => {
                     self.position += 1;
+                    value.push('\'');
                 }
-                '\'' => return Ok(()),
+                '\'' => return Ok(value),
                 '\\' => {
                     return Err(
                         "backslash escapes in generated string literals are unsupported".into(),
                     );
                 }
-                _ => {}
+                _ => value.push(ch),
             }
         }
     }
@@ -330,6 +619,21 @@ impl<'a> Parser<'a> {
         } else {
             false
         }
+    }
+
+    /// Match a SQL keyword without case sensitivity while requiring an identifier boundary.
+    fn consume_keyword(&mut self, keyword: &str) -> bool {
+        let remaining = &self.source[self.position..];
+        let Some(prefix) = remaining.get(..keyword.len()) else {
+            return false;
+        };
+        if !prefix.eq_ignore_ascii_case(keyword)
+            || remaining[keyword.len()..].chars().next().is_some_and(is_ident_continue)
+        {
+            return false;
+        }
+        self.position += keyword.len();
+        true
     }
 
     fn peek_char(&self) -> Option<char> {

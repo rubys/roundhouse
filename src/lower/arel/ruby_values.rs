@@ -94,7 +94,10 @@ fn serialized_value_expr(expr: &Expr, column: &ColumnType, nullable: bool) -> Ex
         }
         ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. }
         | ColumnType::Boolean | ColumnType::String { .. } | ColumnType::Text
-        | ColumnType::Binary | ColumnType::Json | ColumnType::Uuid => return expr.clone(),
+        | ColumnType::Binary
+        | ColumnType::Json
+        | ColumnType::Jsonb
+        | ColumnType::Uuid => return expr.clone(),
     };
     crate::lower::typing::with_ty(converted, text_ty)
 }

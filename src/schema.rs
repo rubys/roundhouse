@@ -63,11 +63,22 @@ pub struct Column {
     /// `character`) normalize to `String { limit: None }` or `Text` for
     /// Roundhouse's ordinary-column typing. `Some(false)` records that
     /// the original type does not have the portable text semantics
-    /// required by the supported generated-expression grammar. `None`
+    /// required by the supported generated-expression grammar. The same
+    /// negative evidence also guards custom-qualified JSON types after
+    /// normalization: their built-in JSON semantics are not proven. `None`
     /// means the normalized `col_type` is sufficient evidence. This is
     /// sparse so well-represented ordinary types retain their serialized form.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_text_compatible: Option<bool>,
+    /// Ingest-only evidence for generated integer-expression validation.
+    /// Integer-like source types such as `smallint`, `serial`, and types
+    /// with discarded typmods normalize to `ColumnType::Integer`, but are
+    /// not faithful PostgreSQL `int4` results. `Some(false)` retains that
+    /// negative evidence; `None` means the normalized type is sufficient.
+    /// This stays sparse so ordinary integer columns keep their serialized
+    /// form and application typing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_int4_compatible: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -98,7 +109,12 @@ pub enum ColumnType {
     DateTime,
     Time,
     Binary,
+    /// `t.json` — retained separately from PostgreSQL `jsonb` for faithful
+    /// schema round-trips; shared model storage remains serialized text.
     Json,
+    /// `t.jsonb` — distinct from `t.json` for faithful PostgreSQL schema
+    /// round-trips. Both JSON variants share serialized-text model storage.
+    Jsonb,
     /// `t.uuid` — a Postgres `uuid` column. SQLite has no uuid type, so
     /// storage is TEXT (the 36-char canonical form); typing is a String.
     /// Not modeled as `String` at ingest so a schema round-trip and a

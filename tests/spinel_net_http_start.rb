@@ -71,4 +71,39 @@ check "a lazily started session serves a stubbed request", http.request(Net::HTT
 http.finish
 check "finish closes a lazily started session", !http.started?
 
+# A second #start on an already-open session raises IOError, matching
+# CRuby's own guard (`raise IOError, 'HTTP session already opened' if
+# @started`, checked ahead of connecting or yielding), and leaves the
+# still-open session untouched by the failed restart.
+nested = Net::HTTP.new("widgets.example", 80)
+nested.start
+raised_nested = ""
+begin
+  nested.start
+rescue IOError => e
+  raised_nested = e.message
+end
+check "starting an already-started session raises IOError", raised_nested == "HTTP session already opened"
+check "the session is still started after the failed restart", nested.started?
+check "the already-started session still serves a stubbed request", nested.request(Net::HTTP::Get.new("/gadget")).body == "gadget body"
+nested.finish
+check "finish still closes the session normally afterwards", !nested.started?
+
+# Same guard with a block: the block never runs, the outer session is
+# not finished out from under its caller, and the error propagates.
+nested_blk = Net::HTTP.new("widgets.example", 80)
+nested_blk.start
+ran_nested_block = false
+raised_nested_block = ""
+begin
+  nested_blk.start { |h| ran_nested_block = true }
+rescue IOError => e
+  raised_nested_block = e.message
+end
+check "starting an already-started session with a block raises IOError", raised_nested_block == "HTTP session already opened"
+check "the block does not run when the nested start raises", !ran_nested_block
+check "the session stays started after the failed block restart", nested_blk.started?
+nested_blk.finish
+check "finish still closes the session after a failed block restart", !nested_blk.started?
+
 puts "done"

@@ -160,6 +160,30 @@ pub fn ingest_inflections<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::naming
     out
 }
 
+/// Does Ruby source `text` read the top-level constant `name` as code: a
+/// bare `X`, a rooted `::X`, or the `X` that starts a path `X::Y`?
+fn names_root_constant(text: &str, name: &str) -> bool {
+    struct Reads<'n> {
+        name: &'n str,
+        found: bool,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Reads<'_> {
+        fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+            self.found |= super::util::constant_id_str(&node.name()) == self.name;
+        }
+        fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
+            if node.parent().is_none() {
+                self.found |= node.name().is_some_and(|id| super::util::constant_id_str(&id) == self.name);
+            }
+            ruby_prism::visit_constant_path_node(self, node);
+        }
+    }
+    let parsed = ruby_prism::parse(text.as_bytes());
+    let mut reads = Reads { name, found: false };
+    ruby_prism::Visit::visit(&mut reads, &parsed.node());
+    reads.found
+}
+
 /// A module or class an initializer defines at the top level, kept
 /// when the app's own code names it and nothing else defines it.
 ///
@@ -199,13 +223,25 @@ fn keep_initializer_defined(
     let referenced = |name: &str| {
         sources.iter().any(|f| {
             let rel = f.path.strip_prefix(root).unwrap_or(&f.path).trim_start_matches('/');
-            (rel.starts_with("app/") || rel.starts_with("lib/"))
-                && f.text.match_indices(name).any(|(i, _)| {
-                    let before = f.text[..i].chars().next_back();
-                    let after = f.text[i + name.len()..].chars().next();
-                    !before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':')
-                        && matches!(after, Some('.') | Some(':'))
-                })
+            if !(rel.starts_with("app/") || rel.starts_with("lib/")) {
+                return false;
+            }
+            // In Ruby, a comment or a string naming it is not a reference.
+            if rel.ends_with(".rb") {
+                return f.text.contains(name) && names_root_constant(&f.text, name);
+            }
+            // A template is not Ruby to parse, so its text is matched.
+            f.text.match_indices(name).any(|(i, _)| {
+                let head = &f.text[..i];
+                let rooted = head.strip_suffix("::").is_some_and(|h| {
+                    !h.chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':')
+                });
+                let before = head.chars().next_back();
+                let after = f.text[i + name.len()..].chars().next();
+                // Not only `X.` / `X::`: forem reads `ApplicationConfig["KEY"]`.
+                (rooted || !before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ':'))
+                    && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            })
         })
     };
     for lc in candidates {

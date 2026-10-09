@@ -793,7 +793,10 @@ echo fake-ok
     let helper = repo.join("scripts/lib/roundhouse-bin.sh");
 
     // Direct helper: ROUNDHOUSE_BIN is consumed; cargo is not.
-    // Drive via a small script file (no bash -c interpolation).
+    // Drive via a small script file (no bash -c interpolation), run as
+    // `bash <file>` rather than exec'd: a fork on another test thread can
+    // still hold the descriptor that just wrote the file, and exec of it
+    // then fails with ETXTBSY ("Text file busy").
     let probe = root.join("probe-helper.sh");
     let probe_app = root.join("probe-app");
     let probe_out = root.join("probe-out");
@@ -803,11 +806,9 @@ echo fake-ok
         "#!/bin/bash\nset -euo pipefail\n. \"$HELPER\"\nroundhouse_run --target ruby \"$PROBE_APP\" -o \"$PROBE_OUT\"\n",
     )
     .unwrap();
-    let mut perms = fs::metadata(&probe).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&probe, perms).unwrap();
     let _ = fs::remove_file(&marker);
-    let output = Command::new(&probe)
+    let output = Command::new("bash")
+        .arg(&probe)
         .env("HELPER", &helper)
         .env("REPO_ROOT", &repo)
         .env("ROUNDHOUSE_BIN", &fake)
@@ -849,10 +850,8 @@ echo fake-ok
         "#!/bin/bash\nset -euo pipefail\n. \"$HELPER\"\nroundhouse_run --version\n",
     )
     .unwrap();
-    let mut perms = fs::metadata(&fail_probe).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&fail_probe, perms).unwrap();
-    let failed = Command::new(&fail_probe)
+    let failed = Command::new("bash")
+        .arg(&fail_probe)
         .env("HELPER", &helper)
         .env("REPO_ROOT", &repo)
         .env("ROUNDHOUSE_BIN", &missing)

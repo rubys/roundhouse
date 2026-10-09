@@ -510,6 +510,12 @@ module Main
       res.status = 404
       res.body = "<h1>404 Not Found</h1>"
       return
+    rescue ActionController::ParameterMissing
+      # `params.expect` / `params.require` refused the request and the app
+      # did not rescue it: Rails' rescue_responses answer :bad_request.
+      res.status = 400
+      res.body = "<h1>400 Bad Request</h1>"
+      return
     end
 
     res.status = controller.status

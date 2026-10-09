@@ -3,7 +3,8 @@
 
 use roundhouse::Symbol;
 use roundhouse::emit::shared::schema_sql::render_schema_statements;
-use roundhouse::ingest::{ingest_migration, ingest_schema};
+use roundhouse::ingest::{ingest_migration, ingest_schema, survey};
+use roundhouse::schema::generated::GeneratedExpressionDialect;
 use roundhouse::schema::{Column, ColumnType, GeneratedColumnStorage, Schema, Table};
 
 fn generated_schema() -> Schema {
@@ -52,6 +53,23 @@ end
         "db/schema.rb",
     )
     .expect("indexed generated-column schema should ingest")
+}
+
+/// Builds a PostgreSQL-mode schema whose generated output depends on a text cast.
+fn postgres_text_cast_schema() -> Schema {
+    roundhouse::ingest::ingest_schema_with_generated_expression_dialect(
+        br#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "people", force: :cascade do |t|
+    t.string "first_name"
+    t.string "nickname"
+    t.virtual "display_name", type: :string, as: "first_name::text", stored: true
+  end
+end
+"#,
+        "db/schema.rb",
+        GeneratedExpressionDialect::Postgres,
+    )
+    .expect("the PostgreSQL DDL path should ingest a text cast")
 }
 
 fn reference_schema() -> Schema {
@@ -257,11 +275,24 @@ fn reference_removal_aliases_still_remove_ordinary_references() {
     }
 }
 
+/// Applies one migration through the default Portable expression-validation path.
 fn apply_migration(schema: &mut Schema, body: &str) -> Result<(), String> {
     ingest_migration(body.as_bytes(), "db/migrate/change_people.rb", schema)
         .map_err(|error| error.to_string())
 }
 
+/// Folds a migration through the same explicit expression dialect used to validate PostgreSQL schema DDL.
+fn apply_postgres_migration(schema: &mut Schema, body: &str) -> Result<(), String> {
+    roundhouse::ingest::ingest_migration_with_generated_expression_dialect(
+        body.as_bytes(),
+        "db/migrate/change_people.rb",
+        schema,
+        GeneratedExpressionDialect::Postgres,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Finds a named table so migration tests can compare the resulting schema state.
 fn table<'a>(schema: &'a Schema, name: &str) -> &'a Table {
     schema
         .tables
@@ -269,6 +300,7 @@ fn table<'a>(schema: &'a Schema, name: &str) -> &'a Table {
         .unwrap_or_else(|| panic!("missing table {name}"))
 }
 
+/// Finds a named column for migration-state assertions.
 fn column<'a>(table: &'a Table, name: &str) -> &'a Column {
     table
         .columns
@@ -277,6 +309,7 @@ fn column<'a>(table: &'a Table, name: &str) -> &'a Column {
         .unwrap_or_else(|| panic!("missing column {name} on {}", table.name.as_str()))
 }
 
+/// Wraps a migration operation in the minimal Rails class needed by the ingester.
 fn one_operation(operation: &str) -> String {
     format!(
         "class ChangePeople < ActiveRecord::Migration[8.1]\n  def change\n    {operation}\n  end\nend\n"
@@ -350,6 +383,137 @@ fn source_rename_or_removal_that_invalidates_an_expression_is_atomic() {
             "rejected migration must keep original table and SQL"
         );
     }
+}
+
+/// Requires source type or name changes that invalidate a cast to leave the prior schema intact; nullability-only changes remain valid.
+#[test]
+fn postgres_cast_operand_mutations_are_atomic_for_every_candidate_fold() {
+    let migrations = [
+        (
+            "add_column",
+            "add_column :people, :first_name, :integer",
+            "type Integer",
+        ),
+        (
+            "change_column",
+            "change_column :people, :first_name, :integer",
+            "type Integer",
+        ),
+        (
+            "remove_column",
+            "remove_column :people, :first_name",
+            "unknown column `first_name`",
+        ),
+        (
+            "rename_column",
+            "rename_column :people, :first_name, :given_name",
+            "unknown column `first_name`",
+        ),
+    ];
+
+    for (verb, operation, reason) in migrations {
+        let mut schema = postgres_text_cast_schema();
+        let original = schema.clone();
+        let error = apply_postgres_migration(&mut schema, &one_operation(operation))
+            .expect_err("a cast operand type/name change must be rejected atomically");
+        assert!(error.contains("generated column"), "{verb}: {error}");
+        assert!(error.contains(reason), "{verb}: {error}");
+        assert_eq!(schema, original, "{verb} must leave the prior schema intact");
+    }
+
+    let mut schema = postgres_text_cast_schema();
+    apply_postgres_migration(
+        &mut schema,
+        &one_operation("change_column_null :people, :first_name, false"),
+    )
+    .expect("a nullability-only migration remains supported");
+    assert_eq!(
+        column(table(&schema, "people"), "display_name")
+            .generated
+            .as_ref()
+            .unwrap()
+            .expression,
+        "first_name::text"
+    );
+}
+
+/// Checks that unrelated candidate folds preserve both the cast expression and its PostgreSQL validation mode.
+#[test]
+fn valid_candidate_folds_keep_the_explicit_postgres_expression_dialect() {
+    for operation in [
+        "add_column :people, :notes, :string",
+        "change_column_default :people, :first_name, \"legacy\"",
+        "remove_column :people, :nickname",
+        "rename_column :people, :nickname, :handle",
+    ] {
+        let mut schema = postgres_text_cast_schema();
+        apply_postgres_migration(&mut schema, &one_operation(operation))
+            .unwrap_or_else(|error| panic!("{operation} should preserve the PG cast: {error}"));
+        assert_eq!(
+            column(table(&schema, "people"), "display_name")
+                .generated
+                .as_ref()
+                .unwrap()
+                .expression,
+            "first_name::text",
+            "{operation} must retain the source expression"
+        );
+    }
+}
+
+/// Compares Portable migration rejection with successful opt-in PostgreSQL migration ingestion.
+#[test]
+fn migration_created_text_casts_require_the_explicit_postgres_mode() {
+    let migration = one_operation(
+        r#"create_table :people do |t|
+      t.string :first_name
+      t.virtual :normalized_name, type: :string, as: "first_name::text", stored: true
+    end"#,
+    );
+
+    let mut portable = Schema::default();
+    let error = ingest_migration(&migration.as_bytes(), "db/migrate/create_people.rb", &mut portable)
+        .expect_err("default migration ingest remains Portable")
+        .to_string();
+    assert!(error.contains("normalized_name"), "{error}");
+    assert!(portable.tables.is_empty(), "failed create must not insert a partial table");
+
+    let mut postgres = Schema::default();
+    apply_postgres_migration(&mut postgres, &migration)
+        .expect("explicit PostgreSQL migration ingest accepts the text cast");
+    assert_eq!(
+        column(table(&postgres, "people"), "normalized_name")
+            .generated
+            .as_ref()
+            .unwrap()
+            .expression,
+        "first_name::text"
+    );
+}
+
+/// Ensures survey mode skips a rejected migration operation, retains the prior schema, and records one gap.
+#[test]
+fn postgres_cast_migration_survey_keeps_the_last_valid_schema() {
+    let mut schema = postgres_text_cast_schema();
+    let original = schema.clone();
+    survey::activate();
+    let result = survey::unwrap_or_record(roundhouse::ingest::ingest_migration_with_generated_expression_dialect(
+        br#"class ChangePeople < ActiveRecord::Migration[8.1]
+  def change
+    change_column :people, :first_name, :integer
+  end
+end
+"#,
+        "db/migrate/change_people.rb",
+        &mut schema,
+        GeneratedExpressionDialect::Postgres,
+    ));
+    let gaps = survey::drain();
+
+    assert!(matches!(result, Ok(None)), "survey should skip the rejected operation: {result:?}");
+    assert_eq!(schema, original, "survey recovery must retain valid table metadata");
+    assert_eq!(gaps.len(), 1, "the rejected mutation should be ledgered once: {gaps:?}");
+    assert!(gaps[0].to_string().contains("change_column"), "{gaps:?}");
 }
 
 #[test]
