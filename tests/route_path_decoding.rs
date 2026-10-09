@@ -84,6 +84,24 @@ fn emitted_rust_router_packages_error_imports() {
     assert!(router.contains("use crate::errors_ext::raise;"), "{router}");
     assert!(router.contains("use crate::errors_ext::ArgumentError;"), "{router}");
     assert!(router.contains("pub fn capture_byte("), "{router}");
+    for binding in ["part", "byte"] {
+        assert!(
+            router.contains(&format!("let Some({binding}) =")),
+            "the checked array read must bind a nonnullable {binding}, not silently default it:\n{router}"
+        );
+    }
+    assert!(
+        router.contains("format!(\"{}{}\", name, \"\")"),
+        "Hash iteration keys must be owned before capture_pairs returns Vec<String>:\n{router}"
+    );
+    assert!(
+        router.contains("params.insert((name.clone()).to_string(), (seg.clone()).to_string())"),
+        "the capture value checked for integer constraints should be inserted without reusing a moved local:\n{router}"
+    );
+    assert!(
+        !router.contains("params.insert((name.clone()).to_string(), (ap.clone()).to_string())"),
+        "the original path segment should not be used after binding `seg`:\n{router}"
+    );
 }
 
 /// Python's host exception must be in scope for invalid UTF-8 and offset

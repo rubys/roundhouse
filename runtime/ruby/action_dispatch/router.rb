@@ -280,7 +280,10 @@ module ActionDispatch
           if int_constrained(int_params, name) && !digits_only(seg)
             return nil
           end
-          params[name] = ap
+          # The route parameter is the same value checked above. Reuse the
+          # local rather than reading `ap` again, which keeps ownership clear
+          # in strict targets while preserving Ruby's string value semantics.
+          params[name] = seg
         elsif pp != ap
           # A literal PREFIX before the `:name` in the same segment —
           # lobsters' `/~:username` and `/@:username`. Rails binds the
@@ -322,7 +325,11 @@ module ActionDispatch
     def self.capture_pairs(params)
       pairs = []
       params.each do |name, value|
-        pairs << name.to_s
+        # Force an owned string on strict targets whose Hash iterator
+        # yields borrowed keys (Rust's `HashMap::iter`, for example).
+        # Concatenating the empty string preserves the value while making
+        # the snapshot independent of the borrowed map entry.
+        pairs << (name.to_s + "")
         pairs << value
       end
       pairs
@@ -331,7 +338,9 @@ module ActionDispatch
     # Internal String-only pair access. The caller visits an even-length
     # snapshot two entries at a time, proving both nonnegative indexes exist.
     def self.capture_part(pairs, index)
-      pairs[index]
+      part = pairs[index]
+      raise ArgumentError, "Missing internal route capture part" if part.nil?
+      part
     end
 
     # Decode bytes before interpreting UTF-8: one character may mix raw and
@@ -436,7 +445,9 @@ module ActionDispatch
     def self.capture_byte(bytes, index)
       raise ArgumentError, "Invalid encoding for path parameter" if index < 0
       raise ArgumentError, "Invalid encoding for path parameter" if index >= bytes.length
-      bytes[index]
+      byte = bytes[index]
+      raise ArgumentError, "Invalid encoding for path parameter" if byte.nil?
+      byte
     end
 
     # ASCII hexadecimal classification without Unicode case folding.

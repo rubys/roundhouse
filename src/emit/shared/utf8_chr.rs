@@ -304,6 +304,13 @@ fn main() {{
         let main = format!("use std::collections::HashMap;\n#[path = {errors:?}] mod errors_ext;\nuse errors_ext::{{raise, ArgumentError}};\n{emitted}\n{}", r#"
 /// Check decoded text, byte combination, and rejection without claiming raw-invalid String transport.
 fn main() {
+    assert_eq!(capture_part(vec!["".into(), "right".into()], 0), "");
+    assert_eq!(capture_part(vec!["left".into(), "right".into()], 1), "right");
+    assert_eq!(capture_byte(vec![65, 0], 1), 0);
+    assert!(std::panic::catch_unwind(|| capture_part(vec![], 0)).is_err());
+    for index in [-1, 1] {
+        assert!(std::panic::catch_unwind(|| capture_byte(vec![65], index)).is_err());
+    }
     for (input, expected) in [
         ("+%2B%20%252F", "++ %2F"),
         ("café%20%E6%9D%B1%E4%BA%AC%F0%9F%8E%89", "café 東京🎉"),
