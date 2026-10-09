@@ -97,12 +97,12 @@ module ActiveSupport
     date_months_since(d, -12 * n)
   end
 
-  def self.date_beginning_of_week(d)
-    date_from_civil(civil_days(d.year, d.month, d.day) - (d.wday + 6) % 7)
+  def self.date_beginning_of_week(d, start = 1)
+    date_from_civil(civil_days(d.year, d.month, d.day) - (d.wday + 7 - start) % 7)
   end
 
-  def self.date_end_of_week(d)
-    date_days_since(date_beginning_of_week(d), 6)
+  def self.date_end_of_week(d, start = 1)
+    date_days_since(date_beginning_of_week(d, start), 6)
   end
 
   def self.date_next_week(d)

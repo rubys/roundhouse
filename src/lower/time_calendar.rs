@@ -130,8 +130,8 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         }
         "end_of_day" | "at_end_of_day" => ("end_of_day", 0),
         "noon" | "at_noon" | "middle_of_day" | "at_middle_of_day" => ("noon", 0),
-        "beginning_of_week" | "at_beginning_of_week" => ("beginning_of_week", 0),
-        "end_of_week" | "at_end_of_week" => ("end_of_week", 0),
+        "beginning_of_week" | "at_beginning_of_week" => ("beginning_of_week", 1),
+        "end_of_week" | "at_end_of_week" => ("end_of_week", 1),
         "beginning_of_month" | "at_beginning_of_month" => ("beginning_of_month", 0),
         "end_of_month" | "at_end_of_month" => ("end_of_month", 0),
         "beginning_of_year" | "at_beginning_of_year" => ("beginning_of_year", 0),
@@ -162,8 +162,9 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     if args.len() > max_args {
         return;
     }
+    let Some(args) = calendar_args(target, args) else { return };
     let mut call_args = vec![r.clone()];
-    call_args.extend(args.iter().cloned());
+    call_args.extend(args);
     if matches!(
         target,
         "today?" | "yesterday?" | "tomorrow?" | "past?" | "future?"
@@ -294,8 +295,8 @@ fn rewrite_date_value(expr: &mut Expr, r: &Expr, method: &str, args: &[Expr]) {
         return;
     }
     let (target, max_args) = match method {
-        "beginning_of_week" | "at_beginning_of_week" => ("date_beginning_of_week", 0),
-        "end_of_week" | "at_end_of_week" => ("date_end_of_week", 0),
+        "beginning_of_week" | "at_beginning_of_week" => ("date_beginning_of_week", 1),
+        "end_of_week" | "at_end_of_week" => ("date_end_of_week", 1),
         "beginning_of_month" | "at_beginning_of_month" => ("date_beginning_of_month", 0),
         "end_of_month" | "at_end_of_month" => ("date_end_of_month", 0),
         "beginning_of_year" | "at_beginning_of_year" => ("date_beginning_of_year", 0),
@@ -319,10 +320,35 @@ fn rewrite_date_value(expr: &mut Expr, r: &Expr, method: &str, args: &[Expr]) {
     if args.len() > max_args {
         return;
     }
+    let Some(args) = calendar_args(target, args) else { return };
     let mut call_args = vec![r.clone()];
-    call_args.extend(args.iter().cloned());
+    call_args.extend(args);
     *expr.node = active_support_call(target, call_args);
     expr.ty = Some(Ty::Date);
+}
+
+pub(crate) fn week_start_wday(arg: &Expr) -> Option<i64> {
+    // Not `Date.beginning_of_week` (the configured default): only a literal names a day the lowering can fix.
+    let ExprNode::Lit { value: Literal::Sym { value } } = &*arg.node else { return None };
+    ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+        .iter()
+        .position(|day| *day == value.as_str())
+        .map(|wday| wday as i64)
+}
+
+fn calendar_args(target: &str, args: &[Expr]) -> Option<Vec<Expr>> {
+    if !target.ends_with("_of_week") {
+        return Some(args.to_vec());
+    }
+    args.iter()
+        .map(|arg| {
+            week_start_wday(arg).map(|wday| {
+                let mut lit = Expr::new(arg.span, ExprNode::Lit { value: Literal::Int { value: wday } });
+                lit.ty = Some(Ty::Int);
+                lit
+            })
+        })
+        .collect()
 }
 
 // Not a runtime Range: spinel's Range holds Integer endpoints only, so `where` has to meet the literal and render it as SQL.
