@@ -20,6 +20,7 @@ mod method;
 mod runtime_method;
 mod shared;
 mod spec;
+mod support;
 pub(crate) mod ty;
 
 pub use runtime_method::emit_method;
@@ -1695,6 +1696,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // src/lib.rs — declares the modules emitted above (hand-written +
     // transpiled). emit_lib_rs scans the emitted file list for stems
     // under `src/`, so adding a new file is enough — no list to update.
+    support::apply(&mut files);
     files.push(emit_lib_rs(&files));
 
     // Dedupe by path — last write wins. Two emit sites can produce
