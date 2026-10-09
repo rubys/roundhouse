@@ -12,15 +12,18 @@
 
 use crate::expr::{Expr, ExprNode, Literal};
 
-use super::super::util::peel_nil;
 use super::super::emit_expr;
+use super::super::util::peel_nil;
 
 /// Per-method positional-param Tys for hand-written runtime modules
 /// (`Db`, future `Broadcasts`, etc.) that aren't surfaced through
 /// `CLASS_METHOD_PARAM_TYS`. The Const-recv dispatch in emit_send
 /// consults this so `Db::prepare(format!(...))` (String arg, `&str`
 /// param) inserts the Borrow coercion automatically.
-pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Option<Vec<crate::ty::Ty>> {
+pub(super) fn external_class_method_param_tys(
+    class: &str,
+    method: &str,
+) -> Option<Vec<crate::ty::Ty>> {
     use crate::ty::Ty;
     let hash_str_untyped = || Ty::Hash {
         key: Box::new(Ty::Str),
@@ -48,14 +51,18 @@ pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Opti
         ("Db", "column_float_opt") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "column_text_opt") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "column_bool_opt") => Some(vec![Ty::Int, Ty::Int]),
-        ("Db", "escape_string_opt") => {
-            Some(vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil] }])
-        }
-        ("Db", "escape_int_opt") => Some(vec![Ty::Union { variants: vec![Ty::Int, Ty::Nil] }]),
-        ("Db", "escape_float_opt") => {
-            Some(vec![Ty::Union { variants: vec![Ty::Float, Ty::Nil] }])
-        }
-        ("Db", "escape_bool_opt") => Some(vec![Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }]),
+        ("Db", "escape_string_opt") => Some(vec![Ty::Union {
+            variants: vec![Ty::Str, Ty::Nil],
+        }]),
+        ("Db", "escape_int_opt") => Some(vec![Ty::Union {
+            variants: vec![Ty::Int, Ty::Nil],
+        }]),
+        ("Db", "escape_float_opt") => Some(vec![Ty::Union {
+            variants: vec![Ty::Float, Ty::Nil],
+        }]),
+        ("Db", "escape_bool_opt") => Some(vec![Ty::Union {
+            variants: vec![Ty::Bool, Ty::Nil],
+        }]),
         ("Db", "last_insert_rowid") => Some(vec![]),
         ("Db", "changes") => Some(vec![]),
         // `Broadcasts::method(HashMap<String, Value>)` — the lowerer
@@ -84,7 +91,151 @@ pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Opti
         ("ActionController", "find_substr") => Some(vec![Ty::Str, Ty::Str]),
         ("ActionController", "find_last") => Some(vec![Ty::Str, Ty::Str]),
         ("ActionController", "csrf_token_valid?") => Some(vec![Ty::Str, Ty::Str]),
+        ("ActiveRecord", "enum_label") => Some(vec![
+            Ty::Int,
+            Ty::Array {
+                elem: Box::new(Ty::Str),
+            },
+            Ty::Array {
+                elem: Box::new(Ty::Int),
+            },
+        ]),
+        ("ActiveRecord", "enum_label_str") => Some(vec![
+            Ty::Str,
+            Ty::Array {
+                elem: Box::new(Ty::Str),
+            },
+            Ty::Array {
+                elem: Box::new(Ty::Str),
+            },
+        ]),
+        ("ActiveRecord", "enum_int" | "enum_int_or_nil") => Some(vec![
+            Ty::Str,
+            Ty::Array {
+                elem: Box::new(Ty::Str),
+            },
+            Ty::Array {
+                elem: Box::new(Ty::Int),
+            },
+            Ty::Array {
+                elem: Box::new(Ty::Str),
+            },
+            Ty::Str,
+        ]),
+        ("ActiveRecord", "enum_str" | "enum_str_or_nil") => Some(vec![
+            Ty::Str,
+            Ty::Array {
+                elem: Box::new(Ty::Str),
+            },
+            Ty::Array {
+                elem: Box::new(Ty::Str),
+            },
+            Ty::Str,
+        ]),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+
+    fn typed_var(name: &str, ty: crate::ty::Ty) -> Expr {
+        let mut expr = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var {
+                id: VarId(0),
+                name: Symbol::from(name),
+            },
+        );
+        expr.ty = Some(ty);
+        expr
+    }
+
+    #[test]
+    fn string_to_s_and_nil_predicate_use_string_representation() {
+        let string = typed_var("title", crate::ty::Ty::Str);
+        let nilable_string = typed_var(
+            "title",
+            crate::ty::Ty::Union {
+                variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil],
+            },
+        );
+        crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+            assert_eq!(
+                dispatch_method_by_recv_ty(&string, "to_s", &[]).as_deref(),
+                Some("title")
+            );
+            assert_eq!(
+                dispatch_method_by_recv_ty(&string, "nil?", &[]).as_deref(),
+                Some("false")
+            );
+            assert_eq!(
+                dispatch_method_by_recv_ty(&nilable_string, "nil?", &[]).as_deref(),
+                Some("title.is_none()")
+            );
+        });
+    }
+
+    #[test]
+    fn nil_to_s_and_nil_predicate_use_unit_representation() {
+        let nil = typed_var("nothing", crate::ty::Ty::Nil);
+        crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+            assert_eq!(
+                dispatch_method_by_recv_ty(&nil, "to_s", &[]).as_deref(),
+                Some("String::new()")
+            );
+            assert_eq!(
+                dispatch_method_by_recv_ty(&nil, "nil?", &[]).as_deref(),
+                Some("true")
+            );
+        });
+    }
+
+    #[test]
+    fn nil_predicate_uses_optional_rust_parameter_representation() {
+        let after = typed_var("after", crate::ty::Ty::Str);
+        let mut declared_params = std::collections::HashMap::new();
+        declared_params.insert(
+            "after".to_string(),
+            crate::ty::Ty::Union {
+                variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil],
+            },
+        );
+
+        crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+            crate::emit::rust::expr::with_param_types(declared_params, || {
+                assert_eq!(
+                    dispatch_method_by_recv_ty(&after, "nil?", &[]).as_deref(),
+                    Some("after.is_none()")
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn nil_predicate_preserves_optional_method_call_representation() {
+        let mut raw_value = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                method: Symbol::from("connected_at_raw"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: true,
+            },
+        );
+        raw_value.ty = Some(crate::ty::Ty::Union {
+            variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil],
+        });
+        crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+            assert_eq!(
+                dispatch_method_by_recv_ty(&raw_value, "nil?", &[]).as_deref(),
+                Some("self.connected_at_raw().is_none()")
+            );
+        });
     }
 }
 
@@ -144,8 +295,8 @@ pub(super) fn controller_shim_arity(method: &str) -> Option<usize> {
 /// so files without `use RubyToS` compile. Untyped/Record and other
 /// Sends keep method-style `.ruby_to_s()`.
 fn ruby_to_s_emit(recv: &Expr, recv_s: &str, ufcs: bool) -> String {
-    use crate::ty::Ty;
     use super::super::util::is_option_ty;
+    use crate::ty::Ty;
     match &*recv.node {
         ExprNode::Send { method: m, .. } if m.as_str() == "get" => {
             format!("{recv_s}.clone().unwrap_or_default()")
@@ -180,25 +331,23 @@ fn ruby_to_s_emit(recv: &Expr, recv_s: &str, ufcs: bool) -> String {
                     format!("{recv_s}.clone().unwrap_or_default()")
                 }
                 Some(Ty::Array { .. }) => format!("{recv_s}.to_string()"),
-                Some(ty) if ufcs && (super::super::super::ty::rust_value_shaped(ty)
-                    || matches!(ty, Ty::Hash { .. })) =>
+                Some(ty)
+                    if ufcs
+                        && (super::super::super::ty::rust_value_shaped(ty)
+                            || matches!(ty, Ty::Hash { .. })) =>
                 {
-                    format!(
-                        "<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))"
-                    )
+                    format!("<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))")
                 }
-                _ if ufcs => format!(
-                    "<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))"
-                ),
+                _ if ufcs => {
+                    format!("<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))")
+                }
                 _ => format!("{recv_s}.ruby_to_s()"),
             }
         }
         ExprNode::Var { .. } | ExprNode::Ivar { .. } if ufcs => {
             format!("<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))")
         }
-        ExprNode::Send { method: m, .. }
-            if ufcs && matches!(m.as_str(), "fetch") =>
-        {
+        ExprNode::Send { method: m, .. } if ufcs && matches!(m.as_str(), "fetch") => {
             format!("<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))")
         }
         _ => format!("{recv_s}.ruby_to_s()"),
@@ -220,7 +369,15 @@ pub(super) fn dispatch_method_by_recv_ty(
     // wraps non-primary recvs (`x.len() as i64`, casts, etc.)
     // before the per-method bridge appends `.<rust_method>(...)`.
     // Mirrors the bare-var clone-suppression path too.
-    let raw_recv_s = super::super::emit_send_recv(recv);
+    // Ruby's `nil?` asks whether an Option receiver is absent. The
+    // generic receiver emitter normally unwraps Option values before
+    // dispatch, but doing that here reverses the predicate and can panic
+    // before the generated `is_none()` call.
+    let raw_recv_s = if matches!(method, "nil?" | "clone") {
+        emit_expr(recv)
+    } else {
+        super::super::emit_send_recv(recv)
+    };
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     // Peel `Union<T, Nil>` to `T` for dispatch. The body-typer reports
     // Ruby's nil-on-miss shape but rust emits panic-on-miss, so the
@@ -244,7 +401,12 @@ pub(super) fn dispatch_method_by_recv_ty(
     // both shapes as Var-like for the binding-is-Option check.
     let var_name: Option<&str> = match &*recv.node {
         ExprNode::Var { name, .. } => Some(name.as_str()),
-        ExprNode::Send { recv: None, method, args, .. } if args.is_empty() => {
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            ..
+        } if args.is_empty() => {
             let n = method.as_str();
             if super::super::param_ty(n).is_some() {
                 Some(n)
@@ -254,6 +416,28 @@ pub(super) fn dispatch_method_by_recv_ty(
         }
         _ => None,
     };
+    // Some generated Rust APIs keep an optional String as
+    // `Option<String>` even when the body typer has peeled the Ruby
+    // `String | nil` union to `Ty::Str` (notably optional route-query
+    // parameters). The type-directed String arm below would then fold
+    // `nil?` to `false`, which is wrong for that actual binding.
+    // Prefer the declared Rust parameter representation for this
+    // predicate, just as the unwrap path below does for ordinary calls.
+    if method == "nil?"
+        && args.is_empty()
+        && recv.ty.as_ref().is_some_and(super::super::util::is_option_ty)
+    {
+        return Some(format!("{raw_recv_s}.is_none()"));
+    }
+    if method == "nil?"
+        && args.is_empty()
+        && let Some(name) = var_name
+        && super::super::param_ty(name)
+            .as_ref()
+            .is_some_and(super::super::util::is_option_ty)
+    {
+        return Some(format!("{name}.is_none()"));
+    }
     // Only insert `.clone().unwrap()` here when the Var emit DIDN'T
     // already do so. Var emit's narrowing-write-back at expr/mod.rs
     // fires when `e.ty` is the narrowed type (T) but the declared
@@ -270,7 +454,7 @@ pub(super) fn dispatch_method_by_recv_ty(
     // assign time to make x a plain `String`. Including locals here
     // would double-unwrap (`pp.clone().clone().unwrap()` on a
     // String-typed pp in router.rs).
-    let binding_is_option = match var_name {
+    let binding_is_option = !matches!(method, "nil?" | "clone") && match var_name {
         Some(n) => {
             let declared = super::super::param_ty(n);
             let is_opt = matches!(declared, Some(ref t) if super::super::util::is_option_ty(t));
@@ -292,6 +476,14 @@ pub(super) fn dispatch_method_by_recv_ty(
         raw_recv_s
     };
     match recv_ty {
+        // Ruby nil is represented as Rust unit. Its to_s value is the
+        // empty string and nil? is always true; neither operation can
+        // use the serde_json::Value bridge.
+        Some(Ty::Nil) => match method {
+            "to_s" if args.is_empty() => Some("String::new()".to_string()),
+            "nil?" if args.is_empty() => Some("true".to_string()),
+            _ => None,
+        },
         Some(Ty::Array { .. }) => match method {
             "size" | "length" | "count" if args.is_empty() => {
                 // The `as i64` cast makes this non-primary. The
@@ -323,13 +515,18 @@ pub(super) fn dispatch_method_by_recv_ty(
             // Borrow constraint. Dereference the iter item so both
             // bool == bool and String == &str comparisons work; `==`
             // borrows its operands, so non-Copy elements are not moved.
-            "include?" | "contains?" if args.len() == 1 => Some(format!(
-                "{recv_s}.iter().any(|__c| *__c == {})",
-                args_s[0]
-            )),
+            "include?" | "contains?" if args.len() == 1 => {
+                Some(format!("{recv_s}.iter().any(|__c| *__c == {})", args_s[0]))
+            }
             _ => None,
         },
         Some(Ty::Str) | Some(Ty::Sym) => match method {
+            // String/Symbol both lower to Rust String, so to_s is
+            // identity and must not require RubyToS in scope.
+            "to_s" if args.is_empty() => Some(recv_s),
+            // Stringish unions are peeled to String above because the
+            // Rust emitter represents them as non-optional Strings.
+            "nil?" if args.is_empty() => Some("false".to_string()),
             "empty?" if args.is_empty() => Some(format!("{recv_s}.is_empty()")),
             "size" | "length" if args.is_empty() => {
                 // `as i64` cast — non-primary. Decide pass stamps
@@ -350,18 +547,16 @@ pub(super) fn dispatch_method_by_recv_ty(
                 // of #22.
                 Some(format!("{recv_s}.parse::<i64>().unwrap_or(0)"))
             }
-            "to_f" if args.is_empty() => {
-                Some(format!("{recv_s}.parse::<f64>().unwrap_or(0.0)"))
-            }
+            "to_f" if args.is_empty() => Some(format!("{recv_s}.parse::<f64>().unwrap_or(0.0)")),
             "upcase" if args.is_empty() => Some(format!("{recv_s}.to_uppercase()")),
             "downcase" if args.is_empty() => Some(format!("{recv_s}.to_lowercase()")),
             // `strip` → `trim()` returns &str; `.to_string()` forces
             // owned to match Ruby's `String#strip` return shape.
             "strip" if args.is_empty() => Some(format!("{recv_s}.trim().to_string()")),
             // `reverse` on String — codepoint reversal via chars().
-            "reverse" if args.is_empty() => Some(format!(
-                "{recv_s}.chars().rev().collect::<String>()"
-            )),
+            "reverse" if args.is_empty() => {
+                Some(format!("{recv_s}.chars().rev().collect::<String>()"))
+            }
             // `chars` returns Array<String> in Ruby; mirror with
             // `Vec<String>` (each char converted to a one-char String).
             "chars" if args.is_empty() => Some(format!(
@@ -377,23 +572,17 @@ pub(super) fn dispatch_method_by_recv_ty(
             "end_with?" if args.len() == 1 => {
                 Some(format!("{recv_s}.ends_with(&*({}))", args_s[0]))
             }
-            "include?" if args.len() == 1 => {
-                Some(format!("{recv_s}.contains(&*({}))", args_s[0]))
-            }
+            "include?" if args.len() == 1 => Some(format!("{recv_s}.contains(&*({}))", args_s[0])),
             // `String#match?(re)` → `re.is_match(str)`. Rust has no
             // `str::match_pred`; the Regex is the natural receiver
             // (mirrors the TypeScript `re.test(s)` flip).
-            "match?" if args.len() == 1 => {
-                Some(format!("{}.is_match(&*({recv_s}))", args_s[0]))
-            }
+            "match?" if args.len() == 1 => Some(format!("{}.is_match(&*({recv_s}))", args_s[0])),
             _ => None,
         },
         // `Regexp#match?(str)` → `re.is_match(str)` when the receiver
         // is already the pattern (validations, flipped call sites).
         Some(Ty::Class { id, .. }) if id.0.as_str() == "Regexp" => match method {
-            "match?" if args.len() == 1 => {
-                Some(format!("{recv_s}.is_match(&*({}))", args_s[0]))
-            }
+            "match?" if args.len() == 1 => Some(format!("{recv_s}.is_match(&*({}))", args_s[0])),
             _ => None,
         },
         // `Untyped` recv (rust's alias for `serde_json::Value`) +
@@ -442,12 +631,12 @@ pub(super) fn dispatch_method_by_recv_ty(
                 // consumer wraps. Arg/let-RHS positions stay bare.
                 Some(format!("{recv_s}.len() as i64"))
             }
-            "keys" if args.is_empty() => Some(format!(
-                "{recv_s}.keys().cloned().collect::<Vec<_>>()"
-            )),
-            "values" if args.is_empty() => Some(format!(
-                "{recv_s}.values().cloned().collect::<Vec<_>>()"
-            )),
+            "keys" if args.is_empty() => {
+                Some(format!("{recv_s}.keys().cloned().collect::<Vec<_>>()"))
+            }
+            "values" if args.is_empty() => {
+                Some(format!("{recv_s}.values().cloned().collect::<Vec<_>>()"))
+            }
             "dup" | "clone" if args.is_empty() => Some(format!("{recv_s}.clone()")),
             // `hash.delete(k)` — Ruby removes by key, returns the
             // removed value. The `&` prefix is needed when the arg
@@ -456,7 +645,9 @@ pub(super) fn dispatch_method_by_recv_ty(
             "delete" if args.len() == 1 => {
                 let key_emit = if matches!(
                     &*args[0].node,
-                    ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                    ExprNode::Lit {
+                        value: Literal::Str { .. } | Literal::Sym { .. }
+                    }
                 ) {
                     args_s[0].clone()
                 } else {

@@ -8,9 +8,8 @@ use crate::expr::{Expr, ExprNode, LValue, Literal};
 use super::util::{coerce_to_value, is_builtin_container_class, is_option_ty};
 use super::{
     current_return_ty, declare_var, emit_expr, in_constructor, in_module_singleton,
-    is_declared_var, is_mut_var, ivar_field_ty,
-    local_var_ty, mark_local_var_ty, module_singleton_slot_name,
-    module_singleton_thread_local, param_ty,
+    is_declared_var, is_mut_var, ivar_field_ty, local_var_ty, mark_local_var_ty,
+    module_singleton_slot_name, module_singleton_thread_local, param_ty,
     record_back_propagated_hash,
 };
 
@@ -19,6 +18,7 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
     match target {
         LValue::Var { name, .. } => {
             let name_str = name.as_str().to_string();
+            let rust_name = super::util::escape_rust_keyword(&name_str);
             // Track local-var declared type for the narrowing-aware
             // Var read. Only records on first assignment — subsequent
             // rebinds leave the recorded declared type alone (Rust's
@@ -29,8 +29,8 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
             // body-typer's `Hash<Untyped, Untyped>` view — subsequent
             // `.insert` emits use this to coerce args to the right K/V.
             if local_var_ty(&name_str).is_none() {
-                let back_propagated = empty_hash_return_ty(value)
-                    .or_else(|| none_init_option_return_ty(value));
+                let back_propagated =
+                    empty_hash_return_ty(value).or_else(|| none_init_option_return_ty(value));
                 if back_propagated.is_some() {
                     record_back_propagated_hash(name_str.clone());
                 }
@@ -61,7 +61,7 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
                 // `result = instance; ...; result` accumulator pattern
                 // in `_adapter_find_by_id` / `find` and friends.
                 let rhs_wrapped = some_wrap_for_assign(&name_str, value, &rhs);
-                return format!("{name_str} = {rhs_wrapped}");
+                return format!("{rust_name} = {rhs_wrapped}");
             }
             let needs_mut = is_mut_var(&name_str);
             // Type-annotate empty HashMap literals when the enclosing
@@ -73,9 +73,9 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
             let annot = empty_hash_return_annotation(value);
             declare_var(name_str.clone());
             if needs_mut {
-                format!("let mut {name_str}{annot} = {rhs}")
+                format!("let mut {rust_name}{annot} = {rhs}")
             } else {
-                format!("let {name_str}{annot} = {rhs}")
+                format!("let {rust_name}{annot} = {rhs}")
             }
         }
         LValue::Ivar { name } => {
@@ -86,9 +86,7 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
                 // stays `Option<T>` regardless of T's nullability.
                 let slot = module_singleton_slot_name(name.as_str());
                 if module_singleton_thread_local() {
-                    return format!(
-                        "{slot}.with(|__s| *__s.borrow_mut() = Some({rhs_coerced}))"
-                    );
+                    return format!("{slot}.with(|__s| *__s.borrow_mut() = Some({rhs_coerced}))");
                 }
                 return format!("*{slot}.lock().unwrap() = Some({rhs_coerced})");
             }
@@ -99,9 +97,13 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
                 // body = ""` declared as `&str` collides with the
                 // `String`-typed field at the Self literal site.
                 let annot = field_let_annotation(name.as_str());
-                return format!("let mut {name}{annot} = {rhs_coerced}");
+                let field = super::util::escape_rust_keyword(name.as_str());
+                return format!("let mut {field}{annot} = {rhs_coerced}");
             }
-            format!("self.{name} = {rhs_coerced}")
+            format!(
+                "self.{} = {rhs_coerced}",
+                super::util::escape_rust_keyword(name.as_str())
+            )
         }
         LValue::Attr { recv, name } => {
             // `self.x = ...` inside a module-singleton class method
@@ -110,9 +112,7 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
             if in_module_singleton() && matches!(&*recv.node, ExprNode::SelfRef) {
                 let slot = module_singleton_slot_name(name.as_str());
                 if module_singleton_thread_local() {
-                    return format!(
-                        "{slot}.with(|__s| *__s.borrow_mut() = Some({rhs}))"
-                    );
+                    return format!("{slot}.with(|__s| *__s.borrow_mut() = Some({rhs}))");
                 }
                 return format!("*{slot}.lock().unwrap() = Some({rhs})");
             }
@@ -140,18 +140,10 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
                     } else {
                         format!("Some({rhs})")
                     };
-                    return format!(
-                        "{}.set({}, {wrapped})",
-                        emit_expr(recv),
-                        emit_expr(index),
-                    );
+                    return format!("{}.set({}, {wrapped})", emit_expr(recv), emit_expr(index),);
                 }
                 if matches!(cls, "Session" | "ActionDispatch::Session") {
-                    return format!(
-                        "{}.set({}, {rhs})",
-                        emit_expr(recv),
-                        emit_expr(index),
-                    );
+                    return format!("{}.set({}, {rhs})", emit_expr(recv), emit_expr(index),);
                 }
                 let leaf = cls.rsplit("::").next().unwrap_or(cls);
                 if leaf == "HeaderStore" {
@@ -220,7 +212,11 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
             // Emit as a plain `let` so the assignment is at least
             // observable; a hoisting pass can replace this when the
             // pattern shows up in practice.
-            let name = path.iter().map(|s| s.as_str().to_string()).collect::<Vec<_>>().join("_");
+            let name = path
+                .iter()
+                .map(|s| super::util::escape_rust_keyword(s.as_str()))
+                .collect::<Vec<_>>()
+                .join("_");
             format!("let {name} = {rhs}")
         }
     }
@@ -280,7 +276,9 @@ fn empty_hash_return_ty(value: &Expr) -> Option<crate::ty::Ty> {
 fn none_init_option_return_ty(value: &Expr) -> Option<crate::ty::Ty> {
     let is_nil_lit = matches!(
         &*value.node,
-        ExprNode::Lit { value: Literal::Nil }
+        ExprNode::Lit {
+            value: Literal::Nil
+        }
     );
     if !is_nil_lit {
         return None;
@@ -314,11 +312,7 @@ fn some_wrap_for_assign(name: &str, value: &Expr, rhs: &str) -> String {
     if !is_option_ty(&declared) {
         return rhs.to_string();
     }
-    let rhs_is_option = value
-        .ty
-        .as_ref()
-        .map(is_option_ty)
-        .unwrap_or(false);
+    let rhs_is_option = value.ty.as_ref().map(is_option_ty).unwrap_or(false);
     if rhs_is_option {
         return rhs.to_string();
     }
@@ -340,7 +334,9 @@ fn maybe_to_string_coercion(ivar_name: &str, value: &Expr, rhs: &str) -> String 
     };
     let (inner_field_ty, needs_some) = match &field_ty {
         crate::ty::Ty::Union { variants } if variants.len() == 2 => {
-            let nil_idx = variants.iter().position(|v| matches!(v, crate::ty::Ty::Nil));
+            let nil_idx = variants
+                .iter()
+                .position(|v| matches!(v, crate::ty::Ty::Nil));
             match nil_idx {
                 Some(0) => (variants[1].clone(), true),
                 Some(1) => (variants[0].clone(), true),
@@ -364,8 +360,10 @@ fn maybe_to_string_coercion(ivar_name: &str, value: &Expr, rhs: &str) -> String 
     let str_color_handled = super::has_str_coercion(value);
     let coerced = if !str_color_handled
         && matches!(inner_field_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
-        && matches!(effective_value_ty.as_ref(), Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym))
-    {
+        && matches!(
+            effective_value_ty.as_ref(),
+            Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym)
+        ) {
         format!("{rhs}.to_string()")
     } else if !needs_some && rhs_is_option {
         // Field is non-Option but RHS is Option-typed — unwrap. Only
@@ -375,7 +373,10 @@ fn maybe_to_string_coercion(ivar_name: &str, value: &Expr, rhs: &str) -> String 
     } else {
         rhs.to_string()
     };
-    if needs_some && !rhs_is_option && !matches!(effective_value_ty.as_ref(), Some(crate::ty::Ty::Nil)) {
+    if needs_some
+        && !rhs_is_option
+        && !matches!(effective_value_ty.as_ref(), Some(crate::ty::Ty::Nil))
+    {
         format!("Some({coerced})")
     } else {
         coerced
@@ -391,4 +392,3 @@ fn field_let_annotation(ivar_name: &str) -> String {
         None => String::new(),
     }
 }
-

@@ -36,6 +36,61 @@ pub(super) fn coerce_arg_for_class_method(method: &str, idx: usize, arg: &Expr) 
     coerce_arg_for_param_ty(arg, &param_ty)
 }
 
+fn emit_hash_as_json_value_map(arg: &Expr) -> Option<String> {
+    let ExprNode::Hash { entries, .. } = &*arg.node else {
+        return None;
+    };
+    if entries.is_empty() {
+        return Some("std::collections::HashMap::new()".to_string());
+    }
+    let entries = entries
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "(({}).to_string(), {})",
+                emit_expr(key),
+                emit_json_value(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("std::collections::HashMap::from([{entries}])"))
+}
+
+fn emit_json_value(expr: &Expr) -> String {
+    match &*expr.node {
+        ExprNode::Hash { entries, .. } => {
+            if entries.is_empty() {
+                return "serde_json::Value::Object(serde_json::Map::new())".to_string();
+            }
+            let entries = entries
+                .iter()
+                .map(|(key, value)| {
+                    format!(
+                        "(({}).to_string(), {})",
+                        emit_expr(key),
+                        emit_json_value(value)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("serde_json::Value::Object(serde_json::Map::from_iter([{entries}]))")
+        }
+        ExprNode::Array { elements, .. } => {
+            let elements = elements
+                .iter()
+                .map(emit_json_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("serde_json::Value::Array(vec![{elements}])")
+        }
+        ExprNode::Lit {
+            value: Literal::Nil,
+        } => "serde_json::Value::Null".to_string(),
+        _ => format!("serde_json::Value::from({})", emit_expr(expr)),
+    }
+}
+
 /// Core callee-back-propagation coercion: given an arg's `Expr` and
 /// the callee's declared param `Ty`, return the emit string with the
 /// appropriate coercion applied. Four families:
@@ -53,6 +108,31 @@ pub(super) fn coerce_arg_for_class_method(method: &str, idx: usize, arg: &Expr) 
 ///    String-producing source (Var/Send/Ivar) → `&(raw)`.
 pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> String {
     use crate::ty::Ty;
+    // A typed String-array parameter is owned (`Vec<String>`), while
+    // Rust string literals in an array default to `&str`. Convert only
+    // explicit array literals whose element types are String/Symbol;
+    // existing Vec values and other array element types keep their
+    // normal move/borrow behavior.
+    if let (
+        Ty::Array { elem: param_elem },
+        ExprNode::Array { elements, .. },
+    ) = (param_ty, &*arg.node)
+        && param_elem.is_stringish()
+        && elements.iter().all(|element| {
+            element
+                .ty
+                .as_ref()
+                .map(peel_nil)
+                .is_some_and(Ty::is_stringish)
+        })
+    {
+        let elements = elements
+            .iter()
+            .map(|element| format!("({}).to_string()", emit_expr(element)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("vec![{elements}]");
+    }
     // Value → primitive narrowing at Send arg position: when arg is
     // `Cast(inner, primitive_ty)` from the `lower::ty_coerce_insertion`
     // Family 2, and inner's body-typer Ty contains Untyped, use the
@@ -114,6 +194,16 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     //    that needs an inner `.to_string()` too — out of scope for
     //    this wedge.
     if is_option_ty(param_ty) {
+        // Nil is already the complete Option value; wrapping it would
+        // produce `Some(None)` for a nullable parameter.
+        if matches!(
+            &*arg.node,
+            ExprNode::Lit {
+                value: Literal::Nil,
+            }
+        ) {
+            return "None".to_string();
+        }
         // Owned `Option<String>` field → borrowed `Option<&str>` param.
         // rust renders a nilable string PARAM as `Option<&str>` but a
         // nilable string FIELD as `Option<String>`, so passing a
@@ -150,6 +240,15 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         // the same Cast wrapper.
         if let ExprNode::Cast { value, target_ty } = &*arg.node {
             if let Some(cast_inner) = is_option_ty(target_ty).then(|| peel_nil(target_ty)) {
+                // A cast nil payload is still None, not Some(None).
+                if matches!(
+                    &*value.node,
+                    ExprNode::Lit {
+                        value: Literal::Nil,
+                    }
+                ) {
+                    return "None".to_string();
+                }
                 // Already nilable — a nullable column's Row reader
                 // returns `Option<T>` and the model setter takes the
                 // same, so `Some(..)` here would build `Option<Option
@@ -172,7 +271,9 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
                 let inner_raw = emit_expr(value);
                 let needs_to_string = matches!(
                     &*value.node,
-                    ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                    ExprNode::Lit {
+                        value: Literal::Str { .. } | Literal::Sym { .. }
+                    }
                 ) && cast_inner.is_stringish()
                     && !super::super::has_str_coercion(value);
                 let payload = if needs_to_string {
@@ -182,6 +283,15 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
                 };
                 return format!("Some({payload})");
             }
+        }
+        // Exact non-string payload matches need no type-erasing Cast to
+        // preserve the Option representation. This covers request-context
+        // snapshots and other owned class values whose callee accepts `T?`.
+        if !peel_nil(param_ty).is_stringish()
+            && arg.ty.as_ref() == Some(peel_nil(param_ty))
+            && !arg.ty.as_ref().is_some_and(is_option_ty)
+        {
+            return format!("Some({raw})");
         }
         // Class-method / Const-recv sites the lowerer registry can
         // miss (`ActionController.header_key_ok?(key)` with String
@@ -194,7 +304,9 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
             if inner.is_stringish() {
                 let needs_to_string = matches!(
                     &*arg.node,
-                    ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                    ExprNode::Lit {
+                        value: Literal::Str { .. } | Literal::Sym { .. }
+                    }
                 ) && !super::super::has_str_coercion(arg);
                 let payload = if needs_to_string {
                     format!("{raw}.to_string()")
@@ -232,6 +344,9 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         if matches!(target_ty, Ty::Hash { value: pv, .. } if matches!(pv.as_ref(), Ty::Untyped))
             && matches!(param_ty, Ty::Hash { value: pv, .. } if matches!(pv.as_ref(), Ty::Untyped))
         {
+            if let Some(rendered) = emit_hash_as_json_value_map(value) {
+                return rendered;
+            }
             let inner_raw = emit_expr(value);
             return format!(
                 "{inner_raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect::<std::collections::HashMap<String, serde_json::Value>>()"
@@ -239,12 +354,11 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         }
     }
     if let Ty::Hash { value: pv, .. } = param_ty {
-        if matches!(pv.as_ref(), Ty::Untyped)
-            && !matches!(&*arg.node, ExprNode::Cast { .. })
-        {
-            if arg_hash_var_local_ty(arg).is_some()
-                || matches!(&*arg.node, ExprNode::Hash { .. })
-            {
+        if matches!(pv.as_ref(), Ty::Untyped) && !matches!(&*arg.node, ExprNode::Cast { .. }) {
+            if let Some(rendered) = emit_hash_as_json_value_map(arg) {
+                return rendered;
+            }
+            if arg_hash_var_local_ty(arg).is_some() || matches!(&*arg.node, ExprNode::Hash { .. }) {
                 return format!(
                     "{raw}.into_iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(v))).collect::<std::collections::HashMap<String, serde_json::Value>>()"
                 );
@@ -289,9 +403,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     // unions as Value, and treating them as value-shaped Casts broke
     // ActionController emit (crystal Int32/Int64, go/kotlin/csharp
     // index types, python `.tr` on str).
-    let value_target = |ty: &Ty| -> bool {
-        super::super::super::ty::rust_value_shaped(ty)
-    };
+    let value_target = |ty: &Ty| -> bool { super::super::super::ty::rust_value_shaped(ty) };
     if let ExprNode::Cast { value, target_ty } = &*arg.node {
         if value_target(target_ty) {
             // Family 3b — Hash literal → Value::Object.
@@ -445,7 +557,35 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         return format!("{raw}.as_deref().unwrap_or(\"\")");
     }
 
-    if param_ty.is_stringish() && !super::super::has_str_coercion(arg) {
+    let emits_owned_class_string = rust_emits_owned_class_method(arg);
+    if param_ty.is_stringish()
+        && (arg.decisions & crate::emit::rust::decide::bits::STR_BORROW == 0
+            || emits_owned_class_string)
+    {
+        // The string-color decision is authoritative about the Rust
+        // representation even when the body typer left the source
+        // expression Untyped. `STR_TO_OWNED` means `emit_expr` has
+        // produced a Rust `String`, which must be borrowed for an
+        // `&str` parameter.
+        let emits_owned_string = rust_emits_owned_route_helper(arg)
+            || emits_owned_class_string
+            || arg.decisions & crate::emit::rust::decide::bits::STR_TO_OWNED != 0
+            || matches!(
+                &*arg.node,
+                ExprNode::Send { method, args, .. }
+                    if matches!(method.as_str(), "to_s" | "ruby_to_s" | "to_string")
+                        && args.is_empty()
+            );
+        if emits_owned_string {
+            if emits_owned_class_string
+                && arg.decisions & crate::emit::rust::decide::bits::STR_BORROW != 0
+            {
+                let mut uncoerced = arg.clone();
+                uncoerced.decisions &= !crate::emit::rust::decide::bits::STR_BORROW;
+                return format!("&({})", emit_expr(&uncoerced));
+            }
+            return format!("&({raw})");
+        }
         // Value-shaped arg → `&str` param. Hash#fetch / Hash#[] on an
         // untyped bag (the `form_with` → `method_override_input`
         // path) and Value-typed locals/ivars need `.as_str()`. Do
@@ -479,9 +619,13 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         // owned String. Borrowing the whole If-expr (`&(if ... {} else
         // {})`) makes Rust coerce both arms' Strings into a shared
         // `&str` via Deref.
-        let if_owned_producing = if let ExprNode::If { then_branch, else_branch, .. } = &*arg.node {
-            owned_producing_node(&*then_branch.node)
-                && owned_producing_node(&*else_branch.node)
+        let if_owned_producing = if let ExprNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } = &*arg.node
+        {
+            owned_producing_node(&*then_branch.node) && owned_producing_node(&*else_branch.node)
         } else {
             false
         };
@@ -498,6 +642,48 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     }
 
     raw
+}
+
+fn rust_emits_owned_route_helper(arg: &Expr) -> bool {
+    let ExprNode::Send {
+        recv: Some(recv),
+        method,
+        ..
+    } = &*arg.node
+    else {
+        return false;
+    };
+    let ExprNode::Const { path } = &*recv.node else {
+        return false;
+    };
+    path.last()
+        .is_some_and(|name| name.as_str() == "RouteHelpers")
+        && (method.as_str().ends_with("_path") || method.as_str().ends_with("_url"))
+}
+
+fn rust_emits_owned_class_method(arg: &Expr) -> bool {
+    let ExprNode::Send { recv, method, .. } = &*arg.node else {
+        return false;
+    };
+    let returns_owned_string = |return_ty: Option<crate::ty::Ty>| {
+        return_ty.is_some_and(|ty| matches!(ty, crate::ty::Ty::Str | crate::ty::Ty::Sym))
+    };
+    match recv {
+        Some(recv) => {
+            let ExprNode::Const { path } = &*recv.node else {
+                return false;
+            };
+            let Some(class) = path.last() else {
+                return false;
+            };
+            returns_owned_string(super::super::global_class_method_return_ty(
+                class.as_str(),
+                method.as_str(),
+            ))
+        }
+        None => super::super::global_helper_method(method.as_str())
+            .is_some_and(|helper| returns_owned_string(helper.return_ty.clone())),
+    }
 }
 
 /// When a Cast's source type renders as `serde_json::Value` at the
@@ -528,9 +714,9 @@ pub(crate) fn cast_via_value_for_union(value: &Expr, target_ty: &crate::ty::Ty) 
             // only honest reading is the stored text form — which is
             // exactly what `parse_db_time` accepts, and it already
             // returns the Option this arm wants.
-            Ty::Time => {
-                Some(format!("({raw}).as_str().and_then(crate::rh_datetime::parse_db_time)"))
-            }
+            Ty::Time => Some(format!(
+                "({raw}).as_str().and_then(crate::rh_datetime::parse_db_time)"
+            )),
             _ => None,
         };
     }
@@ -558,7 +744,9 @@ pub(crate) fn cast_via_value_for_union(value: &Expr, target_ty: &crate::ty::Ty) 
 /// coercion is the non-nullable one minus its `.unwrap()`.
 fn peel_nilable(ty: &crate::ty::Ty) -> Option<&crate::ty::Ty> {
     use crate::ty::Ty;
-    let Ty::Union { variants } = ty else { return None };
+    let Ty::Union { variants } = ty else {
+        return None;
+    };
     if variants.len() != 2 {
         return None;
     }
@@ -567,7 +755,6 @@ fn peel_nilable(ty: &crate::ty::Ty) -> Option<&crate::ty::Ty> {
     }
     variants.iter().find(|v| !matches!(v, Ty::Nil))
 }
-
 
 /// Field-position coercion: variant of `coerce_arg_for_param_ty` for
 /// the constructor's `let <field> = <value>` rewrite. Two differences
@@ -641,28 +828,26 @@ pub(crate) fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> S
                 Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
             )
     };
-    let arg_renders_as_value = arg.ty.as_ref().map(is_value_shaped).unwrap_or(false)
-        || {
-            // Walk through a `.clone()` wrap to reach the underlying
-            // Var name, then look up its declared local type.
-            let inner: &Expr = match &*arg.node {
-                ExprNode::Send { recv: Some(r), method, args: m_args, .. }
-                    if method.as_str() == "clone" && m_args.is_empty() =>
-                {
-                    r
-                }
-                _ => arg,
-            };
-            match &*inner.node {
-                ExprNode::Var { name, .. } => {
-                    super::super::local_var_ty(name.as_str())
-                        .as_ref()
-                        .map(is_value_shaped)
-                        .unwrap_or(false)
-                }
-                _ => false,
-            }
+    let arg_renders_as_value = arg.ty.as_ref().map(is_value_shaped).unwrap_or(false) || {
+        // Walk through a `.clone()` wrap to reach the underlying
+        // Var name, then look up its declared local type.
+        let inner: &Expr = match &*arg.node {
+            ExprNode::Send {
+                recv: Some(r),
+                method,
+                args: m_args,
+                ..
+            } if method.as_str() == "clone" && m_args.is_empty() => r,
+            _ => arg,
         };
+        match &*inner.node {
+            ExprNode::Var { name, .. } => super::super::local_var_ty(name.as_str())
+                .as_ref()
+                .map(is_value_shaped)
+                .unwrap_or(false),
+            _ => false,
+        }
+    };
     if arg_renders_as_value {
         if let Ty::Hash { key, value } = field_ty {
             if key.is_stringish() {
@@ -703,7 +888,10 @@ fn json_value_arg_for_string_param(arg: &Expr) -> bool {
         ExprNode::Var { .. } | ExprNode::Ivar { .. } => {
             // `Union<Untyped, Nil>` rust-emits `Option<Value>`. Peel
             // would call that a Value and emit `.as_str()` on Option.
-            inner.ty.as_ref().is_some_and(|t| !is_option_ty(t) && value_shaped(t))
+            inner
+                .ty
+                .as_ref()
+                .is_some_and(|t| !is_option_ty(t) && value_shaped(t))
         }
         ExprNode::Send { method, recv, .. } => {
             if !matches!(method.as_str(), "[]" | "fetch" | "get") {
@@ -733,14 +921,22 @@ fn json_value_as_str(raw: String, arg: &Expr) -> String {
     } else {
         arg
     };
-    let owned = if let ExprNode::Send { method, recv, args, .. } = &*inner.node {
+    let owned = if let ExprNode::Send {
+        method, recv, args, ..
+    } = &*inner.node
+    {
         let hash_recv = matches!(
             recv.as_ref().and_then(|r| r.ty.as_ref()).map(peel_nil),
             Some(crate::ty::Ty::Hash { .. })
         );
         let fetch_nil = method.as_str() == "fetch"
             && args.len() == 2
-            && matches!(&*args[1].node, ExprNode::Lit { value: Literal::Nil });
+            && matches!(
+                &*args[1].node,
+                ExprNode::Lit {
+                    value: Literal::Nil
+                }
+            );
         if hash_recv && (method.as_str() == "get" || fetch_nil) {
             format!("{raw}.cloned().unwrap_or(serde_json::Value::Null)")
         } else {
@@ -780,4 +976,270 @@ fn var_binding_is_non_option(arg: &Expr) -> bool {
     super::super::local_var_ty(name.as_str())
         .map(|t| !is_option_ty(&t))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod hash_widening_tests {
+    use super::coerce_arg_for_param_ty;
+    use crate::emit::rust::ctx::EmitCtx;
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::span::Span;
+    use crate::ty::Ty;
+
+    fn string(value: &str) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::Lit {
+                value: Literal::Str {
+                    value: value.to_string(),
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn nested_heterogeneous_hash_is_widened_before_tuple_inference() {
+        let span = Span::default();
+        let nested = Expr::new(
+            span,
+            ExprNode::Hash {
+                entries: vec![(string("hidden"), string("true"))],
+                kwargs: true,
+            },
+        );
+        let hash = Expr::new(
+            span,
+            ExprNode::Hash {
+                entries: vec![
+                    (string("aria"), nested),
+                    (
+                        string("size"),
+                        Expr::new(
+                            span,
+                            ExprNode::Lit {
+                                value: Literal::Int { value: 20 },
+                            },
+                        ),
+                    ),
+                ],
+                kwargs: true,
+            },
+        );
+        let widened_ty = Ty::Hash {
+            key: Box::new(Ty::Str),
+            value: Box::new(Ty::Untyped),
+        };
+        let cast = Expr::new(
+            span,
+            ExprNode::Cast {
+                value: hash,
+                target_ty: widened_ty.clone(),
+            },
+        );
+
+        let emitted = crate::emit::rust::expr::with_emit_ctx(EmitCtx::default(), || {
+            coerce_arg_for_param_ty(&cast, &widened_ty)
+        });
+
+        assert!(emitted.contains("serde_json::Map::from_iter"), "{emitted}");
+        assert!(
+            emitted.contains("serde_json::Value::from(20_i64)"),
+            "{emitted}"
+        );
+        assert!(
+            !emitted.contains(".into_iter().map(|(k, v)|"),
+            "the mixed Rust map must not be formed before widening: {emitted}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod string_borrow_tests {
+    use super::coerce_arg_for_param_ty;
+    use crate::emit::rust::ctx::EmitCtx;
+    use crate::emit::rust::ctx::GlobalHelperMethod;
+    use crate::expr::{BlockStyle, Expr, ExprNode, InterpPart, Literal};
+    use crate::ident::{Symbol, TyVar};
+    use crate::span::Span;
+    use crate::ty::Ty;
+
+    #[test]
+    fn owned_string_coercion_does_not_skip_borrow_at_str_param() {
+        let mut value = Expr::new(
+            Span::default(),
+            ExprNode::StringInterp {
+                parts: vec![InterpPart::Text {
+                    value: "dynamic".to_string(),
+                }],
+            },
+        );
+        value.decisions |= crate::emit::rust::decide::bits::STR_TO_OWNED;
+
+        let emitted = crate::emit::rust::expr::with_emit_ctx(EmitCtx::default(), || {
+            coerce_arg_for_param_ty(&value, &Ty::Str)
+        });
+
+        assert!(
+            emitted.starts_with("&("),
+            "expected borrowed owned String: {emitted}"
+        );
+        assert!(emitted.contains(".to_string()"), "{emitted}");
+    }
+
+    #[test]
+    fn untyped_to_s_send_is_borrowed_at_str_param() {
+        let mut receiver = Expr::new(
+            Span::default(),
+            ExprNode::StringInterp {
+                parts: vec![InterpPart::Text {
+                    value: "dynamic".to_string(),
+                }],
+            },
+        );
+        receiver.ty = Some(Ty::Str);
+        let value = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: Some(receiver),
+                method: crate::ident::Symbol::from("to_s"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+
+        let emitted = crate::emit::rust::expr::with_emit_ctx(EmitCtx::default(), || {
+            coerce_arg_for_param_ty(&value, &Ty::Str)
+        });
+
+        assert!(
+            emitted.starts_with("&("),
+            "expected borrowed String: {emitted}"
+        );
+        assert!(emitted.contains("format!"), "{emitted}");
+    }
+
+    #[test]
+    fn untyped_route_helper_result_is_borrowed_at_str_param() {
+        let value = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    Span::default(),
+                    ExprNode::Const {
+                        path: vec![Symbol::from("RouteHelpers")],
+                    },
+                )),
+                method: Symbol::from("qr_code_path"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+
+        let emitted = crate::emit::rust::expr::with_emit_ctx(EmitCtx::default(), || {
+            coerce_arg_for_param_ty(&value, &Ty::Str)
+        });
+
+        assert!(
+            emitted.starts_with("&("),
+            "expected borrowed route String: {emitted}"
+        );
+        assert!(
+            emitted.contains("RouteHelpers::qr_code_path()"),
+            "{emitted}"
+        );
+    }
+
+    #[test]
+    fn unresolved_bare_helper_call_with_block_is_borrowed_at_str_param() {
+        let value = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("link_to_zoom_qr_code"),
+                args: vec![],
+                block: Some(Expr::new(
+                    Span::default(),
+                    ExprNode::Lambda {
+                        params: vec![],
+                        rest_param: None,
+                        block_param: None,
+                        body: Expr::new(
+                            Span::default(),
+                            ExprNode::Lit {
+                                value: Literal::Str {
+                                    value: "qr content".to_string(),
+                                },
+                            },
+                        ),
+                        block_style: BlockStyle::Do,
+                    },
+                )),
+                parenthesized: false,
+            },
+        );
+        let mut value = value;
+        value.ty = Some(Ty::Var { var: TyVar(0) });
+
+        let mut ctx = EmitCtx::default();
+        ctx.global_helper_methods.insert(
+            "link_to_zoom_qr_code".to_string(),
+            GlobalHelperMethod {
+                path: "crate::app_classes::QrCodeHelper".to_string(),
+                params: vec![],
+                defaults: vec![],
+                return_ty: Some(Ty::Str),
+            },
+        );
+        let emitted = crate::emit::rust::expr::with_emit_ctx(ctx, || {
+            coerce_arg_for_param_ty(&value, &Ty::Str)
+        });
+
+        assert!(
+            emitted.starts_with("&(crate::app_classes::QrCodeHelper::link_to_zoom_qr_code("),
+            "expected borrowed owned helper String: {emitted}"
+        );
+        assert!(
+            emitted.contains("||"),
+            "block closure must stay in call: {emitted}"
+        );
+    }
+
+    #[test]
+    fn nullable_helper_return_is_not_borrowed_as_a_plain_string() {
+        let value = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("maybe_label"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let mut value = value;
+        value.ty = Some(Ty::Var { var: TyVar(0) });
+
+        let mut ctx = EmitCtx::default();
+        ctx.global_helper_methods.insert(
+            "maybe_label".to_string(),
+            GlobalHelperMethod {
+                path: "crate::app_classes::LabelsHelper".to_string(),
+                params: vec![],
+                defaults: vec![],
+                return_ty: Some(Ty::Union {
+                    variants: vec![Ty::Str, Ty::Nil],
+                }),
+            },
+        );
+        let emitted = crate::emit::rust::expr::with_emit_ctx(ctx, || {
+            coerce_arg_for_param_ty(&value, &Ty::Str)
+        });
+
+        assert!(
+            !emitted.starts_with("&("),
+            "Option<String> must not be borrowed as a plain String: {emitted}"
+        );
+    }
 }

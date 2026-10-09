@@ -506,6 +506,12 @@ impl RubyToS for String {
     }
 }
 
+impl RubyToS for () {
+    fn ruby_to_s(&self) -> String {
+        String::new()
+    }
+}
+
 impl RubyToS for serde_json::Value {
     fn ruby_to_s(&self) -> String {
         match self {
@@ -513,6 +519,12 @@ impl RubyToS for serde_json::Value {
             serde_json::Value::Null => String::new(),
             other => other.to_string(),
         }
+    }
+}
+
+impl<T: RubyToS> RubyToS for Option<T> {
+    fn ruby_to_s(&self) -> String {
+        self.as_ref().map(RubyToS::ruby_to_s).unwrap_or_default()
     }
 }
 

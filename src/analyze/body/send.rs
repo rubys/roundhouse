@@ -1884,6 +1884,17 @@ impl<'a> BodyTyper<'a> {
             // A method the app adds by reopening `String` (campfire's
             // `all_emoji?`) answers where the builtin table has nothing.
             Some(Ty::Str) if method.as_str() == "bytes" && block_ret.is_some() => Ty::Str,
+            Some(Ty::Str)
+                if method.as_str() == "[]"
+                    && args.len() == 2
+                    && args[0].ty.as_ref().is_some_and(|ty| {
+                        matches!(ty.peel_nilable(), Ty::Class { id, .. } if id.0.as_str() == "Regexp")
+                    }) =>
+            {
+                Ty::Union {
+                    variants: vec![Ty::Str, Ty::Nil],
+                }
+            }
             Some(Ty::Str) => match str_method(method) {
                 Ty::Var { .. } => self
                     .lookup_string_instance(method)

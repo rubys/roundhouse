@@ -62,6 +62,9 @@ pub fn rust_ty(ty: &Ty) -> String {
         }),
         Ty::Class { id, .. } => {
             let name = id.0.as_str();
+            if name == "Regexp" {
+                return "regex::Regex".to_string();
+            }
             // Time → String for now; Rust's `chrono::DateTime<Utc>`
             // is the real target but the framework Ruby surface
             // serializes Times as ISO-8601 strings everywhere, so
@@ -156,5 +159,15 @@ mod tests {
         };
         assert!(!rust_value_shaped(&ty));
         assert!(rust_ty(&ty).starts_with("Option<"));
+    }
+
+    #[test]
+    fn regexp_uses_the_rust_regex_type() {
+        let ty = Ty::Class {
+            id: crate::ident::ClassId(crate::ident::Symbol::from("Regexp")),
+            args: Vec::new(),
+        };
+
+        assert_eq!(rust_ty(&ty), "regex::Regex");
     }
 }

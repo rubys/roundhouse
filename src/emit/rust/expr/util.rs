@@ -51,9 +51,7 @@ pub(crate) fn is_option_of(outer: &crate::ty::Ty, inner: &crate::ty::Ty) -> bool
         return false;
     }
     let has_nil = variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil));
-    let other = variants
-        .iter()
-        .find(|v| !matches!(v, crate::ty::Ty::Nil));
+    let other = variants.iter().find(|v| !matches!(v, crate::ty::Ty::Nil));
     matches!(other, Some(o) if has_nil && o == inner)
 }
 
@@ -107,9 +105,7 @@ pub(crate) fn render_param_default_literal(expr: &crate::expr::Expr) -> Option<S
         ExprNode::Hash { entries, .. } if entries.is_empty() => {
             Some("std::collections::HashMap::new()".to_string())
         }
-        ExprNode::Array { elements, .. } if elements.is_empty() => {
-            Some("vec![]".to_string())
-        }
+        ExprNode::Array { elements, .. } if elements.is_empty() => Some("vec![]".to_string()),
         _ => None,
     }
 }
@@ -141,10 +137,7 @@ pub(crate) fn synth_default_for_ty(ty: &crate::ty::Ty) -> Option<String> {
         // surrounding HashMap literal) hits E0282. Emit the turbofish
         // form so inference always has a concrete element type.
         Ty::Union { variants } => {
-            let inner: Vec<&Ty> = variants
-                .iter()
-                .filter(|v| !matches!(v, Ty::Nil))
-                .collect();
+            let inner: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
             if inner.len() == 1 {
                 Some(format!(
                     "Option::<{}>::None",
@@ -168,7 +161,9 @@ pub(crate) fn arm_body_already_value(body: &Expr) -> bool {
     matches!(body.ty.as_ref(), Some(crate::ty::Ty::Untyped))
         || matches!(
             &*body.node,
-            ExprNode::Lit { value: Literal::Nil }
+            ExprNode::Lit {
+                value: Literal::Nil
+            }
         )
 }
 
@@ -211,7 +206,13 @@ pub(crate) fn try_emit_case_pattern(p: &crate::expr::Pattern) -> Option<String> 
 pub(crate) fn indent(s: &str, level: usize) -> String {
     let pad = "    ".repeat(level);
     s.lines()
-        .map(|l| if l.is_empty() { String::new() } else { format!("{pad}{l}") })
+        .map(|l| {
+            if l.is_empty() {
+                String::new()
+            } else {
+                format!("{pad}{l}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -224,10 +225,15 @@ pub(crate) fn is_builtin_container_class(name: &str) -> bool {
     let last = name.rsplit("::").next().unwrap_or(name);
     matches!(
         last,
-        "Hash" | "HashWithIndifferentAccess" | "Array" | "String"
-            | "Flash" | "Session"
+        "Hash"
+            | "HashWithIndifferentAccess"
+            | "Array"
+            | "String"
+            | "Flash"
+            | "Session"
             | "Parameters"
-            | "Errors" | "ErrorCollection"
+            | "Errors"
+            | "ErrorCollection"
     )
 }
 
@@ -240,10 +246,7 @@ pub(crate) fn coerce_to_value(value: &Expr, rhs: &str) -> String {
     use crate::ty::Ty;
     let already_value = matches!(
         value.ty.as_ref(),
-        Some(Ty::Untyped)
-            | Some(Ty::Var { .. })
-            | Some(Ty::Record { .. })
-            | Some(Ty::Hash { .. })
+        Some(Ty::Untyped) | Some(Ty::Var { .. }) | Some(Ty::Record { .. }) | Some(Ty::Hash { .. })
     );
     if already_value {
         rhs.to_string()
@@ -332,15 +335,55 @@ pub(crate) fn escape_rust_keyword(name: &str) -> String {
 pub(crate) fn is_rust_keyword(name: &str) -> bool {
     matches!(
         name,
-        "as" | "break" | "const" | "continue" | "crate" | "else" | "enum"
-            | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in"
-            | "let" | "loop" | "match" | "mod" | "move" | "mut" | "pub"
-            | "ref" | "return" | "self" | "Self" | "static" | "struct"
-            | "trait" | "true" | "type" | "unsafe" | "use" | "where"
-            | "while" | "async" | "await" | "dyn"
-            | "abstract" | "become" | "box" | "do" | "final" | "macro"
-            | "override" | "priv" | "typeof" | "unsized" | "virtual"
-            | "yield" | "try"
+        "as" | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "async"
+            | "await"
+            | "dyn"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+            | "try"
     )
 }
 

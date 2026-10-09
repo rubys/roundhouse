@@ -19,13 +19,14 @@ use coerce::coerce_arg_for_class_method;
 use dispatch::external_class_method_param_tys;
 use index::try_recv_typed_method;
 use ops::{
-    try_array_push, try_binary_operator, try_constructor_field_assign,
-    try_stdlib_class_method, try_string_append, try_unary_not,
+    try_array_push, try_binary_operator, try_constructor_field_assign, try_stdlib_class_method,
+    try_string_append, try_unary_not,
 };
 
 use super::util::{rewrite_method_name, synth_default_for_ty};
 use super::{
-    current_class_method_param_tys, emit_expr, emit_send_recv, in_class_method, is_static_method,
+    current_class_method_param_tys, emit_expr, emit_send_recv, in_class_method, in_constructor,
+    is_static_method,
 };
 
 pub(super) fn emit_send(
@@ -127,15 +128,68 @@ pub(super) fn emit_send(
             }
         }
     }
-    if let Some(s) = try_constructor_field_assign(recv, method, args) { return s; }
-    if let Some(s) = try_stdlib_class_method(recv, method, args) { return s; }
-    if let Some(s) = try_binary_operator(recv, method, args) { return s; }
-    if let Some(s) = try_unary_not(recv, method, args) { return s; }
-    if let Some(s) = try_array_push(recv, method, args) { return s; }
-    if let Some(s) = try_string_append(recv, method, args) { return s; }
-    if let Some(s) = try_recv_typed_method(recv, method, args) { return s; }
-    if let Some(s) = try_view_helpers_dom_id(recv, method, args) { return s; }
-    if let Some(s) = try_view_helpers_const_escape(recv, method, args) { return s; }
+    if let Some(s) = try_constructor_field_assign(recv, method, args) {
+        return s;
+    }
+    if let Some(s) = try_stdlib_class_method(recv, method, args) {
+        return s;
+    }
+    if let Some(s) = try_binary_operator(recv, method, args) {
+        return s;
+    }
+    if let Some(s) = try_unary_not(recv, method, args) {
+        return s;
+    }
+    if let Some(s) = try_array_push(recv, method, args) {
+        return s;
+    }
+    if let Some(s) = try_string_append(recv, method, args) {
+        return s;
+    }
+    // `Regexp` String indexing emits `Option<String>` (Ruby returns
+    // nil when the regexp/capture does not match). Handle `.to_s`
+    // before the receiver-typed dispatch, which otherwise peels the
+    // receiver's nilable String type and can route this to ordinary
+    // String method emission. Ruby's nil.to_s is the empty string.
+    if method == "to_s" && args.is_empty() {
+        if let Some(Expr {
+            node,
+            ty: Some(crate::ty::Ty::Union { variants }),
+            ..
+        }) = recv
+        {
+            let is_option_string = variants.iter().any(|ty| matches!(ty, crate::ty::Ty::Nil))
+                && matches!(
+                    variants.iter().find(|ty| !matches!(ty, crate::ty::Ty::Nil)),
+                    Some(crate::ty::Ty::Str)
+                );
+            let is_regexp_index = matches!(
+                &**node,
+                ExprNode::Send {
+                    method: index_method,
+                    args: index_args,
+                    ..
+                } if index_method.as_str() == "[]"
+                    && index_args.len() == 2
+                    && matches!(
+                        index_args[0].ty.as_ref().map(super::util::peel_nil),
+                        Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+                    )
+            );
+            if is_option_string && is_regexp_index {
+                return format!(
+                    "{}.map(|v| v.to_string()).unwrap_or_default()",
+                    emit_expr(recv.unwrap())
+                );
+            }
+        }
+    }
+    if let Some(s) = try_recv_typed_method(recv, method, args, outer_ty) {
+        return s;
+    }
+    if let Some(s) = try_view_helpers_const_escape(recv, method, args) {
+        return s;
+    }
     // Ruby/Rust method-name bridge. Sanitize predicates (`foo?` →
     // `foo`, `foo!` → `foo`) since Rust identifiers reject those
     // suffixes. The user-defined HWIA methods `key?`/`has_key?`/etc.
@@ -238,31 +292,32 @@ pub(super) fn emit_send(
                     _ => inner.ty.clone(),
                 };
                 match array_ty.as_ref().map(super::util::peel_nil) {
-                    Some(crate::ty::Ty::Array { elem }) => {
-                        super::util::is_option_ty(elem)
+                    Some(crate::ty::Ty::Array { elem }) => super::util::is_option_ty(elem),
+                    _ => {
+                        r.ty.as_ref()
+                            .map(super::util::is_option_ty)
+                            .unwrap_or(false)
                     }
-                    _ => r
-                        .ty
-                        .as_ref()
-                        .map(super::util::is_option_ty)
-                        .unwrap_or(false),
                 }
             }
             // A call's `ty` comes from the callee's declared signature
             // (`article.title()` on a nullable column reads `Option
             // <String>`), so it is trustworthy here.
-            ExprNode::Send { .. } => r
-                .ty
-                .as_ref()
-                .map(super::util::is_option_ty)
-                .unwrap_or(false),
+            ExprNode::Send { .. } => {
+                r.ty.as_ref()
+                    .map(super::util::is_option_ty)
+                    .unwrap_or(false)
+            }
             // Locals are NOT trustworthy: rust can render a local with
             // a nilable body-typer Ty as a plain `&str` (the router's
             // path segments), where `.map()` doesn't compile.
             _ => false,
         };
         if recv_is_option {
-            return format!("{}.map(|v| v.to_string()).unwrap_or_default()", emit_expr(r));
+            return format!(
+                "{}.map(|v| v.to_string()).unwrap_or_default()",
+                emit_expr(r)
+            );
         }
     }
     // Static-method routing: `self.method(args)` where `method` was
@@ -392,7 +447,8 @@ pub(super) fn emit_send(
             args
         };
         if let Some(param_tys) = param_tys {
-            let mut out: Vec<String> = Vec::with_capacity(param_tys.len().max(effective_args.len()));
+            let mut out: Vec<String> =
+                Vec::with_capacity(param_tys.len().max(effective_args.len()));
             for (i, _) in param_tys.iter().enumerate() {
                 match (effective_args.get(i), param_tys.get(i)) {
                     // Caller-supplied arg: apply per-param coercion.
@@ -407,8 +463,7 @@ pub(super) fn emit_send(
                     // `...`-suffixed output instead of mid-word
                     // truncation.
                     (None, Some(pt)) => {
-                        if let Some(d) =
-                            super::global_class_method_param_default(class, method, i)
+                        if let Some(d) = super::global_class_method_param_default(class, method, i)
                         {
                             out.push(d);
                         } else if let Some(d) = synth_default_for_ty(pt) {
@@ -463,7 +518,11 @@ pub(super) fn emit_send(
     } else {
         args_s
     };
-    let recv_s = emit_send_recv(r);
+    let recv_s = if matches!(method, "nil?" | "clone") {
+        emit_expr(r)
+    } else {
+        emit_send_recv(r)
+    };
     // Static method dispatch — `Type.method(args)` in Ruby becomes
     // `Type::method(args)` in Rust when the receiver is a Const
     // (class/module reference). The `.` form binds to a value
@@ -476,7 +535,10 @@ pub(super) fn emit_send(
     if final_args.is_empty() {
         format!("{recv_s}{dispatch}{rewritten_method}()")
     } else {
-        format!("{recv_s}{dispatch}{rewritten_method}({})", final_args.join(", "))
+        format!(
+            "{recv_s}{dispatch}{rewritten_method}({})",
+            final_args.join(", ")
+        )
     }
 }
 
@@ -513,7 +575,9 @@ fn try_view_helpers_const_escape(
         return None;
     }
     let r = recv?;
-    let ExprNode::Const { path } = &*r.node else { return None };
+    let ExprNode::Const { path } = &*r.node else {
+        return None;
+    };
     if path.last().map(|s| s.as_str()) != Some("ViewHelpers") {
         return None;
     }
@@ -546,26 +610,33 @@ fn fold_const_escape(arg: &Expr) -> Option<String> {
         arg
     };
     match &*inner.node {
-        ExprNode::Lit { value: crate::expr::Literal::Str { value } } => {
+        ExprNode::Lit {
+            value: crate::expr::Literal::Str { value },
+        } => {
             // `{:?}` renders a valid Rust string literal with quotes
             // and escapes.
             Some(format!("{:?}", html_escape_const(value)))
         }
         // `4.to_s` — digits never need escaping; fold to the rendered
         // literal.
-        ExprNode::Send { recv: Some(r), method, args, .. }
-            if method.as_str() == "to_s" && args.is_empty() =>
-        {
-            match &*r.node {
-                ExprNode::Lit { value: crate::expr::Literal::Int { value } } => {
-                    Some(format!("{:?}", value.to_string()))
-                }
-                _ => None,
-            }
-        }
+        ExprNode::Send {
+            recv: Some(r),
+            method,
+            args,
+            ..
+        } if method.as_str() == "to_s" && args.is_empty() => match &*r.node {
+            ExprNode::Lit {
+                value: crate::expr::Literal::Int { value },
+            } => Some(format!("{:?}", value.to_string())),
+            _ => None,
+        },
         // `if cond { "a" } else { "b" }` with literal branches — escape
         // each branch at emit time, keep the cond dynamic.
-        ExprNode::If { cond, then_branch, else_branch } => {
+        ExprNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             let t = fold_const_escape(then_branch)?;
             let f = fold_const_escape(else_branch)?;
             Some(format!("if {} {{ {t} }} else {{ {f} }}", emit_expr(cond)))
@@ -574,11 +645,7 @@ fn fold_const_escape(arg: &Expr) -> Option<String> {
     }
 }
 
-fn try_view_helpers_dom_id(
-    recv: Option<&Expr>,
-    method: &str,
-    args: &[Expr],
-) -> Option<String> {
+fn try_view_helpers_dom_id(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Option<String> {
     if method != "dom_id" {
         return None;
     }
@@ -602,7 +669,10 @@ fn try_view_helpers_dom_id(
         return None;
     }
     let prefix = crate::naming::snake_case(
-        class_name.rsplit("::").next().unwrap_or(class_name.as_str()),
+        class_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(class_name.as_str()),
     );
     let record_s = emit_expr(record);
     // 1-arg `dom_id(record)` → `"<prefix>_<id>"` with no suffix.
@@ -630,8 +700,12 @@ fn try_view_helpers_dom_id(
         suffix
     };
     let suffix_lit: Option<&str> = match &*suffix_inner.node {
-        ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.as_str()),
-        ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Some(value.as_str()),
+        ExprNode::Lit {
+            value: crate::expr::Literal::Sym { value },
+        } => Some(value.as_str()),
+        ExprNode::Lit {
+            value: crate::expr::Literal::Str { value },
+        } => Some(value.as_str()),
         _ => None,
     };
     let suffix_lit = suffix_lit?;
@@ -655,10 +729,7 @@ fn try_view_helpers_dom_id(
 /// the Hash; if found, push that value; if missing (kwargs Hash
 /// silently omits optional kwargs), emit nothing for that slot and
 /// let the existing trailing-default loop synthesize the default.
-fn unpack_trailing_kwargs(
-    args: &[Expr],
-    params: &[crate::ty::Param],
-) -> Option<Vec<Expr>> {
+fn unpack_trailing_kwargs(args: &[Expr], params: &[crate::ty::Param]) -> Option<Vec<Expr>> {
     use crate::expr::{ExprNode, Literal};
     use crate::ty::ParamKind;
     let last = args.last()?;
@@ -680,12 +751,15 @@ fn unpack_trailing_kwargs(
     // Index the Hash literal's entries by key-name. Accept both Symbol
     // and String literal keys (Ruby kwargs surface either way through
     // the parser depending on call shape).
-    let mut by_name: std::collections::HashMap<String, &Expr> =
-        std::collections::HashMap::new();
+    let mut by_name: std::collections::HashMap<String, &Expr> = std::collections::HashMap::new();
     for (k, v) in entries.iter() {
         let name = match &*k.node {
-            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
-            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+            ExprNode::Lit {
+                value: Literal::Sym { value },
+            } => value.as_str().to_string(),
+            ExprNode::Lit {
+                value: Literal::Str { value },
+            } => value.clone(),
             _ => return None, // dynamic key — can't unpack at emit
         };
         by_name.insert(name, v);
@@ -737,7 +811,13 @@ pub(crate) fn is_array_index_read(arg: &Expr) -> bool {
     // reaches here either bare or already assigned to a local. Only the
     // direct form is decidable here; a local's recorded type is the
     // body-typer's business.
-    let ExprNode::Send { recv: Some(r), method, args, .. } = &*arg.node else {
+    let ExprNode::Send {
+        recv: Some(r),
+        method,
+        args,
+        ..
+    } = &*arg.node
+    else {
         return false;
     };
     method.as_str() == "[]"
