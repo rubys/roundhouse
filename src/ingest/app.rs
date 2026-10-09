@@ -177,6 +177,28 @@ fn names_root_constant(text: &str, name: &str) -> bool {
             }
             ruby_prism::visit_constant_path_node(self, node);
         }
+        // A `module X` / `class X` declaration names X without reading it
+        // (`module Shops` around an app model reopens the namespace): only
+        // a namespace path it nests under (`class A::X` reads A) is a read.
+        fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+            if let Some(parent) = node.constant_path().as_constant_path_node().and_then(|p| p.parent()) {
+                self.visit(&parent);
+            }
+            if let Some(body) = node.body() {
+                self.visit(&body);
+            }
+        }
+        fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+            if let Some(parent) = node.constant_path().as_constant_path_node().and_then(|p| p.parent()) {
+                self.visit(&parent);
+            }
+            if let Some(superclass) = node.superclass() {
+                self.visit(&superclass);
+            }
+            if let Some(body) = node.body() {
+                self.visit(&body);
+            }
+        }
     }
     let parsed = ruby_prism::parse(text.as_bytes());
     let mut reads = Reads { name, found: false };
