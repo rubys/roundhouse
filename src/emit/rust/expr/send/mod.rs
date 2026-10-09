@@ -68,6 +68,13 @@ pub(super) fn emit_send(
         }
         return super::util::sanitize_ident(method);
     }
+    // `ActionController::Base#request` is exposed to generated controller
+    // bodies as the active request snapshot. Resolve only an unshadowed,
+    // zero-argument bare send here; parameters and explicit receivers retain
+    // their normal Ruby lookup behavior.
+    if recv.is_none() && method == "request" && args.is_empty() {
+        return "crate::http::current_request_context()".to_string();
+    }
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses
     // stored ISO-8601 text into a native `chrono::DateTime<Utc>`. Maps to
     // the hand-written rust datetime runtime helper, which is nil-safe
@@ -229,6 +236,48 @@ pub(super) fn emit_send(
     };
     let rewritten_method = rewrite_method_name(&effective_method);
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    // A class method can retain a nullable return type in its library
+    // signature even when the call-site expression has lost that union.
+    // Preserve Ruby's ordinary dispatch semantics by unwrapping only
+    // when the immediate class-method receiver is known to return an
+    // Option. Option's own inspection/combinator methods must continue
+    // to operate on the Option itself (not the wrapped value).
+    if let Some(receiver) = recv {
+        let option_method = matches!(
+            method,
+            "nil?" | "clone" | "is_none" | "is_some" | "unwrap" | "unwrap_or"
+                | "unwrap_or_default" | "map" | "and_then" | "ok_or" | "expect"
+        );
+        if !option_method {
+            if let ExprNode::Send {
+                recv: Some(class_recv),
+                method: class_method,
+                ..
+            } = &*receiver.node
+            {
+                if let ExprNode::Const { path } = &*class_recv.node {
+                    if let Some(class) = path.last() {
+                        let return_ty = super::global_class_method_return_ty(
+                            class.as_str(),
+                            class_method.as_str(),
+                        );
+                        if return_ty
+                            .as_ref()
+                            .map(super::util::is_option_ty)
+                            .unwrap_or(false)
+                        {
+                            return format!(
+                                "{}.as_ref().unwrap().{}({})",
+                                emit_expr(receiver),
+                                rewritten_method,
+                                args_s.join(", ")
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     // Free functions / module functions (Inflector.pluralize → bare
     // pluralize() in the inflector module). Implicit-self bare calls
     // emit as bare function calls.

@@ -15,13 +15,11 @@
 use std::fmt::Write;
 use std::path::PathBuf;
 
+use super::super::EmittedFile;
 use crate::App;
 use crate::dialect::{Test, TestModule};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
-use crate::naming::snake_case;
-
-use super::super::EmittedFile;
 
 /// `src/emit/rust/expr/literal.rs::emit_literal` is the rust literal
 /// helper; alias for clarity at this site.
@@ -91,10 +89,19 @@ fn ctrl_test_body_stmts(body: &Expr) -> Vec<&Expr> {
 fn emit_ctrl_test_stmt(stmt: &Expr, app: &App) -> String {
     use crate::expr::LValue;
     match &*stmt.node {
-        ExprNode::Send { recv: None, method, args, block, .. } => {
-            emit_ctrl_test_send(method.as_str(), args, block.as_ref(), app)
-        }
-        ExprNode::Send { recv: Some(r), method, args, .. } => {
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            block,
+            ..
+        } => emit_ctrl_test_send(method.as_str(), args, block.as_ref(), app),
+        ExprNode::Send {
+            recv: Some(r),
+            method,
+            args,
+            ..
+        } => {
             if method.as_str() == "reload" {
                 let recv_s = match &*r.node {
                     ExprNode::Ivar { name } => name.to_string(),
@@ -111,33 +118,40 @@ fn emit_ctrl_test_stmt(stmt: &Expr, app: &App) -> String {
                 format!("{recv_s}.{method}({});", args_s.join(", "))
             }
         }
-        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+        ExprNode::Assign {
+            target: LValue::Var { name, .. },
+            value,
+        } => {
             format!("let mut {name} = {};", emit_ctrl_test_expr(value, app))
         }
-        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+        ExprNode::Assign {
+            target: LValue::Ivar { name },
+            value,
+        } => {
             format!("let mut {name} = {};", emit_ctrl_test_expr(value, app))
         }
         _ => format!("{};", emit_ctrl_test_expr(stmt, app)),
     }
 }
 
-fn emit_ctrl_test_send(
-    method: &str,
-    args: &[Expr],
-    block: Option<&Expr>,
-    app: &App,
-) -> String {
+fn emit_ctrl_test_send(method: &str, args: &[Expr], block: Option<&Expr>, app: &App) -> String {
     use crate::lower::ControllerTestSend;
     match crate::lower::classify_controller_test_send(method, args, block) {
         Some(ControllerTestSend::HttpGet { url }) => {
             let u = emit_url_expr(url, app);
             format!("let resp = server.get(&{u}).await;")
         }
-        Some(ControllerTestSend::HttpWrite { method, url, params }) => {
+        Some(ControllerTestSend::HttpWrite {
+            method,
+            url,
+            params,
+        }) => {
             let u = emit_url_expr(url, app);
             let form_body = params
                 .map(|h| flatten_params_to_form(h, None, app))
-                .unwrap_or_else(|| "std::collections::HashMap::<String, String>::new()".to_string());
+                .unwrap_or_else(|| {
+                    "std::collections::HashMap::<String, String>::new()".to_string()
+                });
             format!("let resp = server.{method}(&{u}).form(&{form_body}).await;")
         }
         Some(ControllerTestSend::HttpDelete { url }) => {
@@ -158,7 +172,12 @@ fn emit_ctrl_test_send(
         Some(ControllerTestSend::AssertSelect { selector, kind }) => {
             emit_assert_select_classified(selector, kind, app)
         }
-        Some(ControllerTestSend::AssertDifference { method, count_expr, delta, block }) => {
+        Some(ControllerTestSend::AssertDifference {
+            method,
+            count_expr,
+            delta,
+            block,
+        }) => {
             let _ = method;
             emit_assert_difference_classified(count_expr, delta, block, app)
         }
@@ -168,8 +187,7 @@ fn emit_ctrl_test_send(
             format!("assert_eq!({e}, {a});")
         }
         None => {
-            let args_s: Vec<String> =
-                args.iter().map(|a| emit_ctrl_test_expr(a, app)).collect();
+            let args_s: Vec<String> = args.iter().map(|a| emit_ctrl_test_expr(a, app)).collect();
             if args_s.is_empty() {
                 format!("{method}();")
             } else {
@@ -217,7 +235,9 @@ fn emit_assert_select_classified(
     app: &App,
 ) -> String {
     use crate::lower::AssertSelectKind;
-    let ExprNode::Lit { value: Literal::Str { value: selector } } = &*selector_expr.node
+    let ExprNode::Lit {
+        value: Literal::Str { value: selector },
+    } = &*selector_expr.node
     else {
         return format!(
             "/* TODO: dynamic selector */ resp.assert_select({:?});",
@@ -286,20 +306,33 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App) -> String {
         ExprNode::Lit { value } => emit_literal_local(value),
         ExprNode::Ivar { name } => name.to_string(),
         ExprNode::Var { name, .. } => name.to_string(),
-        ExprNode::Const { path } => {
-            path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::")
-        }
-        ExprNode::Send { recv: Some(r), method, args, .. } => {
+        ExprNode::Const { path } => path
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join("::"),
+        ExprNode::Send {
+            recv: Some(r),
+            method,
+            args,
+            ..
+        } => {
             let m = method.as_str();
             if m == "last" && args.is_empty() {
                 if let ExprNode::Const { path } = &*r.node {
-                    let class = path.last().map(|s| s.as_str().to_string()).unwrap_or_default();
+                    let class = path
+                        .last()
+                        .map(|s| s.as_str().to_string())
+                        .unwrap_or_default();
                     return format!("{class}::last().unwrap()");
                 }
             }
             if m == "count" && args.is_empty() {
                 if let ExprNode::Const { path } = &*r.node {
-                    let class = path.last().map(|s| s.as_str().to_string()).unwrap_or_default();
+                    let class = path
+                        .last()
+                        .map(|s| s.as_str().to_string())
+                        .unwrap_or_default();
                     return format!("{class}::count()");
                 }
             }
@@ -322,7 +355,12 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App) -> String {
             let args_s: Vec<String> = args.iter().map(|a| emit_ctrl_test_expr(a, app)).collect();
             format!("{recv_s}.{m}({})", args_s.join(", "))
         }
-        ExprNode::Send { recv: None, method, args, .. } => {
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            ..
+        } => {
             if method.as_str().ends_with("_url") || method.as_str().ends_with("_path") {
                 return emit_url_expr(expr, app);
             }
@@ -370,7 +408,13 @@ pub(super) fn emit_rust_test_module(tm: &TestModule, app: &App) -> EmittedFile {
         emit_rust_controller_test(&mut s, test, app);
     }
 
-    let filename = snake_case(tm.name.0.as_str());
+    let filename = crate::naming::underscore(
+        tm.name
+            .0
+            .as_str()
+            .strip_suffix("Test")
+            .unwrap_or(tm.name.0.as_str()),
+    );
     EmittedFile {
         path: PathBuf::from(format!("src/tests/{filename}.rs")),
         content: s,
@@ -380,7 +424,13 @@ pub(super) fn emit_rust_test_module(tm: &TestModule, app: &App) -> EmittedFile {
 fn test_fn_name(desc: &str) -> String {
     let mut s: String = desc
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
     while s.contains("__") {
         s = s.replace("__", "_");

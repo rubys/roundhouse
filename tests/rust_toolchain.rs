@@ -22,7 +22,7 @@ use std::process::Command;
 
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::rust;
-use roundhouse::ingest::ingest_app;
+use roundhouse::ingest::{ingest_app, ingest_app_from_tree};
 
 fn scratch_dir(fixture: &str) -> PathBuf {
     std::env::temp_dir().join(format!("roundhouse-rust-check-{fixture}"))
@@ -78,6 +78,131 @@ fn real_blog_controller_identity_methods_emit_as_instance_methods() {
             );
         }
     }
+}
+
+#[test]
+fn inherited_before_action_calls_dispatch_on_self() {
+    let files = [
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  before_action :require_authentication\n  before_action :deny_bots\n  before_action :allow_browser\n\n  private\n\n  def require_authentication\n    set_version_headers\n    other.foreign_helper\n  end\n\n  def set_version_headers\n  end\n\n  def deny_bots\n  end\n\n  def allow_browser\n  end\n\n  def foreign_helper\n  end\n\n  def unused_parent_helper\n  end\nend\n",
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  def index\n    other.foreign_helper\n  end\n\n  private\n\n  def allow_browser\n    @child_allow_browser = \"child-allow-browser\"\n  end\nend\n",
+        ),
+    ];
+    let tree = files
+        .into_iter()
+        .map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    Analyzer::new(&app).analyze(&mut app);
+    let source = rust::emit(&app)
+        .into_iter()
+        .find(|file| file.path.ends_with("widgets_controller.rs"))
+        .expect("WidgetsController Rust output")
+        .content;
+
+    for method in ["require_authentication", "deny_bots", "set_version_headers"] {
+        let call = format!("self.{method}()");
+        assert!(
+            source.contains(&call),
+            "inherited filter must self-dispatch as `{call}`:\n{source}"
+        );
+        let definition = format!("fn {method}(");
+        assert!(
+            source.contains(&definition),
+            "reachable inherited method `{method}` must be defined on the child:\n{source}"
+        );
+    }
+    assert!(
+        source.contains("self.allow_browser()"),
+        "the inherited filter must still dispatch to the child override:\n{source}"
+    );
+    let allow_browser = source
+        .find("fn allow_browser(")
+        .map(|start| {
+            let body = &source[start..];
+            body.find("\n}")
+                .map(|end| &body[..end])
+                .unwrap_or(body)
+        })
+        .unwrap_or("");
+    assert!(
+        allow_browser.contains("child_allow_browser")
+            && allow_browser.contains("child-allow-browser"),
+        "the child override body must be the emitted definition:\n{source}"
+    );
+    assert!(
+        !source.contains("unused_parent_helper"),
+        "unreferenced ancestor methods must not be copied:\n{source}"
+    );
+    assert!(
+        source.contains("foreign_helper") && !source.contains("fn foreign_helper("),
+        "a same-named method called only on another object must stay a call, not a copy:\n{source}"
+    );
+    assert_eq!(
+        source.matches("fn allow_browser(").count(),
+        1,
+        "child override must replace the inherited definition, not duplicate it:\n{source}"
+    );
+}
+
+#[test]
+fn router_only_references_emitted_controller_handlers() {
+    let tree = [
+        (
+            "app/controllers/reports_controller.rb",
+            "class ReportsController < ActionController::Base\n  def index\n  end\nend\n",
+        ),
+        (
+            "app/controllers/hidden_controller.rb",
+            "class HiddenController < ActionController::Base\n  private\n  def index\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/reports\", to: \"reports#index\"\n  get \"/hidden\", to: \"hidden#index\"\n  get \"/rooms/settings\", to: \"rooms/settings#show\"\n  get \"/up\", to: \"rails/health#show\"\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    Analyzer::new(&app).analyze(&mut app);
+    let files = rust::emit(&app);
+    let router = files
+        .iter()
+        .find(|file| file.path.ends_with("router.rs"))
+        .expect("Rust router output")
+        .content
+        .clone();
+
+    assert!(router.contains(".route(\"/reports\""), "real controller route disappeared:\n{router}");
+    assert!(router.contains("reports_controller::_axum_index"), "real handler missing:\n{router}");
+    for (missing, path) in [
+        ("hidden_controller", "/hidden"),
+        ("rooms::settings_controller", "/rooms/settings"),
+        ("rails::health_controller", "/up"),
+    ] {
+        assert!(!router.contains(missing), "router references non-emitted handler `{missing}`:\n{router}");
+        assert!(router.contains(&format!(".route(\"{path}\"")), "route disappeared instead of remaining explicit:\n{router}");
+    }
+    assert!(router.contains("_roundhouse_unsupported_route"), "missing handlers must not be treated as implemented:\n{router}");
+    assert!(router.contains("StatusCode::NOT_IMPLEMENTED"), "unsupported routes must fail explicitly:\n{router}");
+    assert!(
+        router.contains("request_context_middleware"),
+        "direct router users need an active request scope:\n{router}"
+    );
+    let hidden = files
+        .iter()
+        .find(|file| file.path.ends_with("hidden_controller.rs"))
+        .expect("hidden controller output");
+    assert!(
+        !hidden.content.contains("pub async fn _axum_index"),
+        "a controller with no dispatcher must not emit a route wrapper:\n{}",
+        hidden.content
+    );
 }
 
 /// Execute the generated identity methods in the native Rust toolchain lane.

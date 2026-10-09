@@ -29,6 +29,7 @@ use std::path::PathBuf;
 
 use roundhouse::analyze::diagnose;
 use roundhouse::emit::ruby;
+use roundhouse::emit::rust;
 use roundhouse::ingest::ingest_app_from_tree;
 
 const SCHEMA: &str = "ActiveRecord::Schema.define(version: 1) do\n  \
@@ -83,6 +84,50 @@ fn app() -> roundhouse::App {
     .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
     .collect();
     let mut app = ingest_app_from_tree(tree).expect("ingest tree");
+    roundhouse::session::analyze_and_lower(&mut app);
+    app
+}
+
+fn request_app() -> roundhouse::App {
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        ("db/schema.rb", SCHEMA),
+        ("app/models/current.rb", "class Current < ActiveSupport::CurrentAttributes\n  attribute :request\n  delegate :host, :protocol, to: :request, prefix: true, allow_nil: true\nend\n"),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n  before_action do\n    Current.request = request\n  end\nend\n"),
+        ("app/controllers/rooms_controller.rb", "class RoomsController < ApplicationController\n  def index\n  end\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest request app");
+    roundhouse::session::analyze_and_lower(&mut app);
+    app
+}
+
+fn session_current_app() -> roundhouse::App {
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/current.rb",
+            "class Current < ActiveSupport::CurrentAttributes\n  attribute :session, :user\n  def session=(value)\n    super(value)\n    if value.present?\n      self.user = session.user\n    end\n  end\nend\n",
+        ),
+        (
+            "app/models/session.rb",
+            "class Session\n  def user\n    User.first\n  end\nend\n",
+        ),
+        ("app/models/user.rb", USER),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  before_action do\n    Current.session = Session.new\n  end\nend\n",
+        ),
+        (
+            "app/controllers/rooms_controller.rb",
+            "class RoomsController < ApplicationController\n  def index\n  end\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest session Current tree");
     roundhouse::session::analyze_and_lower(&mut app);
     app
 }
@@ -148,6 +193,67 @@ fn the_nil_arm_survives_so_presence_is_still_asked() {
     );
 }
 
+#[test]
+fn a_nullable_class_method_nil_predicate_uses_option_semantics() {
+    let app = app();
+    let files = rust::emit(&app);
+    let source = files
+        .iter()
+        .find(|file| file.path.to_string_lossy().ends_with("controllers/rooms_controller.rs"))
+        .expect("Rust rooms controller")
+        .content
+        .as_str();
+    assert!(
+        source.contains("Current::user().is_none()")
+            && !source.contains("Current::user().is_null()"),
+        "a nullable Current.user return is an Option, not serde_json::Value:\n{source}"
+    );
+}
+
+#[test]
+fn current_attribute_writer_clones_the_option_without_unwrapping_it() {
+    let app = app();
+    let files = rust::emit(&app);
+    let source = files
+        .iter()
+        .find(|file| file.path.to_string_lossy().ends_with("app_classes/current_class.rs"))
+        .expect("Rust Current class")
+        .content
+        .as_str();
+    let writer = source
+        .split("pub fn __current_instance_set_user")
+        .nth(1)
+        .and_then(|method| method.split("\n    }").next())
+        .expect("Current.user writer");
+    assert!(
+        writer.contains("self.user = value.clone()")
+            && !writer.contains("value.clone().unwrap()"),
+        "an Option-valued CurrentAttributes writer must preserve nil:\n{writer}"
+    );
+}
+
+#[test]
+fn a_current_writer_conditional_preserves_an_option_returning_branch() {
+    let app = session_current_app();
+    let files = rust::emit(&app);
+    let source = files
+        .iter()
+        .find(|file| file.path.to_string_lossy().ends_with("app_classes/current_class.rs"))
+        .expect("Rust Current class")
+        .content
+        .as_str();
+    let writer = source
+        .split("pub fn __current_instance_set_session")
+        .nth(1)
+        .and_then(|method| method.split("\n    }").next())
+        .expect("Current.session writer");
+    assert!(
+        writer.contains("self.__current_instance_set_user")
+            && !writer.contains("Some(self.__current_instance_set_user"),
+        "a branch already returning Option<User> must not become Option<Option<User>>:\n{writer}"
+    );
+}
+
 /// Ablation for the thread-local read: `Thread#[]` answers untyped, and
 /// a reader that returned it on a mere `nil?` test signed its type as
 /// `untyped` — spinel then dispatched every forwarder on a boxed value.
@@ -155,4 +261,54 @@ fn the_nil_arm_survives_so_presence_is_still_asked() {
 fn the_instance_reader_narrows_the_thread_local_to_the_class() {
     let sig = emitted("current.rbs");
     assert!(sig.contains("def self.instance: () -> Current"), "{sig}");
+}
+
+/// A setter synthesized from CurrentAttributes must keep the type of its
+/// whole-app write sites all the way through the Rust class forwarder.
+#[test]
+fn request_writer_uses_the_type_from_its_controller_filter_write() {
+    let app = request_app();
+    let files = rust::emit(&app);
+    let source = files
+        .iter()
+        .find(|file| file.path.to_string_lossy().ends_with("current_class.rs"))
+        .expect("Rust Current class")
+        .content
+        .as_str();
+
+    assert!(
+        source.contains("pub request: Option<crate::http::RequestContext>"),
+        "CurrentAttributes request slots must remain nilable before setup writes:\n{source}"
+    );
+    assert!(
+        source.contains("__current_instance_set_request(&mut self, value: crate::http::RequestContext)"),
+        "{source}"
+    );
+    assert!(
+        source.contains("pub fn set_request(value: crate::http::RequestContext)")
+            && source.contains("__current_instance_set_request(value)"),
+        "{source}"
+    );
+    assert!(
+        source.contains("unwrap().host()"),
+        "a present Current.request must be unwrapped before delegated access:\n{source}"
+    );
+    let delegated_host = source
+        .split("pub fn __current_instance_request_host")
+        .nth(1)
+        .and_then(|method| method.split("\n    }").next())
+        .expect("generated request_host delegate");
+    assert!(
+        delegated_host.contains(".is_none()") && !delegated_host.contains("unwrap().is_none()"),
+        "allow_nil must test the Option before unwrapping its value:\n{delegated_host}"
+    );
+    assert!(
+        files.iter().any(|file| {
+            file.path.to_string_lossy().contains("controllers/")
+                && file
+                    .content
+                    .contains("crate::http::current_request_context()")
+        }),
+        "controller request setup must read the active request context"
+    );
 }

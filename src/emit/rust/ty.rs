@@ -62,6 +62,9 @@ pub fn rust_ty(ty: &Ty) -> String {
         }),
         Ty::Class { id, .. } => {
             let name = id.0.as_str();
+            if name == "ActionDispatch::Request" {
+                return "crate::http::RequestContext".to_string();
+            }
             if name == "Regexp" {
                 return "regex::Regex".to_string();
             }

@@ -187,6 +187,203 @@ thread_local! {
 #[derive(Clone, Debug)]
 pub struct RequestFormatExt(pub String);
 
+/// Owned transport metadata visible during controller, helper, view,
+/// and layout execution for one request. This is intentionally a
+/// snapshot rather than an Axum request borrow: layout wrapping awaits
+/// the handler and consumes the response body before rendering the
+/// layout.
+#[derive(Clone, Debug)]
+pub struct RequestContext {
+    pub method: axum::http::Method,
+    pub uri: axum::http::Uri,
+    pub headers: axum::http::HeaderMap,
+    pub remote_addr: Option<std::net::SocketAddr>,
+}
+
+impl RequestContext {
+    pub fn from_request(req: &axum::extract::Request) -> Self {
+        Self {
+            method: req.method().clone(),
+            uri: req.uri().clone(),
+            headers: req.headers().clone(),
+            remote_addr: req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|info| info.0),
+        }
+    }
+
+    /// Rails' Request#user_agent returns an empty string when the header
+    /// is absent in the shared typed request model.
+    pub fn user_agent(&self) -> String {
+        self.headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    pub fn get_pred(&self) -> bool {
+        self.method == axum::http::Method::GET
+    }
+
+    pub fn head_pred(&self) -> bool {
+        self.method == axum::http::Method::HEAD
+    }
+
+    /// Rails' Request#host omits a port. Prefer the request Host header,
+    /// then an absolute URI authority; do not invent a host when neither
+    /// source carried one.
+    pub fn host(&self) -> String {
+        self.headers
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+            .map(|authority| authority.host().to_owned())
+            .or_else(|| self.uri.host().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// Rails' Request#protocol includes its trailing colon. The URI scheme
+    /// is the authoritative source available on the owned request snapshot;
+    /// a path-only URI has no known scheme and returns an empty string.
+    pub fn protocol(&self) -> String {
+        self.uri
+            .scheme_str()
+            .map(|scheme| format!("{scheme}:"))
+            .unwrap_or_default()
+    }
+
+    pub fn remote_ip(&self) -> String {
+        self.remote_addr
+            .map(|address| address.ip().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Preserve an absolute request URI as-is. For origin-form requests,
+    /// construct an absolute URL only when both scheme and host are present;
+    /// otherwise retain the URI rather than inventing origin metadata.
+    pub fn url(&self) -> String {
+        if self.uri.scheme().is_some() && self.uri.authority().is_some() {
+            return self.uri.to_string();
+        }
+        match (self.protocol().strip_suffix(':').filter(|s| !s.is_empty()), self.host()) {
+            (Some(scheme), host) if !host.is_empty() => {
+                format!("{scheme}://{host}{}", self.uri)
+            }
+            _ => self.uri.to_string(),
+        }
+    }
+
+    pub fn script_name(&self) -> String {
+        String::new()
+    }
+
+    pub fn referrer(&self) -> String {
+        self.headers
+            .get(axum::http::header::REFERER)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    }
+}
+
+tokio::task_local! {
+    static REQUEST_CONTEXT: RequestContext;
+}
+
+/// Run a future in this request's context. Tokio task-local scope follows
+/// the future across awaits and restores any enclosing context afterward.
+pub async fn scope_request_context<F>(context: RequestContext, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    REQUEST_CONTEXT.scope(context, future).await
+}
+
+/// Clone the active request metadata. Access outside a request scope is
+/// an invariant violation; do not fabricate an empty request.
+pub fn current_request_context() -> RequestContext {
+    REQUEST_CONTEXT
+        .try_with(Clone::clone)
+        .expect("request context accessed outside an active HTTP request")
+}
+
+/// Scope the generated router too, so direct router-based integration
+/// tests receive the same context as production server requests.
+pub async fn request_context_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let context = RequestContext::from_request(&req);
+    scope_request_context(context, next.run(req)).await
+}
+
+#[cfg(test)]
+mod request_context_tests {
+    use super::{RequestContext, current_request_context, scope_request_context};
+    use axum::http::{HeaderValue, Method, Request, Uri, header};
+
+    fn context(uri: &str, agent: &str) -> RequestContext {
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(header::USER_AGENT, HeaderValue::from_str(agent).unwrap())
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(
+                "203.0.113.7"
+                    .parse::<std::net::SocketAddr>()
+                    .unwrap(),
+            ));
+        RequestContext::from_request(&request)
+    }
+
+    #[tokio::test]
+    async fn request_context_survives_awaits_and_nested_scopes_restore() {
+        let outer = context("/outer?x=1", "outer-agent");
+        let inner = context("/inner?y=2", "inner-agent");
+        scope_request_context(outer, async {
+            assert_eq!(current_request_context().uri, Uri::from_static("/outer?x=1"));
+            scope_request_context(inner, async {
+                tokio::task::yield_now().await;
+                let current = current_request_context();
+                assert_eq!(current.uri, Uri::from_static("/inner?y=2"));
+                assert_eq!(current.headers[header::USER_AGENT], "inner-agent");
+                assert_eq!(current.user_agent(), "inner-agent");
+                assert!(current.get_pred());
+                assert!(!current.head_pred());
+                assert_eq!(current.remote_addr.unwrap().to_string(), "203.0.113.7");
+            })
+            .await;
+            tokio::task::yield_now().await;
+            let current = current_request_context();
+            assert_eq!(current.uri, Uri::from_static("/outer?x=1"));
+            assert_eq!(current.headers[header::USER_AGENT], "outer-agent");
+        })
+        .await;
+    }
+
+    #[test]
+    fn host_and_protocol_come_from_request_metadata() {
+        let mut request = Request::builder()
+            .uri("https://chat.example.test/messages")
+            .header(header::HOST, "chat.example.test:8443")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let context = RequestContext::from_request(&request);
+        assert_eq!(context.host(), "chat.example.test");
+        assert_eq!(context.protocol(), "https:");
+
+        *request.uri_mut() = Uri::from_static("/messages");
+        let context = RequestContext::from_request(&request);
+        assert_eq!(context.host(), "chat.example.test");
+        assert_eq!(context.protocol(), "");
+    }
+}
+
 /// Stash the inferred format on the per-task thread-local. The axum
 /// wrapper calls this synchronously immediately before the controller
 /// action body — `AC::Base#request_format` (emitted as a shim method

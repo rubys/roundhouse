@@ -110,7 +110,12 @@ pub async fn start(router: Router, opts: StartOptions<'_>) {
         .await
         .expect("bind listener");
     println!("Roundhouse server listening on http://localhost:{}", port);
-    axum::serve(listener, app).await.expect("axum serve");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("axum serve");
 }
 
 // ── method override middleware ─────────────────────────────────
@@ -182,6 +187,17 @@ async fn method_override(req: Request, next: Next) -> Response {
 /// redirects pass through untouched, as do non-HTML responses (the
 /// WebSocket upgrade, any JSON endpoints).
 async fn layout_wrap(req: Request, next: Next) -> Response {
+    let context = crate::http::RequestContext::from_request(&req);
+    crate::http::scope_request_context(context, async move {
+        layout_wrap_in_scope(req, next).await
+    })
+    .await
+}
+
+/// Keep request metadata scoped until after the handler response has
+/// been collected and the outer layout has rendered. Scoping only the
+/// route handler would drop the context before this post-handler work.
+async fn layout_wrap_in_scope(req: Request, next: Next) -> Response {
     // Wipe any stale yield/slot state before the handler runs.
     // Axum's multi-thread runtime means each worker thread has
     // its own thread-local; reset covers the current worker.

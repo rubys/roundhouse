@@ -38,3 +38,26 @@ fn active_support_hash_methods_dispatch() {
     assert!(diags.is_empty(), "{diags:?}");
 }
 
+#[test]
+fn rust_helper_hash_merge_resolves_the_shipped_runtime_function() {
+    let tree = [(
+        PathBuf::from("app/helpers/merge_helper.rb"),
+        b"module MergeHelper\n  def attrs\n    { left: \"old\", right: \"kept\" }.merge(left: \"new\")\n  end\nend\n".to_vec(),
+    )]
+    .into_iter()
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::rust::emit(&app);
+    let helper = files
+        .iter()
+        .find(|file| file.path.ends_with("merge_helper_class.rs"))
+        .expect("helper output");
+    assert!(helper.content.contains("merge_attrs("), "{}", helper.content);
+    assert!(
+        helper.content.contains("use crate::hash_ext::merge_attrs;"),
+        "the helper must bind the existing runtime function:\n{}",
+        helper.content
+    );
+    assert!(files.iter().any(|file| file.path.ends_with("hash_ext.rs")));
+}

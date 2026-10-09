@@ -5161,10 +5161,45 @@ impl Analyzer {
         }
 
         self.apply_param_sites(sites, &params_by_method, &defined);
+        self.apply_current_attribute_write_sites(app);
         // Production signatures keep their production callers' shape.
         // Fold before adding test-owned observations: a same-named test
         // helper must not feed an included production concern either.
         self.fold_concern_param_sites(app);
+    }
+
+    /// Attribute writers synthesized for CurrentAttributes have their
+    /// only useful parameter observations at class-level assignment
+    /// sites (`Current.request = request`), not ordinary method calls
+    /// discoverable by `collect_send_sites`. Feed those observed RHS
+    /// types into the same parameter table so the generated instance
+    /// writer and its class-level forwarder retain one typed contract.
+    fn apply_current_attribute_write_sites(&mut self, app: &App) {
+        let targets: std::collections::HashSet<&ClassId> =
+            app.current_attribute_classes.iter().collect();
+        if targets.is_empty() {
+            return;
+        }
+        let mut writes = HashMap::new();
+        let mut collect = |body: &crate::expr::Expr| {
+            collect_const_attr_writes(body, &targets, &mut writes);
+        };
+        crate::lower::for_each_hook_body_ref(app, &mut collect);
+        for view in &app.views {
+            collect(&view.body);
+        }
+
+        for (class, attrs) in writes {
+            for (attr, ty) in attrs {
+                let key = (class.clone(), Symbol::from(format!("{attr}=")));
+                let entry = self.inferred_params.entry(key).or_default();
+                if entry.is_empty() {
+                    entry.push(ty);
+                } else {
+                    entry[0] = fixpoint_bound::bound(unify_param_ty(entry[0].clone(), ty));
+                }
+            }
+        }
     }
 
     /// Replay production+view param observations, then overlay typed
