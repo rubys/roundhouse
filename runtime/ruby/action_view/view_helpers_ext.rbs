@@ -2,6 +2,7 @@
 module ActionView
   module ViewHelpers
     def self.content_security_policy_nonce: () -> String
+    def self.url_origin=: (String origin) -> String
     def self.url_for_path: (String path) -> String
     def self.class_names: (*(String | Symbol | Integer | bool | Hash[String | Symbol, untyped] | Array[untyped] | nil) args) -> String
     def self.number_with_delimiter: (Integer value) -> String

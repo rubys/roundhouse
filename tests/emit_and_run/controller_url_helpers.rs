@@ -185,6 +185,22 @@ class ArticleJsonUrlsControllerTest < ActionDispatch::IntegrationTest
     assert_includes response.body, %("url":"http://blog.test/articles/#{Article.first.id}.json")
     assert_not_includes response.body, %("url":"/articles/)
   end
+
+  # campfire's bot API tests compare the two sides:
+  # `assert_equal room_message_url(@room, m), json["url"]`. A test
+  # body's `_url` is absolute on the session's host, as the view's is.
+  test "a test body's _url equals the view's self-link" do
+    article = Article.first
+    get article_url(article, format: :json)
+    assert_equal article_url(article, format: :json), JSON.parse(response.body)["url"]
+  end
+
+  test "a test body's _url is on the session host before any request" do
+    assert_equal "http://www.example.com/articles", articles_url
+    host! "blog.test"
+    https!
+    assert_equal "https://blog.test/articles", articles_url
+  end
 end
 "#,
         )

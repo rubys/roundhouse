@@ -22,7 +22,23 @@ module ActionView
     # view_helpers.rb): absolute, on the request's scheme and host —
     # `Rails.application.protocol` / `.domain`, the grounding an ERB
     # view's `_url` gets — as Rails' view `url_for` answers it.
+    #
+    # Under the test harness the origin is the integration session's
+    # instead (`url_origin`, set from `host!` / `https!`): a test body's
+    # `_url` runs between requests, where Rails answers
+    # `http://www.example.com/…` and the last request is no guide. Every
+    # request the harness dispatches carries that same origin, so a view
+    # rendered inside one answers the same either way. Empty outside
+    # tests.
+    @url_origin = ""
+
+    def self.url_origin=(origin)
+      @url_origin = origin
+    end
+
     def self.url_for_path(path)
+      origin = @url_origin
+      return origin + path unless origin.empty?
       Rails.application.protocol + Rails.application.domain + path
     end
 

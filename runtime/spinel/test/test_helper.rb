@@ -973,6 +973,9 @@ class TestBase
   # invoke `super` — same Minitest before_setup → setup ordering.)
   def setup
     SchemaSetup.reset! if defined?(SchemaSetup)
+    # Each test's integration session starts on Rails' default origin;
+    # a test body's `_url` reads it (`RequestDispatch#sync_url_origin`).
+    ActionView::ViewHelpers.url_origin = "http://www.example.com" if defined?(ActionView::ViewHelpers)
     ActiveSupport.travel(0) if defined?(ActiveSupport)
     # AFTER the schema reset, which reloads fixtures — and our fixture
     # loader runs model callbacks, so a broadcasting `after_create_commit`
@@ -1656,6 +1659,7 @@ module RequestDispatch
   # test has ever seen.
   def host!(name)
     @__host = name
+    sync_url_origin
   end
 
   def host
@@ -1668,6 +1672,16 @@ module RequestDispatch
   # `https://` its absolute URLs carry).
   def https!(flag = true)
     @__https = flag
+    sync_url_origin
+  end
+
+  # The session's origin, where a test body's `_url` builds its URL
+  # (`ActionView::ViewHelpers.url_for_path`): Rails' integration
+  # session hands its `host` and `https?` to the url helpers.
+  def sync_url_origin
+    protocol = https? ? "https://" : "http://"
+    ActionView::ViewHelpers.url_origin =
+      ActionController.build_host_url(protocol, host, ActionController.url_port_of(host), "")
   end
 
   def https?
