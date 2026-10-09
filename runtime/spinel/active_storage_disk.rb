@@ -109,6 +109,41 @@ module ActiveStorage
     end
   end
 
+  # Rails' `ActiveStorage::FixtureSet.blob(filename:, **attributes)`,
+  # which a blobs.yml row renders with ERB. Rails builds the blob with a
+  # fresh key, `unfurl`s the file under `test/fixtures/files` (MD5
+  # checksum, detected content type, byte size, `identified: true` in
+  # the metadata), assigns the call's attributes, uploads the bytes and
+  # renders the row; the fixture set then inserts it. Here the loader
+  # (`lower::fixture_to_library`) passes the row's id and the call's
+  # literal arguments, and this does the rest in one step. An empty
+  # string is an argument the call did not pass.
+  #
+  # The content type comes from the extension (Marcel's filename half;
+  # Rails also sniffs the bytes). The metadata is `identified` only, as
+  # Rails' fixture blob is not analyzed. The key is derived, as every key
+  # in this runtime is (`Blob.generate_key`); the id is in its input so
+  # two rows from one file cannot collide on the unique index.
+  class FixtureSet
+    def self.load_blob!(id, filename, service_name, content_type)
+      data = File.binread("test/fixtures/files/" + filename)
+      key = Blob.generate_key(id.to_s + "/" + filename, data.length)
+      Blob.service.upload(key, data)
+      ActiveRecord.adapter.insert("active_storage_blobs", {
+        "id" => id,
+        "key" => key,
+        "filename" => filename,
+        "content_type" => content_type == "" ? ActiveStorage.content_type_for_filename(filename) : content_type,
+        "metadata" => "{\"identified\":true}",
+        "service_name" => service_name == "" ? "local" : service_name,
+        "byte_size" => data.length,
+        "checksum" => Digest::MD5.base64digest(data),
+        "created_at" => ActiveSupport.db_now,
+      })
+      nil
+    end
+  end
+
   # Width and height from the file's header, for the formats a browser
   # renders inline: PNG, GIF, JPEG, BMP, WebP. Header reads only — no
   # decoder — which is all Rails' own `ImageAnalyzer` reports either.

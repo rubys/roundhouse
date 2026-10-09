@@ -1894,6 +1894,30 @@ pub struct Fixture {
     /// `_fixture: model_class:` — the class the rows load, for a set
     /// whose path doesn't name it. `None` derives it from `path`.
     pub model_class: Option<Symbol>,
+    /// Rows written as one `<%= ActiveStorage::FixtureSet.blob(filename:
+    /// …) %>` tag rather than label → fields. Rails renders that call to
+    /// the blob's whole row as JSON, after reading the file from
+    /// `test/fixtures/files`, measuring it and uploading it to the
+    /// service. Each label here also has an (empty) entry in `records`,
+    /// so its position, and so its id, is the one Rails' file order
+    /// gives it.
+    #[serde(default)]
+    pub file_blobs: IndexMap<Symbol, FixtureFileBlob>,
+}
+
+/// `ActiveStorage::FixtureSet.blob(filename: "reading.webp", service_name:
+/// "test")`: the arguments, which are all a row needs. The rest of the
+/// row (key, size, checksum, the detected content type) comes from the
+/// file when the fixture loads, as it does in Rails.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FixtureFileBlob {
+    /// The file under `test/fixtures/files`, and the blob's `filename`.
+    pub filename: String,
+    /// `service_name:`, when the call passes one.
+    pub service_name: Option<String>,
+    /// `content_type:`, when the call passes one; it overrides the
+    /// detected type, as Rails' `assign_attributes` after `unfurl` does.
+    pub content_type: Option<String>,
 }
 
 impl Fixture {

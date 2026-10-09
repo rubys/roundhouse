@@ -1241,6 +1241,29 @@ fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String
     Ok(())
 }
 
+/// An `ActiveStorage::FixtureSet.blob` row loads by reading the file
+/// under `test/fixtures/files` and uploading it to a storage service.
+/// Only the ruby family has one (`runtime/spinel/active_storage_disk.rb`);
+/// elsewhere the shared runtime's service raises, and the native fixture
+/// emitters have no loader for the row. Refuse rather than load a set
+/// without it.
+fn reject_file_blob_fixtures(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        return Ok(());
+    }
+    if let Some((fixture, label)) = app.fixtures.iter()
+        .find_map(|f| f.file_blobs.keys().next().map(|label| (f, label)))
+    {
+        return Err(format!(
+            "{}: fixture `test/fixtures/{}.yml` record `{}` is an `ActiveStorage::FixtureSet.blob` row; file-fixture blobs load only on the Ruby targets",
+            target.as_str(),
+            fixture.path.as_str(),
+            label.as_str(),
+        ));
+    }
+    Ok(())
+}
+
 /// Keep admitted Data factories outside unverified target emitters.
 fn reject_unsupported_data_factories(app: &App, target: BuildTarget) -> Result<(), String> {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel) {
@@ -1525,6 +1548,7 @@ pub fn target_files(
     // errors than the app has.
     report_unsupported_bundled_constants(app, target);
     reject_unsupported_pattern_matches(app, target)?;
+    reject_file_blob_fixtures(app, target)?;
     reject_unsupported_data_factories(app, target)?;
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
@@ -5148,6 +5172,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     if public.exists() {
         walk_dir_into(&public, "public/", &mut files)?;
     }
+    // `test/fixtures/files` — `file_fixture_path`, which `file_fixture`,
+    // `fixture_file_upload` and an `ActiveStorage::FixtureSet.blob`
+    // fixture row read. The same blind spot again: the binary files
+    // arrive through `collect_binary_assets`, a `.txt` or `.csv` did not,
+    // and a blob row naming one loaded nothing.
+    let file_fixtures = fixture.join("test/fixtures/files");
+    if file_fixtures.exists() {
+        walk_dir_into(&file_fixtures, "test/fixtures/files/", &mut files)?;
+    }
 
     let mut files = dedupe_last_wins(files);
     // De-blog the scaffold for whatever app was ingested: regenerate the
@@ -7851,6 +7884,7 @@ mod tests {
             match root {
                 0 | 1 => app.fixtures.push(Fixture {
                     name: Symbol::new("probes"), path: Symbol::new("probes"), model_class: None,
+                    file_blobs: Default::default(),
                     preamble: if root == 0 { vec![constant.clone()] } else { vec![] },
                     records: if root == 1 {
                         [(Symbol::new("one"), [(Symbol::new("value"), FixtureValue::Ruby(constant))].into_iter().collect())].into_iter().collect()
