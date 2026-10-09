@@ -1504,6 +1504,19 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
                     return call;
                 }
             }
+            // ERB can interpolate a route `_url` directly, not only as
+            // the URL argument to link_to/button_to. Ground it at the
+            // shared seam here so Ruby-family views use the request
+            // origin while strict targets keep the path-only runtime
+            // implementation. Leave unknown route helpers untouched.
+            if let Some(stem) = method.as_str().strip_suffix("_url") {
+                let path_helper = format!("{stem}_path");
+                if ctx.route_helper_names.contains(&path_helper) {
+                    let mut call = super::absolute_url_interp(stem, args.clone());
+                    call.inherit_span(e.span);
+                    return call;
+                }
+            }
             // ERB's `h` alias, in a nested/statement position: an explicit
             // escape call. (Nested `h` inside an escaped interpolation
             // double-escapes — as it does in Rails, where interpolating a

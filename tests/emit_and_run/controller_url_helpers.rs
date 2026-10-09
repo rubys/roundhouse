@@ -250,3 +250,28 @@ end
     )
     .assert_passes();
 }
+
+#[test]
+fn erb_url_helper_drops_the_scheme_standard_port() {
+    emit_and_run::real_blog()
+        .write("app/views/articles/index.html.erb", "<%= articles_url %>\n")
+        .write(
+            "test/controllers/articles_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticlesControllerTest < ActionDispatch::IntegrationTest
+  test "an ERB _url drops the standard port from Host" do
+    host! "blog.test:80"
+    # Exercise the request-derived origin, not the test harness's cached origin.
+    ActionView::ViewHelpers.url_origin = ""
+    get "/articles"
+    assert_response :success
+    assert_includes response.body, "http://blog.test/articles", response.body.inspect
+    assert_not_includes response.body, "http://blog.test:80/articles"
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}

@@ -3584,62 +3584,16 @@ fn rewrite_helper_calls(
         return;
     }
 
-    // Bare `<x>_url` whose `<x>_path` sibling is generated — the
-    // absolute variant grounds to protocol + configured domain + the
-    // path helper (same convention as `rewrite_url_helpers_absolute`'s
-    // host-kwarg form): `"#{Rails.application.protocol}#{
-    // Rails.application.domain}#{RouteHelpers.<x>_path(args)}"`. Lobsters' hats page links
-    // `request_hat_url` bare.
+    // Bare `<x>_url` whose `<x>_path` sibling is generated — use the
+    // shared view URL seam so request-derived origins get the same port
+    // normalization as jbuilder. It still resolves Rails.application.domain,
+    // preserving apps' canonical-domain overrides. Lobsters' hats page
+    // links `request_hat_url` bare.
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
         if let Some(stem) = method.as_str().strip_suffix("_url") {
             let path_name = Symbol::from(format!("{stem}_path"));
             if route_helpers.contains(&path_name) {
-                let span = expr.span;
-                let args = args.clone();
-                let domain = Expr::new(
-                    span,
-                    ExprNode::Send {
-                        recv: Some(Expr::new(
-                            span,
-                            ExprNode::Send {
-                                recv: Some(Expr::new(
-                                    span,
-                                    ExprNode::Const { path: vec![Symbol::from("Rails")] },
-                                )),
-                                method: Symbol::from("application"),
-                                args: vec![],
-                                block: None,
-                                parenthesized: false,
-                            },
-                        )),
-                        method: Symbol::from("domain"),
-                        args: vec![],
-                        block: None,
-                        parenthesized: false,
-                    },
-                );
-                let path_call = Expr::new(
-                    span,
-                    ExprNode::Send {
-                        recv: Some(Expr::new(
-                            span,
-                            ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
-                        )),
-                        method: path_name,
-                        args,
-                        block: None,
-                        parenthesized: true,
-                    },
-                );
-                *expr.node = ExprNode::StringInterp {
-                    parts: vec![
-                        crate::expr::InterpPart::Expr {
-                            expr: crate::lower::view_to_library::rails_application_call("protocol"),
-                        },
-                        crate::expr::InterpPart::Expr { expr: domain },
-                        crate::expr::InterpPart::Expr { expr: path_call },
-                    ],
-                };
+                *expr = crate::lower::view_to_library::absolute_url_interp(stem, args.clone());
                 return;
             }
         }
