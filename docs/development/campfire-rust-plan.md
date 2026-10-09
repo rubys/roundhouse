@@ -19,7 +19,7 @@ falling, or a test being selected is not completion evidence.
 
 | Input | Snapshot / status |
 |---|---|
-| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`; status last inspected at head `0c9e9daef27779c2923e030aec26f5073531f238` (test/evidence only; no new compiler support); keep Draft unless Thomas explicitly says otherwise |
+| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`; status inspected 2026-10-10 at head `aecb0b8216a823748eb752e72aa674f90be81515`; head is unchanged; `CodeRabbit` commit status is SUCCESS but GitHub reports zero check-runs, so there is no exact-head CI validation; keep Draft unless Thomas explicitly says otherwise |
 | Baseline implementation SHA | `3b6d1b7576036382f82aa936fef8bcbd5b65272c`; the first plan commit `609248bcf7f51c94d56f91fbdaaf6675dd5b71fe` changed docs only |
 | Campfire | CI pin and checked-out SHA `32b4144b5206304fa8d4c67455a753e2d3c16635` |
 | Strict analyzer | `roundhouse check --strict`: exit 0, 0 errors, 404 warnings |
@@ -32,8 +32,8 @@ falling, or a test being selected is not completion evidence.
 | Historical estimate | ~2,468; current survey lib count is 2,496 (28 higher), broadly similar in magnitude but historical scope/method is unknown. Use 2,496 as this captured survey baseline, not 2,468 |
 | Environment | Debian 12, Linux x86_64; `rustc 1.98.1 (48a229cea 2026-09-01)`, host `x86_64-unknown-linux-gnu`; compiler binary SHA-256 `859254978c0a0402c32f949f6de0d99aee73be8d15f45aac00ae1448aac51e74`; Cargo 1.98.1 binary SHA-256 `da77c8b33849312255ccde3179198ada4c8deb370488d050286146b1d1b27e14`; Roundhouse root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a8e8a5981`; generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` |
 | Rails oracle | Not prepared. Required for Rails equivalence, not for compiler diagnostics |
-| Exact-head CI | At inspected head `0c9e9daef27779c2923e030aec26f5073531f238`, GitHub returned an empty status-check rollup and no check runs. This is **no CI evidence**, not a green result. Earlier `ci:rust` run [37986454230](https://github.com/rubys/roundhouse/actions/runs/37986454230) passed on code head `3b6d1b7576036382f82aa936fef8bcbd5b65272c`; Campfire browser smoke and extra-target jobs were skipped |
-| Review state | At the same inspection, GitHub's review decision was empty. Existing correctness/security threads have replies marked addressed; the latest CodeRabbit review at `0b2323e` left only two low-priority performance observations (regex literal recompilation and duplicate analyzer write-site survey). They are deferred; no correctness or security finding from that review remains pending. The browser room-delete journey is still explicitly unverified on Campfire smoke |
+| Exact-head CI | At inspected head `aecb0b8216a823748eb752e72aa674f90be81515`, GitHub returned no check-runs and only the CodeRabbit commit status marked SUCCESS. This is **no CI evidence**, not a green result. Earlier `ci:rust` run [37986454230](https://github.com/rubys/roundhouse/actions/runs/37986454230) passed on code head `3b6d1b7576036382f82aa936fef8bcbd5b65272c`; Campfire browser smoke and extra-target jobs were skipped |
+| Review state | GitHub's review decision was empty at the last check. The latest CodeRabbit review at `0b2323e` left two low-priority performance observations (regex literal recompilation and duplicate analyzer write-site survey), deferred absent concrete evidence. Three subsequent CodeRabbit observations were inspected: bare `turbo_stream` receiver support and regex-case Option-tail behavior are covered by existing implementation/tests; the bare `request` instance-method shadowing guard is present and now has a focused regression. No production-code change was needed for those observations. The browser room-delete journey is still explicitly unverified on Campfire smoke |
 | Scratch evidence | Command outputs, generated files/hashes, lock, and Cargo JSON live under `/tmp/rh688-baseline` in the current orb; large scratch output is not committed |
 
 The PR already contains substantial Rust Campfire work, including app/helper
@@ -269,6 +269,58 @@ Implementation constraints from that review:
   invocation. Verify behavior where blocks are mutually exclusive as well as
   the absent case.
 
+**D0 classifier and emission boundary (Oracle follow-up, 2026-10-09):**
+
+- Implement one Rust-local `block_abi` analysis over the final Rust-owned
+  `LibraryClass` set. Use a canonical method key containing the full namespace,
+  `MethodReceiver`, and method name. Do not key contracts by leaf class name
+  or bare method name: the existing global class-method registry collapses
+  namespaces and receiver kinds for ordinary dispatch, which is too lossy for
+  an ownership-changing ABI.
+- Have analysis and emission share the same conservative call resolver.
+  Initially admit only uniquely resolved same-owner calls, explicit
+  namespaced class-method calls with known receiver kind, and uniquely
+  registered global helpers. Preserve helper shadowing and dispatch
+  precedence. Leave ambiguous helpers/leaf constants, unknown receivers,
+  unresolved inheritance/overrides, and dynamic calls unsupported.
+- Seed candidates from source-structured optional nil-guarded capture, not a
+  method-name allowlist. Propagate contracts to callers to a fixed point only
+  when the incoming block is forwarded unchanged and all uses are accounted
+  for. Reject reassignment, alias/storage/return, explicit yield/invocation,
+  opaque expressions, deferred nested captures, unproven recursion, and
+  loops that consume the block. Count consumers per execution path: mutually
+  exclusive terminal captures can pass, while sequential double-consumption
+  or use-after-move cannot.
+- A nil-guarded call to general `capture` is not by itself proof that every
+  caller's block returns String. Require positive evidence at each admitted
+  boundary (zero-argument String-producing literals or already-proven D0
+  bindings); if evidence conflicts or is unknown, do not classify that edge.
+  Preserve the arbitrary-result RBS/runtime contract and report excluded
+  Campfire paths explicitly.
+- Feed proven return types and contract facts consistently into definitions,
+  class/global dispatch registries, call-expression effective types, and
+  existing coercion/ownership decisions. A block contract does not imply a
+  String return automatically. Apply Rust-effective facts to Rust-owned IR
+  before coercion insertion; do not mutate shared analyzed input or change
+  shared runtime signatures. Static-safe implementation functions and their
+  instance wrappers must share the same signature contract and move forwarded
+  options unchanged.
+- At D0 callsites append `None` for omitted blocks, move a proven option
+  unchanged for forwarding, box only a proven zero-argument String lambda,
+  and preserve explicit nil as `None`. Keep generic `attach_block` behavior
+  for all non-D0 calls. At the terminal capture only, consume once and adapt
+  `String` to `serde_json::Value::String`; do not invent an empty fallback
+  for an unguarded block. Avoid generic `Ty::Fn` or `param_types` as a place
+  to smuggle optionality, since those paths can reintroduce narrowing or
+  cloning.
+- Add rejection tests as well as the positive native fixture: conflicting
+  targets, namespace/receiver collisions, non-String or argument-bearing
+  blocks, double consumption, use-after-consumption, loops, deferred capture,
+  and ambiguous helper calls. Check D0 call-expression coercion in an
+  argument/interpolation context, not just function tail. Keep the existing
+  form-builder block as a negative-control compatibility test and test the
+  generic capture runtime with both String and non-String results.
+
 **D0 proof order:** (1) contract/refinement tests for two forwarding edges,
 declaration-order independence, optionality, and conflict rejection; (2)
 module/instance emission tests for present, absent, forwarded and borrowed
@@ -390,6 +442,22 @@ review artifacts; avoid committing large generated projects or sensitive data.
 | 2026-10-09 (repeatability check) | `609248bcf7f51c94d56f91fbdaaf6675dd5b71fe` (docs-only difference from baseline code SHA `3b6d1b7`) | `32b4144b5206304fa8d4c67455a753e2d3c16635` | Same captured generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55`; Roundhouse binary reported `2026.9.18 (609248bc)` | Two fresh survey generations with `--survey --allow-unsupported`; generated-file manifests compared before Cargo. Both then ran `cargo check --locked --lib --bin app --message-format=json` with a shared Cargo target cache | Both generated 487 files with identical manifest SHA-256 `955ffa2ca632700fe2c0697c7346df29956299b97e964a6ec45a4e17e650c71b`; both Cargo runs exit 101 with 2,496 errors, 2,252 groups and no malformed JSON; normalized fingerprint+count lists identical. Outputs/captures in `/tmp/rh688-repeat` | P0.3, P0.7 |
 | 2026-10-09 (signature-map fix inventory) | `1e5b828895dcafaa687334756ed0f8c908c27451` | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; reused generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` and baseline Cargo target cache; fresh generated project in `/tmp/rh688-1e5b8288-survey` | Fresh `roundhouse --target rust --survey --allow-unsupported` then `cargo check --locked --lib --bin app --message-format=json` | Exit 101, 2,496 errors, 2,252 fingerprints, 555 warnings; fingerprint+count inventory exactly matches baseline (0 groups removed/added/changed). The 14 unresolved `capture` occurrences in 13 groups are unchanged. This narrow parameter-map fix is correct but does not reduce the Campfire wall; no support claim. Capture JSON/inventory in `/tmp/rh688-1e5b8288-cargo.json` and `/tmp/rh688-1e5b8288-inventory.json` | D0 adjacent signature-map defect covered; D0 ABI remains open |
 | 2026-10-09 (shared capture runtime placement, working tree based on `1e5b8288`) | Parent `1e5b828895dcafaa687334756ed0f8c908c27451` plus uncommitted changes | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; reused generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55`; dirty worktree | `ruby -Iruntime/ruby runtime/ruby/test/action_view/view_helpers_ext_test.rb`; `cargo test --locked --test runtime_src_integration every_runtime_method_body_is_fully_typed`; fresh survey generation and `cargo check --locked --lib --bin app --message-format=json`; generated Rust framework test with `--ignored`, before and after moving direct generic capture probes | CRuby suite passed 21 tests / 38 assertions; runtime typed-body gate passed 1/1. Fresh survey Cargo check: exit 101, 2,510 errors / 554 warnings (baseline `1e5b8288`: 2,496 / 555). Diagnostic-set comparison by code/message/source span: 14 `capture` E0425s and one clone diagnostic disappeared; 14 E0271 callable-result mismatches, 14 E0308 branch mismatches, and one relocated clone diagnostic appeared. This is not a net compiler improvement; it replaces unresolved capture names with concrete evidence that the current closure is `FnOnce() -> ()` where the runtime expects a value, while the survey output still fails. Rust framework harness failed with 24 generated-test compilation errors before probe relocation and 21 after; the three removed errors were from those new probes. Remaining failures include fixture/type-shape mismatches whose baseline status was not tested, so the Rust framework lane remains red. CRuby syntax checks and `git diff --check` passed. | Shared runtime placement locally implemented; capture ABI is now more directly localized; D0 behavior remains unproven |
+
+| Date | Roundhouse SHA | Campfire SHA | Toolchain / locks | Commands and executed scope | Result / artifact links | Checklist updated |
+|---|---|---|---|---|---|---|
+| 2026-10-09 (review-observation verification; local worktree based on `aecb0b82`) | Base `aecb0b8216a823748eb752e72aa674f90be81515` plus one request-shadowing regression test and plan update | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; existing repo lock | `cargo test --locked --lib bare_request_intrinsic_respects_instance_method_shadowing`; `cargo test --locked --lib regex_case_uses_option_branches_only_in_an_option_return_tail`; `cargo test --locked --lib turbo_stream_collection_as_local_seeds_the_actual_partial_contract`; `cargo test --locked --test turbo_stream_views`; `git diff --check` | Request-shadow regression passed 1/1 for both intrinsic and shadowed paths; regex Option-tail test passed 1/1; bare Turbo Stream analyzer regression passed 1/1; `turbo_stream_views` passed 15/15. The initial request test exposed an incorrect expected rendering (`request()` instead of `self.request()`); corrected expectation passed. Direct `rustfmt --check` is not clean: it reports unrelated existing formatting drift through the module tree; no formatter was run to avoid broad changes. These results verify existing review fixes on this local base, not exact-head CI or D0. | Three later CodeRabbit observations verified; request shadowing now has direct regression coverage |
+
+### Latest review observations
+
+The three CodeRabbit observations checked against the `aecb0b82` worktree
+are verified by the tests named in the current snapshot and by the newly
+added `bare_request_intrinsic_respects_instance_method_shadowing` regression.
+The first request-shadow test run caught a wrong test expectation
+(`request()` instead of the actual `self.request()`); the corrected test
+passes. Direct `rustfmt --check` remains unavailable as a clean gate because
+it reports pre-existing formatting drift in adjacent Rust emitter modules;
+no formatter was run, and `git diff --check` passes. These are local checks,
+not exact-head CI or Campfire D0 evidence.
 
 ### Reproduction command template
 

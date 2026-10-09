@@ -1012,6 +1012,24 @@ mod helper_dispatch_tests {
     use crate::ty::{Param, ParamKind, Ty};
 
     #[test]
+    fn bare_request_intrinsic_respects_instance_method_shadowing() {
+        let ctx = EmitCtx::default();
+        crate::emit::rust::expr::with_emit_ctx(ctx, || {
+            assert_eq!(
+                emit_send(None, "request", &[], None),
+                "crate::http::current_request_context()",
+            );
+
+            crate::emit::rust::expr::with_instance_methods(
+                std::collections::HashSet::from(["request".to_string()]),
+                || {
+                    assert_eq!(emit_send(None, "request", &[], None), "self.request()");
+                },
+            );
+        });
+    }
+
+    #[test]
     fn a_unique_app_helper_bare_call_uses_its_emitted_owner() {
         let mut ctx = EmitCtx::default();
         ctx.global_helper_methods.insert(
