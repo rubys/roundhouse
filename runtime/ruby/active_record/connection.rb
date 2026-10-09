@@ -681,6 +681,13 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).paginate(num, page: page, per_page: per_page)
     end
 
+    # Class-side `Model.in_batches`, and a bare `in_batches` in a class method: `Relation#in_batches` off a fresh Relation.
+    def self.in_batches(of: 1000, order: nil)
+      relation = ActiveRecord::Relation.new(self)
+      yield relation if block_given?
+      relation
+    end
+
     # Rails-shape `first` fallback, same story as `where`/`all` above:
     # spec/dynamic call sites reach the class method directly
     # (`Category.first` in lobsters' specs); lowered call sites don't
