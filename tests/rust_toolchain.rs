@@ -47,6 +47,101 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     }
 }
 
+fn generate_project_from_tree(tree: std::collections::HashMap<PathBuf, Vec<u8>>, out: &Path) {
+    if out.exists() {
+        std::fs::remove_dir_all(out).expect("clean scratch");
+    }
+    std::fs::create_dir_all(out).expect("create scratch");
+
+    let mut app = ingest_app_from_tree(tree).expect("ingest synthetic app");
+    Analyzer::new(&app).analyze(&mut app);
+    let files = rust::emit(&app);
+
+    for file in &files {
+        let path = out.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(&path, &file.content).expect("write emitted file");
+    }
+}
+
+/// Execute an optional, zero-argument String block through two forwarding
+/// methods in the generated Rust crate. This exercises the public ingest,
+/// analyze, emit, and Cargo interfaces rather than an isolated Rust prototype.
+#[test]
+#[ignore]
+fn forwarded_optional_string_block_runs_through_two_edges() {
+    let tree = [(
+        PathBuf::from("app/lib/block_forwarding_probe.rb"),
+        b"class BlockForwardingProbe\n  def block_source(&block)\n    block.nil? ? \"\" : capture(&block)\n  end\n\n  def block_middle(&block)\n    block_source(&block)\n  end\n\n  def block_outer(&block)\n    block_middle(&block)\n  end\nend\n".to_vec(),
+    )]
+    .into_iter()
+    .collect();
+    let scratch = scratch_dir("optional-string-forwarded-block");
+    generate_project_from_tree(tree, &scratch);
+
+    let generated_test = r#"
+use app::app_classes::BlockForwardingProbe;
+
+struct NotClone(String);
+
+#[test]
+fn optional_string_block_forwards_and_runs_once() {
+    let probe = BlockForwardingProbe::default();
+    assert_eq!(probe.block_outer(None), "");
+
+    let borrowed = String::from("borrowed");
+    let calls = std::cell::Cell::new(0);
+    let result = probe.block_outer(Some(Box::new(|| {
+        calls.set(calls.get() + 1);
+        borrowed.clone()
+    })));
+    assert_eq!(result, "borrowed");
+    assert_eq!(calls.get(), 1);
+    assert_eq!(borrowed, "borrowed");
+
+    let moved = NotClone(String::from("moved"));
+    let result = probe.block_outer(Some(Box::new(move || moved.0)));
+    assert_eq!(result, "moved");
+}
+"#;
+    std::fs::create_dir_all(scratch.join("tests")).expect("mkdir tests/");
+    std::fs::write(
+        scratch.join("tests/forwarded_optional_block.rs"),
+        generated_test,
+    )
+    .expect("write generated integration test");
+
+    let output = Command::new("cargo")
+        .args([
+            "test",
+            "--test",
+            "forwarded_optional_block",
+            "--",
+            "--exact",
+            "optional_string_block_forwards_and_runs_once",
+        ])
+        .current_dir(&scratch)
+        .output()
+        .expect("run focused test on emitted Rust project");
+
+    assert!(
+        output.status.success(),
+        "focused test failed on emitted project at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("test optional_string_block_forwards_and_runs_once ... ok"),
+        "the emitted-Rust regression did not run:\n{stdout}"
+    );
+}
+
 // `tiny_blog_cargo_check_passes` retired in Phase 7.3 (2026-05-20).
 // The legacy rust emit path it exercised is gone; rust doesn't
 // yet cover tiny-blog's specific shape (Importmap LC absent,

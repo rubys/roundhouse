@@ -184,6 +184,24 @@ transition, not a compile improvement: the optional forwarded-block ABI is
 still missing, and no Campfire behavior claim follows from resolving a name.
 See the latest evidence-ledger row for exact counts and commands.
 
+**D0 regression scaffold (local, not yet a passing feature):**
+`tests/rust_toolchain.rs::forwarded_optional_string_block_runs_through_two_edges`
+now generates a synthetic Ruby class with a nil-guarded terminal `capture`,
+two `&block` forwarding edges, and a generated-crate executable check for
+absence, exactly-once execution, borrowed state, and a moved non-`Clone`
+capture. It currently fails during compilation, as intended for this
+pre-fix reproduction: the emitted helper accepts `Box<dyn FnOnce()>` and
+returns `serde_json::Value`, while shared `ViewHelpers::capture` expects a
+callable returning `serde_json::Value`; the forwarded block currently has
+unit return. This is not a passing regression test and does not establish
+support. A focused Oracle review (2026-10-09) recommends adapting only a
+proven D0 String-returning callable at the terminal capture boundary as
+`FnOnce() -> String` → `FnOnce() -> serde_json::Value::String`, leaving the
+general shared RBS/runtime contract unchanged. The lowered nil guard must
+preserve `None` as empty content; direct unguarded capture must not gain an
+invented empty-block fallback. The next D0 patch must make this fixture pass
+before auditing the 14 Campfire callsites.
+
 Start mapping the 181 strict-generation refusals alongside rustc triage, rather
 than waiting for whole-project convergence. In every fresh build, inventory
 reachable `todo!`, silent/default/no-op methods, 501 routes, and omitted
