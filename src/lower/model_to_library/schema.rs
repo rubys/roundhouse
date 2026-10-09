@@ -1078,18 +1078,12 @@ pub(crate) fn temporal_seam(col: &Column) -> (Ty, &'static str, &'static str) {
 /// Backends without the selected native seam must report unsupported.
 fn temporal_reader_body(col: &Column) -> Expr {
     let stored_ty = super::ty_of_column_slot(col);
+    // The storage ivar itself, typed as its slot: a reader call would
+    // render as `this.x_raw()` on targets where the accessor is a
+    // property getter.
     let raw_value = || {
         with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Send {
-                    recv: Some(self_ref()),
-                    method: col_storage_name(col),
-                    args: Vec::new(),
-                    block: None,
-                    parenthesized: true,
-                },
-            ),
+            Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }),
             stored_ty.clone(),
         )
     };

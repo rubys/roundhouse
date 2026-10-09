@@ -156,7 +156,7 @@ fn date_target_boundary_rejects_before_reading_or_emitting_files() {
             .iter()
             .find(|(p, _)| p == "app/models/calendar_entry.rb")
             .unwrap();
-        assert!(model.1.contains("ActiveSupport.parse_db_date(self.due_on_raw)"));
+        assert!(model.1.contains("ActiveSupport.parse_db_date(@due_on_raw)"));
         assert!(model.1.contains("ActiveSupport.format_db_date"));
         assert!(!model.1.contains("present_db(@__t_due_on"));
         assert!(model.1.contains("schema_date_columns"));
@@ -217,7 +217,7 @@ fn spinel_emits_date_runtime_and_keeps_date_as_a_date() {
         .iter()
         .find(|(path, _)| path == "app/models/calendar_entry.rb")
         .unwrap();
-    assert!(model.1.contains("ActiveSupport.parse_db_date(self.due_on_raw)"));
+    assert!(model.1.contains("ActiveSupport.parse_db_date(@due_on_raw)"));
     assert!(model.1.contains("ActiveSupport.format_db_date"));
     assert!(!diagnostics.iter().any(|d| matches!(
         &d.kind,
