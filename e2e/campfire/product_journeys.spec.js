@@ -24,6 +24,8 @@ test('an administrator creates, renames, and deletes an open room', async ({ pag
   await page.getByRole('button', { name: 'Save' }).click()
   await expect(page.locator('.room--current')).toContainText(renamedRoom)
 
+  // Saving redirects to the room; the delete button lives on its settings page.
+  await page.getByRole('link', { name: 'Settings for this room' }).click()
   page.once('dialog', dialog => dialog.accept())
   await page.getByRole('button', { name: `Delete ${renamedRoom}` }).click()
   await expect(page).toHaveURL(/\/rooms\/1$/)
