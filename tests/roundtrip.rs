@@ -136,6 +136,7 @@ fn tiny_blog_round_trips() {
         // the roundtrip fixture has nothing to say about it.
         binary_assets: Vec::new(),
         inferred_method_params: Default::default(),
+        inferred_method_returns: Default::default(),
         models: vec![post_model],
         library_classes: vec![],
         current_attribute_classes: vec![],
