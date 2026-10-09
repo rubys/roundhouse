@@ -19,8 +19,15 @@ if [[ ! -f "$APP/config/application.rb" ]]; then
 fi
 
 SOURCE_SHA="${CAMPFIRE_SHA:-}"
-if [[ -z "$SOURCE_SHA" && -e "$APP/.git" ]]; then
-    SOURCE_SHA="$(git -C "$APP" rev-parse HEAD)"
+if [[ -e "$APP/.git" ]]; then
+    # A checkout is authoritative: an explicit CAMPFIRE_SHA must match it,
+    # or the inventory would record the pin for some other revision.
+    HEAD_SHA="$(git -C "$APP" rev-parse HEAD)"
+    if [[ -n "$SOURCE_SHA" && "$SOURCE_SHA" != "$HEAD_SHA" ]]; then
+        echo "campfire-route-inventory: CAMPFIRE_SHA $SOURCE_SHA does not match $APP HEAD $HEAD_SHA" >&2
+        exit 2
+    fi
+    SOURCE_SHA="$HEAD_SHA"
 fi
 if [[ -z "$SOURCE_SHA" ]]; then
     echo "campfire-route-inventory: set CAMPFIRE_SHA for a source archive without .git" >&2
@@ -34,6 +41,10 @@ fi
 export CAMPFIRE_SOURCE_SHA="$SOURCE_SHA"
 export SECRET_KEY_BASE="campfire-route-inventory-not-a-deployment-secret"
 export RAILS_ENV=production
+# Campfire's production logger writes to STDOUT, which is where the JSON
+# goes; boot-time warnings (a route naming a missing controller) would
+# land in front of it.
+export RAILS_LOG_LEVEL=error
 
 if [[ "$OUTPUT" == - ]]; then
     (cd "$APP" && bundle exec rails runner "$REPO_ROOT/scripts/campfire-route-inventory.rb")

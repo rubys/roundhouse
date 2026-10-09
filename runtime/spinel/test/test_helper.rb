@@ -1073,12 +1073,34 @@ class TestBase
     end
   end
 
+  # Rails' `travel(duration) { … }` travels for the block and back.
+  # Taking no block here dropped it unrun — a test whose body sat in the
+  # block passed without executing a line of it.
   def travel(duration)
     travel_to(Time.now + duration.to_i)
+    return unless block_given?
+    begin
+      yield
+    ensure
+      travel_back
+    end
   end
 
   def travel_back
     ActiveSupport.travel(0)
+  end
+
+  # Rails' `freeze_time`: `travel_to(Time.now)`, held still — every
+  # read until `travel_back` (the block's end, or the next test's
+  # setup) answers the same whole second.
+  def freeze_time
+    ActiveSupport.freeze(ActiveSupport.now.to_i)
+    return unless block_given?
+    begin
+      yield
+    ensure
+      travel_back
+    end
   end
 
   # `assert_match` left as a method — nilable value handling differs

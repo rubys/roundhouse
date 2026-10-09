@@ -131,15 +131,36 @@ module ActiveSupport
     TRAVEL_OFFSET[0]
   end
 
+  # `freeze_time`'s instant, whole seconds since the epoch; 0 = the
+  # clock runs. Rails' `freeze_time` stubs `Time.now` to one value, so
+  # two reads inside the block are EQUAL — an offset alone keeps
+  # ticking between them.
+  FROZEN_AT = [0]
+
   # Whole seconds relative to the real clock. `travel(0)` is Rails'
-  # `travel_back`, which the harness runs after every test.
+  # `travel_back`, which the harness runs after every test; it thaws a
+  # frozen clock too.
   def self.travel(seconds)
     TRAVEL_OFFSET.clear
     TRAVEL_OFFSET << seconds
+    FROZEN_AT.clear
+    FROZEN_AT << 0
+  end
+
+  # Stop the clock at `seconds` (the harness's `freeze_time`).
+  def self.freeze(seconds)
+    FROZEN_AT.clear
+    FROZEN_AT << seconds
+  end
+
+  def self.clock
+    frozen = FROZEN_AT[0]
+    return Time.at(frozen) if frozen != 0
+    Time.now + TRAVEL_OFFSET[0]
   end
 
   def self.now
-    ActiveSupport.present(Time.now + TRAVEL_OFFSET[0])
+    ActiveSupport.present(clock)
   end
 
   # Write-side sibling of `parse_db_time`: current UTC time in Rails'
@@ -191,7 +212,7 @@ module ActiveSupport
   end
 
   def self.parse_time(str)
-    Time.parse(str, Time.now + TRAVEL_OFFSET[0])
+    Time.parse(str, clock)
   end
 
   # Not `Time.parse`: ActiveSupport's `TimeZone#parse` answers nil for no date and lands an offset in the app's zone.

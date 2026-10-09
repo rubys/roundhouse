@@ -695,6 +695,17 @@ fn parse_forgery_macro(
                 }
                 // `skip_forgery_protection`'s own default; nothing to model.
                 "raise" if !protect => {}
+                // The verification strategy is lifted app-wide at ingest
+                // (`read_forgery_verification_strategy` in ingest/app.rs);
+                // the filter itself is the same either way.
+                "using" if protect => {
+                    if !matches!(
+                        symbol_value(&value).as_deref(),
+                        Some("header_only" | "header_or_legacy_token")
+                    ) {
+                        return None;
+                    }
+                }
                 _ => return None,
             }
         }

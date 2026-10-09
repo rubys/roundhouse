@@ -227,7 +227,7 @@ module Main
 
     begin
       controller.process_action(matched.action)
-    rescue ActiveRecord::RecordNotFound, ActionController::RoutingError
+    rescue ActiveRecord::RecordNotFound, ActionController::RoutingError, AbstractController::ActionNotFound
       return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     rescue ActionController::ParameterMissing
       # `params.expect` / `params.require` refused the request and the app

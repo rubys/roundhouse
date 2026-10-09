@@ -1,9 +1,20 @@
 module ActiveRecord
   class RecordNotFound < StandardError
-    # Bare-construct default. Ruby's StandardError sets the message to
-    # the class name implicitly; JS Error doesn't, so spell the
-    # contract out so transpiled targets get the same default.
-    def initialize(message = "ActiveRecord::RecordNotFound")
+    # Rails' readers (activerecord 8.1.4): the model's class name, its
+    # primary key and the id that was looked up, as passed. `find` sets
+    # all three; `find_by!` / `first!` / `sole` set the model and key and
+    # leave `id` nil. Apps read them in a `rescue_from` handler to build
+    # the 404 body.
+    attr_reader :model, :primary_key, :id
+
+    # Rails' positional signature. The message default differs on
+    # purpose: Ruby's StandardError sets the message to the class name
+    # implicitly; JS Error doesn't, so spell the contract out so
+    # transpiled targets get the same default.
+    def initialize(message = "ActiveRecord::RecordNotFound", model = nil, primary_key = nil, id = nil)
+      @model = model
+      @primary_key = primary_key
+      @id = id
       super(message)
     end
   end

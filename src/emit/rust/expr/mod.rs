@@ -397,6 +397,26 @@ pub(super) fn emit_send_recv(r: &Expr) -> String {
     wrap_if_needs_parens(r, s)
 }
 
+/// Receiver for a call to `method`. A mutating method (`&mut self`) on an
+/// Option-held ivar or local mutates the held value in place through
+/// `.as_mut().unwrap()`; `emit_send_recv`'s `.clone().unwrap()` would run
+/// it on a temporary copy and drop the write.
+pub(super) fn emit_send_recv_for(r: &Expr, method: &str) -> String {
+    let is_place = matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. });
+    if is_place
+        && is_global_mutating_method(method)
+        && !is_nil_guard_receiver(r)
+        && recv_is_rust_option(r)
+    {
+        let ctx = current_emit_ctx().expect("emit_send_recv_for called outside with_emit_ctx");
+        let prev = ctx.suppress_var_clone.replace(true);
+        let place = emit_expr(r);
+        ctx.suppress_var_clone.set(prev);
+        return format!("{place}.as_mut().unwrap()");
+    }
+    emit_send_recv(r)
+}
+
 pub(super) fn with_nil_guard_receiver<F, R>(receiver: ExprNode, f: F) -> R
 where
     F: FnOnce() -> R,

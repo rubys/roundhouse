@@ -861,6 +861,17 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 }
             }
         }
+        // The forgery check's verification strategy (Rails main's
+        // Fetch Metadata rule; see `read_forgery_verification_strategy`).
+        // Only a non-default answer is synthesized; the runtime default
+        // in runtime/ruby/rails.rb is Rails' class default.
+        if let Some(strategy) = read_forgery_verification_strategy(vfs, dir) {
+            if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                "def forgery_protection_verification_strategy\n  {strategy:?}\nend\n"
+            )) {
+                methods.append(&mut synth);
+            }
+        }
         // `GlobalID.app` — the first segment of every `gid://<app>/
         // <Model>/<id>` this runtime mints, and half of every turbo
         // stream name that names a record. Rails takes it from the
@@ -7497,6 +7508,102 @@ fn extract_default_per_page(source: &[u8], file: &str) -> Option<u64> {
         }
     }
     found
+}
+
+/// `forgery_protection_verification_strategy`, app-wide, in Rails'
+/// precedence: `config.load_defaults` 8.2+ sets `:header_only`; an
+/// explicit `config.action_controller.forgery_protection_verification_
+/// strategy = :x` wins over that; and `protect_from_forgery using: :x`
+/// in a controller or concern sets it for the controllers that run it.
+///
+/// Rails keeps the last as a per-controller class attribute. This
+/// runtime has one forgery check, so the lift is app-wide: it is
+/// exact for the shape apps write (ApplicationController, or a concern
+/// it includes — campfire's `Authentication`), and two controllers
+/// asking for different strategies leave the default in place rather
+/// than pick one. Framework controllers configured from an initializer
+/// (`ActiveStorage::BaseController.forgery_…= :x`) are not the app's
+/// controllers and are not read.
+///
+/// `None` = Rails' class default (`header_or_legacy_token`).
+fn read_forgery_verification_strategy<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
+    fn strategy_value(text: &str) -> Option<String> {
+        let v = text.trim().trim_start_matches(':');
+        let name: String =
+            v.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        matches!(name.as_str(), "header_only" | "header_or_legacy_token").then_some(name)
+    }
+    let code_lines = |bytes: &[u8]| -> Vec<String> {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.starts_with('#'))
+            .collect()
+    };
+    let mut strategy: Option<String> = None;
+    let mut config_files: Vec<Vec<String>> = Vec::new();
+    if let Ok(source) = vfs.read(&dir.join("config/application.rb")) {
+        let lines = code_lines(&source);
+        for line in &lines {
+            if let Some(rest) = line.strip_prefix("config.load_defaults") {
+                let version: String = rest
+                    .trim()
+                    .trim_start_matches('(')
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                if let Ok(v) = version.parse::<f64>() {
+                    strategy = (v >= 8.2).then(|| "header_only".to_string());
+                }
+            }
+        }
+        config_files.push(lines);
+    }
+    for sub in ["config/environments/production.rb", "config/initializers"] {
+        let path = dir.join(sub);
+        let paths = if vfs.is_dir(&path) {
+            read_rb_files(vfs, &path).unwrap_or_default()
+        } else {
+            vec![path]
+        };
+        for p in paths {
+            if let Ok(source) = vfs.read(&p) {
+                config_files.push(code_lines(&source));
+            }
+        }
+    }
+    for line in config_files.iter().flatten() {
+        if let Some(rest) =
+            line.strip_prefix("config.action_controller.forgery_protection_verification_strategy")
+        {
+            if let Some(v) = rest.trim().strip_prefix('=').and_then(strategy_value) {
+                strategy = Some(v);
+            }
+        }
+    }
+    let controllers = dir.join("app/controllers");
+    if vfs.is_dir(&controllers) {
+        let mut asked: Option<String> = None;
+        for p in read_rb_files(vfs, &controllers).unwrap_or_default() {
+            let Ok(source) = vfs.read(&p) else { continue };
+            for line in code_lines(&source) {
+                if !line.starts_with("protect_from_forgery") {
+                    continue;
+                }
+                let Some(at) = line.find("using:") else { continue };
+                let Some(v) = strategy_value(&line[at + "using:".len()..]) else { continue };
+                match &asked {
+                    Some(prev) if *prev != v => return strategy.filter(|s| s != "header_or_legacy_token"),
+                    _ => asked = Some(v),
+                }
+            }
+        }
+        if asked.is_some() {
+            strategy = asked;
+        }
+    }
+    strategy.filter(|s| s != "header_or_legacy_token")
 }
 
 /// Whether Rails wraps a JSON body for every controller by default

@@ -35,7 +35,8 @@ supported minimum, with its runtime gates repeated on `MRI_RUBY_NEXT` in
 conformance/comparison. Campfire conformance is pinned (`CAMPFIRE_SHA`)
 and blocking; `campfire-latest` runs the same suite against
 basecamp/once-campfire `main` on that app's own Ruby after every merge to
-`main` and on Full (never in a pull request's plan), advisory. It always
+`main`, on Full, and for unknown changed inputs on non-PR runs (never in
+a pull request's plan), advisory. It always
 surveys the strict emit and reports ingest gaps and strict-emit errors; it
 runs the suite, and reports tests against the pinned floor, only when the
 survey finds no ingest gap. Four unit shards cover all package test targets in

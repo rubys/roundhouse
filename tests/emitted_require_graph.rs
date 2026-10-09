@@ -260,7 +260,7 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
   def show
     begin
       head :ok
-    rescue ActionController::UnpermittedParameters, ActionView::MissingTemplate
+    rescue ActionController::UnpermittedParameters, ActionView::MissingTemplate, AbstractController::ActionNotFound
       head :not_found
     end
   end
@@ -303,8 +303,9 @@ end
     }
 }
 
-/// Both Spinel dispatchers rescue `ActionController::RoutingError`
-/// beside `ActiveRecord::RecordNotFound` and answer 404. The CRuby
+/// Both Spinel dispatchers rescue `ActionController::RoutingError` and
+/// `AbstractController::ActionNotFound` beside
+/// `ActiveRecord::RecordNotFound` and answer 404. The CRuby
 /// overlay path is covered by
 /// `emit_and_run::an_action_that_raises_routing_error_answers_404`; this
 /// pins the native Spinel scaffold the same way without needing a
@@ -317,8 +318,10 @@ fn spinel_dispatchers_rescue_routing_error_as_404() {
     ] {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         assert!(
-            src.contains("rescue ActiveRecord::RecordNotFound, ActionController::RoutingError"),
-            "{path} must rescue RoutingError beside RecordNotFound:\n{src}"
+            src.contains(
+                "rescue ActiveRecord::RecordNotFound, ActionController::RoutingError, AbstractController::ActionNotFound\n"
+            ),
+            "{path} must rescue RoutingError and ActionNotFound beside RecordNotFound:\n{src}"
         );
     }
 }

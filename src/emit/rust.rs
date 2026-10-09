@@ -20,6 +20,7 @@ mod method;
 mod runtime_method;
 mod shared;
 mod spec;
+mod support;
 pub(crate) mod ty;
 
 pub use runtime_method::emit_method;
@@ -380,6 +381,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         .flat_map(|unit| unit.classes)
         .collect();
     let app_uses_user_agent = app_references_const(app, "UserAgent");
+    let app_uses_browser_blocker = app_any_expr(app, &|expr| {
+        matches!(&*expr.node, crate::expr::ExprNode::Const { path }
+            if path.last().is_some_and(|segment| segment.as_str() == "BrowserBlocker"))
+    });
     // `with_lock(*args)` needs an untyped rest param and a block routed
     // through `transaction`, neither of which Rust emit expresses yet.
     // Same gate as UserAgent: an app that calls it gets the (failing)
@@ -393,6 +398,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             // it only to an app that names `UserAgent` (Campfire), so an
             // app that never parses one is not broken by it.
             if path == "src/user_agent.rs" && !app_uses_user_agent {
+                return Vec::new();
+            }
+            // `allow_browser` lowers to `BrowserBlocker.blocked?`, which
+            // is built on UserAgent: same gate, same reason.
+            if path == "src/browser_blocker.rs" && !(app_uses_browser_blocker && app_uses_user_agent) {
                 return Vec::new();
             }
             if !app_uses_with_lock {
@@ -450,6 +460,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         .flat_map(|u| u.classes.iter().cloned())
         .collect();
     for unit in runtime_units {
+        if unit.out_path.ends_with("browser_blocker.rs")
+            && !(app_uses_browser_blocker && app_uses_user_agent)
+        {
+            continue;
+        }
         let mut content = unit.content;
         // The `io << "...#{x}..."` append lowers to `write!(io, ...)`
         // (see ops.rs::try_string_append), whose trait method needs
@@ -670,6 +685,16 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         controller_extras.extend(crate::lower::library_extras::extras_from_funcs(
             &route_helper_funcs,
         ));
+        // The app's own library classes (`Current`, `app/lib`, helpers)
+        // with the analyzer's stamped signatures: a controller reading
+        // `Current.user` resolves it to `User | nil` instead of an
+        // unresolved call whose result lands in a `serde_json::Value`
+        // field. A lowered model of the same name keeps its entry.
+        controller_extras.extend(
+            crate::lower::library_extras::extras_from_lcs(&app.library_classes)
+                .into_iter()
+                .filter(|(id, _)| !model_registry.contains_key(id)),
+        );
         let assocs = crate::lower::model_associations::compute_association_graph(app);
         let mut lcs =
             crate::lower::controller_to_library::lower_controllers_with_arel_views_assocs_and_routes(
@@ -682,6 +707,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     view_visible_controller_methods: Some(
                         &app.view_visible_controller_methods,
                     ),
+                    inferred_params: Some(&app.inferred_method_params),
+                    inferred_returns: Some(&app.inferred_method_returns),
                     ..Default::default()
                 },
             );
@@ -1702,6 +1729,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // src/lib.rs — declares the modules emitted above (hand-written +
     // transpiled). emit_lib_rs scans the emitted file list for stems
     // under `src/`, so adding a new file is enough — no list to update.
+    support::apply(&mut files);
     files.push(emit_lib_rs(&files));
 
     // Dedupe by path — last write wins. Two emit sites can produce

@@ -32,8 +32,12 @@ class CampfireRouteInventoryTests(unittest.TestCase):
     def test_inventory_preserves_all_resolved_routes_and_scopes(self):
         routes = self.inventory["routes"]
         self.assertEqual(len(routes), 178)
+        derived = {}
+        for route in routes:
+            derived[route["scope"]] = derived.get(route["scope"], 0) + 1
+        self.assertEqual(self.inventory["counts"], derived)
         self.assertEqual(
-            self.inventory["counts"],
+            derived,
             {
                 "action_cable": 1,
                 "action_mailbox": 6,

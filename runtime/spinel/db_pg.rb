@@ -875,6 +875,10 @@ module Db
     nil
   end
 
+  def self.query_cache_enabled?
+    false
+  end
+
   # A page-level copy of a SQLite file has no PostgreSQL meaning. Seed
   # with pg_restore or psql before boot instead.
   def self.seed_from_file(src_path)

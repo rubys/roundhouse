@@ -119,6 +119,18 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
             format!("{}.{name} = {rhs}", emit_expr(recv))
         }
         LValue::Index { recv, index } => {
+            // `response.headers[k] = v`: the response lives in the
+            // `RESPONSE` thread-local, so the write is an explicit
+            // setter on its handle (a bare `response` is the handle —
+            // see `emit_send`). A string literal and an owned String
+            // are both valid values, which `IndexMut` cannot accept.
+            if is_response_headers(recv) {
+                return format!(
+                    "crate::http::ResponseHandle.set_header(&({}), ({}).to_string())",
+                    emit_expr(index),
+                    rhs,
+                );
+            }
             // `recv[k] = v` on a Flash / Session struct dispatches to
             // the hand-written `.set(key, value)` method (no IndexMut
             // impl; the runtime/rust/flash.rs etc. surface explicit
@@ -391,4 +403,24 @@ fn field_let_annotation(ivar_name: &str) -> String {
         Some(ty) => format!(": {}", super::super::ty::rust_ty(&ty)),
         None => String::new(),
     }
+}
+
+/// `response.headers` — a receiverless `response` send with `.headers`
+/// on it, the spelling Rails controllers write headers through.
+pub(super) fn is_response_headers(recv: &Expr) -> bool {
+    // A parameter or instance method named `response` shadows the
+    // implicit handle, as it does for an ordinary bare send.
+    if super::param_ty("response").is_some() || super::is_instance_method("response") {
+        return false;
+    }
+    let ExprNode::Send { recv: Some(inner), method, args, .. } = &*recv.node else {
+        return false;
+    };
+    method.as_str() == "headers"
+        && args.is_empty()
+        && matches!(
+            &*inner.node,
+            ExprNode::Send { recv: None, method, args, .. }
+                if method.as_str() == "response" && args.is_empty()
+        )
 }

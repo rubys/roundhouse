@@ -154,6 +154,14 @@ pub fn apply_kwsplat_expansion(app: &mut App) -> Vec<Diagnostic> {
 /// can fire; a callee that IS `**rest` then needs the marker back.
 pub(crate) fn restore_kwrest_in_test_helpers(app: &mut App) {
     let sigs = collect_signatures(app);
+    // Receiver sends too (`subscription.notification(**payload, badge:)`
+    // in campfire's WebPush::Pool): the projection strips their `**`
+    // exactly as it strips a self-send's.
+    fn restore(e: &mut Expr, sigs: &Signatures) {
+        e.node.for_each_child_mut(&mut |c| restore(c, sigs));
+        restore_kwrest_on_typed_send(e, sigs);
+    }
+    super::for_each_hook_body(app, &mut |body| restore(body, &sigs));
     apply_to_self_sends(app, &sigs, &mut Vec::new());
     apply_to_test_modules(app, &mut Vec::new());
 }
@@ -389,7 +397,19 @@ fn restore_kwrest_on_typed_send(expr: &mut Expr, sigs: &Signatures) {
     let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node else {
         return;
     };
-    let Some(params) = recv.ty.as_ref().and_then(|ty| callee_params(ty, method, sigs)) else {
+    let params = match recv.ty.as_ref() {
+        Some(ty @ Ty::Class { .. }) => callee_params(ty, method, sigs),
+        // A receiver with no class type (a block parameter over an
+        // untyped collection — campfire's `batch.each { |subscription| … }`):
+        // the app's ONE instance method of this name, when there is
+        // exactly one and it takes `**rest`. Re-splatting is the
+        // conservative half of this pass — it restores the source's own
+        // `**`, where expansion would restate the hash — and a hash
+        // passed positionally to such a method is the arity error Ruby 3
+        // raises, which the working app cannot contain.
+        _ => unique_instance_params(method, sigs),
+    };
+    let Some(params) = params else {
         return;
     };
     let params = params.clone();
@@ -435,10 +455,14 @@ fn restore_kwrest_splat(args: &mut Vec<Expr>, params: &[Param]) {
     if args.len() != positional + 1 {
         return;
     }
-    let Some(hash) = args.last() else { return };
-    if !is_pure_read(hash) {
+    // A literal keyword list already renders as keywords.
+    if args.last().is_some_and(|a| matches!(&*a.node, ExprNode::Hash { kwargs: true, .. })) {
         return;
     }
+    // Any other expression: `**expr` evaluates it once, exactly as the
+    // merge chain ingest desugared it into did (`**payload, badge: b` →
+    // `payload.merge({ badge: b })`). Only EXPANSION restates the hash
+    // per keyword and needs a pure read.
     let hash = args.pop().expect("checked above");
     args.push(Expr::new(
         hash.span,
@@ -627,6 +651,14 @@ fn is_literal(expr: &Expr) -> bool {
         ExprNode::Array { elements, .. } => elements.is_empty(),
         _ => false,
     }
+}
+
+/// The parameters of the only app class defining instance method
+/// `method`, or `None` when none or several do.
+fn unique_instance_params<'s>(method: &Symbol, sigs: &'s Signatures) -> Option<&'s Vec<Param>> {
+    let mut found = sigs.methods.iter().filter(|((_, name), _)| name == method);
+    let (_, params) = found.next()?;
+    found.next().is_none().then_some(params)
 }
 
 /// The callee's parameter list, walking the inheritance chain the way

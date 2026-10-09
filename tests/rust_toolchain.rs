@@ -522,6 +522,59 @@ fn filters_that_read_action_name_compile() {
     );
 }
 
+/// A filter sets a response header the way Campfire's `VersionHeaders`
+/// does. The bare `response` send must reach the response state, not a
+/// free function that does not exist.
+#[test]
+#[ignore]
+fn response_headers_set_in_a_filter_compile() {
+    let app_dir = scratch_dir("response-headers-app");
+    if app_dir.exists() {
+        std::fs::remove_dir_all(&app_dir).expect("clean app copy");
+    }
+    let copied = Command::new("cp")
+        .arg("-R")
+        .arg(roundhouse::fixtures::real_blog())
+        .arg(&app_dir)
+        .status()
+        .expect("copy real-blog");
+    assert!(copied.success(), "copy real-blog");
+    let controller = app_dir.join("app/controllers/articles_controller.rb");
+    let source = std::fs::read_to_string(&controller).expect("read controller");
+    let edited = source.replacen(
+        "  before_action :set_article,",
+        "  before_action { response.headers[\"X-Probe\"] = \"1\" }\n  \
+           before_action { @probe = response.headers[\"X-Probe\"] }\n  \
+           before_action :set_article,",
+        1,
+    );
+    assert_ne!(source, edited, "the filter edit applies");
+    std::fs::write(&controller, edited).expect("write controller");
+
+    let scratch = scratch_dir("response-headers");
+    generate_project(&app_dir, &scratch);
+    let emitted = std::fs::read_to_string(scratch.join("src/controllers/articles_controller.rs"))
+        .expect("read emitted controller");
+    assert!(
+        emitted.contains("crate::http::ResponseHandle.set_header(&(\"X-Probe\")"),
+        "the header write goes through the response handle:\n{emitted}"
+    );
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&scratch)
+        .output()
+        .expect("run cargo check");
+
+    assert!(
+        output.status.success(),
+        "cargo check failed on the emitted project at {}:\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 /// `Model.find_by(col: v)` and `Model.where(col: v)` on a model class.
 /// Rust models carry no inherited finders, so the shim must provide them,
 /// and a controller that keeps the result has to type-check against them.

@@ -56,6 +56,11 @@ module ActiveSupport
 
     def to_i = @seconds.to_i
     def to_f = @seconds.to_f
+    # Numeric predicates (Rails delegates them to the value; net/http
+    # asks `zero?` of a timeout).
+    def zero? = @seconds.zero?
+    def positive? = @seconds.positive?
+    def negative? = @seconds.negative?
     # Rails parity: Duration#to_s is the seconds value's to_s
     # (`30.minutes.to_s == "1800"`) — also what interpolation calls
     # (lobsters embeds durations in cache keys).

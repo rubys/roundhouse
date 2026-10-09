@@ -490,6 +490,14 @@ module ActiveStorage
       @height
     end
 
+    # `Hash#values_at`, the other read the corpus spells
+    # (`width, height = attachment.metadata.values_at(:width, :height)`).
+    def values_at(*keys)
+      out = []
+      keys.each { |key| out << self[key] }
+      out
+    end
+
     # The JSON Rails writes, so a database this tree and a Rails process
     # share reads the same numbers either way.
     def to_json

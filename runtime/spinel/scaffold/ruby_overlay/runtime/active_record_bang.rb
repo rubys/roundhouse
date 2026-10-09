@@ -10,7 +10,7 @@ module ActiveRecord
   class Base
     def self.find_by!(conditions)
       result = find_by(conditions)
-      raise RecordNotFound, "Couldn't find #{name}" if result.nil?
+      raise RecordNotFound.new("Couldn't find #{name}", name, primary_key) if result.nil?
       result
     end
 

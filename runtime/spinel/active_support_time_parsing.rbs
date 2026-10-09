@@ -8,6 +8,8 @@ module ActiveSupport
   # The test clock — see the TEST CLOCK block in the .rb.
   def self.now: () -> Time
   def self.travel: (Integer seconds) -> void
+  def self.freeze: (Integer seconds) -> void
+  def self.clock: () -> Time
   def self.travel_offset: () -> Integer
   def self.format_db_time: (untyped value) -> String?
   # The RSS feed's `<pubDate>`. Absent from this file until 2026-08-01,

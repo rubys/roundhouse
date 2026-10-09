@@ -149,6 +149,9 @@ pub struct ControllerResponse {
     /// Set when `redirect_to` fires; the wrapper emits a 3xx with
     /// this as the `Location` header instead of an HTML body.
     pub location: Option<String>,
+    /// Extra response headers the action set through
+    /// `response.headers[...] = …`, applied after the body headers.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Default for ControllerResponse {
@@ -158,6 +161,7 @@ impl Default for ControllerResponse {
             body: String::new(),
             content_type: "text/html; charset=utf-8".to_string(),
             location: None,
+            headers: Vec::new(),
         }
     }
 }
@@ -244,14 +248,23 @@ impl RequestContext {
             .unwrap_or_default()
     }
 
-    /// Rails' Request#protocol includes its trailing colon. The URI scheme
-    /// is the authoritative source available on the owned request snapshot;
-    /// a path-only URI has no known scheme and returns an empty string.
+    /// Rails' Request#protocol: `"https://"` or `"http://"`, the same
+    /// rule as the Ruby runtime's `ssl?`. The URI scheme wins when the
+    /// request target is absolute; an origin-form target (what the axum
+    /// server sees) falls back to X-Forwarded-Proto, then plain HTTP,
+    /// which is all this server listens on.
     pub fn protocol(&self) -> String {
-        self.uri
-            .scheme_str()
-            .map(|scheme| format!("{scheme}:"))
-            .unwrap_or_default()
+        let https = match self.uri.scheme_str() {
+            Some(scheme) => scheme.eq_ignore_ascii_case("https"),
+            None => self
+                .headers
+                .get("x-forwarded-proto")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+                .map(|value| value.trim().eq_ignore_ascii_case("https"))
+                .unwrap_or(false),
+        };
+        if https { "https://" } else { "http://" }.to_string()
     }
 
     pub fn remote_ip(&self) -> String {
@@ -267,12 +280,11 @@ impl RequestContext {
         if self.uri.scheme().is_some() && self.uri.authority().is_some() {
             return self.uri.to_string();
         }
-        match (self.protocol().strip_suffix(':').filter(|s| !s.is_empty()), self.host()) {
-            (Some(scheme), host) if !host.is_empty() => {
-                format!("{scheme}://{host}{}", self.uri)
-            }
-            _ => self.uri.to_string(),
+        let host = self.host();
+        if host.is_empty() {
+            return self.uri.to_string();
         }
+        format!("{}{host}{}", self.protocol(), self.uri)
     }
 
     pub fn script_name(&self) -> String {
@@ -375,12 +387,19 @@ mod request_context_tests {
             .unwrap();
         let context = RequestContext::from_request(&request);
         assert_eq!(context.host(), "chat.example.test");
-        assert_eq!(context.protocol(), "https:");
+        assert_eq!(context.protocol(), "https://");
 
         *request.uri_mut() = Uri::from_static("/messages");
         let context = RequestContext::from_request(&request);
         assert_eq!(context.host(), "chat.example.test");
-        assert_eq!(context.protocol(), "");
+        assert_eq!(context.protocol(), "http://");
+        assert_eq!(context.url(), "http://chat.example.test/messages");
+
+        request
+            .headers_mut()
+            .insert("x-forwarded-proto", "https".parse().unwrap());
+        let context = RequestContext::from_request(&request);
+        assert_eq!(context.protocol(), "https://");
     }
 }
 
@@ -626,6 +645,44 @@ pub fn response_set_head(status_name: &str, content_type: Option<String>) {
     });
 }
 
+/// Rails' `response` as a controller action sees it. The response
+/// itself lives in the `RESPONSE` thread-local; this handle is the
+/// zero-sized door to it, so `response.headers[…] = …` has somewhere
+/// to stand.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResponseHandle;
+
+impl ResponseHandle {
+    /// `response.headers[name] = value`. Header names are
+    /// case-insensitive, so a later write replaces an earlier one.
+    /// Answers the value written, as Ruby's `h[k] = v` does — the write
+    /// is often a method's last expression.
+    pub fn set_header(&self, name: &str, value: String) -> serde_json::Value {
+        let written = serde_json::Value::String(value.clone());
+        RESPONSE.with(|r| {
+            let mut resp = r.borrow_mut();
+            match resp.headers.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+                Some(slot) => slot.1 = value,
+                None => resp.headers.push((name.to_string(), value)),
+            }
+        });
+        written
+    }
+
+    /// `response.headers[name]`: the value set so far, nil (JSON null)
+    /// when unset — untyped, as the Ruby hash read is.
+    pub fn header(&self, name: &str) -> serde_json::Value {
+        RESPONSE.with(|r| {
+            r.borrow()
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| serde_json::Value::String(v.clone()))
+                .unwrap_or(serde_json::Value::Null)
+        })
+    }
+}
+
 /// Snapshot + reset — used by the per-action axum wrapper to read
 /// out the state immediately after the action returns. Returns
 /// owned value so the borrow on the thread-local is short.
@@ -645,6 +702,7 @@ pub fn response_into_axum(resp: ControllerResponse) -> axum::response::Response 
         if let Ok(hv) = axum::http::HeaderValue::from_str(&location) {
             response.headers_mut().insert(axum::http::header::LOCATION, hv);
         }
+        apply_extra_headers(&mut response, &resp.headers);
         return response;
     }
     let body = resp.body;
@@ -655,7 +713,19 @@ pub fn response_into_axum(resp: ControllerResponse) -> axum::response::Response 
             .headers_mut()
             .insert(axum::http::header::CONTENT_TYPE, hv);
     }
+    apply_extra_headers(&mut response, &resp.headers);
     response
+}
+
+fn apply_extra_headers(response: &mut axum::response::Response, headers: &[(String, String)]) {
+    for (name, value) in headers {
+        if let (Ok(n), Ok(v)) = (
+            axum::http::HeaderName::from_bytes(name.as_bytes()),
+            axum::http::HeaderValue::from_str(value),
+        ) {
+            response.headers_mut().insert(n, v);
+        }
+    }
 }
 
 /// Public alias for `status_name_to_code` — exposed for the AC::Base
@@ -785,5 +855,28 @@ fn status_name_to_code(name: &str) -> u16 {
         "unprocessable_entity" | "unprocessable_content" => 422,
         "internal_server_error" => 500,
         _ => 200,
+    }
+}
+
+#[cfg(test)]
+mod response_headers_tests {
+    use super::{ResponseHandle, response_clear, response_take};
+
+    #[test]
+    fn header_writes_land_in_the_response_and_replace_case_insensitively() {
+        response_clear();
+        ResponseHandle.set_header("X-Version", "1".to_string());
+        ResponseHandle.set_header("x-version", "2".to_string());
+        ResponseHandle.set_header("X-Rev", "abc".to_string());
+        assert_eq!(ResponseHandle.header("X-Version"), serde_json::json!("2"));
+        assert_eq!(ResponseHandle.header("X-Nope"), serde_json::Value::Null);
+        let response = response_take();
+        assert_eq!(
+            response.headers,
+            vec![
+                ("X-Version".to_string(), "2".to_string()),
+                ("X-Rev".to_string(), "abc".to_string())
+            ]
+        );
     }
 }

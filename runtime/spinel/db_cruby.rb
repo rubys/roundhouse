@@ -839,6 +839,11 @@ module Db
     Fiber[:rh_qcache] = nil
   end
 
+  # Is the replay cache on for this fiber? (`ActiveRecord::Base.uncached`)
+  def self.query_cache_enabled?
+    !Fiber[:rh_qcache].nil?
+  end
+
   # Statement identity => owning handle, on the leased connection. This
   # protects both cache hits and eviction, starting before the first step.
   def self.open_statements(conn)

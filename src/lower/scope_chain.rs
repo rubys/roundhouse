@@ -291,6 +291,9 @@ pub fn scope_variant_name(name: &Symbol, k: usize, subset: &[&Param]) -> Symbol 
 pub struct UserMethodReturns {
     pub instance: HashMap<Symbol, Option<ClassId>>,
     pub class: HashMap<(ClassId, Symbol), ClassId>,
+    /// Scopes whose body answers something OTHER than a relation (see
+    /// [`non_relation_scopes`]). A call to one ends the chain's model.
+    pub non_relation_scopes: HashSet<(ClassId, Symbol)>,
 }
 
 impl UserMethodReturns {
@@ -326,7 +329,80 @@ pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
                 .or_insert(Some(target));
         }
     }
+    reg.non_relation_scopes = non_relation_scopes(models, &model_ids);
     reg
+}
+
+/// Scopes that answer a non-relation VALUE — campfire's `scope
+/// :last_page, -> { last_page_of(PAGE_SIZE) }`, whose class method ends
+/// in `Page.load(…)`, an Array subclass. Rails returns a scope body's
+/// value as-is when it is not nil, so such a call is not a relation and
+/// `page.first(2)` on it is `Array#first`, not the counted terminal.
+///
+/// Proved, not guessed: the body's tail — followed through same-model
+/// bare calls to scopes and class methods — must end in a call on a
+/// constant that names no model. Anything else stays a relation, as
+/// before.
+fn non_relation_scopes(models: &[Model], model_ids: &HashSet<ClassId>) -> HashSet<(ClassId, Symbol)> {
+    let mut out = HashSet::new();
+    for m in models {
+        let mut bodies: HashMap<&Symbol, &Expr> = HashMap::new();
+        for item in &m.body {
+            match item {
+                ModelBodyItem::Scope { scope, .. } => {
+                    bodies.insert(&scope.name, &scope.body);
+                }
+                ModelBodyItem::Method { method, .. }
+                    if method.receiver == crate::dialect::MethodReceiver::Class =>
+                {
+                    bodies.entry(&method.name).or_insert(&method.body);
+                }
+                _ => {}
+            }
+        }
+        for item in &m.body {
+            let ModelBodyItem::Scope { scope, .. } = item else { continue };
+            if tail_is_foreign_const_call(&scope.body, &bodies, model_ids, 0) {
+                out.insert((m.name.clone(), scope.name.clone()));
+            }
+        }
+    }
+    out
+}
+
+fn tail_is_foreign_const_call(
+    body: &Expr,
+    bodies: &HashMap<&Symbol, &Expr>,
+    model_ids: &HashSet<ClassId>,
+    depth: usize,
+) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let tail = match &*body.node {
+        ExprNode::Seq { exprs } => match exprs.last() {
+            Some(e) => e,
+            None => return false,
+        },
+        _ => body,
+    };
+    let ExprNode::Send { recv, method, .. } = &*tail.node else {
+        return false;
+    };
+    match recv.as_ref().map(|r| &*r.node) {
+        Some(ExprNode::Const { path }) => {
+            let name = path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::");
+            let last = path.last().map(|p| p.as_str()).unwrap_or("");
+            !model_ids.iter().any(|id| {
+                id.0.as_str() == name || id.0.as_str().rsplit("::").next() == Some(last)
+            })
+        }
+        // A bare/self call, or a scope reached on a relation chain
+        // (`before(m).last_page`): follow the named sibling's body.
+        _ => bodies
+            .get(method)
+            .is_some_and(|b| tail_is_foreign_const_call(b, bodies, model_ids, depth + 1)),
+    }
 }
 
 // ---- class methods reached THROUGH an association ------------------
@@ -1811,6 +1887,8 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
                             | "destroy_all"
                             | "delete_all"
                             | "update_all"
+                            | "find_each"
+                            | "find_in_batches"
                     )
             {
                 if let ExprNode::Send { method: aname, args: aargs, block: None, .. } = &*r.node {
@@ -2109,6 +2187,15 @@ pub struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// Does a call to scope `method` on `model` keep the relation? False
+    /// for a scope proved to answer some other value
+    /// ([`UserMethodReturns::non_relation_scopes`]).
+    fn scope_keeps_relation(&self, model: &ClassId, method: &Symbol) -> bool {
+        !self
+            .user_returns
+            .non_relation_scopes
+            .contains(&(model.clone(), method.clone()))
+    }
     fn scope_of(&self, model: &ClassId, method: &Symbol) -> bool {
         self.scopes.get(model).is_some_and(|s| s.contains_key(method))
     }
@@ -2305,6 +2392,10 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
         // is a NoMethodError today and a scoped statement after
         // (campfire's `memberships.destroy_by user: users`).
         "destroy_by" | "delete_by" => block.is_none(),
+        // Batch iteration: a query Rails runs against the association's
+        // relation (`room.messages.find_each(&:destroy)`), where the
+        // association read alone is an Array with no `find_each`.
+        "find_each" | "find_in_batches" => true,
         _ => matches!(
             name,
             "ids" | "pluck" | "count" | "first" | "last" | "exists?" | "any?" | "empty?" | "size"
@@ -3216,9 +3307,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 }
                 if ctx.scope_of(self_model, &method) {
                     let leading = ctx.scope_params(self_model, &method);
+                    let keeps = ctx.scope_keeps_relation(self_model, &method);
                     let new_args = thread_rel(args, var_expr(span, rel), leading, span);
                     *expr = put(span, Some(const_expr(span, self_model)), method, new_args, block, true);
-                    return Some(self_model.clone());
+                    return keeps.then(|| self_model.clone());
                 }
                 // One of the model's own class methods that takes the
                 // relation (`last_page_of(PAGE_SIZE)` in campfire's
@@ -3261,9 +3353,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     return Some(self_model);
                 }
                 if ctx.scope_of(&self_model, &method) {
+                    let keeps = ctx.scope_keeps_relation(&self_model, &method);
                     *expr =
                         put(span, Some(const_expr(span, &self_model)), method, args, block, true);
-                    return Some(self_model);
+                    return keeps.then_some(self_model);
                 }
                 if is_relation_chain_method(method.as_str()) {
                     let _ = lower_relation_args(&self_model, &method, &mut args, ctx);
@@ -3365,8 +3458,9 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     return None;
                 }
                 if ctx.scope_of(&m, &method) {
+                    let keeps = ctx.scope_keeps_relation(&m, &method);
                     *expr = put(span, Some(r), method, args, block, parenthesized);
-                    return Some(m);
+                    return keeps.then_some(m);
                 }
                 if is_relation_chain_method(method.as_str())
                     || method.as_str() == "all"
@@ -3704,6 +3798,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             }
                             if is_scope {
                                 let leading = ctx.scope_params(&target, &method);
+                                let keeps = ctx.scope_keeps_relation(&target, &method);
                                 let new_args = thread_rel(args, seed, leading, span);
                                 *expr = put(
                                     span,
@@ -3713,7 +3808,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                                     block,
                                     true,
                                 );
-                                return Some(target);
+                                return keeps.then_some(target);
                             }
                             // `find_sole_by` on a seeded association —
                             // `gadget.widgets.find_sole_by(created_at:
@@ -3877,9 +3972,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 }
                 if ctx.scope_of(&mr, &method) {
                     let leading = ctx.scope_params(&mr, &method);
+                    let keeps = ctx.scope_keeps_relation(&mr, &method);
                     let new_args = thread_rel(args, r, leading, span);
                     *expr = put(span, Some(const_expr(span, &mr)), method, new_args, block, true);
-                    return Some(mr);
+                    return keeps.then_some(mr);
                 }
                 // A registered association-scoped class method takes the
                 // relation the same way a scope does — the relation is
