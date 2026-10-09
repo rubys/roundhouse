@@ -55,18 +55,18 @@ module CgiIo
     body_params = {}
     parse_form_into(query, params) unless query.empty?
 
+    raw_body = ""
     if method == "POST" || method == "PATCH" || method == "PUT"
       length = (env["CONTENT_LENGTH"] || "0").to_i
       ctype  = env["CONTENT_TYPE"] || ""
+      raw_body = stdin.read(length).to_s if length > 0
       if length > 0 && ctype.start_with?("application/x-www-form-urlencoded")
-        body = stdin.read(length).to_s
-        parse_form_into(body, body_params)
+        parse_form_into(raw_body, body_params)
       elsif length > 0 && ctype.start_with?("multipart/form-data")
         # File parts land in the params tree as UploadedFile objects
         # under their bracket-nested name, the way Rack nests them; see
         # runtime/multipart.rb.
-        body = stdin.read(length).to_s
-        form = ActionDispatch::Http::Multipart.parse(body, ctype)
+        form = ActionDispatch::Http::Multipart.parse(raw_body, ctype)
         form.fields.each { |k, v| assign_form_pair(body_params, k, v) }
         form.files.each { |k, v| assign_form_pair(body_params, k, v) }
       elsif length > 0 && ctype.start_with?("application/json")
@@ -74,9 +74,8 @@ module CgiIo
         # (campfire's link unfurl): Rails parses the object into params,
         # keeping its nesting and its types. A malformed body leaves the
         # params as they are, and the action's `require` refuses it.
-        body = stdin.read(length).to_s
         begin
-          parsed = JSON.parse(body)
+          parsed = JSON.parse(raw_body)
           parsed.each { |k, v| body_params[k] = v } if parsed.is_a?(Hash)
         rescue JSON::ParserError
           nil
@@ -108,7 +107,7 @@ module CgiIo
     # same URL typed into the address bar.
     accept = env.fetch("HTTP_ACCEPT", "").to_s
 
-    { method: method, path: path, params: params, body_params: body_params, cookies: cookies, accept: accept }
+    { method: method, path: path, params: params, body_params: body_params, cookies: cookies, accept: accept, raw_body: raw_body }
   end
 
   # Write a CGI response to the given writable IO. `set_cookies` is
