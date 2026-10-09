@@ -54,7 +54,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 90b330024dec3e757c79b6a7e6568f93da8e3148
+  CAMPFIRE_SHA: 2393f01ba2540ec245e772941e3b6cc7a3ee2c69
   WRITEBOOK_SHA: f3fadd21907ad9b18cb23800d971c2cc25045e2a
   # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
@@ -1904,6 +1904,25 @@ jobs:
       # THIS commit and whose runner figure is not in yet — same rule
       # as last time.
       #
+      # `2393f01b` (2026-10-05) is the last upstream main before the next
+      # two shapes outside the subset: `WebPush::Connections`
+      # (`http.extend Stages`, a per-object mixin over Net::HTTP's private
+      # transport) and the response/record/fragment caches on a second
+      # SQLite connection (`PRAGMA data_version`, `ActiveSupport::Cache::
+      # MemoryStore`, `File::LOCK_*`). Strict emit is 0 errors here; the
+      # caches are their own modelling project, tracked separately, and
+      # campfire-latest keeps reporting how far main is past this pin.
+      # Measured locally on the ruby lane: 412 of 414 (405 of 405 at
+      # 90b33002 on the same box), 69 of 70 files. The two unpassed are
+      # new `MessageTest` cases reading preload internals
+      # (`presentation-preload-introspection` in suite-causes.json), and
+      # they turn `message_test` red.
+      #
+      # 392/66 -> 412/69, on the notice this bump's own run emitted
+      # (`61503a01`: 412 of 414, 69 of 70, 2 skipped). The runner now
+      # agrees with the laptop on files green: the vips loader-policy
+      # skips no longer cost a file.
+      #
       # 391/66 -> 392/66, on the notice `eb2a4d09`'s run emitted (the
       # `to_gid` mint). Files green did not move: the test it turned
       # shares a file with `object-extend`, which is outside the subset
@@ -1911,8 +1930,8 @@ jobs:
       # has no per-object method table — or until upstream takes
       # basecamp/once-campfire#280, #279's twin for this file.
         env:
-          FLOOR_TESTS: 392
-          FLOOR_FILES: 66
+          FLOOR_TESTS: 412
+          FLOOR_FILES: 69
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)

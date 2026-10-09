@@ -4275,6 +4275,7 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActionController::UnpermittedParameters",
     "ActionController::UnknownFormat",
     "ActionController::RoutingError",
+    "AbstractController::ActionNotFound",
     "ActionView::MissingTemplate",
 ];
 

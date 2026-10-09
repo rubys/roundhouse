@@ -41,6 +41,14 @@
   ],
   "causes": [
     {
+      "slug": "presentation-preload-introspection",
+      "title": "`ActionText::RichText#embeds` and `record.association(:name).loaded?` — the presentation-preload tests read Rails' association internals",
+      "owner": "compiler",
+      "match": "undefined method '(embeds' for an instance of ActionText::RichText|association' for an instance of Message)",
+      "match_test": "MessageTest#test_presentation_",
+      "note": "campfire 2393f01 (2026-10-05) added two `MessageTest` cases for `Message.with_presentation` and `Message::Pagination::Page#preload_associations`: one walks `message.body.embeds` under `assert_no_queries`, the other asserts `message.association(:rich_text_body).loaded?` before and after a page preloads only the rendered rows. The runtime's `ActionText::RichText` has no `embeds` (the rich text's attached blobs), and a hydrated record has no association-proxy object to ask `loaded?` — associations are readers that hydrate, so there is no per-association loaded state to report. The app path itself emits with zero errors; only these two introspection tests are unpassed. Arrived with the CAMPFIRE_SHA bump 90b3300 -> 2393f01."
+    },
+    {
       "slug": "turbo-signed-stream-name",
       "title": "`Turbo::StreamsChannel.signed_stream_name` and `Turbo.signed_stream_verifier` — minting the name a subscriber sends",
       "owner": "compiler",

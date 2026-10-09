@@ -126,6 +126,7 @@ pub(super) fn synthesize_process_action(
     rescues: &[RescueHandler],
     wraps: &WrapFilters,
     reads_action_name: bool,
+    missing: &[Symbol],
 ) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
 
@@ -150,6 +151,42 @@ pub(super) fn synthesize_process_action(
             parenthesized: true,
         }));
     }
+
+    // A route naming an action this controller does not define (no
+    // method here or on an ancestor, no template) is Rails'
+    // `AbstractController::ActionNotFound`, raised by `process` BEFORE
+    // the callback chain and outside `rescue_from`;
+    // `ActionDispatch::ExceptionWrapper` answers 404. Without this the
+    // `case` below falls through and the request answers 200 with an
+    // empty body. Only controllers with such a route get the guard;
+    // every other dispatcher is unchanged.
+    let not_found_guard = (!missing.is_empty()).then(|| {
+        let raise = syn(ExprNode::Send {
+            recv: None,
+            method: Symbol::from("raise"),
+            args: vec![
+                syn(ExprNode::Const {
+                    path: vec![Symbol::from("AbstractController"), Symbol::from("ActionNotFound")],
+                }),
+                syn(ExprNode::StringInterp {
+                    parts: vec![
+                        crate::expr::InterpPart::Text { value: "The action '".to_string() },
+                        crate::expr::InterpPart::Expr { expr: var_ref(param) },
+                        crate::expr::InterpPart::Text {
+                            value: format!("' could not be found for {}", enclosing_class.as_str()),
+                        },
+                    ],
+                }),
+            ],
+            block: None,
+            parenthesized: false,
+        });
+        syn(ExprNode::If {
+            cond: include_check(missing, &[], param),
+            then_branch: raise,
+            else_branch: empty_seq(),
+        })
+    });
 
     for p in preamble {
         let (stmt, halt_check) = match p {
@@ -285,6 +322,10 @@ pub(super) fn synthesize_process_action(
             ensure: None,
             implicit: false,
         });
+    }
+
+    if let Some(guard) = not_found_guard {
+        body = syn(ExprNode::Seq { exprs: vec![guard, body] });
     }
 
     // Whole-cloth synthesis — attribute the dispatcher scaffolding to

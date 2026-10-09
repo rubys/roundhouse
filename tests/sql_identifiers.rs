@@ -292,7 +292,7 @@ cases.each_with_index do |(class_name, table, _), i|
     ActiveRecord::Relation.new(model).find(99)
     raise 'missing record did not raise'
   rescue ActiveRecord::RecordNotFound => e
-    check(e.message, "Couldn't find record in #{table} with id=99")
+    check(e.message, "Couldn't find #{class_name} with 'id'=99")
   end
   [:first!, :find_by!].each do |method|
     relation = ActiveRecord::Relation.new(model).where(name: 'absent')
@@ -300,7 +300,7 @@ cases.each_with_index do |(class_name, table, _), i|
       method == :first! ? relation.first! : relation.find_by!(name: 'also absent')
       raise 'empty relation did not raise'
     rescue ActiveRecord::RecordNotFound => e
-      check(e.message, "Couldn't find record in #{table}")
+      check(e.message, "Couldn't find #{class_name}")
     end
   end
   model.find(2).destroy!

@@ -44,6 +44,7 @@ module ActiveRecord
     def _await_preload: () -> nil
     # Request values stay intact until the schema-selected scalar adapter.
     def self.find: (Integer | Float | String | nil id) -> Base
+    def self.find_by!: (Hash[String | Symbol, untyped] conditions) -> Base
     def self._find_primary_key_input: (Integer | Float | String | nil id) -> Base?
     def self._cast_primary_key: (Integer | Float | String | nil id) -> (Integer | String | nil)
     def self.connection: () -> Connection

@@ -169,7 +169,7 @@ class BaseTest < Minitest::Test
 
   def test_find_raises_record_not_found_when_missing
     err = assert_raises(ActiveRecord::RecordNotFound) { Item.find(999) }
-    assert_match(/id=999/, err.message)
+    assert_equal "Couldn't find BaseTest::Item with 'id'=999", err.message
   end
 
   def test_find_by_returns_first_match_or_nil

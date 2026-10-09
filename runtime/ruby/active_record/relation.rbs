@@ -215,7 +215,7 @@ module ActiveRecord
     def one?: () -> bool
     def many?: () -> bool
     def all?: () { (Base) -> bool } -> bool
-    def exists?: (?Integer? id) -> bool
+    def exists?: (?(Integer | String | Hash[String | Symbol, untyped] | nil) id) -> bool
     def probe_existence: (Integer n) -> Integer
     def more_than?: (Integer n) -> bool
     def length: () -> Integer
@@ -248,7 +248,7 @@ module ActiveRecord
     def pluck: (String | Symbol col) -> Array[untyped]
     def pick: (String | Symbol col) -> untyped
     def ids: () -> Array[Integer]
-    def find: (Integer | Float | String | Array[Integer | Float | String] id) -> untyped
+    def find: (Integer | Float | String | Array[Integer | Float | String] | nil id) -> untyped
     def find_ids: (Array[Integer | Float | String] ids) -> Array[Base]
     def find_by: (Hash[Symbol, untyped] | String | nil conditions) -> Base?
     def find_by!: (Hash[Symbol, untyped] | String | nil conditions) -> Base
