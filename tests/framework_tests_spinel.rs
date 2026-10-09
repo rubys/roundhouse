@@ -176,7 +176,12 @@ fn build_and_run(test_file: &Path, tag: &str) {
     // `runtime/spinel/json.rb` -> `json_impl.rb` got this far — the copy
     // was a no-op and the failure surfaced later and elsewhere, as
     // `test_helper.rb: cannot load such file -- runtime/json_impl.rb`.
-    for entry in ["base64.rb", "json_impl.rb", "message_digest.rb"] {
+    for entry in [
+        "base64.rb",
+        "json_impl.rb",
+        "message_digest.rb",
+        "fragment_cache.rb",
+    ] {
         let src = runtime_spinel.join(entry);
         assert!(src.exists(), "{} is named in this copy list but does not exist \
                                — was it renamed?", src.display());
@@ -202,6 +207,7 @@ require_relative "../runtime/action_dispatch/router"
 require_relative "../runtime/action_controller/base"
 require_relative "../runtime/message_digest"
 require_relative "../runtime/rails"
+require_relative "../runtime/fragment_cache"
 require_relative "../runtime/action_controller/message_verifier"
 require_relative "../runtime/action_controller/cookies"
 require_relative "../runtime/action_controller/rate_limiter"
@@ -436,6 +442,15 @@ fn ac_rate_limiter_test_passes_under_spinel() {
         Path::new("runtime/ruby/test/action_controller/rate_limiter_test.rb"),
         "ac_rate_limiter",
     );
+}
+
+/// `Rails::Cache#read_str` / `#write_str` / `#increment_str`, including
+/// the disabled-cache behavior. The Spinel shard overlay must preserve
+/// the shared runtime's contract.
+#[test]
+#[ignore]
+fn cache_test_passes_under_spinel() {
+    build_and_run(Path::new("runtime/ruby/test/cache_test.rb"), "cache");
 }
 
 #[test]

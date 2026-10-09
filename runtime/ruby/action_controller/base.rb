@@ -552,6 +552,7 @@ module ActionController
 
     def response_body=(value)
       @body = value
+      @performed = !value.nil?
       @body
     end
 

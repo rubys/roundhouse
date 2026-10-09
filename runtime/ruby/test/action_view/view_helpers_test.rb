@@ -306,6 +306,8 @@ class ViewHelpersTest < Minitest::Test
   end
 
   def test_button_to_emits_form_with_method_input
+    previous_forgery_protection = ActionController::Base.allow_forgery_protection
+    ActionController::Base.allow_forgery_protection = true
     out = ViewHelpers.button_to("Delete", "/articles/42", method: :delete)
     assert_includes out, %(action="/articles/42")
     assert_includes out, %(<input type="hidden" name="_method" value="delete">)
@@ -316,6 +318,8 @@ class ViewHelpersTest < Minitest::Test
     # also lands inside the form (after the button).
     assert_includes out, %(class="button_to")
     assert_includes out, %(<input type="hidden" name="authenticity_token" value="">)
+  ensure
+    ActionController::Base.allow_forgery_protection = previous_forgery_protection
   end
 
   def test_button_to_post_method_omits_hidden_input
@@ -374,15 +378,20 @@ class ViewHelpersTest < Minitest::Test
   end
 
   def test_csrf_token_hidden_input
+    previous_forgery_protection = ActionController::Base.allow_forgery_protection
+    ActionController::Base.allow_forgery_protection = true
     out = ViewHelpers.csrf_token_hidden_input
     assert_equal %(<input type="hidden" name="authenticity_token" value="">), out
+  ensure
+    ActionController::Base.allow_forgery_protection = previous_forgery_protection
   end
 
   def test_csrf_token_hidden_input_is_omitted_when_forgery_protection_is_disabled
+    previous_forgery_protection = ActionController::Base.allow_forgery_protection
     ActionController::Base.allow_forgery_protection = false
     assert_equal "", ViewHelpers.csrf_token_hidden_input
   ensure
-    ActionController::Base.allow_forgery_protection = true
+    ActionController::Base.allow_forgery_protection = previous_forgery_protection
   end
 
   def test_method_override_input_emits_for_patch

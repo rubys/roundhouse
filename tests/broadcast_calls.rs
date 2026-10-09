@@ -136,11 +136,13 @@ fn append_lowers_to_a_broadcasts_call_with_the_records_own_partial() {
 /// name from the runtime class rather than the database column.
 #[test]
 fn model_global_ids_use_the_concrete_runtime_class_name() {
-    let app = sti_room_app();
+    let mut app = sti_room_app();
     assert!(
         roundhouse::analyze::diagnose(&app).is_empty(),
         "the synthesized GlobalID method must remain fully typed"
     );
+    app.global_id_locate_models
+        .insert(roundhouse::ident::Symbol::from("Room"));
     let files = ruby::emit_library(&app)
         .into_iter()
         .chain(ruby::emit_lowered_models(&app))
@@ -149,6 +151,19 @@ fn model_global_ids_use_the_concrete_runtime_class_name() {
     assert!(
         src.contains("GlobalID.param(self.class.name, self.id)"),
         "the base model must use the concrete class name, not the STI column:\n{src}"
+    );
+
+    let files = roundhouse::project::spinel_base_files(&app, roundhouse::fixtures::real_blog())
+        .expect("Spinel base files");
+    let locator = files
+        .iter()
+        .find(|(path, _)| path.ends_with("global_id_locator.rb"))
+        .map(|(_, content)| content)
+        .expect("global_id_locator.rb")
+        .clone();
+    assert!(
+        locator.contains("return nil unless parts[1] == \"Room\" || parts[1] == \"Rooms::Open\""),
+        "a base-class lookup must accept its known STI subclass without resolving wire constants:\n{locator}"
     );
 }
 

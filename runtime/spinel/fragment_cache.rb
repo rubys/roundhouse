@@ -76,6 +76,8 @@ module Rails
     end
 
     def read_str(key)
+      return nil unless Rails.cache_enabled
+
       k = key.to_s
       s = shard_of(k)
       entries = SHARD_ENTRIES[s]
@@ -100,6 +102,8 @@ module Rails
     end
 
     def write_str(key, value, ttl)
+      return value unless Rails.cache_enabled
+
       k = key.to_s
       s = shard_of(k)
       entries = SHARD_ENTRIES[s]
@@ -120,6 +124,8 @@ module Rails
     # not both see the same old value. The expiry is kept from the
     # first write in the window, as the shared version's note says.
     def increment_str(key, ttl)
+      return 1 unless Rails.cache_enabled
+
       k = key.to_s
       s = shard_of(k)
       entries = SHARD_ENTRIES[s]

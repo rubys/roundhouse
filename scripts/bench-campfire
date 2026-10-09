@@ -1537,7 +1537,7 @@ for lane in "${LANES[@]}"; do
         code="$(curl -s -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" \
                 -o "$body" -w '%{http_code}' \
                 "http://127.0.0.1:$port$(ep_path "$ep")")"
-        read -r tags body_sha256 < <(ruby -rdigest -e 'html = File.read(ARGV[0]); print html.scan(/<([a-zA-Z][-a-zA-Z0-9]*)/).size, " ", Digest::SHA256.file(ARGV[0]).hexdigest' "$body")
+        read -r tags body_sha256 < <(ruby -rdigest -e 'html = File.read(ARGV[0]); puts html.scan(/<([a-zA-Z][-a-zA-Z0-9]*)/).size, Digest::SHA256.file(ARGV[0]).hexdigest' "$body")
         printf '%s\t%s\tstatus=%s\ttags=%s\tbytes=%s\tsha256=%s\n' \
             "$lane" "$ep" "$code" "$tags" "$(wc -c < "$body" | tr -d ' ')" "$body_sha256" \
             >> "$OUT_DIR/parity.txt"
