@@ -379,8 +379,27 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         .into_iter()
         .flat_map(|unit| unit.classes)
         .collect();
+    let app_uses_user_agent = app_references_const(app, "UserAgent");
+    // `with_lock(*args)` needs an untyped rest param and a block routed
+    // through `transaction`, neither of which Rust emit expresses yet.
+    // Same gate as UserAgent: an app that calls it gets the (failing)
+    // method, so the gap stays visible; one that doesn't is not broken.
+    let app_uses_with_lock = app_calls_method(app, "with_lock");
     let runtime_units = crate::emit::rust::expr::with_emit_ctx(EmitCtx::default(), || {
-        crate::runtime_loader::rust_units(|_path, mut classes| {
+        crate::runtime_loader::rust_units(|path, mut classes| {
+            // The UserAgent runtime leans on Ruby's nil-on-miss
+            // `Array#[]` throughout, which Rust emit does not yet type
+            // as Option; it does not compile on the Rust target. Ship
+            // it only to an app that names `UserAgent` (Campfire), so an
+            // app that never parses one is not broken by it.
+            if path == "src/user_agent.rs" && !app_uses_user_agent {
+                return Vec::new();
+            }
+            if !app_uses_with_lock {
+                for class in classes.iter_mut() {
+                    class.methods.retain(|method| method.name.as_str() != "with_lock");
+                }
+            }
             let available_classes: Vec<crate::dialect::LibraryClass> = app
                 .library_classes
                 .iter()
@@ -2708,7 +2727,15 @@ fn emit_nested_mod_files(
                     ));
                 }
             }
-            if (parent.is_empty() && root_reexports) || (!parent.is_empty() && nested_reexports) {
+            // Top-level controllers keep their crate-wide name
+            // (`controllers::ArticlesController`); only namespaced ones
+            // stay behind their namespace module.
+            let direct_reexports = if parent.is_empty() {
+                root_reexports || area == "controllers"
+            } else {
+                nested_reexports
+            };
+            if direct_reexports {
                 for (path, name) in &entries {
                     let entry_parent = path.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
                     if entry_parent == parent {
@@ -2957,6 +2984,26 @@ mod nested_module_emit_tests {
     }
 
     #[test]
+    fn top_level_controller_is_reexported_from_the_controllers_root() {
+        let emitted = emit_nested_mod_files(
+            "controllers",
+            &[
+                ("articles_controller".into(), "ArticlesController".into()),
+                ("accounts/bots_controller".into(), "BotsController".into()),
+            ],
+            false,
+            true,
+        );
+        let root = emitted
+            .iter()
+            .find(|file| file.path.to_string_lossy() == "src/controllers/mod.rs")
+            .unwrap();
+
+        assert!(root.content.contains("pub use articles_controller::ArticlesController;"));
+        assert!(!root.content.contains("BotsController;"));
+    }
+
+    #[test]
     fn namespace_alias_is_omitted_when_it_collides_with_a_class_reexport() {
         let emitted = emit_nested_mod_files(
             "app_classes",
@@ -3198,4 +3245,50 @@ fn collect_global_class_methods(
         global_helper_methods: helper_methods,
         ..EmitCtx::default()
     }
+}
+
+/// Does any app-side body name the top-level constant `name`?
+fn app_references_const(app: &App, name: &str) -> bool {
+    app_any_expr(app, &|expr| {
+        matches!(&*expr.node, crate::expr::ExprNode::Const { path }
+            if path.first().is_some_and(|segment| segment.as_str() == name))
+    })
+}
+
+/// Does any app-side body send `method`, on any receiver?
+fn app_calls_method(app: &App, method: &str) -> bool {
+    app_any_expr(app, &|expr| {
+        matches!(&*expr.node, crate::expr::ExprNode::Send { method: sent, .. }
+            if sent.as_str() == method)
+    })
+}
+
+/// Walks model/controller hook bodies, app library classes and views
+/// for an expression matching `pred`.
+fn app_any_expr(app: &App, pred: &dyn Fn(&crate::expr::Expr) -> bool) -> bool {
+    fn any(expr: &crate::expr::Expr, pred: &dyn Fn(&crate::expr::Expr) -> bool) -> bool {
+        if pred(expr) {
+            return true;
+        }
+        let mut found = false;
+        expr.node.for_each_child(&mut |child| {
+            if !found && any(child, pred) {
+                found = true;
+            }
+        });
+        found
+    }
+    let mut found = false;
+    crate::lower::for_each_hook_body_ref(app, &mut |body| {
+        if !found && any(body, pred) {
+            found = true;
+        }
+    });
+    found
+        || app.views.iter().any(|view| any(&view.body, pred))
+        || app
+            .library_classes
+            .iter()
+            .flat_map(|lc| lc.methods.iter())
+            .any(|method| any(&method.body, pred))
 }

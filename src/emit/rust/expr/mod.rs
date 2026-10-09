@@ -346,6 +346,26 @@ where
     r
 }
 
+/// Is `r`'s emitted Rust value an `Option`? A binding's emitted Rust
+/// type decides: the analyzer may widen a read with `nil` that the
+/// struct field or local never carries (an Array index read emits
+/// panic-on-miss), and unwrapping a `Vec` or `String` does not compile.
+pub(super) fn recv_is_rust_option(r: &Expr) -> bool {
+    let binding_ty = match &*r.node {
+        ExprNode::Ivar { name } if !in_module_singleton() => ivar_field_ty(name.as_str()),
+        ExprNode::Var { name, .. } => var_decl_ty(name.as_str()),
+        _ => None,
+    };
+    let binding_is_option = match &binding_ty {
+        Some(ty) => util::is_option_ty(ty),
+        None => r.ty.as_ref().is_some_and(util::is_option_ty),
+    };
+    binding_is_option
+        && (matches!(&*r.node, ExprNode::Ivar { .. })
+            || r.ty.as_ref().is_some_and(util::is_option_ty))
+        && !send::is_array_index_read(r)
+}
+
 /// Emit a Send's *immediate* recv. When the recv is a Var or Ivar (or a
 /// Send shape that resolves to a bare param read — Ruby implicit-self),
 /// suppress owned-value cloning for the duration. Auto-ref handles
@@ -354,11 +374,15 @@ where
 /// own recv emission.
 pub(super) fn emit_send_recv(r: &Expr) -> String {
     let is_bare_var = matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. });
-    let recv_is_option = r.ty.as_ref().is_some_and(util::is_option_ty)
-        || matches!(&*r.node, ExprNode::Ivar { name }
-            if ivar_field_ty(name.as_str()).as_ref().is_some_and(util::is_option_ty));
+    let recv_is_option = recv_is_rust_option(r);
     let s = if is_nil_guard_receiver(r) {
-        format!("({}).unwrap()", emit_expr(r))
+        // A narrowed Option read already renders as `x.clone().unwrap()`.
+        let inner = emit_expr(r);
+        if inner.ends_with(".unwrap()") {
+            inner
+        } else {
+            format!("({inner}).unwrap()")
+        }
     } else if recv_is_option {
         format!("({}).clone().unwrap()", emit_expr(r))
     } else if !is_bare_var {
@@ -870,6 +894,25 @@ pub(super) fn record_back_propagated_hash(name: String) {
 pub(super) fn is_back_propagated_hash(name: &str) -> bool {
     current_emit_ctx()
         .map(|ctx| ctx.back_propagated_hash_locals.borrow().contains(name))
+        .unwrap_or(false)
+}
+
+/// Run `f` with the next Array index read emitted as a checked,
+/// Option-valued lookup. See `EmitCtx::option_index_read`.
+pub(super) fn with_option_index_read<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let ctx = current_emit_ctx().expect("with_option_index_read called outside with_emit_ctx");
+    let prev = ctx.option_index_read.replace(true);
+    let r = f();
+    ctx.option_index_read.set(prev);
+    r
+}
+
+pub(super) fn take_option_index_read() -> bool {
+    current_emit_ctx()
+        .map(|ctx| ctx.option_index_read.replace(false))
         .unwrap_or(false)
 }
 
@@ -1593,13 +1636,17 @@ fn emit_expr_inner(e: &Expr) -> String {
         ExprNode::Raise { value } => {
             format!("panic!(\"{{}}\", {})", emit_expr(value))
         }
+        // A constructor's `super` has nothing left to do: Rust emit
+        // builds the whole flattened struct in this `new`, so the
+        // parent's field initialization is already in the literal.
+        ExprNode::Super { .. } if in_constructor() => "()".to_string(),
         // Keep unsupported IR explicit and syntactically valid in value
         // position. A comment alone disappears and leaves malformed Rust
         // such as `field = /* TODO */;`; `todo!` preserves the unsupported
         // boundary as a runtime panic rather than pretending to implement it.
         other => format!(
-            "todo!(\"Roundhouse Rust emitter does not support ExprNode::{:?}\")",
-            std::mem::discriminant(other)
+            "todo!(\"Roundhouse Rust emitter does not support ExprNode::{}\")",
+            other.kind_str()
         ),
     }
 }

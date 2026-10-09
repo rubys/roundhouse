@@ -972,8 +972,8 @@ pub(crate) fn is_array_index_read(arg: &Expr) -> bool {
     };
     method.as_str() == "[]"
         && args.len() == 1
-        && matches!(r.ty.as_ref(), Some(Ty::Array { .. }))
-        && matches!(args[0].ty.as_ref(), Some(Ty::Int))
+        && matches!(r.ty.as_ref().map(super::util::peel_nil), Some(Ty::Array { .. }))
+        && matches!(args[0].ty.as_ref().map(super::util::peel_nil), Some(Ty::Int))
 }
 
 #[cfg(test)]

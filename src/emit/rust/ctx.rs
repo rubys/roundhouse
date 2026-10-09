@@ -206,6 +206,11 @@ pub struct EmitCtx {
     /// tail position. Toggled by `with_return_tail`.
     pub in_return_tail: Cell<bool>,
 
+    /// Set while emitting the value of a `let Some(x) = arr[i] else`
+    /// nil guard: that one Array index read must keep Ruby's
+    /// nil-on-miss result. Consumed by the first `[]` read emitted.
+    pub option_index_read: Cell<bool>,
+
     /// True while emitting a module-singleton class (Ruby pattern
     /// `module X; class << self; attr_accessor :slot; end; end`):
     /// all methods are class methods, "ivars" are module-level state

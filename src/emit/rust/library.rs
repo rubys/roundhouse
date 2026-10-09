@@ -1908,8 +1908,8 @@ end
         );
         let csrf = method_body(&src, "__rh_static_request_for_csrf");
         assert!(
-            csrf.contains("None;"),
-            "nil-only void method emits its nil expression as a statement:\n{csrf}"
+            !csrf.contains("None"),
+            "nil-only void method must not emit an untyped `None` statement:\n{csrf}"
         );
     }
 }

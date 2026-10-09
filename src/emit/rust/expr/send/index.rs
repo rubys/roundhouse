@@ -29,15 +29,22 @@ pub(super) fn try_recv_typed_method(
         // Peel `Union<T, Nil>` from the recv Ty so receivers bound
         // via `let x = arr[i]` (typed `T | Nil` by the body-typer's
         // Ruby-semantics view) match the same branches as the
-        // plain receiver case. Emit chose panic-on-miss for `[]`,
-        // so the runtime value really is T.
+        // plain receiver case. Outside an Option return tail, emit
+        // chooses panic-on-miss for `[]`, so the runtime value is T.
         let ivar_fallback = match &*r.node {
             ExprNode::Ivar { name } => ivar_field_ty(name.as_str()),
             _ => None,
         };
         let recv_ty = ivar_fallback.as_ref().or(r.ty.as_ref()).map(peel_nil);
         let arg_ty = args[0].ty.as_ref().map(peel_nil);
-        let result_is_option = outer_ty.is_some_and(super::super::util::is_option_ty);
+        // Ruby's nil-on-miss read only reaches a consumer that takes
+        // an Option (the tail of an Option-returning method, or a
+        // `let Some(x) = arr[i] else` nil guard); every other site
+        // keeps panic-on-miss so it still reads as `T`.
+        let option_consumer = super::super::take_option_index_read()
+            || (super::super::in_return_tail() && super::super::current_return_is_option());
+        let result_is_option =
+            outer_ty.is_some_and(super::super::util::is_option_ty) && option_consumer;
         // Range index on Str/Vec receiver — `pp[1..]`. The Range
         // node emits its endpoints unmodified (`1_i64..`), but
         // slice indexing needs `usize`. Wrap the rendered range
@@ -135,8 +142,15 @@ pub(super) fn try_recv_typed_method(
                     } else {
                         super::super::emit_send_recv(r)
                     };
+                    // An element that is itself nilable already is
+                    // the Option; a miss and a stored nil both read nil.
+                    let flatten = if super::super::util::is_option_ty(elem) {
+                        ".flatten()"
+                    } else {
+                        ""
+                    };
                     return Some(format!(
-                        "{recv_s}.get(({}) as usize).{access}()",
+                        "{recv_s}.get(({}) as usize).{access}(){flatten}",
                         emit_expr(&args[0])
                     ));
                 }
@@ -181,6 +195,9 @@ pub(super) fn try_recv_typed_method(
         // through `.get(...).unwrap_or(...)` instead — nullable
         // columns dropped the default and hit the panicking index.
         if map_holds_json_value(recv_ty) {
+            if result_is_option {
+                return Some(format!("{}.get({}).cloned()", emit_expr(r), emit_expr(&args[0])));
+            }
             return Some(format!(
                 "{}.get({}).cloned().unwrap_or(serde_json::Value::Null)",
                 emit_expr(r),

@@ -91,7 +91,7 @@ fn emitted_rust_router_packages_error_imports() {
         );
     }
     assert!(
-        router.contains("format!(\"{}{}\", name, \"\")"),
+        router.contains("format!(\"{}{}\", name.to_string(), \"\")"),
         "Hash iteration keys must be owned before capture_pairs returns Vec<String>:\n{router}"
     );
     assert!(

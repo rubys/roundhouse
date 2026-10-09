@@ -286,12 +286,20 @@ fn render_return(m: &MethodDef) -> String {
 }
 
 pub(super) fn method_return_ty(m: &MethodDef) -> Option<Ty> {
+    // A writer is emitted void (`render_return`), whatever Ruby value
+    // its body ends on, so its tail is a statement.
+    if m.name.as_str().ends_with('=') {
+        return Some(Ty::Nil);
+    }
     let declared = match m.signature.as_ref() {
         Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
         _ => None,
     };
-    if let Some(ty) = declared.as_ref().filter(|ty| !matches!(ty, Ty::Untyped)) {
-        return Some(ty.clone());
+    // A declared signature wins, `untyped` included: that is the
+    // `serde_json::Value` contract callers were emitted against. Only
+    // an unsigned method borrows its body's tail type.
+    if declared.is_some() {
+        return declared;
     }
 
     fn tail_ty(expr: &crate::expr::Expr) -> Option<Ty> {

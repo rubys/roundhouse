@@ -334,7 +334,7 @@ mod request_context_tests {
         request
             .extensions_mut()
             .insert(axum::extract::ConnectInfo(
-                "203.0.113.7"
+                "203.0.113.7:4000"
                     .parse::<std::net::SocketAddr>()
                     .unwrap(),
             ));
@@ -355,7 +355,7 @@ mod request_context_tests {
                 assert_eq!(current.user_agent(), "inner-agent");
                 assert!(current.get_pred());
                 assert!(!current.head_pred());
-                assert_eq!(current.remote_addr.unwrap().to_string(), "203.0.113.7");
+                assert_eq!(current.remote_addr.unwrap().ip().to_string(), "203.0.113.7");
             })
             .await;
             tokio::task::yield_now().await;

@@ -439,6 +439,11 @@ pub(crate) fn emit_literal(lit: &Literal) -> String {
             // Tail `nil` in an untyped/Value-returning method is
             // `Value::Null`, not Option::None (`request_for_csrf`).
             if in_return_tail() {
+                // Tail `nil` in a void method is the unit value; a bare
+                // `None;` statement has no inferable type.
+                if super::current_return_is_unit() {
+                    return "()".to_string();
+                }
                 if let Some(ty) = current_return_ty() {
                     if super::super::ty::rust_value_shaped(&ty) {
                         return "serde_json::Value::Null".to_string();

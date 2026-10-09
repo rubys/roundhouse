@@ -835,7 +835,11 @@ fn try_fuse_let_else(assign: &Expr, guard: &Expr) -> Option<(String, String)> {
     if !then_diverges || !else_is_nil {
         return None;
     }
-    let value_s = emit_expr(value);
+    let value_s = if super::send::is_array_index_read(value) {
+        super::with_option_index_read(|| emit_expr(value))
+    } else {
+        emit_expr(value)
+    };
     let diverge_s = emit_expr_tail(then_branch);
     let n = assign_name.as_str().to_string();
     Some((

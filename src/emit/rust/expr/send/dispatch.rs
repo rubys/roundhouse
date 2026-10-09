@@ -166,7 +166,7 @@ mod tests {
         crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
             assert_eq!(
                 dispatch_method_by_recv_ty(&string, "to_s", &[]).as_deref(),
-                Some("title")
+                Some("title.to_string()")
             );
             assert_eq!(
                 dispatch_method_by_recv_ty(&string, "nil?", &[]).as_deref(),
@@ -373,6 +373,15 @@ pub(super) fn dispatch_method_by_recv_ty(
     // generic receiver emitter normally unwraps Option values before
     // dispatch, but doing that here reverses the predicate and can panic
     // before the generated `is_none()` call.
+    // `String?#to_s` is Ruby's nil-to-empty conversion, not an unwrap:
+    // `nil.to_s == ""`.
+    if method == "to_s"
+        && args.is_empty()
+        && recv.ty.as_ref().is_some_and(|ty| matches!(peel_nil(ty), Ty::Str | Ty::Sym))
+        && super::super::recv_is_rust_option(recv)
+    {
+        return Some(format!("{}.clone().unwrap_or_default()", emit_expr(recv)));
+    }
     let raw_recv_s = if matches!(method, "nil?" | "clone") {
         emit_expr(recv)
     } else {
@@ -466,7 +475,7 @@ pub(super) fn dispatch_method_by_recv_ty(
         }
         None => false,
     };
-    let recv_s = if binding_is_option {
+    let recv_s = if binding_is_option && !raw_recv_s.ends_with(".unwrap()") {
         // `.clone().unwrap()` is a method chain — already a primary
         // form. The outer wrap was historically defensive against
         // downstream `.method` chaining; the `NEEDS_PARENS` decide-
@@ -521,9 +530,10 @@ pub(super) fn dispatch_method_by_recv_ty(
             _ => None,
         },
         Some(Ty::Str) | Some(Ty::Sym) => match method {
-            // String/Symbol both lower to Rust String, so to_s is
-            // identity and must not require RubyToS in scope.
-            "to_s" if args.is_empty() => Some(recv_s),
+            // String/Symbol both lower to Rust String, so to_s is an
+            // owned copy (the receiver may be a borrowed `&String` or
+            // `&str`) and must not require RubyToS in scope.
+            "to_s" if args.is_empty() => Some(format!("{recv_s}.to_string()")),
             // Stringish unions are peeled to String above because the
             // Rust emitter represents them as non-optional Strings.
             "nil?" if args.is_empty() => Some("false".to_string()),
