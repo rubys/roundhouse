@@ -408,6 +408,11 @@ fn field_let_annotation(ivar_name: &str) -> String {
 /// `response.headers` — a receiverless `response` send with `.headers`
 /// on it, the spelling Rails controllers write headers through.
 pub(super) fn is_response_headers(recv: &Expr) -> bool {
+    // A parameter or instance method named `response` shadows the
+    // implicit handle, as it does for an ordinary bare send.
+    if super::param_ty("response").is_some() || super::is_instance_method("response") {
+        return false;
+    }
     let ExprNode::Send { recv: Some(inner), method, args, .. } = &*recv.node else {
         return false;
     };

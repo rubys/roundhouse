@@ -544,6 +544,7 @@ fn response_headers_set_in_a_filter_compile() {
     let edited = source.replacen(
         "  before_action :set_article,",
         "  before_action { response.headers[\"X-Probe\"] = \"1\" }\n  \
+           before_action { @probe = response.headers[\"X-Probe\"] }\n  \
            before_action :set_article,",
         1,
     );

@@ -654,15 +654,16 @@ impl ResponseHandle {
         written
     }
 
-    /// `response.headers[name]`: the value set so far, "" when unset.
-    pub fn header(&self, name: &str) -> String {
+    /// `response.headers[name]`: the value set so far, nil (JSON null)
+    /// when unset — untyped, as the Ruby hash read is.
+    pub fn header(&self, name: &str) -> serde_json::Value {
         RESPONSE.with(|r| {
             r.borrow()
                 .headers
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                .map(|(_, v)| v.clone())
-                .unwrap_or_default()
+                .map(|(_, v)| serde_json::Value::String(v.clone()))
+                .unwrap_or(serde_json::Value::Null)
         })
     }
 }
@@ -852,7 +853,8 @@ mod response_headers_tests {
         ResponseHandle.set_header("X-Version", "1".to_string());
         ResponseHandle.set_header("x-version", "2".to_string());
         ResponseHandle.set_header("X-Rev", "abc".to_string());
-        assert_eq!(ResponseHandle.header("X-Version"), "2");
+        assert_eq!(ResponseHandle.header("X-Version"), serde_json::json!("2"));
+        assert_eq!(ResponseHandle.header("X-Nope"), serde_json::Value::Null);
         let response = response_take();
         assert_eq!(
             response.headers,

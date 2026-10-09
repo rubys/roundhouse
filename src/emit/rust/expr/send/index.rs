@@ -25,6 +25,13 @@ pub(super) fn try_recv_typed_method(
     outer_ty: Option<&crate::ty::Ty>,
 ) -> Option<String> {
     let r = recv?;
+    // `response.headers[k]` — the read half of the header write bridge.
+    if method == "[]" && args.len() == 1 && super::super::assign::is_response_headers(r) {
+        return Some(format!(
+            "crate::http::ResponseHandle.header(&({}))",
+            emit_expr(&args[0])
+        ));
+    }
     if method == "[]" && args.len() == 1 {
         // Peel `Union<T, Nil>` from the recv Ty so receivers bound
         // via `let x = arr[i]` (typed `T | Nil` by the body-typer's
