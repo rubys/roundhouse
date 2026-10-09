@@ -698,6 +698,15 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    runtime_entry! {
+        stem: "action_controller/browser_blocker",
+        namespace: "ActionController",
+        out_path: "src/browser_blocker.rs",
+        mode: Mode::Library,
+        imports: &[("UserAgent", "user_agent")],
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     // errors.rb intentionally NOT transpiled — the Rust-natural
     // `class < StandardError` shape needs Display + Error synthesis
     // that the transpile pipeline doesn't yet support. Phase 3

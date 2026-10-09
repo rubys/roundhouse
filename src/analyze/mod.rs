@@ -1736,9 +1736,10 @@ impl Analyzer {
                 if method.signature.is_some() {
                     continue;
                 }
-                if method.name.as_str() == "initialize" {
-                    continue;
-                }
+                // `initialize` takes the call-site param types (the
+                // `Klass.new(...)` sites feed it) but never a return:
+                // its body type is whatever the last assignment was.
+                let is_initialize = method.name.as_str() == "initialize";
                 let key = (owner.clone(), method.name.clone(), method.receiver);
                 let inferred = self.inferred_params.get(&key);
                 let has_params = inferred
@@ -1759,7 +1760,8 @@ impl Analyzer {
                     .filter(|t| !matches!(t, Ty::Fn { .. }))
                     .cloned()
                     .or_else(|| effective_return_ty(&method.body))
-                    .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped));
+                    .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped))
+                    .filter(|_| !is_initialize);
 
                 if !has_params && ret.is_none() {
                     continue;
