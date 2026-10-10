@@ -196,6 +196,86 @@ end
 }
 
 #[test]
+fn direct_rust_emit_preserves_data_record_storage_and_constructor_shape() {
+    use std::process::Command;
+
+    let source = r#"class FactoryExamples
+  ContentKey = Data.define(:digest, :source) do
+    def cache_key = digest
+  end
+end
+"#;
+    let mut app = ingest(
+        source,
+        "FactoryExamples::ContentKey.new(\"hash\", \"body\")",
+    );
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::rust::emit(&app);
+    let generated = files
+        .iter()
+        .find(|file| file.content.contains("pub struct ContentKey"))
+        .expect("direct emitter probe includes the nominal Data class");
+
+    assert!(generated.content.contains("#[derive(Clone)]"));
+    assert!(!generated.content.contains("#[derive(Clone, Default)]"));
+    assert!(generated.content.contains("digest: String,"));
+    assert!(generated.content.contains("source: String,"));
+    assert!(!generated.content.contains("pub digest: String"));
+    assert!(!generated.content.contains("pub source: String"));
+    assert!(
+        generated
+            .content
+            .contains("pub fn new(digest: &str, source: &str) -> Self"),
+        "{generated:?}"
+    );
+    assert!(generated.content.contains("pub fn digest(&self) -> String"));
+    assert!(generated.content.contains("self.digest()"));
+
+    let emitted = generated
+        .content
+        .lines()
+        .filter(|line| !line.starts_with("use crate::"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let harness = format!(
+        "{emitted}\nfn main() {{\n    let key = ContentKey::new(\"hash\", \"body\");\n    assert_eq!(key.digest(), \"hash\");\n    assert_eq!(key.source(), \"body\");\n    assert_eq!(key.cache_key(), \"hash\");\n}}\n"
+    );
+    let directory = std::env::temp_dir().join(format!(
+        "roundhouse-data-factory-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).expect("create temporary Rust compile directory");
+    let source_path = directory.join("data_factory.rs");
+    let binary_path = directory.join("data_factory");
+    std::fs::write(&source_path, harness).expect("write emitted record harness");
+    let compile = Command::new("rustc")
+        .arg("--edition=2024")
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .expect("run rustc on the directly emitted Data record");
+    assert!(
+        compile.status.success(),
+        "emitted record must compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&binary_path)
+        .output()
+        .expect("run emitted Data record harness");
+    std::fs::remove_dir_all(&directory).expect("remove temporary Rust compile directory");
+    assert!(
+        run.status.success(),
+        "emitted record behavior failed:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
 fn factories_outside_the_literal_subset_are_not_admitted() {
     let other = r#"module Other
   class Data

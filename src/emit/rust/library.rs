@@ -154,6 +154,10 @@ fn emit_library_class_inner(
         .next()
         .unwrap_or(class.name.0.as_str())
         .to_string();
+    let is_data_factory = matches!(
+        &class.origin,
+        Some(crate::dialect::LibraryClassOrigin::DataFactory { .. })
+    );
 
     let mut ivars = collect_ivar_types(&class.methods);
     if is_current_attributes {
@@ -323,7 +327,13 @@ fn emit_library_class_inner(
     // ivar references. If a future non-Default ivar lands, this
     // derive will fail at compile time and we'll need a per-class
     // override.
-    writeln!(out, "#[derive(Clone, Default)]").unwrap();
+    // Data's generated `initialize` requires every positional member, so a
+    // Default value would invent an invalid partially populated record.
+    if is_data_factory {
+        writeln!(out, "#[derive(Clone)]").unwrap();
+    } else {
+        writeln!(out, "#[derive(Clone, Default)]").unwrap();
+    }
     writeln!(out, "pub struct {name} {{").unwrap();
     // Fields are `pub` so legacy-emit-style controller test bodies
     // (`@article.title`, `Article.last.id`) — which use field
@@ -331,10 +341,16 @@ fn emit_library_class_inner(
     // against the same struct. The lowerer-emitted instance
     // methods (`title(&self) -> String { self.title.clone() }`)
     // still work alongside; Rust disambiguates field vs method
-    // by trailing parens at the call site.
+    // by trailing parens at the call site. Data-origin fields are the
+    // exception: their generated public readers have no writers, so the
+    // backing storage stays private to preserve that immutable contract.
     for (fname, ty) in &ivars {
         let field = super::expr::util::escape_rust_keyword(fname);
-        writeln!(out, "    pub {field}: {},", rust_ty(ty)).unwrap();
+        if is_data_factory {
+            writeln!(out, "    {field}: {},", rust_ty(ty)).unwrap();
+        } else {
+            writeln!(out, "    pub {field}: {},", rust_ty(ty)).unwrap();
+        }
     }
     out.push_str("}\n\n");
 

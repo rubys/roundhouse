@@ -457,17 +457,22 @@ IR, while preserving authored methods and allowing authored reader overrides.
 The analyzer infers the fixture's `digest` and `cache_key` as `String` from
 the actual constructor arguments. Ruby emission filters only these synthetic
 IR methods so native `Data.define` still supplies its constructor/readers; a
-regression checks the emitted source. Oracle review recommended this as the
-first source-typed record slice. Rust struct visibility/default
-policy, the owner constant binding, and heterogeneous nominal identity are
-not implemented; the production Rust refusal remains required until their
-combined emitted behavior is compiled and run. Validation on the
-`0bcc91695561` worktree: `data_factory_constants` passes 14/14,
-`cargo check --locked --all-targets` passes with existing warnings, the
-documentation-reference test passes 1/1, `git diff --check` passes, and the
-changed test file passes `rustfmt --check`. Repository-wide `rustfmt --check`
-is not clean because these large existing source files contain prior
-formatting drift; no broad formatting rewrite was made.
+regression checks the emitted source. The Rust emitter now gives Data-origin
+classes private member storage and omits the invalid `Default` derivation; a
+test compiles and executes the directly emitted `ContentKey` record through
+its constructor, generated readers and authored `cache_key` method. That test
+bypasses project admission intentionally: the owner constant binding and
+heterogeneous nominal identity remain unimplemented, so the production Rust
+refusal stays required until the Campfire consumer is compiled and executed.
+Oracle recommended this dependency order rather than tackling erasure and
+identity before a nominal record exists. Validation on the worktree based on
+`1031b440`: `data_factory_constants` passes 15/15, including direct `rustc`
+compile-and-run of the emitted record; `cargo check --locked --all-targets`
+passes with existing warnings, documentation references pass 1/1, and
+whitespace/test-file formatting checks pass. This is isolated record evidence,
+not a current-pin Campfire Cargo count or cache-consumer result. Repository-wide
+`rustfmt --check` is not clean because these large existing source files
+contain prior formatting drift; no broad formatting rewrite was made.
 
 - [ ] **F0.2 — unsigned permanent `last_room`:** implement the smallest typed
   jar operation used by `TrackedRoomVisit`, including Rails-compatible
