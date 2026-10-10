@@ -1961,6 +1961,19 @@ impl<'a> BodyTyper<'a> {
                         return Ty::Array { elem: other.clone() };
                     }
                 }
+                // `Array#fetch(i)` answers the element or raises
+                // IndexError; a default or a block answers a miss.
+                if method.as_str() == "fetch" {
+                    return match (args, block_ret) {
+                        ([_], None) => elem.clone(),
+                        ([_, default], None) => match &default.ty {
+                            Some(default) if !default.is_open() => union_of(elem.clone(), default.clone()),
+                            _ => Ty::Untyped,
+                        },
+                        ([_], Some(missed)) if !missed.is_open() => union_of(elem.clone(), missed.clone()),
+                        _ => Ty::Untyped,
+                    };
+                }
                 array_method(method, elem, block_ret)
             }
             // Relation-typed receiver — a chain started from a scope

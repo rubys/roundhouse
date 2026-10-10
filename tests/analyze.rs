@@ -2074,6 +2074,33 @@ end
 }
 
 #[test]
+fn array_fetch_types_as_the_element_its_default_or_its_block() {
+    // `fetch(i)` answers the element or raises IndexError; a default or
+    // a block answers a miss. `(first_list + second_list).fetch(0).options`
+    // reads the fetched element.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def compute
+    nums = [5, 6, 7]
+    [nums.fetch(0).succ, nums.fetch(9, 0).succ, nums.fetch(9) { 0 }.succ]
+  end
+end
+"#,
+        ),
+    ]);
+    let failures = send_dispatch_failures(&app);
+    for m in ["fetch", "succ"] {
+        assert!(!failures.iter().any(|f| f == m), "`{m}` should resolve; failures = {failures:?}");
+    }
+}
+
+#[test]
 fn create_view_columns_register_with_real_schema_types() {
     // A model backed by a SQL `create_view` gets its columns from the
     // SELECT `AS <alias>` list. A direct `table.column` projection
