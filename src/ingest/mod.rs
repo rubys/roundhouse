@@ -23,6 +23,7 @@ pub mod allow_browser;
 pub mod app;
 mod concern_accessors;
 pub mod controller;
+mod data_factory;
 pub mod expr;
 pub mod fixture;
 pub(crate) mod forwarding;

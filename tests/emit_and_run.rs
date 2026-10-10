@@ -1991,6 +1991,60 @@ raise "readonly body #{body.inspect}" unless body.include?("frozen")
         .assert_passes();
 }
 
+/// `ActiveRecord::Type::Boolean` casts as `ActiveModel::Type::Boolean`
+/// does (its parent), and `deserialize` casts the same way for a
+/// boolean. `ActiveSupport::StringInquirer.new(x)` is `x.inquiry`: a
+/// method returning it answers `<label>?` as a comparison with the
+/// label. Expected values are Rails 8.1's.
+#[test]
+fn ar_boolean_type_and_string_inquirer_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/flags\", to: \"flags#show\"\n",
+        )
+        .write(
+            "app/services/deploy_env.rb",
+            r#"class DeployEnv
+  def self.current(name)
+    ActiveSupport::StringInquirer.new(name.presence || "development")
+  end
+
+  def self.live?(name)
+    current(name).production?
+  end
+end
+"#,
+        )
+        .write(
+            "app/controllers/flags_controller.rb",
+            r#"class FlagsController < ApplicationController
+  def show
+    cast = ActiveRecord::Type::Boolean.new.cast(params[:a])
+    stored = ActiveRecord::Type::Boolean.new.deserialize(params[:b])
+    blank = ActiveRecord::Type::Boolean.new.cast(params[:c])
+    render plain: [cast, stored, blank.nil?, DeployEnv.live?(params[:env].to_s), DeployEnv.live?(""), DeployEnv.current("").development?].join(" ")
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/flags_controller_test.rb",
+            r#"require "test_helper"
+
+class FlagsControllerTest < ActionDispatch::IntegrationTest
+  test "boolean casts and inquirer predicates" do
+    get "/flags", params: { a: "0", b: "t", c: "", env: "production" }
+    assert_equal "false true true true false true", response.body
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/flags_controller_test.rb")
+        .assert_passes();
+}
+
 /// A job `perform_later` enqueues under the test adapter is held, not
 /// dropped, and a blockless `perform_enqueued_jobs only:` runs it
 /// (basecamp/once-campfire#296's tests). Its broadcast is JSON encoded
@@ -7968,6 +8022,19 @@ puts "Data factory identity, aliases, constructors, values and immutability pass
         };
         assert_eq!(ret.as_ref(), &Ty::Class { id, args: vec![] }, "{sidecar}");
     }
+}
+
+/// Execute emitted Ruby to check keyword/positional construction, `with`, method
+/// visibility, aliases, and lexical constants. A preceding `defined?` also catches
+/// factory declarations hoisted ahead of their original source position.
+#[test]
+fn custom_data_factories_preserve_methods_initializers_and_scope() {
+    let run = emit_and_run::real_blog()
+        .write("app/lib/factory_examples.rb", data_factory::CUSTOM_DECLARATIONS)
+        .edit("app/lib/factory_examples.rb", "    PREFIX = \"order\"", "    PREFIX = \"order\"\n    BEFORE = defined?(State)")
+        .run_ruby(&format!("{}\nraise 'declaration was hoisted' unless FactoryExamples::Stateful::BEFORE.nil?", data_factory::CUSTOM_ASSERTIONS));
+    run.assert_passes();
+    assert!(run.stdout.contains("custom Data factory contract passed"));
 }
 
 /// A file in `app/models/<model>/` often reopens the model only to

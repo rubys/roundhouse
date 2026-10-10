@@ -500,8 +500,29 @@ fn ingest_controller_body_item(
                 leading_comments,
             });
         }
+        let expr = ingest_expr(stmt, file)?;
+        // A hand-written `before_action`/`after_action`/`prepend_before_
+        // action` block whose body holds a `next` `restructure_next_in_
+        // block` can't lower to an if/unless would otherwise stay
+        // `Unknown` and be silently dropped at lowering time (`None`
+        // from `lambda_filter_target`, read as "no filter here" rather
+        // than "refused") — strict mode accepted the app and survey mode
+        // never saw it, since this shape carries a block and
+        // `report_unrecognized_controller_macros` only scans the
+        // `block: None` ones. Narrow to exactly that cause (see
+        // `next_restructure_refusal`'s own doc) so this stays a located
+        // diagnostic for the one shape that's actually refused, not a
+        // general unclaimed-block gap.
+        if next_restructure_refusal(&expr) {
+            return Err(IngestError::Unsupported {
+                file: file.to_string(),
+                message: format!(
+                    "`{method}` block holds a `next` that can't be restructured to an if/unless (filter dropped)"
+                ),
+            });
+        }
         return Ok(ControllerBodyItem::Unknown {
-            expr: ingest_expr(stmt, file)?,
+            expr,
             leading_comments,
             leading_blank_line: false,
         });
@@ -889,6 +910,153 @@ fn ir_symbol_list(e: &Expr) -> Vec<Symbol> {
 /// just an options hash to the block-form scan, which finds nothing to
 /// use it for and returns `None` for `only`/`except`/`if`/`unless`
 /// harmlessly).
+/// Lower `next unless cond` / `next if cond` followed by the rest of a
+/// block filter's body into `if cond … end` / `unless cond … end`
+/// wrapping that rest — the structured form `process_action` can inline
+/// directly, where the source shape cannot: unmodified, a block-form
+/// filter's `next` is copied into the dispatcher method's own body,
+/// which is not a block or a loop, so `ruby -c` rejects it ("Invalid
+/// next"). Called from the one resolver (`lambda_filter_target`) both a
+/// hand-written `before_action do … end` and a concern macro's
+/// reconstructed block (`ingest::app::block_filter_from_macro_stmt`) go
+/// through, so this covers both without a separate lowering to drift
+/// out of step.
+///
+/// `None` only when a `next` remains that this can't account for — a
+/// bare `next` not guarded by exactly this modifier-if/unless shape, one
+/// carrying a value, or one in the middle of some other expression —
+/// rather than one legitimately nested in a block or loop of its OWN
+/// (`.each do |x| next if x.odd?; … end`, `while … next if … end`):
+/// those survive emission as real Ruby blocks and loops, so a `next`
+/// inside one was always fine and is left untouched.
+fn restructure_next_in_block(body: &Expr) -> Option<Expr> {
+    if !contains_next_outside_loop_or_block(body) {
+        return Some(body.clone());
+    }
+    let stmts: Vec<Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![body.clone()],
+    };
+    let rebuilt = restructure_next_stmts(&stmts)?;
+    Some(match rebuilt.len() {
+        1 => rebuilt.into_iter().next().expect("checked non-empty"),
+        _ => Expr::new(body.span, ExprNode::Seq { exprs: rebuilt }),
+    })
+}
+
+/// `restructure_next_in_block`'s statement-list half: find the first
+/// `next unless`/`next if` guard, recursively restructure everything
+/// after it (which may hold a guard of its own), and wrap that
+/// (restructured) remainder in the equivalent `if`/`unless`. Statements
+/// ahead of the guard are untouched — they always ran unconditionally,
+/// and still do.
+fn restructure_next_stmts(stmts: &[Expr]) -> Option<Vec<Expr>> {
+    for (i, stmt) in stmts.iter().enumerate() {
+        if let Some((cond, is_unless)) = next_guard_cond(stmt) {
+            let rest = restructure_next_stmts(&stmts[i + 1..])?;
+            let rest_expr = match rest.len() {
+                0 => Expr::new(stmt.span, ExprNode::Seq { exprs: vec![] }),
+                1 => rest.into_iter().next().expect("checked non-empty"),
+                _ => Expr::new(stmt.span, ExprNode::Seq { exprs: rest }),
+            };
+            let empty = Expr::new(stmt.span, ExprNode::Seq { exprs: vec![] });
+            let wrapped = if is_unless {
+                // `next unless cond` — the rest runs only when cond holds.
+                ExprNode::If { cond: cond.clone(), then_branch: rest_expr, else_branch: empty }
+            } else {
+                // `next if cond` — the rest runs only when cond does NOT.
+                ExprNode::If { cond: cond.clone(), then_branch: empty, else_branch: rest_expr }
+            };
+            let mut out: Vec<Expr> = stmts[..i].to_vec();
+            out.push(Expr::new(stmt.span, wrapped));
+            return Some(out);
+        }
+        // Any OTHER `next` reachable without crossing into a nested
+        // block/loop is a shape this restructuring does not understand —
+        // refuse rather than let it ride through to invalid Ruby.
+        if contains_next_outside_loop_or_block(stmt) {
+            return None;
+        }
+    }
+    Some(stmts.to_vec())
+}
+
+/// `next unless cond` / `next if cond` as Prism's unless-desugar leaves
+/// it (`ingest::expr`'s `UnlessNode` arm swaps branches, same IR as an
+/// `if` with the condition negated): a modifier-if whose "no else"
+/// branch is the `nil` default and whose other branch is a bare `next`
+/// with no value. Returns the condition and which branch held the
+/// `next` — `true` for `next unless` (the `next` sat in `else_branch`).
+fn next_guard_cond(stmt: &Expr) -> Option<(&Expr, bool)> {
+    let ExprNode::If { cond, then_branch, else_branch } = &*stmt.node else { return None };
+    let is_nil = |e: &Expr| matches!(&*e.node, ExprNode::Lit { value: Literal::Nil });
+    let is_bare_next = |e: &Expr| matches!(&*e.node, ExprNode::Next { value: None });
+    if is_bare_next(then_branch) && is_nil(else_branch) {
+        return Some((cond, false));
+    }
+    if is_nil(then_branch) && is_bare_next(else_branch) {
+        return Some((cond, true));
+    }
+    None
+}
+
+/// Whether `expr` holds a `Next` reachable WITHOUT crossing into a
+/// nested block or loop of its own — the region that, left as `next` in
+/// a block-form filter's body, would be inlined directly into
+/// `process_action`, a plain method with no block or loop to jump
+/// within. A `Next` found only inside a `Lambda` (any block/proc
+/// literal — `.each do |x| … end`) or a `While` (while/until) belongs to
+/// THAT block/loop, which survives emission as a real one, so this does
+/// not descend into either.
+fn contains_next_outside_loop_or_block(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Next { .. } => true,
+        ExprNode::Lambda { .. } | ExprNode::While { .. } => false,
+        _ => {
+            let mut found = false;
+            expr.node.for_each_child(&mut |c| {
+                if !found && contains_next_outside_loop_or_block(c) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
+}
+
+/// True when `expr` is a recognized lambda/proc/block-target filter
+/// macro call (`before_action`/`after_action`/`prepend_before_action`,
+/// with an attached block or a lambda-literal first argument — exactly
+/// what `lambda_filter_target` itself requires to extract a body) whose
+/// ONE reason for refusal is a `next` inside that body
+/// `restructure_next_in_block` can't lower to an `if`/`unless` — never
+/// any other reason `lambda_filter_target` might return `None` for (the
+/// wrong macro name, no block/lambda argument at all, or some other
+/// shape `ir_lambda_body` doesn't recognize). Narrowing to exactly this
+/// one cause is what lets the caller report it specifically, rather than
+/// claim every unclaimed block shape as a gap — a wider ledger entry is
+/// #778's, not this one's.
+///
+/// `pub(super)` (not private): `ingest::app`'s `expand_class_body_macros`
+/// reuses this exact check for the MACRO-expanded path — a concern
+/// macro's own block filter (`block_filter_from_macro_stmt`) refuses the
+/// same shape the same way, and the two call sites agree on what counts
+/// by sharing this one function rather than drifting apart.
+pub(super) fn next_restructure_refusal(expr: &Expr) -> bool {
+    let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
+        return false;
+    };
+    if !is_lambda_filter_macro(method.as_str()) {
+        return false;
+    }
+    let body = match block {
+        Some(b) => ir_lambda_body(b),
+        None => args.first().and_then(ir_lambda_body),
+    };
+    let Some(body) = body else { return false };
+    restructure_next_in_block(&body).is_none()
+}
+
 pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
     let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
         return None;
@@ -904,6 +1072,12 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
             (ir_lambda_body(first)?, &args[1..])
         }
     };
+    // `next` inside this body would otherwise be copied verbatim into
+    // `process_action` — a plain method, not a block or a loop — which
+    // `ruby -c` rejects. Both surface forms funnel through here (a
+    // hand-written `before_action do … end` and a concern macro's
+    // reconstructed block alike), so lowering it once here covers both.
+    let body = restructure_next_in_block(&body)?;
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
     let mut if_cond: Option<Symbol> = None;

@@ -3,7 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::App;
-use crate::expr::{Expr, ExprNode, Literal};
+use crate::diagnostic::Diagnostic;
+use crate::dialect::LibraryClassOrigin;
+use crate::expr::{Expr, ExprNode, Literal, RESOLVED_DATA_FACTORY};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -11,6 +13,9 @@ use crate::ty::Ty;
 use super::ClassInfo;
 use super::body::ConstResolver;
 
+/// Register class identities for built-in `Data.define` constants with distinct
+/// literal members, retaining any lifted custom methods. Generated readers stay
+/// untyped; rejected declarations are absent from the returned span-to-type map.
 pub(super) fn register(
     app: &App,
     resolver: &ConstResolver,
@@ -54,18 +59,20 @@ pub(super) fn register(
             return;
         };
         // Rehomed constants are not emitted in their original source scope.
-        if id.0.as_str() != format!("{}::{}", owner.0.as_str(), name.as_str()) {
-            return;
-        }
-        // The one class that may already be registered under this name is
-        // the factory's own block (`Data.define(:a) do def … end`, ingested
-        // as a parentless library class of that name): the factory adds
-        // `new` and the readers beside its methods. Anything else — a
-        // source class that happens to share the name — is not this Data.
+        let custom = app.library_classes.iter().any(|class| {
+            class.name == id && matches!(class.origin,
+                Some(LibraryClassOrigin::DataFactory { declaration_span }) if declaration_span == value.span)
+        });
+        // The main branch also ingests Struct block classes into the same
+        // registry. Preserve those generated declarations when a factory
+        // adds its constructor and readers.
         let reopened = app.library_classes.iter().any(|class| {
             class.name == id && !class.is_module && class.parent.is_none()
         });
-        if classes.contains_key(&id) && !reopened {
+        if id.0.as_str() != format!("{}::{}", owner.0.as_str(), name.as_str())
+            || (classes.contains_key(&id) && !custom && !reopened)
+            || (custom && app.library_classes.iter().filter(|class| class.name == id).count() != 1)
+        {
             return;
         }
         let instance = Ty::Class {
@@ -75,12 +82,14 @@ pub(super) fn register(
         let mut info = classes.remove(&id).unwrap_or_default();
         info.class_methods
             .insert(Symbol::from("new"), instance.clone());
+        info.declares_constructor = true;
         // A member declaration establishes a reader, not its value type.
         // Data has no generated writers. A block method of the same name
         // overrides the reader, as it does in Ruby.
         for member in members {
             info.instance_methods.entry(member).or_insert(Ty::Untyped);
         }
+        info.instance_methods.entry(Symbol::from("with")).or_insert(instance.clone());
         classes.insert(id, info);
         factories.insert(value.span, instance);
     };
@@ -90,6 +99,35 @@ pub(super) fn register(
         }
     }
     factories
+}
+
+/// Report lifted custom factories whose declaration was not admitted by analysis
+/// or whose generated class is subclassed. Lifting methods alone does not establish
+/// that the original factory belongs to the supported subset.
+pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
+    if !app.library_classes.iter().any(|class| matches!(class.origin, Some(LibraryClassOrigin::DataFactory { .. }))) {
+        return Vec::new();
+    }
+    let resolver = app.const_resolver.for_sources(&app.sources);
+    let mut diagnostics = Vec::new();
+    for factory in &app.library_classes {
+        let Some(LibraryClassOrigin::DataFactory { declaration_span }) = factory.origin else {
+            continue;
+        };
+        let admitted = app.library_classes.iter().flat_map(|class| &class.constants)
+            .any(|(_, value)| value.span == declaration_span && value.decisions & RESOLVED_DATA_FACTORY != 0);
+        let subclassed = app.library_classes.iter().any(|class| {
+            class.parent.as_ref().is_some_and(|parent| {
+                let path: Vec<_> = parent.0.as_str().split("::").map(Symbol::from).collect();
+                resolver.declaration_name(class.parent_span, &path) == Some(factory.name.0.as_str())
+            })
+        });
+        if !admitted || subclassed {
+            diagnostics.push(Diagnostic::unsupported(declaration_span, None, "Data.define",
+                "custom Data factories require the built-in Data, distinct literal member names, and no class reopening or subclassing"));
+        }
+    }
+    diagnostics
 }
 
 fn reader_name(member: &str) -> bool {

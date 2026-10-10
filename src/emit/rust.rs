@@ -849,7 +849,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // from that Ruby file and inherits the split, but these
                 // model impls are generated here, so a tree-level grep
                 // for the name finds it in the runtime and still misses
-                // the model. `smoke (rust)` is what caught that.
+                // the model. `smoke (rust)` is what caught that, and
+                // again for `_insert_row` (fixtures and bulk inserts:
+                // timestamps filled, no validations, no callbacks).
                 format!(
                     "\nimpl {name} {{\n\
                         pub fn mark_persisted_bang(&mut self) {{ }}\n\
@@ -864,6 +866,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                             if self.id == 0 {{ self.id = self._adapter_insert();{after_create_commit} }}\n\
                             else if Self::_adapter_exists_by_id_pred(self.id) {{ self._adapter_update();{after_update_commit} }}\n\
                             else {{ let _ = self._adapter_insert();{after_create_commit} }}\n\
+                            true\n\
+                        }}\n\
+                        pub fn _insert_row(&mut self) -> bool {{\n\
+                            self.fill_timestamps(true);\n\
+                            self.id = self._adapter_insert();\n\
                             true\n\
                         }}\n\
                         pub fn save_bang(&mut self) -> Self {{\n\

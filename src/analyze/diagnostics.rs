@@ -46,6 +46,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // field's resolved value.
     out.extend(super::graphql::diagnose(app, diagnose_expr));
     out.extend(super::enum_raw_input::diagnose(app));
+    out.extend(super::data::diagnose(app));
     // Rubydex's unresolved constants emit refusal stubs. Collect those
     // annotations from support methods/defaults/constants as well, so
     // an emitted raise cannot be hidden by the library diagnostic policy.

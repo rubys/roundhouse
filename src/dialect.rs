@@ -944,6 +944,12 @@ impl LibraryClass {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "template", rename_all = "snake_case")]
 pub enum LibraryClassOrigin {
+    /// Methods lifted from a constant-assigned `Data.define` block. The call span
+    /// links this class to its owner's constant so emission restores the block
+    /// without changing its declaration order or lexical scope.
+    DataFactory {
+        declaration_span: Span,
+    },
     /// Validated Alba source declarations expanded to ordinary methods before
     /// inference. Analysis checks each constructor site, not a joined type
     /// alone. This remains a source library class, not a model/params sibling.

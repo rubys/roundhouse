@@ -81,14 +81,16 @@ pub const DATA_BLOCK_METHODS: Contract = Contract {
       digest
     end
 
+    # The enclosing visibility marker does not make an explicit singleton
+    # method private; Ruby keeps `build` public.
+    def self.build(value)
+      new(digest: value)
+    end
+
     public
 
     def encoded_digest
       DataKeySupportController.encode(digest)
-    end
-
-    def self.build(value)
-      new(digest: value)
     end
   end
 

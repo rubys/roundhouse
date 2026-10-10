@@ -48,8 +48,8 @@ is the closing check, once our own walls are down.
 
 | # | Blocker | Kind | Routes that reach it | Owner |
 |---|---|---|---|---|
-| 1 | **sqlite3** 2.9.3 | C ext not declared Ractor-safe; module-level `ForkSafety` registry | every route that touches the DB (all but `/up`) | sqlite3-ruby (Mike Dalessandro) |
-| 2 | **nokogiri** 1.19.2, and through it **loofah** 2.25.1 and **rails-html-sanitizer** 1.7.0 | C ext not declared Ractor-safe | cold room page, messages page, POST message (rich-text sanitize) | Mike Dalessandro (all three) |
+| 1 | **sqlite3** 2.9.3 | C ext not declared Ractor-safe; module-level `ForkSafety` registry | every route that touches the DB (all but `/up`) | sqlite3-ruby (Mike Dalessio) |
+| 2 | **nokogiri** 1.19.2, and through it **loofah** 2.25.1 and **rails-html-sanitizer** 1.7.0 | C ext not declared Ractor-safe | cold room page, messages page, POST message (rich-text sanitize) | Mike Dalessio (all three) |
 | 3 | **connection_pool** 3.0.2, via **net-http-persistent** 4.0.8 | global `INSTANCES` WeakMap mutated in `#initialize` | POST message (first one builds the Web Push pool) | connection_pool (Mike Perham); net-http-persistent |
 | 4 | **openssl** 4.0.2 `OpenSSL::Digest::SHA256.new` | subclass `#initialize` is a `define_method` lambda (unshareable Proc) | sign-in page, cold room page (key derivation) | ruby/openssl; **ours to route around** |
 | 5 | **our runtime**: `Db`, caches, lazy loads | module-level mutable state | every route | us |

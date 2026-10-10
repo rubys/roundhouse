@@ -163,6 +163,16 @@ pub fn emit_library_class_with_registry(
     // directly). Subclass constructors overwrite via the outermost-
     // wins property: NewArticle → NewApplicationRecord →
     // NewActiveRecordBase each set Self; the outer call wins.
+    // Build the self-method registry: Ruby names of real (non-attr)
+    // instance methods on this class (the constructor reads it too). Consumed by `emit_send` (via
+    // `EmitCtx.self_methods`) to decide whether `self.foo` emits as
+    // a method call (`self.Foo()`) or a field read (`self.Foo`).
+    // attr_reader/writer-backed slots are NOT in the set — those
+    // are struct fields and the parenless read is the right shape.
+    // Class methods aren't included either; implicit-self calls to
+    // them inside other class methods route through the existing
+    // SelfRef-in-class-method bare-fn path (`ClassName_method()`).
+    let self_methods = collect_self_methods(&class.methods, &fields);
     let wire_self = ar_chain.contains(&name);
     if let Some(init) = class.methods.iter().find(|m| {
         matches!(m.receiver, MethodReceiver::Instance) && m.name.as_str() == "initialize"
@@ -173,6 +183,7 @@ pub fn emit_library_class_with_registry(
             embedded_parent.as_deref(),
             parent_is_variadic,
             wire_self,
+            &self_methods,
         ));
         out.push('\n');
     } else if let Some(ref parent_ty) = embedded_parent {
@@ -185,16 +196,6 @@ pub fn emit_library_class_with_registry(
         out.push('\n');
     }
 
-    // Build the self-method registry: Ruby names of real (non-attr)
-    // instance methods on this class. Consumed by `emit_send` (via
-    // `EmitCtx.self_methods`) to decide whether `self.foo` emits as
-    // a method call (`self.Foo()`) or a field read (`self.Foo`).
-    // attr_reader/writer-backed slots are NOT in the set — those
-    // are struct fields and the parenless read is the right shape.
-    // Class methods aren't included either; implicit-self calls to
-    // them inside other class methods route through the existing
-    // SelfRef-in-class-method bare-fn path (`ClassName_method()`).
-    let self_methods = collect_self_methods(&class.methods, &fields);
 
     for m in &class.methods {
         // Skip attr_reader / attr_writer (now fields) and the
@@ -554,6 +555,7 @@ fn emit_constructor(
     embedded_parent: Option<&str>,
     parent_is_variadic: bool,
     wire_self_back_pointer: bool,
+    self_methods: &std::rc::Rc<std::collections::HashSet<String>>,
 ) -> String {
     let (params, optional_unpack) = render_constructor_params(init);
     let mut out = format!("func New{class_name}({params}) *{class_name} {{\n");
@@ -606,6 +608,7 @@ fn emit_constructor(
         out.push_str(&optional_unpack);
         let mut ctx = EmitCtx::none();
         ctx.void_method = true;
+        ctx.self_methods = Some(std::rc::Rc::clone(self_methods));
         for p in &init.params {
             ctx.declare_param(p.name.as_str());
         }
@@ -814,7 +817,12 @@ fn sanitize_type_name(name: &str) -> String {
 fn embedded_parent_type(class: &LibraryClass) -> Option<String> {
     let parent = class.parent.as_ref()?;
     let raw = parent.0.as_str();
-    if matches!(raw, "Object" | "BasicObject") {
+    // Ruby's exception roots have no Go type to embed; a class under
+    // one is a plain struct, like the framework error sentinels.
+    if matches!(
+        raw,
+        "Object" | "BasicObject" | "Exception" | "StandardError" | "RuntimeError" | "ArgumentError"
+    ) {
         return None;
     }
     Some(sanitize_type_name(raw))
@@ -1365,6 +1373,8 @@ fn go_zero_value(ty: &Ty) -> String {
                     Ty::Hash { .. } | Ty::Array { .. } | Ty::Class { .. } => {
                         "nil".to_string()
                     }
+                    // `String?` is a Go `string`, as in `coerce_return_value`.
+                    Ty::Str | Ty::Sym => "\"\"".to_string(),
                     _ => "nil".to_string(),
                 }
             } else {

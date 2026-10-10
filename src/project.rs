@@ -2953,6 +2953,7 @@ fn ruby_family_runtime_files(
              # commonmark-java Markly shim — from the same list, minus that\n\
              # one name.)\n\
              require_relative \"module_delegate\"\n\
+             require_relative \"open_telemetry_facade\"\n\
              {}{}",
             gem_require_block(&[]),
             WEB_PUSH_STUB_REOPEN
@@ -2976,6 +2977,7 @@ fn ruby_family_runtime_files(
                  # than carrying a second copy.\n\
                  {}\
                  require_relative \"module_delegate\"\n\
+                 require_relative \"open_telemetry_facade\"\n\
                  {}{}",
                 markly_require,
                 gem_require_block(&["markly"]),
@@ -5239,6 +5241,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         // spin_shape replaces it with `require "nokogiri"` (spinel-nokogiri)
         // when the app names Nokogiri.
         "nokogiri_facade",
+        // OpenTelemetry's non-recording-span stub — never swapped for a
+        // real gem (see the file's own header); still its own file, same
+        // whole-file-grain reasoning. `gem_facades.rb`'s own
+        // `require_relative` anchors it for Spinel; the CRuby/JRuby
+        // rewrite below (which replaces that file's content outright)
+        // carries its own matching `require_relative` so it is never
+        // dropped there.
+        "open_telemetry_facade",
         "inflector",
         "inflector_ext",
         "json_builder",

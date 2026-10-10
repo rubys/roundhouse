@@ -285,7 +285,7 @@ module ActionController
     def [](key)
       i = index_of(key)
       return nil if i < 0
-      @vals[i]
+      val_at(i)
     end
 
     # Void: a writer that returns the stored value would leak a
@@ -302,9 +302,9 @@ module ActionController
       if i < 0
         @keys << key
         @lower << key.downcase
-        @vals << value
+        @vals << value.to_s
       else
-        @vals[i] = value
+        @vals[i] = value.to_s
       end
     end
 
@@ -340,7 +340,7 @@ module ActionController
     def delete(key)
       i = index_of(key)
       return nil if i < 0
-      value = @vals[i]
+      value = val_at(i)
       j = i
       while j + 1 < @keys.length
         @keys[j] = @keys[j + 1]
@@ -410,8 +410,23 @@ module ActionController
   #                                 stale-while-revalidate=N?,
   #                                 stale-if-error=N?, immutable?, extras
   class CacheControlStore
+    # The fields are assigned here rather than through `clear`: a
+    # Rust constructor has no `self` to call a method on yet.
     def initialize
-      clear
+      @public = false
+      @private = false
+      @no_store = false
+      @no_cache = false
+      @must_revalidate = false
+      @must_understand = false
+      @immutable = false
+      @max_age = 0
+      @has_max_age = false
+      @stale_while_revalidate = 0
+      @has_stale_while_revalidate = false
+      @stale_if_error = 0
+      @has_stale_if_error = false
+      @extras = []
     end
 
     def public?
