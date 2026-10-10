@@ -24,6 +24,7 @@ fn synth_exists_probe(
     conditions: Option<Predicate>,
     params: Vec<Param>,
     param_tys: Vec<(Symbol, Ty)>,
+    param_binds: bool,
 ) -> MethodDef {
     let op = ArelOp::Select(Select {
         single_record: false,
@@ -43,7 +44,7 @@ fn synth_exists_probe(
         name: Symbol::from(name),
         receiver: MethodReceiver::Class,
         params,
-        body: SqliteVisitor.visit(&op, schema, owner),
+        body: SqliteVisitor { param_binds }.visit(&op, schema, owner),
         signature: Some(fn_sig(param_tys, Ty::Bool)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
@@ -57,10 +58,10 @@ fn synth_exists_probe(
 /// Unscoped emptiness without COUNT(*) — `Base.any?` / `none?` on
 /// Level-3 models. Same Exists emit as `_adapter_exists_by_id?`, no WHERE.
 pub(super) fn synth_adapter_any(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
-    synth_exists_probe(owner, table, schema, "_adapter_any?", None, vec![], vec![])
+    synth_exists_probe(owner, table, schema, "_adapter_any?", None, vec![], vec![], false)
 }
 
-pub(super) fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
+pub(super) fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema, param_binds: bool) -> MethodDef {
     let id = Symbol::from("id");
     let key = key_ty(table);
     synth_exists_probe(
@@ -71,6 +72,7 @@ pub(super) fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema:
         Some(eq_id_param(table, &id)),
         vec![Param::positional(id.clone())],
         vec![(id, key)],
+        param_binds,
     )
 }
 

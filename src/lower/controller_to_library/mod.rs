@@ -241,6 +241,8 @@ pub fn lower_controllers_with_arel_views_and_assocs(
 pub struct LowerControllerOptions<'a> {
     /// Ruby-family nullable read values; strict-target defaults stay unchanged.
     pub ruby_read_values: bool,
+    /// The selected Db shim supports typed positional binds for read predicates.
+    pub param_binds: bool,
     /// App `Schema` — enables the Arel SQL-chain lowering pass.
     pub schema: Option<&'a crate::schema::Schema>,
     /// App views — scanned for `*.json.jbuilder` format dispatch and the
@@ -298,6 +300,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
 ) -> Vec<LibraryClass> {
     let LowerControllerOptions {
         ruby_read_values,
+        param_binds,
         schema,
         views,
         library_classes,
@@ -562,6 +565,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                     rewritten |= crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                         &mut method.body, schema, &classes, assocs, ruby_read_values,
                         &relation_scope_names,
+                        crate::lower::arel::SqliteVisitor { param_binds },
                     );
                 }
             }

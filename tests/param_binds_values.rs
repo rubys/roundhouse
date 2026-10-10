@@ -8,6 +8,16 @@ mod emit_and_run;
 use roundhouse::project::BuildTarget;
 use std::process::Command;
 
+// These probes run on the three supported local runtimes. Pin their default
+// independently of the production capability table, then inspect actual emit.
+fn expected_binds(target: BuildTarget) -> bool {
+    match std::env::var("ROUNDHOUSE_PARAM_BINDS").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => target == BuildTarget::Spinel,
+    }
+}
+
 fn overlay() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write(
@@ -109,14 +119,16 @@ fn success(command: &mut Command) {
 
 fn emitted(test: &str, target: BuildTarget) {
     if std::env::var_os("ROUNDHOUSE_BINDS_CHILD").is_none() {
-        for mode in ["0", "1"] {
-            println!("{test}: ROUNDHOUSE_PARAM_BINDS={mode}");
-            success(
-                Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", test, "--include-ignored", "--nocapture"])
-                    .env("ROUNDHOUSE_BINDS_CHILD", "1")
-                    .env("ROUNDHOUSE_PARAM_BINDS", mode),
-            );
+        for mode in [None, Some("0"), Some("1")] {
+            println!("{test}: ROUNDHOUSE_PARAM_BINDS={mode:?}");
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", test, "--include-ignored", "--nocapture"])
+                .env("ROUNDHOUSE_BINDS_CHILD", "1")
+                .env_remove("ROUNDHOUSE_PARAM_BINDS");
+            if let Some(mode) = mode {
+                child.env("ROUNDHOUSE_PARAM_BINDS", mode);
+            }
+            success(&mut child);
         }
         return;
     }
@@ -146,7 +158,7 @@ fn emitted(test: &str, target: BuildTarget) {
             .0;
         assert!(body.contains("Db.prepare("), "{header}{body}");
         assert!(!body.contains("Reading.where("), "{header}{body}");
-        if method.starts_with("optional_") && std::env::var("ROUNDHOUSE_PARAM_BINDS").unwrap() == "1" {
+        if method.starts_with("optional_") && expected_binds(target) {
             assert!(body.contains(" IS NULL"), "{header}{body}");
             assert!(body.contains(" = ?"), "{header}{body}");
             assert!(!body.contains(" IS ?"), "{header}{body}");
@@ -157,7 +169,7 @@ fn emitted(test: &str, target: BuildTarget) {
             let bind = if method == "ratio_matches" { "Db.bind_text(" } else { "Db.bind_text_opt(" };
             assert_eq!(
                 body.contains(bind),
-                std::env::var("ROUNDHOUSE_PARAM_BINDS").unwrap() == "1",
+                expected_binds(target),
                 "{header}{body}"
             );
         }
@@ -167,7 +179,7 @@ fn emitted(test: &str, target: BuildTarget) {
         if method.starts_with("string_time") {
             assert!(!body.contains("ActiveSupport.format_db_time("), "{header}{body}");
             let bind = if method == "string_time_matches" { "Db.bind_text(" } else { "Db.bind_text_opt(" };
-            assert_eq!(body.contains(bind), std::env::var("ROUNDHOUSE_PARAM_BINDS").unwrap() == "1", "{header}{body}");
+            assert_eq!(body.contains(bind), expected_binds(target), "{header}{body}");
         } else if method.contains("time") || method == "pair_matches" {
             assert!(
                 body.contains("ActiveSupport.format_db_time("),
@@ -177,11 +189,11 @@ fn emitted(test: &str, target: BuildTarget) {
         if method == "time_matches_value(value)" {
             assert_eq!(
                 body.contains("Db.bind_text("),
-                std::env::var("ROUNDHOUSE_PARAM_BINDS").unwrap() == "1",
+                expected_binds(target),
                 "{header}{body}"
             );
         }
-        if method == "pair_matches" && std::env::var("ROUNDHOUSE_PARAM_BINDS").unwrap() == "1" {
+        if method == "pair_matches" && expected_binds(target) {
             assert!(
                 body.contains("Db.bind_int(stmt, 1, @key)"),
                 "{header}{body}"
@@ -289,7 +301,7 @@ end
     let source = std::fs::read_to_string(dir.join("app/models/calendar_entry.rb")).unwrap();
     assert!(source.contains("ActiveSupport.format_db_date(@date_needle)"), "{source}");
     assert!(!source.contains("ActiveSupport.format_db_date(@text_needle)"), "{source}");
-    if std::env::var("ROUNDHOUSE_PARAM_BINDS").unwrap() == "1" {
+    if expected_binds(BuildTarget::Ruby) {
         assert!(source.contains("Db.bind_text_opt("), "{source}");
         assert!(source.contains(" IS NULL"), "{source}");
         assert!(source.contains(" = ?"), "{source}");

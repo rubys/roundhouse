@@ -74,6 +74,7 @@ SPINEL_TESTS = [
     "spinel_db_lease",
     *PARAM_BIND_TESTS,
     "spinel_stmt_cache_lru",
+    "stmt_stats",
     "db_sqlite_concurrency",
     "spinel_param_builder",
     "spinel_net_http_start",
@@ -354,6 +355,7 @@ def native_coverage(path):
                     "spinel_db_lease",
                     *PARAM_BIND_TESTS,
                     "spinel_stmt_cache_lru",
+                    "stmt_stats",
                     "db_sqlite_concurrency",
                 )
             )
