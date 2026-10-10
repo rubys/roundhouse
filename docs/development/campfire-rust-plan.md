@@ -1,15 +1,19 @@
 # Campfire on Rust: compile-to-working plan
 
-**Status:** the pinned input and diagnostic inventory are reproducible, and
-canonical `rubys/roundhouse:main` has been merged locally into the PR branch.
-Strict Rust generation still refuses the app before Cargo. The current Rails
-path facade and request-cookie transport are tested foundations, not a
-Campfire compile improvement: the clean merged-base survey has 2,597 errors;
-the exact source snapshot at `898b4606` has 2,599 errors. Its normalized
-diagnostic inventory is identical to `33c1bc0` (2,361 fingerprints; no groups
-added, removed, or changed), so the production cookie-lifecycle test refactor
-did not move the Campfire compiler wall. Source-level root-cause triage and
-semantic implementation work remain open.
+**Status:** canonical `rubys/roundhouse:main` at `5d3d144e` is merged locally
+into this PR branch; the merge commit is `863dd24b`. The mainline Campfire pin
+has advanced from `32b4144b` to `edbc779f`. On the current Roundhouse source,
+strict analysis of `edbc779f` reports 0 errors and 460 warnings, but Rust
+project generation stops before writing files because Rust has no supported
+`Data.define` representation yet. Therefore there is no Cargo count for the
+current CI pin. The last comparable emitted-project survey remains the older
+Campfire `32b4144b` at `863dd24b`: 2,577 errors / 575 warnings / 2,339
+fingerprints. The exact older-pin source at `898b4606` had 2,599 / 572 / 2,361;
+the changed inventory removes 23 groups/errors and adds one, for 22 fewer
+errors overall after the mainline integration. Do not attribute this
+cross-commit movement to the cookie-lifecycle harness. Next priority is to
+implement and behavior-test the finite Data record needed to unlock the new
+input's survey, then execute Rails config/header and unsigned cookie slices.
 
 **Scope:** the ONCE Campfire revision pinned below, emitted as a Rust project by
 Roundhouse. “Rust compiles” and “Campfire works” are deliberately separate
@@ -25,22 +29,23 @@ falling, or a test being selected is not completion evidence.
 
 | Input | Snapshot / status |
 |---|---|
-| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`; after publication GitHub REST confirmed code-bearing head `898b4606ba85382e816976eaf8ee79121c5b18cc`. At that head there were zero workflow check-runs and only CodeRabbit `SUCCESS` with “review skipped: draft pull request”; this is not CI or a review. Any later docs-only head still needs its own status check. The prior run [38038649634](https://github.com/rubys/roundhouse/actions/runs/38038649634) on `5647c88` was red in `compare (rust)`, `smoke (rust)`, two of three unit shards, `compact-required`, and `CI summary`; Campfire compare/conformance passed, while Campfire smoke and extra-target lanes were skipped. Keep Draft and do not merge unless Thomas explicitly instructs otherwise |
-| Local integration base | `4a70cd0e3e4d67004fb247448329a1bab0d754df` merges canonical `rubys/roundhouse:main` at `cd8656979a9e9c13eb5a25e0bbcc6da5d793565e` into the PR branch whose parent was `5647c88e3e48e8e3fcfda31b2c761514d873e4af`; the one `tests/support/native_http.rs` conflict preserved upstream session-aware `get()` and the existing explicit-cookie override in `get_with_headers()`. The merge is published in PR head `33c1bc0` |
-| Campfire | CI pin and checked-out SHA `32b4144b5206304fa8d4c67455a753e2d3c16635` |
-| Strict analyzer | `roundhouse check --strict`: exit 0, 0 errors, 407 warnings |
-| Strict Rust project generation | Exit 1 before writing a project: 74 unsupported/syntax diagnostics and 109 type diagnostics (183 reported errors total). This is a generator refusal, not a rustc count |
-| Survey-only emitted Rust | The exact `898b4606` source survey used `--survey --allow-unsupported`; it emitted 488 files, including 377 Rust source files (489 files after the captured `Cargo.lock` was added for checking). Generated lock SHA-256 is `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` |
+| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`; last REST confirmation was code head `898b4606ba85382e816976eaf8ee79121c5b18cc`. The current local head `863dd24bd436cc9096fb4e9822c8bca1e77e7bc9` contains a mainline merge and is not yet published. At `898b4606`, GitHub reported zero workflow check-runs and only CodeRabbit `SUCCESS` with “review skipped: draft pull request”; this is not CI or a review. Any later head still needs its own status check. The prior run [38038649634](https://github.com/rubys/roundhouse/actions/runs/38038649634) on `5647c88` was red in `compare (rust)`, `smoke (rust)`, two of three unit shards, `compact-required`, and `CI summary`; Campfire compare/conformance passed, while Campfire smoke and extra-target lanes were skipped. Keep Draft and do not merge unless Thomas explicitly instructs otherwise |
+| Local integration base | `4a70cd0e3e4d67004fb247448329a1bab0d754df` merged canonical main at `cd8656979a9e9c13eb5a25e0bbcc6da5d793565e`; new merge `863dd24bd436cc9096fb4e9822c8bca1e77e7bc9` merges canonical main `5d3d144ed57db6be1e235073f378fd9427896e0a`. Its single `tests/support/native_http.rs` conflict preserves automatic session cookies for ordinary GETs and explicit-cookie override in `get_with_headers()`. History was not rewritten. `cargo check --locked --all-targets` passed after the merge |
+| Campfire target | Current canonical CI pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8`; earlier measured comparison pin `32b4144b5206304fa8d4c67455a753e2d3c16635` |
+| Strict analyzer | On current pin `edbc779f`, `roundhouse check --strict` exits 0 with 0 errors / 460 warnings. This does not imply Rust generation or Cargo success |
+| Strict Rust generation / current pin | Rust survey generation exits 1 before writing files: `rust: Data.define is not supported; use Ruby or Spinel`, from `FragmentCache::ContentKey = Data.define(:digest) { def cache_key = digest }`. This is an explicit target representation gate, not a rustc count. Current-pin Cargo inventory is unavailable until that construct has a sound Rust representation |
+| Last emitted Rust project | Older pin `32b4144b` at merged Roundhouse head `863dd24b`: survey emitted 488 files and Cargo lib/bin check exits 101 with 2,577 errors / 575 warnings / 2,339 fingerprints. This remains the comparison project until `edbc779f` generation is unblocked |
+| Survey-only emitted Rust | The exact `863dd24b` survey of older pin `32b4144b` used `--survey --allow-unsupported`; it emitted 488 files, including 377 Rust source files (489 files after the captured `Cargo.lock` was added for checking). Generated lock SHA-256 is `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` |
 | Historical repeatability and output census | Two pre-merge generations at `609248bc` each emitted 487 files with identical manifest `955ffa2ca632700fe2c0697c7346df29956299b97e964a6ec45a4e17e650c71b` and 2,496 errors / 2,252 fingerprints. Their detailed census is historical, not the current merged-base census. The earlier 1,918-entry post-build hash list is not used as the emitted-file census |
-| Survey lib/bin compiler result | On the clean merged base `4a70cd0`, `cargo check --locked --lib --bin app` exits 101 with 2,597 errors / 571 warnings / 2,359 fingerprints. Exact source head `898b4606` exits 101 with 2,599 errors / 572 warnings / 2,361 fingerprints. Its fingerprint+count inventory is identical to `33c1bc0` (0 groups changed); this is not a net reduction and is not strict production support |
-| Survey all-target/test results | The previous 2,496-error all-target result is historical and predates the canonical-main merge; it is not a current all-target Campfire measurement. The Roundhouse source at `898b4606` passes `cargo check --locked --all-targets`. Do not conflate this source-check with the generated Campfire `cargo check --lib --bin app` above |
-| Compiler diagnostic distribution (survey lib/bin) | E0308 824; E0599 682; E0425 560; E0433 134; E0609 71; E0277 57; E0423 50; E0061 49; remaining codes are in `/tmp/rh688-898-inventory.json`. The reduction in unresolved `Rails` names was largely replaced by unresolved methods on `Rails`; counts and fingerprints are not root causes |
-| Historical estimate | ~2,468 was a prior rough figure with unknown scope. Use 2,597 as the clean merged-base survey baseline and 2,599 as the exact `898b4606` implementation measurement; neither is strict production support |
+| Survey lib/bin compiler result | Clean prior merged base `4a70cd0` on `32b4144b`: 2,597 errors / 571 warnings / 2,359 fingerprints. Code-bearing `898b4606` on `32b4144b`: 2,599 / 572 / 2,361. Current merged `863dd24b` on `32b4144b`: 2,577 / 575 / 2,339. Comparing `898b4606` with `863dd24b` removes 23 groups/errors and adds one; net 22 fewer. This is the observed integrated-head delta, not proof those groups share a root cause or that any feature is complete |
+| Survey all-target/test results | The previous 2,496-error all-target result is historical and predates the canonical-main merge; it is not a current Campfire measurement. Roundhouse source at `863dd24b` passes `cargo check --locked --all-targets`. Do not conflate this source check with generated Campfire lib/bin Cargo results |
+| Compiler diagnostic distribution (older pin survey lib/bin) | E0308 822; E0599 672; E0425 554; E0433 133; E0609 71; E0277 56; E0423 49; E0061 49; remaining codes in `/tmp/rh688-863-32b-inventory.json`. The reduction in unresolved `Rails` names has largely moved into unresolved Rails method/API errors; compiler-code totals are not root causes |
+| Historical estimate | ~2,468 was a prior rough figure with unknown scope. Use 2,597 as the clean merged-base `32b4144b` baseline, 2,577 as the current merged `32b4144b` comparison, and leave current-pin `edbc779f` Cargo count unavailable until generation succeeds |
 | Environment | Debian 12, Linux x86_64; `rustc 1.98.1 (48a229cea 2026-09-01)`, host `x86_64-unknown-linux-gnu`; compiler binary SHA-256 `859254978c0a0402c32f949f6de0d99aee73be8d15f45aac00ae1448aac51e74`; Cargo 1.98.1 binary SHA-256 `da77c8b33849312255ccde3179198ada4c8deb370488d050286146b1d1b27e14`; Roundhouse root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a8e8a5981`; generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` |
-| Rails oracle | Partial probe prepared at `33c1bc0`: a standalone Action Controller dispatch loaded the pinned initializer and `VersionHeaders` callback, returning 200 for five environment cases. Full Campfire boot and its locked Rails bundle were unavailable because the locked Rails checkout is missing; wire serialization of a nil `X-Rev` remains unverified |
-| Exact-head CI | At the post-push check for code head `898b4606`, GitHub had no workflow/check-run. CodeRabbit's only status says review skipped because this PR is Draft. Earlier `ci:rust`/`ci:full` results do not validate this head |
-| Review state | The CodeRabbit observations on earlier heads for `turbo_stream`, regex-case Option-tail handling, `request` shadowing, comparison return types, HTML-safe nil, and room-delete URL assumptions have follow-up confirmations as addressed. Low-value performance observations (regex recompilation, repeated analyzer/route surveys) remain deferred. No new review has been published for `898b4606`. The Campfire browser room-delete journey remains explicitly unverified |
-| Scratch evidence | Baseline and dirty surveys, Cargo JSON and indexed diagnostic groups live under `/tmp/rh688-base-4a70-*`, `/tmp/rh688-current-4a70-*`, and `/tmp/rh688-898-*`; older command outputs and locks remain under `/tmp/rh688-baseline` in the current orb. Large scratch output is not committed |
+| Rails oracle | Partial probe on `32b4144b`: standalone Action Controller dispatch loaded the version initializer and `VersionHeaders` callback; five environment cases returned 200. Full pinned Rails boot and on-wire nil `X-Rev` behavior remain unverified |
+| Exact-head CI | At the last post-push check for code head `898b4606`, GitHub had no workflow/check-run. CodeRabbit said review skipped because the PR was Draft. The local `863dd24b` merge has not been pushed and has no GitHub check status yet |
+| Review state | Earlier CodeRabbit findings for `turbo_stream`, regex-case Option-tail handling, `request` shadowing, comparison return types, HTML-safe nil, and room-delete URL assumptions have follow-up confirmations as addressed. Low-value performance observations remain deferred. No new review has been published for the new local merge. The Campfire browser room-delete journey remains explicitly unverified |
+| Scratch evidence | Older-pin generation and JSON inventory are under `/tmp/rh688-863-32b-*`; latest-pin strict check and failed generation captures are `/tmp/rh688-edbc779-check.out` and `/tmp/rh688-edbc779-generate.stderr`. Previous baseline captures remain under `/tmp/rh688-baseline` and `/tmp/rh688-898-*`; do not commit generated output or scratch logs |
 
 The PR already contains substantial Rust Campfire work, including app/helper
 class emission, namespace-aware controller structure, reachable inherited
@@ -291,35 +296,48 @@ erases a forwarded block to `Box<dyn FnOnce()>`; they cannot be repaired by a
 capture helper that returns empty text or guesses the block result. D0 is not
 completion of the Campfire capture callsites.
 
-**Replan for the current milestone:** the latest clean/dirty surveys show that
-Rails-root wiring alone relocates unresolved `Rails` errors into unresolved
-`Rails` methods, and the request-transport foundation alone does not remove
-any `cookies` callsite. These are groundwork, not a successful diagnostic
-reduction. For the immediate Campfire compile goal, finish the higher-yield
-Rails/config and cookie slices before returning to D0 implementation. Oracle's
-recommended sequence is retained: first prove the version-header/config path,
-then the unsigned permanent `last_room` round trip, then the signed permanent
-`session_token` path with a real verifier and fail-closed secret handling.
-Keep D0 as an independent workstream; do not mix its callable ABI into the
-central Rails/config or request-cookie contracts.
+**Replan after canonical main moved the Campfire pin:** Oracle recommends
+working on current CI input `edbc779f` first, rather than quietly treating the
+older `32b4144b` pin as current. The current input strictly analyzes with zero
+errors but cannot emit Rust because `FragmentCache::ContentKey` uses
+`Data.define`. Ingest and analysis already recognize the literal factory and
+carry its methods; the missing contract is a target representation. Implement
+only statically representable immutable Data records with constructor/readers
+and source-defined methods, preserving explicit errors for unsupported forms
+and uses. In particular, `CachedResponses` asks whether a flattened
+heterogeneous cache key includes `FragmentCache::ContentKey`; resolving the
+factory name without preserving nominal identity would silently break cache
+versioning. Until that consumer has a correct representation, keep that use
+explicitly unsupported and do not claim fragment-cache behavior.
+
+Once current-pin survey output exists, re-triage its fresh fingerprints.
+Then proceed with a separate typed Rails version/header slice, followed by
+unsigned permanent `last_room`, then a real fail-closed Rails-compatible
+verifier for signed permanent `session_token`. Keep encrypted
+`_campfire_session` separate. The previous `32b4144b` inventory is a control,
+not a current-pin denominator. D0 remains independent; do not mix its
+callable ABI into Data, Rails/config or request-cookie contracts.
 
 #### Next execution checklist — Rails and cookies
 
-All Campfire paths below refer to the pinned source at
-`32b4144b5206304fa8d4c67455a753e2d3c16635` under
-`/tmp/rh688-baseline/campfire/`. Check a step only when its completion
-evidence is recorded in the ledger. The current local path/transport work is
-an initial foundation and does **not** check off any complete Campfire
-behavior.
+The primary current-pin checkout is `/tmp/campfire-edbc779/`
+(`edbc779f4dfc9b26c36310881711ddc976a9dfc8`); the historical comparison
+checkout is `/tmp/rh688-baseline/campfire/`
+(`32b4144b5206304fa8d4c67455a753e2d3c16635`). The Rails/cookie source audit
+below was first performed on the older pin and must be rechecked on the current
+pin before claiming source parity. Check a step only when its completion
+evidence is recorded in the ledger. Existing path and transport work are
+foundations only and do **not** check off complete Campfire behavior.
 
 - [x] Re-read the pinned source contracts: `config/initializers/version.rb`,
   `app/controllers/concerns/version_headers.rb`,
   `app/controllers/concerns/tracked_room_visit.rb`,
   `app/controllers/concerns/authentication/session_lookup.rb`, and
   `app/controllers/concerns/authentication.rb`.
-- [x] Merge canonical `rubys/roundhouse:main` locally at `4a70cd0`; resolve
-  the `native_http.rs` conflict without rewriting history. `cargo
-  check --locked --all-targets` passes on the dirty Roundhouse checkout.
+- [x] Merge canonical `rubys/roundhouse:main` at `4a70cd0` and again at
+  `5d3d144e` in merge commit `863dd24b`; preserve history and resolve the sole
+  `native_http.rs` conflict by retaining both automatic session propagation
+  and explicit-cookie override. `cargo check --locked --all-targets` passes.
 - [x] Emit the typed shared Rails path facade and pin isolated Rails path
   behavior. This covers `Rails.root`/`public_path` only, not
   `Rails.application`, config, cache, env, or Campfire headers.
@@ -355,6 +373,26 @@ behavior.
   non-HTML skip layout but drain handler writes, and concurrent requests stay
   isolated. This establishes transport ownership/finalization only, not jar
   serialization semantics or Rails cookie behavior.
+- [ ] **D-Data.1 — current-pin declaration audit:** exact source use is
+  `FragmentCache::ContentKey = Data.define(:digest) do ... cache_key ... end`
+  in `app/models/fragment_cache.rb`; `CachedResponses` also uses
+  `is_a?(FragmentCache::ContentKey)` on a heterogeneous flattened cache key.
+  Confirm constructor, member, block and consumer behavior against Rails; do
+  not count this input as Cargo-measurable yet.
+- [ ] **D-Data.2 — finite Rust Data representation:** reuse existing ingest and
+  analysis metadata; carry nominal class identity, ordered members, inferred
+  member types and factory block methods through lowering to Rust. Do not
+  derive `Default`, expose mutable fields, invent missing values or accept
+  unsupported factory shapes. Preserve the `is_a?`/heterogeneous-key
+  distinction or retain an explicit unsupported diagnostic for that use.
+- [ ] **D-Data.3 — Data execution and gates:** add production-path emitted Rust
+  compile/run coverage for the actual ContentKey constructor, `digest` and
+  `cache_key` behavior, plus negative cases for unsupported forms and identity
+  checks. Verify `is_a?` evaluates its receiver and has correct nominal
+  behavior before admitting Campfire's cache consumer. Then record strict
+  generation, generated Cargo check and fresh error fingerprints on both pins.
+  Successful survey generation alone is an inventory milestone, not feature
+  completion.
 - [ ] **F0.2 — unsigned permanent `last_room`:** implement the smallest typed
   jar operation used by `TrackedRoomVisit`, including Rails-compatible
   request parsing, write/read/delete and permanent-cookie attributes. Exercise
@@ -371,11 +409,11 @@ behavior.
   on the emitted app. Keep Rails encrypted `_campfire_session` separate if
   Campfire routes actually require it; signed `session_token` is not an
   encrypted Rails session.
-- [ ] Re-run fresh strict generation, survey lib/bin and error fingerprints
-  after each integrated slice; explain newly revealed downstream methods.
-  Record direct removals, retained/new groups, generated-file changes and
-  actual executed behavior tests. Do not forecast one-to-one reductions from
-  the historical 119 Rails / 104 cookie diagnostics.
+- [ ] Re-run fresh strict analysis/generation, survey lib/bin and error
+  fingerprints for both Campfire pins after each integrated slice; explain
+  newly revealed downstream methods. Record direct removals, retained/new
+  groups, generated-file changes and executed behavior tests. Do not forecast
+  one-to-one reductions from historical Rails/cookie diagnostic counts.
 
 **Parallel execution boundary:** parallelize pinned Rails oracle/test-matrix
 preparation and cookie wire-format/request-isolation tests in separate orbs;
@@ -721,6 +759,7 @@ review artifacts; avoid committing large generated projects or sensitive data.
 
 | Date | Roundhouse SHA | Campfire SHA | Toolchain / locks | Commands and executed scope | Result / artifact links | Checklist updated |
 |---|---|---|---|---|---|---|
+| 2026-10-10 (canonical-main merge + current-pin generation gate + comparison rebaseline) | `863dd24bd436cc9096fb4e9822c8bca1e77e7bc9` | Current CI pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8`; comparison pin `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55`; Linux x86_64 | Canonical `main` fetch/merge at `5d3d144e`; `cargo check --locked --all-targets`; ignored cookie lifecycle and transport harnesses; emitted-Ruby ordinalize regression; strict `roundhouse check --strict` on `edbc779f`; exact current-pin Rust survey attempt; fresh `32b4144b` survey and generated `cargo check --locked --lib --bin app --message-format=json`; Cargo JSON indexing and inventory comparison against `898b4606` | Merge conflict in `tests/support/native_http.rs` resolved retaining both session defaulting and explicit-cookie override; all-target check passed; production cookie lifecycle 1/1, transport 1/1, ordinalize emitted-Ruby test 1/1. Current-pin strict analyzer: 0 errors / 460 warnings. Current-pin Rust survey exits 1 before writing output: `Data.define` explicitly unsupported, so Cargo count unavailable. Older-pin survey at `863dd24b` emits 488 files and Cargo lib/bin exits 101 with 2,577 errors / 575 warnings / 2,339 fingerprints. Against `898b4606`/older pin (2,599/572/2,361), 23 fingerprint groups/errors disappear and one appears; net count −22, not yet root-cause classified. Canonical main moved `CAMPFIRE_SHA` to `edbc779f`; update all future scope labels and rebaseline per pin. No PR push was performed in this batch. | Main merge checked locally; current-pin Data blocker identified; older-pin comparison baseline refreshed; A0/F0 behavior remains open |
 | 2026-10-10 (production cookie-stack regression + exact-head survey) | `898b4606ba85382e816976eaf8ee79121c5b18cc` | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55`; Linux x86_64 | `cargo test --locked --test rust_server_cookie_lifecycle -- --ignored --nocapture`; `cargo test --locked --test rust_http_transport -- --ignored --nocapture`; `cargo check --locked --all-targets`; `rustfmt --edition 2024 --check runtime/rust/server.rs tests/rust_server_cookie_lifecycle.rs`; `git diff --check`; exact-head survey `cargo run --locked --bin roundhouse -- --target rust --survey --allow-unsupported /tmp/rh688-baseline/campfire -o /tmp/rh688-898-survey`; generated `cargo check --locked --lib --bin app --message-format=json`; diagnostic indexing and fingerprint comparison | Production-stack harness passed 1/1; transport harness passed 1/1; Roundhouse all-target check passed with existing warnings; changed Rust files pass rustfmt and whitespace checks. The pinned Campfire survey emitted 488 files (489 including Cargo.lock); generated app check exited 101 with 2,599 errors / 572 warnings / 2,361 fingerprints. Comparing to `33c1bc0` shows identical file census and identical diagnostic fingerprints/counts; only generated `src/server.rs` changed. This is not a compiler-wall reduction or a working build. Separate Rails callback probe remains partial; full pinned Rails boot and nil-header wire behavior are unverified. Exact-head GitHub REST after publication confirmed Draft/open, no workflow checks, and CodeRabbit review skipped. | F0.1 checked; A0.1 partial; A0 config and Rails CookieJar/signing/session remain open |
 | 2026-10-10 (canonical-main merge + Rails/cookie foundations) | `33c1bc0f8509447b5d988e0a05d8712ac8cae277` (includes merge `4a70cd0e3e4d67004fb247448329a1bab0d754df`, parents PR base `5647c88e3e48e8e3fcfda31b2c761514d873e4af` and canonical `main` `cd8656979a9e9c13eb5a25e0bbcc6da5d793565e`) | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55`; Linux x86_64 | `cargo test --locked --test rails_runtime` (3 tests); ignored isolated transport harness `cargo test --locked --test rust_http_transport request_cookie_transport_is_request_scoped_and_appends_headers -- --ignored --exact --nocapture` (1 test); Roundhouse `cargo check --locked --all-targets`; `roundhouse check --strict`; strict Rust generation; fresh clean-base and dirty-tree survey `cargo check --locked --lib --bin app`; diagnostic inventory comparison; `git diff --check`. Full `cargo fmt --all -- --check` was also run and reports extensive existing rustfmt drift throughout unrelated files; no repo-wide formatter was run | Rails runtime tests 3/3, transport harness 1/1, Roundhouse all-target check passed, strict analyzer 0 errors/407 warnings, diff whitespace check passed. Strict Rust generation remains blocked at 74 unsupported/syntax + 109 type diagnostics. Clean merged-base Campfire survey: 2,597 errors/571 warnings/2,359 groups. Survey output from the committed source: 2,599/572/2,361; inventory comparison: 111 groups / 118 errors removed, 113 groups / 120 errors added. This is not a net reduction or a strict build. PR was published in Draft state; no exact-head workflow/check-run had executed at inspection time. Captures/inventories are in `/tmp/rh688-base-4a70-*` and `/tmp/rh688-current-4a70-*` | Main synced and published; A0 Rails path and F0 request transport foundations tested; A0 config and F0 Rails jar remain open; fresh compiler counts updated |
 | 2026-10-09 (pre-inventory CI observation) | `3b6d1b7576036382f82aa936fef8bcbd5b65272c` | `32b4144b5206304fa8d4c67455a753e2d3c16635` | PR pin 1.98.1; no local Cargo lock measurement yet | CI run [37986454230](https://github.com/rubys/roundhouse/actions/runs/37986454230): Rust compare, Campfire compare/conformance passed at last inspection; Campfire browser smoke and extra-target jobs were skipped | No local compiler inventory in that observation; superseded by the baseline row below | Historical only |
