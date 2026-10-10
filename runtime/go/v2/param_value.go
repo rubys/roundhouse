@@ -6,9 +6,9 @@
 // (TS string | dict | array union), and `runtime/crystal/
 // param_value.cr` (Crystal alias).
 //
-// Rails request params shape as a recursive tree of String, nested
-// Hash, or Array. Go has no native sum type, so the realization is
-// `any` (interface{}) — concrete runtime values hold `string`,
+// Rails request params shape as a recursive tree of JSON values. Go has
+// no native sum type, so the realization is `any` (interface{}) —
+// concrete runtime values hold strings, numbers, booleans, nil,
 // `map[string]any`, or `[]any` per the recursive shape. The named
 // alias preserves the RBS-declared `Roundhouse::ParamValue` →
 // `RoundhouseParamValue` mapping so transpiled call sites

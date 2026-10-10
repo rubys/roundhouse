@@ -1,9 +1,9 @@
 # Narrowing accessors for the recursive request-params tree.
 #
-# `Roundhouse::ParamValue` is `String | Hash[String, ParamValue] |
-# Array[ParamValue]`, realized per target (Crystal alias, TS union,
-# rust `serde_json::Value`, Go `any`). Until now that per-target file
-# carried a TYPE AND NO OPERATIONS, so every consumer had to narrow at
+# `Roundhouse::ParamValue` is `String | Integer | Float | bool | nil |
+# Hash[String, ParamValue] | Array[ParamValue]`, realized per target
+# (Crystal alias, TS union, rust `serde_json::Value`, Go `any`). Until
+# now that per-target file carried a TYPE AND NO OPERATIONS, so every consumer had to narrow at
 # its own call site with `is_a?` — and each emitter recognized that as
 # an IDIOM (a type test in `If`-condition position returning the
 # narrowed value) rather than modeling the type test itself.

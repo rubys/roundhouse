@@ -11,4 +11,4 @@ export interface ParamValueObject {
   [key: string]: ParamValue;
 }
 
-export type ParamValue = string | ParamValueObject | ParamValue[];
+export type ParamValue = string | number | boolean | null | ParamValueObject | ParamValue[];

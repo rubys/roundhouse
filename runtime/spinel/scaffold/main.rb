@@ -54,9 +54,12 @@ module Main
   # `user_ids[]=2&user_ids[]=3` reached the controller as `{"" => "3"}`.
   #
   # A multipart body's text fields arrive by name from its parser
-  # (`Tep::Request#body_fields`), and a JSON body's flattened the same
-  # way, so a repeated multipart field still keeps its last value; the urlencoded body and the query string are
-  # parsed from their raw bytes and keep every one.
+  # (`Tep::Request#body_fields`), so repeated multipart fields still
+  # keep their last value. JSON has a separate typed channel
+  # (`Tep::Request#json_body_params`) and keeps nested objects, arrays,
+  # numbers, booleans, and nulls intact, then applies Rails' default
+  # deep-munge rule that removes nil array members. The urlencoded body
+  # and query string are parsed from their raw bytes and keep every pair.
   # Rails' "any format": an Accept that is a bare `*/*` (parameters
   # allowed), which Rails takes as a valid header whose one format is
   # Mime::ALL. A browser's list ending in `, */*` is "browser-like" and
@@ -67,13 +70,16 @@ module Main
   end
 
   # The body's params alone - Rails' `request_parameters`, which
-  # ParamsWrapper copies from - nested by `ParamBuilder`; nil where Rails
-  # answers 400.
+  # ParamsWrapper copies from. Return a fresh root hash because
+  # `request_params` merges query and path keys into its body hash.
+  # URL-encoded and multipart form data are nested by `ParamBuilder`;
+  # JSON is normalized by `ParamBuilder.from_json` to keep typed values
+  # and Rails' default deep-munge behavior. nil where Rails answers 400.
   def self.request_body_params(req)
     body = {}
     if req.form?
       body = ParamBuilder.from_query_string(req.raw_body)
-    elsif req.multipart? || req.json?
+    elsif req.multipart?
       keys = []
       values = []
       present = []
@@ -83,6 +89,8 @@ module Main
         present.push(true)
       end
       body = ParamBuilder.build(keys, values, present)
+    elsif req.json?
+      body = ParamBuilder.from_json(req.json_body_params)
     end
     body
   end
