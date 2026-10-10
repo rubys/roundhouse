@@ -571,6 +571,156 @@ fn uri_and_socket_errors_are_rescued_on_spinel() {
     uri_and_socket_errors_app().run_spinel(URI_AND_SOCKET_ASSERTIONS).assert_passes();
 }
 
+/// `errors.full_message(:field, msg)` answers Rails' text without adding
+/// to the record: the humanized field before the message, the bare message
+/// for `:base`.
+fn full_message_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/models/article.rb",
+        "  validates :title, presence: true\n",
+        "  validates :title, presence: true
+
+  def self.taken_title_message
+    Article.new.errors.full_message(:title, \"is taken\")
+  end
+
+  def self.base_message(text)
+    Article.new.errors.full_message(:base, text)
+  end
+
+  def body_message(count)
+    errors.full_message(:body, \"needs #{count} words\")
+  end
+",
+    )
+}
+
+const FULL_MESSAGE_ASSERTIONS: &str = r#"raise "taken: #{Article.taken_title_message}" unless Article.taken_title_message == "Title is taken"
+raise "base: #{Article.base_message("Whole")}" unless Article.base_message("Whole") == "Whole"
+article = Article.new(title: "x", body: "y")
+raise "body: #{article.body_message(3)}" unless article.body_message(3) == "Body needs 3 words"
+raise "added" unless article.errors.empty?
+puts "full_message passed"
+"#;
+
+#[test]
+fn errors_full_message_answers_the_humanized_text() {
+    full_message_app().run_ruby(FULL_MESSAGE_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn errors_full_message_answers_the_humanized_text_on_spinel() {
+    full_message_app().run_spinel(FULL_MESSAGE_ASSERTIONS).assert_passes();
+}
+
+/// The app's locale names attributes and formats full messages, as
+/// Rails' I18n does: `activerecord.attributes.article.title` and
+/// `errors.format` reach validation messages, `errors.add`,
+/// `full_message` and `errors[:field]` alike.
+fn localized_messages_app() -> emit_and_run::Overlay {
+    full_message_app()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  errors:\n    format: \"%{attribute}: %{message}\"\n  activerecord:\n    attributes:\n      article:\n        title: \"Headline\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  def self.taken_title_message\n",
+            "  def flag_title\n    errors.add(:title, \"is flagged\")\n  end\n\n  def listed_errors\n    errors.full_messages\n  end\n\n  def title_errors\n    errors[:title]\n  end\n\n  def self.taken_title_message\n",
+        )
+}
+
+const LOCALIZED_MESSAGES_ASSERTIONS: &str = r#"article = Article.new(title: "", body: "short")
+raise "valid" if article.valid?
+raise "full: #{article.listed_errors.inspect}" unless article.listed_errors == ["Headline: can't be blank", "Body: is too short (minimum is 10 characters)"]
+raise "taken: #{Article.taken_title_message}" unless Article.taken_title_message == "Headline: is taken"
+raise "body: #{article.body_message(3)}" unless article.body_message(3) == "Body: needs 3 words"
+raise "base: #{Article.base_message("Whole")}" unless Article.base_message("Whole") == "Whole"
+flagged = Article.new(title: "t", body: "long enough body")
+flagged.flag_title
+raise "add: #{flagged.listed_errors.inspect}" unless flagged.listed_errors == ["Headline: is flagged"]
+puts "localized messages passed"
+"#;
+
+#[test]
+fn localized_attribute_names_and_format_reach_error_messages() {
+    let index = r#"raise "index: #{Article.new(title: "", body: "long enough body").tap(&:valid?).title_errors.inspect}" unless Article.new(title: "", body: "long enough body").tap(&:valid?).title_errors == ["can't be blank"]
+"#;
+    localized_messages_app().run_ruby(&format!("{index}{LOCALIZED_MESSAGES_ASSERTIONS}")).assert_passes();
+}
+
+// Not `title_errors` here: `errors[:field]` does not compile on Spinel, with or without a locale.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn localized_attribute_names_and_format_reach_error_messages_on_spinel() {
+    localized_messages_app().run_spinel(LOCALIZED_MESSAGES_ASSERTIONS).assert_passes();
+}
+
+/// Validation and `errors.add` messages come from the locale as Rails
+/// looks them up: a model's attribute override, the plural form for the
+/// count, `%{model}` and `%{value}` interpolated.
+fn localized_error_kinds_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  activerecord:\n    models:\n      article:\n        one: \"Story\"\n        other: \"Stories\"\n    errors:\n      models:\n        article:\n          attributes:\n            title:\n              blank: \"is required for %{model}\"\n      messages:\n        too_short:\n          one: \"needs at least one character, got %{value}\"\n          other: \"needs %{count} characters, got %{value}\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def listed_errors
+    errors.full_messages
+  end
+
+  def flag
+    errors.add(:title, :blank)
+    errors.add(:body)
+  end
+",
+        )
+}
+
+const LOCALIZED_ERROR_KINDS_ASSERTIONS: &str = r#"article = Article.new(title: "", body: "short")
+raise "valid" if article.valid?
+raise "validated: #{article.listed_errors.inspect}" unless article.listed_errors == ["Title is required for Story", "Body needs 10 characters, got short"]
+flagged = Article.new(title: "t", body: "long enough body")
+flagged.flag
+raise "added: #{flagged.listed_errors.inspect}" unless flagged.listed_errors == ["Title is required for Story", "Body is invalid"]
+puts "localized error kinds passed"
+"#;
+
+#[test]
+fn localized_error_kinds_reach_validations_and_errors_add() {
+    localized_error_kinds_app().run_ruby(LOCALIZED_ERROR_KINDS_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn localized_error_kinds_reach_validations_and_errors_add_on_spinel() {
+    localized_error_kinds_app().run_spinel(LOCALIZED_ERROR_KINDS_ASSERTIONS).assert_passes();
+}
+
+/// A field the lowering cannot humanize at compile time keeps its error.
+#[test]
+fn errors_full_message_on_a_dynamic_field_stays_an_error() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def message_for(field)
+    errors.full_message(field, \"is taken\")
+  end
+",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("full_message lacks")), "{errors:?}");
+}
+
 /// A Sidekiq worker's class-side entries run its `perform` inline, as an
 /// ActiveJob's `perform_later` does: `include Sidekiq::Job` (or `Worker`)
 /// and `sidekiq_options` leave the emitted class, `perform_in` /
@@ -10797,3 +10947,4 @@ raise "the cached copy is the caller's object" if again.equal?(body)
 "##)
         .assert_passes();
 }
+

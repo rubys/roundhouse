@@ -30,6 +30,7 @@ pub mod gems;
 pub mod haml;
 pub mod slim;
 pub mod ide;
+pub mod i18n;
 pub mod ident;
 pub mod ingest;
 pub mod lower;

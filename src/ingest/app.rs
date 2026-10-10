@@ -1674,6 +1674,26 @@ end
     }
     app.stylesheets = stylesheets;
 
+    // `config/locales/**/*.yml`, Rails' default I18n load path for the app.
+    let locales_dir = dir.join("config/locales");
+    let mut files = Vec::new();
+    let mut stack = if vfs.is_dir(&locales_dir) { vec![locales_dir] } else { Vec::new() };
+    while let Some(current) = stack.pop() {
+        for entry in vfs.read_dir(&current)? {
+            if vfs.is_dir(&entry) {
+                stack.push(entry);
+            } else if entry.extension().and_then(|s| s.to_str()) == Some("yml") {
+                if let Some(source) = read_to_string_or_ledger(vfs, &entry)? {
+                    let rel = entry.strip_prefix(dir).unwrap_or(&entry).display().to_string();
+                    files.push((rel, source));
+                }
+            }
+        }
+    }
+    let (catalog, _problems) = crate::i18n::Catalog::load(&default_locale(vfs, dir), &mut files);
+    app.i18n = catalog;
+    crate::i18n::stamp_models(&mut app);
+
     // `sig/**/*.rbs` — user-authored RBS sidecars for app code the
     // Rails conventions can't fully type on their own. Recursively
     // walk the sig dir, parse each file, merge into app.rbs_signatures
@@ -9247,4 +9267,19 @@ fn inherit_enums(models: &mut [crate::dialect::Model]) {
             current = grand.clone();
         }
     }
+}
+
+/// `config.i18n.default_locale = :xx` in `config/application.rb`, else `en`.
+fn default_locale<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> String {
+    let path = dir.join("config/application.rb");
+    let source = vfs.read_to_string(&path).unwrap_or_default();
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .find_map(|l| l.strip_prefix("config.i18n.default_locale").map(str::trim))
+        .and_then(|rest| rest.strip_prefix('='))
+        .map(|v| v.trim().trim_start_matches(':').trim_matches(|c| c == '"' || c == '\'').to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "en".to_string())
 }

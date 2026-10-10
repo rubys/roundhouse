@@ -10,6 +10,14 @@ fn refuses(body: &str, expected: &str) {
 }
 
 fn refuses_with(body: &str, expected: &str, extra: &[(&str, &str)]) {
+    gate(body, expected, extra, false);
+}
+
+fn admits(body: &str) {
+    gate(body, "", &[], true);
+}
+
+fn gate(body: &str, expected: &str, extra: &[(&str, &str)], admitted: bool) {
     let root = std::env::temp_dir().join(format!("rh_admission_{}_{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst)));
     for (path, text) in [
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n".to_string()),
@@ -32,6 +40,10 @@ fn refuses_with(body: &str, expected: &str, extra: &[(&str, &str)]) {
         if args[0] != "check" { command.arg("-o").arg(root.join("emitted")); }
         let output = command.output().unwrap();
         let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        if admitted {
+            assert!(output.status.success(), "{args:?} refused {body}: {text}");
+            continue;
+        }
         assert!(!output.status.success(), "{args:?} accepted {body}: {text}");
         assert!(text.contains(expected), "{args:?} lost named refusal {expected}: {text}");
     }
@@ -53,9 +65,15 @@ fn unresolved_declared_classes_are_errors() {
 
 #[test]
 fn new_errors_api_requires_runtime_support() {
-    for body in ["errors.added?(:title, :blank)", "errors.details", "errors.where(:title)", "errors.merge!(errors)", "errors.first.options", "errors.delete(:title); errors.size"] {
+    for body in ["errors.added?(:title, :blank)", "errors.details", "errors.where(:title)", "errors.merge!(errors)", "errors.first.options", "errors.delete(:title); errors.size", "f = title.to_sym; errors.full_message(f, \"is taken\")"] {
         refuses(body, "ActiveModel::Errors");
     }
+}
+
+#[test]
+fn errors_full_message_on_a_literal_field_is_admitted() {
+    admits("errors.full_message(:title, \"is taken\").upcase");
+    admits("Probe.new.errors.full_message(:base, title.to_s)");
 }
 
 #[test]

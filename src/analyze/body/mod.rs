@@ -1666,6 +1666,13 @@ impl<'a> BodyTyper<'a> {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
                     return Ty::Array { elem: Box::new(elem.unwrap_or_else(unknown)) };
                 }
+                if method.as_str() == "full_message"
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                    && crate::lower::errors_add::full_message_bakes(recv.as_ref(), args, block.as_ref())
+                {
+                    return Ty::Str;
+                }
                 // What every object and every module answers, when the
                 // receiver's own table did not. App analyzer only.
                 // `class_object_receiver` was resolved above for block binding
