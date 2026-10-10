@@ -3006,6 +3006,7 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "number_to_human_size"
             | "number_to_percentage"
             | "number_to_phone"
+            | "fragment_name_with_digest"
             | "content_security_policy_nonce"
             | "class_names"
             | "label_tag"
@@ -7595,6 +7596,12 @@ fn require_path_for_body_const(
         // `project::BUNDLED`, so nothing writes a bare `require "zlib"`
         // and the constant would resolve to nothing at all.
         "Zlib" => Some("runtime/zlib".to_string()),
+        // `Timeout` — ported into `runtime/ruby/timeout.rb` for spinel,
+        // swapped for Ruby's own on the ruby family (`require
+        // "timeout"`). Anchored for the same reason Zlib is: on spinel
+        // nothing else loads the port, and campfire's unfurl controller
+        // names the constant without a require.
+        "Timeout" => Some("runtime/timeout".to_string()),
         // `TypeID` — ported into `runtime/ruby/typeid.rb`, swapped for the
         // gem on the ruby family. Anchored so the model that names it
         // (lobsters' Token concern, spliced into 18 models) loads it.
@@ -7610,9 +7617,10 @@ fn require_path_for_body_const(
         // `require` reaches it on the ruby family either.
         "Mime" => Some("runtime/mime".to_string()),
         // `I18n` — the i18n gem's locale accessors, in
-        // `runtime/ruby/i18n.rb`. No Rails is loaded on these trees, so
-        // nothing else defines the constant.
-        "I18n" => Some("runtime/i18n".to_string()),
+        // `runtime/ruby/i18n_locale.rb` (not `i18n.rb`, which would shadow the
+        // gem wherever `runtime/ruby` is on the load path). No Rails is
+        // loaded on these trees, so nothing else defines the constant.
+        "I18n" => Some("runtime/i18n_locale".to_string()),
         // `useragent` + `platform_agent`, PORTED into
         // `runtime/ruby/user_agent.rb` — they were façades that raised
         // until campfire's room page turned out to render all three PWA

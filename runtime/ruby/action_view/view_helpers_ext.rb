@@ -159,6 +159,16 @@ module ActionView
       number_helper_for_template(:number_with_precision, value, options)
     end
 
+    # Rails' `fragment_name_with_digest(name, digest_path)` — the key a
+    # helper hands `cache`/`Rails.cache` for a fragment it renders itself
+    # (campfire's `MessagesHelper#cache_message_actions`). Rails puts the
+    # current template's digest path in front; templates carry no digest
+    # here (see runtime/spinel/action_controller_fragment_caching.rb), so
+    # an explicit `digest_path` is kept and an omitted one adds nothing.
+    def self.fragment_name_with_digest(name, digest_path)
+      digest_path.nil? ? name : [digest_path] + name
+    end
+
     def self.number_to_currency(value, options = {})
       number_helper_for_template(:number_to_currency, value, options)
     end
