@@ -1586,7 +1586,11 @@ jobs:
       #             cannot silently take the pool with it.
       - &campfire-suite-gems
         name: Install the gems the emitted suite loads
-        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent concurrent-ruby net-http-persistent web-push rails-html-sanitizer --no-document
+        # rack: the ruby-family swap of runtime/rack_utils.rb is
+        # `require "rack/utils"`. Without the gem every controller
+        # integration test aborts at load (`cannot load such file --
+        # rack/utils`). campfire-compare already installs it.
+        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent concurrent-ruby net-http-persistent web-push rails-html-sanitizer rack --no-document
       - name: Verify the suite's bcrypt test configuration
         run: ruby tests/campfire_suite_bcrypt.rb
       - name: Fetch once-campfire at the pinned SHA
@@ -1635,8 +1639,9 @@ jobs:
             > /tmp/campfire-strict.log 2>&1 || status=$?
           errors=$(grep -c 'error\[' /tmp/campfire-strict.log || true)
           # An ingest abort prints no `error[` line, so a count of zero
-          # alone would pass it. A nonzero exit inside the ceiling is that.
-          if [ "$status" -ne 0 ] && [ "$errors" -le "$CEILING_ERRORS" ]; then
+          # with a nonzero exit is that. Counted errors at or below the
+          # ceiling are the pin's remaining gaps, not an abort.
+          if [ "$status" -ne 0 ] && [ "$errors" -eq 0 ]; then
             tail -5 /tmp/campfire-strict.log
             echo "::error::campfire strict emit failed (exit $status) without a counted error: ingest stopped before analysis"
             exit 1

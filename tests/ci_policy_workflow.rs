@@ -301,6 +301,16 @@ fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
             .iter()
             .filter_map(|step| step["run"].as_str())
             .collect();
+        let suite_gems = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Install the gems the emitted suite loads"))
+            .and_then(|step| step["run"].as_str());
+        if let Some(run) = suite_gems {
+            assert!(
+                run.split_whitespace().any(|w| w == "rack"),
+                "{job_name} must install rack: ruby-family rack_utils.rb is require \"rack/utils\""
+            );
+        }
         for run in &runs {
             for line in run.lines() {
                 let trimmed = line.trim();
@@ -352,23 +362,32 @@ fn strict_emit_ceiling_fails_an_ingest_abort_that_prints_no_error_line() {
         .to_owned();
     let dir = std::env::temp_dir().join(format!("roundhouse-ceiling-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let step = |bin_body: &str| {
+    let step = |bin_body: &str, ceiling: &str| {
         let bin = dir.join("roundhouse");
         fs::write(&bin, format!("#!/bin/sh\n{bin_body}\n")).unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         std::process::Command::new("bash")
             .args(["-c", &run])
             .env("ROUNDHOUSE_BIN", &bin)
-            .env("CEILING_ERRORS", "0")
+            .env("CEILING_ERRORS", ceiling)
             .output()
             .unwrap()
     };
-    let aborted = step("echo 'roundhouse: ingest app: unsupported construct in app/models/x.rb'; exit 1");
+    let aborted = step(
+        "echo 'roundhouse: ingest app: unsupported construct in app/models/x.rb'; exit 1",
+        "0",
+    );
     assert!(!aborted.status.success(), "an ingest abort passed the ceiling");
     assert!(String::from_utf8_lossy(&aborted.stdout).contains("ingest stopped before analysis"));
-    let clean = step("echo 'roundhouse: emitted 3 files'; exit 0");
+    let clean = step("echo 'roundhouse: emitted 3 files'; exit 0", "0");
     assert!(clean.status.success(), "{}", String::from_utf8_lossy(&clean.stdout));
-    let over = step("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1");
+    let at_ceiling = step("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1", "2");
+    assert!(
+        at_ceiling.status.success(),
+        "a counted error at the ceiling must pass: {}",
+        String::from_utf8_lossy(&at_ceiling.stdout)
+    );
+    let over = step("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1", "0");
     assert!(!over.status.success(), "an error over the ceiling passed");
     fs::remove_dir_all(&dir).ok();
 }
