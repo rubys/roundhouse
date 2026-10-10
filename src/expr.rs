@@ -53,6 +53,12 @@ pub const ADMITTED_PRELOADER_CALL: u64 = 1 << 10;
 /// is not evidence of an indexing defect.
 pub const UNINDEXED_SCOPE_CONST_REF: u64 = 1 << 11;
 
+/// A source `**value` call argument that the shared keyword lowering made
+/// positional (`lower::forwarding`, legacy policy) for targets without
+/// keyword arguments. The Ruby emitter writes the splat back: in Ruby 3 a
+/// positional Hash does not bind keyword parameters.
+pub const ERASED_KEYWORD_SPLAT: u64 = 1 << 12;
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by

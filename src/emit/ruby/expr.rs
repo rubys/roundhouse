@@ -1548,7 +1548,8 @@ pub(crate) fn ruby_sym_literal(value: &str) -> String {
 }
 
 /// A call or `super` argument. A bare `**` is already a keyword splat;
-/// wrapping it again would print `****`.
+/// wrapping it again would print `****`. A splat the shared lowering
+/// made positional is written back as one.
 fn emit_keyword_forward_arg(arg: &Expr) -> String {
     match &*arg.node {
         ExprNode::KeywordSplat { .. } => emit_node(&arg.node),
@@ -1559,6 +1560,9 @@ fn emit_keyword_forward_arg(arg: &Expr) -> String {
             } else {
                 format!("{pairs}, **")
             }
+        }
+        _ if arg.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0 => {
+            format!("**{}", paren_multiline(emit_arg(arg)))
         }
         _ => emit_arg(arg),
     }

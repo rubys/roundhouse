@@ -151,10 +151,23 @@ pub(super) fn apply_with_plans(
         names: &ConstructorNames,
     ) {
         if plans.get(&e.span) == Some(&KeywordPolicy::Legacy) {
+            // `lower::kwsplat` resolves a callee through the receiver's
+            // class (or the enclosing class for a receiverless call) and
+            // decides there whether the Hash stays positional, expands
+            // to keywords or is restored as `**`. Only a call it cannot
+            // resolve keeps the source's splat in emitted Ruby: a dynamic
+            // `send`, or a receiver with no class type.
+            let mut callee_unresolved = false;
             let (args, constructor_splat) = match &mut *e.node {
                 ExprNode::Send {
                     recv, method, args, ..
                 } => {
+                    callee_unresolved = matches!(
+                        method.as_str(),
+                        "send" | "public_send" | "__send__"
+                    ) || recv.as_ref().is_some_and(|recv| {
+                        !matches!(recv.ty, Some(crate::ty::Ty::Class { .. }))
+                    });
                     let constructor_splat = method.as_str() == "new"
                         && args
                             .iter()
@@ -189,6 +202,9 @@ pub(super) fn apply_with_plans(
                 for arg in args {
                     if let ExprNode::KeywordSplat { value } = &mut *arg.node {
                         *arg = std::mem::replace(value, super::typing::nil_lit());
+                        if callee_unresolved {
+                            arg.decisions |= crate::expr::ERASED_KEYWORD_SPLAT;
+                        }
                     }
                 }
             }
