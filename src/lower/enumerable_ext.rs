@@ -111,15 +111,15 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     }
     // Rails' Array#excluding and its #without alias share this helper.
     // Keep Relation calls on ActiveRecord::Relation's typed methods, and
-    // leave unions/untyped or computed receivers alone. Some dynamic Rails
-    // scopes are inferred as Arrays even though they return Relations, so
-    // route only direct Array values whose shape we can prove here.
+    // leave unions, variables, and computed receivers alone. Some dynamic
+    // Rails scopes are inferred as Arrays even though they return Relations;
+    // only an Array literal proves the runtime receiver is actually an Array.
     if matches!(method.as_str(), "excluding" | "without") && block.is_none() {
         let Some(receiver) = recv.as_ref() else { return false };
         if !matches!(receiver.ty.as_ref(), Some(Ty::Array { .. })) {
             return false;
         }
-        if !matches!(&*receiver.node, ExprNode::Var { .. } | ExprNode::Array { .. }) {
+        if !matches!(&*receiver.node, ExprNode::Array { .. }) {
             return false;
         }
         let receiver = recv.take().expect("checked above");
@@ -489,7 +489,10 @@ mod tests {
     fn array_exclusion(method: &str, receiver_ty: Ty, excluded: usize) -> Expr {
         let mut receiver = Expr::new(
             Span::synthetic(),
-            ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("items") },
+            ExprNode::Array {
+                elements: Vec::new(),
+                style: Default::default(),
+            },
         );
         receiver.ty = Some(receiver_ty);
         Expr::new(
@@ -530,25 +533,22 @@ mod tests {
         assert!(!rewrite_node(&mut e));
         assert_eq!(method_of(&e), "excluding");
         let ExprNode::Send { recv: Some(receiver), .. } = &*e.node else { panic!() };
-        assert!(matches!(&*receiver.node, ExprNode::Var { .. }));
+        assert!(matches!(&*receiver.node, ExprNode::Array { .. }));
     }
 
     #[test]
-    fn computed_array_typed_receiver_is_not_assumed_to_be_an_array() {
+    fn array_typed_variable_receiver_is_not_assumed_to_be_an_array() {
         let mut e = array_exclusion("excluding", array_of_users(), 1);
         let ExprNode::Send { recv: Some(receiver), .. } = &mut *e.node else { panic!() };
-        let mut computed = Expr::new(
+        let mut variable = Expr::new(
             Span::synthetic(),
-            ExprNode::Send {
-                recv: None,
-                method: Symbol::from("all_positioned_siblings"),
-                args: Vec::new(),
-                block: None,
-                parenthesized: false,
+            ExprNode::Var {
+                id: crate::ident::VarId(0),
+                name: Symbol::from("items"),
             },
         );
-        computed.ty = Some(array_of_users());
-        *receiver = computed;
+        variable.ty = Some(array_of_users());
+        *receiver = variable;
         assert!(!rewrite_node(&mut e));
         assert_eq!(method_of(&e), "excluding");
     }

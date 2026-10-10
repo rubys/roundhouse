@@ -1,13 +1,12 @@
 pub const SOURCE: &str = r#"class ArrayExcludingProbe
   def self.results
-    items = [3, 1, 2, 1]
     [
-      items.excluding,
-      items.excluding(2),
-      items.without(3, 1),
-      items.excluding([2, 3]),
-      items.excluding(9),
-      items,
+      [3, 1, 2, 1].excluding,
+      [3, 1, 2, 1].excluding(2),
+      [3, 1, 2, 1].without(3, 1),
+      [3, 1, 2, 1].excluding([2, 3]),
+      [3, 1, 2, 1].excluding(9),
+      [3, 1, 2, 1],
     ]
   end
 end
