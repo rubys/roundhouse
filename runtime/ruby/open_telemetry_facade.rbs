@@ -1,0 +1,16 @@
+# Typing contract for the OpenTelemetry stub (open_telemetry_facade.rb
+# beside this file). Permanent on every target — see that file's
+# header — so, unlike the other façade sidecars, this signature is
+# never dropped by a later swap.
+module OpenTelemetry
+  module Trace
+    class Span
+      def recording?: () -> bool
+      def set_attribute: (untyped _key, untyped _value) -> Span
+    end
+
+    NON_RECORDING_SPAN: Span
+
+    def self.current_span: () -> Span
+  end
+end

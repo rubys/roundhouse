@@ -1874,7 +1874,7 @@ end
     // class-side methods, and its expansion joins the same filter chain.
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
     super::class_attribute::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes);
-    expand_class_body_macros(&mut app);
+    expand_class_body_macros(&mut app)?;
     // The same idea one base over: `const` / `prop` under a class
     // whose ancestry a sidecar says reaches `T::Props` IS the
     // `T::Struct` macro, and gets expanded rather than replayed. It
@@ -3184,7 +3184,7 @@ fn report_unrecognized_controller_macros(app: &App) {
 /// :redirect_signed_in_user_to_root` behind it — fails OPEN. So a macro
 /// whose body holds one statement this can't read stays Unknown, whole,
 /// and is recorded as a gap.
-fn expand_class_body_macros(app: &mut App) {
+fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
     use crate::dialect::{ControllerBodyItem, MethodReceiver};
     use crate::expr::ExprNode;
 
@@ -3209,7 +3209,7 @@ fn expand_class_body_macros(app: &mut App) {
         }
     }
     if macros.is_empty() {
-        return;
+        return Ok(());
     }
 
     let surfaces = controller_concern_surfaces(app);
@@ -3348,8 +3348,10 @@ fn expand_class_body_macros(app: &mut App) {
                 expanded.push(item);
                 continue;
             };
-            match expand_macro_filters(&body, &module) {
-                Some(items) => {
+            let param_names: Vec<crate::Symbol> =
+                macro_def.params.iter().map(|p| p.name.clone()).collect();
+            match expand_macro_filters(&body, &module, &param_names) {
+                Ok(items) => {
                     let mut comments = leading_comments.clone();
                     let mut blank = *leading_blank_line;
                     for macro_item in items {
@@ -3381,7 +3383,35 @@ fn expand_class_body_macros(app: &mut App) {
                         }
                     }
                 }
-                None => {
+                // A block-form filter's `next` that `restructure_next_in_
+                // block` can't lower — narrow enough to name the actual
+                // reason, and important enough to hard-fail strict mode
+                // rather than silently accept an app whose filter never
+                // actually runs: unlike `NotFilterDsl` just below,
+                // `block_filter_from_macro_stmt` already accepted this
+                // shape as a successfully expanded filter (the refusal
+                // used to surface only much later, at lowering time, as
+                // a silent drop with no gap at all). Survey mode keeps
+                // the same shape every other refusal here has — record
+                // and keep the macro call whole.
+                Err(MacroExpansionRefusal::NextRestructure { method: blocked_method }) => {
+                    let err = IngestError::Unsupported {
+                        file: format!("{}", controller.name.0.as_str()),
+                        message: format!(
+                            "class-body macro not expanded: `{}` from {} holds a `{}` block whose `next` can't be restructured to an if/unless",
+                            method.as_str(),
+                            module.0.as_str(),
+                            blocked_method.as_str()
+                        ),
+                    };
+                    if survey::is_active() {
+                        survey::record(&err);
+                        expanded.push(item);
+                    } else {
+                        return Err(err);
+                    }
+                }
+                Err(MacroExpansionRefusal::NotFilterDsl) => {
                     survey::record(&IngestError::Unsupported {
                         file: format!("{}", controller.name.0.as_str()),
                         message: format!(
@@ -3396,6 +3426,7 @@ fn expand_class_body_macros(app: &mut App) {
         }
         controller.body = expanded;
     }
+    Ok(())
 }
 
 /// Inline same-concern class-method calls inside a filter macro before
@@ -4095,29 +4126,465 @@ enum MacroFilterItem {
 /// filter nor a recognized block-form one — the all-or-nothing contract
 /// `expand_class_body_macros` relies on to decide whether to expand the
 /// whole macro or keep it whole and ledgered.
+///
+/// A PREFIX of plain-local assignments (`stamp = "@#{date.to_datetime.to_i}"`,
+/// `sunset = sunset&.to_date&.httpdate` — the latter reassigning, and so
+/// shadowing, a bound parameter of the same name) is folded away before any
+/// statement is tried as a filter: each is evaluated with
+/// `fold_local_value` against the locals already folded, and the result —
+/// always a LITERAL, never executed at runtime (this crate's Spinel target
+/// has no `to_datetime`/`httpdate` to call) — both drops the statement and
+/// extends the environment later statements (including the filter's own
+/// block body, via `substitute_locals`) read it back from. Two
+/// environments, not one: `by_name` for a genuinely new local (`stamp` is
+/// never a parameter, so its `Var` reads survive substitution untouched);
+/// `by_span` for one that shadows a parameter (`sunset` IS one, so
+/// `substitute_params` already replaced every read of it, body-wide, with
+/// a clone of the call's value — carrying that clone's span — before this
+/// function ever ran; see `by_span`'s own doc at its declaration). Which
+/// case applies is decided by `param_names` — the macro's OWN declared
+/// parameter names, threaded in from the call site's `macro_def` — never
+/// by shape alone: a local's value can reach a parameter's literal clone
+/// mid-expression (`stamp`'s `date.to_datetime.to_i` does, for the date
+/// parameter) without the ASSIGNMENT itself reassigning that parameter,
+/// and `by_span` must stay empty for that local or a later, unrelated
+/// read sharing the same span (`date` read again in the filter body)
+/// would be wrongly rewritten to `stamp`'s value instead of its own. The
+/// first statement that is not a plain-local assignment is tried as the
+/// filter the existing two branches already read, with every local folded
+/// so far substituted in first; anything after it — another local
+/// assignment or not — hits the same `return None` an unrecognized
+/// statement always has, since neither branch accepts an `Assign`. A
+/// local whose value cannot be reduced to a literal (an unknown method, a
+/// non-literal date) refuses the whole macro the same way, rather than
+/// leave the free variable for
+/// `filter_from_send`/`block_filter_from_macro_stmt` to choke on.
+///
+/// A macro with no such prefix (every macro this crate recognized before
+/// this environment existed) never populates either environment, so every
+/// statement is tried exactly as before — `substitute_locals` is not even
+/// called — which is what keeps #680's and afc2462f's expansions
+/// byte-identical.
+/// Why `expand_macro_filters` refused a macro body. `expand_class_body_
+/// macros` reads this to pick the right message: `NextRestructure` is
+/// narrow enough to name the actual reason (and, unlike every other
+/// refusal here, to hard-fail strict mode — see its call site), while
+/// `NotFilterDsl` keeps the generic message and always-keep-whole
+/// behavior every other refusal already had.
+enum MacroExpansionRefusal {
+    /// A block-form filter statement whose body holds a `next`
+    /// `restructure_next_in_block` can't lower to an if/unless — the
+    /// same cause `ingest::controller::next_restructure_refusal` names
+    /// for a hand-written block, here reached through a concern macro's
+    /// own `before_action`/`after_action`/`prepend_before_action`
+    /// (`method`) instead. Narrow: never raised for any OTHER reason
+    /// `block_filter_from_macro_stmt` refuses a block (an unreadable
+    /// `only:`/`except:`/`if:`/`unless:` entry, a shadowed block
+    /// parameter, …) — those stay `NotFilterDsl`, same as before this
+    /// variant existed.
+    NextRestructure { method: crate::Symbol },
+    /// Every other refusal this function already had: an unreducible
+    /// local, a statement that's neither Symbol-target nor block-form
+    /// filter DSL, one after the filter, or no filter at all.
+    NotFilterDsl,
+}
+
 fn expand_macro_filters(
     body: &crate::expr::Expr,
     module: &crate::ident::ClassId,
-) -> Option<Vec<MacroFilterItem>> {
-    use crate::expr::ExprNode;
+    param_names: &[crate::Symbol],
+) -> Result<Vec<MacroFilterItem>, MacroExpansionRefusal> {
+    use crate::expr::{ExprNode, LValue};
 
     let mut out = Vec::new();
     let statements: Vec<&crate::expr::Expr> = match &*body.node {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
         _ => vec![body],
     };
+    let mut by_name: Vec<(crate::Symbol, crate::expr::Expr)> = Vec::new();
+    // A local that REASSIGNS a macro parameter (`sunset = sunset&.…`)
+    // shadows the bound value — but `substitute_params` already replaced
+    // every read of that parameter, body-wide, with a CLONE of its
+    // call-site value, before this function ever runs (and must keep
+    // doing so unmodified — see this function's own doc). A clone keeps
+    // its original's span, and two DISTINCT source literals never share
+    // one, so every surviving occurrence of "a read of the shadowed
+    // parameter" in a LATER statement is identifiable by span alone:
+    // `const_fold_expr` records the span of every `Lit` leaf it folds
+    // through, and the ones gathered while folding a reassignment's
+    // value are exactly the parameter's pre-fold occurrences, wherever
+    // they still appear. `by_name` alone (a `Var` named `sunset`) finds
+    // nothing there, because there is no `Var` left to find.
+    let mut by_span: Vec<(crate::span::Span, crate::expr::Expr)> = Vec::new();
+    let mut seen_filter = false;
     for stmt in statements {
-        if let Some(filters) = filter_from_send(stmt, module) {
+        if !seen_filter {
+            if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*stmt.node {
+                let mut consumed_spans = Vec::new();
+                match fold_local_value(value, &by_name, &mut consumed_spans) {
+                    Some(lit) => {
+                        by_name.retain(|(n, _)| n != name);
+                        by_name.push((name.clone(), lit.clone()));
+                        // Only a local that REASSIGNS a macro parameter
+                        // (its name is one of `param_names`) has anything
+                        // to find by span: `substitute_params` replaced
+                        // every read of THAT parameter, body-wide, with a
+                        // clone of its call-site value before this
+                        // function ever ran, so matching by span finds
+                        // those surviving clones. A plain new local
+                        // (`stamp`, never a parameter) binds by name only
+                        // — its value's `consumed_spans` are some OTHER
+                        // read's literal (e.g. `date`'s), and registering
+                        // them here would wrongly rewrite that other
+                        // read's later occurrences to `stamp`'s value.
+                        if param_names.contains(name) {
+                            for span in consumed_spans {
+                                by_span.retain(|(s, _)| *s != span);
+                                by_span.push((span, lit.clone()));
+                            }
+                        }
+                        continue;
+                    }
+                    // A local that doesn't reduce to a literal is a gap,
+                    // same as any other statement that isn't filter DSL:
+                    // refuse the whole macro rather than leave it a free
+                    // variable downstream.
+                    None => return Err(MacroExpansionRefusal::NotFilterDsl),
+                }
+            }
+        }
+        let substituted;
+        let candidate: &crate::expr::Expr = if by_name.is_empty() && by_span.is_empty() {
+            stmt
+        } else {
+            substituted = {
+                let mut s = stmt.clone();
+                substitute_locals(&mut s, &by_name, &by_span);
+                s
+            };
+            &substituted
+        };
+        if let Some(filters) = filter_from_send(candidate, module) {
             out.extend(filters.into_iter().map(MacroFilterItem::Filter));
+            seen_filter = true;
             continue;
         }
-        if let Some(block) = block_filter_from_macro_stmt(stmt) {
+        // `block_filter_from_macro_stmt` doesn't itself check whether the
+        // block's `next` (if any) can be restructured — that's
+        // `lambda_filter_target`'s job, reached only later at lowering
+        // time, by which point `block_filter_from_macro_stmt` has
+        // already succeeded at reconstructing the block and this macro
+        // would otherwise be accepted as expanded with no gap recorded
+        // at all. Catch that one cause here, BEFORE accepting the
+        // block, narrowly, so it refuses with a located message instead
+        // of silently riding through as a successfully expanded filter.
+        if let ExprNode::Send { recv: None, method, block: Some(_), .. } = &*candidate.node {
+            if super::controller::is_lambda_filter_macro(method.as_str())
+                && super::controller::next_restructure_refusal(candidate)
+            {
+                return Err(MacroExpansionRefusal::NextRestructure { method: method.clone() });
+            }
+        }
+        if let Some(block) = block_filter_from_macro_stmt(candidate) {
             out.push(MacroFilterItem::Block(block));
+            seen_filter = true;
             continue;
         }
+        return Err(MacroExpansionRefusal::NotFilterDsl);
+    }
+    if out.is_empty() { Err(MacroExpansionRefusal::NotFilterDsl) } else { Ok(out) }
+}
+
+/// Replace every `Var` read in `expr` naming one of `by_name`'s locals,
+/// and every `Lit` whose span is one of `by_span`'s, with the literal it
+/// folded to — the same blind, scope-unaware full-tree rewrite
+/// `substitute_params::replace` already does for macro parameters, run a
+/// second time for the locals `expand_macro_filters` folds on top of
+/// that substitution. Safe for the same reason `replace` is: `by_name`'s
+/// names are the macro body's own locals, not ones a nested block could
+/// re-declare out from under it in any of the shapes this crate expands
+/// (a reused block-param name would shadow correctly in real Ruby and
+/// wrongly here, same pre-existing caveat `rewrite_var_to_self_ref`
+/// documents); `by_span`'s spans each identify one SOURCE location — two
+/// distinct ones never collide, and two clones of the same one (which is
+/// exactly what a shadowed parameter's surviving occurrences are) always
+/// do.
+fn substitute_locals(
+    expr: &mut crate::expr::Expr,
+    by_name: &[(crate::Symbol, crate::expr::Expr)],
+    by_span: &[(crate::span::Span, crate::expr::Expr)],
+) {
+    use crate::expr::ExprNode;
+    match &*expr.node {
+        ExprNode::Var { name, .. } => {
+            if let Some((_, value)) = by_name.iter().rev().find(|(n, _)| n == name) {
+                *expr = value.clone();
+                return;
+            }
+        }
+        ExprNode::Lit { .. } => {
+            if let Some((_, value)) = by_span.iter().rev().find(|(s, _)| *s == expr.span) {
+                *expr = value.clone();
+                return;
+            }
+        }
+        _ => {}
+    }
+    expr.node.for_each_child_mut(&mut |c| substitute_locals(c, by_name, by_span));
+}
+
+/// A local assignment's value, folded to a literal against the locals
+/// already bound in `by_name` — `None` if any part of it cannot be
+/// reduced, which `expand_macro_filters` reads as "refuse the macro".
+/// Every `Lit` leaf the fold passes through (its own value, or one
+/// reached via a chained method call) is appended to `consumed_spans` —
+/// see `by_span`'s doc at its declaration in `expand_macro_filters` for
+/// why that identifies a shadowed parameter's other occurrences.
+fn fold_local_value(
+    value: &crate::expr::Expr,
+    by_name: &[(crate::Symbol, crate::expr::Expr)],
+    consumed_spans: &mut Vec<crate::span::Span>,
+) -> Option<crate::expr::Expr> {
+    let mut scratch: Vec<(crate::Symbol, FoldedValue)> =
+        by_name.iter().map(|(n, e)| (n.clone(), FoldedValue::Lit(e.clone()))).collect();
+    match const_fold_expr(value, &mut scratch, consumed_spans)? {
+        FoldedValue::Lit(e) => Some(e),
+        // `.to_datetime`/`.to_date` with no following `.to_i`/`.httpdate`
+        // to finish the chain: not a value this macro-folding DSL
+        // understands as terminal, so the local can't be bound.
+        FoldedValue::DateTimeStr(_) | FoldedValue::DateStr(_) => None,
+    }
+}
+
+/// An intermediate result of folding a macro-local's value at compile
+/// time. `Lit` is a real, emittable Ruby literal; the other two variants
+/// exist only to carry a validated `YYYY-MM-DD` string between the two
+/// links of the one two-call chain each models (`.to_datetime.to_i`,
+/// `.to_date.httpdate`) — see `fold_date_method`. Neither survives past
+/// `fold_local_value`: a local whose value is still one of them (the
+/// chain's second call never came) refuses the macro rather than bind a
+/// value this crate has no literal shape for.
+#[derive(Clone)]
+enum FoldedValue {
+    Lit(crate::expr::Expr),
+    DateTimeStr(String),
+    DateStr(String),
+}
+
+impl FoldedValue {
+    /// Ruby truthiness: `nil` and `false` are the only falsy values,
+    /// which only `Lit` can ever hold (the date-chain intermediates are
+    /// always truthy, same as any other real object).
+    fn is_truthy(&self) -> bool {
+        use crate::expr::{ExprNode, Literal};
+        match self {
+            FoldedValue::Lit(e) => !matches!(
+                &*e.node,
+                ExprNode::Lit { value: Literal::Nil } | ExprNode::Lit { value: Literal::Bool { value: false } }
+            ),
+            FoldedValue::DateTimeStr(_) | FoldedValue::DateStr(_) => true,
+        }
+    }
+}
+
+/// Reduce `expr` to a `FoldedValue` at compile time, reading `env` (both
+/// the macro's folded locals and, mid-expression, the safe-navigation
+/// temps `&.` desugars to — see `ingest::expr`'s `__safe_nav<pos>`
+/// locals) for `Var` reads, and pushing new ones for `Assign`. Only the
+/// shapes `fold_local_value`'s two callers actually need are modeled —
+/// everything else is a refusal, never a guess, so a date-folding mistake
+/// is a missed expansion rather than a wrong `Deprecation`/`Sunset`
+/// header value.
+///
+/// Every `Lit` leaf reached — whether written directly in the macro
+/// source or substituted in for a parameter read — appends its span to
+/// `consumed_spans`; see `by_span`'s doc at its declaration in
+/// `expand_macro_filters` for why.
+fn const_fold_expr(
+    expr: &crate::expr::Expr,
+    env: &mut Vec<(crate::Symbol, FoldedValue)>,
+    consumed_spans: &mut Vec<crate::span::Span>,
+) -> Option<FoldedValue> {
+    use crate::expr::{BoolOpKind, ExprNode, LValue};
+
+    match &*expr.node {
+        ExprNode::Lit { .. } => {
+            consumed_spans.push(expr.span);
+            Some(FoldedValue::Lit(expr.clone()))
+        }
+        ExprNode::Var { name, .. } => {
+            env.iter().rev().find(|(n, _)| n == name).map(|(_, v)| v.clone())
+        }
+        ExprNode::StringInterp { parts } => {
+            let mut out = String::new();
+            for part in parts {
+                match part {
+                    crate::expr::InterpPart::Text { value } => out.push_str(value),
+                    crate::expr::InterpPart::Expr { expr } => {
+                        let FoldedValue::Lit(lit) = const_fold_expr(expr, env, consumed_spans)? else {
+                            // An interpolated `.to_date`/`.to_datetime`
+                            // with no finishing call — not a string this
+                            // DSL can render.
+                            return None;
+                        };
+                        out.push_str(&literal_to_s(&lit)?);
+                    }
+                }
+            }
+            Some(FoldedValue::Lit(crate::expr::Expr::new(
+                expr.span,
+                ExprNode::Lit { value: crate::expr::Literal::Str { value: out } },
+            )))
+        }
+        // `nil&.x` / `false&.x` (Ruby's only safe-nav-guarded values) —
+        // `ingest::expr` desugars `a&.b` to `a && a.b` (or
+        // `(tmp = a) && tmp.b` for a non-plain-read receiver), so a
+        // literal-nil/false left operand already means the right-hand
+        // call never ran; short-circuit the same way here rather than
+        // fold into a call on nil.
+        ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } => {
+            let l = const_fold_expr(left, env, consumed_spans)?;
+            if !l.is_truthy() {
+                return Some(l);
+            }
+            const_fold_expr(right, env, consumed_spans)
+        }
+        // The safe-nav temp's own binding (`__safe_nav17 = <recv>`):
+        // fold the value and extend the SCRATCH env the same way a
+        // macro local extends the persistent one, so the paired read a
+        // few nodes over resolves.
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            let v = const_fold_expr(value, env, consumed_spans)?;
+            env.push((name.clone(), v.clone()));
+            Some(v)
+        }
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. } if args.is_empty() => {
+            let recv = const_fold_expr(recv, env, consumed_spans)?;
+            fold_date_method(&recv, method.as_str(), expr.span)
+        }
+        _ => None,
+    }
+}
+
+/// The one method pair each of `FoldedValue::DateTimeStr`/`DateStr`
+/// exists for: `'YYYY-MM-DD'.to_datetime.to_i` (Integer Unix seconds at
+/// UTC midnight — what `String#to_datetime` parses a date-only string
+/// to, offset-less so UTC, per Rails 8.1/ActiveSupport) and
+/// `'YYYY-MM-DD'.to_date.httpdate` (`Date#httpdate`'s RFC 2822 string,
+/// always `00:00:00 GMT` — a `Date` carries no time of day). Both calls
+/// on anything else — a non-literal receiver, extra args, a method this
+/// chain doesn't use — refuse rather than guess.
+fn fold_date_method(recv: &FoldedValue, method: &str, span: crate::span::Span) -> Option<FoldedValue> {
+    use crate::expr::{ExprNode, Literal};
+
+    match (recv, method) {
+        (FoldedValue::Lit(e), "to_datetime") => {
+            let ExprNode::Lit { value: Literal::Str { value } } = &*e.node else { return None };
+            parse_ymd(value)?;
+            Some(FoldedValue::DateTimeStr(value.clone()))
+        }
+        (FoldedValue::Lit(e), "to_date") => {
+            let ExprNode::Lit { value: Literal::Str { value } } = &*e.node else { return None };
+            parse_ymd(value)?;
+            Some(FoldedValue::DateStr(value.clone()))
+        }
+        (FoldedValue::DateTimeStr(date), "to_i") => {
+            let (y, m, d) = parse_ymd(date)?;
+            let seconds = days_from_civil(y, m, d) * 86_400;
+            Some(FoldedValue::Lit(crate::expr::Expr::new(
+                span,
+                ExprNode::Lit { value: Literal::Int { value: seconds } },
+            )))
+        }
+        (FoldedValue::DateStr(date), "httpdate") => {
+            let (y, m, d) = parse_ymd(date)?;
+            Some(FoldedValue::Lit(crate::expr::Expr::new(
+                span,
+                ExprNode::Lit { value: Literal::Str { value: format_httpdate(y, m, d) } },
+            )))
+        }
+        _ => None,
+    }
+}
+
+/// A Ruby literal's `to_s` — what a `#{}` interpolation actually renders.
+/// Only the shapes `fold_date_method`'s own results (and a literal
+/// already in the body) can produce: `Integer#to_s` and (vacuously)
+/// `String#to_s`. Not a general `Object#to_s`: a receiver this crate
+/// cannot fold has already refused the macro higher up.
+fn literal_to_s(e: &crate::expr::Expr) -> Option<String> {
+    use crate::expr::{ExprNode, Literal};
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Int { value } } => Some(value.to_string()),
+        ExprNode::Lit { value: Literal::Nil } => Some(String::new()),
+        ExprNode::Lit { value: Literal::Bool { value } } => Some(value.to_string()),
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    }
+}
+
+/// Strict `YYYY-MM-DD` parse (four digits, `-`, two digits, `-`, two
+/// digits — nothing else, no the loose leading-digits `String#to_i`
+/// would accept) plus calendar validity (real month, real day for that
+/// month/year, leap years included). `retire_endpoint`'s date arrives as
+/// a string literal from the controller's call site; a value this loose
+/// about its own shape is exactly where "fold a wrong header value"
+/// would come from; refusing is always the safe alternative.
+fn parse_ymd(s: &str) -> Option<(i64, u32, u32)> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
         return None;
     }
-    if out.is_empty() { None } else { Some(out) }
+    let digits = |r: std::ops::Range<usize>| -> Option<u32> {
+        if s[r.clone()].bytes().all(|b| b.is_ascii_digit()) { s[r].parse().ok() } else { None }
+    };
+    let year = digits(0..4)? as i64;
+    let month = digits(5..7)?;
+    let day = digits(8..10)?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    if day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+    Some((year, month, day))
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    const DAYS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if month == 2 && is_leap_year(year) { 29 } else { DAYS[(month - 1) as usize] }
+}
+
+/// Days since the Unix epoch (1970-01-01) for a proleptic-Gregorian
+/// civil date — Howard Hinnant's `days_from_civil`
+/// (<https://howardhinnant.github.io/date_algorithms.html>, public
+/// domain), the standard exact algorithm so this doesn't quietly drift
+/// from ActiveSupport on some year this crate's test dates don't cover.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (i64::from(m) + 9) % 12; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
+/// `Date#httpdate`'s RFC 2822 rendering — `Thu, 01 Oct 2026 00:00:00
+/// GMT` — always midnight: a `Date` has no time component to carry.
+fn format_httpdate(y: i64, m: u32, d: u32) -> String {
+    const MONTHS: [&str; 12] =
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    // 1970-01-01 (day 0 of `days_from_civil`) was a Thursday.
+    const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    let days = days_from_civil(y, m, d);
+    let weekday = WEEKDAYS[(days.rem_euclid(7)) as usize];
+    format!("{weekday}, {d:02} {month} {y:04} 00:00:00 GMT", month = MONTHS[(m - 1) as usize])
 }
 
 /// Try a macro-body statement (already parameter-substituted) as a
@@ -4435,10 +4902,16 @@ fn fold_literal_if(expr: &mut crate::expr::Expr) {
     let ExprNode::If { cond, then_branch, else_branch } = &*expr.node else {
         return;
     };
-    let ExprNode::Lit { value: Literal::Bool { value } } = &*cond.node else {
-        return;
+    // Ruby's only two falsy values: `nil` is what a folded-away `sunset:`
+    // local leaves behind in `… if sunset` once `expand_macro_filters`
+    // has substituted the literal in — a guard that never had an `unless`
+    // counterpart to confuse it with.
+    let truthy = match &*cond.node {
+        ExprNode::Lit { value: Literal::Bool { value } } => *value,
+        ExprNode::Lit { value: Literal::Nil } => false,
+        _ => return,
     };
-    *expr = if *value { then_branch.clone() } else { else_branch.clone() };
+    *expr = if truthy { then_branch.clone() } else { else_branch.clone() };
 }
 
 /// `self.instance_exec(&<lambda>)` (receiver `SelfRef`, or implicit self)
