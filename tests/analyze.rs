@@ -2266,6 +2266,39 @@ end
 }
 
 #[test]
+fn concurrent_map_types_without_errors() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        ("db/schema.rb", widget_schema()),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  LOCKS = Concurrent::Map.new
+
+  def self.lock_for(id) = LOCKS.compute_if_absent(id) { Mutex.new }
+  def self.forget_locks = LOCKS.clear
+
+  class << self
+    def remember(id, at) = seen[id] = at
+    def seen_at(id) = seen[id]
+
+    private
+
+    def seen
+      @seen ||= Concurrent::Map.new
+    end
+  end
+end
+"#,
+        ),
+    ]);
+    assert_eq!(errors_of(&app), Vec::<String>::new());
+}
+
+#[test]
 fn rails_env_is_a_string_inquirer() {
     // `Rails.env` is an ActiveSupport::StringInquirer: `development?` /
     // `production?` (any `<word>?`) resolve to Bool via method_missing,
