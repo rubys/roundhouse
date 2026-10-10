@@ -3049,6 +3049,21 @@ pub(super) fn hash_method(
             key: Box::new(key.clone()),
             value: Box::new(value.clone()),
         },
+        // The supported Rails subset is the non-mutating, one-argument,
+        // no-block form. Keep block conflicts and `deep_merge!` unresolved
+        // rather than claiming semantics the shared runtime does not provide.
+        "deep_merge" if args.len() == 1 && block_ret.is_none() => {
+            match args[0].ty.as_ref() {
+                Some(Ty::Hash {
+                    key: other_key,
+                    value: other_value,
+                }) => Ty::Hash {
+                    key: Box::new(union_of(key.clone(), (**other_key).clone())),
+                    value: Box::new(union_of(value.clone(), (**other_value).clone())),
+                },
+                _ => unknown(),
+            }
+        }
         // `Hash#to_h` is identity (returns self when called without a
         // block; with a block, transforms entries — same shape).
         // Common in controller bodies: `params.expect(...).to_h` to
@@ -3096,7 +3111,7 @@ pub(super) fn hash_method(
         | "select" | "filter" | "reject" | "compact" | "compact!"
         | "select!" | "filter!" | "reject!" | "keep_if" | "delete_if"
         | "merge!" | "update" | "with_defaults" | "with_defaults!"
-        | "reverse_merge" | "reverse_merge!" | "deep_merge" | "deep_merge!"
+        | "reverse_merge" | "reverse_merge!"
         // ActiveSupport's `compact_blank` — `reject(&:blank?)`, so the
         // same shape as the `compact` beside it.
         | "compact_blank" | "compact_blank!"

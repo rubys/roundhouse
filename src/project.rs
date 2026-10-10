@@ -5220,6 +5220,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         "action_view_number_helper",
         "action_view_number_helper_mixin",
         "active_support_ext",
+        "hash_deep_merge",
         "security_utils",
         "params",
         "action_text",

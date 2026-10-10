@@ -45,6 +45,38 @@ fn rewrite(expr: &mut Expr) {
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {
     let replacement = match &mut *expr.node {
+        // A typed, no-block Hash#deep_merge call is routed through the
+        // shared helper because Spinel cannot dispatch this ActiveSupport
+        // core extension on its native Hash representation.
+        ExprNode::Send {
+            recv: Some(receiver),
+            method,
+            args,
+            block: None,
+            ..
+        } if method.as_str() == "deep_merge"
+            && args.len() == 1
+            && matches!(receiver.ty.as_ref(), Some(Ty::Hash { .. }))
+            && matches!(args[0].ty.as_ref(), Some(Ty::Hash { .. })) =>
+        {
+            let mut call = Expr::new(
+                expr.span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        expr.span,
+                        ExprNode::Const {
+                            path: vec![crate::ident::Symbol::from("ActiveSupport")],
+                        },
+                    )),
+                    method: crate::ident::Symbol::from("deep_merge"),
+                    args: vec![receiver.clone(), args[0].clone()],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            call.ty = expr.ty.clone();
+            Some(call)
+        }
         // ActiveSupport's `deep_dup` on a typed Hash or Array — the core_ext
         // reopen the CRuby overlay hosts, as the function every scaffold
         // tree ships (`ActiveSupport.deep_dup`, runtime/ruby/

@@ -1407,6 +1407,39 @@ impl<'a> BodyTyper<'a> {
                     });
                     return unknown();
                 }
+                let unsupported_deep_merge = match method.as_str() {
+                    "deep_merge" if block.is_some() => Some((
+                        "Hash#deep_merge conflict block",
+                        "only the no-block Rails deep_merge form is supported",
+                    )),
+                    "deep_merge!" => Some((
+                        "Hash#deep_merge!",
+                        "the mutating deep_merge! form is unsupported",
+                    )),
+                    "deep_merge" if args.len() != 1 => Some((
+                        "Hash#deep_merge arity",
+                        "exactly one Hash argument is supported",
+                    )),
+                    "deep_merge"
+                        if !matches!(args.first().and_then(|arg| arg.ty.as_ref()), Some(Ty::Hash { .. })) =>
+                    {
+                        Some((
+                            "Hash#deep_merge argument",
+                            "the supported no-block form requires a statically typed Hash argument",
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some((construct, detail)) = unsupported_deep_merge
+                    && matches!(recv_ty, Some(Ty::Hash { .. }))
+                {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from(construct),
+                        detail: detail.into(),
+                    });
+                    return unknown();
+                }
                 // Force `parenthesized: true` when dispatch resolves
                 // to a `Method`-kind on a registered class. The TS
                 // emitter's bare-recv-Send fallback omits parens when
