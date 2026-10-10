@@ -86,6 +86,14 @@ module Tep
     def set_status(n); @status = n; end
 
     def halted_close?
+      # A handler's close option also overrides request keep-alive.
+      @headers.each do |name, value|
+        if name.downcase == "connection"
+          value.downcase.split(",").each do |option|
+            return true if option.strip == "close"
+          end
+        end
+      end
       @halted && @status >= 300
     end
   end

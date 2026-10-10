@@ -95,7 +95,7 @@ module Sock
         if io.wait_readable(5).nil?
           return ""
         end
-        chunk = Sock.sp_net_recv_some(fd, n - out.bytesize)
+        chunk = Sock.sp_net_recv_some(fd, n - out.bytesize).b
         if chunk.bytesize == 0
           return ""
         end

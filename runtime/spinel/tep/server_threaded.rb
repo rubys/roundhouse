@@ -180,9 +180,10 @@ module Tep
           raise
         end
         begin
+          input = InputBuffer.new
           keep_going = true
           while keep_going
-            keep_going = Tep::Server::Threaded.handle_one(client, io)
+            keep_going = Tep::Server::Threaded.handle_one(client, io, input)
           end
         ensure
           io.close
@@ -193,12 +194,12 @@ module Tep
 
       # Process exactly one request on `client`. Returns true to keep the
       # connection open for the next keep-alive request, false to close.
-      def self.handle_one(client, io)
-        blob = Tep::Server::Threaded.read_request_blob(client, io, KEEPALIVE_TIMEOUT)
+      def self.handle_one(client, io, input = InputBuffer.new)
+        blob = Tep::Server::Threaded.read_request_blob(client, io, KEEPALIVE_TIMEOUT, input)
         if blob.length == 0
           return false
         end
-        req = Parser.parse(blob)
+        req = Parser.parse(blob, input)
         if req == nil
           Tep::Server::Threaded.send_simple(client, 400, "bad request")
           return false
@@ -229,20 +230,19 @@ module Tep
           return false
         end
 
-        # Streaming responses use chunked Connection: close (same
-        # simplification as the prefork server).
-        keep_alive = req.keep_alive? && !res.halted_close? && !res.streaming
+        # The writer returns the keep-alive decision it actually sends.
+        keep_alive = req.keep_alive? && !res.halted_close?
         Tep::Server::Threaded.write_response(client, io, req, res, keep_alive)
-        keep_alive
       end
 
       # Request reader. Returns the accumulated blob once "\r\n\r\n" is
       # seen, or "" on timeout / EOF / oversize. The timed wait parks the
       # thread; a peer that closes wakes it (EOF reads as zero bytes).
-      def self.read_request_blob(fd, io, timeout_seconds)
-        buf = +""
+      def self.read_request_blob(fd, io, timeout_seconds, input = InputBuffer.new)
+        buf = input.take_pending_input
+        return buf if buf.include?("\r\n\r\n")
         deadline = Time.now.to_i + timeout_seconds
-        while buf.length < MAX_REQUEST_BYTES
+        while buf.bytesize < MAX_REQUEST_BYTES
           remaining = deadline - Time.now.to_i
           if remaining <= 0
             return ""
@@ -251,12 +251,12 @@ module Tep
           if ready.nil?
             return ""
           end
-          chunk = Sock.sphttp_recv_some(fd, 4096)
+          chunk = Sock.sphttp_recv_some(fd, [4096, MAX_REQUEST_BYTES - buf.bytesize].min).b
           if chunk.length == 0
             return ""
           end
           buf << chunk
-          if buf.length >= 4 && buf.include?("\r\n\r\n")
+          if buf.bytesize >= 4 && buf.include?("\r\n\r\n")
             return buf
           end
         end
@@ -288,7 +288,7 @@ module Tep
           ensure
             res.ws_driver.retire
           end
-          return 0
+          return false
         end
 
         # Streaming branch -- chunked, Connection: close.
@@ -305,7 +305,7 @@ module Tep
           out = Tep::Stream.new(client)
           res.streamer.pump(out)
           Sock.sphttp_write_chunk_end(client)
-          return 0
+          return false
         end
 
         # Default Content-Type for inline-body responses.
@@ -323,6 +323,10 @@ module Tep
         end
         if res.file_path.length > 0
           fs = Sock.sphttp_filesize(res.file_path)
+          if fs < 0
+            Tep::Server::Threaded.send_simple(client, 404, "file not found")
+            return false
+          end
           head << "Content-Length: " + fs.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
           Sock.sphttp_sendfile(client, res.file_path) unless req.verb == "HEAD"
@@ -338,7 +342,7 @@ module Tep
             Sock.sphttp_write_bytes(client, res.body, res.body.bytesize)
           end
         end
-        0
+        keep_alive
       end
 
       # bytesize, as write_response: a multibyte `msg` would otherwise

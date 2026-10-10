@@ -2,9 +2,30 @@
 # byte blob the C helper read off the wire (headers, possibly a
 # prefix of the body).
 module Tep
+  # Owned by one connection, never by an fd number or the server singleton.
+  # Headers can arrive with bytes belonging to a later pipelined request.
+  class InputBuffer
+    def initialize
+      @pending_input = +"".b
+    end
+
+    def take_pending_input
+      pending = @pending_input
+      @pending_input = +"".b
+      pending
+    end
+
+    def keep_pending_input(bytes)
+      @pending_input = bytes
+      nil
+    end
+  end
+
   class Parser
     # Returns a fully-populated Request, or nil if the blob is malformed.
-    def self.parse(blob)
+    def self.parse(blob, input = InputBuffer.new)
+      # Delimit headers and bodies as octets, even with a UTF-8-tagged recv.
+      blob = blob.b
       # String#index returns nil (not -1) when not found — matches CRuby.
       # See matz/spinel#532; spinel 0210389 fixed the prior -1 sentinel.
       end_of_headers = blob.index("\r\n\r\n")
@@ -89,12 +110,20 @@ module Tep
         end
       end
 
-      # Carry over any body bytes already in the blob (the C helper
-      # may have read more than just the headers in one recv()).
+      # Content-Length ends this body exactly, including zero (or an
+      # absent header). Keep surplus bytes for this connection's next
+      # request instead of appending them to the body or dropping them.
       body_start = end_of_headers + 4
-      if body_start < blob.length
-        req.raw_body = blob[body_start, blob.length - body_start]
+      received = blob.bytesize - body_start
+      body_bytes = req.content_length
+      if body_bytes < 0
+        body_bytes = 0   # body_refusal will reject the invalid length
       end
+      if body_bytes > received
+        body_bytes = received
+      end
+      req.raw_body = blob.byteslice(body_start, body_bytes)
+      input.keep_pending_input(blob.byteslice(body_start + body_bytes, received - body_bytes))
 
       req
     end

@@ -184,9 +184,10 @@ module Tep
       # Mirrors the Tep::Server#handle_one fix (210a5f6) for the prefork
       # server; this Scheduled server is the one the blog actually runs.
       def self.handle_connection(client)
+        input = InputBuffer.new
         keep_going = true
         while keep_going
-          keep_going = Tep::Server::Scheduled.handle_one(client)
+          keep_going = Tep::Server::Scheduled.handle_one(client, input)
         end
         Sock.sphttp_close(client)
         0
@@ -194,12 +195,12 @@ module Tep
 
       # Process exactly one request on `client`. Returns true to keep the
       # connection open for the next keep-alive request, false to close.
-      def self.handle_one(client)
-        blob = Tep::Server::Scheduled.read_request_blob(client, KEEPALIVE_TIMEOUT)
+      def self.handle_one(client, input = InputBuffer.new)
+        blob = Tep::Server::Scheduled.read_request_blob(client, KEEPALIVE_TIMEOUT, input)
         if blob.length == 0
           return false
         end
-        req = Parser.parse(blob)
+        req = Parser.parse(blob, input)
         if req == nil
           Tep::Server::Scheduled.send_simple(client, 400, "bad request")
           return false
@@ -231,21 +232,18 @@ module Tep
           return false
         end
 
-        # Streaming responses use chunked Connection: close (same
-        # simplification as the prefork server) -- force the keep-alive
-        # loop to end after this response so the stream's terminator isn't
-        # followed by a stale read on the same fd.
-        keep_alive = req.keep_alive? && !res.halted_close? && !res.streaming
+        # The writer returns the keep-alive decision it actually sends.
+        keep_alive = req.keep_alive? && !res.halted_close?
         Tep::Server::Scheduled.write_response(client, req, res, keep_alive)
-        keep_alive
       end
 
       # Non-blocking request reader. Returns the accumulated blob
       # once "\r\n\r\n" is seen, or "" on timeout / EOF / oversize.
-      def self.read_request_blob(fd, timeout_seconds)
-        buf = +""
+      def self.read_request_blob(fd, timeout_seconds, input = InputBuffer.new)
+        buf = input.take_pending_input
+        return buf if buf.include?("\r\n\r\n")
         deadline = Time.now.to_i + timeout_seconds
-        while buf.length < MAX_REQUEST_BYTES
+        while buf.bytesize < MAX_REQUEST_BYTES
           remaining = deadline - Time.now.to_i
           if remaining <= 0
             return ""
@@ -254,12 +252,12 @@ module Tep
           if ready == 0
             return ""
           end
-          chunk = Sock.sphttp_recv_some(fd, 4096)
+          chunk = Sock.sphttp_recv_some(fd, [4096, MAX_REQUEST_BYTES - buf.bytesize].min).b
           if chunk.length == 0
             return ""
           end
           buf << chunk
-          if buf.length >= 4 && buf.include?("\r\n\r\n")
+          if buf.bytesize >= 4 && buf.include?("\r\n\r\n")
             return buf
           end
         end
@@ -284,7 +282,7 @@ module Tep
           # other connection. Refuse the upgrade rather than serve it wrong.
           Tep::Server::Scheduled.send_simple(client, 501,
             "websocket upgrade needs TEP_SERVER=thread")
-          return 0
+          return false
         end
 
         # Streaming branch -- cooperative mirror of Tep::Server's
@@ -310,7 +308,7 @@ module Tep
           out = Tep::Stream.new(client)
           res.streamer.pump(out)
           Sock.sphttp_write_chunk_end(client)
-          return 0
+          return false
         end
 
         # Default Content-Type for inline-body responses. Matches
@@ -331,6 +329,10 @@ module Tep
         end
         if res.file_path.length > 0
           fs = Sock.sphttp_filesize(res.file_path)
+          if fs < 0
+            Tep::Server::Scheduled.send_simple(client, 404, "file not found")
+            return false
+          end
           head << "Content-Length: " + fs.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
           Sock.sphttp_sendfile(client, res.file_path) unless req.verb == "HEAD"
@@ -353,7 +355,7 @@ module Tep
             Sock.sphttp_write_bytes(client, res.body, res.body.bytesize)
           end
         end
-        0
+        keep_alive
       end
 
       # bytesize, as write_response: a multibyte `msg` would otherwise
