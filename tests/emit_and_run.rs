@@ -10389,3 +10389,22 @@ end
         .run_test("test/controllers/token_free_forms_controller_test.rb")
         .assert_passes();
 }
+
+/// A bounded `ActiveSupport::Cache::MemoryStore` keeps an html-safe
+/// String (a SafeBuffer) as such, as Rails' store does. campfire main
+/// caches each text message's rendered body this way (`auto_link`
+/// answers a SafeBuffer); the store refused anything but an exact
+/// String, so with caching on every message body rendered empty.
+#[test]
+fn a_memory_store_keeps_an_html_safe_string() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+store = ActiveSupport::Cache::MemoryStore.new(size: 4096)
+body = store.fetch("presentation") { "<b>hi</b>".html_safe }
+raise "fetch answered #{body.inspect}" unless body == "<b>hi</b>" && body.html_safe?
+again = store.read("presentation")
+raise "read answered #{again.inspect}" unless again == "<b>hi</b>" && again.html_safe?
+raise "the cached copy is the caller's object" if again.equal?(body)
+"##)
+        .assert_passes();
+}
