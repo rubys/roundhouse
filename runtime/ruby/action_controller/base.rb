@@ -380,6 +380,234 @@ module ActionController
     end
   end
 
+  # `response.cache_control` — a typed store standing in for Rails'
+  # one mixed Hash (`{public: true, max_age: 31556952}`, an Integer
+  # and a boolean sharing one container: the type bag every strict
+  # target pays for). Every field below is its own bool/Integer, so
+  # no strict target carries an `untyped` cache_control.
+  #
+  # `max_age` / `stale_while_revalidate` / `stale_if_error` each keep
+  # a presence bool alongside the Integer rather than a nilable one —
+  # a present key counts even when its value is 0 (`expires_in 0,
+  # public: false` is a STATED max-age of zero, not "unset"), and a
+  # nilable Integer field is the same gradual-escape tax
+  # `cache_control_max_age` existed to dodge before this class (see
+  # its callers on Base).
+  #
+  # The Hash-like `[]` / `[]=` / `delete` / `merge!` / `replace`
+  # surface app code actually writes (`response.cache_control.replace
+  # (private: true, no_store: true)`) is a RUBY-FAMILY reopen —
+  # `action_controller/cache_control.rb`, beside `cookies.rb` — so
+  # this class stays plain typed getters/setters here, usable by
+  # `expires_in` below on every target.
+  #
+  # `to_header` follows Rails 8.1.4's
+  # `ActionDispatch::Http::Cache::Response#cache_control_header`
+  # exactly — branch selection and field order both — pinned against
+  # the gem in `cache_control_test.rb`:
+  #   empty store                → no header at all ("")
+  #   no_store                   → private?, must-understand?, "no-store"
+  #   no_cache (no_store unset)  → public?, "no-cache", extras
+  #   otherwise                  → max-age=N?, public-or-private,
+  #                                 must-revalidate?,
+  #                                 stale-while-revalidate=N?,
+  #                                 stale-if-error=N?, immutable?, extras
+  class CacheControlStore
+    def initialize
+      @public = false
+      @private = false
+      @no_store = false
+      @no_cache = false
+      @must_revalidate = false
+      @must_understand = false
+      @immutable = false
+      @max_age = 0
+      @has_max_age = false
+      @stale_while_revalidate = 0
+      @has_stale_while_revalidate = false
+      @stale_if_error = 0
+      @has_stale_if_error = false
+      @extras = []
+    end
+
+    def public?
+      @public
+    end
+
+    def public=(value)
+      @public = value ? true : false
+    end
+
+    def private?
+      @private
+    end
+
+    def private=(value)
+      @private = value ? true : false
+    end
+
+    def no_store?
+      @no_store
+    end
+
+    def no_store=(value)
+      @no_store = value ? true : false
+    end
+
+    def no_cache?
+      @no_cache
+    end
+
+    def no_cache=(value)
+      @no_cache = value ? true : false
+    end
+
+    def must_revalidate?
+      @must_revalidate
+    end
+
+    def must_revalidate=(value)
+      @must_revalidate = value ? true : false
+    end
+
+    def must_understand?
+      @must_understand
+    end
+
+    def must_understand=(value)
+      @must_understand = value ? true : false
+    end
+
+    def immutable?
+      @immutable
+    end
+
+    def immutable=(value)
+      @immutable = value ? true : false
+    end
+
+    def max_age
+      @max_age
+    end
+
+    def max_age?
+      @has_max_age
+    end
+
+    def max_age=(value)
+      @max_age = value
+      @has_max_age = true
+    end
+
+    # A stated Integer field is cleared back to "not stated" rather
+    # than assigned a sentinel — the counterpart to `max_age=` for
+    # `expires_in`'s "an option not passed overwrites" semantics (an
+    # omitted keyword clears whatever a prior call stated) and for
+    # the Hash surface's `store[:max_age] = nil`.
+    def clear_max_age
+      @max_age = 0
+      @has_max_age = false
+    end
+
+    def stale_while_revalidate
+      @stale_while_revalidate
+    end
+
+    def stale_while_revalidate?
+      @has_stale_while_revalidate
+    end
+
+    def stale_while_revalidate=(value)
+      @stale_while_revalidate = value
+      @has_stale_while_revalidate = true
+    end
+
+    def clear_stale_while_revalidate
+      @stale_while_revalidate = 0
+      @has_stale_while_revalidate = false
+    end
+
+    def stale_if_error
+      @stale_if_error
+    end
+
+    def stale_if_error?
+      @has_stale_if_error
+    end
+
+    def stale_if_error=(value)
+      @stale_if_error = value
+      @has_stale_if_error = true
+    end
+
+    def clear_stale_if_error
+      @stale_if_error = 0
+      @has_stale_if_error = false
+    end
+
+    def extras
+      @extras
+    end
+
+    def extras=(value)
+      @extras = value
+    end
+
+    def clear
+      @public = false
+      @private = false
+      @no_store = false
+      @no_cache = false
+      @must_revalidate = false
+      @must_understand = false
+      @immutable = false
+      @max_age = 0
+      @has_max_age = false
+      @stale_while_revalidate = 0
+      @has_stale_while_revalidate = false
+      @stale_if_error = 0
+      @has_stale_if_error = false
+      @extras = []
+    end
+
+    def empty?
+      !@public && !@private && !@no_store && !@no_cache && !@must_revalidate &&
+        !@must_understand && !@immutable && !@has_max_age &&
+        !@has_stale_while_revalidate && !@has_stale_if_error && @extras.empty?
+    end
+
+    def to_header
+      return "" if empty?
+      parts = []
+      if @no_store
+        parts << "private" if @private
+        parts << "must-understand" if @must_understand
+        parts << "no-store"
+      elsif @no_cache
+        parts << "public" if @public
+        parts << "no-cache"
+        extra_index = 0
+        while extra_index < @extras.length
+          parts << @extras[extra_index]
+          extra_index += 1
+        end
+      else
+        parts << "max-age=#{@max_age}" if @has_max_age
+        parts << (@public ? "public" : "private")
+        parts << "must-revalidate" if @must_revalidate
+        parts << "stale-while-revalidate=#{@stale_while_revalidate}" if @has_stale_while_revalidate
+        parts << "stale-if-error=#{@stale_if_error}" if @has_stale_if_error
+        parts << "immutable" if @immutable
+        extra_index = 0
+        while extra_index < @extras.length
+          parts << @extras[extra_index]
+          extra_index += 1
+        end
+      end
+      parts.join(", ")
+    end
+  end
+
   # Symbol form (`status: :see_other`) to integer code — Rack's
   # `SYMBOL_TO_STATUS_CODE`, PORTED whole rather than grown entry by
   # entry as apps surfaced them. It used to be "an ad-hoc subset; grow
@@ -502,15 +730,20 @@ module ActionController
     # sets it only in a controller that reads it.
     attr_reader   :action_name
     attr_reader   :status, :body, :location, :content_type
-    # Cache-Control, split into two TYPED readers rather than Rails'
-    # one mixed Hash. Rails' `response.cache_control` is
-    # `{public: true, max_age: 31556952}` — an Integer and a boolean in
-    # one container, which is the type bag every strict target pays
-    # for. The two facts are kept apart here and re-assembled into
-    # Rails' Hash shape by the TEST harness
-    # (ActionResponse#cache_control), the only reader that wants the
-    # subscript spelling.
-    attr_reader   :cache_control_max_age, :cache_control_public
+
+    # `response.cache_control_max_age` / `_public` — delegate to the
+    # typed `CacheControlStore` (above HeaderStore) so these two
+    # pre-existing readers keep working unchanged for every caller
+    # that predates it, the TEST harness included
+    # (ActionResponse#cache_control reassembles Rails' mixed Hash from
+    # exactly these two calls).
+    def cache_control_max_age
+      @cache_control.max_age
+    end
+
+    def cache_control_public
+      @cache_control.public?
+    end
 
     # `response` is this controller in the shared runtime, so controller
     # actions that set `response.content_type` need the same writer Rails'
@@ -548,10 +781,10 @@ module ActionController
       @head_response = false
       # Set unconditionally, not on first `expires_in`: an ivar a strict
       # target never sees assigned has no type to infer, and the readers
-      # above are reachable on every controller. 0 = "no max-age
-      # stated", which is also what a response without the header means.
-      @cache_control_max_age = 0
-      @cache_control_public = false
+      # above are reachable on every controller. Empty store = no
+      # max-age stated, which is also what a response without the
+      # header means.
+      @cache_control = ActionController::CacheControlStore.new
     end
 
     # True once render/redirect_to/head has produced a response.
@@ -765,30 +998,47 @@ module ActionController
       true
     end
 
-    # `expires_in 1.year, public: true` — Rails' Cache-Control writer.
-    # campfire's QR code, avatar and logo actions all open with one, and
-    # the QR test reads the result back
-    # (`response.cache_control[:max_age]`), which is what makes this a
-    # VALUE the harness carries rather than a header it would be enough
-    # to buffer.
+    # `expires_in 1.year, public: true` — Rails' Cache-Control writer,
+    # following activesupport 8.1.4's `expires_in` to the keyword:
+    # deletes `:no_store`, then merges all six of `max_age:`, `public:`,
+    # `must_revalidate:`, `stale_while_revalidate:`, `stale_if_error:`,
+    # `immutable:` — an option THIS call does not pass overwrites
+    # whatever the store already held for it (a bare `expires_in 60`
+    # right after `response.cache_control.replace(immutable: true)`
+    # drops `:immutable`, exactly as Rails does). `commit_cache_control!`
+    # (the ruby-family `cache_control.rb` reopen) writes the composed
+    # header from the store onto the wire.
     #
-    # SECONDS, not a Duration. `lower::duration`'s `rewrite_expires_in`
-    # unwraps the corpus' `1.year` at the CALL SITE — the same grounding
+    # SECONDS, not a Duration, for every duration-shaped argument.
+    # `lower::duration`'s `rewrite_expires_in` unwraps the corpus'
+    # `1.year` / `stale_while_revalidate: 30.seconds` /
+    # `stale_if_error: 1.day` at the CALL SITE — the same grounding
     # `signed_id(expires_in:)` gets — so this signature stays Integer
     # and no strict target pays for an `untyped` parameter here.
-    # `stale_while_revalidate: 0` means "not stated", which keeps the
-    # parameter Integer rather than nullable; two of campfire's three
-    # call sites pass it, so accepting only `public:` would have turned
-    # a NoMethodError into an ArgumentError at those two and looked like
-    # progress.
     #
-    # NO Cache-Control HEADER IS WRITTEN. The two cache-control facts are response
-    # state; dispatch does not translate them into a Cache-Control
-    # header. Arbitrary headers written through headers are separately
-    # copied to the Ruby-family response by dispatch.
-    def expires_in(seconds, public: false, stale_while_revalidate: 0)
-      @cache_control_max_age = seconds
-      @cache_control_public = public
+    # `stale_while_revalidate:` / `stale_if_error:` default to -1
+    # ("not stated") rather than 0: Rails' merge treats a literal `0`
+    # as a STATED zero-second window (still a key in the Hash) and an
+    # omitted keyword as clearing whatever a prior call set, so this
+    # signature needs a sentinel no real duration can be — -1 — to
+    # tell the two apart without a second boolean parameter per field.
+    def expires_in(seconds, public: false, must_revalidate: false,
+                    stale_while_revalidate: -1, stale_if_error: -1, immutable: false)
+      @cache_control.no_store = false
+      @cache_control.max_age = seconds
+      @cache_control.public = public
+      @cache_control.must_revalidate = must_revalidate
+      if stale_while_revalidate == -1
+        @cache_control.clear_stale_while_revalidate
+      else
+        @cache_control.stale_while_revalidate = stale_while_revalidate
+      end
+      if stale_if_error == -1
+        @cache_control.clear_stale_if_error
+      else
+        @cache_control.stale_if_error = stale_if_error
+      end
+      @cache_control.immutable = immutable
       nil
     end
 

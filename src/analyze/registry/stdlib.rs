@@ -629,9 +629,15 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         register_stdlib_class(classes, exc, &[], &methods);
     }
     // `ActiveModel::Type::Boolean.new.cast(v)`: nil for a blank value, else the boolean.
-    register_stdlib_class(classes, "ActiveModel::Type::Boolean", &[], &[
-        ("cast", Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }),
-    ]);
+    // Not answered here beyond `new`: the dispatch arm for `ActiveSupport::StringInquirer` types its predicates and String surface.
+    register_stdlib_class(classes, "ActiveSupport::StringInquirer", &[("new", Ty::Str)], &[]);
+    // `ActiveRecord::Type::Boolean` is a subclass with the same casting; `deserialize` casts the same way for a boolean.
+    for name in ["ActiveModel::Type::Boolean", "ActiveRecord::Type::Boolean"] {
+        register_stdlib_class(classes, name, &[], &[
+            ("cast", Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }),
+            ("deserialize", Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }),
+        ]);
+    }
     // Not a typed store: a thread-local slot holds whatever the caller put there, so `[]` answers untyped.
     // `new` / `pass` / `kill` / `join` — `runtime/ruby/timeout.rb`'s wall-clock
     // port (Spinel lane) starts a worker and kills it past the deadline.

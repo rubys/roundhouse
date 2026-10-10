@@ -69,15 +69,15 @@ use render::{
 pub(crate) use body::union_of;
 pub use preload::{missing_preload_report, PreloadCoverage};
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use rubydex::model::identity_maps::IdentityHashMap;
 use rubydex::model::ids::DeclarationId;
 
 use crate::adapter::{DatabaseAdapter, SqliteAdapter};
 use crate::App;
 use crate::dialect::{
-    Action, Controller, ControllerBodyItem, Filter, FilterKind, LayoutDecl, MethodDef, MethodReceiver,
-    Model, ModelBodyItem, RenderTarget,
+    Action, Controller, ControllerBodyItem, Filter, FilterKind, LayoutDecl, LibraryClassOrigin,
+    MethodDef, MethodReceiver, Model, ModelBodyItem, RenderTarget,
 };
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
@@ -144,6 +144,9 @@ pub struct Analyzer {
     typed_constants: IdentityHashMap<DeclarationId, Ty>,
     /// Literal Data constants on library classes, keyed by source span.
     data_factories: HashMap<crate::span::Span, Ty>,
+    /// Registered Data factories that use the generated initializer, so
+    /// `.new` call-site types do not manufacture a source `initialize`.
+    data_factories_without_custom_initialize: HashSet<ClassId>,
     /// The controller/mailer→view channel as the last production
     /// typing pass harvested it. See [`ViewSeeds`].
     view_seeds: Option<ViewSeeds>,
@@ -1066,6 +1069,15 @@ impl Analyzer {
 
         let const_resolver = app.const_resolver.for_sources(&app.sources);
         let data_factories = data::register(app, &const_resolver, &mut classes);
+        let data_factories_without_custom_initialize = app
+            .library_classes
+            .iter()
+            .filter(|class| {
+                matches!(class.origin, Some(LibraryClassOrigin::DataFactory { .. }))
+                    && !class.methods.iter().any(|method| method.name.as_str() == "initialize")
+            })
+            .map(|class| class.name.clone())
+            .collect();
 
         Self {
             classes,
@@ -1084,6 +1096,7 @@ impl Analyzer {
             source_indexed: !app.sources.is_empty(),
             typed_constants: IdentityHashMap::default(),
             data_factories,
+            data_factories_without_custom_initialize,
             view_seeds: None,
             callers_by_target: HashMap::new(),
             controller_action_meta_cache: HashMap::new(),
@@ -4625,7 +4638,7 @@ impl Analyzer {
                         && method.name_span.is_synthetic()
                         && matches!(
                             &lc.origin,
-                            Some(crate::dialect::LibraryClassOrigin::DataFactory { members })
+                            Some(crate::dialect::LibraryClassOrigin::DataFactory { members, .. })
                                 if members.contains(&method.name)
                         )
                         && ret.as_ref().is_some_and(|ty| {
@@ -6110,7 +6123,9 @@ impl Analyzer {
                     let record_initialize = method.as_str() == "new"
                         && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }));
                     for class_id in recv_classes {
-                        if record_initialize {
+                        if record_initialize
+                            && !self.data_factories_without_custom_initialize.contains(&class_id)
+                        {
                             out.push((
                                 class_id.clone(),
                                 Symbol::from("initialize"),

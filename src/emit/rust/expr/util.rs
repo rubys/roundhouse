@@ -308,7 +308,6 @@ pub(crate) fn rewrite_method_name(m: &str) -> String {
         "to_s" => "to_string",
         "length" => "len",
         "nil?" => "is_none",
-        "empty?" => "is_empty",
         "key?" => "contains_key",
         "has_key?" => "contains_key",
         "include?" => "contains",

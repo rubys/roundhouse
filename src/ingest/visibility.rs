@@ -330,6 +330,9 @@ impl Visibility {
         Ok(())
     }
 
+    /// Resolve static method visibility within one lexical body, starting public.
+    /// Nested classes and recognized Data factory blocks have separate declaration
+    /// passes, so their methods and visibility markers do not affect this scope.
     fn walk(
         &mut self,
         body: Option<Node<'_>>,
@@ -486,6 +489,9 @@ impl Visibility {
             }
             // Nested classes have their own declaration pass and namespace.
             if node.as_class_node().is_some() {
+                continue;
+            }
+            if super::data_factory::declaration(node).is_some() {
                 continue;
             }
             if let Some(module) = node.as_module_node() {

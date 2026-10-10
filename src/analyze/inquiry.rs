@@ -76,11 +76,26 @@ pub fn tail_is_inquiry(body: &Expr) -> bool {
         ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, right, .. } => {
             tail_is_inquiry(right)
         }
-        ExprNode::Send { method, args, block: None, .. } => {
-            method.as_str() == "inquiry" && args.is_empty()
-        }
+        ExprNode::Send { .. } => inquirer_value(body).is_some(),
         _ => false,
     }
+}
+
+/// The string an inquirer is made from: `x.inquiry`, or
+/// `ActiveSupport::StringInquirer.new(x)`, which Rails' `inquiry` is.
+pub fn inquirer_value(expr: &Expr) -> Option<&Expr> {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else { return None };
+    match (method.as_str(), args.as_slice()) {
+        ("inquiry", []) => Some(recv),
+        ("new", [value]) if is_string_inquirer_const(recv) => Some(value),
+        _ => None,
+    }
+}
+
+fn is_string_inquirer_const(expr: &Expr) -> bool {
+    matches!(&*expr.node, ExprNode::Const { path }
+        if matches!(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice(),
+            ["ActiveSupport", "StringInquirer"] | ["", "ActiveSupport", "StringInquirer"]))
 }
 
 /// Is `recv.<method>` (no arguments) an inquirer predicate: a
@@ -100,8 +115,8 @@ pub fn is_inquiry_predicate(
         return false;
     }
     match &*recv.node {
-        ExprNode::Send { method: rm, args: rargs, block: None, .. } => {
-            (rm.as_str() == "inquiry" && rargs.is_empty()) || inquirers.contains(rm)
+        ExprNode::Send { method: rm, block: None, .. } => {
+            inquirer_value(recv).is_some() || inquirers.contains(rm)
         }
         _ => false,
     }

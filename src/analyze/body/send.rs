@@ -1667,6 +1667,10 @@ impl<'a> BodyTyper<'a> {
                 // inquiry; everything else dispatches as a String
                 // (`==`/interpolation/`upcase`/`to_sym` all work).
                 if id.0.as_str() == "ActiveSupport::StringInquirer" {
+                    // Not an inquirer instance: `lower::inquiry` reads `new(x)` as `x`, the String it compares.
+                    if method.as_str() == "new" && call_args.len() == 1 {
+                        return Ty::Str;
+                    }
                     if method.as_str().ends_with('?') {
                         return Ty::Bool;
                     }

@@ -91,12 +91,11 @@ end
         .find(|class| class.name.0.as_str() == "FactoryExamples::ContentKey")
         .expect("the Data block becomes its own library class");
 
-    assert_eq!(
-        class.origin,
-        Some(LibraryClassOrigin::DataFactory {
-            members: vec![Symbol::from("digest"), Symbol::from("source")],
-        })
-    );
+    assert!(matches!(
+        &class.origin,
+        Some(LibraryClassOrigin::DataFactory { members, .. })
+            if members == &[Symbol::from("digest"), Symbol::from("source")]
+    ));
     assert!(
         class
             .methods
@@ -150,6 +149,29 @@ end
     assert_eq!(
         info.instance_methods.get(&Symbol::from("cache_key")),
         Some(&Ty::Str)
+    );
+}
+
+#[test]
+fn custom_data_initializer_parameters_are_inferred_from_new_calls() {
+    let source = r#"class FactoryExamples
+  State = Data.define(:value) do
+    def initialize(value:)
+      super
+    end
+  end
+end
+"#;
+    let mut app = ingest(source, "FactoryExamples::State.new(value: \"typed\")");
+    let mut analyzer = Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+
+    assert_eq!(
+        analyzer.inferred_param_types(
+            &ClassId(Symbol::from("FactoryExamples::State")),
+            &Symbol::from("initialize"),
+        ),
+        Some(&[Ty::Str][..]),
     );
 }
 
@@ -272,6 +294,46 @@ end
         run.status.success(),
         "emitted record behavior failed:\n{}",
         String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn inline_private_class_method_visibility_is_preserved_for_data_factories() {
+    let source = r#"class FactoryExamples
+  State = Data.define(:value) do
+    private_class_method def self.build(value)
+      new(value: value)
+    end
+
+    private
+
+    def self.public_builder(value)
+      new(value: value)
+    end
+  end
+end
+"#;
+    let app = ingest(source, "FactoryExamples::State.new(value: \"typed\")");
+    let factory = app
+        .library_classes
+        .iter()
+        .find(|class| class.name.0.as_str() == "FactoryExamples::State")
+        .expect("Data factory");
+    let method = |name: &str| {
+        factory
+            .methods
+            .iter()
+            .find(|method| method.name.as_str() == name)
+            .unwrap_or_else(|| panic!("missing factory method {name}"))
+    };
+
+    assert_eq!(
+        method("build").visibility,
+        roundhouse::dialect::MethodVisibility::Private
+    );
+    assert_eq!(
+        method("public_builder").visibility,
+        roundhouse::dialect::MethodVisibility::Public
     );
 }
 
@@ -772,14 +834,64 @@ fn core_data_new_remains_unsupported() {
     );
 }
 
+/// Reject ingestion paths and block statements that cannot retain the custom
+/// factory contract, rather than accepting the constant while dropping its body.
+#[test]
+fn custom_factory_blocks_are_not_silently_discarded() {
+    let source = b"class Owner; State = Data.define(:name) do; def label; name; end; end; end";
+    assert!(roundhouse::ingest::ingest_library_class(source, "probe.rb").is_err());
+    for block in [
+        "def label; name; end; LIMIT = 4",
+        "def label; name; end; include Comparable",
+        "def label; name; end; puts 'side effect'",
+        "def other.label; 1; end",
+        "|value| def label; name; end",
+    ] {
+        let source = format!("class Owner; State = Data.define(:name) do {block}; end; end");
+        assert!(
+            roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb").is_err(),
+            "{source}"
+        );
+    }
+}
+
+/// Keep error diagnostics for dynamic/invalid members, shadowed Data, and
+/// reopened or subclassed factories even when their method bodies can be lifted.
+#[test]
+fn custom_factories_outside_the_literal_subset_report_errors() {
+    use roundhouse::diagnostic::{DiagnosticKind, Severity};
+
+    for source in [
+        "class Owner; MEMBER = :name; State = Data.define(MEMBER) do; def label; name; end; end; end",
+        "class Owner; State = Data.define(:name, :name) do; def label; name; end; end; end",
+        "class Owner; State = Data.define(:name=) do; def label; 1; end; end; end",
+        "class Owner; class Data; def self.define(name); name; end; end; State = Data.define(:name) do; def label; name; end; end; end",
+        "class Data; end; class Owner; State = ::Data.define(:name) do; def label; name; end; end; end",
+        "class Owner; State = Data.define(:name) do; def label; name; end; end; class State; def extra; 1; end; end; end",
+        "class Owner; State = Data.define(:name) do; def label; name; end; end; class Child < State; end; end",
+    ] {
+        let mut app = ingest(source, "nil");
+        roundhouse::session::analyze_and_lower(&mut app);
+        let diagnostics = roundhouse::analyze::diagnose(&app);
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.severity == Severity::Error
+            && matches!(&diagnostic.kind, DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "Data.define")), "{source}: {diagnostics:?}");
+    }
+}
+
+/// Analyzer admission is not support on every target: non-Ruby/Spinel emitters
+/// must return source-located errors instead of silently emitting a factory.
 #[test]
 fn admitted_data_factories_are_rejected_before_unverified_target_emission() {
     use roundhouse::diagnostic::{DiagnosticKind, Severity};
     use roundhouse::project::{BuildTarget, target_files};
 
     let mut app = ingest(
-        data_factory::DECLARATIONS,
-        "FactoryExamples::First::Result.new(\"first\", 1.0, false)",
+        &format!(
+            "{}\n{}",
+            data_factory::DECLARATIONS,
+            data_factory::CUSTOM_DECLARATIONS
+        ),
+        "FactoryExamples::Stateful::State.new(10, true)",
     );
     roundhouse::session::analyze_and_lower(&mut app);
     let errors: Vec<_> = roundhouse::analyze::diagnose(&app)
@@ -798,7 +910,7 @@ fn admitted_data_factories_are_rejected_before_unverified_target_emission() {
             result.is_err(),
             "{target:?} silently emitted a Data factory"
         );
-        assert_eq!(diagnostics.len(), 3, "{target:?}: {diagnostics:?}");
+        assert_eq!(diagnostics.len(), 7, "{target:?}: {diagnostics:?}");
         for diagnostic in diagnostics {
             assert_eq!(diagnostic.severity, Severity::Error);
             assert!(!diagnostic.span.is_synthetic(), "{diagnostic:?}");
@@ -811,13 +923,19 @@ fn admitted_data_factories_are_rejected_before_unverified_target_emission() {
     }
 }
 
+/// Check both supported targets produce parseable factory sidecars with custom
+/// methods and one class declaration, while differing only in sidecar placement.
 #[test]
 fn ruby_and_spinel_emit_declared_factory_types_without_data_errors() {
     use roundhouse::diagnostic::Severity;
     use roundhouse::project::{BuildTarget, target_files};
 
     let mut app = ingest(
-        data_factory::DECLARATIONS,
+        &format!(
+            "{}\n{}",
+            data_factory::DECLARATIONS,
+            data_factory::CUSTOM_DECLARATIONS
+        ),
         "FactoryExamples::First::Result.new(\"first\", 1.0, false)",
     );
     roundhouse::session::analyze_and_lower(&mut app);
@@ -851,6 +969,40 @@ fn ruby_and_spinel_emit_declared_factory_types_without_data_errors() {
         assert!(
             signatures.contains_key(&ClassId(Symbol::from("FactoryExamples::First::Result"))),
             "{target:?}: {sidecar}"
+        );
+        let path = format!("{prefix}app/models/factory_examples/stateful.rbs");
+        let sidecar = &files
+            .iter()
+            .find(|(name, _)| name == &path)
+            .expect("custom factory sidecar")
+            .1;
+        let signatures =
+            roundhouse::rbs::parse_app_signatures(sidecar).expect("custom factory RBS parses");
+        let methods = &signatures[&ClassId(Symbol::from("FactoryExamples::Stateful::State"))];
+        for name in ["new", "initialize", "label", "secret"] {
+            assert!(
+                methods.contains_key(&Symbol::from(name)),
+                "missing {name} for {target:?}; parsed methods: {:?}; {sidecar}",
+                methods.keys().collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            sidecar.contains("attr_reader quantity: untyped")
+                && sidecar.contains("attr_reader enabled: untyped"),
+            "Data member readers remain declared as readers: {sidecar}"
+        );
+        assert!(
+            sidecar.contains("private def secret:"),
+            "private factory methods retain their non-public RBS visibility: {sidecar}"
+        );
+        assert!(
+            sidecar.contains("attr_reader name: untyped") && sidecar.contains("def self.name:"),
+            "a singleton method does not replace the generated instance reader: {sidecar}"
+        );
+        assert_eq!(
+            sidecar.matches("class State < ::Data").count(),
+            1,
+            "{sidecar}"
         );
     }
 }

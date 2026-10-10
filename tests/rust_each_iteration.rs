@@ -87,3 +87,33 @@ fn each_with_nonlocal_return_emits_a_loop_instead_of_a_closure() {
         "an optional enclosing method must wrap a found loop item in Some:\n{source}"
     );
 }
+
+#[test]
+fn custom_empty_predicate_calls_use_the_emitted_method_name() {
+    let tree = [(
+        PathBuf::from("app/models/predicate_probe.rb"),
+        b"class PredicateProbe\n  def empty?\n    true\n  end\n\n  def check_empty\n    empty?\n  end\n\n  def self.empty_collection\n    [].empty?\n  end\nend\n".to_vec(),
+    )]
+    .into_iter()
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest synthetic app");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let source = rust::emit(&app)
+        .into_iter()
+        .find(|file| file.content.contains("fn check_empty"))
+        .expect("PredicateProbe method")
+        .content;
+
+    assert!(
+        source.contains("self.empty_pred()"),
+        "the custom `empty?` call must target its emitted predicate method:\n{source}"
+    );
+    assert!(
+        !source.contains("self.is_empty()"),
+        "a custom predicate must not be mistaken for a Rust collection method:\n{source}"
+    );
+    assert!(
+        source.contains(".is_empty()"),
+        "the typed collection bridge must still use Rust's `is_empty` method:\n{source}"
+    );
+}
