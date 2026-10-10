@@ -413,6 +413,15 @@ module ActionController
   #                                 stale-while-revalidate=N?,
   #                                 stale-if-error=N?, immutable?, extras
   class CacheControlStore
+    def self.append_extras(parts, extras)
+      extra_index = 0
+      while extra_index < extras.length
+        parts << extras[extra_index]
+        extra_index += 1
+      end
+      parts
+    end
+
     def initialize
       @public = false
       @private = false
@@ -586,11 +595,6 @@ module ActionController
       elsif @no_cache
         parts << "public" if @public
         parts << "no-cache"
-        extra_index = 0
-        while extra_index < @extras.length
-          parts << @extras[extra_index]
-          extra_index += 1
-        end
       else
         parts << "max-age=#{@max_age}" if @has_max_age
         parts << (@public ? "public" : "private")
@@ -598,12 +602,8 @@ module ActionController
         parts << "stale-while-revalidate=#{@stale_while_revalidate}" if @has_stale_while_revalidate
         parts << "stale-if-error=#{@stale_if_error}" if @has_stale_if_error
         parts << "immutable" if @immutable
-        extra_index = 0
-        while extra_index < @extras.length
-          parts << @extras[extra_index]
-          extra_index += 1
-        end
       end
+      parts = CacheControlStore.append_extras(parts, @extras) unless @no_store
       parts.join(", ")
     end
   end

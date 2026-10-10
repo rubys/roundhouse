@@ -63,6 +63,7 @@ module ActionController
     @has_stale_if_error: bool
     @extras: Array[String]
 
+    def self.append_extras: (Array[String] parts, Array[String] extras) -> Array[String]
     def initialize: () -> void
     def public?: () -> bool
     def public=: (bool) -> void

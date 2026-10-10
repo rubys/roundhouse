@@ -63,6 +63,12 @@ class CacheControlStoreTest < Minitest::Test
     assert_equal "public, no-cache", @store.to_header
   end
 
+  def test_no_cache_keeps_extra_directives_after_the_cache_flag
+    @store.no_cache = true
+    @store.extras = ["foo=bar"]
+    assert_equal "no-cache, foo=bar", @store.to_header
+  end
+
   # ── otherwise (default) branch ───────────────────────────────
 
   def test_public_alone
