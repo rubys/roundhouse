@@ -532,3 +532,18 @@ end"#
         );
     }
 }
+
+/// A concern's `ClassMethods` carrier written with `class << self; def
+/// extended(base)` hooks that singleton is the carrier module's own, not the
+/// includers' class side the carrier is flattened into, so the refusal says so.
+#[test]
+fn a_class_methods_carrier_singleton_is_refused_by_name() {
+    let source = "module Sharded\n  extend ActiveSupport::Concern\n\n  module ClassMethods\n    class << self\n      def extended(base)\n        base\n      end\n    end\n\n    def sharded?\n      true\n    end\n  end\nend\n";
+    let error = ingest_library_classes(source.as_bytes(), "sharded.rb").unwrap_err();
+    assert!(
+        error.to_string().contains(
+            "`class << self` in a concern's `ClassMethods` defines the carrier module's own singleton methods"
+        ),
+        "{error}"
+    );
+}
