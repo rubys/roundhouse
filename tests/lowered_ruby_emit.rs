@@ -1516,7 +1516,7 @@ fn lowered_article_partial_truncate_wrapped_in_html_escape() {
 fn lowered_view_word_wrap_routes_to_shared_runtime_and_escapes_output() {
     let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
     let view = roundhouse::ingest::view::ingest_view(
-        "<%= word_wrap(\"one two three\", line_width: 7, break_sequence: \"|\") %>\n",
+        "<%= word_wrap(\"one two three\", line_width: 7, break_sequence: \"|\") %>\n<%= word_wrap(article.body) %>\n",
         Path::new("articles/word_wrap.html.erb"),
         "app/views/articles/word_wrap.html.erb",
     )
@@ -1528,6 +1528,10 @@ fn lowered_view_word_wrap_routes_to_shared_runtime_and_escapes_output() {
     assert!(
         src.contains("ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.word_wrap(\"one two three\", line_width: 7, break_sequence: \"|\"))"),
         "expected a qualified shared helper call with normal interpolation escaping; got:\n{src}",
+    );
+    assert!(
+        src.contains("ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.word_wrap(article.body.to_s))"),
+        "expected nullable word_wrap text to be coerced to String; got:\n{src}",
     );
 }
 

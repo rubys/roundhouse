@@ -185,7 +185,7 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             Some(view_helpers_call("html_escape", vec![truncated]))
         }
         WordWrap { text, opts } => {
-            let mut args = vec![(*text).clone()];
+            let mut args = vec![lit_str_coerce((*text).clone())];
             if let Some(o) = opts {
                 args.push((*o).clone());
             }

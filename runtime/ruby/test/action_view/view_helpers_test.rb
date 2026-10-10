@@ -152,6 +152,8 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "a|b|c", ViewHelpers.word_wrap("a\nb c", line_width: 2, break_sequence: "|")
     assert_equal "a||b", ViewHelpers.word_wrap("a\n\nb", line_width: 1, break_sequence: "|")
     assert_equal "één|twee", ViewHelpers.word_wrap("één twee", line_width: 5, break_sequence: "|")
+    assert_equal "1234\\15678\\19", ViewHelpers.word_wrap("1234 5678 9", line_width: 4, break_sequence: "\\1")
+    assert_equal "12345678", ViewHelpers.word_wrap("1234 5678", line_width: 4, break_sequence: "")
   end
 
   # Rails raises for zero but returns nil for a negative width. Keep the

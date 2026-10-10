@@ -370,7 +370,8 @@ module ActionView
       return +"" if text.empty?
 
       pattern = /(.{1,#{line_width}})(?:[^\S\n]+\n?|\n*\Z|\n)|\n/
-      text.gsub(pattern, "\\1#{break_sequence}").chomp!(break_sequence)
+      escaped_break_sequence = break_sequence.split("\\", -1).join("\\\\")
+      text.gsub(pattern, "\\1#{escaped_break_sequence}").chomp(break_sequence)
     end
   
     # ── DOM helpers ──────────────────────────────────────────────────
