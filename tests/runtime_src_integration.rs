@@ -980,7 +980,45 @@ fn every_runtime_method_body_concretely_typed() {
     // beside them already count.
     // The date-column cast hook adds 2 measured sites: its raw adapter value
     // is as column-dependent as `cast_schema_value`'s; the merged tree measures 428.
-    const CEILING: usize = 428;
+    // Canonical main ae7bf6cf measures 334 sites; #720's Ruby runtime
+    // additions contribute 39 more, primarily from generic JSON, deep_dup,
+    // session and request-environment values. Keep those intentional dynamic
+    // boundaries visible in the measured combined ceiling.
+    // `transaction(requires_new: true)` savepoints add 3 in
+    // `self.transaction`, MEASURED 373 -> 376 on main 9d577c24: the
+    // `requires_new` option is `untyped` (as `with_lock` forwards it), and
+    // the nested block's value is now read back after its RELEASE.
+    // MEASURED 2026-10-09, measured on top of #644/#671's 310 before #689: the typed
+    // `ActionController::CacheControlStore` (rubys/roundhouse#679,
+    // `action_controller/base.rb`) alone costs NOTHING here — every
+    // field is bool/Integer/Array[String], and measured back-to-back
+    // against this same base it leaves the residual at exactly 310
+    // (unlike against the pre-#644/#671 base, where it happened to
+    // drop the count by 2 — whatever those two sites were, they no
+    // longer net out the same way here). `action_controller/
+    // cache_control.rb`'s Hash-like `[]`/`[]=`/`delete`/`merge!`/
+    // `replace` surface over that store adds 24 — a `Symbol key`
+    // dispatch over `untyped value` is what a Hash-subscript API costs;
+    // ruby-family only (see the file's own header), never reaches a
+    // strict target. 310 + 24 = 334.
+    // Rebased onto main's 316 (after #704): MEASURED 341 after the latest rebase (was 337); the store surface adds 21–24 depending on
+    // which of its sites main already counts.
+    // Rebased onto main's 376 (after #736's Head and the savepoint fix):
+    // MEASURED 398 on 2026-10-10 at this commit (the store surface adds 22).
+    // MEASURED 2026-10-09 (rubys/roundhouse#694 review fix, on top of
+    // this same 341): `commit_cache_control!`'s merge with a directly-
+    // written `Cache-Control` header (`action_controller/
+    // cache_control.rb`) adds 14 — `parse_cache_control_header`'s
+    // comma-split/Symbol-dispatch parse of an arbitrary header String
+    // and `cache_control_as_hash`'s per-key Hash snapshot are both
+    // `Hash[Symbol, untyped]`-shaped, the same tax the Hash-like `[]`/
+    // `[]=` surface already pays; ruby-family only, never reaches a
+    // strict target. 341 + 14 = 355.
+    // Rebased onto main's 376 (after #736's Head and the savepoint fix):
+    // MEASURED 459 on 2026-10-10 against main's 423 (445 at the Hash-surface commit + 14).
+    // Rebased onto main's 428 (after the exception classes and the date-column hook):
+    // MEASURED 466 on 2026-10-10, main 9249df4d (452 at the Hash-surface commit + 14).
+    const CEILING: usize = 466;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -225,6 +225,31 @@ end
     );
 }
 
+/// `expires_in`'s three duration-shaped arguments all ground to
+/// seconds — rubys/roundhouse#679's `stale_if_error: 1.day` is the one
+/// `rewrite_expires_in` did not unwrap before this pass (it already
+/// handled the leading seconds argument and `stale_while_revalidate:`).
+#[test]
+fn expires_in_grounds_seconds_stale_while_revalidate_and_stale_if_error() {
+    let out = lower_and_emit(
+        r#"
+class WidgetsController < ActionController::Base
+  def show
+    expires_in 3.minutes, public: true, stale_while_revalidate: 30.seconds, stale_if_error: 1.day
+  end
+end
+"#,
+    );
+    assert!(
+        out.contains(
+            "expires_in ActiveSupport::Duration.minutes(3).to_i, public: true, \
+             stale_while_revalidate: ActiveSupport::Duration.seconds(30).to_i, \
+             stale_if_error: ActiveSupport::Duration.day(1).to_i"
+        ),
+        "every duration-shaped expires_in argument must ground to seconds:\n{out}",
+    );
+}
+
 /// `second` is a duration unit AND `Array#second`, ActiveSupport's
 /// ordinal accessor — the only unit that collides with something other
 /// than a `Time` reader, which is why it sat outside the guarded set.

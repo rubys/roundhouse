@@ -782,7 +782,7 @@ class ActionResponse
   attr_reader :status, :body, :location, :flash, :cookies, :content_type
 
   def initialize(status:, body:, location:, flash:, cookies:, content_type: "text/html; charset=utf-8",
-                 cache_control_max_age: 0, cache_control_public: false, headers: {})
+                 cache_control_max_age: 0, cache_control_public: false, cache_control_store: nil, headers: {})
     @status   = status
     @body     = body
     @location = location
@@ -791,6 +791,11 @@ class ActionResponse
     @content_type = content_type
     @cache_control_max_age = cache_control_max_age
     @cache_control_public = cache_control_public
+    # The full typed store, when the caller has one — `cache_control`
+    # below reads EVERY field off it (no_store/private included), not
+    # just the two legacy ones. nil for `relation_find_test.rb`'s
+    # bare `ParsedBodyTest` responses, which never touch Cache-Control.
+    @cache_control_store = cache_control_store
     @extra_headers = headers
   end
 
@@ -818,20 +823,40 @@ class ActionResponse
     out
   end
 
-  # Rails' `response.cache_control` — the one place the two TYPED
-  # controller readers (see ActionController::Base) are re-assembled
-  # into the mixed Hash Rails hands back, because the subscript
-  # spelling is what a test writes:
+  # Rails' `response.cache_control` — the mixed Hash Rails hands back,
+  # because the subscript spelling is what a test writes:
   #
   #   assert_equal 1.year, response.cache_control[:max_age].to_i
   #   assert response.cache_control[:public]
+  #   assert response.cache_control[:no_store]
   #
-  # `:public` is ABSENT rather than false when the response is private,
-  # which is Rails' own shape and what makes the bare truthiness
-  # assertion above mean what it says.
+  # Reads every field off the full typed store when the response
+  # carries one — `:private` / `:no_store` included, not just the two
+  # legacy readers below. `:public` (and every other bool key) is
+  # ABSENT rather than false when unset, which is Rails' own shape and
+  # what makes a bare truthiness assertion like the ones above mean
+  # what it says.
+  #
+  # Falls back to the two legacy TYPED controller readers
+  # (ActionController::Base#cache_control_max_age / _public) when no
+  # store was given — `relation_find_test.rb`'s bare `ParsedBodyTest`
+  # responses construct one directly with neither.
   def cache_control
-    out = { max_age: @cache_control_max_age }
-    out[:public] = true if @cache_control_public
+    return { max_age: @cache_control_max_age, **(@cache_control_public ? { public: true } : {}) } if @cache_control_store.nil?
+
+    store = @cache_control_store
+    out = {}
+    out[:max_age] = store[:max_age] unless store[:max_age].nil?
+    out[:public] = true if store[:public]
+    out[:private] = true if store[:private]
+    out[:no_store] = true if store[:no_store]
+    out[:no_cache] = true if store[:no_cache]
+    out[:must_revalidate] = true if store[:must_revalidate]
+    out[:must_understand] = true if store[:must_understand]
+    out[:immutable] = true if store[:immutable]
+    out[:stale_while_revalidate] = store[:stale_while_revalidate] unless store[:stale_while_revalidate].nil?
+    out[:stale_if_error] = store[:stale_if_error] unless store[:stale_if_error].nil?
+    out[:extras] = store[:extras] unless store[:extras].empty?
     out
   end
 
@@ -1992,6 +2017,10 @@ module RequestDispatch
     @__cookies = ActionController::CookieJar.new(
       accept_cookies(cookies.to_h, controller.cookies.pending)
     )
+    # Compose `Cache-Control` from whatever `response.cache_control`
+    # holds onto the buffered header store, right before the copy
+    # below — same contract as the two production wire paths.
+    controller.commit_cache_control!
     copied_headers = {}
     hi = 0
     hn = controller.headers.size
@@ -2008,6 +2037,7 @@ module RequestDispatch
       content_type: controller.content_type,
       cache_control_max_age: controller.cache_control_max_age,
       cache_control_public: controller.cache_control_public,
+      cache_control_store: controller.cache_control,
       headers:  copied_headers,
     )
     # Rails' OWN names, alongside the `__`-prefixed ones the harness

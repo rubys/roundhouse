@@ -41,6 +41,62 @@ module ActionController
     def val_at: (Integer i) -> String
     def index_of: (String key) -> Integer
   end
+
+  # Typed store backing `response.cache_control`. See the .rb for the
+  # Rails 8.1.4 field/branch/order contract `to_header` follows. The
+  # Hash-like `[]`/`[]=`/`delete`/`merge!`/`replace` surface is a
+  # ruby-family reopen (`cache_control.rb`'s own .rbs), not declared
+  # here.
+  class CacheControlStore
+    @public: bool
+    @private: bool
+    @no_store: bool
+    @no_cache: bool
+    @must_revalidate: bool
+    @must_understand: bool
+    @immutable: bool
+    @max_age: Integer
+    @has_max_age: bool
+    @stale_while_revalidate: Integer
+    @has_stale_while_revalidate: bool
+    @stale_if_error: Integer
+    @has_stale_if_error: bool
+    @extras: Array[String]
+
+    def initialize: () -> void
+    def public?: () -> bool
+    def public=: (bool) -> void
+    def private?: () -> bool
+    def private=: (bool) -> void
+    def no_store?: () -> bool
+    def no_store=: (bool) -> void
+    def no_cache?: () -> bool
+    def no_cache=: (bool) -> void
+    def must_revalidate?: () -> bool
+    def must_revalidate=: (bool) -> void
+    def must_understand?: () -> bool
+    def must_understand=: (bool) -> void
+    def immutable?: () -> bool
+    def immutable=: (bool) -> void
+    def max_age: () -> Integer
+    def max_age?: () -> bool
+    def max_age=: (Integer) -> void
+    def clear_max_age: () -> void
+    def stale_while_revalidate: () -> Integer
+    def stale_while_revalidate?: () -> bool
+    def stale_while_revalidate=: (Integer) -> void
+    def clear_stale_while_revalidate: () -> void
+    def stale_if_error: () -> Integer
+    def stale_if_error?: () -> bool
+    def stale_if_error=: (Integer) -> void
+    def clear_stale_if_error: () -> void
+    def extras: () -> Array[String]
+    def extras=: (Array[String]) -> void
+    def clear: () -> void
+    def empty?: () -> bool
+    def to_header: () -> String
+  end
+
   # Symbolic-status to integer-code mapping (`STATUS_CODES`) is a
   # Ruby-level frozen Hash literal — module-level constant, not a
   # method. RBS doesn't require declaring constants for the strict
@@ -87,6 +143,7 @@ module ActionController
     @headers: ActionController::HeaderStore
     @content_type_explicit: bool
     @head_response: bool
+    @cache_control: ActionController::CacheControlStore
     def action_name: () -> String
     def assign_action_name: (Symbol name) -> String
 
@@ -152,9 +209,15 @@ module ActionController
     def response: () -> Base
     def fresh_when: (untyped subject) -> void
     def stale?: (?etag: untyped) -> bool
-    # Integer SECONDS — `lower::duration::rewrite_expires_in` grounds the
-    # corpus' `1.year` / `1.week` before the call reaches here.
-    def expires_in: (Integer seconds, ?public: bool, ?stale_while_revalidate: Integer) -> void
+    # Integer SECONDS on every duration-shaped keyword —
+    # `lower::duration::rewrite_expires_in` grounds the corpus' `1.year`
+    # / `1.week` / `stale_while_revalidate: 30.seconds` /
+    # `stale_if_error: 1.day` before the call reaches here. -1 on
+    # `stale_while_revalidate:` / `stale_if_error:` means "not stated"
+    # (see the .rb).
+    def expires_in: (Integer seconds, ?public: bool, ?must_revalidate: bool,
+                      ?stale_while_revalidate: Integer, ?stale_if_error: Integer,
+                      ?immutable: bool) -> void
     def cache_control_max_age: () -> Integer
     def cache_control_public: () -> bool
     def headers: () -> ActionController::HeaderStore
