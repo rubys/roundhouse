@@ -4620,6 +4620,25 @@ impl Analyzer {
             let class_id = &lc.name;
             for method in &lc.methods {
                 let ret = self.method_return_ty(class_id, method);
+                let uninformative_data_member_reader =
+                    matches!(method.kind, crate::dialect::AccessorKind::AttributeReader)
+                        && method.name_span.is_synthetic()
+                        && matches!(
+                            &lc.origin,
+                            Some(crate::dialect::LibraryClassOrigin::DataFactory { members })
+                                if members.contains(&method.name)
+                        )
+                        && ret.as_ref().is_some_and(|ty| {
+                            ty.has_unknown_arm() && ty.clone().strip_unknown() == Ty::Nil
+                        });
+                if uninformative_data_member_reader {
+                    // The synthesized Data reader's only evidence can be the
+                    // nil-initialized synthetic ivar plus an unknown
+                    // constructor argument. Do not turn that lack of evidence
+                    // into a false `Nil` return; preserve any call-site type
+                    // information that produced a concrete reader type.
+                    continue;
+                }
                 let target = match method.receiver {
                     crate::dialect::MethodReceiver::Instance => {
                         &mut self.classes.entry(class_id.clone()).or_default().instance_methods

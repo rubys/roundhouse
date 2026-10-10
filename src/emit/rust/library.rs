@@ -1950,14 +1950,12 @@ end
         let src = emit_action_controller();
         let set_index = method_body(&src, "set_index");
         assert!(
-            set_index.contains("store_value("),
-            "HeaderStore []= delegates validation and storage to store_value:\n{set_index}"
+            set_index.contains("header_key_ok_pred(Some(")
+                && set_index.contains("header_value_ok_pred(value)")
+                && set_index.contains("store_value("),
+            "HeaderStore []= validates both inputs before delegating storage:\n{set_index}"
         );
         let store_value = method_body(&src, "store_value");
-        assert!(
-            store_value.contains("header_key_ok_pred(Some("),
-            "header_key_ok? takes String?, wrap &str in store_value:\n{store_value}"
-        );
         assert!(
             store_value.contains("keys.push(key.to_string())"),
             "the owned key inserted into Vec<String> must come from String#to_s:\n{store_value}"
