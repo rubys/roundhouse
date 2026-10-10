@@ -110,6 +110,10 @@ class BaseTest < Minitest::Test
       ActiveRecord.adapter.update(Item.table_name, @id, attributes())
     end
 
+    def _adapter_touch
+      ActiveRecord.adapter.update(Item.table_name, @id, attributes())
+    end
+
     def _adapter_delete
       ActiveRecord.adapter.delete(Item.table_name, @id)
     end

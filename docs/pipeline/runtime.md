@@ -2378,7 +2378,7 @@ surface twice. Do it with the golden dumps regenerated in the same
 commit, and check `compare-*` on every target rather than assuming a
 DOM comparison cannot see it.
 
-### Pooled web push connections do not track their stage on spinel — not yet
+### Pooled web push connections on spinel wait on a compact-class fix — not yet
 
 campfire's `WebPush::Connections` (upstream since #351) opens pooled push
 connections as `class HTTP < Net::HTTP; include Stages; end`, where
@@ -2395,22 +2395,36 @@ On the ruby family this runs as written, against Ruby's own net/http
 test helper starts; the twentieth mixes a module into one connection
 with `extend`, the per-object mixin no compiled target has).
 
-On spinel it does not, for two reasons, and both are work not done
-rather than a subset boundary:
+For spinel, the forwarding and the hooks are done:
 
-- **Our side.** The spinel emit refuses `def m(...)` forwarding into
-  `super` (`full argument forwarding not supported`), which is two of
-  the strict-emit errors CI's ceiling counts. The parent methods'
-  signatures are known (`begin_transport(req)`, `connect()`), so the
-  forwarding can be spelled out.
-- **Spinel's side.** `packages/net`'s `Net::HTTP` has neither method:
-  its request path is `request` → `perform` → `reconnect`, and it has no
-  `keep_alive_timeout`. The hooks have to exist there, shaped as CRuby's,
-  for an override of them to mean anything.
+- **The forwarding.** `lower::known_super_forwarding` gives a `(...)`
+  override that only reaches `super` the destination's own
+  parameters when the destination is a stdlib method of known
+  signature. For these two that is CRuby's: `begin_transport(req)` and
+  `connect()`. The strict spinel emit has no errors left.
+- **The hooks.** `runtime/spinel/net_http.rb` routes its transport
+  through `connect` and `begin_transport(req)` in CRuby's order and
+  holds `keep_alive_timeout` and `proxy?`, so an override of either
+  hook runs. It works against the net package before and after
+  matz/spinel#8361, which adds the same methods upstream.
+  `tests/emit_and_run.rs` runs the pattern natively
+  (`forwarding_into_net_http_transport_hooks_runs_on_spinel`).
 
-Until both land, `WebPush::Connections::HTTP` is not defined in the
-spinel binary (spinel warns "defined nowhere in the program"), so a
-pooled push delivery there raises where it reaches the class.
+Three gaps remain, all on spinel's side:
+
+- **The class itself (matz/spinel#8369).** A class nested in a compact
+  `class A::B` body is undefined at run time when it is named like its
+  superclass. campfire's `class WebPush::Connections` + nested
+  `class HTTP < Net::HTTP` is exactly that, and the emit writes nested
+  modules in the compact form too. Until it is fixed, a pooled push
+  delivery on the spinel binary raises NameError where it reaches
+  `WebPush::Connections::HTTP`.
+- **The tests' TLS server.** campfire's push-service test helper serves
+  TLS itself (`OpenSSL::SSL::SSLContext#key=`, a server-side context).
+  spinel's openssl package is a client, so those tests cannot handshake
+  even with the class defined.
+- **Proxies.** One test constructs `Net::HTTP.new(host, port, proxy)`.
+  The net package refuses a proxy at construction.
 
 ### Smaller shapes campfire main reaches, each narrower than Rails
 
@@ -2434,6 +2448,14 @@ pooled push delivery there raises where it reaches the class.
 - **`Rails.application.env_config` holds what is set and is consulted
   for nothing**: a forgery failure always renders the 422 that
   `action_dispatch.show_exceptions = :rescuable` asks for.
+- **`save` writes the whole row; only `touch` writes what changed.**
+  Rails' partial writes UPDATE the changed columns; this runtime's
+  `_adapter_update` writes every column the record loaded. A bare
+  `touch` (and so `belongs_to … touch: true`) UPDATEs `updated_at`
+  alone (`_adapter_touch`), which is what keeps campfire's
+  trigger-maintained `rooms.messages_count` correct when a message
+  touches its room. A `save`/`update` of a record loaded before a
+  trigger moved one of its columns still writes the stale value back.
 
 ## Related docs
 

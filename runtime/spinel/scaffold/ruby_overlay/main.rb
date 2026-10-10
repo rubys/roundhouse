@@ -230,10 +230,13 @@ module Main
       controller.process_action(matched.action)
     rescue ActiveRecord::RecordNotFound, ActionController::RoutingError, AbstractController::ActionNotFound
       return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
-    rescue ActionController::ParameterMissing
+    rescue ActionController::ParameterMissing, ActionController::BadRequest
       # `params.expect` / `params.require` refused the request and the app
       # did not rescue it: Rails' rescue_responses answer :bad_request.
       return [400, "<h1>400 Bad Request</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
+    rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotSaved, ActionController::InvalidAuthenticityToken
+      # Not a 500: Rails' rescue_responses answer these with 422.
+      return [422, "<h1>422 Unprocessable Content</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     end
 
     # Dispatch on status, not on @location nil-ness: redirect_to

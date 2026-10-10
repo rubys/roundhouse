@@ -1,11 +1,15 @@
 //! Rails' record methods that take a COLUMN NAME, rewritten at the call
 //! site where that name is a literal:
 //!
-//!   touch :connected_at            -> self.connected_at = ActiveSupport.db_now; touch
+//!   touch :connected_at            -> self.connected_at = ActiveSupport.db_now; touch_written
 //!   increment!(:connections, touch: true)
-//!                                  -> self.connections = self.connections + 1; touch
+//!                                  -> self.connections = self.connections + 1; touch_written
 //!   decrement!(:connections, touch: true)
-//!                                  -> self.connections = self.connections - 1; touch
+//!                                  -> self.connections = self.connections - 1; touch_written
+//!
+//! `touch_written` is `Base#touch` writing the whole row, so the
+//! column assigned in front of it reaches the database; the bare
+//! `touch` writes `updated_at` alone, as Rails' does.
 //!
 //! Rails' `touch(*names)` stamps the named columns along with
 //! `updated_at`. The shared runtime's `touch` is NO-ARG on purpose:
@@ -120,14 +124,14 @@ fn rewrite_stmt(e: &mut Expr) {
             parenthesized: false,
         },
     );
-    // The no-arg `touch` still runs: it is what stamps `updated_at`
-    // and issues the UPDATE, so the column write above would otherwise
-    // never reach the row.
+    // `touch_written` stamps `updated_at` and writes the row, so the
+    // column write above reaches it (the bare `touch` writes only the
+    // timestamp).
     let touch = Expr::new(
         span,
         ExprNode::Send {
             recv: None,
-            method: Symbol::from("touch"),
+            method: Symbol::from("touch_written"),
             args: vec![],
             block: None,
             parenthesized: false,

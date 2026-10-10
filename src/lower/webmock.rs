@@ -152,6 +152,10 @@ fn replacement_for(expr: &Expr) -> Option<Expr> {
         }
         "disable_net_connect!" if is_webmock(outer) => lower_disable_net_connect(args, span),
         "reset!" if is_webmock(outer) && args.is_empty() => Some(http_stub_call(span, "clear", vec![])),
+        // campfire's push-service helper switches interception off around
+        // a test that talks to a real TLS server, and back on after it.
+        "disable!" if is_webmock(outer) && args.is_empty() => Some(http_stub_call(span, "disable", vec![])),
+        "enable!" if is_webmock(outer) && args.is_empty() => Some(http_stub_call(span, "enable", vec![])),
         _ => None,
     }
 }
@@ -532,5 +536,14 @@ mod tests {
         let mut e = send(Some(webmock()), "reset!", vec![]);
         rewrite(&mut e);
         assert!(matches!(&*e.node, ExprNode::Send { method, .. } if method.as_str() == "clear"));
+    }
+
+    #[test]
+    fn lowers_disable_and_enable() {
+        for (from, to) in [("disable!", "disable"), ("enable!", "enable")] {
+            let mut e = send(Some(webmock()), from, vec![]);
+            rewrite(&mut e);
+            assert!(matches!(&*e.node, ExprNode::Send { method, .. } if method.as_str() == to), "{from}");
+        }
     }
 }

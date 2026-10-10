@@ -25,7 +25,7 @@ module ActionDispatch
     # like this one.
     class Route
       attr_reader :verb, :pattern, :controller, :action, :req_format, :int_params,
-                  :pattern_parts
+                  :pattern_parts, :seg_constraints
 
       # `req_format` — the route-forced response format (Rails'
       # `get "/rss" => "home#index", :format => "rss"`), nil for the
@@ -42,13 +42,26 @@ module ActionDispatch
       # Kotlin, Go, and Spinel. A candidate segment that isn't all digits
       # makes the route a non-match, so `/articles/12abc` falls through
       # to 404 instead of binding `id = "12abc"`.
-      def initialize(verb, pattern, controller, action, req_format = nil, int_params = +"")
+      #
+      # `seg_constraints` — every OTHER (non-digit-class) requirement
+      # this route carries (`constraints(slug: %r{[^@/.]+})`), encoded
+      # by `segment_pattern.rs`'s compiler into a small backtrack-free
+      # literal/char-class program `segment_pattern_match` below reads
+      # with plain string/char ops — no `Regexp`, so this stays
+      # lowerable to every target, including ones (Elixir) with no
+      # regex-method dispatch at all. One combined String, same
+      # scalar-tail reason as `int_params`; empty for the unconstrained
+      # common case. A route whose requirement couldn't be compiled
+      # into this subset is never emitted at all (see `lower::routes`),
+      # so every `seg_constraints` this class ever sees is enforceable.
+      def initialize(verb, pattern, controller, action, req_format = nil, int_params = +"", seg_constraints = +"")
         @verb        = verb
         @pattern     = pattern
         @controller  = controller
         @action      = action
         @req_format  = req_format
         @int_params  = int_params
+        @seg_constraints = seg_constraints
         # Split ONCE, at table-construction time. `Router.match` is a linear
         # scan, so splitting the pattern inside the match loop charged every
         # request two fresh segment arrays per candidate route it walked past
@@ -196,7 +209,7 @@ module ActionDispatch
         # the GET pass, in declaration order with the GET routes.
         verb = route.verb.to_s
         if verb == method_upcase || (verb == "ANY" && method_upcase != "HEAD")
-          params = match_parts(route.pattern_parts, path_parts, route.int_params, format)
+          params = match_parts(route.pattern_parts, path_parts, route.int_params, format, route.seg_constraints)
           unless params.nil?
             return ActionDispatch::Router::MatchResult.new(route.controller, route.action, params, route.req_format)
           end
@@ -219,8 +232,8 @@ module ActionDispatch
     # keeps scanning and the request 404s. The check runs here on the
     # raw segment (`ap`, a non-nil String local) rather than after
     # capture so no target has to model `Hash#[]` returning nil.
-    def self.match_pattern(pattern, path, int_params = +"")
-      match_parts(pattern.split("/"), path.split("/"), int_params)
+    def self.match_pattern(pattern, path, int_params = +"", seg_constraints = +"")
+      match_parts(pattern.split("/"), path.split("/"), int_params, +"", seg_constraints)
     end
 
     # The segment loop, over already-split parts. `Router.match` feeds it the
@@ -242,7 +255,7 @@ module ActionDispatch
     # remaining path segment, slash-joined, as its value. A glob route
     # therefore matches any path at least as long as its pattern; every
     # other route still needs an exact segment count.
-    def self.match_parts(pattern_parts, path_parts, int_params = +"", format = +"")
+    def self.match_parts(pattern_parts, path_parts, int_params = +"", format = +"", seg_constraints = +"")
       # The tail segment is bound to a local before it is asked anything,
       # like `pp`/`ap` below: an array index read straight into a method
       # call is what some strict emitters coerce as nilable.
@@ -280,9 +293,13 @@ module ActionDispatch
           if int_constrained(int_params, name) && !digits_only(seg)
             return nil
           end
-          # The route parameter is the same value checked above. Reuse the
-          # local rather than reading `ap` again, which keeps ownership clear
-          # in strict targets while preserving Ruby's string value semantics.
+          pattern_for_name = segment_pattern_for(seg_constraints, name)
+          if !pattern_for_name.empty? && !segment_pattern_match(pattern_for_name, seg)
+            return nil
+          end
+          # Reuse the normalized capture that was checked above. This keeps
+          # integer and compiled segment constraints aligned with the stored
+          # route parameter on strict targets.
           params[name] = seg
         elsif pp != ap
           # A literal PREFIX before the `:name` in the same segment —
@@ -294,7 +311,37 @@ module ActionDispatch
           plen = param_prefix_length(pp)
           return nil if plen <= 0 || ap.length <= plen
           return nil unless ap.start_with?(pp[0, plen].to_s)
-          params[pp[plen + 1, pp.length].to_s] = ap[plen, ap.length].to_s
+          prefixed_name = pp[plen + 1, pp.length].to_s
+          prefixed_seg = ap[plen, ap.length].to_s
+          # Same two constraint checks as the plain `:name` segment
+          # above — a prefixed param (`/@:slug`) is still a named
+          # capture Rails' `constraints:` can restrict, and until this
+          # neither digit-class NOR segment-pattern requirements were
+          # enforced here at all (MEASURED: `/@alice@remote.example`
+          # matched a `[^@/.]+`-constrained `/@:slug` with no check).
+          if int_constrained(int_params, prefixed_name) && !digits_only(prefixed_seg)
+            return nil
+          end
+          prefixed_pattern = segment_pattern_for(seg_constraints, prefixed_name)
+          if !prefixed_pattern.empty? && !segment_pattern_match(prefixed_pattern, prefixed_seg)
+            return nil
+          end
+          # `ap[plen, ap.length].to_s` again here (not storing the
+          # already-computed `prefixed_seg`): the same `params[name] =
+          # ap` shape above stores the plain segment's own ORIGINAL
+          # local, never `seg` (the one built for the checks). One
+          # strict emitter's whole-program Hash specialization
+          # (`sp_StrStrHash`) needs every `params[...] = ` value to be
+          # an inline expression computed at the store site — MEASURED:
+          # a bare named local standing in for that same `.to_s` value
+          # (`prefixed_seg`, with NO constraint check even added) is
+          # enough on its own to make the later `decode_captures(params)`
+          # call refuse with "a method argument given a Hash, which no
+          # conversion keeps in its sp_StrStrHash * slot"; the two
+          # constraint calls on `prefixed_seg` above are not required to
+          # trigger it. A fresh inline recompute at the store site
+          # sidesteps the whole-program unification.
+          params[prefixed_name] = ap[plen, ap.length].to_s
         end
         i += 1
       end
@@ -616,6 +663,184 @@ module ActionDispatch
         i += 1
       end
       true
+    end
+
+    # A decimal-digit length prefix starting at `at` is terminated by a
+    # `.` delimiter (never itself a digit, so no escaping is needed no
+    # matter what the following content contains) — the same shape
+    # `segment_pattern.rs`'s encoder writes for every item AND for
+    # every `(name, pattern)` entry in a route's combined
+    # `seg_constraints`. Two single-purpose scans rather than one
+    # returning a pair: a multi-value return destructured at the call
+    # site (`a, b = …`) isn't a shape every target's emitter carries
+    # (MEASURED: it broke the Python lowering of this very file).
+    #
+    # The index of the first content byte — just past the ".". A
+    # bound-checked scan (`while j < s.length`) with the delimiter test
+    # as an internal `return`, the same shape `param_prefix_length`
+    # above uses — not `while s[j] != "."` (MEASURED: a while-header
+    # built from the content test itself, with no numeric bound, left
+    # the whole method a refused `While not supported (elixir2)` stub;
+    # only a plain counter-vs-bound comparison lowers to Elixir's
+    # recursion rewrite).
+    def self.length_prefix_content_start(s, at)
+      j = at
+      while j < s.length
+        return j + 1 if s[j, 1].to_s == "."
+        j += 1
+      end
+      -1
+    end
+
+    # The length VALUE the digits between `at` and `content_start - 1`
+    # spell out. Callers get `content_start` from the scan above first.
+    def self.length_prefix_value(s, at, content_start)
+      s[at, content_start - at - 1].to_s.to_i
+    end
+
+    # `name`'s segment-pattern requirement from a route's combined
+    # `seg_constraints` string — self-delimiting `<namelen>.<name>
+    # <patlen>.<pattern>` entries back to back (`segment_pattern.rs`'s
+    # `encode_route_constraints`). `+""` when `name` carries none — an
+    # unambiguous sentinel, since the shortest real encoded pattern is
+    # longer than that (a 4-char item header plus its content).
+    def self.segment_pattern_for(seg_constraints, name)
+      i = 0
+      while i < seg_constraints.length
+        after_namelen = length_prefix_content_start(seg_constraints, i)
+        namelen = length_prefix_value(seg_constraints, i, after_namelen)
+        entry_name = seg_constraints[after_namelen, namelen].to_s
+        pat_at = after_namelen + namelen
+        after_patlen = length_prefix_content_start(seg_constraints, pat_at)
+        patlen = length_prefix_value(seg_constraints, pat_at, after_patlen)
+        return seg_constraints[after_patlen, patlen].to_s if entry_name == name
+        # A counter STEP (`i += advance`), not a fresh absolute
+        # assignment (`i = …`) — the same `advance`-variable shape
+        # `percent_bytes` above uses, which IS the one the Elixir
+        # while→recursion lowering recognizes as progress.
+        advance = after_patlen + patlen - i
+        i += advance
+      end
+      +""
+    end
+
+    # Is one-character String `c` a member of class `set` (flipped by
+    # `neg`; `any` ignores `set`/`neg` and matches every character)?
+    # Explicit char-by-char scan with early return, the same shape
+    # `int_constrained` above uses for its membership test.
+    def self.segment_pattern_char_in_class(c, neg, any, set)
+      return true if any == "1"
+      i = 0
+      while i < set.length
+        return neg != "1" if set[i, 1].to_s == c
+        i += 1
+      end
+      neg == "1"
+    end
+
+    # Match ONE literal item (`quant` is always `"1"` for a multi-char
+    # literal; a quantified literal is always a single character — see
+    # `segment_pattern.rs`). Returns the characters consumed from
+    # `value` at `start`, or -1 for "this item can't match here".
+    def self.segment_pattern_literal_match(quant, text, value, start)
+      if quant == "1"
+        tlen = text.length
+        return -1 if start + tlen > value.length
+        return -1 unless value[start, tlen].to_s == text
+        return tlen
+      end
+      ch = text
+      if quant == "?"
+        return 1 if start < value.length && value[start, 1].to_s == ch
+        return 0
+      end
+      # `+` needs at least one character. The loop below returns its
+      # count as soon as a character fails, so check the first one here:
+      # a 0 from the loop would read as a match.
+      return -1 if quant == "+" && !(start < value.length && value[start, 1].to_s == ch)
+      i = start
+      # A single-comparison header (`i < value.length`), not a compound
+      # `&&` one — the Elixir while→recursion lowering only takes a
+      # plain bound check. The count is `i - start`, computed AT each
+      # exit rather than kept in its own accumulator: the lowering
+      # allows exactly one compound-assignment step per loop (the
+      # counter, `i += 1`) and rejects a second one (MEASURED — a
+      # `count += 1` alongside it left the method a refused `While not
+      # supported (elixir2)` stub).
+      while i < value.length
+        return i - start unless value[i, 1].to_s == ch
+        i += 1
+      end
+      count = i - start
+      return -1 if quant == "+" && count == 0
+      count
+    end
+
+    # Match ONE character-class item, greedily. Returns characters
+    # consumed, or -1 for "can't match here". Safe to do greedily with
+    # no backtracking ONLY because `segment_pattern.rs`'s compiler
+    # already refused any pattern where that wouldn't be correct (see
+    # its `check_safe_adjacency`).
+    def self.segment_pattern_class_match(quant, neg, any, set, value, start)
+      if quant == "1"
+        return -1 if start >= value.length
+        return segment_pattern_char_in_class(value[start, 1].to_s, neg, any, set) ? 1 : -1
+      end
+      if quant == "?"
+        return 1 if start < value.length && segment_pattern_char_in_class(value[start, 1].to_s, neg, any, set)
+        return 0
+      end
+      # `+` needs at least one character; see `segment_pattern_literal_match`.
+      return -1 if quant == "+" && !(start < value.length && segment_pattern_char_in_class(value[start, 1].to_s, neg, any, set))
+      i = start
+      # Same reason as `segment_pattern_literal_match`: `i - start` at
+      # each exit, rather than a second accumulator alongside `i`'s own
+      # counter step.
+      while i < value.length
+        return i - start unless segment_pattern_char_in_class(value[i, 1].to_s, neg, any, set)
+        i += 1
+      end
+      count = i - start
+      return -1 if quant == "+" && count == 0
+      count
+    end
+
+    # One item, dispatched by its `L`/`C` tag.
+    def self.segment_pattern_item_match(tag, quant, neg, any, text, value, start)
+      return segment_pattern_literal_match(quant, text, value, start) if tag == "L"
+      segment_pattern_class_match(quant, neg, any, text, value, start)
+    end
+
+    # Does the WHOLE of `value` satisfy `pattern` (one route's
+    # compiled requirement for one param)? Anchored to the whole
+    # segment, as Rails anchors every routing requirement — walks
+    # `pattern`'s items strictly left to right over `value`, greedily,
+    # with no backtracking (see `segment_pattern.rs`'s module docs for
+    # why that is always correct for a pattern this compiled).
+    def self.segment_pattern_match(pattern, value)
+      pi = 0
+      vi = 0
+      while pi < pattern.length
+        tag = pattern[pi, 1].to_s
+        quant = pattern[pi + 1, 1].to_s
+        neg = pattern[pi + 2, 1].to_s
+        any = pattern[pi + 3, 1].to_s
+        after_len = length_prefix_content_start(pattern, pi + 4)
+        len = length_prefix_value(pattern, pi + 4, after_len)
+        text = pattern[after_len, len].to_s
+        advance = after_len + len - pi
+        consumed = segment_pattern_item_match(tag, quant, neg, any, text, value, vi)
+        return false if consumed < 0
+        # Only ONE compound-assignment step is allowed per loop (the
+        # lowering's "counter") — `pi`'s, since `pi` is what the while
+        # header bounds. `vi` carries forward as a plain rebind
+        # instead (MEASURED: a second `+=` here, alongside `pi`'s,
+        # left the method a refused `While not supported (elixir2)`
+        # stub).
+        vi = vi + consumed
+        pi += advance
+      end
+      vi == value.length
     end
   end
 end

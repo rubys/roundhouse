@@ -2579,6 +2579,18 @@ module HttpStub
     WebMock.reset! if defined?(WebMock)
     nil
   end
+
+  def self.disable
+    require "webmock"
+    WebMock.disable!
+    nil
+  end
+
+  def self.enable
+    require "webmock"
+    WebMock.enable!
+    nil
+  end
 end
 "##;
 
@@ -4463,6 +4475,8 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActionController::ParameterMissing",
     "ActionController::UnpermittedParameters",
     "ActionController::UnknownFormat",
+    "ActionController::BadRequest",
+    "ActionController::InvalidAuthenticityToken",
     "ActionController::RoutingError",
     "AbstractController::ActionNotFound",
     "ActionView::MissingTemplate",
@@ -4495,7 +4509,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
     }
     let bundled = matches!(
         name,
-        "URI::HTTP" | "URI::HTTPS" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
+        "URI::HTTP" | "URI::HTTPS" | "URI::Error" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
+        | "SocketError"
         | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
@@ -6839,7 +6854,13 @@ fn names_constant(src: &str, konst: &str) -> bool {
                     b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b':');
             let tail = at + konst.len();
             let tail_ok = matches!(b.get(tail), Some(b'.' | b'[' | b'('))
-                || (b.get(tail) == Some(&b':') && b.get(tail + 1) == Some(&b':'));
+                || (b.get(tail) == Some(&b':') && b.get(tail + 1) == Some(&b':'))
+                // Only right after the keyword or a rescue-list comma: `raise "Timeout waiting"` names no constant.
+                || (matches!(b.get(tail), None | Some(b',' | b' ')) && {
+                    let before = line[..at].trim_start();
+                    before == "rescue " || before == "raise "
+                        || (before.starts_with("rescue ") && before.trim_end().ends_with(','))
+                });
             if head_ok && tail_ok {
                 return true;
             }
@@ -6939,7 +6960,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 18] = [
+const BUNDLED: [(&str, &str); 19] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -6990,6 +7011,9 @@ const BUNDLED: [(&str, &str); 18] = [
     // TimeLimitedVideoPreviewer#capture. Default gem on CRuby/JRuby;
     // Spinel takes `runtime/ruby/timeout.rb` via spinel_files.
     ("Timeout", "timeout"),
+    // `rescue SocketError` — the socket extension's class, loaded by Rails
+    // before the app; spinel's runtime defines it without a package.
+    ("SocketError", "socket"),
     // `Shellwords.escape`: a default gem that a booted Rails 8.1 app has
     // already loaded, so apps call it without a require. INERT on our
     // trees: `runtime/spinel/shellwords.rb` defines the module (no
@@ -8139,6 +8163,18 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_exception_class_is_named_only_in_rescue_or_raise_position() {
+        assert!(names_constant("  rescue SocketError => e\n", "SocketError"));
+        assert!(names_constant("  rescue Timeout::Error, SocketError\n", "SocketError"));
+        assert!(names_constant("  rescue Timeout::Error,SocketError\n", "SocketError"));
+        assert!(names_constant("  raise SocketError, \"down\"\n", "SocketError"));
+        assert!(names_constant("  raise SocketError\n", "SocketError"));
+        assert!(!names_constant("  raise \"Timeout waiting for pool tasks\"\n", "Timeout"));
+        assert!(!names_constant("  rescue => e # SocketError here\n", "SocketError"));
+        assert!(!names_constant("  raise Error, \"SocketError down\"\n", "SocketError"));
+    }
 
     #[test]
     fn bundled_instance_method_gate_is_scoped_to_model_receivers() {

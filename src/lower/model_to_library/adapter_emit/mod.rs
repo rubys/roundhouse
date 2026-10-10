@@ -63,6 +63,7 @@ pub(super) fn push_adapter_methods(
     methods.push(synth_adapter_last(owner, table, schema));
     methods.push(synth_adapter_insert(owner, table, schema));
     methods.push(synth_adapter_update(owner, table, schema));
+    methods.push(synth_adapter_touch(owner, table, schema));
     methods.push(synth_adapter_delete(owner, table, schema));
     methods.push(synth_adapter_count(owner, table, schema));
     methods.push(synth_adapter_any(owner, table, schema));
@@ -636,6 +637,55 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         // A model whose only non-key attributes are generated columns has
         // nothing to write on update. Do not render `UPDATE ... SET WHERE`;
         // generated values are database-owned and a no-op save stays a no-op.
+        body: if has_assignments {
+            SqliteVisitor.visit(&op, schema, owner)
+        } else {
+            super::nil_lit()
+        },
+        signature: Some(fn_sig(vec![], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+            mutates_self: false,
+            block_param: None,
+    }
+}
+
+/// `def _adapter_touch` — `touch`'s write: `updated_at` alone, as
+/// Rails' `touch` issues it. A full-row `_adapter_update` writes back
+/// every column the record loaded, so a column the database maintains
+/// behind the record — campfire's trigger-kept `rooms.messages_count`,
+/// which a message's `belongs_to :room, touch: true` reaches — is
+/// overwritten with the stale in-memory value. A table without
+/// `updated_at` has nothing to write.
+fn synth_adapter_touch(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
+    let assignments: Vec<Assignment> = table
+        .columns
+        .iter()
+        .filter(|c| c.name.as_str() == "updated_at" && c.generated.is_none())
+        .map(|c| Assignment {
+            column: c.name.clone(),
+            value: Value::Runtime {
+                expr: ivar_ref(&super::schema::col_storage_name(c)),
+                ty: value_type_for_column(c),
+            },
+        })
+        .collect();
+    let has_assignments = !assignments.is_empty();
+    let op = ArelOp::Update(Update {
+        table: TableRef(table.name.clone()),
+        assignments,
+        conditions: Some(eq_id_ivar(table)),
+    });
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("_adapter_touch"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
         body: if has_assignments {
             SqliteVisitor.visit(&op, schema, owner)
         } else {

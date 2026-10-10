@@ -982,6 +982,25 @@ impl Analyzer {
                 info.app_declared = true;
             }
         }
+        let by_name: HashMap<&ClassId, &crate::dialect::LibraryClass> =
+            app.library_classes.iter().map(|lc| (&lc.name, lc)).collect();
+        for lc in &app.library_classes {
+            let mut current = Some(lc);
+            for _ in 0..32 {
+                let Some(class) = current else { break };
+                if matches!(class.origin, Some(crate::dialect::LibraryClassOrigin::StructSuperclass { .. })) {
+                    if let Some(info) = classes.get_mut(&lc.name) {
+                        info.positional_struct = true;
+                    }
+                    break;
+                }
+                // Not the struct's constructor any more: a subclass's own `initialize` (campfire's `Sound::Image`) decides what `new` takes.
+                if class.methods.iter().any(|m| m.name.as_str() == "initialize" && m.receiver == crate::dialect::MethodReceiver::Instance) {
+                    break;
+                }
+                current = class.parent.as_ref().and_then(|p| by_name.get(p).copied());
+            }
+        }
         // Not wholly the app's: declaring a constant an unmodeled gem defines reopens it.
         if let Some(census) = app.gem_lock.as_ref().map(crate::gems::GemCensus::of) {
             for (id, info) in classes.iter_mut() {

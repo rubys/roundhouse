@@ -299,13 +299,17 @@ pub fn lower_test_modules_with_inner(
     // emit — the spinel `.rbs` sidecar especially — carries real types
     // instead of falling back to `untyped`. No fixture-call rewrite
     // (inner classes are framework-test stand-ins, not Rails models).
+    // Across every module, not per module: an included test helper is
+    // carried into each test that includes it, and its `.rbs` sidecar is
+    // one file by class name, so every copy has to declare the same thing.
+    let passed = keyword_args_passed(test_modules);
     let mut typed_inner_per_module: Vec<Vec<LibraryClass>> = inner_classes_per_module
         .into_iter()
         .map(|inners| {
             inners
                 .into_iter()
                 .map(|mut inner| {
-                    type_inner_class(&mut inner, &classes);
+                    type_inner_class(&mut inner, &classes, &passed);
                     inner
                 })
                 .collect()
@@ -512,7 +516,11 @@ fn adopt_param_names(ty: Ty, params: &[crate::dialect::Param]) -> Ty {
     Ty::Fn { params: renamed, block, ret, effects }
 }
 
-fn type_inner_class(inner: &mut LibraryClass, classes: &HashMap<ClassId, ClassInfo>) {
+fn type_inner_class(
+    inner: &mut LibraryClass,
+    classes: &HashMap<ClassId, ClassInfo>,
+    passed: &HashMap<(Symbol, Symbol), Vec<Expr>>,
+) {
     let empty_ivars: HashMap<Symbol, Ty> = HashMap::new();
 
     // An override has to keep the shape it overrides. `def
@@ -570,7 +578,9 @@ fn type_inner_class(inner: &mut LibraryClass, classes: &HashMap<ClassId, ClassIn
                 .map(|ty| adopt_param_names(ty, &method.params));
             let adopted = inherited.is_some();
             method.signature = inherited
-                .or_else(|| Some(signature_from_params(&method.params, classes, Ty::Untyped)));
+                .or_else(|| {
+                    Some(signature_from_params(&method.name, &method.params, classes, passed, Ty::Untyped))
+                });
             crate::lower::typing::type_method_body(method, classes, &empty_ivars);
             !adopted
         })
@@ -636,8 +646,10 @@ fn type_inner_class(inner: &mut LibraryClass, classes: &HashMap<ClassId, ClassIn
 /// and `untyped` (the inner stand-ins don't annotate). `ret` is the
 /// caller-supplied return type.
 fn signature_from_params(
+    method: &Symbol,
     params: &[crate::dialect::Param],
     classes: &HashMap<ClassId, ClassInfo>,
+    passed: &HashMap<(Symbol, Symbol), Vec<Expr>>,
     ret: Ty,
 ) -> Ty {
     use crate::ty::Param as TyParam;
@@ -648,10 +660,26 @@ fn signature_from_params(
             // it never has a default — typing it from one would be
             // typing the wrong thing. Everything else takes its default's
             // type when it has one.
-            let ty = match &p.default {
+            let mut ty = match &p.default {
                 Some(d) if !p.rest => ty_of_expr(d, classes),
                 _ => Ty::Untyped,
             };
+            // A keyword also takes what the module's own calls pass for
+            // it: campfire's push-service `Server#hung_up?(within: 5)` is
+            // called `hung_up?(within: 0.1)`, and an `Integer` from the
+            // default alone was a declaration spinel then refused the
+            // Float against. Only a value that types standalone (a
+            // literal) is read; anything else leaves the default's type.
+            // A keyword ingest flattened to a positional
+            // (`from_keyword`) is still passed by name at the call.
+            if (p.keyword || p.from_keyword) && !p.rest && !matches!(ty, Ty::Untyped) {
+                for value in passed.get(&(method.clone(), p.name.clone())).into_iter().flatten() {
+                    let seen = ty_of_expr(value, classes);
+                    if !matches!(seen, Ty::Untyped | Ty::Var { .. }) {
+                        ty = crate::analyze::union_of(ty, seen);
+                    }
+                }
+            }
             TyParam { name: p.name.clone(), ty, kind: p.ty_kind() }
         })
         .collect();
@@ -661,6 +689,46 @@ fn signature_from_params(
         ret: Box::new(ret),
         effects: EffectSet::pure(),
     }
+}
+
+/// The literal keyword arguments the test modules' own code passes, by
+/// (method name, keyword): `hung_up?(within: 0.1)` files `0.1` under
+/// `(hung_up?, within)`. Tests, setup, helpers and the inner classes'
+/// own bodies are read; receivers are not resolved, so a name shared by
+/// two inner classes collects both callers' values.
+fn keyword_args_passed(modules: &[TestModule]) -> HashMap<(Symbol, Symbol), Vec<Expr>> {
+    fn walk(e: &Expr, out: &mut HashMap<(Symbol, Symbol), Vec<Expr>>) {
+        if let ExprNode::Send { method, args, .. } = &*e.node {
+            if let Some(last) = args.last() {
+                if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
+                    for (k, v) in entries {
+                        if let ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*k.node {
+                            out.entry((method.clone(), value.clone())).or_default().push(v.clone());
+                        }
+                    }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, out));
+    }
+    let mut out = HashMap::new();
+    for tm in modules {
+        for t in &tm.tests {
+            walk(&t.body, &mut out);
+        }
+        if let Some(setup) = &tm.setup {
+            walk(setup, &mut out);
+        }
+        for h in &tm.helpers {
+            walk(&h.body, &mut out);
+        }
+        for inner in &tm.inner_classes {
+            for m in &inner.methods {
+                walk(&m.body, &mut out);
+            }
+        }
+    }
+    out
 }
 
 /// Type a standalone expression (e.g. a parameter default) against the

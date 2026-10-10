@@ -12,6 +12,7 @@ module HttpStub
   STUB_BODIES: Array[String]
   STUB_HEADER_LINES: Array[String]
   STUB_MATCHER_JSON: Array[String]
+  ENABLED: Array[bool]
   def self.normalize: (String url) -> String
   def self.stub: (String verb, String url, Integer status, String body, Hash[String, String] headers) -> nil
   def self.stub_matching: (String verb, String url, Integer status, String body, Hash[String, String] headers, String expected_json) -> nil
@@ -25,4 +26,6 @@ module HttpStub
   # Ignored by the double, and a caller passes whatever `allow:` held.
   def self.allow_net_connect: (untyped hosts) -> nil
   def self.clear: () -> nil
+  def self.disable: () -> nil
+  def self.enable: () -> nil
 end

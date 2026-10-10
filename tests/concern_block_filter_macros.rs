@@ -535,3 +535,314 @@ expect("/gadgets", "loud=1", [200, "Signature"])
         )
         .assert_passes();
 }
+
+// ---------------------------------------------------------------------
+// A NAMED keyword beside a forwarded `**kwargs` — `substitute_params`
+// used to bind every macro parameter POSITIONALLY, keyword params
+// included. `retire_endpoint '2022-11-14', only: [:index]` bound
+// `sunset` to the whole `{only: [:index]}` options Hash (the second
+// POSITIONAL slot) and `kwargs` to `{}` (nothing left to bind), losing
+// the call's `only:` scope and emitting Ruby that doesn't even parse:
+// `response.headers["Sunset"] = only: [:index] if only: [:index]`.
+// Fixed to bind positionals from the call's positional args and NAMED
+// keywords from its trailing keyword Hash by name, with `**kwargs`
+// catching whatever is left over.
+// ---------------------------------------------------------------------
+
+const SUNSET_CONCERN: &str = r#"module SunsetConcern
+  extend ActiveSupport::Concern
+  class_methods do
+    def retire_endpoint(date, sunset: nil, **kwargs)
+      before_action(**kwargs) do |controller|
+        response.headers['Deprecation'] = date
+        response.headers['Sunset'] = sunset if sunset
+      end
+    end
+  end
+end
+"#;
+
+fn sunset_build(call: &str) -> (App, Vec<IngestError>) {
+    let widgets = format!(
+        "class WidgetsController < ApplicationController\n  {call}\n\n  def index\n    head :ok\n  end\nend\n"
+    );
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        ("app/controllers/concerns/sunset_concern.rb", SUNSET_CONCERN.to_string()),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  include SunsetConcern\nend\n"
+                .to_string(),
+        ),
+        ("app/controllers/widgets_controller.rb", widgets),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: [:index]\nend\n".to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(p, s)| (PathBuf::from(p), s.into_bytes()))
+    .collect();
+    survey::activate();
+    let result = ingest_app_from_tree(tree);
+    let gaps = survey::drain();
+    (result.expect("ingest must not hard-fail; an unexpanded macro is a survey gap"), gaps)
+}
+
+fn assert_parses(src: &str) {
+    let result = ruby_prism::parse(src.as_bytes());
+    let errors: Vec<String> = result.errors().map(|e| e.message().to_string()).collect();
+    assert!(errors.is_empty(), "{errors:?}\n{src}");
+}
+
+#[test]
+fn a_named_keyword_beside_a_forwarded_kwrest_binds_by_name_not_position() {
+    let (app, gaps) = sunset_build("retire_endpoint '2022-11-14', only: [:index]");
+    assert!(!has_gap(&gaps, "retire_endpoint"), "{gaps:?}");
+    let src = emitted_widgets(app);
+    assert_parses(&src);
+    assert!(
+        src.contains("Deprecation") && src.contains("2022-11-14"),
+        "the Deprecation value must be the date:\n{src}"
+    );
+    assert!(
+        src.contains("[:index]"),
+        "the call's only: scope must survive, not be lost to positional mis-binding:\n{src}"
+    );
+    assert!(
+        !src.contains("only: [:index] if only: [:index]")
+            && !src.contains("= only: [:index]"),
+        "sunset must not be bound to the whole options Hash:\n{src}"
+    );
+    // `sunset` defaults to nil: either no Sunset header line at all, or
+    // one that's guarded by a nil/false condition — never a bare write.
+    let sunset_line = src.lines().find(|l| l.contains("Sunset"));
+    if let Some(line) = sunset_line {
+        assert!(
+            line.contains("if") || line.contains("nil"),
+            "an unguarded Sunset write means `sunset` bound to something truthy:\n{line}\nfull:\n{src}"
+        );
+    }
+}
+
+#[test]
+fn a_positional_and_keyword_mix_binds_sunset_by_name_and_passes_if_through() {
+    let (app, gaps) =
+        sunset_build("retire_endpoint '2022-11-14', sunset: '2023-01-01', if: :alpha?");
+    assert!(!has_gap(&gaps, "retire_endpoint"), "{gaps:?}");
+    let src = emitted_widgets(app);
+    assert_parses(&src);
+    assert!(
+        src.contains("2022-11-14"),
+        "the Deprecation value must still be the date:\n{src}"
+    );
+    assert!(
+        src.contains("2023-01-01"),
+        "sunset must bind by NAME to its own keyword, not the if: guard:\n{src}"
+    );
+    assert!(
+        src.contains("alpha?"),
+        "the if: guard must reach the filter dispatcher:\n{src}"
+    );
+}
+
+#[test]
+fn a_missing_required_keyword_is_refused() {
+    let concern = r#"module SunsetConcern
+  extend ActiveSupport::Concern
+  class_methods do
+    def retire_endpoint(date, at:, **kwargs)
+      before_action(**kwargs) do |controller|
+        response.headers['At'] = at
+      end
+    end
+  end
+end
+"#;
+    let widgets =
+        "class WidgetsController < ApplicationController\n  retire_endpoint '2022-11-14'\n\n  def index\n    head :ok\n  end\nend\n";
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        ("app/controllers/concerns/sunset_concern.rb", concern.to_string()),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  include SunsetConcern\nend\n"
+                .to_string(),
+        ),
+        ("app/controllers/widgets_controller.rb", widgets.to_string()),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: [:index]\nend\n".to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(p, s)| (PathBuf::from(p), s.into_bytes()))
+    .collect();
+    survey::activate();
+    let app = ingest_app_from_tree(tree).expect("ingest must not hard-fail");
+    let gaps = survey::drain();
+    assert!(
+        gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. }
+            if message.contains("retire_endpoint") && message.contains("not filter DSL"))),
+        "a required keyword the call omits must be refused, not guessed: {gaps:?}"
+    );
+    let c = widgets_controller(&app);
+    assert!(
+        c.body.iter().any(|item| matches!(item, ControllerBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "retire_endpoint"))),
+        "a refused macro call must stay whole: {:?}",
+        c.body
+    );
+    assert!(
+        !c.body.iter().any(|item| matches!(item, ControllerBodyItem::Filter { .. })),
+        "a refused macro must not half-expand: {:?}",
+        c.body
+    );
+}
+
+#[test]
+fn an_unknown_keyword_with_no_kwrest_is_refused() {
+    let concern = r#"module SunsetConcern
+  extend ActiveSupport::Concern
+  class_methods do
+    def retire_endpoint(date, sunset: nil)
+      before_action do |controller|
+        response.headers['Deprecation'] = date
+        response.headers['Sunset'] = sunset if sunset
+      end
+    end
+  end
+end
+"#;
+    let widgets = "class WidgetsController < ApplicationController\n  retire_endpoint '2022-11-14', sunset: '2023-01-01', bogus: true\n\n  def index\n    head :ok\n  end\nend\n";
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        ("app/controllers/concerns/sunset_concern.rb", concern.to_string()),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  include SunsetConcern\nend\n"
+                .to_string(),
+        ),
+        ("app/controllers/widgets_controller.rb", widgets.to_string()),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: [:index]\nend\n".to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(p, s)| (PathBuf::from(p), s.into_bytes()))
+    .collect();
+    survey::activate();
+    let app = ingest_app_from_tree(tree).expect("ingest must not hard-fail");
+    let gaps = survey::drain();
+    assert!(
+        gaps.iter().any(|g| matches!(g, IngestError::Unsupported { message, .. }
+            if message.contains("retire_endpoint") && message.contains("not filter DSL"))),
+        "an unclaimed keyword with no **rest to catch it must be refused: {gaps:?}"
+    );
+    let c = widgets_controller(&app);
+    assert!(
+        c.body.iter().any(|item| matches!(item, ControllerBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "retire_endpoint"))),
+        "a refused macro call must stay whole: {:?}",
+        c.body
+    );
+}
+
+#[test]
+fn a_positional_splat_this_binder_cannot_model_is_refused() {
+    // `*dates`'s element count is unknown here; binding it to the
+    // single `date` slot would be a guess (and would emit
+    // `headers['Deprecation'] = *dates`, which isn't what Ruby assigns).
+    let (app, gaps) = sunset_build("retire_endpoint(*dates, sunset: '2023-01-01')");
+    assert!(
+        has_gap(&gaps, "retire_endpoint"),
+        "a positional splat of unknown arity must not be guessed into one param: {gaps:?}"
+    );
+    let c = widgets_controller(&app);
+    assert!(
+        c.body.iter().any(|item| matches!(item, ControllerBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "retire_endpoint"))),
+        "a refused macro call must stay whole: {:?}",
+        c.body
+    );
+}
+
+#[test]
+fn a_duplicate_keyword_key_binds_the_last_value_and_drops_earlier_duplicates() {
+    // Ruby collapses a duplicate keyword key to its LAST value before the
+    // call ever runs. `sunset` must bind to the last duplicate, and the
+    // earlier one must not survive into `**kwargs` where a literal read
+    // (`kwargs[:sunset]`) could fold back to the stale value.
+    let concern = r#"module SunsetConcern
+  extend ActiveSupport::Concern
+  class_methods do
+    def retire_endpoint(date, sunset: nil, **kwargs)
+      before_action do |controller|
+        response.headers['Deprecation'] = date
+        response.headers['Sunset'] = sunset
+        response.headers['SunsetRest'] = kwargs[:sunset]
+      end
+    end
+  end
+end
+"#;
+    let widgets = "class WidgetsController < ApplicationController\n  retire_endpoint '2022-11-14', sunset: '2023-01-01', sunset: '2024-06-01'\n\n  def index\n    head :ok\n  end\nend\n";
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        ("app/controllers/concerns/sunset_concern.rb", concern.to_string()),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  include SunsetConcern\nend\n"
+                .to_string(),
+        ),
+        ("app/controllers/widgets_controller.rb", widgets.to_string()),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: [:index]\nend\n".to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(p, s)| (PathBuf::from(p), s.into_bytes()))
+    .collect();
+    survey::activate();
+    let app = ingest_app_from_tree(tree).expect("ingest must not hard-fail");
+    let gaps = survey::drain();
+    assert!(!has_gap(&gaps, "retire_endpoint"), "{gaps:?}");
+    let src = emitted_widgets(app);
+    assert_parses(&src);
+    assert!(
+        src.contains("2024-06-01"),
+        "sunset must bind to the LAST duplicate, as Ruby does:\n{src}"
+    );
+    assert!(
+        !src.contains("2023-01-01"),
+        "an earlier duplicate must not leak into **kwargs, where a literal \
+         `kwargs[:sunset]` read could fold back to it:\n{src}"
+    );
+}
+
+#[test]
+fn an_empty_keyword_rest_does_not_emit_a_bare_double_splat() {
+    // No trailing keyword args at the call site means `kwargs`'s
+    // leftover is empty: `before_action(**kwargs)` must not become
+    // `before_action(**)`, which `ruby -c` refuses to parse. Checked on
+    // the substituted macro body itself (the `Unknown` item ingest
+    // leaves pre-lowering, same shape a hand-written block-form filter
+    // would ingest as) — once `analyze_and_lower` consumes it into
+    // `process_action`, the raw options Hash is gone from the final
+    // source regardless of this bug, so that final text can't see it.
+    let (app, gaps) = sunset_build("retire_endpoint '2022-11-14'");
+    assert!(!has_gap(&gaps, "retire_endpoint"), "{gaps:?}");
+    let c = widgets_controller(&app);
+    let unknown = c
+        .body
+        .iter()
+        .find_map(|item| match item {
+            ControllerBodyItem::Unknown { expr, .. } => Some(expr),
+            _ => None,
+        })
+        .expect("the block-form before_action must stay Unknown pre-lowering");
+    let src = roundhouse::emit::ruby::emit_expr(unknown);
+    assert_parses(&src);
+    assert!(
+        !src.contains("(**)"),
+        "an empty keyword rest must not emit a bare, valueless double splat:\n{src}"
+    );
+}

@@ -52,6 +52,45 @@ def rollback_case(name, mode)
         "error=" + msg + " title=" + title + " delta=" + delta.to_s)
 end
 
+# A raise that starts INSIDE a joined block rolls back the whole outer
+# transaction, writes made before the nested block included, as in Rails.
+# `rollback_case`'s "nested" mode raises from the outer block after the
+# nested one has returned; this raises from within it, through two (or
+# three) stacked `transaction` frames. Spinel inlines the nested call
+# into the outer block, and with a `begin/rescue/ensure` on each level
+# the exception skipped the outermost `rescue`: its `ensure` COMMITTED.
+# "savepoint" runs the inner block under `requires_new: true`: the
+# savepoint rolls back, the exception goes on, and the outer one too.
+def inner_raise_case(name, mode)
+  a = Article.create!(title: "before", body: "long enough body")
+  n0 = Article.count
+  msg = ""
+  begin
+    Article.transaction do
+      a.update!(title: "during")
+      if mode == "deep"
+        Article.transaction do
+          Article.transaction do
+            Article.create!(title: "inner", body: "long enough body")
+            raise "boom"
+          end
+        end
+      else
+        Article.transaction(requires_new: mode == "savepoint") do
+          Article.create!(title: "inner", body: "long enough body")
+          raise "boom"
+        end
+      end
+    end
+  rescue => e
+    msg = e.message
+  end
+  title = Article.find(a.id).title
+  delta = Article.count - n0
+  check(name, msg == "boom" && title == "before" && delta == 0 && Db._txn_depth == 0,
+        "error=" + msg + " title=" + title + " delta=" + delta.to_s + " depth=" + Db._txn_depth.to_s)
+end
+
 # Nested blocks that finish commit once, with the outer one.
 def commit_case(name)
   a = Article.create!(title: "before", body: "long enough body")
@@ -204,6 +243,10 @@ fn script(pool_size: usize) -> String {
          rollback_case(\"nested, bare\", \"nested\")\n\
          Db.with_connection {{ rollback_case(\"nested, in a request lease\", \"nested\") }}\n\
          commit_case(\"nested and leased blocks commit with the outer one\")\n\
+         inner_raise_case(\"a raise inside a joined block rolls back the outer one\", \"joined\")\n\
+         Db.with_connection {{ inner_raise_case(\"a raise inside a joined block, in a request lease\", \"joined\") }}\n\
+         inner_raise_case(\"a raise two joined blocks deep rolls back the outer one\", \"deep\")\n\
+         inner_raise_case(\"a raise inside a savepoint block rolls back the outer one\", \"savepoint\")\n\
          return_case(\"a non-local return commits and restores depth\")\n\
          rollback_failure_case(\"a failed ROLLBACK does not hide the original exception\")\n\
          {pool1_case}\
@@ -218,7 +261,7 @@ fn assert_all_ok(pool_size: usize) {
     assert!(out.lines().any(|l| l == "done"), "driver did not finish\n{out}\n{}", run.stderr);
     let failed: Vec<&str> = out.lines().filter(|l| l.starts_with("FAIL")).collect();
     assert!(failed.is_empty(), "pool_size {pool_size}:\n{}\n=== stdout ===\n{out}", failed.join("\n"));
-    let expected = if pool_size == 1 { 10 } else { 8 };
+    let expected = if pool_size == 1 { 14 } else { 12 };
     assert_eq!(out.lines().filter(|l| l.starts_with("ok ")).count(), expected, "{out}");
 }
 
@@ -245,6 +288,9 @@ fn a_nested_transaction_joins_the_outer_one_on_cruby() {
          a = Article.create!(title: \"before\", body: \"long enough body\")\n\
          Article.transaction {{ Article.transaction {{ a.update!(title: \"nested\") }} }}\n\
          check(\"nested commit\", Article.find(a.id).title == \"nested\", \"\")\n\
+         inner_raise_case(\"a raise inside a joined block rolls back the outer one\", \"joined\")\n\
+         inner_raise_case(\"a raise two joined blocks deep rolls back the outer one\", \"deep\")\n\
+         inner_raise_case(\"a raise inside a savepoint block rolls back the outer one\", \"savepoint\")\n\
          return_case(\"a non-local return commits and restores depth\")\n\
          break_case(\"a break commits and restores depth\")\n\
          rollback_failure_case(\"a failed ROLLBACK does not hide the original exception\")\n\
@@ -255,7 +301,7 @@ fn a_nested_transaction_joins_the_outer_one_on_cruby() {
     let out = &run.stdout;
     assert!(out.lines().any(|l| l == "done"), "{out}");
     assert!(!out.contains("FAIL"), "{out}");
-    assert_eq!(out.lines().filter(|l| l.starts_with("ok ")).count(), 6, "{out}");
+    assert_eq!(out.lines().filter(|l| l.starts_with("ok ")).count(), 9, "{out}");
 }
 
 /// `Db.exec`'s bare-BEGIN case must reserve (and bind) the connection

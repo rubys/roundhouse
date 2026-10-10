@@ -28,6 +28,8 @@
 
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
+
 use crate::app::App;
 use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem, Param};
 use crate::expr::{Expr, ExprNode, Literal};
@@ -41,9 +43,11 @@ pub(crate) fn normalizer_name(attr: &Symbol) -> Symbol {
 }
 
 /// Every attribute `model` declares a reproducible normalization for,
-/// with the lambda's parameter and body.
-pub(crate) fn normalizations(model: &Model) -> HashMap<Symbol, (Symbol, Expr)> {
-    let mut out = HashMap::new();
+/// with the lambda's parameter and body, in declaration order (an
+/// `IndexMap`: a repeated `normalizes :attr` keeps its first position
+/// but the later declaration's body wins, same as a Ruby `Hash`).
+pub(crate) fn normalizations(model: &Model) -> IndexMap<Symbol, (Symbol, Expr)> {
+    let mut out = IndexMap::new();
     for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
         let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };

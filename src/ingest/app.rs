@@ -1923,6 +1923,10 @@ end
     // and reuses the prepared resolver rather than rebuilding it.
     super::concern_accessors::validate(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
 
+    // After every library class and include is known: a `...` that only
+    // reaches a stdlib method of known signature through `super` takes
+    // that signature (campfire's `WebPush::Connections::Stages`).
+    crate::lower::known_super_forwarding::restate(&mut app);
     collect_binary_assets(vfs, dir, &mut app);
     // Generated re-ingest labels never register real sources. No later
     // pass may append source-backed FileIds beyond the indexed snapshot.
@@ -3311,7 +3315,20 @@ fn expand_class_body_macros(app: &mut App) {
                     continue;
                 }
             }
-            let body = substitute_params(&macro_def, args);
+            // A keyword shape that can't be bound (see `substitute_params`) refuses the macro, like any other
+            // statement that isn't filter DSL.
+            let Some(body) = substitute_params(&macro_def, args) else {
+                survey::record(&IngestError::Unsupported {
+                    file: format!("{}", controller.name.0.as_str()),
+                    message: format!(
+                        "class-body macro not expanded: `{}` from {} holds a statement that is not filter DSL",
+                        method.as_str(),
+                        module.0.as_str()
+                    ),
+                });
+                expanded.push(item);
+                continue;
+            };
             let Some(body) = expand_nested_filter_macros(
                 &body,
                 &module,
@@ -3437,7 +3454,10 @@ fn expand_nested_filter_macros(
                 return None;
             }
             stack.push(method.clone());
-            let nested = substitute_params(def, args);
+            let Some(nested) = substitute_params(def, args) else {
+                stack.pop();
+                return None;
+            };
             let expanded =
                 expand_statements(&nested, module, macros, shadowed, stack, remaining);
             stack.pop();
@@ -3539,7 +3559,7 @@ fn method_stores_keyword_rest(method: &crate::dialect::MethodDef) -> bool {
 fn substitute_params(
     macro_def: &crate::dialect::MethodDef,
     args: &[crate::expr::Expr],
-) -> crate::expr::Expr {
+) -> Option<crate::expr::Expr> {
     use crate::expr::ExprNode;
 
     fn replace(expr: &mut crate::expr::Expr, bindings: &[(crate::ident::Symbol, crate::expr::Expr)]) {
@@ -3621,46 +3641,67 @@ fn substitute_params(
             ));
         }
     }
-    let bindings: Vec<(crate::ident::Symbol, crate::expr::Expr)> = macro_def
-        .params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            if let Some((_, v)) = extracted.iter().find(|(n, _)| n == &p.name) {
-                return (p.name.clone(), v.clone());
-            }
-            let value = match args.get(i) {
-                Some(a) => match &*a.node {
-                    ExprNode::KeywordSplat { value } => value.clone(),
-                    _ => a.clone(),
-                },
-                None if p.default.is_some() => p.default.clone().expect("checked"),
-                // `p.rest` alone doesn't say which: `library_class`'s
-                // `body_forwards_rest` keeps a literally-forwarded
-                // `**kwrest` as `Param::keyword(name, None); p.rest =
-                // true` (NOT flattened to the `from_kwrest`
-                // positional-with-`{}`-default this match's `None =>`
-                // arm below exists for) when the def's own source calls
-                // `(**name)`/`, **name)` — exactly the
-                // `before_action(**kwargs) { ... }` shape a block-form
-                // filter macro forwards through. `p.keyword` is what
-                // tells the two apart: only a plain `*rest` (`keyword:
-                // false`) binds an empty Array when the caller omits
-                // it; a kept `**kwrest` (`keyword: true`) means `{}`,
-                // same as the flattened/defaulted shape just below.
-                None if p.rest && !p.keyword => crate::expr::Expr::new(
-                    span,
-                    ExprNode::Array { elements: vec![], style: Default::default() },
-                ),
-                None => crate::expr::Expr::new(
-                    span,
-                    ExprNode::Hash { entries: vec![], kwargs: false },
-                ),
-            };
-            (p.name.clone(), value)
-        })
-        .collect();
-    let mut bindings = bindings;
+    // A NAMED keyword param — one the source declared `name:`/`name:
+    // default`, whether or not `library_class` kept it honest
+    // (`p.keyword`) or flattened it to a positional-with-default
+    // (`p.from_keyword`, see that flag's doc) — has to bind BY NAME from
+    // the call's trailing keyword producer, not by position: positional
+    // binding alone is what let `retire_endpoint '2022-11-14', only:
+    // [:index]` (a `sunset: nil` keyword beside a forwarded `**kwargs`)
+    // bind `sunset` to the whole `{only: [:index]}` options Hash and
+    // `kwargs` to `{}`, losing the filter's scope and emitting Ruby that
+    // does not even parse (`headers['Sunset'] = only: [:index] if
+    // only: [:index]`). Every shape below this check still has zero or
+    // one keyword-ish param (bare `**options`/`**kwargs`, no named
+    // keyword beside it), where positional binding already does the
+    // right thing — that branch is untouched so those shapes keep
+    // emitting byte-for-byte what they did before.
+    let has_named_keyword = macro_def.params.iter().any(|p| {
+        !extracted.iter().any(|(n, _)| n == &p.name) && ((p.keyword && !p.rest) || p.from_keyword)
+    });
+    let mut bindings: Vec<(crate::ident::Symbol, crate::expr::Expr)> = if has_named_keyword {
+        bind_params_by_name(macro_def, args, &extracted, span)?
+    } else {
+        macro_def
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if let Some((_, v)) = extracted.iter().find(|(n, _)| n == &p.name) {
+                    return (p.name.clone(), v.clone());
+                }
+                let value = match args.get(i) {
+                    Some(a) => match &*a.node {
+                        ExprNode::KeywordSplat { value } => value.clone(),
+                        _ => a.clone(),
+                    },
+                    None if p.default.is_some() => p.default.clone().expect("checked"),
+                    // `p.rest` alone doesn't say which: `library_class`'s
+                    // `body_forwards_rest` keeps a literally-forwarded
+                    // `**kwrest` as `Param::keyword(name, None); p.rest =
+                    // true` (NOT flattened to the `from_kwrest`
+                    // positional-with-`{}`-default this match's `None =>`
+                    // arm below exists for) when the def's own source calls
+                    // `(**name)`/`, **name)` — exactly the
+                    // `before_action(**kwargs) { ... }` shape a block-form
+                    // filter macro forwards through. `p.keyword` is what
+                    // tells the two apart: only a plain `*rest` (`keyword:
+                    // false`) binds an empty Array when the caller omits
+                    // it; a kept `**kwrest` (`keyword: true`) means `{}`,
+                    // same as the flattened/defaulted shape just below.
+                    None if p.rest && !p.keyword => crate::expr::Expr::new(
+                        span,
+                        ExprNode::Array { elements: vec![], style: Default::default() },
+                    ),
+                    None => crate::expr::Expr::new(
+                        span,
+                        ExprNode::Hash { entries: vec![], kwargs: false },
+                    ),
+                };
+                (p.name.clone(), value)
+            })
+            .collect()
+    };
     let extra: Vec<_> = extracted
         .into_iter()
         .filter(|(n, _)| !bindings.iter().any(|(b, _)| b == n))
@@ -3668,7 +3709,223 @@ fn substitute_params(
     bindings.extend(extra);
     replace(&mut body, &bindings);
     fold_literal_hash_reads(&mut body);
-    body
+    Some(body)
+}
+
+/// True for the call-site expression that supplies keyword arguments —
+/// a trailing bare-kwargs Hash (`only: [:index]`, `KeywordHashNode` in
+/// the Ruby parser) or an explicit `**`-splat. An explicit `{...} =>`
+/// Hash literal (`kwargs: false`) is a plain positional argument, not
+/// this — see `ExprNode::Hash`'s doc.
+fn is_keyword_producer(e: &crate::expr::Expr) -> bool {
+    matches!(
+        &*e.node,
+        crate::expr::ExprNode::Hash { kwargs: true, .. } | crate::expr::ExprNode::KeywordSplat { .. }
+    )
+}
+
+/// `substitute_params`'s binding when the macro declares at least one
+/// NAMED keyword parameter (kept honest or flattened — see
+/// `has_named_keyword`'s comment at the call site). Binds the way Ruby
+/// does: positionals from the call's positional args (required,
+/// optional-with-default, and at most one `*rest` gathering the
+/// middle); named keywords from the call's trailing keyword producer BY
+/// NAME, applying defaults when the caller omits one; a trailing
+/// `**rest` (kept honest or flattened to `from_kwrest`) collects
+/// whatever keys the named params didn't consume.
+///
+/// Returns `None` — refuse the macro, caller keeps the gap — the moment
+/// a shape can't be read back statically: a required keyword the call
+/// omits, an unknown keyword with no `**rest` to catch it, a keyword
+/// producer that isn't a literal Hash (names unreadable), a computed
+/// key (might be any name), or too many/few positional arguments. Never
+/// guesses.
+fn bind_params_by_name(
+    macro_def: &crate::dialect::MethodDef,
+    args: &[crate::expr::Expr],
+    extracted: &[(crate::ident::Symbol, crate::expr::Expr)],
+    span: crate::span::Span,
+) -> Option<Vec<(crate::ident::Symbol, crate::expr::Expr)>> {
+    use crate::expr::{Expr, ExprNode, Literal};
+
+    let remaining: Vec<&crate::dialect::Param> = macro_def
+        .params
+        .iter()
+        .filter(|p| !extracted.iter().any(|(n, _)| n == &p.name))
+        .collect();
+
+    // A real `**kwrest` (`p.keyword && p.rest`) or one `library_class`
+    // flattened to a positional default of `{}` (`p.from_kwrest`) — same
+    // binding either way, only the emitted shape differs.
+    let is_kwrest = |p: &crate::dialect::Param| (p.keyword && p.rest) || p.from_kwrest;
+    // A named keyword (`sunset: nil`, required `at:`), kept honest or
+    // flattened to a positional default — see `has_named_keyword`.
+    let is_named_keyword = |p: &crate::dialect::Param| (p.keyword && !p.rest) || p.from_keyword;
+
+    let positional_params: Vec<&crate::dialect::Param> = remaining
+        .iter()
+        .copied()
+        .filter(|p| !is_kwrest(p) && !is_named_keyword(p))
+        .collect();
+    let named_keyword_params: Vec<&crate::dialect::Param> =
+        remaining.iter().copied().filter(|p| is_named_keyword(p)).collect();
+    let kwrest_param: Option<&crate::dialect::Param> = remaining.iter().copied().find(|p| is_kwrest(p));
+
+    // The call's trailing keyword producer, split off the positional
+    // args it does not belong to.
+    let (positional_args, kw_source): (&[Expr], Option<&Expr>) = match args.last() {
+        Some(last) if is_keyword_producer(last) => (&args[..args.len() - 1], Some(last)),
+        _ => (args, None),
+    };
+
+    // A positional `*splat` at the call site (`retire_endpoint *dates,
+    // only: [:index]`) has an element count that isn't known here —
+    // binding it to a single param slot would guess (and the resulting
+    // body would read `headers['Deprecation'] = *dates`, which isn't
+    // what Ruby assigns). Refuse rather than guess; the only splat this
+    // function spreads is the literal-array one `substitute_params`
+    // already handles for the `extract_options!` rest, above.
+    if positional_args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. })) {
+        return None;
+    }
+
+    // --- positional: required / optional-with-default / one `*rest` ---
+    let rest_pos = positional_params.iter().position(|p| p.rest && !p.keyword);
+    let mut positional_bindings: Vec<(crate::ident::Symbol, Expr)> = Vec::new();
+    if let Some(rest_pos) = rest_pos {
+        let leading = &positional_params[..rest_pos];
+        let rest_param = positional_params[rest_pos];
+        let posts = &positional_params[rest_pos + 1..];
+        if positional_args.len() < posts.len() {
+            return None; // not enough args left for the required posts
+        }
+        let split = positional_args.len() - posts.len();
+        let (for_leading_and_rest, for_posts) = positional_args.split_at(split);
+        let mut cursor = 0;
+        for p in leading {
+            if cursor < for_leading_and_rest.len() {
+                positional_bindings.push((p.name.clone(), for_leading_and_rest[cursor].clone()));
+                cursor += 1;
+            } else if let Some(default) = &p.default {
+                positional_bindings.push((p.name.clone(), default.clone()));
+            } else {
+                return None; // a required positional the call doesn't supply
+            }
+        }
+        let rest_elements: Vec<Expr> = for_leading_and_rest[cursor..].to_vec();
+        positional_bindings.push((
+            rest_param.name.clone(),
+            Expr::new(span, ExprNode::Array { elements: rest_elements, style: Default::default() }),
+        ));
+        for (p, a) in posts.iter().zip(for_posts.iter()) {
+            positional_bindings.push((p.name.clone(), a.clone()));
+        }
+    } else {
+        if positional_args.len() > positional_params.len() {
+            return None; // too many positional arguments
+        }
+        let mut cursor = 0;
+        for p in &positional_params {
+            if cursor < positional_args.len() {
+                positional_bindings.push((p.name.clone(), positional_args[cursor].clone()));
+                cursor += 1;
+            } else if let Some(default) = &p.default {
+                positional_bindings.push((p.name.clone(), default.clone()));
+            } else {
+                return None; // a required positional the call doesn't supply
+            }
+        }
+    }
+
+    // --- keyword: named params by name, `**rest` gets the leftovers ---
+    let entries: Vec<(Expr, Expr)> = match kw_source {
+        None => Vec::new(),
+        Some(src) => {
+            let hash_entries = match &*src.node {
+                ExprNode::Hash { entries, .. } => Some(entries),
+                ExprNode::KeywordSplat { value } => match &*value.node {
+                    ExprNode::Hash { entries, .. } => Some(entries),
+                    // A forwarded, non-literal keyword bundle (`**var`):
+                    // the names it carries aren't known here, and a
+                    // named param needs its name — refuse rather than
+                    // guess which key is which.
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(hash_entries) = hash_entries else { return None };
+            // A computed key might be any name — same reason.
+            if hash_entries
+                .iter()
+                .any(|(k, _)| !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } }))
+            {
+                return None;
+            }
+            hash_entries.clone()
+        }
+    };
+    let key_name = |e: &Expr| match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        _ => None,
+    };
+    let mut consumed = vec![false; entries.len()];
+    let mut keyword_bindings: Vec<(crate::ident::Symbol, Expr)> = Vec::new();
+    for p in &named_keyword_params {
+        // A repeated key's LAST entry wins, as Ruby's own Hash literal
+        // construction already collapsed it by the time the call runs.
+        let found = entries
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(i, (k, _))| !consumed[*i] && key_name(k).as_ref() == Some(&p.name));
+        match found {
+            Some((_, (_, v))) => {
+                // Every entry sharing this name is spent, not just the
+                // last one: Ruby's own Hash literal construction already
+                // collapsed the earlier duplicates by the time the call
+                // runs, so none of them is real data left over for
+                // `**rest` — only the bound value is.
+                for (j, (k, _)) in entries.iter().enumerate() {
+                    if key_name(k).as_ref() == Some(&p.name) {
+                        consumed[j] = true;
+                    }
+                }
+                keyword_bindings.push((p.name.clone(), v.clone()));
+            }
+            None => match &p.default {
+                Some(default) => keyword_bindings.push((p.name.clone(), default.clone())),
+                None => return None, // a required keyword the call omits
+            },
+        }
+    }
+    let leftover: Vec<(Expr, Expr)> = entries
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !consumed[*i])
+        .map(|(_, kv)| kv.clone())
+        .collect();
+    match kwrest_param {
+        Some(p) => {
+            // An empty leftover still needs a value bound to the kwrest
+            // param, but `kwargs: true` (bare trailing-kwargs form) on
+            // zero entries emits nothing at all — wrapped in a `**`
+            // splat at the call site, that's `before_action(**)`, which
+            // `ruby -c` refuses to parse. `kwargs: false` emits the
+            // explicit `{}` a double-splat can actually take.
+            let kwargs = !leftover.is_empty();
+            keyword_bindings
+                .push((p.name.clone(), Expr::new(span, ExprNode::Hash { entries: leftover, kwargs })));
+        }
+        // A keyword the call passes that no named param claims, and
+        // nothing left to catch it — the macro's `**rest` is gone, the
+        // keyword wouldn't go anywhere real Ruby wouldn't error on too.
+        None if !leftover.is_empty() => return None,
+        None => {}
+    }
+
+    let mut bindings = positional_bindings;
+    bindings.extend(keyword_bindings);
+    Some(bindings)
 }
 
 /// `{only: [:a]}[:if]` → the value, or nil for an absent key — what the

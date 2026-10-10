@@ -974,7 +974,13 @@ fn every_runtime_method_body_concretely_typed() {
     // mutation runtime adds 47 measured sites on that baseline (45 range/edit
     // and 2 pending-index writes); the merged tree measures 421. Bar A still
     // requires zero untyped method bodies.
-    const CEILING: usize = 421;
+    // Rails' raised exception classes add 5 MEASURED sites (errors.rb 7 -> 10,
+    // parameter_missing.rb 4 -> 6): each new class's `super(message)` into
+    // StandardError, and RecordNotSaved's `@record` write, as the classes
+    // beside them already count.
+    // The date-column cast hook adds 2 measured sites: its raw adapter value
+    // is as column-dependent as `cast_schema_value`'s; the merged tree measures 428.
+    const CEILING: usize = 428;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

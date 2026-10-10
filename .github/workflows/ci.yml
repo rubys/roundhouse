@@ -1618,16 +1618,12 @@ jobs:
       # Same debug binary as the suite (ROUNDHOUSE_BIN from build-roundhouse), so the
       # compiler is shared rather than paid twice (#317).
       #
-      # 0 -> 2 with the edbc779 pin, deliberately and for one named shape:
-      # `WebPush::Connections::Stages` overrides CRuby net/http's private
-      # `begin_transport(...)` / `connect(...)` and forwards to `super`.
-      # The spinel emit refuses `(...)` into super, and spinel's
-      # `packages/net` has neither method — not yet, not a boundary
-      # (docs/pipeline/runtime.md, "Pooled web push connections do not
-      # track their stage on spinel"). Lower it back to 0 when both land.
+      # It went 0 -> 2 with the edbc779 pin (WebPush::Connections::Stages'
+      # `(...)` overrides of Net::HTTP's transport hooks) and back to 0
+      # once `lower::known_super_forwarding` spelled those forwards out.
       - name: Enforce the strict-emit ceiling
         env:
-          CEILING_ERRORS: 2
+          CEILING_ERRORS: 0
         run: |
           set -uo pipefail
           test -n "${ROUNDHOUSE_BIN:-}"
@@ -1862,6 +1858,9 @@ jobs:
       # divergence; strict emit 2 (see the ceiling above). The floor stays
       # at the 32b4144 figure until this runner's notice, as before.
       #
+      # 417/69 -> 550/69 on the notice `301da2b8`'s run emitted (550 of
+      # 578, 69 of 86 files on the runner; 552/70 on the laptop).
+      #
       # `32b4144b` (2026-10-06) is the Rails main bump (#314, rails
       # e3d5c569 with the 8.2 defaults live) and the PRs merged before it.
       # Three shapes it needed: the 8.2 default forgery strategy,
@@ -1907,7 +1906,7 @@ jobs:
       # has no per-object method table — or until upstream takes
       # basecamp/once-campfire#280, #279's twin for this file.
         env:
-          FLOOR_TESTS: 417
+          FLOOR_TESTS: 550
           FLOOR_FILES: 69
         run: |
           set -euo pipefail
