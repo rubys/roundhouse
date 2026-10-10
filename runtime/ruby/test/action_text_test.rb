@@ -405,6 +405,148 @@ class ActionTextFragmentTest < Minitest::Test
     assert_equal "<div>a<b>k</b></div>", fragment.to_s
   end
 
+  def test_update_removes_disallowed_nodes_and_their_contents
+    html = "<p>keep</p><svg><script>nested</script><a>gone</a></svg><iframe>frame</iframe><div><script>alert(1)</script>ok<span>stay</span></div>"
+    fragment = ActionText::Content.new(html).fragment
+    out = fragment.update do |source|
+      source.css("*").each do |node|
+        node.remove unless %w[ a div p span ].include?(node.name)
+      end
+    end
+    assert_equal "<p>keep</p><div>ok<span>stay</span></div>", out.to_s
+    assert_equal html, fragment.to_s
+  end
+
+  def test_update_removes_malformed_nested_elements_in_reverse_order
+    out = ActionText::Fragment.new("<b><i></b></i>").update do |source|
+      nodes = source.css("*")
+      nodes[1].remove
+      nodes[0].remove
+    end
+
+    assert_equal "", out.to_s
+  end
+
+  def test_update_removes_stale_crossing_element_after_serialization
+    html = "<script><iframe></script></iframe>alert(1)</script><p>keep</p>"
+    out = ActionText::Fragment.new(html).update do |source|
+      nodes = source.css("*")
+      nodes[1].remove
+      assert_equal "<script>alert(1)</script><p>keep</p>", source.to_s
+      nodes[0].remove
+    end
+
+    assert_equal "<p>keep</p>", out.to_s
+  end
+
+  def test_replace_observes_a_pending_remove
+    fragment = ActionText::Fragment.new("<script>gone</script><div>keep</div>")
+    fragment.css("script")[0].remove
+
+    out = fragment.replace("div") { |node| node.to_s }
+
+    assert_equal "<div>keep</div>", out.to_s
+  end
+
+  def test_writing_a_parent_after_removing_a_child_does_not_restore_the_child
+    out = ActionText::Fragment.new("<div><script>unsafe</script><span>keep</span></div>").update do |source|
+      nodes = source.css("*")
+      nodes[1].remove
+      nodes[0]["class"] = "safe"
+    end
+
+    assert_equal "<div class=\"safe\"><span>keep</span></div>", out.to_s
+  end
+
+  def test_rewriting_parent_inner_html_after_removing_a_child_does_not_restore_it
+    out = ActionText::Fragment.new("<div><script>unsafe</script><span>keep</span></div>").update do |source|
+      parent = source.css("div")[0]
+      child = source.css("script")[0]
+      child.remove
+      parent.inner_html = parent.inner_html + "<b>added</b>"
+    end
+
+    assert_equal "<div><span>keep</span><b>added</b></div>", out.to_s
+  end
+
+  def test_overlapping_malformed_element_removals_keep_later_nodes_removable
+    fragment = ActionText::Fragment.new("<x><y>" + ("a" * 50) + "</x></y><script>alert(1)</script>")
+    nodes = fragment.css("*")
+
+    nodes[0].remove
+    nodes[1].remove
+    assert_equal "<script>alert(1)</script>", fragment.to_s
+
+    nodes[2].remove
+    assert_equal "", fragment.to_s
+  end
+
+  def test_separately_scanned_nodes_preserve_each_others_attribute_writes
+    fragment = ActionText::Fragment.new("<div>keep</div>")
+    first = fragment.css("div")[0]
+    second = fragment.css("div")[0]
+
+    first["id"] = "one"
+    assert_equal "one", second["id"]
+    assert_equal "one", second.attributes["id"]
+    assert_equal "<div id=\"one\">keep</div>", second.to_s
+    second["class"] = "two"
+
+    assert_equal "<div id=\"one\" class=\"two\">keep</div>", fragment.to_s
+  end
+
+  def test_remove_detaches_the_node_from_its_fragment
+    out = ActionText::Fragment.new("<script>unsafe</script><p>safe</p>")
+    removed = out.css("*")[0]
+
+    removed.remove
+    removed["class"] = "detached"
+
+    assert_equal "<p>safe</p>", out.to_s
+    assert_equal "<script class=\"detached\">unsafe</script>", removed.to_s
+  end
+
+  def test_remove_after_a_write_to_an_earlier_node_uses_the_shifted_offset
+    out = ActionText::Fragment.new("<div></div><script>x</script><p>keep</p>").update do |source|
+      nodes = source.css("*")
+      nodes[0]["class"] = "long-value"
+      nodes[1].remove
+    end
+
+    assert_equal "<div class=\"long-value\"></div><p>keep</p>", out.to_s
+  end
+
+  def test_writes_to_a_captured_descendant_do_not_reach_a_removed_parent
+    out = ActionText::Fragment.new("<svg><a>gone</a></svg><p>keep</p>")
+    nodes = out.css("*")
+    nodes[0].remove
+    nodes[1]["class"] = "detached"
+
+    assert_equal "<p>keep</p>", out.to_s
+    assert_equal "<a class=\"detached\">gone</a>", nodes[1].to_s
+  end
+
+  def test_a_fresh_scan_after_a_write_uses_current_fragment_offsets
+    out = ActionText::Fragment.new("<div></div><p>first</p><p>second</p>").update do |source|
+      source.css("div")[0]["class"] = "long-value"
+      source.css("p")[1]["class"] = "target"
+    end
+
+    assert_equal "<div class=\"long-value\"></div><p>first</p><p class=\"target\">second</p>", out.to_s
+  end
+
+  def test_a_fresh_scan_inside_replaced_inner_html_uses_current_offsets
+    out = ActionText::Fragment.new("<div><i>old</i></div>").update do |source|
+      root = source.css("div")[0]
+      stale_child = source.css("i")[0]
+      root.inner_html = "<script>unsafe</script><span>keep</span>"
+      source.css("script")[0].remove
+      stale_child["class"] = "detached"
+    end
+
+    assert_equal "<div><span>keep</span></div>", out.to_s
+  end
+
   def test_setting_an_attribute_replaces_it_in_place_or_appends_it
     fragment = ActionText::Content.new("<div class=\"a\" id=\"b\">t</div>").fragment
     out = fragment.update do |source|

@@ -130,11 +130,7 @@ impl Server {
         request_headers.extend_from_slice(headers);
         let (status, _, response_headers, body) =
             self.send("GET", path, &request_headers, "");
-        Response {
-            status,
-            headers: response_headers,
-            body,
-        }
+        Response { status, headers: response_headers, body }
     }
 
     /// A POST with neither cookie nor token.

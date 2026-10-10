@@ -78,13 +78,11 @@ module ActiveSupport
   end
 end
 
-# Rails 8.1.4's pure-string Inflector methods that do not depend on the
-# pluralization, transliteration, or locale-specific rule catalogs. These
-# match the default ASCII identifier behavior; configured acronym tables are
-# intentionally not modeled here. `classify`/`tableize`, locale mutation,
-# constantization, transliteration, and parameterization are deliberately not
-# exposed: they need pluralization catalogs, constant lookup, or Rails' other
-# locale/transliteration rules, none of which this pure-string slice models.
+# Rails 8.1.4 Inflector methods that do not depend on pluralization,
+# transliteration, constant lookup, or locale-specific rule catalogs. String
+# methods match default ASCII identifier behavior; configured acronym tables
+# are intentionally not modeled. `classify`/`tableize`, locale mutation,
+# constantization, transliteration, and parameterization remain unexposed.
 module ActiveSupport
   module Inflector
     # Rails' camelize with the default (upper camel case) and lower-camel
@@ -158,6 +156,25 @@ module ActiveSupport
       s = text.to_s
       return s if s.empty?
       s[0].to_s.downcase + s[1, s.length - 1].to_s
+    end
+
+    # Rails' default integer ordinal suffix rules. Configuration and
+    # locale-specific ActiveSupport behavior do not affect this slice.
+    def self.ordinalize(number)
+      magnitude = number.abs
+      remainder_hundred = magnitude % 100
+      suffix = "th"
+      if remainder_hundred < 11 || remainder_hundred > 13
+        remainder_ten = magnitude % 10
+        if remainder_ten == 1
+          suffix = "st"
+        elsif remainder_ten == 2
+          suffix = "nd"
+        elsif remainder_ten == 3
+          suffix = "rd"
+        end
+      end
+      number.to_s + suffix
     end
   end
 end

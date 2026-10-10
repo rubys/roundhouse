@@ -54,7 +54,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 32b4144b5206304fa8d4c67455a753e2d3c16635
+  CAMPFIRE_SHA: edbc779f4dfc9b26c36310881711ddc976a9dfc8
   # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
   # Pinned like the apps above; bump deliberately.
@@ -1613,9 +1613,17 @@ jobs:
       #
       # Same debug binary as the suite (ROUNDHOUSE_BIN from build-roundhouse), so the
       # compiler is shared rather than paid twice (#317).
+      #
+      # 0 -> 2 with the edbc779 pin, deliberately and for one named shape:
+      # `WebPush::Connections::Stages` overrides CRuby net/http's private
+      # `begin_transport(...)` / `connect(...)` and forwards to `super`.
+      # The spinel emit refuses `(...)` into super, and spinel's
+      # `packages/net` has neither method — not yet, not a boundary
+      # (docs/pipeline/runtime.md, "Pooled web push connections do not
+      # track their stage on spinel"). Lower it back to 0 when both land.
       - name: Enforce the strict-emit ceiling
         env:
-          CEILING_ERRORS: 0
+          CEILING_ERRORS: 2
         run: |
           set -uo pipefail
           test -n "${ROUNDHOUSE_BIN:-}"
@@ -1627,8 +1635,9 @@ jobs:
             > /tmp/campfire-strict.log 2>&1 || status=$?
           errors=$(grep -c 'error\[' /tmp/campfire-strict.log || true)
           # An ingest abort prints no `error[` line, so a count of zero
-          # alone would pass it. A nonzero exit inside the ceiling is that.
-          if [ "$status" -ne 0 ] && [ "$errors" -le "$CEILING_ERRORS" ]; then
+          # with a nonzero exit is that. Counted errors at or below the
+          # ceiling are the pin's remaining gaps, not an abort.
+          if [ "$status" -ne 0 ] && [ "$errors" -eq 0 ]; then
             tail -5 /tmp/campfire-strict.log
             echo "::error::campfire strict emit failed (exit $status) without a counted error: ingest stopped before analysis"
             exit 1
@@ -1836,6 +1845,18 @@ jobs:
       # locally after it: that number includes `to_gid`, which lands in
       # THIS commit and whose runner figure is not in yet — same rule
       # as last time.
+      #
+      # `edbc779f` (2026-10-09) is upstream main with basecamp/once-campfire
+      # #351 (the pooled push connection is a `Net::HTTP` subclass that
+      # includes `Stages`, so no `extend` is left in app code) on top of
+      # the caching layer (#698/#720: ResponseCache, RecordCache,
+      # FragmentCache, CachedResponses, the WAL checkpointer, header-only
+      # forgery protection with token-free forms, and `rooms.messages_count`
+      # kept by SQLite triggers). Measured locally: ruby lane 552 of 579,
+      # 70 of 86 files; spinel lane 382 of 579, 50 of 86 files (16 do not
+      # link); campfire-compare green on both lanes with no forgiven
+      # divergence; strict emit 2 (see the ceiling above). The floor stays
+      # at the 32b4144 figure until this runner's notice, as before.
       #
       # `32b4144b` (2026-10-06) is the Rails main bump (#314, rails
       # e3d5c569 with the 8.2 defaults live) and the PRs merged before it.
