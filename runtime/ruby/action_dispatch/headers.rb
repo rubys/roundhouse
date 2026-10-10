@@ -49,9 +49,21 @@ module ActionDispatch
 
       def self.env_name(key)
         name = key.to_s
+        upper = name.upcase
+        return upper if upper == "CONTENT_TYPE" || upper == "CONTENT_LENGTH"
+        return upper.tr("-", "_") if /\AHTTP_[A-Z0-9_-]+\z/.match?(upper)
         return name unless HTTP_HEADER.match?(name)
         upper = name.upcase.tr("-", "_")
         CGI_VARIABLES.include?(upper) ? upper : "HTTP_" + upper
+      end
+
+      # Rails reads Authorization from its ordinary Rack key, legacy
+      # server spellings, and the CGI redirect fallback.
+      def self.authorization(env)
+        headers = Headers.new(env)
+        headers["Authorization"] || env["X-HTTP-AUTHORIZATION"] ||
+          env["X-HTTP_AUTHORIZATION"] || env["X_HTTP_AUTHORIZATION"] ||
+          env["REDIRECT_X_HTTP_AUTHORIZATION"] || headers["X-HTTP-Authorization"]
       end
     end
   end

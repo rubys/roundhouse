@@ -22,7 +22,7 @@ class ActionDispatchRequestTest < Minitest::Test
     # without a value here is what this test is for.
     %i[
       @remote_ip @path @query_string @script_name @request_method
-      @referer @host @format @body @env @user_agent @params
+      @referer @host @format @body @env @user_agent @params @path_parameters
     ].each do |name|
       assert !r.instance_variable_get(name).nil?,
              "#{name} is unset after `new` — `Request.for` reads it before writing"
@@ -78,6 +78,49 @@ class ActionDispatchRequestTest < Minitest::Test
     assert !r.ssl?
     assert_equal "http://", r.protocol
     assert_equal "http://chat.test", r.base_url
+  end
+
+  def test_headers_accept_case_insensitive_http_and_rack_names
+    r = ActionDispatch::Request.for({
+      "HTTP_X_CAMPFIRE_BOT_KEY" => "bot-secret",
+      "CONTENT_TYPE" => "application/json",
+    })
+    assert_equal "bot-secret", r.headers["X-Campfire-Bot-Key"]
+    assert_equal "bot-secret", r.headers["http_x_campfire_bot_key"]
+    assert_equal "bot-secret", r.headers.fetch("HtTp_X_CaMpFiRe_BoT_KeY")
+    assert_equal "application/json", r.headers.fetch("content-type", "missing")
+    assert_equal "application/json", r.headers["content_type"]
+    assert r.headers.key?("x-campfire-bot-key")
+    assert !r.headers.key?("X-Missing")
+  end
+
+  def test_authorization_checks_rack_and_legacy_env_keys
+    assert_equal "Bearer key", ActionDispatch::Request.for(
+      { "HTTP_AUTHORIZATION" => "Bearer key" }
+    ).authorization
+    assert_equal "Bearer legacy", ActionDispatch::Request.for(
+      { "X-HTTP-AUTHORIZATION" => "Bearer legacy" }
+    ).authorization
+    assert_equal "Bearer rails legacy", ActionDispatch::Request.for(
+      { "X-HTTP_AUTHORIZATION" => "Bearer rails legacy" }
+    ).authorization
+    assert_equal "Bearer underscore legacy", ActionDispatch::Request.for(
+      { "X_HTTP_AUTHORIZATION" => "Bearer underscore legacy" }
+    ).authorization
+    assert_equal "Bearer redirect", ActionDispatch::Request.for(
+      { "REDIRECT_X_HTTP_AUTHORIZATION" => "Bearer redirect" }
+    ).authorization
+  end
+
+  def test_path_parameters_are_route_only_and_indifferent
+    r = ActionDispatch::Request.new
+    assert !r.path_parameters.key?(:bot_key)
+    r.path_parameters = { "bot_key" => "route-secret" }
+    assert_equal "route-secret", r.path_parameters[:bot_key]
+    assert_equal "route-secret", r.path_parameters.fetch("bot_key", "missing")
+    assert !r.path_parameters.key?(:query_key)
+    assert_nil r.path_parameters.fetch(:query_key, nil)
+    assert_raises(KeyError) { r.path_parameters.fetch(:query_key) }
   end
 
   # A proxy chain lists one scheme per hop; the first is the client's.
