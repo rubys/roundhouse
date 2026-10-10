@@ -1,6 +1,7 @@
-// Not left on the String: ActiveSupport reopens of String that no
-// ruby-family runtime ships as instance methods. Grounded as
-// `ActiveSupport.<name>(receiver, …)` against `active_support_ext.rb`.
+// Ground ActiveSupport extensions as static module calls: String helpers
+// route through `ActiveSupport`, and Integer#ordinalize through
+// `ActiveSupport::Inflector`. The shared implementation is in
+// `active_support_inflections.rb`, loaded by the Ruby/Spinel scaffold.
 use crate::app::App;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
@@ -33,6 +34,23 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         return;
     };
     let name = method.as_str();
+    if name == "ordinalize" && args.is_empty() && matches!(r.ty.as_ref(), Some(Ty::Int)) {
+        let number = r.clone();
+        *expr.node = ExprNode::Send {
+            recv: Some(Expr::new(
+                expr.span,
+                ExprNode::Const {
+                    path: vec![Symbol::from("ActiveSupport"), Symbol::from("Inflector")],
+                },
+            )),
+            method: Symbol::from("ordinalize"),
+            args: vec![number],
+            block: None,
+            parenthesized: true,
+        };
+        expr.ty = Some(Ty::Str);
+        return;
+    }
     let arity_ok = match name {
         "humanize" | "titleize" | "underscore" | "demodulize" | "singularize" => args.is_empty(),
         // ActiveSupport's `String#remove` takes one or more patterns; the
