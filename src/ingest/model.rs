@@ -36,11 +36,22 @@ pub type TablePrefixes = std::collections::HashMap<String, String>;
 mod enum_constants;
 pub(in crate::ingest) use enum_constants::EnumConstants;
 
-/// Scan one file for `module <Ns>; def self.table_name_prefix; "<p>"; end`.
-/// Deliberately narrow: only a module-level `self.` def whose body is a
+/// Scan one file for `module <Ns>; def self.table_name_prefix; "<p>"; end`,
+/// or the same def inside the module's `class << self`.
+/// Deliberately narrow: only a module-level singleton def whose body is a
 /// single string literal. A computed prefix would have to run to be known,
 /// and nothing in the corpus writes one.
 pub fn ingest_table_name_prefixes(source: &[u8], file: &str) -> TablePrefixes {
+    fn literal_prefix(def: &ruby_prism::DefNode<'_>) -> Option<String> {
+        if constant_id_str(&def.name()) != "table_name_prefix" {
+            return None;
+        }
+        let stmts = flatten_statements(def.body()?);
+        if stmts.len() != 1 {
+            return None;
+        }
+        string_value(&stmts[0])
+    }
     let result = super::prism::parse(source, file);
     let root = result.node();
     let mut out = TablePrefixes::new();
@@ -51,21 +62,46 @@ pub fn ingest_table_name_prefixes(source: &[u8], file: &str) -> TablePrefixes {
         let mut full = scope;
         full.extend(name_path);
         let Some(body) = module.body() else { continue };
-        for stmt in flatten_statements(body) {
-            let Some(def) = stmt.as_def_node() else { continue };
-            if def.receiver().and_then(|r| r.as_self_node()).is_none() {
-                continue;
-            }
-            if constant_id_str(&def.name()) != "table_name_prefix" {
-                continue;
-            }
-            let Some(def_body) = def.body() else { continue };
-            let stmts = flatten_statements(def_body);
-            if stmts.len() != 1 {
-                continue;
-            }
-            if let Some(prefix) = string_value(&stmts[0]) {
-                out.insert(full.join("::"), prefix);
+        let stmts = flatten_statements(body);
+        // `extend self` makes every instance method a singleton one too, so a
+        // nested module can override an outer `ledger_` with a plain
+        // `def table_name_prefix = ""`.
+        let extends_self = stmts.iter().any(|s| {
+            s.as_call_node().is_some_and(|c| {
+                c.receiver().is_none()
+                    && constant_id_str(&c.name()) == "extend"
+                    && c.arguments().is_some_and(|a| {
+                        let args: Vec<_> = a.arguments().iter().collect();
+                        args.len() == 1 && args[0].as_self_node().is_some()
+                    })
+            })
+        });
+        for stmt in stmts {
+            if let Some(def) = stmt.as_def_node() {
+                let singleton = match def.receiver() {
+                    Some(r) => r.as_self_node().is_some(),
+                    None => extends_self,
+                };
+                if !singleton {
+                    continue;
+                }
+                if let Some(prefix) = literal_prefix(&def) {
+                    out.insert(full.join("::"), prefix);
+                }
+            } else if let Some(sclass) = stmt.as_singleton_class_node() {
+                if sclass.expression().as_self_node().is_none() {
+                    continue;
+                }
+                let Some(sbody) = sclass.body() else { continue };
+                for inner in flatten_statements(sbody) {
+                    let Some(def) = inner.as_def_node() else { continue };
+                    if def.receiver().is_some() {
+                        continue;
+                    }
+                    if let Some(prefix) = literal_prefix(&def) {
+                        out.insert(full.join("::"), prefix);
+                    }
+                }
             }
         }
     }
