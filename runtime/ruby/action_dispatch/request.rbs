@@ -18,7 +18,7 @@ module ActionDispatch
     @values: Hash[String, String]
     def initialize: (Hash[String, String] values) -> void
     def []: (untyped key) -> String?
-    def fetch: (untyped key, ?String? default) -> String?
+    def fetch: (untyped key, *untyped defaults) -> String?
     def key?: (untyped key) -> bool
   end
 

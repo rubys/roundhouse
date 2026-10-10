@@ -80,9 +80,12 @@ module ActionDispatch
       @values[key.to_s]
     end
 
-    def fetch(key, default = nil)
+    def fetch(key, *defaults)
       name = key.to_s
-      @values.key?(name) ? @values[name] : default
+      return @values[name] if @values.key?(name)
+      raise ArgumentError, "wrong number of arguments" if defaults.length > 1
+      return defaults[0] unless defaults.empty?
+      raise KeyError, "key not found: #{key}"
     end
 
     def key?(key)
@@ -239,10 +242,10 @@ module ActionDispatch
       @body
     end
 
-    # Rails checks the ordinary Rack Authorization key and both legacy
-    # X-HTTP-Authorization spellings used by some servers.
+    # Rails checks the ordinary Rack Authorization key, legacy server
+    # spellings, and the CGI redirect fallback.
     def authorization
-      headers["Authorization"] || @env["X-HTTP-AUTHORIZATION"] || @env["X_HTTP_AUTHORIZATION"] || headers["X-HTTP-Authorization"]
+      headers["Authorization"] || @env["X-HTTP-AUTHORIZATION"] || @env["X_HTTP_AUTHORIZATION"] || @env["REDIRECT_X_HTTP_AUTHORIZATION"] || headers["X-HTTP-Authorization"]
     end
 
     def path_parameters

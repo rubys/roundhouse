@@ -25,6 +25,7 @@ const ROUTES: &str = r#"Rails.application.routes.draw do
   resources :widgets, only: :index
   get "peek", to: "widgets#peek"
   get "basic", to: "widgets#basic"
+  get "path/:bot_key", to: "widgets#path"
 end
 "#;
 
@@ -40,6 +41,10 @@ const CONTROLLER: &str = r#"class WidgetsController < ApplicationController
   def peek
     found = authenticate_with_http_token { |token, options| token == "secret" ? "ok #{options["nonce"]}" : nil }
     render plain: "found=#{found}"
+  end
+
+  def path
+    render plain: "path=#{request.path_parameters[:bot_key]}"
   end
 
   def basic
@@ -137,6 +142,10 @@ fn the_spinel_tree_defines_the_http_auth_helpers_and_reads_the_header() {
         "main.rb does not map parsed headers into the request env"
     );
     assert!(file(&files, "main.rb").contains("request_obj.path_parameters = matched.path_params"));
+    assert!(
+        include_str!("../runtime/spinel/scaffold/ruby_overlay/main.rb")
+            .contains("controller.request.path_parameters = matched.path_params")
+    );
     let request = file(&files, "runtime/action_dispatch/request.rb");
     for feature in [
         "class RequestPathParameters",
@@ -189,7 +198,8 @@ fn token_and_basic_auth_answer_401_without_credentials_and_200_with_them() {
     overlay
         .run_ruby(
             r#"def get(path, authorization = nil)
-  env = { "REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "", "rack.input" => StringIO.new("") }
+  path_info, query_string = path.split("?", 2)
+  env = { "REQUEST_METHOD" => "GET", "PATH_INFO" => path_info, "QUERY_STRING" => query_string.to_s, "rack.input" => StringIO.new("") }
   env["HTTP_AUTHORIZATION"] = authorization unless authorization.nil?
   status, headers, body = Main.run_rack(env)
   [status, headers["www-authenticate"], body.join]
@@ -213,10 +223,20 @@ basic_denied = [401, 'Basic realm="Widgets"', "HTTP Basic: Access denied.\n"]
 expect("/basic", nil, basic_denied)
 expect("/basic", "Basic #{["admin:wrong"].pack("m0")}", basic_denied)
 expect("/basic", "Basic #{["admin:pw"].pack("m0")}", [200, nil, "basic ok"])
+expect("/path/route-secret?bot_key=query-secret", nil, [200, nil, "path=route-secret"])
+
+redirected = ActionDispatch::Request.new({ "REDIRECT_X_HTTP_AUTHORIZATION" => "Bearer redirected" })
+raise "overlay redirect authorization fallback failed" unless redirected.authorization == "Bearer redirected"
 
 request = ActionDispatch::Request.new({})
 request.path_parameters = { "bot_key" => "route-secret" }
 raise "overlay path parameters are not indifferent" unless request.path_parameters[:bot_key] == "route-secret"
+begin
+  request.path_parameters.fetch(:missing)
+rescue KeyError
+else
+  raise "missing path parameter fetch should raise KeyError"
+end
 "#,
         )
         .assert_passes();
@@ -255,6 +275,9 @@ raise "path parameters failed" unless request.path_parameters[:bot_key] == "rout
 legacy = ActionDispatch::Request.new
 legacy.env["X-HTTP-AUTHORIZATION"] = "Basic legacy"
 raise "legacy authorization fallback failed" unless legacy.authorization == "Basic legacy"
+redirect = ActionDispatch::Request.new
+redirect.env["REDIRECT_X_HTTP_AUTHORIZATION"] = "Bearer redirected"
+raise "redirect authorization fallback failed" unless redirect.authorization == "Bearer redirected"
 controller = WidgetsController.new
 controller.request = request
 found = controller.authenticate_with_http_token { |token, _options| token }

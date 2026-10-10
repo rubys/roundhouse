@@ -101,6 +101,9 @@ class ActionDispatchRequestTest < Minitest::Test
     assert_equal "Bearer legacy", ActionDispatch::Request.for(
       { "X-HTTP-AUTHORIZATION" => "Bearer legacy" }
     ).authorization
+    assert_equal "Bearer redirect", ActionDispatch::Request.for(
+      { "REDIRECT_X_HTTP_AUTHORIZATION" => "Bearer redirect" }
+    ).authorization
   end
 
   def test_path_parameters_are_route_only_and_indifferent
@@ -109,6 +112,8 @@ class ActionDispatchRequestTest < Minitest::Test
     assert_equal "route-secret", r.path_parameters[:bot_key]
     assert_equal "route-secret", r.path_parameters.fetch("bot_key", "missing")
     assert !r.path_parameters.key?(:query_key)
+    assert_nil r.path_parameters.fetch(:query_key, nil)
+    assert_raises(KeyError) { r.path_parameters.fetch(:query_key) }
   end
 
   # A proxy chain lists one scheme per hop; the first is the client's.
