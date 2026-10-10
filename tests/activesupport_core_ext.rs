@@ -102,6 +102,52 @@ puts "ActiveSupport 8.1.4 core extension contracts passed"
     );
 }
 
+#[test]
+fn array_excluding_and_without_match_rails_814() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r#"
+require "active_support"
+require "active_support/core_ext/array/access"
+load ARGV.fetch(0)
+
+def assert(value, message)
+  raise message unless value
+end
+
+input = [3, 1, 2, 1]
+[
+  [ActiveSupport.excluding(input), input.excluding],
+  [ActiveSupport.excluding(input, 2), input.excluding(2)],
+  [ActiveSupport.excluding(input, 3, 1), input.excluding(3, 1)],
+  [ActiveSupport.excluding(input, [2, 3]), input.excluding([2, 3])],
+].each do |runtime_result, rails_result|
+  assert(runtime_result == rails_result, "excluding result must match Rails 8.1.4")
+end
+
+assert(ActiveSupport.excluding(input) == [3, 1, 2, 1], "no-argument exclusion preserves the receiver")
+assert(ActiveSupport.excluding(input, 9) == [3, 1, 2, 1], "no-op exclusion preserves order and non-excluded duplicates")
+assert(ActiveSupport.excluding(input, 2) == [3, 1, 1], "single exclusion preserves remaining duplicates")
+assert(ActiveSupport.excluding(input, 3, 1) == [2], "multiple exclusions")
+assert(ActiveSupport.excluding(input, [2, 3]) == [1, 1], "one-level flattening of excluded elements")
+assert(ActiveSupport.excluding(input, 9) == input.excluding(9), "non-excluded duplicates follow Rails Array#-")
+assert(input == [3, 1, 2, 1], "excluding must not mutate its receiver")
+assert(input.without(3, 1) == [2], "without alias")
+puts "Array excluding 8.1.4 contracts passed"
+"#;
+    let output = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .arg(root.join("runtime/ruby/active_support_ext.rb"))
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("contracts passed"),
+        "Rails 8.1.4 Array#excluding contract smoke failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+}
+
 fn body(source: &str) -> roundhouse::Expr {
     let classes = ingest_library_classes(source.as_bytes(), "ext.rb").expect("ingest");
     let mut app = App::new();

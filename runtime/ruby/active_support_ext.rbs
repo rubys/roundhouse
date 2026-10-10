@@ -23,6 +23,7 @@ module ActiveSupport
     end
   end
   def self.index_by: (untyped list) { (untyped) -> untyped } -> Hash[untyped, untyped]
+  def self.excluding: [A] (Array[A] list, *A elements) -> Array[A]
   # The lowerer routes only Array receivers to this helper. Relation
   # receivers keep their typed method, and Array/Relation unions use
   # the existing size lowering, so an Array contract here cannot coerce

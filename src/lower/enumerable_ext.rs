@@ -109,6 +109,29 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     if method.as_str() == "wrap" {
         return ground_array_wrap(expr);
     }
+    // Rails' Array#excluding and its #without alias share this helper.
+    // Keep Relation calls on ActiveRecord::Relation's typed methods, and
+    // leave unions, variables, and computed receivers alone. Some dynamic
+    // Rails scopes are inferred as Arrays even though they return Relations;
+    // only an Array literal proves the runtime receiver is actually an Array.
+    if matches!(method.as_str(), "excluding" | "without") && block.is_none() {
+        let Some(receiver) = recv.as_ref() else { return false };
+        if !matches!(receiver.ty.as_ref(), Some(Ty::Array { .. })) {
+            return false;
+        }
+        if !matches!(&*receiver.node, ExprNode::Array { .. }) {
+            return false;
+        }
+        let receiver = recv.take().expect("checked above");
+        *recv = Some(Expr::new(
+            span,
+            ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+        ));
+        args.insert(0, receiver);
+        *method = Symbol::from("excluding");
+        *parenthesized = true;
+        return true;
+    }
     let wants_block = match method.as_str() {
         "index_by" => true,
         "many?" => block.is_some(),
@@ -461,6 +484,73 @@ mod tests {
             ExprNode::Send { method, .. } => method.as_str().to_string(),
             other => format!("{other:?}"),
         }
+    }
+
+    fn array_exclusion(method: &str, receiver_ty: Ty, excluded: usize) -> Expr {
+        let mut receiver = Expr::new(
+            Span::synthetic(),
+            ExprNode::Array {
+                elements: Vec::new(),
+                style: Default::default(),
+            },
+        );
+        receiver.ty = Some(receiver_ty);
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(receiver),
+                method: Symbol::from(method),
+                args: (0..excluded)
+                    .map(|value| Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Int { value: value as i64 } }))
+                    .collect(),
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+
+    #[test]
+    fn array_excluding_and_without_ground_to_the_shared_helper() {
+        for name in ["excluding", "without"] {
+            let mut e = array_exclusion(name, array_of_users(), 2);
+            assert!(rewrite_node(&mut e));
+            assert_eq!(method_of(&e), "excluding");
+            let ExprNode::Send { recv: Some(helper), args, parenthesized, .. } = &*e.node else { panic!() };
+            assert!(*parenthesized);
+            assert!(matches!(&*helper.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));
+            assert_eq!(args.len(), 3, "receiver plus both exclusions");
+        }
+        let mut no_args = array_exclusion("excluding", array_of_users(), 0);
+        assert!(rewrite_node(&mut no_args));
+        let ExprNode::Send { args, .. } = &*no_args.node else { panic!() };
+        assert_eq!(args.len(), 1, "the empty Rails exclusion list still reaches the helper");
+    }
+
+    #[test]
+    fn relation_excluding_keeps_its_typed_relation_method() {
+        let model = crate::ident::ClassId(Symbol::from("User"));
+        let mut e = array_exclusion("excluding", Ty::Relation { of: model }, 1);
+        assert!(!rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "excluding");
+        let ExprNode::Send { recv: Some(receiver), .. } = &*e.node else { panic!() };
+        assert!(matches!(&*receiver.node, ExprNode::Array { .. }));
+    }
+
+    #[test]
+    fn array_typed_variable_receiver_is_not_assumed_to_be_an_array() {
+        let mut e = array_exclusion("excluding", array_of_users(), 1);
+        let ExprNode::Send { recv: Some(receiver), .. } = &mut *e.node else { panic!() };
+        let mut variable = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var {
+                id: crate::ident::VarId(0),
+                name: Symbol::from("items"),
+            },
+        );
+        variable.ty = Some(array_of_users());
+        *receiver = variable;
+        assert!(!rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "excluding");
     }
 
     /// campfire's direct-room sidebar: `presence || [user]` types
