@@ -811,6 +811,24 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).find_by(conditions.to_h)
     end
 
+    # `Model.find_or_initialize_by` / `find_or_create_by` /
+    # `find_or_create_by!`: Rails delegates them to `all`, so the
+    # default scope applies to the find and seeds the built record. The
+    # lowered call sites (`lower::first_or_create`) inline the statement
+    # forms; these answer the rest (a receiverless call inside a class
+    # method, an `||` operand).
+    def self.find_or_initialize_by(conditions)
+      ActiveRecord::Relation.new(self).find_or_initialize_by(conditions.to_h)
+    end
+
+    def self.find_or_create_by(conditions)
+      ActiveRecord::Relation.new(self).find_or_create_by(conditions.to_h)
+    end
+
+    def self.find_or_create_by!(conditions)
+      ActiveRecord::Relation.new(self).find_or_create_by!(conditions.to_h)
+    end
+
     # `Model.find_sole_by(attrs)` — Rails' `where(attrs).sole`; see
     # Relation#find_sole_by. `Model.sole` is the same on the whole table.
     def self.find_sole_by(conditions)

@@ -2001,6 +2001,26 @@ module ActiveRecord
       created
     end
 
+    # Rails' `find_or_create_by!`: `find_by(attributes) ||
+    # create!(attributes)`. A block is the lowering's statement form
+    # (`lower::first_or_create`); the runtime method takes none.
+    def find_or_create_by!(conditions)
+      record = find_by(conditions)
+      return record if !record.nil?
+      created = @model.new(scope_attributes.merge(conditions))
+      created.save!
+      created
+    end
+
+    # Rails' `find_or_initialize_by`: `find_by(attributes) ||
+    # new(attributes)`, the new record unsaved and carrying the
+    # relation's scope attributes and the given ones.
+    def find_or_initialize_by(conditions)
+      record = find_by(conditions)
+      return record if !record.nil?
+      @model.new(scope_attributes.merge(conditions))
+    end
+
     # ---- SQL composition --------------------------------------------
 
     def to_sql

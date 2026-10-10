@@ -83,6 +83,9 @@ module ActiveRecord
     def self.where: (Hash[Symbol, untyped] conditions) -> Relation
     def self.find_by: (Hash[String | Symbol, untyped] conditions) -> Base?
     def self.find_sole_by: (Hash[String | Symbol, untyped] conditions) -> Base
+    def self.find_or_initialize_by: (Hash[Symbol, untyped] conditions) -> Base
+    def self.find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
+    def self.find_or_create_by!: (Hash[Symbol, untyped] conditions) -> Base
     def self.sole: () -> Base
     def self.all: () -> Relation
     def self.none: () -> Relation
