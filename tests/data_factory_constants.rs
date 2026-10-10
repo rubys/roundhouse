@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use roundhouse::analyze::Analyzer;
+use roundhouse::dialect::LibraryClassOrigin;
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ty::Ty;
 
@@ -70,6 +71,39 @@ fn literal_data_declarations_register_exact_members_without_writers() {
             "{alias}"
         );
     }
+}
+
+#[test]
+fn block_data_classes_retain_ordered_members_as_nominal_origin() {
+    let source = r#"class FactoryExamples
+  ContentKey = Data.define(:digest, :source) do
+    def cache_key = digest
+  end
+end
+"#;
+    let app = ingest(
+        source,
+        "FactoryExamples::ContentKey.new(\"hash\", \"body\")",
+    );
+    let class = app
+        .library_classes
+        .iter()
+        .find(|class| class.name.0.as_str() == "FactoryExamples::ContentKey")
+        .expect("the Data block becomes its own library class");
+
+    assert_eq!(
+        class.origin,
+        Some(LibraryClassOrigin::DataFactory {
+            members: vec![Symbol::from("digest"), Symbol::from("source")],
+        })
+    );
+    assert!(
+        class
+            .methods
+            .iter()
+            .any(|method| method.name.as_str() == "cache_key"),
+        "source-defined Data block methods remain on the nominal class"
+    );
 }
 
 #[test]

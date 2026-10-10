@@ -157,6 +157,18 @@ pub(super) fn data_define_block<'pr>(value: &Node<'pr>) -> Option<ruby_prism::Bl
         .then_some(block)
 }
 
+fn data_define_members(value: &Node<'_>) -> Option<Vec<Symbol>> {
+    let call = value.as_call_node()?;
+    let Some(arguments) = call.arguments() else {
+        return Some(Vec::new());
+    };
+    arguments
+        .arguments()
+        .iter()
+        .map(|arg| symbol_value(&arg).map(Symbol::from))
+        .collect()
+}
+
 /// `ContentKey = Data.define(:digest) do def cache_key = digest end` —
 /// the block is `class_eval`ed on the new class, so its `def`s are that
 /// class's methods, exactly as a later `class ContentKey; def …; end`
@@ -173,7 +185,9 @@ fn data_block_classes(
     let Some(body) = body else { return Ok(out) };
     for stmt in flatten_statements(body) {
         let Some(cw) = stmt.as_constant_write_node() else { continue };
-        let Some(block) = data_define_block(&cw.value()) else { continue };
+        let value = cw.value();
+        let Some(block) = data_define_block(&value) else { continue };
+        let Some(members) = data_define_members(&value) else { continue };
         let name = ClassId(Symbol::from(format!("{}::{}", owner.0.as_str(), constant_id_str(&cw.name()))));
         let DeclBody { includes, methods, constants, unknown_calls, class_initializers, class_attributes: _ } =
             walk_decl_body(block.body(), &name, file, DeclBodyMode::Instance)?;
@@ -186,7 +200,7 @@ fn data_block_classes(
             includes,
             methods,
             nullable_columns: Vec::new(),
-            origin: None,
+            origin: Some(crate::dialect::LibraryClassOrigin::DataFactory { members }),
             constants,
             unknown_calls,
             class_ivar_initializers: class_initializers,
