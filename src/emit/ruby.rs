@@ -236,6 +236,7 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
         app,
         crate::lower::model_to_library::Materialization::Emit,
     );
+    library::preserve_record_receiver_returns(&mut lcs, app);
     // The sqlite statement handle `Db.prepare` returns is a per-target
     // `Db` primitive: an integer cursor on most adapters (the shared
     // model lowerer's `Ty::Int` default), but an opaque FFI `void *` on

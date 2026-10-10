@@ -314,10 +314,10 @@ impl ClassInfo {
 /// resolved lexically: `scope::name`, then each enclosing namespace,
 /// and finally the name as written. `None` when no registered class
 /// answers, so an unknown name (a gem's class) is left as written.
-pub(crate) fn lexical_class(
+pub(crate) fn lexical_class<T>(
     written: &ClassId,
     scope: &str,
-    classes: &HashMap<ClassId, ClassInfo>,
+    classes: &HashMap<ClassId, T>,
 ) -> Option<ClassId> {
     let name = written.0.as_str();
     let mut parts: Vec<&str> = scope.split("::").filter(|s| !s.is_empty()).collect();

@@ -29,6 +29,7 @@ mod body;
 mod class_configuration;
 mod data;
 pub(crate) use body::string_answers;
+pub(crate) use body::lexical_class;
 pub(crate) use body::ConstResolverTask;
 pub use body::PreparedConstResolver;
 pub mod async_color;
@@ -708,7 +709,15 @@ impl Analyzer {
                     continue;
                 }
                 let Some(kind) = entry.return_kind else { continue };
-                cls.instance_methods.insert(Symbol::from(entry.name), instantiate(kind));
+                // The shared runtime types these as `() -> Base`, but in Rails
+                // `reload` and `lock!` answer `self`: keep the receiver's own
+                // class so its model methods still resolve on the result.
+                let ret = if matches!(entry.name, "reload" | "lock!") {
+                    self_ty.clone()
+                } else {
+                    instantiate(kind)
+                };
+                cls.instance_methods.insert(Symbol::from(entry.name), ret);
             }
             // AR instance methods not (yet) in the catalog: dirty-tracking
             // snapshots, mass assignment, marked-for-destruction, and the

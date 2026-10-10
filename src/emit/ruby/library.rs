@@ -19,6 +19,84 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
 
+/// Base's shared methods return Base in the runtime sidecar. A concrete
+/// forwarder discards that ABI result and returns its own `self`, so the
+/// model type promised by analysis is also true with Spinel's RBS seeds.
+pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &App) {
+    let templates = crate::runtime_src::parse_methods(
+        "def reload\n  super()\n  self\nend\ndef lock!(lock = true)\n  super(lock)\n  self\nend\n",
+    ).expect("receiver-return forwarders parse");
+    let classes: HashMap<ClassId, ()> = app.models.iter().map(|m| &m.name)
+        .chain(app.library_classes.iter().map(|lc| &lc.name))
+        .map(|id| (id.clone(), ())).collect();
+    for lc in lcs {
+        if !app.models.iter().any(|m| m.name == lc.name && app.schema.tables.contains_key(&m.table.0)) {
+            continue;
+        }
+        let self_ty = Ty::Class { id: lc.name.clone(), args: vec![] };
+        for template in &templates {
+            if lc.methods.iter().any(|m| m.name == template.name && m.receiver == MethodReceiver::Instance)
+                || record_return_overridden(app, &classes, &lc.name, template.name.as_str())
+            {
+                continue;
+            }
+            let mut method = template.clone();
+            method.name_span = Span::synthetic();
+            method.enclosing_class = Some(lc.name.0.clone());
+            method.body.ty = Some(self_ty.clone());
+            let params = method.params.iter().map(|p| crate::ty::Param {
+                name: p.name.clone(),
+                ty: Ty::Union { variants: vec![Ty::Bool, Ty::Str, Ty::Nil] },
+                kind: crate::ty::ParamKind::Optional,
+            }).collect();
+            method.signature = Some(Ty::Fn {
+                params,
+                ret: Box::new(self_ty.clone()),
+                block: None,
+                effects: crate::effect::EffectSet::default(),
+            });
+            lc.methods.push(method);
+        }
+    }
+}
+
+/// Source overrides, including those on ApplicationRecord or a mixin,
+/// may return a different object. Do not interpose a self-returning wrapper.
+fn record_return_overridden(app: &App, classes: &HashMap<ClassId, ()>, class: &ClassId, method: &str) -> bool {
+    let mut pending = vec![class.clone()];
+    let mut seen = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id.clone()) { continue; }
+        // Per-file ingest can retain a relative include. Resolve it in
+        // its owner's scope before looking for the concern's override.
+        let resolve = |written: &ClassId| crate::analyze::lexical_class(written, id.0.as_str(), classes)
+            .unwrap_or_else(|| written.clone());
+        let relevant = |m: &MethodDef| m.receiver == MethodReceiver::Instance
+            && (m.name.as_str() == method || (method == "lock!" && m.name.as_str() == "reload"));
+        if let Some(model) = app.models.iter().find(|m| m.name == id) {
+            if model.methods().any(relevant) { return true; }
+            pending.extend(model.parent.iter().cloned());
+            for item in &model.body {
+                let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+                let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+                if method.as_str() != "include" { continue; }
+                for arg in args {
+                    if let ExprNode::Const { path } = &*arg.node {
+                        let written = ClassId(Symbol::from(path.iter().map(Symbol::as_str).collect::<Vec<_>>().join("::")));
+                        pending.push(resolve(&written));
+                    }
+                }
+            }
+        }
+        if let Some(lc) = app.library_classes.iter().find(|lc| lc.name == id) {
+            if lc.methods.iter().any(relevant) { return true; }
+            pending.extend(lc.parent.iter().cloned());
+            pending.extend(lc.includes.iter().map(resolve));
+        }
+    }
+    false
+}
+
 /// Lower library classes for Ruby and emit their source/RBS file pairs, grouping
 /// nested declarations with their owners where possible. Lifted Data factories
 /// participate in lowering but emit inside their owner's constant declaration,
