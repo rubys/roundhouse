@@ -1,15 +1,18 @@
 # Campfire on Rust: compile-to-working plan
 
 **Current working state (2026-10-10, latest local verification):** PR #688 is
-OPEN and Draft at published head `0c66e7a95b8dba5055b4116c7604dc6c9a796faf`,
+OPEN and Draft at published head `631eae9d2d456e46e4b1ab1845779662664275f3`,
 base `main`; it must remain Draft and must not be merged. The local branch is
-`pr688-prep` at `bd85467b`, with canonical `main`
-`ee70dd318ca3fb7c23428e61d74d80fd740991e2` integrated by merge commit
-`bd85467b`. The branch contains three unpublished commits: the Elixir-safe
-CacheControlStore fix, the prior main integration, and this latest main
-integration. The only uncommitted path is this plan. Exact-head run
+`pr688-prep` at the same SHA. Canonical `main`
+`ee70dd318ca3fb7c23428e61d74d80fd740991e2` is integrated by merge commit
+`bd85467b`. The previously prepared CacheControlStore Elixir-compatibility
+fix and both main integrations, plus the updated compiler plan, are published;
+the worktree is clean. New exact-head CI run
+[38073157190](https://github.com/rubys/roundhouse/actions/runs/38073157190)
+is in progress at the plan stage; no build/test result has posted yet. The
+previous exact-head run
 [38069192191](https://github.com/rubys/roundhouse/actions/runs/38069192191)
-finished **red** on the older published head `0c66e7a9`: `unit (3)` failed two
+finished **red** on previous head `0c66e7a9`: `unit (3)` failed two
 Elixir lowering tests because `While` is unsupported in that target; other
 unit shards and Rust compare/smoke passed. `compact-required` and `CI summary`
 failed as consequences. Campfire compare and conformance passed; Campfire
@@ -18,8 +21,8 @@ in `1596a8af`; after merging canonical `main` through `ee70dd31`,
 `cargo test --locked --test route_path_decoding --test cache_control_header`
 passes (route 8/8 with 3 ignored; cache-control 4 passed with 1 native Spinel
 test ignored). The ignored emitted real-blog Rust Cargo gate passes 1/1, and
-`cargo check --locked --all-targets` passes. A new exact-head hosted run has
-not yet validated the unpublished commits. These checks restore the real-blog
+`cargo check --locked --all-targets` passes. Hosted validation of the new head
+is pending. These checks restore the real-blog
 compiler/execution forcing gate but do not reduce Campfire's compiler wall. On pinned Campfire
 `edbc779f4dfc9b26c36310881711ddc976a9dfc8`, strict analysis is 0 errors / 460
 warnings. Strict Rust generation reports 132 unsupported/syntax + 113 type
@@ -141,8 +144,8 @@ falling, or a test being selected is not completion evidence.
 
 | Input | Snapshot / status |
 |---|---|
-| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`, published head `0c66e7a95b8dba5055b4116c7604dc6c9a796faf` (verified locally with `gh pr view`). Exact-head run [38069192191](https://github.com/rubys/roundhouse/actions/runs/38069192191) completed red as summarized above; it is not validation of unpublished commits `1596a8af` and `b9b88ef6`. Keep Draft and do not merge |
-| Local integration base | Canonical `main` `ee70dd318ca3fb7c23428e61d74d80fd740991e2` is merged in local commit `bd85467b` without unresolved conflicts. The uncommitted change is this plan only. `cargo check --locked --all-targets`, Rust route/cache-control tests, and the emitted real-blog Rust Cargo gate pass on the local branch; see the newest ledger row |
+| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`, published head `631eae9d2d456e46e4b1ab1845779662664275f3` (verified with `gh pr view` and `git ls-remote`). New run [38073157190](https://github.com/rubys/roundhouse/actions/runs/38073157190) is in progress at `plan`; no checks are complete yet. Previous run [38069192191](https://github.com/rubys/roundhouse/actions/runs/38069192191) was red on the prior head, with its Elixir failure now fixed and published but not yet validated by hosted CI. Keep Draft and do not merge |
+| Local integration base | Canonical `main` `ee70dd318ca3fb7c23428e61d74d80fd740991e2` is merged in commit `bd85467b` without unresolved conflicts. The branch is clean after publishing the plan. `cargo check --locked --all-targets`, Rust route/cache-control tests, and the emitted real-blog Rust Cargo gate pass locally; see the newest ledger row |
 | Campfire target | Current canonical CI pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8`; earlier measured comparison pin `32b4144b5206304fa8d4c67455a753e2d3c16635` |
 | Strict analyzer | On current pin `edbc779f`, `roundhouse check --strict` exits 0 with 0 errors / 460 warnings. This does not imply Rust generation or Cargo success |
 | Strict Rust generation / current pin | Fresh production generation exits 1 before writing files after reporting 132 unsupported/syntax and 113 type errors (245 total), including `FragmentCache::ContentKey = Data.define(:digest) { def cache_key = digest }`. `--survey --allow-unsupported` also exits at `rust: Data.define is not supported; use Ruby or Spinel`. This is an explicit target representation gate, not a rustc count. Current-pin Cargo inventory is unavailable until the factory and its nominal cache-key consumer have a sound Rust representation |
@@ -155,8 +158,8 @@ falling, or a test being selected is not completion evidence.
 | Historical estimate | ~2,468 was a prior rough figure with unknown scope. Use 2,597 as the clean merged-base `32b4144b` baseline, 2,577 as the current merged `32b4144b` comparison, and leave current-pin `edbc779f` Cargo count unavailable until generation succeeds |
 | Environment | Debian 12, Linux x86_64; `rustc 1.98.1 (48a229cea 2026-09-01)`, host `x86_64-unknown-linux-gnu`; compiler binary SHA-256 `859254978c0a0402c32f949f6de0d99aee73be8d15f45aac00ae1448aac51e74`; Cargo 1.98.1 binary SHA-256 `da77c8b33849312255ccde3179198ada4c8deb370488d050286146b1d1b27e14`; Roundhouse root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a8e8a5981`; generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` |
 | Rails oracle | Partial probe on `32b4144b`: standalone Action Controller dispatch loaded the version initializer and `VersionHeaders` callback; five environment cases returned 200. Full pinned Rails boot and on-wire nil `X-Rev` behavior remain unverified |
-| Exact-head CI | Published head `0c66e7a9` has completed run [38069192191](https://github.com/rubys/roundhouse/actions/runs/38069192191): `unit (3)`, `compact-required`, and `CI summary` failed; the remaining selected unit shards and Rust compare/smoke passed; Campfire compare/conformance passed; Campfire smoke and Spinel jobs were skipped. The failing Elixir loop regression has a local fix at `1596a8af`, but the fix has no hosted validation until the branch is pushed. CodeRabbit SUCCESS on a Draft is a skipped review, not substantive review |
-| Review state | The latest substantive review observations in the retained evidence cover older heads; no review covers unpublished `1596a8af`, `b9b88ef6`, or `bd85467b`. CodeRabbit SUCCESS on the published Draft is explicitly a skipped review. Earlier review points have follow-up confirmations as addressed; low-priority performance observations remain deferred. The Campfire browser room-delete journey remains unverified |
+| Exact-head CI | Previous head `0c66e7a9` has completed run [38069192191](https://github.com/rubys/roundhouse/actions/runs/38069192191): `unit (3)`, `compact-required`, and `CI summary` failed; the remaining selected unit shards and Rust compare/smoke passed; Campfire compare/conformance passed; Campfire smoke and Spinel jobs were skipped. The Elixir loop regression is fixed at `1596a8af` and now included in published head `631eae9d`; hosted validation is pending in [run 38073157190](https://github.com/rubys/roundhouse/actions/runs/38073157190). CodeRabbit SUCCESS on a Draft is a skipped review, not substantive review |
+| Review state | No substantive review covers newly published head `631eae9d`; existing addressed findings and their confirmation comments are retained, and the new head has not yet received fresh review coverage. CodeRabbit SUCCESS on an earlier Draft was a skipped review, not substantive review. Low-priority performance observations remain deferred. The Campfire browser room-delete journey remains unverified |
 | Scratch evidence | Current-pin strict check and generation captures after merging `ee70dd31` are `/tmp/rh688-bd854-strict-check.out`, `/tmp/rh688-bd854-strict-rust.out`, and `/tmp/rh688-bd854-survey.out`; the historical older-pin project and inventory remain under `/tmp/rh688-863-32b-*`. Do not commit generated projects or scratch logs |
 
 ## Next compiler-wall reduction wave
