@@ -1,0 +1,45 @@
+# Typing for runtime/spinel/active_job_serialization.rb. Readers take
+# the parsed `arguments` array, which is `JSON.parse` output and so
+# `untyped`, the same contract as `JsonColumn.load`.
+module ActiveJob
+  module Arguments
+    GLOBALID_KEY: String
+    SERIALIZER_KEY: String
+    SYMBOL_SERIALIZER: String
+    TIME_SERIALIZER: String
+
+    def self.null: () -> String
+    def self.bool: (bool value) -> String
+    def self.int: (Integer value) -> String
+    def self.float: (Float value) -> String
+    def self.str: (String value) -> String
+    def self.sym: (Symbol value) -> String
+    def self.record: (String gid_uri) -> String
+    def self.time: (Time value) -> String
+    def self.list: (Array[String] parts) -> String
+
+    def self.count: (untyped args) -> Integer
+    def self.null_at: (untyped args, Integer i) -> bool
+    def self.bool_at: (untyped args, Integer i) -> bool
+    def self.int_at: (untyped args, Integer i) -> Integer
+    def self.float_at: (untyped args, Integer i) -> Float
+    def self.str_at: (untyped args, Integer i) -> String
+    def self.sym_at: (untyped args, Integer i) -> Symbol
+    def self.time_at: (untyped args, Integer i) -> Time
+    def self.int_array_at: (untyped args, Integer i) -> Array[Integer]
+    def self.float_array_at: (untyped args, Integer i) -> Array[Float]
+    def self.str_array_at: (untyped args, Integer i) -> Array[String]
+    def self.bool_array_at: (untyped args, Integer i) -> Array[bool]
+    def self.sym_array_at: (untyped args, Integer i) -> Array[Symbol]
+    def self.gid_parts: (untyped value) -> Array[String]
+    def self.missing_record_message: (String model_name, String id) -> String
+    def self.deserialize_message: (String detail) -> String
+    def self.serialized_value: (untyped value, String serializer) -> String
+    def self.key_of: (untyped value, String key) -> untyped
+    def self.parse_time: (String text) -> Time
+  end
+
+  module Payload
+    def self.build: (String job_class, String queue_name, String arguments_json) -> String
+  end
+end

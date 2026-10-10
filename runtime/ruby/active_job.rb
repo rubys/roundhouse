@@ -151,8 +151,41 @@ module ActiveJob
     nil
   end
 
+  # ---- Serialized payloads --------------------------------------------
+  #
+  # An ActiveJob-format JSON payload (the `job.serialize` hash Rails
+  # hands to Sidekiq), built by `ActiveJob::Payload.build` on the
+  # Ruby-family lanes. A job whose arguments all serialize goes this
+  # way, and the drain looks its records up again when it runs, as
+  # Rails does. Every other job keeps a Proc over its live arguments.
+  #
+  # THE PAYLOAD RIDES THE SAME QUEUE, wrapped in a Proc. A strict target
+  # has one element type per Array, so `PENDING` cannot hold a String
+  # beside its Procs; a Proc that closes over the JSON and runs it
+  # through `perform_payload` is the same `() -> nil` as every other
+  # entry, so the one FIFO and its locking stay as they are. What the
+  # Proc closes over is the serialized text, not the job's objects.
+  def self.enqueue_payload(json)
+    enqueue(-> { perform_payload(json)
+    nil })
+  end
+
   def self.pending_count
     PENDING.length
+  end
+
+  # Run one payload and answer whether a job class took it. The default
+  # knows no job classes: only the Ruby-family lanes build payloads, and
+  # their job registry redefines this (a later definition wins, as in
+  # `thread_state`). A payload reaching this one is reported, not run.
+  def self.perform_payload(json)
+    warn "[job] no job registry for a queued payload"
+    false
+  end
+
+  # Raised when a payload names a record that is gone, as Rails' is.
+  # `discard_on ActiveJob::DeserializationError` drops the job quietly.
+  class DeserializationError < StandardError
   end
 
   # Run every job queued so far, FIFO, and answer how many ran.

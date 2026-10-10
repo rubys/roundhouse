@@ -1,0 +1,130 @@
+{
+  "activejob": "8.1.3",
+  "arguments": [
+    null,
+    true,
+    false,
+    42,
+    -7,
+    1099511627776,
+    1.5,
+    0.1,
+    -0.000000025,
+    1e+20,
+    "plain",
+    "quote\" backslash\\ nl\n tab\t ctrl\u0001 <&> é ✓  ",
+    "",
+    {
+      "_aj_serialized": "ActiveJob::Serializers::SymbolSerializer",
+      "value": "open"
+    },
+    {
+      "_aj_globalid": "gid://campfire/Room/7"
+    },
+    {
+      "_aj_globalid": "gid://campfire/Rooms::Open/8"
+    },
+    {
+      "_aj_serialized": "ActiveJob::Serializers::TimeSerializer",
+      "value": "2026-10-09T12:14:56.123456789Z"
+    },
+    {
+      "_aj_serialized": "ActiveJob::Serializers::TimeSerializer",
+      "value": "2026-10-09T12:14:56.000000005Z"
+    },
+    [
+      1,
+      2,
+      3
+    ],
+    [
+      "a",
+      "b"
+    ],
+    [],
+    [
+      true,
+      false
+    ],
+    [
+      {
+        "_aj_serialized": "ActiveJob::Serializers::SymbolSerializer",
+        "value": "x"
+      },
+      {
+        "_aj_serialized": "ActiveJob::Serializers::SymbolSerializer",
+        "value": "y"
+      }
+    ]
+  ],
+  "job": {
+    "job_class": "PushMessageJob",
+    "job_id": "a17b3ece-9bcb-486d-8212-5e4da7da40c4",
+    "provider_job_id": null,
+    "queue_name": "default",
+    "priority": null,
+    "arguments": [
+      null,
+      true,
+      false,
+      42,
+      -7,
+      1099511627776,
+      1.5,
+      0.1,
+      -0.000000025,
+      1e+20,
+      "plain",
+      "quote\" backslash\\ nl\n tab\t ctrl\u0001 <&> é ✓  ",
+      "",
+      {
+        "_aj_serialized": "ActiveJob::Serializers::SymbolSerializer",
+        "value": "open"
+      },
+      {
+        "_aj_globalid": "gid://campfire/Room/7"
+      },
+      {
+        "_aj_globalid": "gid://campfire/Rooms::Open/8"
+      },
+      {
+        "_aj_serialized": "ActiveJob::Serializers::TimeSerializer",
+        "value": "2026-10-09T12:14:56.123456789Z"
+      },
+      {
+        "_aj_serialized": "ActiveJob::Serializers::TimeSerializer",
+        "value": "2026-10-09T12:14:56.000000005Z"
+      },
+      [
+        1,
+        2,
+        3
+      ],
+      [
+        "a",
+        "b"
+      ],
+      [],
+      [
+        true,
+        false
+      ],
+      [
+        {
+          "_aj_serialized": "ActiveJob::Serializers::SymbolSerializer",
+          "value": "x"
+        },
+        {
+          "_aj_serialized": "ActiveJob::Serializers::SymbolSerializer",
+          "value": "y"
+        }
+      ]
+    ],
+    "executions": 0,
+    "exception_executions": {},
+    "locale": "en",
+    "timezone": "UTC",
+    "enqueued_at": "2026-10-09T16:15:07.497576322Z",
+    "scheduled_at": null
+  }
+}

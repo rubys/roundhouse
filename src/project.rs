@@ -4973,6 +4973,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         files.push(("sig/runtime/json_column.rbs".to_string(), rbs));
     }
 
+    // ActiveJob payload codecs. Same reason as the JSON-column sidecar:
+    // the readers take parsed JSON, which only the sidecar can type.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/active_job_serialization.rbs")
+            .map_err(|e| format!("read runtime/spinel/active_job_serialization.rbs: {e}"))?;
+        files.push(("sig/runtime/active_job_serialization.rbs".to_string(), rbs));
+    }
+
     // Duration sidecar — pins @seconds Integer so ago/from_now stay
     // Time-typed under AOT inference (an untyped @seconds widens the
     // temporal arithmetic to poly against the Time-typed C return).
