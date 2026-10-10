@@ -29,8 +29,8 @@ falling, or a test being selected is not completion evidence.
 
 | Input | Snapshot / status |
 |---|---|
-| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`; GitHub REST verified published head `5415a9f86e3c7afa8a5e1845de69f85049ddc7a6`. The exact-head run [38048889276](https://github.com/rubys/roundhouse/actions/runs/38048889276) is in progress: plan and fixture generation succeeded, Roundhouse build is running, and unit/store/Ruby-compare/Rust-compare/site jobs are queued. Several Spinel, WASM, extra-target, and Campfire smoke jobs are skipped by this workflow; this is not full Campfire validation. Do not describe the run as green or complete. CodeRabbit's current status is the draft-review skip, not a code review. The prior run [38038649634](https://github.com/rubys/roundhouse/actions/runs/38038649634) on `5647c88` was red in `compare (rust)`, `smoke (rust)`, two of three unit shards, `compact-required`, and `CI summary`; Campfire compare/conformance passed, while Campfire smoke and extra-target lanes were skipped. Keep Draft and do not merge unless Thomas explicitly instructs otherwise |
-| Local integration base | `4a70cd0e3e4d67004fb247448329a1bab0d754df` merged canonical main at `cd8656979a9e9c13eb5a25e0bbcc6da5d793565e`; new merge `863dd24bd436cc9096fb4e9822c8bca1e77e7bc9` merges canonical main `5d3d144ed57db6be1e235073f378fd9427896e0a`. Its single `tests/support/native_http.rs` conflict preserves automatic session cookies for ordinary GETs and explicit-cookie override in `get_with_headers()`. History was not rewritten. `cargo check --locked --all-targets` passed after the merge |
+| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`; published head `35c0534373f8c07750f2040002ac7f2d815adbde` was verified by REST before this integration batch. Local merge commit `02938da8` incorporates canonical main `c210f226346b462214866b5756b457ad53f647b1`; `cargo check --locked --all-targets` and `ci_policy_workflow` (18/18) pass locally at that merge. The exact-published-head run [38049346432](https://github.com/rubys/roundhouse/actions/runs/38049346432) has passed plan/build, with fixture generation in progress and Campfire compare/conformance queued; Campfire smoke is skipped. The earlier [38048889276](https://github.com/rubys/roundhouse/actions/runs/38048889276) on `5415a9f8` completed plan/build/store-check successfully, but its unit, compare, site, and Campfire compare/conformance jobs were cancelled; it is not a green full run. Keep Draft and do not merge. CodeRabbit's current status is the draft-review skip, not a code review |
+| Local integration base | Original integration `863dd24bd436cc9096fb4e9822c8bca1e77e7bc9` merges canonical main `5d3d144ed57db6be1e235073f378fd9427896e0a`, with its single `tests/support/native_http.rs` conflict resolved to preserve session-cookie defaults and explicit-cookie override. Canonical main subsequently advanced to `c210f226346b462214866b5756b457ad53f647b1`; merge commit `02938da8` integrates it without conflicts. `CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_STRIP=symbols CARGO_PROFILE_DEV_STRIP=symbols cargo check --locked --all-targets` passed after this merge. `CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=2 CARGO_PROFILE_TEST_STRIP=none cargo test --locked --test ci_policy_workflow` passed 18/18; the debug symbols are required by its backtrace assertion |
 | Campfire target | Current canonical CI pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8`; earlier measured comparison pin `32b4144b5206304fa8d4c67455a753e2d3c16635` |
 | Strict analyzer | On current pin `edbc779f`, `roundhouse check --strict` exits 0 with 0 errors / 460 warnings. This does not imply Rust generation or Cargo success |
 | Strict Rust generation / current pin | Rust survey generation exits 1 before writing files: `rust: Data.define is not supported; use Ruby or Spinel`, from `FragmentCache::ContentKey = Data.define(:digest) { def cache_key = digest }`. This is an explicit target representation gate, not a rustc count. Current-pin Cargo inventory is unavailable until that construct has a sound Rust representation |
@@ -43,7 +43,7 @@ falling, or a test being selected is not completion evidence.
 | Historical estimate | ~2,468 was a prior rough figure with unknown scope. Use 2,597 as the clean merged-base `32b4144b` baseline, 2,577 as the current merged `32b4144b` comparison, and leave current-pin `edbc779f` Cargo count unavailable until generation succeeds |
 | Environment | Debian 12, Linux x86_64; `rustc 1.98.1 (48a229cea 2026-09-01)`, host `x86_64-unknown-linux-gnu`; compiler binary SHA-256 `859254978c0a0402c32f949f6de0d99aee73be8d15f45aac00ae1448aac51e74`; Cargo 1.98.1 binary SHA-256 `da77c8b33849312255ccde3179198ada4c8deb370488d050286146b1d1b27e14`; Roundhouse root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a8e8a5981`; generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` |
 | Rails oracle | Partial probe on `32b4144b`: standalone Action Controller dispatch loaded the version initializer and `VersionHeaders` callback; five environment cases returned 200. Full pinned Rails boot and on-wire nil `X-Rev` behavior remain unverified |
-| Exact-head CI | At head `5415a9f8`, run `38048889276` is still in progress. Plan and fixture generation passed; `build-roundhouse` is running; `store-check`, four unit shards, Ruby/Rust compares, and site build are queued. Campfire smoke and several other platform lanes are skipped. No completed required-check conclusion is available yet. CodeRabbit only reports that review was skipped because the PR is Draft |
+| Exact-head CI | Published head `35c05343` has run `38049346432`; plan and build passed, fixture generation is in progress, and Campfire compare/conformance are queued; Campfire smoke and several other platform lanes are skipped. Prior run `38048889276` at `5415a9f8` passed plan, fixture generation, build and store-check, but its unit shards, Ruby/Rust compare, site, and Campfire compare/conformance were cancelled. Neither remote run validates local-only merge `02938da8`. CodeRabbit only reports that review was skipped because the PR is Draft |
 | Review state | Earlier CodeRabbit findings for `turbo_stream`, regex-case Option-tail handling, `request` shadowing, comparison return types, HTML-safe nil, and room-delete URL assumptions have follow-up confirmations as addressed. Low-value performance observations remain deferred. Review comments/review submissions last target `3b6d1b7`; no new review has been published for `5415a9f8`. The Campfire browser room-delete journey remains explicitly unverified |
 | Scratch evidence | Older-pin generation and JSON inventory are under `/tmp/rh688-863-32b-*`; latest-pin strict check and failed generation captures are `/tmp/rh688-edbc779-check.out` and `/tmp/rh688-edbc779-generate.stderr`. Previous baseline captures remain under `/tmp/rh688-baseline` and `/tmp/rh688-898-*`; do not commit generated output or scratch logs |
 
@@ -229,6 +229,36 @@ panic, fabricate defaults, or refuse required routes.
 
 Do not activate a package until its prerequisite/interface is recorded here
 with a minimal reproducer, owned files, semantic checks, and integration check.
+
+#### Execution order and safe parallelism
+
+- **Serial baseline gate:** current pinned Campfire `edbc779f` cannot produce a
+  Rust project because of `Data.define`. Keep that gate explicit and first in
+  the production-baseline path; do not use survey-only internals to report a
+  Cargo count. The Data representation and the `CachedResponses` nominal
+  identity check must be solved together or remain explicitly unsupported.
+- **Parallel contract work:** while the Data fix is developed, A0 and F0 may
+  independently prepare test fixtures and pin their own source/API contracts.
+  Do not claim either as Campfire support until current-pin production
+  generation and emitted execution are available. A0 owns the typed app-config
+  and version-header contract; F0 owns the request-bound plain-cookie jar and
+  transport semantics. A0/F0 must not edit the same central Rust app/module
+  wiring concurrently; one integrator owns `src/emit/rust.rs`,
+  `src/project.rs`, the shared result matrix, and the combined Campfire
+  inventory.
+- **Oracle prerequisite for F0:** the currently installed global Rails is
+  8.1.4, while the pinned Campfire lockfile resolves Rails 8.2.0.alpha; the
+  pinned app's `bundle check` currently fails on missing gems. Existing
+  committed compatibility vectors cover signed/encrypted cookie wires, but do
+  not establish the plain/permanent jar's missing-versus-empty behavior or
+  default attributes. Do not infer these from the Ruby-family `CookieJar` or
+  the different global Rails version. Obtain those cases from the pinned Rails
+  oracle before changing behavior.
+- **Integration order:** after isolated A0/F0 tests pass, integrate one owner
+  at a time, then run combined Rust tests and a fresh strict generation/survey.
+  Reassign dependencies from the resulting diagnostics before opening the
+  next implementation wave. Keep signed `session_token` and encrypted
+  `_campfire_session` outside F0.
 
 | Package | State | Scope and dependency | Completion evidence |
 |---|---|---|---|
