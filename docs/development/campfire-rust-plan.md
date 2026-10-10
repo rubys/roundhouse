@@ -233,6 +233,49 @@ with a minimal reproducer, owned files, semantic checks, and integration check.
 | **E — STI/routes** | Not re-triaged on this survey; hold | Activate only for a verified remaining `link_to @record`/polymorphic route repro after checking persisted/hydrated subtype identity and route bridge. | New/edit/namespace/routeless-subclass cases as applicable, with emitted URL execution; don't infer success from a helper's type-check. |
 | **C — residual compiler clusters** | Not classified globally; inventory by source signature first | Assign narrow, confirmed E0308/E0599/etc. causes only; exclude central files owned by another package. | Before/after representative semantics and no missing modules/methods/tests in a fresh census. |
 
+### First substantial reduction target: request/auth vertical slice
+
+Fresh measurement at Roundhouse `ab04ceb67a065096e63bcfd89acec21aa5b961a6`
+and Campfire `32b4144b5206304fa8d4c67455a753e2d3c16635` found 2,510 Cargo
+errors in survey-only lib/bin output. This is the classification starting
+point, not a production build. Largest diagnostic-code totals are E0308 833,
+E0599 575, E0425 456, and E0433 255; these codes are too broad to treat as
+root causes. More useful first buckets are 119 “cannot find type `Rails`”,
+104 “cannot find function `cookies`”, 33 “expected function, found module
+`session`”, 51 `unwrap` calls on `serde_json::Value`, and 23 references to
+the undefined `RoundhouseUnsupportedRelation` marker. These counts overlap
+larger code totals but are separate diagnostic messages; they must not be
+summed as independent fixes or promised as one-to-one reductions.
+
+The best first candidate for a few-hundred-error reduction is a vertically
+verified request/auth slice, not a generic E0308 cast pass: (1) trace the
+119 Rails references to the precise typed Rails namespace/root/config
+contracts already present in shared runtime code; (2) define request-owned
+cookie state and lifecycle before implementing the 104 cookie callsites;
+(3) trace the
+repeated session/auth controller errors back through lowering and the
+`resume_session`/`session` signatures; and (4) keep signed-cookie crypto and
+secret configuration fail-closed. The Rails and cookie counts alone total
+223 diagnostics, but a correct implementation may expose additional errors
+or remove cascading ones, so this is an opportunity estimate, not a forecast.
+The session/unwrap/type mismatches may belong to this slice only after
+source-to-emitted tracing confirms it. Never add an empty Rails value, global
+cookie jar, `Value`-typed callback, default secret, or no-op login path to
+chase the number.
+
+Before the first implementation batch: [ ] store the full JSON diagnostic
+inventory and normalized fingerprints for this exact head; [ ] for each
+candidate cluster, map generated spans back to Campfire source and classify
+direct versus cascading diagnostics; [ ] choose the smallest complete
+request/auth behavior with an emitted regression that checks valid, rejected,
+and cross-request-isolation cases; [ ] rerun fresh strict generation and
+survey lib/bin after the change; [ ] report actual removed/retained/new
+fingerprints and the executed behavioral cases. Continue the next verified
+cluster if the first complete slice does not approach 500 net fewer errors;
+do not weaken diagnostics or count lost output as progress. D0 remains a
+correctness prerequisite for 14 HTML block sites, but is not by itself a
+500-error lever.
+
 ### Oracle review and current decision
 
 The Oracle review on 2026-10-09 recommends an evidence-readiness batch first,
