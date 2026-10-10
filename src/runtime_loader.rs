@@ -632,6 +632,7 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         imports: &[
             ("Base", "active_record_base"),
             ("merge_attrs", "hash_ext"),
+            ("Rails", "rails"),
             // `RubyToS` trait — the `inner_v.to_s` / `v.to_s` sends
             // in `render_attrs` lower to `(recv).ruby_to_s()` via
             // the `Ty::Untyped` arm in
@@ -707,6 +708,19 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    runtime_entry! {
+        stem: "rails",
+        namespace: "",
+        out_path: "src/rails.rs",
+        // Keep the Rails global in the Rust runtime table as one
+        // typed unit. The Rust transform below exports only the subset
+        // whose generated implementation compiles; app config remains
+        // an explicit unsupported gap.
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     // errors.rb intentionally NOT transpiled — the Rust-natural
     // `class < StandardError` shape needs Display + Error synthesis
     // that the transpile pipeline doesn't yet support. Phase 3
@@ -737,7 +751,37 @@ where
 {
     let mut out = Vec::with_capacity(RUST_RUNTIME.len());
     for entry in RUST_RUNTIME {
-        let unit = transpile_entry(entry, &RUST_TARGET, "//", &mut transform)?;
+        let mut rust_transform = |path: &str, classes: Vec<LibraryClass>| {
+            let classes = transform(path, classes);
+            if path != "src/rails.rs" {
+                return classes;
+            }
+            // The complete Rails facade carries app/config and framework
+            // integrations that are not yet Rust-runtime-complete. Ship
+            // only the path surface that this target can compile and
+            // behavior-test; other targets keep the full shared runtime.
+            classes
+                .into_iter()
+                .filter_map(|mut class| {
+                    let allowed = match class.name.0.as_str() {
+                        "Rails" => Some((
+                            crate::dialect::MethodReceiver::Class,
+                            &["root", "public_path"][..],
+                        )),
+                        "Rails::AppPath" => Some((
+                            crate::dialect::MethodReceiver::Instance,
+                            &["initialize", "join", "to_s", "to_path"][..],
+                        )),
+                        _ => None,
+                    }?;
+                    class.methods.retain(|method| {
+                        method.receiver == allowed.0 && allowed.1.contains(&method.name.as_str())
+                    });
+                    Some(class)
+                })
+                .collect()
+        };
+        let unit = transpile_entry(entry, &RUST_TARGET, "//", &mut rust_transform)?;
         out.push(unit);
     }
     // StringIO is a small hand-written primitive rather than a Ruby

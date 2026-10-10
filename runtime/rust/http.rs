@@ -202,10 +202,29 @@ pub struct RequestContext {
     pub uri: axum::http::Uri,
     pub headers: axum::http::HeaderMap,
     pub remote_addr: Option<std::net::SocketAddr>,
+    cookies: std::sync::Arc<std::sync::Mutex<CookieTransport>>,
+}
+
+#[derive(Debug, Default)]
+struct CookieTransport {
+    incoming: HashMap<String, String>,
+    pending: Vec<axum::http::HeaderValue>,
 }
 
 impl RequestContext {
     pub fn from_request(req: &axum::extract::Request) -> Self {
+        let mut incoming = HashMap::new();
+        for header in req.headers().get_all(axum::http::header::COOKIE) {
+            if let Ok(value) = header.to_str() {
+                for pair in value.split(';') {
+                    if let Some((name, value)) = pair.trim().split_once('=') {
+                        incoming
+                            .entry(name.trim().to_string())
+                            .or_insert_with(|| value.trim().to_string());
+                    }
+                }
+            }
+        }
         Self {
             method: req.method().clone(),
             uri: req.uri().clone(),
@@ -214,6 +233,53 @@ impl RequestContext {
                 .extensions()
                 .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
                 .map(|info| info.0),
+            cookies: std::sync::Arc::new(std::sync::Mutex::new(CookieTransport {
+                incoming,
+                pending: Vec::new(),
+            })),
+        }
+    }
+
+    /// Read an incoming cookie value without applying Rails' jar semantics.
+    /// The CookieJar runtime owns decoding, signing, and missing-value rules.
+    pub fn request_cookie(&self, name: &str) -> Option<String> {
+        self.cookies
+            .lock()
+            .expect("request cookie transport mutex poisoned")
+            .incoming
+            .get(name)
+            .cloned()
+    }
+
+    /// Queue one fully serialized Set-Cookie value. Validation happens before
+    /// it enters request state so malformed headers cannot disappear later.
+    pub fn queue_set_cookie(
+        &self,
+        value: &str,
+    ) -> Result<(), axum::http::header::InvalidHeaderValue> {
+        let value = axum::http::HeaderValue::from_str(value)?;
+        self.cookies
+            .lock()
+            .expect("request cookie transport mutex poisoned")
+            .pending
+            .push(value);
+        Ok(())
+    }
+
+    /// Append pending cookie headers to the finished response and drain the
+    /// queue. `Set-Cookie` is multi-valued and must never use `insert` here.
+    pub fn append_pending_cookies(&self, response: &mut axum::response::Response) {
+        let pending = std::mem::take(
+            &mut self
+                .cookies
+                .lock()
+                .expect("request cookie transport mutex poisoned")
+                .pending,
+        );
+        for value in pending {
+            response
+                .headers_mut()
+                .append(axum::http::header::SET_COOKIE, value);
         }
     }
 
@@ -327,8 +393,15 @@ pub async fn request_context_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let context = RequestContext::from_request(&req);
-    scope_request_context(context, next.run(req)).await
+    let inherited = REQUEST_CONTEXT.try_with(Clone::clone).ok();
+    let context = inherited
+        .clone()
+        .unwrap_or_else(|| RequestContext::from_request(&req));
+    let mut response = scope_request_context(context.clone(), next.run(req)).await;
+    if inherited.is_none() {
+        context.append_pending_cookies(&mut response);
+    }
+    response
 }
 
 #[cfg(test)]
@@ -400,6 +473,93 @@ mod request_context_tests {
             .insert("x-forwarded-proto", "https".parse().unwrap());
         let context = RequestContext::from_request(&request);
         assert_eq!(context.protocol(), "https://");
+    }
+
+    fn cookie_context(session: &'static str) -> RequestContext {
+        let mut request = Request::builder()
+            .uri("/messages")
+            .header(
+                header::COOKIE,
+                format!("session={session}; session=duplicate; theme=dark; encoded=a%20b"),
+            )
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request
+            .headers_mut()
+            .append(header::COOKIE, "empty=".parse().unwrap());
+        RequestContext::from_request(&request)
+    }
+
+    async fn cookie_response(context: RequestContext, response_cookie: &'static str) -> Vec<String> {
+        scope_request_context(context.clone(), async move {
+            assert_eq!(context.request_cookie("session").as_deref(), Some(response_cookie));
+            assert_eq!(context.request_cookie("empty").as_deref(), Some(""));
+            assert_eq!(context.request_cookie("encoded").as_deref(), Some("a%20b"));
+            context
+                .queue_set_cookie(&format!("new={response_cookie}; Path=/; HttpOnly"))
+                .unwrap();
+            tokio::task::yield_now().await;
+            assert_eq!(current_request_context().request_cookie("session").as_deref(), Some(response_cookie));
+
+            let mut response = axum::response::Response::new(axum::body::Body::empty());
+            response
+                .headers_mut()
+                .append(header::SET_COOKIE, HeaderValue::from_static("flash=preserved; Path=/"));
+            context.append_pending_cookies(&mut response);
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .map(|value| value.to_str().unwrap().to_string())
+                .collect()
+        })
+        .await
+    }
+
+    async fn cookie_route() -> axum::response::Response {
+        current_request_context()
+            .queue_set_cookie("route=handled; Path=/; HttpOnly")
+            .unwrap();
+        axum::response::Response::new(axum::body::Body::empty())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cookie_transport_is_request_scoped_and_appends_without_overwriting() {
+        let first = cookie_context("first");
+        let second = cookie_context("second");
+        let (first_headers, second_headers) = tokio::join!(
+            cookie_response(first, "first"),
+            cookie_response(second, "second"),
+        );
+
+        assert_eq!(first_headers.len(), 2);
+        assert_eq!(first_headers[0], "flash=preserved; Path=/");
+        assert_eq!(first_headers[1], "new=first; Path=/; HttpOnly");
+        assert_eq!(second_headers.len(), 2);
+        assert_eq!(second_headers[0], "flash=preserved; Path=/");
+        assert_eq!(second_headers[1], "new=second; Path=/; HttpOnly");
+    }
+
+    #[tokio::test]
+    async fn request_context_middleware_flushes_cookies_after_the_handler() {
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(cookie_route))
+            .layer(axum::middleware::from_fn(super::request_context_middleware));
+        let server = axum_test::TestServer::new(app).expect("construct HTTP test server");
+        let response = server.get("/").await;
+        let values = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["route=handled; Path=/; HttpOnly"]);
+    }
+
+    #[test]
+    fn cookie_transport_rejects_invalid_response_header_values() {
+        let context = cookie_context("session");
+        assert!(context.queue_set_cookie("cookie=value\r\nInjected: yes").is_err());
     }
 }
 

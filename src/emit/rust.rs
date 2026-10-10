@@ -167,6 +167,8 @@ use crate::models::*;
 use crate::views::*;
 #[allow(unused_imports)]
 use crate::app_classes::*;
+#[allow(unused_imports)]
+use crate::rails::Rails;
 ";
 
 /// Prelude for emitted controller files. Controllers call into the
@@ -212,6 +214,8 @@ use crate::views::*;
 use crate::errors_ext::{raise, NotImplementedError, RecordNotFound, RecordInvalid};
 #[allow(unused_imports)]
 use crate::app_classes::*;
+#[allow(unused_imports)]
+use crate::rails::Rails;
 ";
 
 const MODEL_IMPORTS: &str = "\
@@ -254,6 +258,8 @@ use crate::models::*;
 // view emit when Phase 5b lands.
 #[allow(unused_imports)]
 use crate::views::*;
+#[allow(unused_imports)]
+use crate::rails::Rails;
 ";
 
 /// The transpiled framework runtime, by bare name, for TEST files.
@@ -2693,7 +2699,7 @@ fn emit_app_library_classes(
         files.push(EmittedFile {
             path: PathBuf::from(format!("src/app_classes/{class_path}.rs")),
             content: format!(
-                "#[allow(unused_imports)]\nuse crate::app_classes::*;\nuse crate::user_agent::*;\nuse crate::view_helpers::ViewHelpers;\n{route_helpers_import}{ruby_to_s_import}{string_io_import}{hash_import}{model_import}{body}"
+                "#[allow(unused_imports)]\nuse crate::app_classes::*;\nuse crate::user_agent::*;\nuse crate::view_helpers::ViewHelpers;\n#[allow(unused_imports)]\nuse crate::rails::Rails;\n{route_helpers_import}{ruby_to_s_import}{string_io_import}{hash_import}{model_import}{body}"
             ),
         });
         entries.push((class_path, name));

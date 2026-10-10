@@ -184,8 +184,14 @@ fn real_blog_controller_identity_methods_emit_as_instance_methods() {
     generate_project(fixture, &scratch);
 
     for (path, class_name) in [
-        (scratch.join("src/action_controller_base.rs"), "ActionController::Base"),
-        (scratch.join("src/controllers/articles_controller.rs"), "ArticlesController"),
+        (
+            scratch.join("src/action_controller_base.rs"),
+            "ActionController::Base",
+        ),
+        (
+            scratch.join("src/controllers/articles_controller.rs"),
+            "ArticlesController",
+        ),
     ] {
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -243,9 +249,7 @@ fn inherited_before_action_calls_dispatch_on_self() {
         .find("fn allow_browser(")
         .map(|start| {
             let body = &source[start..];
-            body.find("\n}")
-                .map(|end| &body[..end])
-                .unwrap_or(body)
+            body.find("\n}").map(|end| &body[..end]).unwrap_or(body)
         })
         .unwrap_or("");
     assert!(
@@ -297,18 +301,36 @@ fn router_only_references_emitted_controller_handlers() {
         .content
         .clone();
 
-    assert!(router.contains(".route(\"/reports\""), "real controller route disappeared:\n{router}");
-    assert!(router.contains("reports_controller::_axum_index"), "real handler missing:\n{router}");
+    assert!(
+        router.contains(".route(\"/reports\""),
+        "real controller route disappeared:\n{router}"
+    );
+    assert!(
+        router.contains("reports_controller::_axum_index"),
+        "real handler missing:\n{router}"
+    );
     for (missing, path) in [
         ("hidden_controller", "/hidden"),
         ("rooms::settings_controller", "/rooms/settings"),
         ("rails::health_controller", "/up"),
     ] {
-        assert!(!router.contains(missing), "router references non-emitted handler `{missing}`:\n{router}");
-        assert!(router.contains(&format!(".route(\"{path}\"")), "route disappeared instead of remaining explicit:\n{router}");
+        assert!(
+            !router.contains(missing),
+            "router references non-emitted handler `{missing}`:\n{router}"
+        );
+        assert!(
+            router.contains(&format!(".route(\"{path}\"")),
+            "route disappeared instead of remaining explicit:\n{router}"
+        );
     }
-    assert!(router.contains("_roundhouse_unsupported_route"), "missing handlers must not be treated as implemented:\n{router}");
-    assert!(router.contains("StatusCode::NOT_IMPLEMENTED"), "unsupported routes must fail explicitly:\n{router}");
+    assert!(
+        router.contains("_roundhouse_unsupported_route"),
+        "missing handlers must not be treated as implemented:\n{router}"
+    );
+    assert!(
+        router.contains("StatusCode::NOT_IMPLEMENTED"),
+        "unsupported routes must fail explicitly:\n{router}"
+    );
     assert!(
         router.contains("request_context_middleware"),
         "direct router users need an active request scope:\n{router}"
@@ -725,10 +747,16 @@ fn model_finders_compile() {
 
     let scratch = scratch_dir("model-finders");
     generate_project(&app_dir, &scratch);
-    let model = std::fs::read_to_string(scratch.join("src/models/article.rs"))
-        .expect("read emitted model");
-    assert!(model.contains("pub fn find_by<"), "model carries find_by:\n{model}");
-    assert!(model.contains("pub fn r#where<"), "model carries where:\n{model}");
+    let model =
+        std::fs::read_to_string(scratch.join("src/models/article.rs")).expect("read emitted model");
+    assert!(
+        model.contains("pub fn find_by<"),
+        "model carries find_by:\n{model}"
+    );
+    assert!(
+        model.contains("pub fn r#where<"),
+        "model carries where:\n{model}"
+    );
     let output = Command::new("cargo")
         .arg("check")
         .arg("--quiet")

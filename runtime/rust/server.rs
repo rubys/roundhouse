@@ -188,10 +188,12 @@ async fn method_override(req: Request, next: Next) -> Response {
 /// WebSocket upgrade, any JSON endpoints).
 async fn layout_wrap(req: Request, next: Next) -> Response {
     let context = crate::http::RequestContext::from_request(&req);
-    crate::http::scope_request_context(context, async move {
+    let mut response = crate::http::scope_request_context(context.clone(), async move {
         layout_wrap_in_scope(req, next).await
     })
-    .await
+    .await;
+    context.append_pending_cookies(&mut response);
+    response
 }
 
 /// Keep request metadata scoped until after the handler response has
