@@ -169,6 +169,63 @@ fn data_define_members(value: &Node<'_>) -> Option<Vec<Symbol>> {
         .collect()
 }
 
+fn data_factory_methods(
+    owner: &ClassId,
+    members: &[Symbol],
+    mut methods: Vec<MethodDef>,
+) -> Vec<MethodDef> {
+    for member in members {
+        if !methods.iter().any(|method| {
+            method.receiver == MethodReceiver::Instance && method.name == *member
+        }) {
+            methods.push(synth_attr_reader(owner, member, MethodReceiver::Instance));
+        }
+    }
+    if !methods.iter().any(|method| {
+        method.receiver == MethodReceiver::Instance && method.name.as_str() == "initialize"
+    }) {
+        let params = members.iter().cloned().map(Param::positional).collect();
+        let assigns = members
+            .iter()
+            .map(|member| {
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Assign {
+                        target: LValue::Ivar {
+                            name: member.clone(),
+                        },
+                        value: Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Var {
+                                id: VarId(0),
+                                name: member.clone(),
+                            },
+                        ),
+                    },
+                )
+            })
+            .collect();
+        methods.push(MethodDef {
+            name_span: Span::synthetic(),
+            name: Symbol::from("initialize"),
+            receiver: MethodReceiver::Instance,
+            visibility: crate::dialect::MethodVisibility::Private,
+            params,
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: assigns }),
+            signature: None,
+            effects: EffectSet::default(),
+            enclosing_class: Some(owner.0.clone()),
+            kind: crate::dialect::AccessorKind::Method,
+            is_async: false,
+            mutates_self: true,
+            block_param: None,
+        });
+    }
+    methods
+}
+
 /// `ContentKey = Data.define(:digest) do def cache_key = digest end` —
 /// the block is `class_eval`ed on the new class, so its `def`s are that
 /// class's methods, exactly as a later `class ContentKey; def …; end`
@@ -191,6 +248,7 @@ fn data_block_classes(
         let name = ClassId(Symbol::from(format!("{}::{}", owner.0.as_str(), constant_id_str(&cw.name()))));
         let DeclBody { includes, methods, constants, unknown_calls, class_initializers, class_attributes: _ } =
             walk_decl_body(block.body(), &name, file, DeclBodyMode::Instance)?;
+        let methods = data_factory_methods(&name, &members, methods);
         debug_assert!(includes.is_empty() && constants.is_empty() && unknown_calls.is_empty());
         out.push(LibraryClass {
             name,

@@ -172,7 +172,17 @@ fn splice_data_block(files: &mut [EmittedFile], block: &LibraryClass, app: &App)
     let indent = "  ".repeat(depth - 1);
     let stem = crate::naming::underscore(name);
     let rb_path = PathBuf::from(format!("app/models/{stem}.rb"));
-    let rendered = emit_library_class_decl(block, app, rb_path.clone());
+    let rendered_block = if matches!(
+        &block.origin,
+        Some(crate::dialect::LibraryClassOrigin::DataFactory { .. })
+    ) {
+        let mut authored = block.clone();
+        authored.methods.retain(|method| !method.name_span.is_synthetic());
+        authored
+    } else {
+        block.clone()
+    };
+    let rendered = emit_library_class_decl(&rendered_block, app, rb_path.clone());
     let lines: Vec<&str> = rendered.content.lines().collect();
     let mut hoisted = Vec::new();
     for line in lines.iter().filter(|line| line.starts_with("require_relative ")) {
@@ -189,7 +199,7 @@ fn splice_data_block(files: &mut [EmittedFile], block: &LibraryClass, app: &App)
     let body_lines: Vec<&str> = lines.iter().copied().filter(|line| !line.starts_with("require")).collect();
     let Some(body) = unwrapped(&body_lines, depth) else {
         assert!(
-            block.methods.is_empty() && hoisted.is_empty(),
+            rendered_block.methods.is_empty() && hoisted.is_empty(),
             "Data.define methods or requires were not emitted for {name}"
         );
         return;

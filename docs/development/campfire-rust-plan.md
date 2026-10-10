@@ -450,22 +450,24 @@ availability. The gate remains until constructor/member storage, reader
 typing, the `cache_key` receiver, and the heterogeneous nominal identity path
 are implemented and executed together.
 
-**D-Data progress (2026-10-10):** the block-form library class now retains
-`DataFactory` provenance and source-ordered member names alongside its
-authored methods, with a regression proving both facts. This is metadata only:
-no constructor, typed readers, Rust representation, constant binding, or
-heterogeneous nominal-identity behavior has been implemented. The production
-Rust refusal remains required. Oracle review recommends the next slice be a
-source-typed nominal record (required initializer plus read-only members),
-while preserving native Ruby `Data.define` semantics and keeping the Rust
-support gate in place; identity-aware heterogeneous cache behavior remains a
-separate prerequisite before Campfire support can be admitted. Validation on
-the `0bcc91695561` worktree: `data_factory_constants` passes 13/13,
+**D-Data progress (2026-10-10):** the block-form library class retains
+`DataFactory` provenance and source-ordered members; ingest also materializes
+required positional initialization and read-only readers in the typed class
+IR, while preserving authored methods and allowing authored reader overrides.
+The analyzer infers the fixture's `digest` and `cache_key` as `String` from
+the actual constructor arguments. Ruby emission filters only these synthetic
+IR methods so native `Data.define` still supplies its constructor/readers; a
+regression checks the emitted source. Oracle review recommended this as the
+first source-typed record slice. Rust struct visibility/default
+policy, the owner constant binding, and heterogeneous nominal identity are
+not implemented; the production Rust refusal remains required until their
+combined emitted behavior is compiled and run. Validation on the
+`0bcc91695561` worktree: `data_factory_constants` passes 14/14,
 `cargo check --locked --all-targets` passes with existing warnings, the
-documentation-reference test passes 1/1, and `git diff --check` passes.
-Repository-wide `rustfmt --check` is not clean because these large existing
-source files contain prior formatting drift; no broad formatting rewrite was
-made, and the changed test file itself passes `rustfmt --check`.
+documentation-reference test passes 1/1, `git diff --check` passes, and the
+changed test file passes `rustfmt --check`. Repository-wide `rustfmt --check`
+is not clean because these large existing source files contain prior
+formatting drift; no broad formatting rewrite was made.
 
 - [ ] **F0.2 — unsigned permanent `last_room`:** implement the smallest typed
   jar operation used by `TrackedRoomVisit`, including Rails-compatible

@@ -81,7 +81,7 @@ fn block_data_classes_retain_ordered_members_as_nominal_origin() {
   end
 end
 "#;
-    let app = ingest(
+    let mut app = ingest(
         source,
         "FactoryExamples::ContentKey.new(\"hash\", \"body\")",
     );
@@ -103,6 +103,95 @@ end
             .iter()
             .any(|method| method.name.as_str() == "cache_key"),
         "source-defined Data block methods remain on the nominal class"
+    );
+    for member in ["digest", "source"] {
+        assert!(
+            class.methods.iter().any(|method| {
+                method.name.as_str() == member && method.name_span.is_synthetic()
+            }),
+            "Data declares a synthesized reader for {member}"
+        );
+        assert!(
+            !class
+                .methods
+                .iter()
+                .any(|method| method.name.as_str() == format!("{member}=")),
+            "Data member readers do not gain Struct-style writers"
+        );
+    }
+    let initialize = class
+        .methods
+        .iter()
+        .find(|method| method.name.as_str() == "initialize")
+        .expect("Data receives a synthesized initializer");
+    assert_eq!(
+        initialize
+            .params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect::<Vec<_>>(),
+        ["digest", "source"]
+    );
+    assert!(
+        initialize
+            .params
+            .iter()
+            .all(|param| param.default.is_none())
+    );
+
+    let mut analyzer = Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    let analyzed = analyzer.class_registry();
+    let info = &analyzed[&ClassId(Symbol::from("FactoryExamples::ContentKey"))];
+    assert_eq!(
+        info.instance_methods.get(&Symbol::from("digest")),
+        Some(&Ty::Str)
+    );
+    assert_eq!(
+        info.instance_methods.get(&Symbol::from("cache_key")),
+        Some(&Ty::Str)
+    );
+}
+
+#[test]
+fn ruby_keeps_data_members_native_instead_of_emitting_synthetic_methods() {
+    use roundhouse::project::{BuildTarget, target_files};
+
+    let source = r#"class FactoryExamples
+  ContentKey = Data.define(:digest, :source) do
+    def cache_key = digest
+  end
+end
+"#;
+    let mut app = ingest(
+        source,
+        "FactoryExamples::ContentKey.new(\"hash\", \"body\")",
+    );
+    roundhouse::session::analyze_and_lower(&mut app);
+    let (result, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+        target_files(&app, roundhouse::fixtures::real_blog(), BuildTarget::Ruby)
+    });
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let files = result.expect("Ruby files emit");
+    let owner = files
+        .iter()
+        .find(|(_, content)| content.contains("def cache_key"))
+        .map(|(_, content)| content)
+        .expect("the Data block's authored method is spliced into the owner");
+
+    assert!(owner.contains("ContentKey = Data.define(:digest, :source) do"));
+    assert!(owner.contains("def cache_key"));
+    assert!(
+        !owner.contains("def initialize"),
+        "Ruby Data retains its native constructor"
+    );
+    assert!(
+        !owner.contains("def digest"),
+        "Ruby Data retains its native reader"
+    );
+    assert!(
+        !owner.contains("def source"),
+        "Ruby Data retains its native reader"
     );
 }
 
