@@ -6563,10 +6563,12 @@ fn default_package_scan<V: Vfs + ?Sized>(vfs: &V, dir: &Path, out: &mut Vec<Path
     scan(vfs, dir, 1, out);
 }
 
-/// Roots an app adds to `config.autoload_paths` / `config.eager_load_paths`
-/// in `config/application.rb`, as paths relative to the app root:
+/// Roots an app adds to `config.autoload_paths`, `config.eager_load_paths`
+/// or `config.autoload_once_paths` in `config/application.rb`, as paths
+/// relative to the app root:
 /// `config.eager_load_paths << Rails.root.join("extras")` → `extras`,
-/// `config.autoload_paths += %w[app/lib]` → `app/lib`.
+/// `config.autoload_paths += %w[app/lib]` → `app/lib`,
+/// `config.autoload_once_paths << "#{root}/lib/shared"` → `lib/shared`.
 ///
 /// Line-scanned rather than parsed, like the `autoload_lib` and
 /// `time_zone` readers next to it: the file is railtie soup ingest does
@@ -6580,7 +6582,7 @@ fn extract_autoload_path_roots(source: &[u8]) -> Vec<String> {
         if t.starts_with('#') {
             continue;
         }
-        if !t.contains("config.autoload_paths") && !t.contains("config.eager_load_paths") {
+        if !AUTOLOAD_PATH_SETTINGS.iter().any(|setting| t.contains(setting)) {
             continue;
         }
         // `Rails.root.join("a", "b")` — the segments, joined.
@@ -6611,13 +6613,27 @@ fn extract_autoload_path_roots(source: &[u8]) -> Vec<String> {
         }
         if let Some((_, rest)) = t.split_once('"') {
             if let Some((value, _)) = rest.split_once('"') {
-                if !value.is_empty() {
-                    roots.push(value.to_string());
+                if let Some(root) = app_relative_path(value) {
+                    roots.push(root.to_string());
                 }
             }
         }
     }
     roots
+}
+
+const AUTOLOAD_PATH_SETTINGS: &[&str] =
+    &["config.autoload_paths", "config.eager_load_paths", "config.autoload_once_paths"];
+
+fn app_relative_path(value: &str) -> Option<&str> {
+    let path = match value.strip_prefix("#{") {
+        Some(interpolated) => match interpolated.split_once('}')? {
+            ("root" | "Rails.root" | "config.root", path) => path.strip_prefix('/')?,
+            _ => return None,
+        },
+        None => value,
+    };
+    (!path.is_empty()).then_some(path)
 }
 
 /// `get "up" => "rails/health#show"` — every `rails new` app's health

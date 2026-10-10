@@ -139,3 +139,39 @@ end
         "a declared eager-load root is app code; diagnostics = {diags:?}"
     );
 }
+
+#[test]
+fn a_root_the_app_adds_to_the_autoload_once_paths_is_walked() {
+    let application_rb = r##"module Blog
+  class Application < Rails::Application
+    config.autoload_lib(ignore: %w[autoload_once])
+    config.autoload_once_paths << "#{root}/lib/autoload_once"
+  end
+end
+"##;
+    let (app, diags) = diagnostics(&[
+        ("config/application.rb", application_rb),
+        ("lib/autoload_once/interactors/build_report.rb", INTERACTOR),
+    ]);
+    assert!(
+        !interactor_error(&app, &diags),
+        "a declared autoload-once root is app code; diagnostics = {diags:?}"
+    );
+}
+
+#[test]
+fn a_root_written_under_the_interpolated_app_root_is_walked() {
+    for root in ["root", "Rails.root", "config.root"] {
+        let application_rb = format!(
+            "module Blog\n  class Application < Rails::Application\n    config.autoload_paths << \"#{{{root}}}/extra_domain\"\n  end\nend\n"
+        );
+        let (app, diags) = diagnostics(&[
+            ("config/application.rb", application_rb.as_str()),
+            ("extra_domain/build_report.rb", INTERACTOR),
+        ]);
+        assert!(
+            !interactor_error(&app, &diags),
+            "`\"#{{{root}}}/extra_domain\"` names `extra_domain`; diagnostics = {diags:?}"
+        );
+    }
+}
