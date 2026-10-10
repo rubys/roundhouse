@@ -67,6 +67,7 @@ module ActionDispatch
 
     def get? = request_method == "GET"
     def post? = request_method == "POST"
+    def put? = request_method == "PUT"
     # Rails' "is this a safe request" idiom is `request.get? ||
     # request.head?`, and campfire writes exactly that in
     # `BlockBannedRequests#safe_request?`. This overlay is the Request

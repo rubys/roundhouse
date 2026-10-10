@@ -44,6 +44,20 @@ class ActionDispatchRequestTest < Minitest::Test
     assert_equal "POST", r.request_method
   end
 
+  def test_put_predicate_matches_only_the_put_method
+    r = ActionDispatch::Request.new
+    assert !r.put?
+
+    r.request_method = "PUT"
+    assert r.put?
+    assert !r.get?
+    assert !r.post?
+    assert !r.head?
+
+    r.request_method = "put"
+    assert !r.put?
+  end
+
   # A key missing from env falls back to the documented default, and a
   # present one is coerced to String (env holds `untyped` by contract).
   def test_missing_env_keys_take_their_defaults
