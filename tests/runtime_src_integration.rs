@@ -990,6 +990,7 @@ fn active_support_inflector_slice_adds_no_bar_b_sites() {
         "foreign_key",
         "upcase_first",
         "downcase_first",
+        "ordinalize",
     ] {
         let method = methods
             .iter()

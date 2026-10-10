@@ -69,6 +69,8 @@ mod action_text_sanitize;
 mod campfire_caches_contract;
 #[path = "spinel_toolchain/campfire_caches.rs"]
 mod campfire_caches;
+#[path = "spinel_toolchain/ordinalize.rs"]
+mod ordinalize;
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]
