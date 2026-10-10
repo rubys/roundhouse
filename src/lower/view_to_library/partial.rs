@@ -479,14 +479,17 @@ fn wrap_cached_collection(
         false,
     );
     let append_version = send(Some(append_slash), "<<", vec![version], None, false);
+    // The block ends in `nil`: with `key << …` last, its value is the key
+    // itself, and Spinel boxes that value (a copy of the whole buffer) on
+    // every element when `each` takes the block as a proc. `each` drops it.
     let key_lambda = Expr::new(
         span,
         ExprNode::Lambda { extra_params: Vec::new(),
             rest_param: None,
             params: vec![rec_name],
             block_param: None,
-            body: append_version,
-            block_style: BlockStyle::Brace,
+            body: seq(vec![append_version, nil_lit()]),
+            block_style: BlockStyle::Do,
         },
     );
     let build_key = send(

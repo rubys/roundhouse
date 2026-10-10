@@ -215,6 +215,70 @@ end
     );
 }
 
+/// The key walk's block ends with `nil`. `each` drops the block's value,
+/// but Spinel still builds it when the collection is a Relation (the
+/// block compiles to a proc): with `__cc_key << …` last, that value is a
+/// copy of the whole key, made once per record. The key grows with every
+/// record, so a 10k-row sidebar copied the key 10k times.
+#[test]
+fn a_cached_true_collection_key_walk_yields_nil() {
+    let tree = tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "articles", force: :cascade do |t|
+    t.string "title", null: false
+    t.datetime "updated_at", null: false
+  end
+end
+"#,
+        ),
+        ("app/models/article.rb", "class Article < ApplicationRecord\nend\n"),
+        (
+            "app/controllers/articles_controller.rb",
+            r#"class ArticlesController < ApplicationController
+  def index
+    @articles = Article.all
+  end
+end
+"#,
+        ),
+        ("app/views/articles/_article.html.erb", "<p><%= article.title %></p>\n"),
+        (
+            "app/views/articles/index.html.erb",
+            "<%= render partial: \"articles/article\", collection: @articles, cached: true %>\n",
+        ),
+    ]);
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let (files, _) = roundhouse::emit::diagnostics::scope(|| ruby::emit_lowered_views(&app));
+    let body = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("app/views/articles/index.rb"))
+        .map(|f| f.content.clone())
+        .expect("index.rb");
+    let open = body
+        .find("|__cc_r_")
+        .unwrap_or_else(|| panic!("key walk over the collection:\n{body}"));
+    let n: String = body[open + "|__cc_r_".len()..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    let append = format!("__cc_key_{n} << \"/\" << __cc_r_{n}.cache_key_with_version");
+    let after_append = body[open..]
+        .find(&append)
+        .map(|i| open + i + append.len())
+        .unwrap_or_else(|| panic!("key walk appends each record's version:\n{body}"));
+    let tail = body[after_append..].trim_start_matches(|c: char| c.is_whitespace() || c == ';');
+    let closes_after_nil = tail
+        .strip_prefix("nil")
+        .map(str::trim_start)
+        .is_some_and(|t| t.starts_with("end") || t.starts_with('}'));
+    assert!(
+        closes_after_nil,
+        "the key walk's last expression must be nil, not the key buffer:\n{body}"
+    );
+}
+
 #[test]
 fn a_cached_true_collection_with_locals_puts_them_in_the_key() {
     let tree = tree(&[
