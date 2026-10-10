@@ -6465,7 +6465,8 @@ fn emit_library_class_decl_inner(
     // so emit works correctly from any output directory.
     let mut requires: Vec<String> = Vec::new();
     if let Some(parent) = lc.parent.as_ref() {
-        if let Some(anchor) = require_path_for_parent(parent, app) {
+        let parent = lexical_parent(name, parent, app);
+        if let Some(anchor) = require_path_for_parent(&parent, app) {
             if anchor != self_anchor {
                 requires.push(relpath(&out_dir, &anchor));
             }
@@ -7364,6 +7365,41 @@ fn outer_class_parent(name: &str, app: &App) -> Option<ClassId> {
         .iter()
         .find(|c| c.name.0.as_str() == name && !c.is_module)
         .and_then(|c| c.parent.clone())
+}
+
+/// The app class a written superclass names, looked up from the child's
+/// namespace outward as Ruby does: `Base` written in
+/// `Outer::Inner::Leaf` is `Outer::Inner::Base`. A name that matches
+/// no app class at any level is returned as written (a runtime or gem
+/// class).
+///
+/// The ingested class keeps only its qualified name, so this reads the
+/// nested form (`module Outer; module Inner`) and tries every enclosing
+/// prefix. The compact form (`module Outer::Inner`) searches only the
+/// innermost one, so an outer match that natively falls through to a
+/// top-level class can add a require the program does not need; the
+/// innermost match, the case that fixes load order, is the same in both
+/// forms. This only orders `require`s; typing uses `ConstResolver`.
+fn lexical_parent(child: &str, parent: &ClassId, app: &App) -> ClassId {
+    let written = parent.0.as_str();
+    if written.starts_with("::") {
+        return parent.clone();
+    }
+    let defined = |candidate: &str| {
+        app.models.iter().any(|m| m.name.0.as_str() == candidate)
+            || app.controllers.iter().any(|c| c.name.0.as_str() == candidate)
+            || app.library_classes.iter().any(|lc| lc.name.0.as_str() == candidate)
+    };
+    let mut scope: Vec<&str> = child.split("::").collect();
+    scope.pop();
+    while !scope.is_empty() {
+        let candidate = format!("{}::{written}", scope.join("::"));
+        if defined(&candidate) {
+            return ClassId(crate::ident::Symbol::from(candidate.as_str()));
+        }
+        scope.pop();
+    }
+    parent.clone()
 }
 
 fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
