@@ -1,6 +1,6 @@
 # Campfire on Rust: compile-to-working plan
 
-**Status:** PR #688 is OPEN and Draft at published head
+**Historical snapshot (superseded 2026-10-10):** PR #688 was OPEN and Draft at published head
 `f228175fde7d8dacbf7bbbbe3045b986a6e92f28`, based on `main`; no merge or
 ready transition is authorized. Canonical `main` at `5d3d144e` is merged
 locally in `863dd24b`; a later canonical-main integration is present in local
@@ -28,6 +28,26 @@ consumer; implementing a Data struct alone is not enough to remove the
 generation refusal. Then execute Rails config/header and unsigned-cookie
 slices.
 
+**Current local integration (2026-10-10):** local merge commit
+`030052820334dbcc9883f4763c43cd6e3e2f3e39` joins PR parent
+`ee9a718f077b19d0651266d634045031cd2f156f` and canonical `main`
+`9249df4dce36dbc33401fc79bb90f41b34537c2c`. The merge had no unresolved
+conflicts. Four follow-up files remain modified: this plan, the Rust model
+insertion shim and assertion, and the view partial inference correction.
+`cargo check --locked --all-targets` passed after the merge; focused tests
+passed for Data factory analysis (15), route block constraints (7), route
+segment matching (5), view ivar/local collision (3), `real_blog` (6), and the
+ignored emitted real-blog Rust Cargo gate (1). The separate ignored
+forwarded-block Cargo regression was rerun and still fails with five generated
+Rust errors; it is explicitly not a passing check. On Campfire
+`edbc779f4dfc9b26c36310881711ddc976a9dfc8`, strict Rust generation reports 132
+unsupported/syntax plus 113 type diagnostics (245 total), then refuses
+`Data.define` before writing a project. Current-pin Cargo errors therefore
+remain unavailable. The 2,577-error / 575-warning / 2,339 fingerprint
+measurement is historical, for Campfire `32b4144b` at Roundhouse `863dd24b`;
+it must not be compared directly with the current 245 front-end diagnostics.
+The local integration and follow-up fixes have not been pushed.
+
 **Scope:** the ONCE Campfire revision pinned below, emitted as a Rust project by
 Roundhouse. “Rust compiles” and “Campfire works” are deliberately separate
 milestones. The first is necessary, not sufficient, for the second.
@@ -42,8 +62,8 @@ falling, or a test being selected is not completion evidence.
 
 | Input | Snapshot / status |
 |---|---|
-| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`, exact published head `da57db7f789e851078e8f55fd70f22e0628a8a24`. The prior `ci:rust` run [38049749293](https://github.com/rubys/roundhouse/actions/runs/38049749293) is fully complete and red: unit shards 0 and 2, Rust compare, Rust smoke, and Campfire compare failed; plan, fixture generation, build, store-check, Ruby compares, site build, conformance, and result archive succeeded. Campfire smoke, extra target lanes, and Spinel lanes were skipped by the plan. The first three issues (stale runtime-emission assertion, stale plan path, and `HeaderStore#store_value` pushing `&str` into `Vec<String>`) were corrected locally and covered by focused passing checks before this head was published. Campfire compare still differs in `rooms.messages_count` (Rails 1 vs emitted 2); the exact same row-level difference occurs on canonical `main` in full run [38049081004](https://github.com/rubys/roundhouse/actions/runs/38049081004), so it is a known mainline baseline, not a regression established by this PR. It remains a real differential mismatch requiring separate root-cause work. CodeRabbit's SUCCESS status is not a code review. Keep Draft and do not merge |
-| Local integration base | Original integration `863dd24bd436cc9096fb4e9822c8bca1e77e7bc9` merges canonical main `5d3d144ed57db6be1e235073f378fd9427896e0a`, with its single `tests/support/native_http.rs` conflict resolved to preserve session-cookie defaults and explicit-cookie override. Canonical main subsequently advanced to `c210f226346b462214866b5756b457ad53f647b1`; merge commit `02938da8` integrates it without conflicts. `CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_STRIP=symbols CARGO_PROFILE_DEV_STRIP=symbols cargo check --locked --all-targets` passed after this merge. `CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=2 CARGO_PROFILE_TEST_STRIP=none cargo test --locked --test ci_policy_workflow` passed 18/18; the debug symbols are required by its backtrace assertion |
+| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`, published head `ee9a718f077b19d0651266d634045031cd2f156f` (verified with `gh pr view` on 2026-10-10). Exact-head GitHub check-runs: 0; the sole status context is CodeRabbit SUCCESS with description “Review skipped: draft pull request,” so this is not a code review. Earlier red `ci:rust` evidence at `f228175` and `0b2323e` is historical and predates later fixes/integration; it must not be presented as the current head's run. The latest current-branch local work is not yet published. Keep Draft and do not merge |
+| Local integration base | Local merge commit `030052820334dbcc9883f4763c43cd6e3e2f3e39` joins PR parent `ee9a718f077b19d0651266d634045031cd2f156f` and canonical `main` `9249df4dce36dbc33401fc79bb90f41b34537c2c` without unresolved conflicts. `cargo check --locked --all-targets` passed after the merge; focused test evidence and the remaining known D0 failure are recorded in the current-local-integration block and newest evidence row |
 | Campfire target | Current canonical CI pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8`; earlier measured comparison pin `32b4144b5206304fa8d4c67455a753e2d3c16635` |
 | Strict analyzer | On current pin `edbc779f`, `roundhouse check --strict` exits 0 with 0 errors / 460 warnings. This does not imply Rust generation or Cargo success |
 | Strict Rust generation / current pin | Fresh production generation exits 1 before writing files after reporting 132 unsupported/syntax and 113 type errors (245 total), including `FragmentCache::ContentKey = Data.define(:digest) { def cache_key = digest }`. `--survey --allow-unsupported` also exits at `rust: Data.define is not supported; use Ruby or Spinel`. This is an explicit target representation gate, not a rustc count. Current-pin Cargo inventory is unavailable until the factory and its nominal cache-key consumer have a sound Rust representation |
@@ -56,8 +76,8 @@ falling, or a test being selected is not completion evidence.
 | Historical estimate | ~2,468 was a prior rough figure with unknown scope. Use 2,597 as the clean merged-base `32b4144b` baseline, 2,577 as the current merged `32b4144b` comparison, and leave current-pin `edbc779f` Cargo count unavailable until generation succeeds |
 | Environment | Debian 12, Linux x86_64; `rustc 1.98.1 (48a229cea 2026-09-01)`, host `x86_64-unknown-linux-gnu`; compiler binary SHA-256 `859254978c0a0402c32f949f6de0d99aee73be8d15f45aac00ae1448aac51e74`; Cargo 1.98.1 binary SHA-256 `da77c8b33849312255ccde3179198ada4c8deb370488d050286146b1d1b27e14`; Roundhouse root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a8e8a5981`; generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` |
 | Rails oracle | Partial probe on `32b4144b`: standalone Action Controller dispatch loaded the version initializer and `VersionHeaders` callback; five environment cases returned 200. Full pinned Rails boot and on-wire nil `X-Rev` behavior remain unverified |
-| Exact-head CI | Latest published head `da57db7f789e851078e8f55fd70f22e0628a8a24` has no GitHub Actions run/check-runs yet; the latest `ci:rust` run `38049749293` is on its parent `f228175`. Canonical main `c210f226` full-validation run `38049081004` completed with failures, including Rust compare and Campfire compare. Its Campfire log reports the same `rooms.messages_count` value pair as the PR's preceding compare run, establishing that mismatch as a mainline baseline. Campfire smoke and extra target lanes were skipped in the PR run |
-| Review state | Earlier CodeRabbit findings for `turbo_stream`, regex-case Option-tail handling, `request` shadowing, comparison return types, HTML-safe nil, and room-delete URL assumptions have follow-up confirmations as addressed. Low-value performance observations remain deferred. No review has been published against the latest local edits; CI status or CodeRabbit SUCCESS does not substitute for review. The Campfire browser room-delete journey remains explicitly unverified |
+| Exact-head CI | Published head `ee9a718f` has 0 check-runs; its only status is CodeRabbit SUCCESS explicitly because review was skipped for a draft. The red `ci:rust` observations on `f228175` / `0b2323e`, skipped Campfire smoke, and canonical-main comparison run on `c210f226` belong to older heads and are not current exact-head validation |
+| Review state | CodeRabbit's latest substantive report observed here covers `0b2323e`, not published head `ee9a718f` or local merge `03005282`. Earlier findings have follow-up confirmations as addressed; low-priority performance observations remain deferred. No review covers the current local edits. The Campfire browser room-delete journey remains explicitly unverified |
 | Scratch evidence | Older-pin generation and JSON inventory are under `/tmp/rh688-863-32b-*`; latest-pin strict check and failed generation captures are `/tmp/rh688-edbc779-check.out` and `/tmp/rh688-edbc779-generate.stderr`. Previous baseline captures remain under `/tmp/rh688-baseline` and `/tmp/rh688-898-*`; do not commit generated output or scratch logs |
 
 The PR already contains substantial Rust Campfire work, including app/helper
@@ -71,8 +91,9 @@ must extend the present lifecycle instead of rebuilding those foundations.
 
 **Interpretation guard:** the two captures establish deterministic survey
 output for the measured inputs; they do not complete P0.2 provenance or the
-source root-cause map. Strict generation still stops at its 181 reported
-front-end diagnostics, before a production Cargo project exists.
+source root-cause map. Strict generation on the current Campfire pin stops at
+245 front-end diagnostics before a production Cargo project exists. The older
+181-diagnostic observation is historical only.
 
 ## Non-negotiable correctness rules
 
@@ -168,8 +189,10 @@ front-end diagnostics, before a production Cargo project exists.
   signature/import/runtime. Mark causes **confirmed** or **suspected**; retain
   unclassified errors rather than forcing a category.
 - [x] **P1.6a** Record raw counts by strict/survey lane and Cargo target scope.
-  Strict generation is blocked by 181 compiler-front-end diagnostics; survey
-  lib/bin has 2,496 rustc errors; `--all-targets` adds 165 lib-test errors.
+  The original 2026-10-09 baseline was 181 front-end diagnostics, 2,496
+  survey lib/bin errors, and 165 additional lib-test errors. The current pin
+  `edbc779f` is blocked by 245 front-end diagnostics and has no Cargo count;
+  2,577/575/2,339 remains an older-pin comparison at `32b4144b` / `863dd24b`.
 - [ ] **P1.6b** Manually assign root-cause cluster membership to the inventory.
   The error-code distribution above is a prioritization hint, not a root-cause
   classification. Do not report only totals: foundation fixes can expose
@@ -182,7 +205,7 @@ prior work, not promises that they remain the dominant errors.
 
 | Wave | Work | Exit condition |
 |---|---|---|
-| 0 — evidence readiness | Pinned inputs; complete provenance; repeat generation/fingerprint comparison; generated module/class/route/test census; map the 181 strict generator refusals | Baseline can be rerun and compared; refusals have source-level owners, not just counts |
+| 0 — evidence readiness | Pinned inputs; complete provenance; repeat generation/fingerprint comparison; generated module/class/route/test census; map the current 245 strict generator refusals (the 181 count is the original baseline) | Baseline can be rerun and compared; refusals have source-level owners, not just counts |
 | 1 — contracts and independent foundations | Typed Rails application/config contract; return-preserving forwarded-block ABI; request-owned cookie transport contract; Rails oracle and Rust translated-test lane preparation | Interfaces and ownership are frozen; small semantic repros prove the foundation without pretending dependent behavior is complete |
 | 2 — dependent semantics | Residual capture; signing and signed/permanent cookie views; session/login/logout; separately typed SignedId/InvalidSignature behavior; confirmed STI and narrow expression clusters | Each package meets its dependency contract and has executed semantic/security tests; fresh inventory is re-triaged |
 | 3 — whole-project convergence | Remaining strict-generation refusals and production/generated-test Cargo errors; reachable unsupported/panic/default/501 audit | Fresh strict generation, production Cargo check/build, and generated-test compile all pass without lost output |
@@ -232,8 +255,8 @@ preserve `None` as empty content; direct unguarded capture must not gain an
 invented empty-block fallback. The next D0 patch must make this fixture pass
 before auditing the 14 Campfire callsites.
 
-Start mapping the 181 strict-generation refusals alongside rustc triage, rather
-than waiting for whole-project convergence. In every fresh build, inventory
+Continue mapping the current 245 strict-generation refusals alongside rustc
+triage; the earlier 181 count is the original baseline only. In every fresh build, inventory
 reachable `todo!`, silent/default/no-op methods, 501 routes, and omitted
 methods/modules. A green `cargo check` is not completion if accepted paths
 panic, fabricate defaults, or refuse required routes.
@@ -840,6 +863,7 @@ review artifacts; avoid committing large generated projects or sensitive data.
 
 | Date | Roundhouse SHA | Campfire SHA | Toolchain / locks | Commands and executed scope | Result / artifact links | Checklist updated |
 |---|---|---|---|---|---|---|
+| 2026-10-10 (canonical-main integration + local Rust check repairs; unpublished working tree) | Merge `030052820334dbcc9883f4763c43cd6e3e2f3e39` plus four uncommitted files | Current CI pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8` | rustc/Cargo 1.98.1; root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a3e8a5981`; Linux x86_64 | `cargo check --locked --all-targets`; `cargo test --locked --test rust_toolchain --test route_path_decoding`; ignored emitted-real-blog gate `cargo test --locked --test rust_toolchain real_blog_cargo_test_passes -- --ignored --exact --nocapture`; strict current-pin generation; `git diff --check` | Canonical main merged locally with no unresolved conflicts. All-target check passed; regular Rust toolchain tests 3/3 and route-path tests 8/8 passed (7 ignored); emitted real-blog Rust Cargo test 1/1 passed. Local generated-model assertion confirms `_insert_row` fills timestamps and uses the raw adapter insertion path; route matcher fixture was updated to its four-argument API; view partial inference now has an explicit collected vector type. Latest strict generation still reports 245 frontend diagnostics (132 unsupported/syntax + 113 type) and refuses `Data.define` before project emission, so the current-pin Rust/Cargo error count is unavailable. The ignored forwarded optional String block regression remains red with five generated Rust errors; this integration is not a Campfire compile milestone. `cargo check` emits existing unused-code warnings. | Mainline integration locally checked; current compiler boundary and D0 failure remain accurately open |
 | 2026-10-10 (Data factory Rust-emitter probe; temporary test removed) | `183a2aa4` plus local plan update | Current CI pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8`; minimal source reproduces `FragmentCache::ContentKey` | rustc/Cargo 1.98.1; root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a3e8a5981` | Temporary `cargo test --locked --test rust_data_factory_probe -- --nocapture`; direct `roundhouse::emit::rust::emit` on a minimal ingested Data factory; probe file deleted after inspection | Probe harness passed 1/1 and printed the actual emitted classes: owner `ContentKey` binding is a TODO; generated class has no fields or constructor and derives `Default`; `cache_key` is emitted with an untyped `serde_json::Value` result and unresolved bare `digest()` call. This source inspection bypassed project validation intentionally and is not an emitted-crate compile/run or a feature test. The production `Data.define` refusal is necessary; no Rust support or current-pin Cargo count is claimed. | D-Data.2/3 remain blocked; implement complete nominal constructor/member/method and heterogeneous identity flow before removing gate |
 | 2026-10-10 (local Rust ownership fix + exact-head CI triage; published at `da57db7f`) | `da57db7f789e851078e8f55fd70f22e0628a8a24`; local changes include `runtime/ruby/action_controller/base.rb`, `src/emit/rust/library.rs`, and this plan | Current CI pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8` | rustc/Cargo 1.98.1; root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a3e8a5981` | `cargo test --locked --test data_factory_constants`; `cargo test --locked --lib action_controller_runtime_emit_typechecks_hotspots -- --nocapture`; `cargo test --locked --test docs_references doc_path_references_resolve -- --nocapture`; ignored generated Rust tests `real_blog_controller_identity_values_match_rails` and `inflector_test_passes_under_rust`; `cargo check --locked --all-targets`; exact-head `ci:rust` run [38049749293](https://github.com/rubys/roundhouse/actions/runs/38049749293) and canonical-main full run [38049081004](https://github.com/rubys/roundhouse/actions/runs/38049081004) log inspection | Data tests 12/12; focused action-controller assertion 1/1; docs reference 1/1; generated real-blog Rust identity test 1/1; generated Rust Inflector test 1/1; Roundhouse all-target check passed with existing warnings. Local fix converts the stored header key to `String`, matching `Vec<String>` and the current `store_value` delegation; stale local assertions/path references were corrected. The PR run predates these edits and is red as detailed above. The exact `rooms.messages_count` difference (Rails 1, emit 2) is also present on canonical main, so it is not established as a PR regression, but remains an unresolved semantic mismatch. Exploratory ignored `ac_base` generated-Rust test still fails in generated test-harness compilation; the Ruby counterpart could not run because required gems are absent. Campfire smoke and post-edit differential were not rerun; there is no current-pin Cargo inventory or browser-smoke evidence. | Rust ownership fix and focused gates verified locally; preserve the Data generation gate; investigate the shared baseline mismatch and run Campfire smoke |
 | 2026-10-10 (exact-head `ci:rust` diagnosis + current-pin gate refresh) | Published `f228175fde7d8dacbf7bbbbe3045b986a6e92f28`; local changes after that head are uncommitted | Current CI pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8` | rustc/Cargo 1.98.1; root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a3e8a5981` | `gh pr view 688`; failed-job logs for run [38049749293](https://github.com/rubys/roundhouse/actions/runs/38049749293); `cargo test --test data_factory_constants`; strict Rust generation and `--survey --allow-unsupported` generation; focused `action_controller_runtime_emit_typechecks_hotspots` probe | PR remains OPEN/Draft at `f228175`. CI failures: stale `set_index` assertion, stale server-module path in the plan, `Vec<String>::push(&str)` in Rust compare/smoke, and `rooms.messages_count` Rails-vs-emit mismatch (1 vs 2); `campfire-conformance` passed, while Campfire smoke was skipped. Data factory tests pass 12/12. Current-pin production and survey generation both stop at Data; strict generation reports 132 unsupported/syntax + 113 type errors (245 total), so no current-pin Cargo count. The local action-controller probe confirmed the existing assertion was stale because validation lives in `store_value`; it also exposed the owned-String push gap. Oracle recommends keeping the current gate until Data's nominal identity survives the actual heterogeneous `flatten`/`is_a?` cache-key consumer. Local source/test/doc edits fix the compile bug and stale assertions/references, but have not yet passed the emitted Rust runtime test or Campfire differential; the CI run predates these edits. | Re-triage Data boundary; address exact-head CI regressions and verify the DB differential before publication |

@@ -421,6 +421,18 @@ fn real_blog_cargo_test_passes() {
     let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog");
     generate_project(fixture, &scratch);
+    let article_source = std::fs::read_to_string(scratch.join("src/models/article.rs"))
+        .expect("read emitted Article model");
+    assert!(
+        article_source.contains("pub fn _insert_row(&mut self) -> bool"),
+        "the Rust model shim must expose callback-free fixture insertion:\n{article_source}"
+    );
+    assert!(
+        article_source.contains(
+            "self.fill_timestamps(true); self.id = self._adapter_insert(); self._note_hydrated(); true"
+        ),
+        "fixture insertion must fill timestamps and use the raw adapter path:\n{article_source}"
+    );
     // Pin the shared Inflector's new String seam on the live backend,
     // not the legacy emit_method extraction walker.
     std::fs::create_dir_all(scratch.join("tests")).unwrap();
@@ -472,7 +484,7 @@ use app::router::Router;
 fn routed_captures_and_checked_bytes() {
     for (input, expected) in [("abc", "abc"), ("+%2B", "++"), ("%00", "\0"), ("%2500", "%00"), ("%C3%A9", "é")] {
         let path = format!("/echo/{input}");
-        let hit = Router::match_pattern("/echo/:value", &path, "").expect("route");
+        let hit = Router::match_pattern("/echo/:value", &path, "", "").expect("route");
         assert_eq!(hit["value"], expected);
     }
     assert_eq!(Router::capture_byte(vec![0, 255], 0), 0);

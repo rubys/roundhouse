@@ -290,7 +290,7 @@ fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
                 // see `ivar_local_names`). The partial binds it by
                 // position, under its own name.
                 .map(|n| var_ref(Symbol::from(ctx.ivar_local(n.as_str()))))
-                .collect()
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default()
         .into_iter()
