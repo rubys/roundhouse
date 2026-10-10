@@ -1678,10 +1678,13 @@ impl<'a> BodyTyper<'a> {
                     // membership. Refuse Module protocol only for true Module-only
                     // names, or for `include?` on a nominal class *instance* (where
                     // Module#include? would be the wrong answer). Untyped /
-                    // String / Array receivers fall through to membership → Bool.
+                    // String / Array receivers fall through to membership → Bool, and
+                    // so does a value typed `Class` or `Module`, which is a module
+                    // object and answers Module#include? itself.
                     let module_only = send::is_module_protocol(method)
                         && (method.as_str() != "include?"
-                            || matches!(recv_ty, Some(Ty::Class { .. })));
+                            || matches!(&recv_ty, Some(Ty::Class { id, .. })
+                                if !matches!(id.0.as_str(), "Class" | "Module")));
                     if module_only && !class_object
                         && !self.owns_operator(recv_ty.as_ref(), method, false) {
                         expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
