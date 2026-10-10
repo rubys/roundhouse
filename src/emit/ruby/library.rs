@@ -7153,6 +7153,20 @@ fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>, b
         }
     }
 
+    /// The constants a value writes as it runs (`ALL = [LOW = new(…)]`
+    /// writes LOW): they exist only once that value has run. This walks every
+    /// child, including blocks and branches the typing registry excludes.
+    /// Deferring a constant that reads one of those is harmless: a later
+    /// definition order is always valid, a missing one is not.
+    fn written_constants(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+        if let ExprNode::Assign { target: crate::expr::LValue::Const { path }, .. } = &*expr.node {
+            if let [name] = path.as_slice() {
+                out.insert(name.as_str().to_string());
+            }
+        }
+        expr.node.for_each_child(&mut |child| written_constants(child, out));
+    }
+
     let own: std::collections::HashSet<&str> =
         lc.methods.iter().map(|m| m.name.as_str()).collect();
     let mut deferred_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -7160,6 +7174,7 @@ fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>, b
     for (i, (name, value)) in lc.constants.iter().enumerate() {
         if calls_self(value, &own, &deferred_names, lc.name.0.as_str()) {
             deferred_names.insert(name.as_str().to_string());
+            written_constants(value, &mut deferred_names);
             deferred.push(i);
         } else {
             eager.push(i);
