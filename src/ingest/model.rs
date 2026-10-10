@@ -145,6 +145,59 @@ pub fn ingest_isolated_namespace_prefixes(source: &[u8], file: &str) -> TablePre
     out
 }
 
+/// Each class one file declares with its own `self.table_name_prefix =
+/// "…"`, by full name. Rails keeps the prefix in a class attribute, so a
+/// model inherits it from its abstract base: an abstract
+/// `PrefixedRecord` that sets `legacy_` gives its
+/// models (`Line`, …) that name no table `legacy_lines`.
+pub fn ingest_class_table_prefixes(source: &[u8], file: &str) -> TablePrefixes {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let mut out = TablePrefixes::default();
+    for (mut scope, class) in super::util::find_all_classes_with_scope(&root) {
+        let Some(prefix) = class.body().and_then(explicit_table_prefix) else { continue };
+        let Some(path) = class_name_path(&class) else { continue };
+        scope.extend(path);
+        out.insert(scope.join("::"), prefix);
+    }
+    out
+}
+
+/// The prefix each abstract base passes down: its own, else its parent's.
+/// `pairs` are the pre-pass's `(abstract class, parent)` pairs; a bare
+/// parent is found the way Ruby finds it, the child's enclosing scopes first.
+pub fn inherited_table_prefixes(own: &TablePrefixes, pairs: &[(String, String)]) -> TablePrefixes {
+    let parents: std::collections::HashMap<&str, &str> = pairs.iter().map(|(c, p)| (c.as_str(), p.as_str())).collect();
+    let known = |name: &str| own.contains_key(name) || parents.contains_key(name);
+    let resolve = |child: &str, parent: &str| -> String {
+        let mut segments: Vec<&str> = child.split("::").collect();
+        segments.pop();
+        while !segments.is_empty() {
+            let candidate = format!("{}::{parent}", segments.join("::"));
+            if known(&candidate) {
+                return candidate;
+            }
+            segments.pop();
+        }
+        parent.to_string()
+    };
+    let mut out = TablePrefixes::default();
+    for (child, _) in pairs {
+        let mut at = child.clone();
+        // A cycle guard: the walk follows `parent` links, so a cyclic
+        // hierarchy must end somewhere.
+        for _ in 0..16 {
+            if let Some(prefix) = own.get(&at) {
+                out.insert(child.clone(), prefix.clone());
+                break;
+            }
+            let Some(parent) = parents.get(at.as_str()) else { break };
+            at = resolve(&at, parent);
+        }
+    }
+    out
+}
+
 /// `self.table_name_prefix = "three_d_secure_"` in a model body: the
 /// class's own prefix, which wins over any namespace module's.
 fn explicit_table_prefix(body: ruby_prism::Node<'_>) -> Option<String> {
@@ -181,14 +234,17 @@ pub fn ingest_model(
     constants.record(source, file);
     constants.finish();
     let bases = super::library_class::ModelBases::new();
-    ingest_model_with_enum_constants(source, file, schema, prefixes, &constants, &bases)
+    ingest_model_with_enum_constants(source, file, schema, prefixes, &TablePrefixes::default(), &constants, &bases)
 }
 
+/// `base_prefixes`: each abstract base's inherited `table_name_prefix`
+/// ([`inherited_table_prefixes`]).
 pub(super) fn ingest_model_with_enum_constants(
     source: &[u8],
     file: &str,
     schema: &Schema,
     prefixes: &TablePrefixes,
+    base_prefixes: &TablePrefixes,
     enum_constants: &EnumConstants,
     model_bases: &super::library_class::ModelBases,
 ) -> IngestResult<Option<Model>> {
@@ -229,12 +285,23 @@ pub(super) fn ingest_model_with_enum_constants(
         let mut segments: Vec<&str> = class_name.as_str().split("::").collect();
         segments.pop();
         let mut prefix = class.body().and_then(explicit_table_prefix).unwrap_or_default();
+        let mut from_module = false;
         while prefix.is_empty() && !segments.is_empty() {
             if let Some(p) = prefixes.get(&segments.join("::")) {
                 prefix = p.clone();
+                from_module = true;
                 break;
             }
             segments.pop();
+        }
+        // No module parent declares one (an empty one still counts): the
+        // class attribute its abstract base set.
+        if prefix.is_empty()
+            && !from_module
+            && let Some(parent) = class.superclass().and_then(|n| constant_path_of(&n))
+            && let Some(inherited) = base_prefixes.get(&model_bases.resolve_superclass(&scope, &parent))
+        {
+            prefix = inherited.clone();
         }
         format!("{prefix}{}", crate::naming::rails_table_name(class_name.as_str()))
     };

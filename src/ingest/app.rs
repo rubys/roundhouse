@@ -447,6 +447,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // An app engine's own `isolate_namespace` (in its `lib/`): a prefix
     // the module's declared `table_name_prefix` overrides.
     let mut isolated_prefixes = super::model::TablePrefixes::default();
+    // Each class's own `self.table_name_prefix =`, for the models that
+    // inherit it from an abstract base.
+    let mut class_prefixes = super::model::TablePrefixes::default();
     // Qualified enum arrays can live in a later file (e.g. a service
     // module). Collect literal inputs before expanding any model DSL.
     let mut enum_constants = super::model::EnumConstants::default();
@@ -467,6 +470,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
             table_prefixes
                 .extend(super::model::ingest_table_name_prefixes(&source, &entry.display().to_string()));
+            class_prefixes.extend(super::model::ingest_class_table_prefixes(&source, &entry.display().to_string()));
             model_bases.record(&source, &mut base_pairs);
             enum_constants.record(&source, &entry.display().to_string());
             enum_input_files.insert(entry);
@@ -489,6 +493,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 &entry.display().to_string(),
             ));
             isolated_prefixes.extend(super::model::ingest_isolated_namespace_prefixes(&source, &entry.display().to_string()));
+            class_prefixes.extend(super::model::ingest_class_table_prefixes(&source, &entry.display().to_string()));
             model_bases.record(&source, &mut base_pairs);
             if sub != "lib" || !ignored_lib_file(&entry) {
                 enum_constants.record(&source, &entry.display().to_string());
@@ -499,6 +504,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     for (module, prefix) in isolated_prefixes {
         table_prefixes.entry(module).or_insert(prefix);
     }
+    let base_prefixes = super::model::inherited_table_prefixes(&class_prefixes, &base_pairs);
     enum_constants.finish();
     model_bases.close_over(&base_pairs);
     for root in &roots {
@@ -513,7 +519,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 Some(ClassKind::Model) | None => {
                     if let Some(maybe_model) =
                         unwrap_or_record(ingest_model_with_enum_constants(
-                            &source, &path_str, &app.schema, &table_prefixes, &enum_constants,
+                            &source, &path_str, &app.schema, &table_prefixes, &base_prefixes, &enum_constants,
                             &model_bases,
                         ))?
                     {
@@ -670,7 +676,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             // directory itself is the app saying what the file is.
             if super::library_class::has_active_record_base(&source, &model_bases) {
                 match ingest_model_with_enum_constants(
-                    &source, &path_str, &app.schema, &table_prefixes, &enum_constants,
+                    &source, &path_str, &app.schema, &table_prefixes, &base_prefixes, &enum_constants,
                     &model_bases,
                 ) {
                     Ok(Some(model)) => {
