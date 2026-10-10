@@ -1158,6 +1158,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
                     crate::ident::Symbol::from("TestBase"),
                 ));
             }
+            let test_rb_path = out_path.clone();
             let mut emitted = library::emit_library_class_decl_with_synthesized(
                 &lc_for_emit,
                 app,
@@ -1180,7 +1181,9 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             if !lowered.constants.is_empty() {
                 let mut consts_block = String::new();
                 for (name, value) in &lowered.constants {
-                    let value_s = super::ruby::expr::emit_expr(value);
+                    let value_s = expr::with_emitted_file(&test_rb_path, || {
+                        super::ruby::expr::emit_expr(value)
+                    });
                     writeln!(consts_block, "  {} = {}", name.as_str(), value_s).unwrap();
                 }
                 consts_block.push('\n');

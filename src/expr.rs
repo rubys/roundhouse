@@ -59,6 +59,16 @@ pub const UNINDEXED_SCOPE_CONST_REF: u64 = 1 << 11;
 /// positional Hash does not bind keyword parameters.
 pub const ERASED_KEYWORD_SPLAT: u64 = 1 << 12;
 
+/// This string literal is the source file's own location (`__FILE__`,
+/// or the directory `__dir__` names), written relative to the app root.
+/// Ruby gives the absolute path of the loaded file there, whatever the
+/// process's cwd. A target that relocates the file (the Ruby family
+/// emits `lib/x.rb` as `app/models/x.rb`) uses this bit to anchor the
+/// path on the emitted file's own directory. Then `File.expand_path("../..",
+/// __FILE__)` still names the app root, and the same relative walk
+/// reaches the files carried there. Other targets emit the literal.
+pub const SOURCE_FILE_PATH: u64 = 1 << 13;
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by

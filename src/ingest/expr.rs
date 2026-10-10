@@ -594,6 +594,14 @@ pub(super) fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Ex
     ))
 }
 
+/// A string literal naming this source file's own location (`__FILE__`,
+/// `__dir__`), app-root relative and flagged `SOURCE_FILE_PATH`.
+fn source_file_path_lit(span: Span, path: String) -> Expr {
+    let mut lit = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: path } });
+    lit.decisions |= crate::expr::SOURCE_FILE_PATH;
+    lit
+}
+
 fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Byte offsets into the text registered for `file` (the exact text
     // prism is parsing). FileId(0) when the entry point didn't
@@ -651,6 +659,22 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_call_node().is_some() => {
             let c = n.as_call_node().unwrap();
             let method = constant_id_str(&c.name()).to_string();
+            // `__dir__` is `File.dirname` of the loaded file's absolute
+            // path: the same static fact as `__FILE__` below, one level
+            // up. Flagged the same way so the target anchors it on the
+            // emitted file's location.
+            if method == "__dir__"
+                && c.receiver().is_none()
+                && c.arguments().is_none()
+                && c.block().is_none()
+            {
+                let rel = super::sources::relative_path(file);
+                let dir = match std::path::Path::new(&rel).parent() {
+                    Some(d) if !d.as_os_str().is_empty() => d.to_string_lossy().into_owned(),
+                    _ => ".".to_string(),
+                };
+                return Ok(source_file_path_lit(span, dir));
+            }
             let args: Vec<Expr> = if let Some(a) = c.arguments() {
                 ingest_forwardable_arguments(&a, file)?
             } else {
@@ -1126,8 +1150,13 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // emitted program. A read of `__FILE__` types as `Str` like any
         // other string literal, so `File.expand_path('..', __FILE__)`
         // and friends type-check through it for free.
+        //
+        // The literal carries `SOURCE_FILE_PATH`: Ruby's `__FILE__` is
+        // the loaded file's absolute path, independent of cwd, so a
+        // target that relocates the file rewrites it against its own
+        // emitted location (see the flag).
         n if n.as_source_file_node().is_some() => {
-            ExprNode::Lit { value: Literal::Str { value: super::sources::relative_path(file) } }
+            return Ok(source_file_path_lit(span, super::sources::relative_path(file)));
         }
         // `__LINE__` uses this parse's bytes, not an older registration of
         // the same filename. ERB later translates it to the template line.

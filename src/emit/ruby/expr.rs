@@ -21,6 +21,45 @@ thread_local! {
     /// see the comment there. Off everywhere else, so ordinary app and
     /// library bodies keep reading the way they always have.
     static IN_CORE_CLASS_REOPEN: Cell<bool> = const { Cell::new(false) };
+    /// The emitted path (relative to the output root) of the file being
+    /// rendered. A `SOURCE_FILE_PATH` literal anchors on it; `None`
+    /// outside a per-file emit, where the literal is written as is.
+    static EMITTED_FILE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` while emitting the file that lands at `out_path` (relative
+/// to the output root), restoring the previous setting after.
+pub(super) fn with_emitted_file<R>(out_path: &std::path::Path, f: impl FnOnce() -> R) -> R {
+    let prev = EMITTED_FILE.with(|c| c.replace(Some(out_path.to_path_buf())));
+    let r = f();
+    EMITTED_FILE.with(|c| *c.borrow_mut() = prev);
+    r
+}
+
+/// `__FILE__` / `__dir__` from a source file the Ruby family emits
+/// elsewhere. Ruby answers the loaded file's absolute path, so this is
+/// the source's app-relative path resolved from the emitted file's own
+/// directory: `app/models/loader.rb` carrying
+/// `lib/x/loader.rb` writes
+/// `File.expand_path("../../lib/x/loader.rb", __dir__)`.
+/// The app root maps to the output root, so walks up from `__FILE__`
+/// land on the files carried there, whatever the process's cwd.
+fn source_file_path(e: &Expr) -> Option<String> {
+    if e.decisions & crate::expr::SOURCE_FILE_PATH == 0 {
+        return None;
+    }
+    let ExprNode::Lit { value: Literal::Str { value } } = &*e.node else { return None };
+    if std::path::Path::new(value).is_absolute() {
+        return None;
+    }
+    let out = EMITTED_FILE.with(|c| c.borrow().clone())?;
+    let ups = out.parent().map_or(0, |d| d.components().count());
+    let rel = format!("{}{}", "../".repeat(ups), value);
+    Some(format!(
+        "File.expand_path({}, __dir__)",
+        emit_node(&ExprNode::Lit { value: Literal::Str { value: rel } })
+    ))
 }
 
 /// Run `f` while emitting a core-class reopen's body (or not). The
@@ -57,6 +96,9 @@ pub fn emit_expr(e: &Expr) -> String {
             // expressions retain their effects through the ordinary emitter.
             return emit_send_base(recv.as_ref(), method, args, *parenthesized);
         }
+    }
+    if let Some(path) = source_file_path(e) {
+        return path;
     }
     if is_mutable_string_literal(e) {
         return format!("+{}", emit_node(&e.node));

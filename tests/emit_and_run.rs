@@ -7432,7 +7432,7 @@ end
 raise "constant guard changed" unless GuardProbe.constants == ["constant", "constant", nil, nil]
 raise "method guard changed" unless GuardProbe.calls == "method"
 raise "super guard changed" unless GuardChild.calls == "super"
-raise "source identity changed" unless GuardProbe.location == ["app/services/guard_probe.rb", 13]
+raise "source identity changed" unless GuardProbe.location == [File.expand_path("app/services/guard_probe.rb", Dir.pwd), 13]
 raise "predicate query was lowered or evaluated as a normal call" unless GuardProbe.predicates == [nil, "method", "method"]
 raise "static descriptors became booleans" unless GuardProbe.simple == ["self", "nil", "true", "false", "expression", nil]
 raise "nil class variable was confused with absence" unless GuardProbe.new.classvars == [nil, "class variable"]

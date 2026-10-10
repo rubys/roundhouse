@@ -6382,8 +6382,11 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     // emitter is a free function reached from a dozen callers. A reopen
     // of a core class needs its `self.` receivers kept (see the elision
     // in `expr.rs`); everything else is emitted exactly as before.
-    super::expr::with_core_class_reopen(is_core_class_name(lc.name.0.as_str()), || {
-        emit_library_class_decl_inner(lc, app, out_path, synthesized_siblings)
+    let path = out_path.clone();
+    super::expr::with_emitted_file(&path, || {
+        super::expr::with_core_class_reopen(is_core_class_name(lc.name.0.as_str()), || {
+            emit_library_class_decl_inner(lc, app, out_path, synthesized_siblings)
+        })
     })
 }
 
