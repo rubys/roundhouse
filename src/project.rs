@@ -5072,6 +5072,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         files.push(("sig/runtime/request_forgery_protection.rbs".to_string(), rbs));
     }
 
+    // Rails 8.1.4 ActionController::Head's options-hash implementation
+    // is only emitted for the Ruby family and Spinel, not strict targets.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/action_controller_head.rbs")
+            .map_err(|e| format!("read runtime/spinel/action_controller_head.rbs: {e}"))?;
+        files.push(("sig/runtime/action_controller_head.rbs".to_string(), rbs));
+    }
+
     // HTTP Token/Basic auth sidecar — the ActionController::Base reopen in
     // runtime/http_authentication.rb (ruby family only). It types the
     // block parameters the helpers yield, which the app's blocks compare.

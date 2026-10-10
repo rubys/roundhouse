@@ -237,16 +237,17 @@ module ActionView
     # A view's `<% cache key do %>` reads and writes its fragment through
     # these two (`lower::view_to_library::walker`, `emit_cached_fragment`):
     # `nil` from the read is a miss, and the write answers what it stored.
-    # This shared form is the runtime's own store; the ruby family and
-    # spinel reopen both (runtime/action_controller_fragment_caching.rb)
+    # The non-Ruby targets have no shared cache runtime, so this fallback
+    # always misses and lets the rendered fragment recompute. The ruby
+    # family and spinel reopen both (runtime/spinel/action_controller_fragment_caching.rb)
     # to go through the controller as Rails' CacheHelper does —
     # `perform_caching`, `combined_fragment_cache_key`, `cache_store`.
-    def self.fragment_read(key)
-      Rails.cache.read_str(key)
+    def self.fragment_read(_key)
+      nil
     end
 
-    def self.fragment_write(key, value, ttl)
-      Rails.cache.write_str(key, value, ttl)
+    def self.fragment_write(_key, value, _ttl)
+      value
     end
 
     def self.to_query(params)
@@ -895,8 +896,14 @@ module ActionView
       # target's unset shape and for `false` alike.
       return "" if @broadcast_rendering == true
       return "" if ActionController.forgery_switched_off
-      return "" if Rails.application.token_fields_omitted
+      return "" if token_fields_omitted?
       %(<input type="hidden" name="authenticity_token" value="#{html_escape(form_authenticity_token)}">)
+    end
+
+    # Strict non-Ruby targets do not emit Rails::Application. The Ruby
+    # family and Spinel override this with the app-specific test setting.
+    def self.token_fields_omitted?
+      false
     end
 
     # Bracket a broadcast partial render (the lowered

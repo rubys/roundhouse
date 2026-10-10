@@ -186,6 +186,29 @@ fn is_empty_branch(e: &Expr) -> bool {
         || matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
 }
 
+/// A postfix `if` (`x if c`) is a syntax error as a Crystal call
+/// argument, array element, or hash value — wrap it. Mirrors
+/// `src/emit/ruby/expr.rs`.
+fn renders_as_trailing_modifier(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::If { then_branch, else_branch, .. } => {
+            is_empty_branch(else_branch)
+                && !matches!(&*then_branch.node, ExprNode::Seq { .. })
+                && !emit_expr(then_branch).contains('\n')
+        }
+        ExprNode::RescueModifier { .. } => true,
+        _ => false,
+    }
+}
+
+fn emit_arg(e: &Expr) -> String {
+    if renders_as_trailing_modifier(e) {
+        format!("({})", emit_expr(e))
+    } else {
+        emit_expr(e)
+    }
+}
+
 /// Map Ruby stdlib type names that don't exist in Crystal to their
 /// Crystal analogs. `Integer` (abstract integer in Ruby) maps to
 /// `Int` (abstract integer in Crystal — parent of Int8…Int128).
@@ -368,7 +391,7 @@ fn emit_node(n: &ExprNode) -> String {
             }
         }
         ExprNode::Apply { fun, args, block } => {
-            let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+            let args_s: Vec<String> = args.iter().map(emit_arg).collect();
             let base = format!("{}.call({})", emit_expr(fun), args_s.join(", "));
             if let Some(b) = block {
                 format!("{base} {{ {} }}", emit_expr(b))
@@ -646,7 +669,7 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Super { args } => match args {
             None => "super".to_string(),
             Some(args) => {
-                let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+                let args_s: Vec<String> = args.iter().map(emit_arg).collect();
                 format!("super({})", args_s.join(", "))
             }
         },
@@ -851,7 +874,7 @@ fn emit_array(elements: &[Expr], _style: &crate::expr::ArrayStyle) -> String {
         // sites surface a Crystal error.
         return "[] of String".to_string();
     }
-    let parts: Vec<String> = elements.iter().map(emit_expr).collect();
+    let parts: Vec<String> = elements.iter().map(emit_arg).collect();
     format!("[{}]", parts.join(", "))
 }
 
@@ -1052,7 +1075,10 @@ fn emit_hash_forced(entries: &[(Expr, Expr)]) -> String {
     let parts: Vec<String> = entries
         .iter()
         .map(|(k, v)| {
-            let v_s = emit_expr_with_form_hint_forced(v);
+            let mut v_s = emit_expr_with_form_hint_forced(v);
+            if renders_as_trailing_modifier(v) {
+                v_s = format!("({v_s})");
+            }
             if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
                 let name = value.as_str();
                 if is_simple_ident(name) {
@@ -1094,11 +1120,11 @@ fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
                 if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
                     let name = value.as_str();
                     if is_simple_ident(name) {
-                        return format!("{name}: {}", emit_expr(v));
+                        return format!("{name}: {}", emit_arg(v));
                     }
-                    return format!("{:?}: {}", name, emit_expr(v));
+                    return format!("{:?}: {}", name, emit_arg(v));
                 }
-                format!("{} => {}", emit_expr(k), emit_expr(v))
+                format!("{} => {}", emit_expr(k), emit_arg(v))
             })
             .collect();
         return parts.join(", ");
@@ -1129,7 +1155,7 @@ fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
                 let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else {
                     unreachable!()
                 };
-                format!("{}: {}", value.as_str(), emit_expr(v))
+                format!("{}: {}", value.as_str(), emit_arg(v))
             })
             .collect();
         return format!("{{{}}}", parts.join(", "));
@@ -1144,11 +1170,11 @@ fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
                 // use the bare form (`:foo`). Same convention Ruby
                 // and Crystal share.
                 if is_simple_ident(name) {
-                    return format!(":{name} => {}", emit_expr(v));
+                    return format!(":{name} => {}", emit_arg(v));
                 }
-                return format!(":{name:?} => {}", emit_expr(v));
+                return format!(":{name:?} => {}", emit_arg(v));
             }
-            format!("{} => {}", emit_expr(k), emit_expr(v))
+            format!("{} => {}", emit_expr(k), emit_arg(v))
         })
         .collect();
     format!("{{ {} }}", parts.join(", "))
@@ -1185,7 +1211,14 @@ pub(super) fn emit_send_base(
 ) -> String {
     let args_s: Vec<String> = args
         .iter()
-        .map(|a| emit_expr_with_form_hint(a, force_hash_form_for_arg(recv, method)))
+        .map(|a| {
+            let s = emit_expr_with_form_hint(a, force_hash_form_for_arg(recv, method));
+            if renders_as_trailing_modifier(a) {
+                format!("({s})")
+            } else {
+                s
+            }
+        })
         .collect();
     // Ruby → Crystal method-name translations. Crystal stdlib
     // collections (Array, String, Hash) use `size` not `length`;
