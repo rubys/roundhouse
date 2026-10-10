@@ -173,7 +173,9 @@ pub(super) fn ingest_routes_with_engines(
     // table whatever scope the `load` call was written inside.
     entries.extend(cx.hoisted.take());
 
-    Ok(RouteTable { entries, direct_helpers, redirects: redirect_sink::drain(), diagnostics: cx.diagnostics.take() })
+    let mut diagnostics = cx.diagnostics.take();
+    diagnostics.extend(refused_route_diagnostics(&entries, source, file));
+    Ok(RouteTable { entries, direct_helpers, redirects: redirect_sink::drain(), diagnostics })
 }
 
 /// The `draw do … end` calls that are statements of the program itself
@@ -285,6 +287,41 @@ fn runtime_cable_mount(call: &ruby_prism::CallNode<'_>) -> bool {
         }
     }
     server && path.as_deref() == Some("/cable") && call.block().is_none()
+}
+
+/// One located `unsupported` per route the router leaves out of its
+/// dispatch table because a `constraints:` requirement is outside the
+/// segment-pattern subset (`lower::segment_pattern`). The URL helper is
+/// still generated, so links to the route keep working; a request for it
+/// is not served. Located at the regex literal when it can be found.
+fn refused_route_diagnostics(entries: &[RouteSpec], source: &[u8], file: &str) -> Vec<Diagnostic> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for route in crate::lower::routes::flatten_route_entries(entries) {
+        let Some((param, rx)) = &route.refused else { continue };
+        let verb = format!("{:?}", route.method).to_uppercase();
+        if !seen.insert((verb.clone(), route.path.clone())) {
+            continue;
+        }
+        let needle = format!("/{rx}/");
+        let (start, end) = source
+            .windows(needle.len())
+            .position(|w| w == needle.as_bytes())
+            .map(|at| (at as u32, (at + needle.len()) as u32))
+            .unwrap_or((0, 0));
+        out.push(Diagnostic::unsupported(
+            Span { file: super::sources::file_id(file), start, end },
+            None,
+            "route constraint",
+            format!(
+                "{verb} {} is not dispatched: `{param}:` requirement `{rx}` is outside the \
+                 router's segment-pattern subset (no lookahead, backreference, alternation, \
+                 anchors, or backtracking); its URL helper is still generated",
+                route.path
+            ),
+        ));
+    }
+    out
 }
 
 /// Attach a located unsupported-mount diagnostic and the matching survey
@@ -544,7 +581,7 @@ fn engine_route_helper_methods(entries: &[RouteSpec]) -> HashSet<String> {
         entries: entries.to_vec(),
     });
     let mut methods = HashSet::new();
-    for route in crate::lower::flatten_routes(&app) {
+    for route in crate::lower::routes::flatten_routes_for_helpers(&app) {
         if !route.named || route.as_name.is_empty() {
             continue;
         }
