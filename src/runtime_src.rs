@@ -2009,12 +2009,13 @@ mod tests {
             ),
             other => panic!("@keys = [] must carry Array[String], got {other:?}"),
         }
+        // Not `Array[String]` any more: #761 lets a header value be nil, and the RBS says `Array[String?]`.
         match ivar_assign_ty(&init.body, "vals") {
             Some(Ty::Array { elem }) => assert!(
-                matches!(elem.as_ref(), Ty::Str),
-                "expected Array[String], got Array[{elem:?}]"
+                matches!(elem.as_ref(), Ty::Union { variants } if variants.contains(&Ty::Str) && variants.contains(&Ty::Nil) && variants.len() == 2),
+                "expected Array[String?], got Array[{elem:?}]"
             ),
-            other => panic!("@vals = [] must carry Array[String], got {other:?}"),
+            other => panic!("@vals = [] must carry Array[String?], got {other:?}"),
         }
     }
 }

@@ -1191,10 +1191,10 @@ end
     #[test]
     fn action_controller_runtime_emit_typechecks_hotspots() {
         let src = emit_action_controller();
-        let set_index = method_body(&src, "set_index");
+        let store_value = method_body(&src, "store_value");
         assert!(
-            set_index.contains("header_key_ok_pred(Some("),
-            "header_key_ok? takes String?, wrap &str:\n{set_index}"
+            store_value.contains("header_key_ok_pred(Some("),
+            "header_key_ok? takes String?, wrap &str:\n{store_value}"
         );
         let key_at = method_body(&src, "key_at");
         assert!(
