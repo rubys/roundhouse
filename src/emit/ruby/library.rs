@@ -6940,23 +6940,32 @@ fn emit_library_class_decl_inner(
     // class extends a base we don't model at all. See
     // `replays_foreign_class_body`. After the constants (a captured
     // call may reference one) and before the methods.
-    if replays_foreign_class_body(lc, app) {
+    //
+    // A plain class (no superclass, or a built-in one) that `extend`s an app
+    // module replays that `extend` and the calls to the module's methods
+    // after it (`app_extension_calls`); every other call stays dropped.
+    let replayed: Vec<&Expr> = if replays_foreign_class_body(lc, app) {
+        lc.unknown_calls.iter().collect()
+    } else {
+        let own = app_extension_calls(lc, app);
         for call in &lc.unknown_calls {
-            for line in super::emit_expr(call).lines() {
-                if line.is_empty() {
-                    writeln!(s).unwrap();
-                } else {
-                    writeln!(s, "{body_pad}{line}").unwrap();
-                }
+            if !own.iter().any(|c| std::ptr::eq(*c, call)) {
+                report_dropped_class_body_call(lc, call);
             }
         }
-        if !lc.unknown_calls.is_empty() && !lc.methods.is_empty() {
-            writeln!(s).unwrap();
+        own
+    };
+    for call in &replayed {
+        for line in super::emit_expr(call).lines() {
+            if line.is_empty() {
+                writeln!(s).unwrap();
+            } else {
+                writeln!(s, "{body_pad}{line}").unwrap();
+            }
         }
-    } else {
-        for call in &lc.unknown_calls {
-            report_dropped_class_body_call(lc, call);
-        }
+    }
+    if !replayed.is_empty() && !lc.methods.is_empty() {
+        writeln!(s).unwrap();
     }
 
     // Non-ordered classes keep the methods-then-initializers partition.
@@ -7355,6 +7364,54 @@ fn replays_foreign_class_body(lc: &LibraryClass, app: &App) -> bool {
     lc.parent.as_ref().is_some_and(|p| {
         require_path_for_parent(p, app).is_none() && !is_core_class_name(p.0.as_str())
     })
+}
+
+/// The class-body calls of a plain class (no superclass, or a built-in one)
+/// that only the app's own code defines: `extend M` of an app module and
+/// the bare calls after it to that module's methods (`extend SymbolEnum`
+/// then `symbol_enum :state, [:on, :off]`). No runtime base answers
+/// these, so the module is the receiver's and replaying the calls is what
+/// Ruby runs. They are written before the methods, like every replayed
+/// call, so a call to the class's own `def self.` (defined below it in
+/// the emitted body) is not one of them. Anything else stays dropped and
+/// reported (`replays_foreign_class_body`).
+fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App) -> Vec<&'a Expr> {
+    if lc.is_module || lc.parent.as_ref().is_some_and(|p| !is_core_class_name(p.0.as_str())) {
+        return Vec::new();
+    }
+    let app_module = |path: &[Symbol]| -> Option<&LibraryClass> {
+        let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        let nested = format!("{}::{written}", lc.name.0.as_str());
+        app.library_classes.iter().find(|c| {
+            c.is_module && c.origin.is_none() && (c.name.0.as_str() == written || c.name.0.as_str() == nested)
+        })
+    };
+    let mut extended: Vec<&LibraryClass> = Vec::new();
+    let mut out = Vec::new();
+    for call in &lc.unknown_calls {
+        let ExprNode::Send { recv: None, method, args, .. } = &*call.node else { continue };
+        if method.as_str() == "extend" {
+            let modules: Option<Vec<&LibraryClass>> = args
+                .iter()
+                .map(|a| match &*a.node {
+                    ExprNode::Const { path } => app_module(path),
+                    _ => None,
+                })
+                .collect();
+            if let Some(modules) = modules.filter(|m| !m.is_empty()) {
+                extended.extend(modules);
+                out.push(call);
+            }
+            continue;
+        }
+        let defines = |c: &LibraryClass| {
+            c.methods.iter().any(|m| m.name == *method && m.receiver == MethodReceiver::Instance)
+        };
+        if extended.iter().any(|m| defines(m)) {
+            out.push(call);
+        }
+    }
+    out
 }
 
 /// Ledger a class-body call we captured but chose not to replay. The
