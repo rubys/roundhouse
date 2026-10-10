@@ -143,6 +143,17 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "abc[…]", ViewHelpers.truncate("abcdefghij", length: 6, omission: "[…]")
   end
 
+  # Measured against ActionView 8.1.4. Long unbroken words remain
+  # intact, existing newlines are boundaries, and callers can choose
+  # the inserted break sequence.
+  def test_word_wrap_matches_rails_boundaries_and_options
+    assert_equal "one two\nthree", ViewHelpers.word_wrap("one two three", line_width: 7)
+    assert_equal "123456789", ViewHelpers.word_wrap("123456789", line_width: 4)
+    assert_equal "a|b|c", ViewHelpers.word_wrap("a\nb c", line_width: 2, break_sequence: "|")
+    assert_equal "a||b", ViewHelpers.word_wrap("a\n\nb", line_width: 1, break_sequence: "|")
+    assert_equal "één|twee", ViewHelpers.word_wrap("één twee", line_width: 5, break_sequence: "|")
+  end
+
   # ── slot store ─────────────────────────────────────────────
 
   def test_content_for_set_and_get

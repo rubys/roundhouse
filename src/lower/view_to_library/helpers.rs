@@ -184,6 +184,14 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             let truncated = view_helpers_call("truncate", args);
             Some(view_helpers_call("html_escape", vec![truncated]))
         }
+        WordWrap { text, opts } => {
+            let mut args = vec![(*text).clone()];
+            if let Some(o) = opts {
+                args.push((*o).clone());
+            }
+            let wrapped = view_helpers_call("word_wrap", args);
+            Some(view_helpers_call("html_escape", vec![wrapped]))
+        }
         ContentForGetter { slot } => Some(view_helpers_call(
             "content_for_get",
             vec![lit_sym(Symbol::from(*slot))],

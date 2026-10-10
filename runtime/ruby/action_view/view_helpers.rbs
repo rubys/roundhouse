@@ -64,6 +64,11 @@ module ActionView
     # passes `article.body` (typed String per the model RBS) so the
     # contraction lands without source churn.
     def self.truncate: (String s, ?length: Integer, ?omission: String) -> String
+    def self.word_wrap: (
+      String text,
+      ?line_width: Integer,
+      ?break_sequence: String
+    ) -> String
   
     # ── DOM helpers ─────────────────────────────────────────────────
     # Monomorphic record-shape: dom_id takes an ActiveRecord::Base

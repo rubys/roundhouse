@@ -9,6 +9,8 @@
 //! validation target for the lowering pipeline; per-target emitter
 //! migrations (TS / Rust / …) are deferred.
 
+use std::path::Path;
+
 use roundhouse::emit::{ruby, EmittedFile};
 use roundhouse::ingest::ingest_app;
 
@@ -1507,6 +1509,25 @@ fn lowered_article_partial_truncate_wrapped_in_html_escape() {
     assert!(
         src.contains("ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.truncate(article.body.to_s, length: 100))"),
         "expected html_escape-wrapped truncate; got:\n{src}",
+    );
+}
+
+#[test]
+fn lowered_view_word_wrap_routes_to_shared_runtime_and_escapes_output() {
+    let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
+    let view = roundhouse::ingest::view::ingest_view(
+        "<%= word_wrap(\"one two three\", line_width: 7, break_sequence: \"|\") %>\n",
+        Path::new("articles/word_wrap.html.erb"),
+        "app/views/articles/word_wrap.html.erb",
+    )
+    .expect("ingest word_wrap view");
+    app.views.push(view);
+
+    let files = ruby::emit_lowered_views(&app);
+    let src = find(&files, "app/views/articles/word_wrap.rb");
+    assert!(
+        src.contains("ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.word_wrap(\"one two three\", line_width: 7, break_sequence: \"|\"))"),
+        "expected a qualified shared helper call with normal interpolation escaping; got:\n{src}",
     );
 }
 
