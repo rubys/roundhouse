@@ -1635,8 +1635,9 @@ jobs:
             > /tmp/campfire-strict.log 2>&1 || status=$?
           errors=$(grep -c 'error\[' /tmp/campfire-strict.log || true)
           # An ingest abort prints no `error[` line, so a count of zero
-          # alone would pass it. A nonzero exit inside the ceiling is that.
-          if [ "$status" -ne 0 ] && [ "$errors" -le "$CEILING_ERRORS" ]; then
+          # with a nonzero exit is that. Counted errors at or below the
+          # ceiling are the pin's remaining gaps, not an abort.
+          if [ "$status" -ne 0 ] && [ "$errors" -eq 0 ]; then
             tail -5 /tmp/campfire-strict.log
             echo "::error::campfire strict emit failed (exit $status) without a counted error: ingest stopped before analysis"
             exit 1
