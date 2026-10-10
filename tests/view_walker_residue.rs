@@ -193,7 +193,7 @@ end
         "collection cache key includes the partial:\n{body}"
     );
     assert!(
-        body.contains("read_str"),
+        body.contains("fragment_read"),
         "warm path is one store read:\n{body}"
     );
     assert!(

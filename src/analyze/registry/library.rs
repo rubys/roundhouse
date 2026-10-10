@@ -346,7 +346,7 @@ pub(in crate::analyze) fn register(
                 if lc
                     .includes
                     .iter()
-                    .any(|inc| inc.0.as_str() == "Sidekiq::Worker")
+                    .any(|inc| matches!(inc.0.as_str(), "Sidekiq::Worker" | "Sidekiq::Job"))
                 {
                     return true;
                 }
@@ -366,11 +366,19 @@ pub(in crate::analyze) fn register(
             if cls.parent.is_none() {
                 cls.parent = lc.parent.clone();
             }
+            // Not the job id String Sidekiq answers: `lower::job_class_side` runs the job inline and its wrapper answers nil.
             for m in ["perform_async", "perform_in", "perform_at"] {
                 cls.class_methods
                     .entry(Symbol::from(m))
-                    .or_insert(Ty::Str);
+                    .or_insert(Ty::Nil);
             }
+        }
+        // `lower::job_class_side` takes the `include` out of the emitted class, so it is not an unresolved one.
+        for module in ["Sidekiq::Worker", "Sidekiq::Job"] {
+            classes.entry(ClassId(Symbol::from(module))).or_insert_with(|| ClassInfo {
+                is_module: true,
+                ..ClassInfo::default()
+            });
         }
     }
 }
@@ -399,6 +407,9 @@ fn ar_instance_ty(kind: crate::catalog::ReturnKind) -> Option<Ty> {
         ReturnKind::Str => Some(Ty::Str),
         ReturnKind::HashSymStr => {
             Some(Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) })
+        }
+        ReturnKind::HashStrUntyped => {
+            Some(Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) })
         }
         ReturnKind::ArrayOfSym => Some(Ty::Array { elem: Box::new(Ty::Sym) }),
         ReturnKind::ArrayOfInt => Some(Ty::Array { elem: Box::new(Ty::Int) }),

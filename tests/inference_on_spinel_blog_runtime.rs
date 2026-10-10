@@ -319,7 +319,41 @@ fn untyped_subexpressions_baseline() {
     // campfire's `reorder(Arel.sql("+messages.created_at"))`): 547 ->
     // 549, MEASURED — each one's `fragment` parameter, read here
     // without its RBS.
-    const CEILING: usize = 549;
+    // Transaction join/pin + its `ensure`-based non-local-exit fix
+    // (spinel-txn-pin #693, matz/spinel#8182), rebased onto #704:
+    // 549 -> 561, MEASURED. `self.transaction`'s per-thread nesting
+    // depth reads/writes through `Db._txn_depth`/`=` (runtime/ruby/db.rbs)
+    // instead of a raw `Thread.current[:ar_txn_depth]`: the companion
+    // RBS-paired probe has no model for the `Db` the depth used to
+    // bypass, so the raw `Thread.current` read/write there typed as the
+    // unresolved `Var`, not the honest gradual `Untyped` — routing it
+    // through `Db`'s own declared contract is what brings that probe to
+    // zero residual (see its hand-authored RBS and the `insert_db_stub`
+    // mirror). This raw-inference probe (zero hand-authored signatures
+    // anywhere, not even for the app's own runtime shims) has no such
+    // stub for `Db` — confirmed by reverting to the `Thread.current` form
+    // and re-measuring: exactly 549 (this branch's base after rebasing),
+    // so the old form cost this probe nothing. Eleven of the twelve new
+    // sites are the depth variable's reads/writes/arithmetic now going
+    // through an unmodeled `Db` method; the twelfth is the `ensure`-based
+    // non-local-exit fix (CodeRabbit on #693) — its outer branch's
+    // `ensure`'s `if rolled_back then nil else … end` has to unify `nil`
+    // against the unresolved `Db.exec("COMMIT")` call. Its RBS-paired
+    // method stays at zero residual throughout.
+    // `raise ActiveRecord::Rollback` (campfire's messages_count and
+    // creation tests): 561 -> 562, MEASURED by removing the one line.
+    // The new site is the Rollback arm's `Db.exec("ROLLBACK")`, read
+    // here without the Db contract like the other arm's.
+    // `clear_query_caches_for_current_thread` and `raw_connection.
+    // transaction(:immediate)` (campfire's caching tests and its
+    // messages_count trigger repair): 562 -> 569, MEASURED by removing
+    // each — 4 for the former's `Db.query_cache_*` calls (the same escape
+    // `uncached` takes), 3 for the latter's `Db.exec` calls.
+    // `requires_new:` savepoints: 569 -> 578, MEASURED by removing them.
+    // All nine are the nested branch's new `Db.exec` SAVEPOINT / RELEASE /
+    // ROLLBACK TO calls (and the `if`/`unless` arms holding them) plus the
+    // `depth` read in the savepoint name, unmodeled here like the others.
+    const CEILING: usize = 578;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\

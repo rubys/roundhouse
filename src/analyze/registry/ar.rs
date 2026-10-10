@@ -105,11 +105,24 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             .or_default();
         for m in [
             "transaction",
-            "connection_pool",
             "establish_connection",
         ] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Untyped);
         }
+        // Which database, and the pool's `with_connection` — served on the
+        // ruby family and spinel by runtime/spinel/active_record_db_config.rb.
+        base.class_methods
+            .entry(Symbol::from("connection_db_config"))
+            .or_insert(Ty::Class {
+                id: ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig")),
+                args: vec![],
+            });
+        base.class_methods
+            .entry(Symbol::from("connection_pool"))
+            .or_insert(Ty::Class {
+                id: ClassId(Symbol::from("ActiveRecord::ConnectionAdapters::DbPool")),
+                args: vec![],
+            });
         base.class_methods
             .entry(Symbol::from("connection"))
             .or_insert_with(connection_ty);
@@ -132,6 +145,28 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         base.class_methods
             .entry(Symbol::from("strict_loading_by_default"))
             .or_insert(Ty::Bool);
+    }
+
+    {
+        let config = classes
+            .entry(ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig")))
+            .or_default();
+        for m in ["database", "adapter", "name", "env_name"] {
+            config.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
+        }
+        // The block's value: whatever the caller computes from the connection.
+        classes
+            .entry(ClassId(Symbol::from("ActiveRecord::ConnectionAdapters::DbPool")))
+            .or_default()
+            .instance_methods
+            .entry(Symbol::from("with_connection"))
+            .or_insert(Ty::Untyped);
+        classes
+            .entry(ClassId(Symbol::from("ActiveRecord::ConnectionAdapters::SQLite3Adapter")))
+            .or_default()
+            .class_methods
+            .entry(Symbol::from("resolve_path"))
+            .or_insert(Ty::Str);
     }
 
     // CollectionProxy — the runtime helper transpiled models use
@@ -276,6 +311,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("attach_blob", Ty::Nil),
             ("attach", Ty::Nil),
             ("purge", Ty::Nil),
+            ("purge_later", Ty::Nil),
             ("destroy", Ty::Nil),
         ] {
             attached.instance_methods.insert(Symbol::from(m), ty);
@@ -336,6 +372,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             many.instance_methods.insert(Symbol::from("attach_blob"), Ty::Nil);
             many.instance_methods.insert(Symbol::from("attach"), Ty::Nil);
             many.instance_methods.insert(Symbol::from("purge"), Ty::Nil);
+            many.instance_methods.insert(Symbol::from("purge_later"), Ty::Nil);
+            many.instance_methods.insert(Symbol::from("first"), nilable(class_ty(&many_row_id)));
             many.instance_methods.insert(Symbol::from("destroy"), Ty::Nil);
             classes.insert(many_id, many);
         }
@@ -351,6 +389,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("signed_id", Ty::Str),
             ("download", Ty::Str),
             ("purge", Ty::Nil),
+            ("purge_later", Ty::Nil),
+            // `ActionText::Attachable` — the ruby-family Blob reopen
+            // (runtime/spinel/active_storage_disk.rb) mints it.
+            ("attachable_sgid", Ty::Str),
             ("video?", Ty::Bool),
             ("image?", Ty::Bool),
             ("audio?", Ty::Bool),
@@ -398,6 +440,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let mut variant = ClassInfo::default();
         for (m, ty) in [
             ("processed", class_ty(&variant_id)),
+            ("processed?", Ty::Bool),
             ("process", Ty::Nil),
             ("image", nilable(class_ty(&attached_id))),
             ("blob", nilable(class_ty(&blob_id))),
@@ -412,6 +455,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         variant.class_methods.insert(Symbol::from("record_select"), Ty::Str);
         variant.class_methods.insert(Symbol::from("purge_records_of"), Ty::Nil);
         classes.insert(variant_id, variant);
+        let mut variant_record = ClassInfo::default();
+        variant_record.class_methods.insert(Symbol::from("count"), Ty::Int);
+        classes.insert(ClassId(Symbol::from("ActiveStorage::VariantRecord")), variant_record);
 
         // One `attachable.variant :name, resize_to_limit: [w, h],
         // format: :f` declaration, constructed into the reader by

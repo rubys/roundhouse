@@ -81,6 +81,8 @@ module ActiveStorage
     def self.from_attachable: (untyped value) -> ActiveStorage::Blob?
     def download: () -> String
     def purge: () -> nil
+    def purge_later: () -> nil
+    def variant: (ActiveStorage::Variation variation) -> ActiveStorage::VariantWithRecord
     def video?: () -> bool
     def previewable?: () -> bool
     def preview_image: () -> ActiveStorage::Attached
@@ -169,6 +171,7 @@ module ActiveStorage
     def initialize: (ActiveStorage::Blob? blob, ActiveStorage::Variation? variation) -> void
     def blob: () -> ActiveStorage::Blob?
     def variation: () -> ActiveStorage::Variation?
+    def processed?: () -> bool
     def processed: () -> ActiveStorage::VariantWithRecord
     def self.record_select: (String where) -> String
     def self.purge_records_of: (Integer blob_id) -> nil
@@ -210,14 +213,16 @@ module ActiveStorage
     def analyze: () -> nil
     # The named variant (`:thumb`) — a declared variation — or an
     # inline transformation hash, which is the identity variant.
-    def variant: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::VariantWithRecord
+    def variant: (Symbol | Hash[Symbol, untyped] | ActiveStorage::Variation transformations) -> ActiveStorage::VariantWithRecord
     def representation: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::VariantWithRecord
-    def find_variation: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::Variation?
-    def preview: (ActiveStorage::Variation? transformations) -> ActiveStorage::Preview
+    def find_variation: (Symbol | Hash[Symbol, untyped] | ActiveStorage::Variation | nil transformations) -> ActiveStorage::Variation?
+    def preview: (Symbol | ActiveStorage::Variation | nil transformations) -> ActiveStorage::Preview
     def url: () -> String
     def attach_blob: (ActiveStorage::Blob blob) -> nil
     def attach: (String data, String filename, String content_type) -> nil
     def purge: () -> nil
+    def purge_later: () -> nil
+    def detach_each: () -> Array[ActiveStorage::Blob]
     # `Attached::One#destroy` — see the .rb: purge under Rails' name.
     def destroy: () -> nil
   end
@@ -245,13 +250,24 @@ module ActiveStorage
     def initialize: (String record_type, Integer record_id, String name) -> void
     def attached?: () -> bool
     def attachments: () -> Array[ActiveStorage::ManyAttachment]
+    def first: () -> ActiveStorage::ManyAttachment?
     def _preload_rows: (Array[ActiveStorage::ManyAttachment] rows) -> nil
     def each: () { (ActiveStorage::ManyAttachment) -> untyped } -> Array[ActiveStorage::ManyAttachment]
     def _sync_blob_ids: (Array[Integer] blob_ids) -> nil
     def attach_blob: (ActiveStorage::Blob blob) -> nil
     def attach: (String data, String filename, String content_type) -> nil
     def purge: () -> nil
+    def purge_later: () -> nil
+    def detach_each: () -> Array[ActiveStorage::Blob]
     def destroy: () -> nil
+  end
+
+  class PurgeJob
+    def self.perform_later: (ActiveStorage::Blob blob) -> nil
+  end
+
+  class VariantRecord
+    def self.count: () -> Integer
   end
 end
 

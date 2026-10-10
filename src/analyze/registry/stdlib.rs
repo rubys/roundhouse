@@ -17,7 +17,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // propagate through dispatch without bottoming out at Var.
     // `Rails.env` is the one we can type concretely as Str.
     let mut rails_cls = ClassInfo::default();
-    for m in ["application", "logger", "cache", "configuration", "root"] {
+    for m in ["application", "logger", "cache", "configuration", "root", "public_path"] {
         rails_cls.class_methods.insert(Symbol::from(m), Ty::Untyped);
     }
     // `Rails.env` is an ActiveSupport::StringInquirer (a String
@@ -368,8 +368,81 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `runtime/ruby/zlib.rb`); registering only it keeps a call to
     // `Zlib.deflate` an honest gap instead of a method that types and
     // then fails to resolve.
+    // `gzip` is Ruby's own on the ruby family and spinel's
+    // `packages/zlib` on spinel, so it types here and a strict target,
+    // whose port has no deflate, refuses the call by name
+    // (`project::RUBY_SPINEL_ONLY_METHODS`).
     register_stdlib_class(classes, "Zlib", &[
         ("crc32", Ty::Int),
+        ("gzip", Ty::Str),
+    ], &[]);
+    // `SQLite3::Database` — the sqlite3 gem on the ruby family, and
+    // `runtime/spinel/sqlite3_database.rb` (the same surface over the FFI)
+    // on spinel. ONLY that surface: campfire's `ResponseCache` keeps a
+    // read-only observer (`new(path, readonly: true)`,
+    // `get_first_value("PRAGMA data_version")`, `close`) and its WAL
+    // checkpointer opens a block-form connection, sets
+    // `busy_handler_timeout=` and `execute`s a pragma. A row is an Array
+    // of column values.
+    let sqlite_db = Ty::Class { id: ClassId(Symbol::from("SQLite3::Database")), args: vec![] };
+    register_stdlib_class(classes, "SQLite3::Database", &[
+        ("new", sqlite_db.clone()),
+        ("open", sqlite_db.clone()),
+    ], &[
+        ("execute", Ty::Array { elem: Box::new(Ty::Array { elem: Box::new(Ty::Untyped) }) }),
+        ("get_first_row", Ty::Union { variants: vec![Ty::Array { elem: Box::new(Ty::Untyped) }, Ty::Nil] }),
+        ("get_first_value", Ty::Untyped),
+        ("close", Ty::Nil),
+        ("closed?", Ty::Bool),
+        ("readonly?", Ty::Bool),
+        ("busy_timeout=", Ty::Int),
+        ("busy_handler_timeout=", Ty::Int),
+    ]);
+    // `ActiveSupport::Cache` — `expand_cache_key` and the bounded
+    // `MemoryStore`, in runtime/spinel/active_support_cache.rb (the ruby
+    // family and spinel). A cached value is whatever was written.
+    register_stdlib_class(classes, "ActiveSupport::Cache", &[
+        ("expand_cache_key", Ty::Str),
+    ], &[]);
+    let memory_store = Ty::Class { id: ClassId(Symbol::from("ActiveSupport::Cache::MemoryStore")), args: vec![] };
+    register_stdlib_class(classes, "ActiveSupport::Cache::MemoryStore", &[
+        ("new", memory_store),
+    ], &[
+        ("read", Ty::Untyped),
+        ("write", Ty::Bool),
+        ("fetch", Ty::Untyped),
+        ("delete", Ty::Bool),
+        ("exist?", Ty::Bool),
+        ("clear", Ty::Untyped),
+        ("cleanup", Ty::Nil),
+        ("prune", Ty::Nil),
+        ("read_multi", Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) }),
+        ("write_multi", Ty::Bool),
+    ]);
+
+    // `FileUtils` — a default gem / spinel's `packages/fileutils`.
+    register_stdlib_class(classes, "FileUtils", &[
+        ("mkdir_p", Ty::Untyped), ("makedirs", Ty::Untyped),
+        ("rm_rf", Ty::Untyped), ("rm_f", Ty::Untyped),
+        ("remove_entry", Ty::Nil), ("touch", Ty::Untyped),
+    ], &[]);
+    // `ActiveSupport::JSON` — Rails' coder, in `runtime/ruby/
+    // active_support_ext.rb` (the ruby family and spinel). `encode`
+    // answers the document; `decode` whatever the document holds.
+    register_stdlib_class(classes, "ActiveSupport::JSON", &[
+        ("encode", Ty::Str),
+        ("decode", Ty::Untyped),
+    ], &[]);
+    // `Rack::Utils` — the two encoding-negotiation functions, ported
+    // into `runtime/ruby/rack_utils.rb` (the rack gem's own on the ruby
+    // family). ONLY that surface, the IPAddr rule. A pair is
+    // `[name, quality]`; the name is nil for an empty header part.
+    let q_pair = Ty::Tuple {
+        elems: vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil] }, Ty::Float],
+    };
+    register_stdlib_class(classes, "Rack::Utils", &[
+        ("q_values", Ty::Array { elem: Box::new(q_pair) }),
+        ("select_best_encoding", Ty::Union { variants: vec![Ty::Str, Ty::Nil] }),
     ], &[]);
     register_stdlib_class(classes, "IPAddr", &[], &[
         ("ipv4?", Ty::Bool), ("ipv6?", Ty::Bool), ("ipv4_mapped?", Ty::Bool),
@@ -512,6 +585,15 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "Timeout::Error",
         // `rescue EOFError` around `readpartial` on a pipe or a pty.
         "EOFError",
+        // `rescue SQLite3::Exception` — campfire's `ResponseCache` drops
+        // its observer on any driver error (see `SQLite3::Database`).
+        "SQLite3::Exception", "SQLite3::CantOpenException",
+        "SQLite3::BusyException", "SQLite3::SQLException",
+        // `rescue ArgumentError, RQRCodeCore::QRCodeRunTimeError` —
+        // campfire's `QrCodeController#show` answers 400 for data too
+        // long to encode. rqrcode_core's classes on the ruby family, the
+        // spinel-rqrcode package's (same names, same raise) on spinel.
+        "RQRCodeCore::QRCodeRunTimeError", "RQRCodeCore::QRCodeArgumentError",
     ] {
         register_stdlib_class(classes, exc, &[], &exception_surface);
     }
@@ -698,6 +780,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "Thread::Mutex", "Comparable", "Enumerable"] {
         register_stdlib_class(classes, name, &[], &[]);
     }
+    for (class, method) in BUILTIN_BLOCK_VALUE_METHODS {
+        classes
+            .entry(ClassId(Symbol::from(*class)))
+            .or_default()
+            .block_value_methods
+            .insert(Symbol::from(*method));
+    }
     // `Array.wrap` is folded by `lower::enumerable_ext` before emit.
     // Registered so the analyzer does not report it as unknown. The
     // element type is not known from a scalar argument.
@@ -773,6 +862,20 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         register_stdlib_class(classes, gem.name, &class_methods, &instance_methods);
     }
 }
+
+/// Library methods that answer their block's value, by Ruby's (or
+/// ActiveSupport's) definition rather than by inference:
+/// `mutex.synchronize { … }` — campfire's `ResponseCache#version` is
+/// `@mutex.synchronize { current_version }` — and a cache `fetch`, which
+/// answers the block's value on a miss and what such a block wrote on a
+/// hit. Only an informative block type is adopted (`block_value_return`).
+/// Re-seeded after every harvest of the app's own block-value methods
+/// (`Analyzer::harvest_block_value_methods`), which starts from empty.
+pub(crate) const BUILTIN_BLOCK_VALUE_METHODS: &[(&str, &str)] = &[
+    ("Mutex", "synchronize"),
+    ("Thread::Mutex", "synchronize"),
+    ("ActiveSupport::Cache::MemoryStore", "fetch"),
+];
 
 fn register_stdlib_class(
     classes: &mut HashMap<ClassId, ClassInfo>,

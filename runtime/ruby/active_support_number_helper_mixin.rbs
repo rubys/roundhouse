@@ -1,0 +1,15 @@
+module ActiveSupport
+  module NumberHelper
+    type number_input = Integer | Float | Rational | String
+    type number_value = number_input | nil
+    type number_option_value = String | Integer | Float | Rational | Symbol | bool | Regexp | nil | Hash[Symbol, String | Hash[Symbol, String]]
+    type number_options = Hash[Symbol | String, number_option_value]
+    def number_to_currency: (number_value number, ?number_options options) -> String?
+    def number_to_delimited: (number_value number, ?number_options options) -> String?
+    def number_to_human: (number_value number, ?number_options options) -> String?
+    def number_to_human_size: (number_value number, ?number_options options) -> String?
+    def number_to_percentage: (number_value number, ?number_options options) -> String?
+    def number_to_phone: (number_value number, ?number_options options) -> String?
+    def number_to_rounded: (number_value number, ?number_options options) -> String?
+  end
+end

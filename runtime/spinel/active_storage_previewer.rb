@@ -29,5 +29,36 @@ module ActiveStorage
       File.delete(out)
       png
     end
+
+    # Rails' `ActiveStorage::Analyzer::VideoAnalyzer`, its width and
+    # height: ffprobe on the first video stream. campfire posts a video
+    # with a poster only when its size is known (`too_many_pixels_to_
+    # preview?` reads both), so a video with no dimensions was a video
+    # with no poster. The bytes go to a file under the storage root
+    # because ffprobe reads a path, and the answer comes back through
+    # `-o`, for the same `system`-only reason as `poster`. No ffprobe, or
+    # a stream it cannot read, answers `[0, 0]` — the metadata Rails
+    # leaves empty when its analyzer fails. Rotation (Rails swaps width
+    # and height for a 90/270 degree stream) is not read.
+    PROBES = [0]
+
+    def self.video_dimensions(data)
+      PROBES[0] = PROBES[0] + 1
+      service = ActiveStorage::Blob.service
+      service.ensure_dir(service.root)
+      path = service.root + "/.probe-" + Process.pid.to_s + "-" + PROBES[0].to_s
+      out = path + ".txt"
+      File.binwrite(path, data)
+      ok = system("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                  "-of", "csv=s=x:p=0", "-o", out, path)
+      dims = [0, 0]
+      if ok && File.exist?(out)
+        parts = File.read(out).strip.split("x")
+        dims = [parts[0].to_i, parts[1].to_i] if parts.length >= 2
+      end
+      File.delete(out) if File.exist?(out)
+      File.delete(path) if File.exist?(path)
+      dims
+    end
   end
 end

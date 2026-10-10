@@ -113,6 +113,34 @@ fn tap_binds_its_block_parameter_to_the_receiver() {
 }
 
 #[test]
+fn thread_new_binds_block_parameters_from_constructor_arguments() {
+    let found = errors(vec![
+        (
+            "app/models/worker_state.rb",
+            "class WorkerState\n  def read\n    \"ready\"\n  end\nend\n",
+        ),
+        (
+            "app/models/user.rb",
+            "class User < ApplicationRecord\n  \
+               def start_worker\n    \
+                 Thread.new(WorkerState.new) do |state|\n      \
+                   state.read\n      \
+                   state.no_such_method\n      \
+                 end\n  \
+               end\nend\n",
+        ),
+    ]);
+    assert!(
+        found.iter().any(|d| d.contains("`no_such_method`")),
+        "Thread.new forwards its positional argument into the block: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|d| d.contains("`read`")),
+        "the argument's valid methods must resolve on the block parameter: {found:?}"
+    );
+}
+
+#[test]
 fn string_new_is_a_str_and_answers_force_encoding() {
     let found = errors(vec![(
         "app/models/user.rb",

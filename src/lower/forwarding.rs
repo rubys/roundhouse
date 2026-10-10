@@ -23,6 +23,13 @@ pub(super) struct ConstructorNames {
     pub(super) ambiguous_names: HashSet<String>,
     pub(super) lexical_refinement_calls: HashSet<crate::span::Span>,
     pub(super) model_names: HashSet<String>,
+    /// Classes a TEST FILE carries whose `initialize` kept keyword
+    /// parameters, by full and (when unambiguous) simple name.
+    /// `Server.new(**options)` there (campfire's `PushServiceTestHelper`)
+    /// reaches the analyzer untyped, and Ruby 3 binds the bundle to
+    /// keywords only through the splat, so it is kept. Library classes
+    /// are not here: their keyword splats expand (`lower::kwsplat`).
+    pub(super) keyword_initializers: HashSet<String>,
 }
 
 pub(super) fn constructor_names(
@@ -61,6 +68,7 @@ pub(super) fn constructor_names(
         })
         .collect();
     splat_classes.extend(ambiguous_names.iter().cloned());
+    let keyword_initializers = keyword_initializer_names(app, &ambiguous_names);
     ConstructorNames {
         splat_classes,
         unqualified_class_ids,
@@ -71,7 +79,31 @@ pub(super) fn constructor_names(
             .iter()
             .map(|model| model.name.0.as_str().to_string())
             .collect(),
+        keyword_initializers,
     }
+}
+
+fn keyword_initializer_names(app: &App, ambiguous: &HashSet<String>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let classes = app.test_modules.iter().flat_map(|module| module.inner_classes.iter());
+    for class in classes {
+        let keeps = class.methods.iter().any(|m| {
+            m.name.as_str() == "initialize"
+                && m.receiver == crate::dialect::MethodReceiver::Instance
+                && m.params.iter().any(|p| p.keyword)
+                && !m.params.iter().any(|p| p.forwarding)
+        });
+        if !keeps {
+            continue;
+        }
+        let full = class.name.0.as_str();
+        out.insert(full.to_string());
+        let simple = full.rsplit("::").next().unwrap_or(full);
+        if !ambiguous.contains(simple) {
+            out.insert(simple.to_string());
+        }
+    }
+    out
 }
 
 fn unqualified_constructor_names<'a>(
@@ -142,7 +174,11 @@ pub(super) fn apply_with_plans(
                                                 .map_or(id.0.as_str(), String::as_str)
                                         ) || names.ambiguous_names.contains(id.0.as_str())
                                             || names.lexical_refinement_calls.contains(&e.span)
-                                ))
+                                ) || (recv.ty.is_none()
+                                    && matches!(&*recv.node, ExprNode::Const { path }
+                                        if names.keyword_initializers.contains(
+                                            &path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")
+                                        ))))
                         });
                     (Some(args), constructor_splat)
                 }

@@ -1,0 +1,40 @@
+module ActiveSupport
+  module NumberHelper
+    type number_input = Integer | Float | Rational | String
+    type number_value = number_input | nil
+    type number_option_scalar = String | Integer | Float | Rational | Symbol | bool | Regexp | nil
+    type unit_value = String | Hash[Symbol, String]
+    type unit_map = Hash[Symbol, unit_value]
+    type locale_format = Hash[Symbol, String | Integer | bool]
+    type locale_nested = Hash[Symbol, String | Integer | bool | unit_value | unit_map | locale_format]
+    type locale_section = Hash[Symbol, String | Integer | bool | unit_value | unit_map | locale_format | locale_nested]
+    type number_option_value = number_option_scalar | Hash[Symbol, String | Integer | bool | unit_value | unit_map | locale_format]
+    type number_options = Hash[Symbol | String, number_option_value]
+    type locale_profile = Hash[Symbol, locale_section]
+
+    DEFAULT_LOCALE: Symbol
+    def self.register_locale: (Symbol | String locale, String separator, String delimiter, ?locale_profile translations) -> locale_profile
+    def self.symbolize_options: (number_options options) -> Hash[Symbol, number_option_value]
+    def self.locale_profile: (number_options options) -> locale_profile
+    def self.locale_format: (number_options options) -> locale_format
+    def self.translated_option: (locale_profile profile, Symbol namespace, Symbol key, number_option_value fallback) -> number_option_value
+    def self.validate_options: (Hash[Symbol, number_option_value] options, Array[Symbol] allowed) -> Hash[Symbol, number_option_value]
+    def self.number_to_currency: (number_value number, ?number_options options) -> String?
+    def self.number_to_delimited: (number_value number, ?number_options options) -> String?
+    def self.number_to_human: (number_value number, ?number_options options) -> String?
+    def self.number_to_human_size: (number_value number, ?number_options options) -> String?
+    def self.number_to_percentage: (number_value number, ?number_options options) -> String?
+    def self.number_to_phone: (number_value number, ?number_options options) -> String?
+    def self.number_to_rounded: (number_value number, ?number_options options) -> String?
+    def self.registered_units: (locale_profile profile, String | Symbol scope) -> unit_map?
+    def self.valid_decimal_string?: (String text) -> bool
+    def self.numeric_text: (number_input number, ?Integer digits_after_point) -> String
+    def self.expand_decimal: (String text) -> String
+    def self.divide_decimal: (String text, Integer divisor, Integer digits_after_point) -> String
+    def self.shift_decimal: (String text, Integer places) -> String
+    def self.decimal_digit_count: (String text) -> Integer
+    def self.round_decimal: (String text, Integer precision, Symbol mode) -> String
+    def self.should_increment: (String discarded, String kept, String sign, Symbol mode) -> bool
+    def self.increment_digits: (String digits) -> String
+  end
+end

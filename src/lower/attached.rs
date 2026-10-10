@@ -106,15 +106,16 @@ pub fn apply_attach_lowering(app: &mut crate::app::App) {
 }
 
 /// `x.preview(format: :webp, resize_to_limit: [w, h])` ->
-/// `x.preview(ActiveStorage::Variation.new("", w, h, "webp"))`. Only
-/// `preview`: `variant`/`representation` take a declared name in the
-/// corpus, and their inline form stays the identity variant the
-/// runtime documents. A hash with a key this cannot lower is left as
-/// written.
+/// `x.preview(ActiveStorage::Variation.new("", w, h, "webp"))`, and the
+/// same for `variant` / `representation` written inline — campfire's
+/// `embeds.first.blob.variant(resize_to_limit: [ 1024, 768 ])`, the
+/// variant Action Text's own blob partial would make. A declared NAME
+/// (`variant(:thumb)`) is not a hash and is left for the runtime to
+/// look up; a hash with a key this cannot lower is left as written.
 fn rewrite_inline_transformation(e: &mut Expr) {
     e.node.for_each_child_mut(&mut rewrite_inline_transformation);
     let ExprNode::Send { method, args, .. } = &mut *e.node else { return };
-    if method.as_str() != "preview" || args.len() != 1 {
+    if !matches!(method.as_str(), "preview" | "variant" | "representation") || args.len() != 1 {
         return;
     }
     let ExprNode::Hash { entries, .. } = &*args[0].node else { return };
@@ -756,6 +757,152 @@ pub(crate) fn push_attached_methods(methods: &mut Vec<MethodDef>, model: &Model)
             m.body.inherit_span(span);
         }
     }
+    push_attachment_changes(methods, model);
+    push_purge_on_destroy(methods, model);
+}
+
+/// What destroying the owner does to an attachment, from the macro's
+/// `dependent:` — Rails' default `:purge_later` (the join row now, the
+/// blob in an `ActiveStorage::PurgeJob`), `:purge` (both now), or
+/// `false` (neither). `None` for a value Rails doesn't define, which
+/// keeps the default rather than guessing.
+fn attached_dependent(model: &Model, attr: &Symbol) -> Option<&'static str> {
+    for item in &model.body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+        if !matches!(method.as_str(), "has_one_attached" | "has_many_attached") {
+            continue;
+        }
+        let Some(ExprNode::Lit { value: Literal::Sym { value } }) = args.first().map(|a| &*a.node) else {
+            continue;
+        };
+        if value.as_str() != attr.as_str() {
+            continue;
+        }
+        for arg in &args[1..] {
+            let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
+            for (k, v) in entries {
+                let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { continue };
+                if key.as_str() != "dependent" {
+                    continue;
+                }
+                return match &*v.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "purge" => Some("purge"),
+                    ExprNode::Lit { value: Literal::Bool { value: false } } => Some(""),
+                    _ => Some("purge_later"),
+                };
+            }
+        }
+    }
+    Some("purge_later")
+}
+
+/// ```ruby
+/// def after_destroy
+///   self.attachment.purge_later
+/// end
+/// ```
+///
+/// Destroying the owner takes its attachments with it, as Rails'
+/// `has_one :<attr>_attachment, dependent: :destroy` does, and the
+/// blob goes as `dependent:` says. Without it campfire's
+/// `Room#destroy_one_message_at_a_time` left every message's
+/// attachment row (and its file) behind.
+fn push_purge_on_destroy(methods: &mut Vec<MethodDef>, model: &Model) {
+    let attrs = attached_attrs(model).into_iter().chain(many_attached_attrs(model));
+    for (span, attr) in attrs {
+        let action = attached_dependent(model, &attr).unwrap_or("purge_later");
+        if action.is_empty() {
+            continue;
+        }
+        let syn = |node: ExprNode| Expr::new(span, node);
+        let call = syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::Send {
+                recv: Some(syn(ExprNode::SelfRef)),
+                method: attr.clone(),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            })),
+            method: Symbol::from(action),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        });
+        super::model_to_library::markers::fold_into_or_push(methods, model, "after_destroy", call);
+    }
+}
+
+/// The type of `attachment_changes`: attribute name -> the blob the
+/// writer staged.
+pub fn attachment_changes_ty() -> Ty {
+    Ty::Hash { key: Box::new(Ty::Str), value: Box::new(blob_class_ty()) }
+}
+
+/// ```ruby
+/// def attachment_changes
+///   changes = {}
+///   changes["logo"] = @logo_pending unless @logo_pending.nil?
+///   changes
+/// end
+/// ```
+///
+/// Rails' dirty record of attachments assigned but not yet saved,
+/// keyed by attribute name — campfire's `Message::Searchable` asks
+/// `attachment_changes.key?("attachment")` in a `before_update` to learn
+/// the file was replaced. The writer's staged blob IS that record here:
+/// it is set by `<attr>=` and cleared once the save attaches it, so the
+/// hash answers through every callback up to `after_save`. Rails keeps
+/// an `ActiveStorage::Attached::Changes::CreateOne` as the value; this
+/// keeps the blob it wraps, so a caller reading the value's own API
+/// (`.attachable`, `.upload`) does not type.
+fn push_attachment_changes(methods: &mut Vec<MethodDef>, model: &Model) {
+    let attrs = attached_attrs(model);
+    let name = Symbol::from("attachment_changes");
+    if attrs.is_empty()
+        || super::model_to_library::model_defines_instance_method(model, &name)
+        || methods.iter().any(|m| m.name == name)
+    {
+        return;
+    }
+    let syn = |node: ExprNode| Expr::new(Span::synthetic(), node);
+    let changes = Symbol::from("changes");
+    let var = || syn(ExprNode::Var { id: crate::ident::VarId(0), name: changes.clone() });
+    let mut exprs = vec![syn(ExprNode::Assign {
+        target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: changes.clone() },
+        value: syn(ExprNode::Hash { entries: vec![], kwargs: false }),
+    })];
+    for (_span, attr) in &attrs {
+        let pending = || syn(ExprNode::Ivar { name: Symbol::from(format!("{}_pending", attr.as_str())) });
+        exprs.push(syn(ExprNode::If {
+            cond: syn(ExprNode::Send {
+                recv: Some(pending()),
+                method: Symbol::from("nil?"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            }),
+            then_branch: syn(ExprNode::Lit { value: Literal::Nil }),
+            else_branch: syn(ExprNode::Send {
+                recv: Some(var()),
+                method: Symbol::from("[]="),
+                args: vec![syn(ExprNode::Lit { value: Literal::Str { value: attr.as_str().to_string() } }), pending()],
+                block: None,
+                parenthesized: false,
+            }),
+        }));
+    }
+    exprs.push(var());
+    super::model_to_library::push_synth_instance_method(
+        methods,
+        model,
+        name,
+        Vec::new(),
+        syn(ExprNode::Seq { exprs }),
+        Some(super::model_to_library::fn_sig(vec![], attachment_changes_ty())),
+        AccessorKind::Method,
+        true,
+    );
 }
 
 /// ```ruby

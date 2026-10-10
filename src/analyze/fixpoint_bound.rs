@@ -318,6 +318,24 @@ mod tests {
         }
     }
 
+    /// The same for a parameter row: its call sites' observations are
+    /// joined first and the row is bounded once.
+    #[test]
+    fn a_param_slot_is_bounded_once_after_its_observations() {
+        let key = (ClassId(Symbol::from("C")), Symbol::from("m"), crate::dialect::MethodReceiver::Instance);
+        let fold = |order: [usize; 3]| {
+            let writers = bound_order_writers();
+            let mut rows = std::collections::HashMap::new();
+            let observations = order.iter().map(|&i| (key.clone(), vec![writers[i].clone()])).collect();
+            super::super::fold_param_observations(&mut rows, observations);
+            rows.remove(&key).unwrap()
+        };
+        let first = fold([0, 1, 2]);
+        for order in [[1, 2, 0], [2, 0, 1], [0, 2, 1]] {
+            assert_eq!(fold(order), first, "observations in order {order:?}");
+        }
+    }
+
     #[test]
     fn bounding_is_idempotent_so_a_cut_type_is_a_fixed_point() {
         for ty in [json_like(12), nested_arrays(MAX_DEPTH + 4)] {

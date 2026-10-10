@@ -307,9 +307,18 @@ impl Visibility {
                 self.invalid |= self.reject_defs;
             }
         }
+        // A def inside a call's block belongs to that block's owner, not
+        // to this class: a DSL block (has_many extensions), or the class
+        // a constant is assigned from — `ContentKey = Data.define(:digest)
+        // do def cache_key … end end` (campfire's FragmentCache),
+        // `Struct.new(…) do … end`.
+        let owns_defs = node.as_call_node().is_some()
+            || node
+                .as_constant_write_node()
+                .is_some_and(|w| w.value().as_call_node().is_some_and(|c| c.block().is_some()));
         let mut declarations = Declarations {
             invalid: false,
-            reject_defs: node.as_call_node().is_none(),
+            reject_defs: !owns_defs,
         };
         ruby_prism::Visit::visit(&mut declarations, node);
         if declarations.invalid {
@@ -486,6 +495,14 @@ impl Visibility {
                 continue;
             }
             let Some(call) = node.as_call_node() else {
+                // `X = Data.define(:a) do def … end` defines X's methods,
+                // not this body's; `library_class::data_block_classes`
+                // gives them a class of their own.
+                if node.as_constant_write_node().is_some_and(|cw| {
+                    super::library_class::data_define_block(&cw.value()).is_some()
+                }) {
+                    continue;
+                }
                 // A `def` is handled above. Anything else — an `if` that
                 // wraps a definition, a modifier that does not — still
                 // has to be rejected when it hides a marker or a `def`.

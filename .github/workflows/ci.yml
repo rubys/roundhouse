@@ -55,7 +55,6 @@ env:
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
   CAMPFIRE_SHA: 32b4144b5206304fa8d4c67455a753e2d3c16635
-  WRITEBOOK_SHA: f3fadd21907ad9b18cb23800d971c2cc25045e2a
   # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
   # Pinned like the apps above; bump deliberately.
@@ -96,80 +95,6 @@ jobs:
           CI_SPINEL_REVISION: ${{ inputs.spinel_revision }}
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci-plan.py plan
-
-  writebook-inventory:
-    needs: plan
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'writebook-inventory') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
-      - name: Fetch pinned Writebook source
-        run: |
-          curl -fsSL "https://codeload.github.com/basecamp/writebook/tar.gz/${WRITEBOOK_SHA}" -o /tmp/writebook.tar.gz
-          mkdir /tmp/writebook
-          tar -xzf /tmp/writebook.tar.gz -C /tmp/writebook --strip-components=1
-      - name: Look for an identical successful PR execution
-        id: reuse
-        if: github.event_name == 'pull_request'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci-reuse.py probe --job writebook-inventory --input /tmp/writebook
-      - name: Build Roundhouse and run inventory
-        id: inventory
-        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
-        env:
-          WRITEBOOK_ROOT: /tmp/writebook
-          WRITEBOOK_INVENTORY_REPORT: writebook-inventory-current.json
-        run: cargo test --locked --release --bin roundhouse --test writebook -- --ignored --nocapture
-      - name: Save complete check report
-        id: report
-        if: always() && (steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true')
-        env:
-          WRITEBOOK_ROOT: /tmp/writebook
-        run: |
-          set +e
-          target/release/roundhouse check --continue "$WRITEBOOK_ROOT" > writebook-check.txt 2>&1
-          status=$?
-          set -e
-          cat writebook-check.txt
-          test "$(grep -c '^roundhouse-check: .* — ' writebook-check.txt)" -eq 1
-          summary=$(grep '^roundhouse-check: .* — ' writebook-check.txt)
-          pattern='^roundhouse-check: .* — ([0-9]+) parse error\(s\), ([0-9]+) error\(s\), [0-9]+ warning\(s\), [0-9]+ gap-attributed note\(s\), [0-9]+ survey gap\(s\)$'
-          [[ "$summary" =~ $pattern ]]
-          expected=0
-          if (( BASH_REMATCH[1] + BASH_REMATCH[2] > 0 )); then expected=1; fi
-          test "$status" -eq "$expected"
-      - name: Upload Writebook reports and baseline
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: writebook-inventory
-          path: |
-            writebook-check.txt
-            writebook-inventory-current.json
-            tests/fixtures/writebook-inventory.json
-      - name: Record actual successful execution
-        id: execution
-        if: success() && steps.reuse.outputs.eligible == 'true' && steps.inventory.outcome == 'success' && steps.report.outcome == 'success'
-        continue-on-error: true
-        run: python3 scripts/ci-reuse.py record --job writebook-inventory --outcome '${{ steps.inventory.outcome }}' --outcome '${{ steps.report.outcome }}'
-      - name: Save execution receipt and reports
-        if: success() && steps.execution.outcome == 'success'
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
-        with:
-          name: ci-executed-writebook-inventory-${{ github.run_attempt }}
-          path: ${{ steps.reuse.outputs.bundle }}
-          retention-days: 7
-          if-no-files-found: error
 
   # -------------------------------------------------------------------
   # Share both fixtures through this run's artifact. First-attempt PRs
@@ -1111,7 +1036,7 @@ jobs:
 
     services:
       redis:
-        image: redis
+        image: public.ecr.aws/docker/library/redis
         ports: ['6379:6379']
     env:
       # The oracle's `bundle install` lands inside build/campfire-oracle
@@ -1375,7 +1300,7 @@ jobs:
       verify-gen: ${{ steps.result.outputs.verify-gen }}
     services:
       redis:
-        image: redis
+        image: public.ecr.aws/docker/library/redis
         ports: ['6379:6379']
     env:
       BUNDLE_PATH: vendor/bundle
@@ -1477,7 +1402,7 @@ jobs:
     continue-on-error: true
     services:
       redis:
-        image: redis
+        image: public.ecr.aws/docker/library/redis
         ports: ['6379:6379']
     env:
       BUNDLE_PATH: vendor/bundle
@@ -3918,7 +3843,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, campfire-latest, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, writebook-inventory, spinel-build, spinel-framework, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, campfire-latest, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, archive-results, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

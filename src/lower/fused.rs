@@ -445,6 +445,8 @@ fn rewrite_hook_node(
     super::number_to_fs::rewrite_node(e);
     super::string_inflections::rewrite_node(e);
     super::to_json::rewrite_node(e);
+    super::bigdecimal::rewrite_node(e);
+    super::range_enumerable::rewrite_node(e);
     super::csv_generate::rewrite_node(e);
     super::presence_in::rewrite_node(e);
     super::enumerable_ext::rewrite_node(e);
@@ -491,6 +493,8 @@ fn rewrite_view_node(
     super::number_to_fs::rewrite_node(e);
     super::string_inflections::rewrite_node(e);
     super::to_json::rewrite_node(e);
+    super::bigdecimal::rewrite_node(e);
+    super::range_enumerable::rewrite_node(e);
     super::csv_generate::rewrite_node(e);
     super::presence_in::rewrite_node(e);
     super::enumerable_ext::rewrite_node(e);
@@ -519,6 +523,8 @@ fn rewrite_view_node(
 
 fn rewrite_test_node(e: &mut Expr, skip_full_messages: bool) {
     super::save_without_validation::rewrite_node(e);
+    super::bigdecimal::rewrite_node(e);
+    super::range_enumerable::rewrite_node(e);
     super::enumerable_ext::rewrite_node(e);
     super::byte_size::rewrite_node(e);
     super::dirty_predicate_kwargs::rewrite_node(e);

@@ -2005,6 +2005,38 @@ fn multi_write_with_post_rest_targets_ingests_and_round_trips() {
 }
 
 #[test]
+fn nested_multi_write_refuses_a_reordered_last_write() {
+    use roundhouse::emit::ruby::emit_expr;
+    use roundhouse::ingest::IngestError;
+
+    let parse = |source: &str| {
+        let result = ruby_prism::parse(source.as_bytes());
+        let program = result.node();
+        roundhouse::ingest::ingest_expr(&program.as_program_node().unwrap().statements().as_node(), "<snippet>")
+    };
+    let expr = parse("_, (_, size) = entries.shift").unwrap();
+    let emitted = emit_expr(&expr);
+    assert_eq!(expr, parse(&emitted).unwrap(), "round-trip IR, not only emitted text, must be stable");
+
+    // Ruby writes depth first in source order, the desugar a level at a
+    // time: `(x, y), x = [1, 2], 3` leaves x at 3 in Ruby and would leave
+    // it at 1, so it is refused.
+    let Err(IngestError::Unsupported { message, .. }) = parse("(x, y), x = [1, 2], 3") else {
+        panic!("expected unsupported");
+    };
+    assert!(message.contains("out of source order"), "{message}");
+    // The same name written twice in an order the desugar keeps is fine.
+    assert!(parse("x, (y, x) = 1, [2, 3]").is_ok());
+
+    let Err(IngestError::Unsupported { message, .. }) =
+        parse("(self.flag, _), @observed = [1, 2], true")
+    else {
+        panic!("expected nested setter reordering to be unsupported");
+    };
+    assert!(message.contains("assignment-method targets"), "{message}");
+}
+
+#[test]
 fn multi_write_temporary_does_not_capture_a_user_target() {
     let source = "a, *__mw_0, c = [11, 22, 33]";
     let result = ruby_prism::parse(source.as_bytes());

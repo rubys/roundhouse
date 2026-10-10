@@ -64,11 +64,15 @@ module Db
   # one thread for a request's duration, the cache needs no lock.
   class Conn
     attr_reader :raw, :stmt_cache, :open_statements
+    # Whether a BEGIN this lane ran is still open. JDBC's autocommit flag
+    # does not see a BEGIN issued as SQL, so `exec` keeps it.
+    attr_accessor :in_txn
 
     def initialize(raw)
       @raw = raw
       @stmt_cache = {}
       @open_statements = {}.compare_by_identity
+      @in_txn = false
     end
   end
 
@@ -155,6 +159,19 @@ module Db
     @free[0]
   end
 
+  # `ActiveRecord::Base.transaction`'s per-thread nesting depth
+  # (connection.rb) — see the contract note in runtime/ruby/db.rbs.
+  # Mirrors db_cruby.rb: `Fiber[:k]` for the same reason `current_dbh`
+  # above uses it.
+  def self._txn_depth
+    d = Fiber[:ar_txn_depth]
+    d.nil? ? 0 : d
+  end
+
+  def self._txn_depth=(value)
+    Fiber[:ar_txn_depth] = value
+  end
+
   # Request-scoped connection lease. Mirrors db_cruby.rb: checks out a
   # Conn under @mutex (parking on @cv while the pool is momentarily
   # exhausted), binds it to fiber-storage so `current_dbh` resolves to it
@@ -165,6 +182,23 @@ module Db
   # rebind the connection and, on release, unbind the outer lease's.
   def self.in_lease?
     !Fiber[:db_handle].nil?
+  end
+
+  # `ActiveRecord::Base.connection_db_config` answers from these
+  # (runtime/spinel/active_record_db_config.rb): the database this
+  # process configured, the adapter name Rails would report for it, and
+  # whether the holder is inside a transaction of its own — the request
+  # read snapshot is the shim's, not the app's, so it does not count.
+  def self.database_path
+    @path
+  end
+
+  def self.adapter_name
+    "sqlite3"
+  end
+
+  def self.transaction_open?
+    current_dbh.in_txn
   end
 
   def self.with_connection
@@ -281,9 +315,14 @@ module Db
     # invalidates the whole query cache on write; so do we.
     qcache = Fiber[:rh_qcache]
     qcache.clear unless qcache.nil?
-    st = current_dbh.raw.create_statement
+    conn = current_dbh
+    st = conn.raw.create_statement
     begin
       st.execute(sql)
+      word = sql.strip.split(" ", 2).first.to_s.upcase
+      conn.in_txn = true if word == "BEGIN"
+      rollback_to_savepoint = word == "ROLLBACK" && sql.strip.upcase.start_with?("ROLLBACK TO ")
+      conn.in_txn = false if word == "COMMIT" || word == "END" || (word == "ROLLBACK" && !rollback_to_savepoint)
     rescue StandardError => e
       raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
       raise

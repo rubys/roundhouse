@@ -54,6 +54,21 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("Float", "MIN", || Ty::Float),
     ("IO", "NULL", || Ty::Str),
     ("File", "NULL", || Ty::Str),
+    // `File.open(path, File::RDWR | File::CREAT, 0644)` and
+    // `file.flock(File::LOCK_EX | File::LOCK_NB)` — campfire's WAL
+    // checkpointer. Ruby defines them on `File::Constants`, which `File`
+    // includes; CRuby and spinel answer the same POSIX values.
+    ("File", "RDONLY", || Ty::Int),
+    ("File", "WRONLY", || Ty::Int),
+    ("File", "RDWR", || Ty::Int),
+    ("File", "CREAT", || Ty::Int),
+    ("File", "EXCL", || Ty::Int),
+    ("File", "TRUNC", || Ty::Int),
+    ("File", "APPEND", || Ty::Int),
+    ("File", "LOCK_SH", || Ty::Int),
+    ("File", "LOCK_EX", || Ty::Int),
+    ("File", "LOCK_NB", || Ty::Int),
+    ("File", "LOCK_UN", || Ty::Int),
     ("Encoding", "UTF_8", encoding_ty),
     ("Encoding", "BINARY", encoding_ty),
     ("Encoding", "ASCII_8BIT", encoding_ty),
@@ -75,6 +90,7 @@ fn encoding_ty() -> Ty {
 fn rbs_type_name(ty: &Ty) -> &'static str {
     match ty {
         Ty::Float => "Float",
+        Ty::Int => "Integer",
         Ty::Str => "String",
         Ty::Class { id, .. } if id.0.as_str() == "Encoding" => "Encoding",
         _ => "untyped",

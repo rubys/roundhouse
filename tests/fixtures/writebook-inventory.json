@@ -1091,8 +1091,6 @@
     "Warning|unresolved_type|app/views/sections/update.turbo_stream.erb:1:5|method call `turbo_stream` has unresolved type": 1
   },
   "ingest_gaps": {
-    "UsersController|class-body macro not expanded: `require_unauthenticated_access` from Authentication holds a statement that is not filter DSL": 1,
-    "app/controllers/users_controller.rb|controller class-body macro not recognized: `require_unauthenticated_access` (its effect is dropped from the output)": 1,
     "app/views/books/show.md.erb|view template not ingested: erb (non-html format)": 1,
     "app/views/leafables/show.md.erb|view template not ingested: erb (non-html format)": 1
   },

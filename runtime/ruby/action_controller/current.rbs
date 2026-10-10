@@ -6,6 +6,7 @@ module ActionController
     def request: () -> ActionDispatch::Request?
     def request=: (ActionDispatch::Request?) -> ActionDispatch::Request?
     def request_host_for_redirect: () -> String
+    def request_protocol_for_url: () -> String
     def request_for_csrf: () -> ActionDispatch::Request?
     def csrf_header_token: () -> String
   end

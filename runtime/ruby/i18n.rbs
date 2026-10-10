@@ -1,0 +1,4 @@
+module I18n
+  def self.default_locale: () -> Symbol
+  def self.locale: () -> Symbol
+end

@@ -275,13 +275,91 @@ pub fn ingest_test_case_setup(source: &[u8], file: &str) -> IngestResult<Option<
             continue;
         }
         let Some(body) = class.body() else { continue };
+        let mut setup: Option<Expr> = None;
+        let mut after_fixtures: Vec<Expr> = Vec::new();
         for stmt in flatten_statements(body) {
-            if let Some(setup) = ingest_setup_declaration(&stmt, file)? {
-                return Ok(Some(setup));
+            if setup.is_none() {
+                if let Some(found) = ingest_setup_declaration(&stmt, file)? {
+                    setup = Some(found);
+                    continue;
+                }
+            }
+            if let Some(stmts) = ingest_load_fixtures_override(&stmt, file)? {
+                after_fixtures = stmts;
             }
         }
+        if after_fixtures.is_empty() {
+            return Ok(setup);
+        }
+        // The fixture hook's statements run first: Rails loads fixtures
+        // in `before_setup`, ahead of every `setup` block, and the
+        // harness reloads them per test before this runs.
+        let mut exprs = after_fixtures;
+        match setup {
+            Some(s) => match *s.node {
+                ExprNode::Seq { exprs: own } => exprs.extend(own),
+                node => exprs.push(Expr::new(s.span, node)),
+            },
+            None => {}
+        }
+        return Ok(Some(Expr::new(Span::synthetic(), ExprNode::Seq { exprs })));
     }
     Ok(None)
+}
+
+/// `def load_fixtures(config) = (fixtures = super; …; fixtures)` on the
+/// app's `ActiveSupport::TestCase` — work to do once fixtures are in
+/// the database. campfire repairs `rooms.messages_count` there, because
+/// `fixtures :all` inserts messages before the rooms they count:
+///
+/// ```ruby
+/// def load_fixtures(config)
+///   fixtures = super
+///   Room::MessagesCount.ensure!
+///   Room::MessagesCount.backfill!
+///   fixtures
+/// end
+/// ```
+///
+/// Only that shape — `super` first (bare or assigned), its value last
+/// when assigned — is read, as the statements between. The harness
+/// loads fixtures itself, so those statements are what the override
+/// adds. Any other shape is an error rather than a hook silently left
+/// out.
+fn ingest_load_fixtures_override(stmt: &Node<'_>, file: &str) -> IngestResult<Option<Vec<Expr>>> {
+    let Some(def) = stmt.as_def_node() else { return Ok(None) };
+    if std::str::from_utf8(def.name().as_slice()).ok() != Some("load_fixtures") {
+        return Ok(None);
+    }
+    let unsupported = || IngestError::Unsupported {
+        file: file.into(),
+        message: "a `load_fixtures` override other than `x = super; …; x` is not supported".into(),
+    };
+    let Some(body) = def.body() else { return Ok(Some(Vec::new())) };
+    let body = ingest_expr(&body, file)?;
+    let mut stmts = match *body.node {
+        ExprNode::Seq { exprs } => exprs,
+        node => vec![Expr::new(body.span, node)],
+    };
+    if stmts.is_empty() {
+        return Err(unsupported());
+    }
+    let first = stmts.remove(0);
+    let is_super = |e: &Expr| matches!(&*e.node, ExprNode::Super { .. });
+    match &*first.node {
+        _ if is_super(&first) => {}
+        ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, value } if is_super(value) => {
+            let returns_it = stmts
+                .last()
+                .is_some_and(|e| matches!(&*e.node, ExprNode::Var { name: n, .. } if n == name));
+            if !returns_it {
+                return Err(unsupported());
+            }
+            stmts.pop();
+        }
+        _ => return Err(unsupported()),
+    }
+    Ok(Some(stmts))
 }
 
 /// Collect every class the file declares outside another class, each

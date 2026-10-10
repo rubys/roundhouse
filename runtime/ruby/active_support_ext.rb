@@ -10,6 +10,7 @@
 # so the scaffold ActiveSupport module is one constant with both
 # surfaces.
 require_relative "active_support_inflections"
+require_relative "active_support_number_helper"
 #
 # `src/lower/blank.rs` grounds `blank?`/`present?`/`presence` by the
 # receiver's static type and every target compiles the result. What it
@@ -42,34 +43,65 @@ require_relative "active_support_inflections"
 # Integer's `"0"` is not blank, a Symbol's `"sym"` is not blank, and a
 # String is itself.
 module ActiveSupport
-  # `ActiveSupport::JSON.encode(value)` — Rails' JSON coder, here for a
-  # flat Hash, which is what reaches it: campfire encodes the unread
-  # notice once (`ActiveSupport::JSON.encode(roomId: room.id)`) and
-  # broadcasts the text to every member with `coder: nil`
-  # (basecamp/once-campfire#292). A nested Hash or Array value raises
-  # rather than encode wrong.
+  # `ActiveSupport::JSON` — Rails' JSON coder over the json library.
+  #
+  # `encode` is `value.as_json.to_json` with Rails' default HTML-entity
+  # escaping (`JsonBuilder.escape_html_entities`; the U+2028/U+2029
+  # separators are left alone, as `load_defaults` 8.1+ leaves them).
+  # campfire encodes a flat Hash for the unread notice
+  # (`ActiveSupport::JSON.encode(roomId: room.id)`, broadcast with
+  # `coder: nil`, basecamp/once-campfire#292), and since its response
+  # cache an Array of request facts (`CachedResponses#response_cache_key`)
+  # and the raw attributes of cached records (`RecordCache.fetch`).
+  #
+  # `as_json` is spelled out for the values those carry — nil, booleans,
+  # numbers, Strings, Symbols, and Arrays/Hashes of them, keys as their
+  # `to_s`, a non-finite Float as null, as Rails answers. Anything else
+  # (a Time, a record) raises rather than encode some other text.
+  #
+  # `decode` is `JSON.parse`, which is all Rails' is while
+  # `ActiveSupport.parse_json_times` keeps its default (off).
   module JSON
     def self.encode(value)
-      out = "{"
-      first = true
-      value.each do |key, item|
-        out = out + "," unless first
-        first = false
-        out = out + ::JSON.generate(key.to_s) + ":" + ActiveSupport::JSON.encode_scalar(item)
-      end
-      out + "}"
+      JsonBuilder.escape_html_entities(::JSON.generate(ActiveSupport::JSON.jsonable(value)))
+    end
+
+    def self.decode(text)
+      ::JSON.parse(text)
     end
 
     # One `case` rather than a chain of tests: each read of the untyped
     # value is a site the runtime typing gate counts.
-    def self.encode_scalar(item)
-      text = item.to_s
-      case item
-      when nil then "null"
-      when String, Symbol then ::JSON.generate(text)
-      when Hash, Array then raise ArgumentError, "ActiveSupport::JSON.encode: nested values are not supported yet"
-      else text
+    def self.jsonable(value)
+      case value
+      when Array then value.map { |item| ActiveSupport::JSON.jsonable(item) }
+      when Hash
+        out = {}
+        value.each { |key, item| out[key.to_s] = ActiveSupport::JSON.jsonable(item) }
+        out
+      when Float then value.finite? ? value : nil
+      when Symbol then value.to_s
+      when nil, true, false, Integer, String then value
+      else raise ArgumentError, "ActiveSupport::JSON.encode: #{value.class} values are not supported yet"
       end
+    end
+  end
+
+  # ActiveSupport's `deep_dup` (core_ext/object/deep_dup.rb), for a typed
+  # Hash or Array receiver (`lower::symbolize_keys` routes the call here).
+  # A Hash copies each value and, for keys that are neither String nor
+  # Symbol, the key too — re-inserted after the String/Symbol ones, as
+  # Rails' delete-and-store does. An Array copies each element. Any other
+  # value is its `dup` (an Integer's, nil's or a Symbol's is itself).
+  def self.deep_dup(value)
+    case value
+    when Array then value.map { |item| ActiveSupport.deep_dup(item) }
+    when Hash
+      out = {}
+      value.each { |key, item| out[key] = ActiveSupport.deep_dup(item) if key.is_a?(String) || key.is_a?(Symbol) }
+      value.each { |key, item| out[ActiveSupport.deep_dup(key)] = ActiveSupport.deep_dup(item) unless key.is_a?(String) || key.is_a?(Symbol) }
+      out
+    else value.dup
     end
   end
 
@@ -191,19 +223,20 @@ module ActiveSupport
     h
   end
 
-  # AS `Enumerable#many?`, no-block form: MORE THAN ONE element. Rails
-  # writes it as a short-circuiting `any?` with a counter so it stops at
-  # the second hit; the receivers that reach here are already
-  # materialized, so `length` answers the same question without the
-  # block. Another core_ext reopen the transpiled runtimes cannot host —
-  # same home and same rule as `index_by` above, the receiver evaluated
+  # AS `Enumerable#many?`: the materialized no-block form is a length
+  # check; the block form counts matches and stops at the second hit.
+  # Another core_ext reopen the transpiled runtimes cannot host — same
+  # home and same rule as `index_by` above, the receiver is evaluated
   # exactly once.
-  #
-  # The block form (`many? { … }`) is NOT here: it counts matches
-  # instead, and no corpus app writes it. `lower::enumerable_ext`
-  # rewrites only the bare call, so the block form stays visible.
   def self.many?(list)
-    list.length > 1
+    return list.length > 1 unless block_given?
+
+    count = 0
+    list.each do |item|
+      count = count + 1 if yield item
+      return true if count > 1
+    end
+    false
   end
 
   # AS `String#squish`: runs of whitespace collapsed to one space, and
@@ -211,8 +244,8 @@ module ActiveSupport
   # `gsub(/[[:space:]]+/, " ").strip` on a `String` reopen — a core_ext
   # the transpiled runtimes cannot host, and a REGEX the targets do not
   # all lower, so the scan is spelled out the way `to_sentence` below
-  # is. `[[:space:]]` is the six ASCII whitespace characters; a corpus
-  # that needs Unicode spaces would widen this test, not the shape.
+  # is. Match each character against Rails' POSIX whitespace class,
+  # including Unicode whitespace.
   #
   # campfire's `content_filters_test` writes `<<~HTML.squish` to put a
   # multi-line fixture body on one line before handing it to a filter.
@@ -222,7 +255,7 @@ module ActiveSupport
     i = 0
     while i < text.length
       c = text[i]
-      if c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f" || c == "\v"
+      if c.match?(/[[:space:]]/)
         pending_space = !out.empty?
       else
         out = out + " " if pending_space
@@ -232,6 +265,14 @@ module ActiveSupport
       i = i + 1
     end
     out
+  end
+
+  # Rails' destructive form always returns the same receiver, including
+  # when its contents were already squished.
+  def self.squish!(text)
+    text.gsub!(/[[:space:]]+/, " ")
+    text.strip!
+    text
   end
 
   # AS `Enumerable#sole`: THE one element, and a raise for any other
@@ -806,5 +847,27 @@ module ActiveSupport
       i = i + 1
     end
     sign + out + rest
+  end
+
+  # Not `f.to_s` as it is: `Float#to_d` keeps the shortest digits but cuts them at 16 without rounding (bigdecimal's BIGDECIMAL_DOUBLE_FIGURES).
+  def self.float_decimal_text(f)
+    text = f.to_s
+    exp_at = text.index("e")
+    mantissa = exp_at.nil? ? text : text[0, exp_at].to_s
+    exp = exp_at.nil? ? 0 : text[exp_at + 1, text.length].to_s.to_i
+    negative = mantissa.start_with?("-")
+    mantissa = mantissa[1, mantissa.length].to_s if negative
+    dot = mantissa.index(".")
+    int_part = dot.nil? ? mantissa : mantissa[0, dot].to_s
+    frac_part = dot.nil? ? "" : mantissa[dot + 1, mantissa.length].to_s
+    digits = int_part + frac_part
+    lead = 0
+    while lead < digits.length && digits[lead] == "0"
+      lead = lead + 1
+    end
+    significant = digits[lead, digits.length].to_s
+    return text if significant.length <= 16
+    point = int_part.length - lead + exp
+    (negative ? "-" : "") + "0." + significant[0, 16].to_s + "e" + point.to_s
   end
 end

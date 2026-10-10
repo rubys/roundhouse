@@ -11,13 +11,14 @@
 //! a trailing options Hash (`isolation:`/`requires_new:`/`joinable:`,
 //! Rails' `DatabaseStatements#transaction` keywords) separated from the
 //! lock-clause argument, both forwarded to `transaction` rather than
-//! raising `ArgumentError`. (Nested transactions — `with_lock` or
-//! `transaction` called from inside one already open — still error on
-//! SQLite; #644 made `with_lock` always open its own, which the corpus
-//! doesn't yet exercise nested. Tracked separately, not fixed here —
-//! see the PR thread.) Exercised on both the Ruby and Spinel targets;
-//! the Spinel case is `#[ignore]`d like its sibling suites (CI's
-//! `spinel-framework` job runs it with `--ignored` — see
+//! raising `ArgumentError`. Nested transactions — `with_lock` or
+//! `transaction` called from inside one already open — JOIN the outer
+//! one (Rails' default `requires_new: false`): no BEGIN of its own, and
+//! an exception from the inner block rolls back the outer transaction's
+//! writes too (see `tests/spinel_transaction_connection.rs` and
+//! connection.rb's `self.transaction`). Exercised on both the Ruby and
+//! Spinel targets; the Spinel case is `#[ignore]`d like its sibling
+//! suites (CI's `spinel-framework` job runs it with `--ignored` — see
 //! `scripts/ci-plan.py`'s `SPINEL_TESTS`).
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
@@ -100,6 +101,26 @@ opts_result = opts.with_lock(requires_new: true, isolation: :serializable, joina
 end
 raise "with_lock should accept Rails' transaction options without raising" unless opts_result == :opts_block_value
 raise "with_lock should still commit with options forwarded" unless Widget.find(opts.id).name == "opts-value"
+
+# `with_lock` called inside an already-open `Model.transaction` joins it
+# (no nested BEGIN): a raise from the inner block rolls back the outer
+# write too, not just the inner one.
+joined = Widget.create!(name: "join-start")
+raised_join = false
+begin
+  Widget.transaction do
+    joined.update!(name: "outer-write")
+    joined.with_lock do
+      joined.update!(name: "inner-write")
+      raise "boom-join"
+    end
+  end
+rescue => e
+  raised_join = true
+  raise "wrong exception propagated from joined with_lock: #{e.message}" unless e.message == "boom-join"
+end
+raise "expected with_lock-in-transaction to re-raise the block's exception" unless raised_join
+raise "with_lock joining an open transaction should roll back the outer write too" unless Widget.find(joined.id).name == "join-start"
 
 puts "lock! and with_lock contract passed"
 "#;

@@ -466,8 +466,7 @@ fn build_load_method_body(
         // ordinary `new` applies. Populate them without assignment validation.
         // Preserve the existing constructor-before-fixture-fields lifecycle:
         // after_initialize still sees model defaults, and fixture data (implicit
-        // or explicit) wins over its writes. Rails' callback-free fixture loading
-        // remains a separate gap, as documented at save_after_validation below.
+        // or explicit) wins over its writes. The insert below runs no callbacks.
         for col in defaults.iter().filter(|c| !r.fields.iter().any(|f| f.column == c.name)) {
             exprs.push(Expr::new(Span::synthetic(), ExprNode::Send {
                 recv: Some(instance_var.clone()),
@@ -537,37 +536,26 @@ fn build_load_method_body(
                     recv: Some(save_recv),
                     // NOT `save`: Rails loads fixtures with raw SQL
                     // (`insert_fixtures_set`), so a fixture row runs NO
-                    // validations. Ours built a model and saved it, and
-                    // the difference is not cosmetic — it silently
-                    // dropped every row whose model validated something
-                    // the fixture did not satisfy (see the note in
-                    // `lower::fixtures` about `Room`'s creator taking
-                    // all seven room fixtures with it), and it walked
+                    // validations and NO callbacks. Saving a model ran
+                    // both: validations silently dropped every row whose
+                    // model checked something the fixture did not
+                    // satisfy (`Room`'s creator took all seven room
+                    // fixtures with it, see `lower::fixtures`) and walked
                     // campfire's push-subscription fixtures into a live
-                    // DNS lookup via `Surfguard`, which is a loud
-                    // failure on every strict target.
+                    // DNS lookup; callbacks did what the app does on a
+                    // real create — Message's `after_create_commit`
+                    // marked memberships unread, so the fixture users
+                    // started with unread rooms.
                     //
-                    // `save_after_validation` is the seam
-                    // `runtime/ruby/active_record/base.rb` already
-                    // factors out for Rails' validation-skipping writes,
-                    // and because every target's AR base is TRANSPILED
-                    // from that file, every target already has it —
-                    // `SaveAfterValidation` in C#/Go, `saveAfterValidation`
-                    // in Kotlin/Swift. No per-runtime work.
-                    //
-                    // Validations only. Rails skips the callbacks too,
-                    // but this loader has always run them and the
-                    // emitted helper already compensates (it resets the
-                    // broadcast log after loading for exactly that
-                    // reason). Dropping them is a separate, larger
-                    // change; this closes the half that is actively
-                    // wrong.
+                    // `_insert_row` (runtime/ruby/active_record/
+                    // base.rb) fills omitted timestamps and inserts.
+                    // Every target's AR base is transpiled from that
+                    // file, so every target has it.
                     //
                     // Safe because a fixture assigns only scalar
-                    // columns — never an association object — so the
-                    // `belongs_to` autosave that `before_validation`
-                    // carries has nothing to do here.
-                    method: Symbol::from("save_after_validation"),
+                    // columns — never an association object — so there
+                    // is no autosave to miss.
+                    method: Symbol::from("_insert_row"),
                     args: vec![],
                     block: None,
                     // Explicit parens so per-target emit doesn't drop

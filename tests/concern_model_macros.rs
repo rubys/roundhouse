@@ -818,3 +818,23 @@ fn dormant_custom_included_hook_does_not_refuse_accessors_elsewhere() {
     assert!(class.methods.iter().any(|method| method.name.as_str() == "note="));
     assert!(!class.methods.iter().any(|method| method.name.as_str() == "scratch="));
 }
+
+/// A `def` in the block a constant is assigned from belongs to the class
+/// that block defines — campfire's `ContentKey = Data.define(:digest) do
+/// def cache_key … end end` inside `FragmentCache` — not to the
+/// enclosing class, whose visibility it cannot change. Refusing it as a
+/// "dynamic declaration" refused the whole app. A `def` an `if` hides is
+/// still refused.
+#[test]
+fn a_def_in_a_constants_defining_block_is_not_a_dynamic_declaration() {
+    let schema = ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :messages do |t|\n    t.string :body\n  end\nend\n");
+    let model = ("app/models/message.rb", "class Message < ApplicationRecord\nend\n");
+    let cache = "class FragmentCache\n  ContentKey = Data.define(:digest) do\n    def cache_key\n      digest\n    end\n  end\n\n  def self.store\n    1\n  end\nend\n";
+    ingest_app_from_tree(tree(&[schema, model, ("app/models/fragment_cache.rb", cache)]))
+        .expect("a constant's defining block owns its defs");
+    let hidden = "class FragmentCache\n  if ENV[\"X\"]\n    def store\n      1\n    end\n  end\n  private :store\nend\n";
+    let error = ingest_app_from_tree(tree(&[schema, model, ("app/models/fragment_cache.rb", hidden)]))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("conditional or dynamic visibility"), "{error}");
+}

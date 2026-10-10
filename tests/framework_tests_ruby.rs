@@ -410,3 +410,12 @@ fn view_helpers_ext_test_passes_cruby() {
         "view_helpers_ext",
     );
 }
+
+#[test]
+#[ignore]
+fn active_support_number_helper_test_passes_under_cruby() {
+    build_and_run(
+        Path::new("runtime/ruby/test/active_support/number_helper_test.rb"),
+        "active_support_number_helper",
+    );
+}

@@ -13,6 +13,7 @@ module ActiveStorage
   end
 
   class Blob
+    def attachable_sgid: () -> String
     def self.from_attachable: (untyped value) -> ActiveStorage::Blob?
     def self.from_io_hash: (untyped value) -> ActiveStorage::Blob?
   end

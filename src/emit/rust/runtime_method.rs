@@ -17,6 +17,16 @@ use crate::ty::Ty;
 /// StringInterp / If). Runtime-authored code broader than this will
 /// surface as a TODO in the emitted source and a test failure.
 pub fn emit_method(m: &MethodDef) -> String {
+    // ActiveSupport's shared `squish!` body uses Ruby's `gsub!` and
+    // `strip!` to mutate its String argument. Rust strings cannot host
+    // those Ruby methods, so lower this runtime contract directly to
+    // one mutable String operation. Keeping the argument by mutable
+    // reference preserves the caller's receiver, and returning that
+    // reference matches Ruby's same-object `text` result.
+    if m.name.as_str() == "squish!" {
+        return emit_squish_bang(m);
+    }
+
     let sig = m
         .signature
         .as_ref()
@@ -59,6 +69,42 @@ pub fn emit_method(m: &MethodDef) -> String {
     }
     out.push_str("}\n");
     out
+}
+
+fn emit_squish_bang(m: &MethodDef) -> String {
+    let sig = m
+        .signature
+        .as_ref()
+        .expect("emit_method requires a signature");
+    let Ty::Fn { params, ret, .. } = sig else {
+        panic!("signature is not Ty::Fn");
+    };
+    assert_eq!(m.params.len(), 1, "squish! must take one String argument");
+    assert_eq!(params.len(), 1, "squish! must take one String argument");
+    assert!(
+        matches!(params[0].ty, Ty::Str),
+        "squish! argument must be String"
+    );
+    assert!(matches!(**ret, Ty::Str), "squish! must return String");
+
+    let name = &m.params[0].name;
+    format!(
+        "pub fn squish_bang({name}: &mut String) -> &mut String {{\n\
+         let mut out = String::new();\n\
+         let mut pending_space = false;\n\
+         for ch in {name}.chars() {{\n\
+             if ch.is_whitespace() {{\n\
+                 pending_space = !out.is_empty();\n\
+             }} else {{\n\
+                 if pending_space {{ out.push(' '); pending_space = false; }}\n\
+                 out.push(ch);\n\
+             }}\n\
+         }}\n\
+         out = out.trim_matches(|ch| ch == '\\0' || ch == ' ').to_owned();\n\
+         *{name} = out;\n\
+         {name}\n\
+         }}\n"
+    )
 }
 
 /// Parameter-position type: strings borrowed (`&str`) by idiom.

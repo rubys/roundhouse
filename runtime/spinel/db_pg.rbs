@@ -117,6 +117,9 @@ module Db
   def self.shard_count: () -> Integer
   def self.pool_for_thread: () -> PgPool
   def self.current_conn: () -> PgConn
+  def self.database_path: () -> String
+  def self.adapter_name: () -> String
+  def self.transaction_open?: () -> bool
   def self.in_lease?: () -> bool
   def self.pin_transaction: (PgConn conn) -> nil
   def self.with_connection: [T] () { () -> T } -> T

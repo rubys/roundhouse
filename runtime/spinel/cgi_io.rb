@@ -116,7 +116,7 @@ module CgiIo
     code   = status.is_a?(Integer) ? status : status.to_i
     reason = REASON_PHRASES.fetch(code, "OK")
     io.write("Status: #{code} #{reason}\r\n")
-    write_header(io, "Content-Type", content_type.to_s)
+    write_header(io, "Content-Type", content_type.to_s) unless content_type.nil? || content_type.to_s.empty?
     write_header(io, "Location", location.to_s) unless location.nil?
     extra_headers.each { |k, v| write_header(io, k.to_s, v.to_s) unless v.nil? }
     set_cookies.each do |name, val|

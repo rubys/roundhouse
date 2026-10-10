@@ -76,6 +76,7 @@ module ActionDispatch
     def url: () -> String
     def referrer: () -> String
     def user_agent: () -> String
+    def headers: () -> ActionDispatch::Http::Headers
     def session_options: () -> Hash[Symbol, bool]
     def session_skip?: () -> bool
     def user_agent=: (String) -> String

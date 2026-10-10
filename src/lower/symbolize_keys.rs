@@ -1,4 +1,4 @@
-//! ActiveSupport `Hash#symbolize_keys` grounding: on a receiver the
+//! ActiveSupport `Hash#symbolize_keys` (and `deep_dup`) grounding: on a receiver the
 //! analyzer stamped `Hash[Symbol, _]`, the call is the IDENTITY, so it
 //! becomes the receiver.
 //!
@@ -45,6 +45,21 @@ fn rewrite(expr: &mut Expr) {
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {
     let replacement = match &mut *expr.node {
+        // ActiveSupport's `deep_dup` on a typed Hash or Array — the core_ext
+        // reopen the CRuby overlay hosts, as the function every scaffold
+        // tree ships (`ActiveSupport.deep_dup`, runtime/ruby/
+        // active_support_ext.rb). campfire's `CachedResponses` snapshots
+        // the session (`session.to_hash.deep_dup`) before a cached render.
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "deep_dup"
+                && args.is_empty()
+                && matches!(r.ty.as_ref(), Some(Ty::Hash { .. } | Ty::Array { .. })) =>
+        {
+            let ty = r.ty.clone();
+            let mut call = active_support_call(expr.span, "deep_dup", r.clone());
+            call.ty = ty;
+            Some(call)
+        }
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
             if method.as_str() == "stringify_keys" && args.is_empty() =>
         {

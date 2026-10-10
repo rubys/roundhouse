@@ -243,6 +243,21 @@ module ActionView
     # for the two lanes that can use it. A poly walk over untyped values
     # and an `Array#sort` are not shapes every strict target's emit
     # answers, and this seam keeps them off those trees.
+    # A view's `<% cache key do %>` reads and writes its fragment through
+    # these two (`lower::view_to_library::walker`, `emit_cached_fragment`):
+    # `nil` from the read is a miss, and the write answers what it stored.
+    # This shared form is the runtime's own store; the ruby family and
+    # spinel reopen both (runtime/action_controller_fragment_caching.rb)
+    # to go through the controller as Rails' CacheHelper does —
+    # `perform_caching`, `combined_fragment_cache_key`, `cache_store`.
+    def self.fragment_read(key)
+      Rails.cache.read_str(key)
+    end
+
+    def self.fragment_write(key, value, ttl)
+      Rails.cache.write_str(key, value, ttl)
+    end
+
     def self.to_query(params)
       to_query_pairs(params, "")
     end
@@ -296,6 +311,20 @@ module ActionView
     # (C# reads `x.gsub(a, b)` as the regex+table form and emits
     # `"+".Replace(x, …)`, which compiles nowhere).
     MAILTO_ESCAPE_PATTERN = /[ !"\#$%&'()*+,\/:;<=>?\[\\\]^`{|}]/.freeze
+
+    # The URL a view's `<x>_url` route helper answers, given its path.
+    # Rails answers it absolute, on the request's scheme and host
+    # (`http://www.example.com/articles/1.json`). This universal body
+    # answers the PATH: a strict target's view has no request in scope
+    # (neither `ActionController::Current` nor `Rails.application`
+    # reaches those runtimes), and a path is what a client resolves
+    # against the page it came from. The ruby family reopens it in
+    # `view_helpers_ext.rb` over the request, so the lanes that know the
+    # host render what Rails renders. jbuilder's `json.url
+    # article_url(…)` is the caller (`jbuilder_to_library`).
+    def self.url_for_path(path)
+      path
+    end
 
     # Monomorphic, like `url_encode`.
     def self.url_encode_component(s)
@@ -580,6 +609,7 @@ module ActionView
     # `authenticity_token` value is the form-field name; the token value
     # is empty here because spinel-blog doesn't sign sessions.
     def self.csrf_meta_tags
+      return "" if ActionController.forgery_switched_off
       %(<meta name="csrf-param" content="authenticity_token" />\n<meta name="csrf-token" content="#{html_escape(form_authenticity_token)}" />)
     end
 
@@ -858,6 +888,8 @@ module ActionView
       # on that lane). The explicit comparison is false for every
       # target's unset shape and for `false` alike.
       return "" if @broadcast_rendering == true
+      return "" if ActionController.forgery_switched_off
+      return "" if Rails.application.token_fields_omitted
       %(<input type="hidden" name="authenticity_token" value="#{html_escape(form_authenticity_token)}">)
     end
 

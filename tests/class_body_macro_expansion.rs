@@ -32,14 +32,26 @@ module Authentication
   end
 
   class_methods do
+    def require_unauthenticated_access(**options)
+      allow_unauthenticated_access **options
+      before_action :redirect_signed_in_user_to_root, **options
+    end
+
     def allow_unauthenticated_access(**options)
       skip_before_action :require_authentication, **options
+      before_action :restore_authentication, **options
     end
   end
 
   private
     def require_authentication
       redirect_to "/session/new"
+    end
+    def restore_authentication
+      @restored = true
+    end
+    def redirect_signed_in_user_to_root
+      @redirected = true
     end
 end
 "#;
@@ -68,6 +80,30 @@ fn app_with(controller_src: &str) -> App {
     .into_iter()
     .collect();
     ingest_app_from_tree(tree).expect("ingest")
+}
+
+fn app_with_routed_controller(controller_src: &str) -> App {
+    let tree = vec![
+        (
+            std::path::PathBuf::from("app/controllers/concerns/authentication.rb"),
+            AUTHENTICATION.as_bytes().to_vec(),
+        ),
+        (
+            std::path::PathBuf::from("app/controllers/application_controller.rb"),
+            APPLICATION_CONTROLLER.as_bytes().to_vec(),
+        ),
+        (
+            std::path::PathBuf::from("app/controllers/things_controller.rb"),
+            controller_src.as_bytes().to_vec(),
+        ),
+        (
+            std::path::PathBuf::from("config/routes.rb"),
+            b"Rails.application.routes.draw do\n  get \"/things/new\" => \"things#new\"\n  post \"/things\" => \"things#create\"\nend\n".to_vec(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    ingest_app_from_tree(tree).expect("ingest routed controller")
 }
 
 /// Every filter on ThingsController, as `(kind, target, only, except)`.
@@ -155,6 +191,198 @@ end
         "a scoped skip must stay scoped — widening it would sign users \
          out of authentication on every action"
     );
+}
+
+#[test]
+fn require_unauthenticated_access_expands_its_composed_auth_filters() {
+    let mut app = app_with_routed_controller(
+        r#"
+class ThingsController < ApplicationController
+  require_unauthenticated_access only: %i[new create]
+
+  def new
+  end
+
+  def create
+  end
+end
+"#,
+    );
+    let filters = filters(&app);
+    assert_eq!(
+        filters,
+        vec![
+            (
+                FilterKind::Skip,
+                "require_authentication".to_string(),
+                vec!["new".to_string(), "create".to_string()],
+                vec![],
+            ),
+            (
+                FilterKind::Before,
+                "restore_authentication".to_string(),
+                vec!["new".to_string(), "create".to_string()],
+                vec![],
+            ),
+            (
+                FilterKind::Before,
+                "redirect_signed_in_user_to_root".to_string(),
+                vec!["new".to_string(), "create".to_string()],
+                vec![],
+            ),
+        ],
+        "the macro must preserve every authentication callback and its action scope"
+    );
+    let diagnostics = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "all named callbacks must resolve before output is claimed: {diagnostics:?}"
+    );
+    let emitted = roundhouse::emit::ruby::emit_lowered_controllers(&app)
+        .into_iter()
+        .find(|file| file.path.to_string_lossy().ends_with("things_controller.rb"))
+        .expect("ThingsController emitted")
+        .content;
+    let dispatch = emitted
+        .split("def process_action")
+        .nth(1)
+        .expect("callback dispatcher is emitted")
+        .split("\n  end")
+        .next()
+        .expect("dispatcher body");
+    assert!(dispatch.contains("restore_authentication"), "{dispatch}");
+    assert!(dispatch.contains("redirect_signed_in_user_to_root"), "{dispatch}");
+    assert!(
+        dispatch.contains("require_authentication if !([:new, :create].include?(action_name))"),
+        "the skip must retain authentication for protected actions and omit it for anonymous ones: {dispatch}"
+    );
+}
+
+#[test]
+fn a_nested_filter_macro_is_not_inlined_when_an_included_concern_overrides_it() {
+    let tree = [
+        (
+            "app/controllers/concerns/authentication.rb",
+            r#"
+module Authentication
+  extend ActiveSupport::Concern
+  class_methods do
+    def require_unauthenticated_access(**options)
+      allow_unauthenticated_access **options
+      before_action :redirect_signed_in_user_to_root, **options
+    end
+    def allow_unauthenticated_access(**options)
+      skip_before_action :require_authentication, **options
+    end
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/concerns/locked_down_policy.rb",
+            r#"
+module LockedDownPolicy
+  extend ActiveSupport::Concern
+  class_methods do
+    def allow_unauthenticated_access(**options)
+      before_action :require_authentication, **options
+    end
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/things_controller.rb",
+            "class ThingsController < ActionController::Base\n include Authentication\n include LockedDownPolicy\n require_unauthenticated_access only: :new\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+
+    let app = ingest_app_from_tree(tree).expect("ambiguous macro stays an ingest gap");
+    assert!(filters(&app).is_empty(), "refusal must not inline either policy: {:?}", filters(&app));
+    assert!(app.controllers[0].body.iter().any(|item| matches!(
+        item,
+        ControllerBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, roundhouse::expr::ExprNode::Send { method, .. }
+                if method.as_str() == "require_unauthenticated_access")
+    )));
+}
+
+#[test]
+fn a_parent_controller_class_method_can_shadow_a_nested_filter_macro() {
+    let application_controller = r#"
+class ApplicationController < ActionController::Base
+  include Authentication
+  def self.allow_unauthenticated_access(**options)
+    before_action :require_authentication, **options
+  end
+end
+"#;
+    let things_controller = r#"
+class ThingsController < ApplicationController
+  require_unauthenticated_access only: :new
+  def new
+  end
+end
+"#;
+    let tree = [
+        ("app/controllers/concerns/authentication.rb", AUTHENTICATION),
+        ("app/controllers/application_controller.rb", application_controller),
+        ("app/controllers/things_controller.rb", things_controller),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+
+    let app = ingest_app_from_tree(tree).expect("shadowed filter macro stays an ingest gap");
+    assert!(filters(&app).is_empty(), "must not inline the concern's auth skip");
+    let controller = app
+        .controllers
+        .iter()
+        .find(|controller| controller.name.0.as_str() == "ThingsController")
+        .expect("ThingsController ingested");
+    assert!(controller.body.iter().any(|item| matches!(
+        item,
+        ControllerBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, roundhouse::expr::ExprNode::Send { method, .. }
+                if method.as_str() == "require_unauthenticated_access")
+    )));
+}
+
+#[test]
+fn nested_filter_macro_expansion_has_a_total_work_budget() {
+    let mut methods = String::from("def macro_0\n before_action :authenticate\nend\n");
+    for index in 1..15 {
+        methods.push_str(&format!(
+            "def macro_{index}\n macro_{}\n macro_{}\nend\n",
+            index - 1,
+            index - 1
+        ));
+    }
+    let concern = format!(
+        "module ExpandingConcern\n extend ActiveSupport::Concern\n class_methods do\n{methods} end\nend\n"
+    );
+    let controller = "class ThingsController < ActionController::Base\n include ExpandingConcern\n macro_14\nend\n";
+    let tree = [
+        ("app/controllers/concerns/expanding_concern.rb", concern.as_str()),
+        ("app/controllers/things_controller.rb", controller),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+
+    let app = ingest_app_from_tree(tree).expect("over-budget macro stays an ingest gap");
+    assert!(filters(&app).is_empty(), "refusal must not partially expand");
+    assert!(app.controllers[0].body.iter().any(|item| matches!(
+        item,
+        ControllerBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, roundhouse::expr::ExprNode::Send { method, .. }
+                if method.as_str() == "macro_14")
+    )));
 }
 
 #[test]

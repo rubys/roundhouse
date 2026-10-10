@@ -705,6 +705,7 @@ end
 module Db
   # Shards (see configure); empty until configured.
   @pools = []
+  @database = ""
   @assign_lock = Mutex.new
   @next_pool = 0
   # Named statements kept per connection (db.rb's DbConn::CAP).
@@ -734,6 +735,7 @@ module Db
     per = n / stripes
     per = 1 if per < 1
     config = PgConfig.new(url.to_s)
+    @database = config.database
     pools = []
     i = 0
     while i < stripes
@@ -787,6 +789,24 @@ module Db
     c = Thread.current[:db_conn]
     return c if !c.nil?
     Db.pool.first
+  end
+
+  # `ActiveRecord::Base.connection_db_config` answers from these
+  # (runtime/spinel/active_record_db_config.rb): the database this
+  # process configured, the adapter name Rails would report for it, and
+  # whether the holder is inside a transaction of its own — the request
+  # read snapshot is the shim's, not the app's, so it does not count.
+  def self.database_path
+    @database
+  end
+
+  def self.adapter_name
+    "postgresql"
+  end
+
+  def self.transaction_open?
+    st = current_conn.status
+    st == PG::PQTRANS_INTRANS || st == PG::PQTRANS_INERROR
   end
 
   def self.in_lease?

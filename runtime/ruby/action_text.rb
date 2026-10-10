@@ -376,9 +376,27 @@ module ActionText
 
     # Rails delegates this to the blob, whose `filename` is an
     # `ActiveStorage::Filename` (extension, base, …); the node carries
-    # the same name as text, so wrap it the same way.
+    # the same name as text, so wrap it the same way. A node that names
+    # its blob only by sgid (campfire's helper tests embed one so) reads
+    # the blob's own.
     def filename
-      ActiveStorage::Filename.new(self["filename"])
+      text = self["filename"]
+      return ActiveStorage::Filename.new(text) unless text == ""
+      b = blob
+      b.nil? ? ActiveStorage::Filename.new("") : b.filename
+    end
+
+    # Delegated to the blob too, as `active_storage/blobs/_blob` reads it
+    # for the file's size; the node's `filesize` without one.
+    def byte_size
+      b = blob
+      b.nil? ? self["filesize"].to_i : b.byte_size
+    end
+
+    # The blob the sgid names, when it names one.
+    def blob
+      return nil unless resolved_model_name == "ActiveStorage::Blob"
+      ActiveStorage::Blob.find(resolved_id)
     end
 
     def url
@@ -1173,33 +1191,30 @@ module ActionText
       @html
     end
 
-    # Empty / whitespace-only markup is blank without scanning. Non-empty
-    # shells (`<div></div>`, `<div><br></div>`) still need to_plain_text —
-    # empty blockquotes become curly quotes and are not blank.
+    # Rails' `Content#blank?`, which is `to_html.blank?`
+    # (actiontext 8.1, `delegate :blank?, … to: :to_html`): the MARKUP is
+    # blank only when it is empty or whitespace. A body that is nothing
+    # but an attachment — campfire's unfurled link preview — is present,
+    # and `has_rich_text` saves it. This used to answer from
+    # `to_plain_text`, which an attachment-only body renders as "", so the
+    # body was never stored (campfire's rooms link-preview tests; they had
+    # passed only while the test env served the POST-time render from the
+    # fragment cache).
     def blank?
       html = @html
       return true if html.nil?
       n = html.length
-      return true if n == 0
       i = 0
       while i < n
         c = html[i, 1].to_s
-        unless c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f"
-          # Entity-decoded plain text (`&nbsp;` → " ") is blank when
-          # whitespace-only. Scan here: ActionText::Content must not
-          # resolve `ActiveSupport` through this class (emitted tests
-          # do not load the ActiveSupport module in this namespace).
-          text = to_plain_text
-          j = 0
-          m = text.length
-          while j < m
-            d = text[j, 1].to_s
-            unless d == " " || d == "\t" || d == "\n" || d == "\r" || d == "\f"
-              return false
-            end
-            j = j + 1
-          end
-          return true
+        unless c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f" ||
+            c == "\u000b" || c == "\u0085" ||
+            c == "\u00a0" || c == "\u1680" || c == "\u2000" || c == "\u2001" ||
+            c == "\u2002" || c == "\u2003" || c == "\u2004" || c == "\u2005" ||
+            c == "\u2006" || c == "\u2007" || c == "\u2008" || c == "\u2009" ||
+            c == "\u200a" || c == "\u2028" || c == "\u2029" || c == "\u202f" ||
+            c == "\u205f" || c == "\u3000"
+          return false
         end
         i = i + 1
       end

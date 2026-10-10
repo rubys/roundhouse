@@ -283,6 +283,7 @@ fn build_library_class(
             .collect(),
         models: known_models.iter().cloned().collect(),
         temps: Default::default(),
+        key_marks: Default::default(),
         partials: partials.clone(),
         partial_key,
     };
@@ -544,6 +545,10 @@ struct Ctx {
     /// (`__col0`, `__col1`, …), shared by every clone of the template's
     /// `Ctx` so two collection blocks never bind the same name.
     temps: std::rc::Rc<std::cell::Cell<usize>>,
+    /// Counter for the marks of keys that may be taken back
+    /// (`io_key0`, …), shared the same way. Separate from `temps` so a
+    /// template's collection locals keep their names.
+    key_marks: std::rc::Rc<std::cell::Cell<usize>>,
     /// Every jbuilder partial's parameters, for the calls this template
     /// makes to them.
     partials: std::rc::Rc<PartialParams>,
@@ -625,6 +630,15 @@ enum JbStmt<'a> {
         item_var: Symbol,
         body: &'a Expr,
     },
+    /// `Recv.call(args) do … end` on anything but `json`, whose block
+    /// reaches `json` — a tenant scope, `I18n.with_locale`, a gem
+    /// helper. The call stays as written; its block's pairs belong to
+    /// the enclosing object, as the block runs with the same builder.
+    Around { call: &'a Expr, body: &'a Expr },
+    /// The same, but with a block the lowerer cannot rebuild (a block
+    /// parameter named `json`, or a block argument that is not a
+    /// literal block). Reported, never dropped.
+    AroundUnlowered,
     /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
@@ -675,6 +689,15 @@ fn cache_block_body(stmt: &Expr) -> Option<&Expr> {
 }
 
 fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
+    emit_object_filled(raw_stmts, ctx).0
+}
+
+/// `emit_object`, and whether every run of it writes at least one pair.
+/// `false` when that is only known at run time: a pair under a
+/// condition, a whole-template partial (whose own pairs may be
+/// conditional), or no pair at all. A whole-template array is always a
+/// value.
+fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
     let classified: Vec<JbStmt<'_>> = raw_stmts.iter().map(|s| classify(s)).collect();
 
     // Whole-template DSL forms (single stmt covers the entire JSON
@@ -689,6 +712,14 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
         // Synthesis choke point (whole-template forms): everything
         // emitted for the single DSL statement attributes back to it.
         let src_span = raw_stmts[index].span;
+        // An array is a value even when it is empty (`_array` sets
+        // `[]`); a partial's object is empty when the partial may set
+        // nothing.
+        let filled = match only {
+            JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. } => true,
+            JbStmt::Partial { partial_path, .. } => partial_always_filled(partial_path, ctx),
+            _ => false,
+        };
         let whole = match only {
             JbStmt::ArrayPartial { collection, partial_path, item_var } => {
                 Some(emit_array_partial(collection, partial_path, item_var, ctx))
@@ -720,7 +751,7 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
                     out.push(emit_local(src, ctx));
                 }
             }
-            return out;
+            return (out, filled);
         }
     }
 
@@ -730,9 +761,33 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
     // that may or may not have emitted one (`Sep::Unknown`).
     let mut out: Vec<Expr> = Vec::new();
     out.push(io_append_lit(&ctx.accumulator, "{"));
-    emit_pairs(&classified, raw_stmts, ctx, &mut out, Sep::First);
+    let end = emit_pairs(&classified, raw_stmts, ctx, &mut out, Sep::First);
     out.push(io_append_lit(&ctx.accumulator, "}"));
-    out
+    // A statement the walker could not lower is written as nothing, so
+    // an empty object there says nothing about what Jbuilder sets:
+    // such an object is left as it was, not taken for BLANK.
+    (out, end == Sep::After || has_unlowered(raw_stmts, ctx))
+}
+
+/// Whether an object's statements, or a branch of them, include one
+/// the walker writes as an empty append (`JbStmt::Unknown`).
+fn has_unlowered(stmts: &[&Expr], ctx: &Ctx) -> bool {
+    stmts.iter().any(|s| match classify(s) {
+        JbStmt::Unknown | JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. } => true,
+        JbStmt::PartialRecord { arg, as_name } => {
+            record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.models).is_none()
+        }
+        JbStmt::Cond { then_branch, else_branch, .. } => {
+            has_unlowered(&branch_stmts(then_branch), ctx) || has_unlowered(&branch_stmts(else_branch), ctx)
+        }
+        JbStmt::Guarded { body, rescues } => {
+            has_unlowered(&branch_stmts(body), ctx)
+                || rescues.iter().any(|r| has_unlowered(&branch_stmts(&r.body), ctx))
+        }
+        JbStmt::Around { body, .. } => has_unlowered(&branch_stmts(body), ctx),
+        JbStmt::AroundUnlowered => true,
+        _ => false,
+    })
 }
 
 /// Whether the next pair of an object takes a `,` before it.
@@ -774,6 +829,81 @@ fn push_separator(out: &mut Vec<Expr>, ctx: &Ctx, sep: Sep) {
             ));
         }
     }
+}
+
+/// The pairs of a partial rendered inside an object, merged into it:
+///
+///   io_part0 = Views::Widgets.gadget_json(gadget)
+///   if io_part0.length > 2
+///     io << "," if !(io.end_with?("{"))
+///     io << io_part0[1, io_part0.length - 2]
+///   end
+///
+/// The partial's object without its braces is its pairs; a partial that
+/// sets nothing renders `{}` and adds none. Answers the comma state
+/// after it.
+fn emit_merged_partial(call: Expr, ctx: &Ctx, out: &mut Vec<Expr>, sep: Sep) -> Sep {
+    let n = ctx.key_marks.get();
+    ctx.key_marks.set(n + 1);
+    let part = Symbol::from(format!("{}_part{n}", ctx.accumulator));
+    out.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign { target: LValue::Var { id: VarId(0), name: part.clone() }, value: call },
+    ));
+    let length = || send(Some(var_ref(part.clone())), "length", Vec::new(), None, false);
+    let int = |value: i64| Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value } });
+    let mut then = Vec::new();
+    push_separator(&mut then, ctx, sep);
+    let inner = send(
+        Some(var_ref(part.clone())),
+        "[]",
+        vec![int(1), send(Some(length()), "-", vec![int(2)], None, false)],
+        None,
+        false,
+    );
+    then.push(io_append_call(&ctx.accumulator, inner));
+    out.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: send(Some(length()), ">", vec![int(2)], None, false),
+            then_branch: seq(then),
+            else_branch: seq(Vec::new()),
+        },
+    ));
+    if sep == Sep::After { Sep::After } else { Sep::Unknown }
+}
+
+/// A statement the lowering cannot write, carrying the report: the
+/// survey lists it and the Ruby emit raises it where it stood.
+fn unsupported_stmt(span: Span, construct: &str, detail: &str) -> Expr {
+    let mut e = Expr::new(span, ExprNode::Lit { value: Literal::Nil });
+    e.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+        target: None,
+        construct: Symbol::from(construct),
+        detail: detail.to_string(),
+    });
+    e
+}
+
+/// `io.length`.
+fn io_length(ctx: &Ctx) -> Expr {
+    send(Some(var_ref(Symbol::from(ctx.accumulator.as_str()))), "length", Vec::new(), None, false)
+}
+
+/// `io.slice!(mark, io.length) if io.end_with?("{}")`: drop what was
+/// appended since `mark` when it ends in an empty object. Only the
+/// object just written can end there: a non-empty object ends in a
+/// value and its `}`, never in `{}`.
+fn drop_blank_object(mark: Symbol, ctx: &Ctx) -> Expr {
+    let io = || var_ref(Symbol::from(ctx.accumulator.as_str()));
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: send(Some(io()), "end_with?", vec![lit_str("{}".to_string())], None, true),
+            then_branch: send(Some(io()), "slice!", vec![var_ref(mark), io_length(ctx)], None, true),
+            else_branch: seq(Vec::new()),
+        },
+    )
 }
 
 /// The statements of an `if` branch. A missing `else` (and the empty
@@ -865,16 +995,39 @@ fn emit_pairs(
                 sep = Sep::After;
             }
             JbStmt::Nested { key, body } => {
+                let (object, filled) =
+                    emit_object_filled(&flatten_cache_blocks(stmts_of(body)), ctx);
+                // Jbuilder leaves a key out when its block sets nothing
+                // (`_merge_block` answers BLANK, `_set_value` skips it).
+                // When the lowerer cannot tell that the block always
+                // sets a pair, the key, its comma and its `{}` are
+                // taken back at run time.
+                let mark = (!filled).then(|| {
+                    let n = ctx.key_marks.get();
+                    ctx.key_marks.set(n + 1);
+                    let mark = Symbol::from(format!("{}_key{n}", ctx.accumulator));
+                    out.push(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Assign {
+                            target: LValue::Var { id: VarId(0), name: mark.clone() },
+                            value: io_length(ctx),
+                        },
+                    ));
+                    mark
+                });
                 push_separator(out, ctx, sep);
                 out.push(io_append_lit(
                     &ctx.accumulator,
                     &format!("\"{}\":", key.as_str()),
                 ));
-                out.extend(emit_object(
-                    &flatten_cache_blocks(stmts_of(body)),
-                    ctx,
-                ));
-                sep = Sep::After;
+                out.extend(object);
+                sep = match mark {
+                    None => Sep::After,
+                    Some(mark) => {
+                        out.push(drop_blank_object(mark, ctx));
+                        if sep == Sep::After { Sep::After } else { Sep::Unknown }
+                    }
+                };
             }
             JbStmt::PairBlock { key, collection, item_var, body } => {
                 push_separator(out, ctx, sep);
@@ -885,13 +1038,29 @@ fn emit_pairs(
                 out.extend(emit_array_block(collection, item_var, body, ctx));
                 sep = Sep::After;
             }
-            JbStmt::ArrayPartial { .. }
-            | JbStmt::Partial { .. }
-            | JbStmt::ArrayBlock { .. }
-            | JbStmt::PartialRecord { .. } => {
-                // These shouldn't appear in an object template, but if
-                // they do (mixed with pair-emitting stmts), drop a
-                // TODO marker rather than emit malformed JSON.
+            // `json.partial!` next to pairs, or under a condition: the
+            // partial renders into the same object, so its pairs join
+            // this one's.
+            JbStmt::Partial { partial_path, locals } => {
+                let locals = locals
+                    .iter()
+                    .map(|(k, v)| (k.clone(), rewrite_h_escape(&rewrite_route_helpers(v, ctx))))
+                    .collect();
+                sep = emit_merged_partial(partial_call(partial_path, locals, ctx), ctx, out, sep);
+            }
+            JbStmt::PartialRecord { arg, as_name } => {
+                match record_partial_path(arg, as_name.as_ref(), &ctx.resource_dir, &ctx.models) {
+                    Some((partial_path, local)) => {
+                        let call = partial_call(&partial_path, vec![(local, (*arg).clone())], ctx);
+                        sep = emit_merged_partial(call, ctx, out, sep);
+                    }
+                    None => out.push(io_append_lit(&ctx.accumulator, "")),
+                }
+            }
+            JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. } => {
+                // An array is not merged into an object (jbuilder raises
+                // a MergeError once the object has a pair): drop a
+                // marker rather than emit malformed JSON.
                 out.push(io_append_lit(&ctx.accumulator, ""));
             }
             JbStmt::Cond { cond, then_branch, else_branch } => {
@@ -926,6 +1095,36 @@ fn emit_pairs(
             }
             JbStmt::Local => {
                 out.push(emit_local(src, ctx));
+            }
+            JbStmt::Around { call, body } => {
+                // The block may run any number of times: its first pair
+                // takes a comma unless one is already known, and so
+                // does the pair after the call.
+                let start = if sep == Sep::After { Sep::After } else { Sep::Unknown };
+                let stmts = branch_stmts(body);
+                let classified: Vec<JbStmt<'_>> = stmts.iter().map(|s| classify(s)).collect();
+                let mut appends = Vec::new();
+                emit_pairs(&classified, &stmts, ctx, &mut appends, start);
+                let mut call = (*call).clone();
+                if let ExprNode::Send { block: Some(block), .. } = &mut *call.node {
+                    if let ExprNode::Lambda { body, .. } = &mut *block.node {
+                        *body = seq(appends);
+                    }
+                }
+                out.push(call);
+                sep = start;
+            }
+            JbStmt::AroundUnlowered => {
+                crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                    file: String::new(),
+                    message: "jbuilder: a block on a non-json call reaches `json` but cannot be lowered"
+                        .to_string(),
+                });
+                out.push(unsupported_stmt(
+                    src.span,
+                    "jbuilder block on a non-json call",
+                    "the block reaches `json` but its parameters or form cannot be lowered",
+                ));
             }
             JbStmt::Unknown => {
                 out.push(io_append_lit(&ctx.accumulator, ""));
@@ -1024,8 +1223,9 @@ fn emit_guarded(
 }
 
 /// A template local as written, its value given the rewrites a pair's
-/// value gets (`<x>_url` to `RouteHelpers.<x>_path`, `h`): the value is
-/// read by pairs later, and the emitted view has no `_url` helpers.
+/// value gets (`<x>_url` to its absolute URL over `RouteHelpers.<x>_path`,
+/// `h`): the value is read by pairs later, and the emitted view has no
+/// `_url` helpers.
 fn emit_local(stmt: &Expr, ctx: &Ctx) -> Expr {
     let ExprNode::Assign { target, value } = &*stmt.node else {
         return stmt.clone();
@@ -1052,6 +1252,23 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
     }
     if let ExprNode::Assign { target: LValue::Var { .. }, .. } = &*stmt.node {
         return JbStmt::Local;
+    }
+    if let ExprNode::Send { recv, block: Some(block), .. } = &*stmt.node {
+        // A block parameter named `json` shadows the builder: the
+        // block's `json.` calls go to whatever the call yields, which
+        // the lowering cannot follow.
+        let binds_json = matches!(&*block.node, ExprNode::Lambda { params, .. }
+            if params.iter().any(|p| p.as_str() == "json"));
+        if !recv.as_ref().is_some_and(is_json_receiver) && (binds_json || mentions_json(block)) {
+            return match &*block.node {
+                ExprNode::Lambda { params, rest_param: None, body, .. }
+                    if !params.iter().any(|p| p.as_str() == "json") =>
+                {
+                    JbStmt::Around { call: stmt, body }
+                }
+                _ => JbStmt::AroundUnlowered,
+            };
+        }
     }
     let ExprNode::Send {
         recv: Some(recv),
@@ -1101,9 +1318,6 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             // `partial:` before it looks at a block.
             if args.len() == 1 {
                 if let Some((item_var, body)) = item_block(block) {
-                    if !element_body_supported(body) {
-                        return JbStmt::Unknown;
-                    }
                     return JbStmt::ArrayBlock { collection, item_var, body };
                 }
             }
@@ -1258,9 +1472,6 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             let Some((item_var, body)) = item_block(block) else {
                 return JbStmt::Unknown;
             };
-            if !element_body_supported(body) {
-                return JbStmt::Unknown;
-            }
             JbStmt::PairBlock {
                 key: Symbol::from(key),
                 collection: &args[0],
@@ -1312,47 +1523,21 @@ fn item_block(block: &Option<Expr>) -> Option<(Symbol, &Expr)> {
     Some((item_var.clone(), body))
 }
 
-/// Whether a collection block's body lowers to the element Jbuilder
-/// builds. A lone `json.partial!` is the element; a partial next to
-/// other statements (or under a branch) renders into the same element
-/// in Jbuilder, which the object walker cannot do yet: it writes a
-/// partial there as an empty append and the element would lose the
-/// partial's fields. Such a body is reported as unsupported and the
-/// statement stays Unknown, rather than lowered without them. The same
-/// holds for a partial inside a nested `json.<key> do … end` object of
-/// the element, which the object walker writes the same way.
-fn element_body_supported(body: &Expr) -> bool {
-    fn has_partial(stmts: &[&Expr]) -> bool {
-        stmts.iter().any(|s| match classify(s) {
-            JbStmt::Partial { .. } => true,
-            JbStmt::Cond { then_branch, else_branch, .. } => {
-                has_partial(&branch_stmts(then_branch)) || has_partial(&branch_stmts(else_branch))
-            }
-            JbStmt::Nested { body, .. } => has_partial(&flatten_cache_blocks(stmts_of(body))),
-            JbStmt::Guarded { body, rescues } => {
-                has_partial(&branch_stmts(body))
-                    || rescues.iter().any(|r| has_partial(&branch_stmts(&r.body)))
-            }
-            _ => false,
-        })
-    }
-    let stmts = flatten_cache_blocks(stmts_of(body));
-    if stmts.len() == 1 && matches!(classify(stmts[0]), JbStmt::Partial { .. }) {
-        return true;
-    }
-    if !has_partial(&stmts) {
-        return true;
-    }
-    crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
-        file: String::new(),
-        message: "jbuilder: a collection block that mixes `json.partial!` with other statements is not compiled"
-            .to_string(),
-    });
-    false
-}
-
 /// `json` parsed as a bare method call: `Send { recv: None, method:
 /// "json", args: [] }`. Anything else fails the discriminator.
+/// Whether `e` reads the template's builder anywhere: a `json.<x>`
+/// call or a bare `json`.
+fn mentions_json(e: &Expr) -> bool {
+    if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+        if method.as_str() == "json" && args.is_empty() {
+            return true;
+        }
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || mentions_json(c));
+    found
+}
+
 fn is_json_receiver(recv: &Expr) -> bool {
     matches!(
         &*recv.node,
@@ -1539,10 +1724,14 @@ fn emit_array_block(collection: &Expr, item_var: &Symbol, body: &Expr, ctx: &Ctx
     } else {
         crate::expr::BlockStyle::Do
     };
+    // Whether every element sets a pair: a partial may set nothing,
+    // unless its template always does.
+    let mut filled = false;
     let element = match single_partial {
         Some((partial_path, locals)) => {
+            filled = partial_always_filled(&partial_path, ctx);
             // The arguments get the rewrites a `PairPartial` argument
-            // gets (`<x>_url` to `RouteHelpers.<x>_path`, `h`).
+            // gets (`<x>_url` to its absolute URL, `h`).
             let locals = locals
                 .iter()
                 .map(|(k, v)| (k.clone(), rewrite_h_escape(&rewrite_route_helpers(v, ctx))))
@@ -1553,7 +1742,9 @@ fn emit_array_block(collection: &Expr, item_var: &Symbol, body: &Expr, ctx: &Ctx
             let mut inner = ctx.clone();
             inner.accumulator = format!("{}_{}", ctx.accumulator, item_var.as_str());
             let mut exprs = vec![assign_accumulator_string_new(&inner.accumulator)];
-            exprs.extend(emit_object(&stmts, &inner));
+            let (object, always) = emit_object_filled(&stmts, &inner);
+            filled = always;
+            exprs.extend(object);
             let mut result = var_ref(Symbol::from(inner.accumulator.as_str()));
             result.hint = Some(IrHint::StringBuilderResult);
             exprs.push(result);
@@ -1581,7 +1772,26 @@ fn emit_array_block(collection: &Expr, item_var: &Symbol, body: &Expr, ctx: &Ctx
             value: collection.clone(),
         },
     );
-    let mapped = send(Some(var_ref(col.clone())), "map", Vec::new(), Some(block), false);
+    let mut mapped = send(Some(var_ref(col.clone())), "map", Vec::new(), Some(block), false);
+    // Jbuilder drops an element whose block sets nothing
+    // (`_map_collection` deletes BLANK): `.reject { |e| e == "{}" }`
+    // when an element may be empty. Only an empty object is `{}`.
+    if !filled {
+        let el = Symbol::from("__el");
+        let is_blank = send(Some(var_ref(el.clone())), "==", vec![lit_str("{}".to_string())], None, false);
+        let reject = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                extra_params: Vec::new(),
+                rest_param: None,
+                params: vec![el],
+                block_param: None,
+                body: is_blank,
+                block_style: crate::expr::BlockStyle::Brace,
+            },
+        );
+        mapped = send(Some(mapped), "reject", Vec::new(), Some(reject), false);
+    }
     let joined = send(Some(mapped), "join", vec![lit_str(",".to_string())], None, true);
     // Jbuilder's `array!` answers `[]` for a nil collection, and
     // `json.<key>(nil) { … }` goes through it.
@@ -1729,6 +1939,10 @@ pub(crate) struct PartialParams {
     /// Each partial's ivar parameters: the ivar, then its parameter.
     ivars: std::collections::HashMap<(String, String), Vec<(Symbol, Symbol)>>,
     closures: std::collections::HashMap<Symbol, Vec<Symbol>>,
+    /// The partials whose every render is a non-empty value: an object
+    /// with a pair on every path, or an array. A render of any other
+    /// partial may come out `{}`, which Jbuilder treats as BLANK.
+    filled: std::collections::HashSet<(String, String)>,
 }
 
 impl PartialParams {
@@ -1806,10 +2020,49 @@ fn partial_params(app: &App) -> PartialParams {
             }
             ivars.push((iv.clone(), param));
         }
+        if template_always_filled(&flatten_cache_blocks(stmts_of(&v.body))) {
+            out.filled.insert(key.clone());
+        }
         out.params.insert(key.clone(), names);
         out.ivars.insert(key, ivars);
     }
     out
+}
+
+/// Whether a template's every render is a non-empty value: a lone
+/// `json.array!` (an array, even an empty one), or an object with a
+/// pair on every path. Conservative: a partial or a block on another
+/// call counts as possibly empty.
+fn template_always_filled(stmts: &[&Expr]) -> bool {
+    let mut dsl = stmts.iter().map(|s| classify(s)).filter(|c| !matches!(c, JbStmt::Local));
+    if let (Some(JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. }), None) = (dsl.next(), dsl.next()) {
+        return true;
+    }
+    sets_a_pair(stmts)
+}
+
+/// Whether every run of `stmts`, as an object's statements, sets a pair.
+fn sets_a_pair(stmts: &[&Expr]) -> bool {
+    stmts.iter().any(|s| match classify(s) {
+        JbStmt::Extract { attrs, .. } => !attrs.is_empty(),
+        JbStmt::Pair { .. } | JbStmt::PairPartial { .. } | JbStmt::PairBlock { .. } => true,
+        JbStmt::Nested { body, .. } => sets_a_pair(&flatten_cache_blocks(stmts_of(body))),
+        JbStmt::Cond { then_branch, else_branch, .. } => {
+            sets_a_pair(&branch_stmts(then_branch)) && sets_a_pair(&branch_stmts(else_branch))
+        }
+        // The body's pairs, or a rescue's after them (`emit_guarded`).
+        JbStmt::Guarded { body, rescues } => {
+            sets_a_pair(&branch_stmts(body)) && rescues.iter().all(|r| sets_a_pair(&branch_stmts(&r.body)))
+        }
+        _ => false,
+    })
+}
+
+/// Whether a render of `partial_path` from this template is always a
+/// non-empty value (`PartialParams::filled`).
+fn partial_always_filled(partial_path: &str, ctx: &Ctx) -> bool {
+    let (mod_path, method) = partial_target(partial_path, &ctx.resource_dir);
+    ctx.partials.filled.contains(&partial_key(&mod_path, &method))
 }
 
 /// Each jbuilder template's partial renders: the partial's key, its
@@ -2061,18 +2314,18 @@ fn rewrite_h_escape(e: &Expr) -> Expr {
 // ── route-helper rewrite for pair values ────────────────────────────
 
 /// Rewrite bare `<x>_url(record, format: :fmt, ...)` calls into
-/// `RouteHelpers.<x>_path(record.id)`. The runtime's
-/// `app/route_helpers.rb` (generated by `routes_to_library`) exposes
-/// `_path` helpers only — host-aware `_url` helpers aren't emitted —
-/// so this rewrite is the bridge between Rails' `article_url(article,
-/// format: :json)` convention and the runtime's path-only surface.
+/// `ActionView::ViewHelpers.url_for_path(RouteHelpers.<x>_path(record.id))`.
+/// The runtime's `app/route_helpers.rb` (generated by `routes_to_library`)
+/// exposes `_path` helpers only; `url_for_path` adds the host half
+/// where the runtime knows it. The ruby family answers Rails' absolute
+/// `http://host/articles/1.json` (`view_helpers_ext.rb`, over
+/// `Rails.application.protocol` / `.domain`). The strict targets carry
+/// no request into a view and answer the path, which is what this
+/// rewrite rendered everywhere before.
 ///
-/// A `format: :<sym>` kwarg appends `.<sym>` to the result so JSON
-/// templates emit the same `/articles/1.json` self-link shape Rails
-/// produces — without that the comparator flags every `json.url`
-/// pair as a value mismatch. Other kwargs still drop on the floor;
-/// scheme+host (the rest of the `_url` vs `_path` difference) is
-/// per-deployment noise the comparator canonicalizes away.
+/// A `format: :<sym>` kwarg appends `.<sym>` to the path, so JSON
+/// templates emit the `…/articles/1.json` self-link shape Rails
+/// produces. Other kwargs still drop on the floor.
 fn rewrite_route_helpers(e: &Expr, ctx: &Ctx) -> Expr {
     let new_node = match &*e.node {
         ExprNode::Send {
@@ -2108,7 +2361,7 @@ fn rewrite_route_helpers(e: &Expr, ctx: &Ctx) -> Expr {
                 block.clone(),
                 *parenthesized,
             );
-            return match format_sym {
+            let path = match format_sym {
                 Some(fmt) => send(
                     Some(path_call),
                     "+",
@@ -2118,6 +2371,18 @@ fn rewrite_route_helpers(e: &Expr, ctx: &Ctx) -> Expr {
                 ),
                 None => path_call,
             };
+            return send(
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const {
+                        path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
+                    },
+                )),
+                "url_for_path",
+                vec![path],
+                None,
+                true,
+            );
         }
         ExprNode::Send {
             recv,

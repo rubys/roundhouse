@@ -12,6 +12,8 @@
 # action_dispatch require chain): the CRuby tree keeps its overlay
 # Request (CGI-env-backed, runtime/action_dispatch_request.rb) and must
 # not blend the two shapes.
+require_relative "headers"
+
 module ActionDispatch
   # `request.body` — the raw body as Rails hands it back: an IO, not the
   # String. campfire's bot endpoints read it the way Rails documents
@@ -172,6 +174,11 @@ module ActionDispatch
     # other keys rack reads (`:expire_after`, `:renew`, …) are consumed
     # by a cookie-store middleware we don't run, and a write of one
     # refuses at the type rather than being silently ignored.
+    # `request.headers["Accept-Encoding"]` — see `Http::Headers`.
+    def headers
+      ActionDispatch::Http::Headers.new(@env)
+    end
+
     def session_options
       @session_options
     end

@@ -1,3 +1,8 @@
+module AbstractController
+  class DoubleRenderError < StandardError
+  end
+end
+
 module ActionController
   def self.header_key_ok?: (String? k) -> bool
   def self.header_value_ok?: (String? v) -> bool
@@ -7,21 +12,32 @@ module ActionController
   def self.strip_trailing_controls: (String s) -> String
   def self.location_host: (String url) -> String
   def self.find_substr: (String hay, String needle) -> Integer
+  def self.build_host_url: (String protocol, String host, String port, String path) -> String
+  def self.normalize_url_protocol: (String protocol) -> String
+  def self.url_host_without_port: (String hostport) -> String
+  def self.url_port_of: (String hostport) -> String
   def self.find_last: (String hay, String needle) -> Integer
   def self.forgery_flag: () -> bool
   def self.set_forgery_flag: (bool value) -> void
+  def self.forgery_switched_off: () -> bool
+  def self.set_forgery_switched_off: (bool value) -> void
   def self.masked_authenticity_token: () -> String
   def self.csrf_token_valid?: (String given, String expected) -> bool
 
   class HeaderStore
     @keys: Array[String]
-    @vals: Array[String?]
+    @lower: Array[String]
+    @vals: Array[String]
     def initialize: () -> void
     def []: (String key) -> String?
     def []=: (String key, String? value) -> void
+    def slice: (*String names) -> Hash[String, String]
+    def merge!: (Hash[String, String] other) -> HeaderStore
+    def delete: (String key) -> String?
     def size: () -> Integer
     def key_at: (Integer i) -> String
     def val_at: (Integer i) -> String
+    def index_of: (String key) -> Integer
   end
   # Symbolic-status to integer-code mapping (`STATUS_CODES`) is a
   # Ruby-level frozen Hash literal — module-level constant, not a
@@ -67,6 +83,8 @@ module ActionController
     def path_parameters: () -> Hash[String, String]
     def path_parameters=: (Hash[String, String]) -> Hash[String, String]
     @headers: ActionController::HeaderStore
+    @content_type_explicit: bool
+    @head_response: bool
     def action_name: () -> String
     def assign_action_name: (Symbol name) -> String
 
@@ -124,9 +142,15 @@ module ActionController
       ?status: Symbol
     ) -> void
 
-    # `head(:no_content, content_type: "application/json")` — empty
-    # body, status only; content_type optional.
-    def head: (Symbol status, ?content_type: String?, ?location: String?) -> void
+    # Rails 8.1.4's positional status + optional options hash. Status is
+    # usually a Symbol; Integer and nil mirror Rails' response behavior.
+    def head: ((Symbol | Integer | nil) status, ?(Hash[String | Symbol, Object?] | nil) options) -> bool
+    def head_response?: () -> bool
+    def head_status_code: (Symbol | Integer status) -> Integer
+    def head_includes_content?: (Integer status) -> bool
+    def head_format_content_type: () -> String
+    def head_option_content_type: (Object? content_type) -> String
+    def normalize_head_header_name: (String name) -> String
     def response: () -> Base
     def fresh_when: (untyped subject) -> void
     def stale?: (?etag: untyped) -> bool
@@ -144,6 +168,9 @@ module ActionController
     def request_for_csrf: () -> untyped
     def same_host_location: (String loc) -> String
     def request_host_for_redirect: () -> String
+    def default_url_options: () -> Hash[Symbol, String]
+    def request_protocol_for_url: () -> String
+    def url_from_path: (String path) -> String
 
     # Monomorphic on Symbol — body looks up STATUS_CODES. Integer
     # pass-through was previously supported via `is_a?(Integer)`

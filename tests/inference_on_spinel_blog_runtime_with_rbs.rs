@@ -45,6 +45,7 @@ const DEPENDENCY_RBS: &[&str] = &[
     "runtime/ruby/rails.rbs",
     "runtime/ruby/action_controller/message_verifier.rbs",
     "runtime/ruby/active_support_time_parsing.rbs",
+    "runtime/ruby/active_support_ext.rbs",
     // `Inflector.pluralize_word`, for the multi-id RecordNotFound message.
     "runtime/ruby/inflector_ext.rbs",
 ];
@@ -513,9 +514,11 @@ fn qualified_runtime_signatures_seed_contexts_and_results() {
             },
         );
         typer.analyze_expr(&mut probes[0].methods[0].body, &ctx);
+        // `rows` answers Rails' shape, each row an Array of its values;
+        // the constructor above still takes the row hashes.
         assert_eq!(
             probes[0].methods[0].body.ty,
-            Some(rows.clone()),
+            Some(Ty::Array { elem: Box::new(Ty::Array { elem: Box::new(Ty::Untyped) }) }),
             "{class}"
         );
     }

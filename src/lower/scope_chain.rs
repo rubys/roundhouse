@@ -1346,7 +1346,7 @@ fn self_qualified_assoc_read(r: Expr, ctx: &Ctx) -> Expr {
 /// `order`, which decides what `.first`/`.last` mean) is treated as
 /// row-changing: the list is an allowlist so an unrecognized method
 /// declines rather than being assumed harmless.
-fn scope_is_row_preserving(scope: &Expr) -> bool {
+pub(crate) fn scope_is_row_preserving(scope: &Expr) -> bool {
     fn walk(e: &Expr) -> bool {
         match &*e.node {
             ExprNode::Send { recv, method, .. } => {
@@ -1892,6 +1892,8 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
                             | "touch_all"
                             | "to_sql"
                             | "in_batches"
+                            | "maximum"
+                            | "minimum"
                     )
             {
                 if let ExprNode::Send { method: aname, args: aargs, block: None, .. } = &*r.node {
@@ -1993,7 +1995,7 @@ pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> boo
     found
 }
 
-/// True when `expr` calls `<Model>.insert_all(rows)`. Gate for the
+/// True when `expr` calls `<Model>.insert_all(rows)` (or `insert_all!`). Gate for the
 /// call-site expansion in `rewrite_send`.
 pub fn mentions_model_insert_all(expr: &Expr, models: &HashSet<ClassId>) -> bool {
     let mut found = false;
@@ -2002,8 +2004,8 @@ pub fn mentions_model_insert_all(expr: &Expr, models: &HashSet<ClassId>) -> bool
             return;
         }
         if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node {
-            if method.as_str() == "insert_all"
-                && args.len() == 1
+            if ((method.as_str() == "insert_all" && args.len() == 1)
+                || (method.as_str() == "insert_all!" && (1..=2).contains(&args.len())))
                 && const_model(r, models).is_some()
             {
                 *found = true;
@@ -2374,7 +2376,10 @@ fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span
 /// `Push::Subscription.destroy_by(endpoint:, user_id:)` reached nothing
 /// at all, with the analyzer saying so (`send_dispatch_failed: no known
 /// method `destroy_by` on Class { Push::Subscription }`).
-const CLASS_ROOT_TERMINALS: &[&str] = &["pluck", "ids", "destroy_by", "delete_by"];
+///
+/// `maximum` / `minimum` likewise: `Base` defines neither, and the arel
+/// pass leaves them to `Relation`'s SQL extrema.
+const CLASS_ROOT_TERMINALS: &[&str] = &["pluck", "ids", "destroy_by", "delete_by", "maximum", "minimum"];
 
 /// Relation TERMINALS our runtime implements — a seeded association
 /// chain may end in one (`@story.merged_stories.ids`). Deliberately
@@ -2411,6 +2416,8 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
                 | "touch_all"
                 | "to_sql"
                 | "in_batches"
+                | "maximum"
+                | "minimum"
                 // Reads the relation and, on a miss, WRITES through it —
                 // so it is a terminal on both counts. Listing it here is
                 // what lets `assoc_scope_shape` see a class method whose
@@ -2532,7 +2539,7 @@ pub fn assoc_read_target(
 /// (`Current.user`, `@message.creator`, `user.account`) qualifies; a
 /// send taking arguments, a block, or a deeper chain does not — those
 /// keep their source shape rather than being duplicated into a query.
-fn owner_reads_once(owner: &Expr) -> bool {
+pub(crate) fn owner_reads_once(owner: &Expr) -> bool {
     let ExprNode::Send { recv, args, block: None, .. } = &*owner.node else { return false };
     if !args.is_empty() {
         return false;
@@ -3433,11 +3440,15 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             parenthesized: true,
                         },
                     );
+                    // `_insert_row`: Rails' bulk insert runs neither
+                    // validations nor callbacks (it is one INSERT), and
+                    // neither does this. Timestamps fill, as Rails'
+                    // `record_timestamps` default does.
                     let save = syn(
                         span,
                         ExprNode::Send {
                             recv: Some(build),
-                            method: Symbol::from("save_after_validation"),
+                            method: Symbol::from("_insert_row"),
                             args: vec![],
                             block: None,
                             parenthesized: true,
@@ -3464,6 +3475,133 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         },
                     );
                     return None;
+                }
+                // `<Model>.insert_all!(rows, returning: %w[id])` — the
+                // raising twin: no conflict guard (a duplicate raises,
+                // as `insert_all!` does), and its value is Rails'
+                // `ActiveRecord::Result` of the RETURNING columns, one
+                // row per insert (the primary key when `returning:` is
+                // left out, SQLite's default). campfire's search test
+                // reads the new ids with `.rows.flatten`.
+                //
+                //   ActiveRecord::Result.new(rows.map { |__attrs|
+                //     __rec = Message.new(__attrs)
+                //     __rec._insert_row
+                //     { "id" => __rec.id } })
+                //
+                // Only a literal column list (Strings or Symbols) lowers;
+                // anything else declines.
+                if method.as_str() == "insert_all!" && !args.is_empty() && args.len() <= 2 && block.is_none() {
+                    let returning: Option<Vec<String>> = match args.get(1).map(|a| &*a.node) {
+                        None => Some(vec!["id".to_string()]),
+                        Some(ExprNode::Hash { entries, .. }) if entries.len() == 1 => {
+                            let (k, v) = &entries[0];
+                            let key_ok = matches!(&*k.node,
+                                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "returning");
+                            match (&*v.node, key_ok) {
+                                (ExprNode::Array { elements, .. }, true) => elements
+                                    .iter()
+                                    .map(|e| match &*e.node {
+                                        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                                        _ => None,
+                                    })
+                                    .collect(),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(columns) = returning {
+                        let attrs = Symbol::from("__attrs");
+                        let rec = Symbol::from("__rec");
+                        let build = syn(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(const_expr(span, &m)),
+                                method: Symbol::from("new"),
+                                args: vec![var_expr(span, &attrs)],
+                                block: None,
+                                parenthesized: true,
+                            },
+                        );
+                        let bind = syn(
+                            span,
+                            ExprNode::Assign {
+                                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: rec.clone() },
+                                value: build,
+                            },
+                        );
+                        let insert = syn(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(var_expr(span, &rec)),
+                                method: Symbol::from("_insert_row"),
+                                args: vec![],
+                                block: None,
+                                parenthesized: true,
+                            },
+                        );
+                        let row = syn(
+                            span,
+                            ExprNode::Hash {
+                                entries: columns
+                                    .iter()
+                                    .map(|c| {
+                                        (
+                                            syn(span, ExprNode::Lit { value: Literal::Str { value: c.clone() } }),
+                                            syn(
+                                                span,
+                                                ExprNode::Send {
+                                                    recv: Some(var_expr(span, &rec)),
+                                                    method: Symbol::from(c.as_str()),
+                                                    args: vec![],
+                                                    block: None,
+                                                    parenthesized: false,
+                                                },
+                                            ),
+                                        )
+                                    })
+                                    .collect(),
+                                kwargs: false,
+                            },
+                        );
+                        let mut args = args;
+                        let rows = syn(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(args.remove(0)),
+                                method: Symbol::from("map"),
+                                args: vec![],
+                                block: Some(syn(
+                                    span,
+                                    ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
+                                        params: vec![attrs],
+                                        block_param: None,
+                                        body: syn(span, ExprNode::Seq { exprs: vec![bind, insert, row] }),
+                                        block_style: BlockStyle::Brace,
+                                    },
+                                )),
+                                parenthesized: false,
+                            },
+                        );
+                        *expr = syn(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(syn(
+                                    span,
+                                    ExprNode::Const {
+                                        path: vec![Symbol::from("ActiveRecord"), Symbol::from("Result")],
+                                    },
+                                )),
+                                method: Symbol::from("new"),
+                                args: vec![rows],
+                                block: None,
+                                parenthesized: true,
+                            },
+                        );
+                        return None;
+                    }
                 }
                 if ctx.scope_of(&m, &method) {
                     let keeps = ctx.scope_keeps_relation(&m, &method);

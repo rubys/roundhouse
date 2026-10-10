@@ -1801,7 +1801,8 @@ pub(super) fn rewrite_destroy_bang(expr: &Expr) -> Expr {
     })
 }
 
-/// `request.format.html?` → `self.request_format == :html`, and
+/// `request.format.html?` → `self.request_format == :html`,
+/// `request.format.to_s` → its Mime string, and
 /// `request.format = :html` → `self.request_format = :html`.
 ///
 /// Rails' `request.format` is a `Mime::Type` whose predicates answer
@@ -1836,6 +1837,35 @@ pub(super) fn rewrite_request_format(expr: &Expr) -> Expr {
         )
     }
     map_expr(expr, &|e| match &*e.node {
+        // `request.format.to_s` — the negotiated Mime::Type's string
+        // (`"text/html"`), which campfire folds into its cache keys.
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if args.is_empty() && method.as_str() == "to_s" && is_request_format(r) =>
+        {
+            let lookup = Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        e.span,
+                        ExprNode::Const { path: vec![Symbol::from("Mime"), Symbol::from("Type")] },
+                    )),
+                    method: Symbol::from("lookup_by_extension"),
+                    args: vec![request_format(e.span)],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(lookup),
+                    method: Symbol::from("to_s"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            ))
+        }
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
             if args.is_empty() && method.as_str().ends_with('?') && is_request_format(r) =>
         {
@@ -2168,16 +2198,17 @@ pub(super) fn rewrite_redirect_to(
     })
 }
 
-/// `render(:show, …, location: @article)` — Rails' POST-201 idiom.
+/// `render(:show, …, location: @article)` or
+/// `head :created, location: @article` — Rails' POST-201 idioms.
 /// The kwarg value is a polymorphic record reference; rewrite to
 /// `RouteHelpers.<singular>_path(@x.id)` so the runtime's
-/// `render(body, location: <string>)` sees a path string. Mirrors
-/// the `redirect_to @x` polymorphic rewrite below; runs over render
+/// response location handling sees a path string. Mirrors the
+/// `redirect_to @x` polymorphic rewrite below; runs over render/head
 /// Sends specifically (not redirect_to, which has its own pass).
-pub(super) fn rewrite_render_location_kwarg(expr: &Expr) -> Expr {
+pub(super) fn rewrite_response_location_kwarg(expr: &Expr) -> Expr {
     map_expr(expr, &|e| match &*e.node {
         ExprNode::Send { recv: None, method, args, block, parenthesized }
-            if method.as_str() == "render" && !args.is_empty() =>
+            if (method.as_str() == "render" || method.as_str() == "head") && !args.is_empty() =>
         {
             let new_args: Vec<Expr> = args
                 .iter()
@@ -2352,6 +2383,36 @@ pub fn rewrite_route_helpers(
     shadowed: &HashSet<Symbol>,
     id_segments: &std::collections::HashMap<String, Vec<bool>>,
 ) -> Expr {
+    rewrite_route_helpers_with(expr, shadowed, id_segments, false)
+}
+
+/// `rewrite_route_helpers` for a CONTROLLER body, where a `_url` helper
+/// answers an absolute URL: `articles_url` →
+/// `url_from_path(RouteHelpers.articles_path)`. `ActionController::Base
+/// #url_from_path` (runtime/ruby/action_controller/base.rb) builds it
+/// the way Rails' `url_for` does — the request's protocol, host and
+/// optional port, each overridden by the controller's own
+/// `default_url_options`. The helper runs on `self`, which is what lets
+/// an app's `default_url_options` override reach it.
+///
+/// Folding onto the bare path, as test bodies still do, made
+/// `render plain: articles_url` answer `/articles` where Rails answers
+/// `http://www.example.com/articles`, and `head :created, location:
+/// message_url(@message)` a relative Location.
+pub fn rewrite_controller_route_helpers(
+    expr: &Expr,
+    shadowed: &HashSet<Symbol>,
+    id_segments: &std::collections::HashMap<String, Vec<bool>>,
+) -> Expr {
+    rewrite_route_helpers_with(expr, shadowed, id_segments, true)
+}
+
+fn rewrite_route_helpers_with(
+    expr: &Expr,
+    shadowed: &HashSet<Symbol>,
+    id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    absolute_urls: bool,
+) -> Expr {
     let expr = &strip_url_helpers_receiver(expr);
     map_expr(expr, &|e| match &*e.node {
         // `controller_path` is ActionController::Base's underscored
@@ -2366,9 +2427,10 @@ pub fn rewrite_route_helpers(
                 && !shadowed.contains(method) =>
         {
             // `RouteHelpers` only emits `_path` helpers — Rails'
-            // `_url` form differs by host prefix, which we don't
-            // model. Fold `_url` onto its `_path` twin so test/
-            // controller bodies that use the URL form resolve.
+            // `_url` form differs by host prefix. Dispatch `_url` onto
+            // its `_path` twin; a controller body then adds the host
+            // half (`to_url` below), and a test body keeps the path,
+            // which its harness resolves against the session's host.
             let raw = method.as_str();
             let dispatch_method = if let Some(stem) = raw.strip_suffix("_url") {
                 Symbol::from(format!("{stem}_path"))
@@ -2445,7 +2507,7 @@ pub fn rewrite_route_helpers(
                             },
                         )
                     } else {
-                        rewrite_route_helpers(arg, shadowed, id_segments)
+                        rewrite_route_helpers_with(arg, shadowed, id_segments, absolute_urls)
                     }
                 })
                 .collect();
@@ -2457,17 +2519,36 @@ pub fn rewrite_route_helpers(
                     args: projected_args,
                     block: block
                         .as_ref()
-                        .map(|b| rewrite_route_helpers(b, shadowed, id_segments)),
+                        .map(|b| rewrite_route_helpers_with(b, shadowed, id_segments, absolute_urls)),
                     parenthesized: *parenthesized,
                 },
             );
-            let Some(i) = splat_at else { return Some(call) };
-            let splat = rewrite_route_helpers(
+            // The path, with its query suffix when the call carried one;
+            // a controller's `_url` then takes the host half on top.
+            let absolute = absolute_urls && raw.ends_with("_url");
+            let to_url = |path: Expr| {
+                if !absolute {
+                    return path;
+                }
+                Expr::new(
+                    e.span,
+                    ExprNode::Send {
+                        recv: None,
+                        method: Symbol::from("url_from_path"),
+                        args: vec![path],
+                        block: None,
+                        parenthesized: true,
+                    },
+                )
+            };
+            let Some(i) = splat_at else { return Some(to_url(call)) };
+            let splat = rewrite_route_helpers_with(
                 route_helper_query_splat_value(&args_all[i]),
                 shadowed,
                 id_segments,
+                absolute_urls,
             );
-            Some(Expr::new(
+            Some(to_url(Expr::new(
                 e.span,
                 ExprNode::Send {
                     recv: Some(call),
@@ -2485,7 +2566,7 @@ pub fn rewrite_route_helpers(
                     block: None,
                     parenthesized: false,
                 },
-            ))
+            )))
         }
         _ => None,
     })

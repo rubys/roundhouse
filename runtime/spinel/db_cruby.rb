@@ -240,6 +240,18 @@ module Db
     @pool.free[0]
   end
 
+  # `ActiveRecord::Base.transaction`'s per-thread nesting depth
+  # (connection.rb) — see the contract note in runtime/ruby/db.rbs.
+  # `Fiber[:k]` for the same reason `current_dbh` above uses it.
+  def self._txn_depth
+    d = Fiber[:ar_txn_depth]
+    d.nil? ? 0 : d
+  end
+
+  def self._txn_depth=(value)
+    Fiber[:ar_txn_depth] = value
+  end
+
   # Request-scoped connection lease. Checks out a handle, binds it to
   # this thread's fiber-storage so `current_dbh` resolves to it for the
   # block's duration, and returns it on completion (even on raise).
@@ -255,6 +267,24 @@ module Db
   # rebind the connection and, on release, unbind the outer lease's.
   def self.in_lease?
     !Fiber[:db_handle].nil?
+  end
+
+  # `ActiveRecord::Base.connection_db_config` answers from these
+  # (runtime/spinel/active_record_db_config.rb): the database this
+  # process configured, the adapter name Rails would report for it, and
+  # whether the holder is inside a transaction of its own — the request
+  # read snapshot is the shim's, not the app's, so it does not count.
+  def self.database_path
+    @path
+  end
+
+  def self.adapter_name
+    "sqlite3"
+  end
+
+  def self.transaction_open?
+    conn = current_dbh
+    conn.transaction_active? && conn.instance_variable_get(:@rh_snapshot) != :open
   end
 
   def self.with_connection

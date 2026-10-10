@@ -254,15 +254,20 @@ class ActionTextContentTest < Minitest::Test
     assert_equal "<div class=\"trix-content\">\n  " + html + "\n</div>\n", content.to_s
   end
 
-  def test_blank_tracks_plain_text_not_markup
+  # Rails' `Content#blank?` is `to_html.blank?` (actiontext 8.1.4,
+  # content.rb: `delegate :blank?, … to: :to_html`): whitespace-only
+  # MARKUP is blank, and any element — an empty shell, an attachment —
+  # is not. An attachment-only body is a message with a link preview.
+  def test_blank_is_the_markup_blank
     assert ActionText::Content.new("").blank?
     assert ActionText::Content.new("   \n\t").blank?
-    assert ActionText::Content.new("<div></div>").blank?
-    assert ActionText::Content.new("<div><br></div>").blank?
-    # Entity-decoded whitespace (`&nbsp;` → " ") is blank, matching
-    # ActiveSupport — not only an empty plain-text string.
-    assert ActionText::Content.new("&nbsp;").blank?
-    assert ActionText::Content.new("<div>&nbsp;</div>").blank?
+    assert ActionText::Content.new("\u000b").blank?
+    assert ActionText::Content.new("\u0085").blank?
+    assert ActionText::Content.new("\u00a0").blank?
+    refute ActionText::Content.new("<div></div>").blank?
+    refute ActionText::Content.new("<div><br></div>").blank?
+    refute ActionText::Content.new("&nbsp;").blank?
+    refute ActionText::Content.new(%(<action-text-attachment content-type="application/vnd.actiontext.opengraph-embed" url="u"></action-text-attachment>)).blank?
     refute ActionText::Content.new("<div>x</div>").blank?
     assert ActionText::Content.new("<div>x</div>").present?
   end
@@ -273,15 +278,6 @@ class ActionTextContentTest < Minitest::Test
     second = content.to_plain_text
     assert_equal "Hello world", first
     assert_same first, second
-  end
-
-  def test_blank_reuses_to_plain_text_memo
-    content = ActionText::Content.new("<div></div>")
-    assert content.blank?
-    first = content.to_plain_text
-    assert content.blank?
-    assert_same first, content.to_plain_text
-    assert_equal "", first
   end
 
   def test_tag_name_is_the_canonical_attachment_element

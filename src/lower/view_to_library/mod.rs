@@ -833,6 +833,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         strict_locals: lx.strict_locals.clone(),
         view_name: view.name.as_str().to_string(),
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
+        str_ivars: std::rc::Rc::new(view_str_ivars(app, &view.name)),
     };
 
     // A partial that receives a form builder as a local re-derives the
@@ -1231,6 +1232,19 @@ pub fn insert_db_stub(classes: &mut std::collections::HashMap<ClassId, crate::an
             Ty::Bool,
         ),
     );
+    // `ActiveRecord::Base.transaction`'s per-thread nesting depth
+    // (connection.rb) — boxed behind this accessor instead of a raw
+    // `Thread.current`/`Fiber[]` read so the body-typer resolves it
+    // concretely, same as every other Db call here. See the contract
+    // note in runtime/ruby/db.rbs.
+    db_info.class_methods.insert(
+        Symbol::from("_txn_depth"),
+        fn_sig(vec![], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("_txn_depth="),
+        fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
+    );
     classes.insert(ClassId(Symbol::from("Db")), db_info);
 
     // MessageDigest — the keyed-digest primitive surface, same
@@ -1425,8 +1439,13 @@ pub(crate) fn insert_framework_stubs(
         "hidden_field",
         "render",
         "time_ago_in_words",
+        "number_to_currency",
         "number_to_human",
+        "number_to_human_size",
+        "number_to_percentage",
+        "number_to_phone",
         "number_with_delimiter",
+        "number_with_precision",
         "pluralize",
         "raw",
         "safe_join",
@@ -1547,6 +1566,14 @@ pub(crate) fn insert_framework_stubs(
             ],
             Ty::Str,
         ),
+    );
+    // `url_for_path(path)` — the URL a jbuilder `<x>_url` answers
+    // (runtime/ruby/action_view/view_helpers.rb). Typed here so the
+    // jbuilder pair that encodes it sees a String, not an unknown the
+    // rust emitter would pass to `encode_value` as a `Value`.
+    vh.class_methods.insert(
+        Symbol::from("url_for_path"),
+        fn_sig(vec![(Symbol::from("path"), Ty::Str)], Ty::Str),
     );
     let nil_helpers = ["content_for_set", "content_for", "set_flash", "flash"];
     for name in nil_helpers {
@@ -3864,6 +3891,20 @@ fn mentions_relation(ty: &crate::ty::Ty) -> bool {
 /// `@edit_user` names its fields `user[...]` the way Rails does. Ivars
 /// whose type is anything else (a collection, a scalar, untyped) are
 /// left out — the caller falls back to its own convention.
+/// This view's ivars the analyzer typed `String` (`App::view_ivar_types`).
+fn view_str_ivars(app: &App, view_name: &Symbol) -> std::collections::HashSet<String> {
+    app.view_ivar_types
+        .get(view_name)
+        .map(|ivars| {
+            ivars
+                .iter()
+                .filter(|(_, ty)| matches!(ty, crate::ty::Ty::Str))
+                .map(|(name, _)| name.as_str().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn view_ivar_models(app: &App, view_name: &Symbol) -> std::collections::HashMap<String, String> {
     let Some(ivars) = app.view_ivar_types.get(view_name) else {
         return std::collections::HashMap::new();
@@ -4719,7 +4760,13 @@ pub(super) struct ViewCtx {
     /// "presentation-v2"]` — so the site has to be in the key or one
     /// would serve the other's markup.
     pub(super) view_name: String,
-    pub(super) ivar_models: std::rc::Rc<std::collections::HashMap<String, String>>,
+    pub(super) ivar_models:
+        std::rc::Rc<std::collections::HashMap<String, String>>,
+    /// This view's ivars the analyzer typed `String` — markup a
+    /// controller rendered ahead (`@message_html = render_to_string …`).
+    /// `turbo_stream.append target, @message_html` sends it as given
+    /// rather than rendering a partial named after it.
+    pub(super) str_ivars: std::rc::Rc<std::collections::HashSet<String>>,
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models
@@ -4983,29 +5030,16 @@ pub(crate) fn view_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
     send(Some(recv), method, args, None, true)
 }
 
-/// `"#{Rails.application.protocol}#{Rails.application.domain}#{RouteHelpers.<stem>_path(args)}"`
-/// — the grounding for bare `<x>_url` absolute route helpers
-/// (RouteHelpers only generates `_path` functions; the convention
-/// matches `rewrite_url_helpers_absolute`'s host-kwarg form). Shared
-/// by the form-action resolver and the URL-position classifier. The
-/// scheme is the request's, as Rails' `url_for` takes it: a literal
-/// `http://` was mixed content on every https page behind a proxy.
-pub(super) fn absolute_url_interp(stem: &str, args: Vec<Expr>) -> Expr {
+/// `ActionView::ViewHelpers.url_for_path(RouteHelpers.<stem>_path(args))`
+/// — the grounding for bare `<x>_url` helpers in ERB views.
+/// `url_for_path` is the shared URL seam used by jbuilder too: Ruby-family
+/// views preserve `Rails.application.domain` overrides and normalize the
+/// scheme's standard port, while strict targets keep the path because
+/// their views have no request context. Shared by ERB helper rewriting,
+/// the form-action resolver, and the URL-position classifier.
+pub(crate) fn absolute_url_interp(stem: &str, args: Vec<Expr>) -> Expr {
     let path_call = route_helpers_call(&format!("{stem}_path"), args);
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::StringInterp {
-            parts: vec![
-                InterpPart::Expr {
-                    expr: rails_application_call("protocol"),
-                },
-                InterpPart::Expr {
-                    expr: rails_application_call("domain"),
-                },
-                InterpPart::Expr { expr: path_call },
-            ],
-        },
-    )
+    view_helpers_call("url_for_path", vec![path_call])
 }
 
 /// `Rails.application.<method>` — the framework-default readers

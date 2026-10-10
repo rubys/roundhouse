@@ -88,8 +88,20 @@ module ActionDispatch
       self
     end
 
+    # Rails' `Request::Session#to_hash` (aliased `to_h`): a copy of the
+    # data with nil values dropped, so a caller holding it neither sees
+    # later writes nor changes the session by writing to it. campfire's
+    # `CachedResponses` compares a snapshot against it after a render.
+    def to_hash
+      out = {}
+      @data.each do |k, v|
+        out[k] = v unless v.nil?
+      end
+      out
+    end
+
     def to_h
-      @data
+      to_hash
     end
 
     def merge(other)

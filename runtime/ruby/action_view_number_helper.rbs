@@ -1,0 +1,25 @@
+module ActionView
+  module Helpers
+    module NumberHelper
+      type number_option_value = String | Integer | Float | Rational | Symbol | bool | Regexp | nil | Hash[Symbol, String | Hash[Symbol, String]]
+      class InvalidNumberError < StandardError
+        @number: Object
+        def number: () -> Object
+        def message: () -> String
+        def initialize: (Object number) -> void
+      end
+      def self.valid_float_string?: (String text) -> bool
+      def self.valid_number?: (Object number) -> bool
+      def self.escape_html: (String text) -> String
+      def self.delegate_number_helper_method: (Symbol method, Object number, ?Hash[Symbol | String, number_option_value] options, ?bool escape_output) -> String?
+      def self.template_number_helper: (Symbol method, Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def self.number_to_currency: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def self.number_to_human: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def self.number_to_human_size: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def self.number_to_percentage: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def self.number_to_phone: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def self.number_with_delimiter: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def self.number_with_precision: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+    end
+  end
+end

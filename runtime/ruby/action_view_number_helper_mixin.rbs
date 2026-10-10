@@ -1,0 +1,14 @@
+module ActionView
+  module Helpers
+    module NumberHelper
+      type number_option_value = String | Integer | Float | Rational | Symbol | bool | Regexp | nil | Hash[Symbol, String | Hash[Symbol, String]]
+      def number_to_currency: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def number_to_human: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def number_to_human_size: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def number_to_percentage: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def number_to_phone: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def number_with_delimiter: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+      def number_with_precision: (Object number, ?Hash[Symbol | String, number_option_value] options) -> String?
+    end
+  end
+end

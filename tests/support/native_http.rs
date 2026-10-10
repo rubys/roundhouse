@@ -8,6 +8,7 @@
 //! as a browser's would: the ruby family enforces forgery protection on
 //! `ActionController::Base` controllers, as Rails does.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -42,6 +43,7 @@ pub struct Server {
 
 pub struct Response {
     pub status: u16,
+    pub headers: BTreeMap<String, String>,
     pub body: String,
 }
 
@@ -82,7 +84,7 @@ impl Server {
     /// GET `path` and keep the session cookie and the page's
     /// `csrf-token` meta for the requests that follow.
     pub fn take_session(&mut self, path: &str) {
-        let (status, set_cookies, body) = self.send("GET", path, &[], "");
+        let (status, set_cookies, _, body) = self.send("GET", path, &[], "");
         assert_eq!(status, 200, "GET {path}:\n{body}\n{}", self.log());
         self.cookie = set_cookies
             .iter()
@@ -103,20 +105,57 @@ impl Server {
             ("Cookie", self.cookie.as_str()),
             ("X-CSRF-Token", self.token.as_str()),
         ];
-        let (status, _, body) = self.send("POST", path, &headers, body);
-        Response { status, body }
+        let (status, _, headers, body) = self.send("POST", path, &headers, body);
+        Response { status, headers, body }
+    }
+
+    /// A GET with the session's cookie.
+    pub fn get(&self, path: &str) -> Response {
+        let headers = [("Cookie", self.cookie.as_str())];
+        let (status, _, headers, body) = self.send("GET", path, &headers, "");
+        Response { status, headers, body }
+    }
+
+    /// A GET with additional request headers.
+    pub fn get_with_headers(&self, path: &str, headers: &[(&str, &str)]) -> Response {
+        let mut request_headers = Vec::with_capacity(headers.len() + 1);
+        if !self.cookie.is_empty()
+            && !headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+        {
+            request_headers.push(("Cookie", self.cookie.as_str()));
+        }
+        request_headers.extend_from_slice(headers);
+        let (status, _, response_headers, body) =
+            self.send("GET", path, &request_headers, "");
+        Response {
+            status,
+            headers: response_headers,
+            body,
+        }
     }
 
     /// A POST with neither cookie nor token.
     pub fn post_without_session(&self, path: &str, content_type: &str, body: &str) -> Response {
         let headers = [("Content-Type", content_type), ("Accept", "application/json")];
-        let (status, _, body) = self.send("POST", path, &headers, body);
-        Response { status, body }
+        let (status, _, response_headers, body) = self.send("POST", path, &headers, body);
+        Response {
+            status,
+            headers: response_headers,
+            body,
+        }
     }
 
     /// One HTTP/1.1 request on its own connection: the status, every
-    /// `Set-Cookie` value, and the body.
-    fn send(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> (u16, Vec<String>, String) {
+    /// `Set-Cookie` values, all headers, and the body.
+    fn send(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> (u16, Vec<String>, BTreeMap<String, String>, String) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("connect");
         stream.set_read_timeout(Some(Duration::from_secs(30))).expect("read timeout");
         let mut request = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n");
@@ -144,7 +183,12 @@ impl Server {
             .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
             .map(|(_, value)| value.trim().to_string())
             .collect();
-        (status, set_cookies, body.to_string())
+        let headers = head
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        (status, set_cookies, headers, body.to_string())
     }
 }
 

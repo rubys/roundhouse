@@ -8,4 +8,13 @@ module ActiveSupport
   def self.singularize: (String text) -> String
   def self.humanize: (String? text) -> String
   def self.titleize: (String? text) -> String
+
+  module Inflector
+    # Default Rails 8.1.4 behavior without configured acronym tables.
+    def self.camelize: (String text, ?bool uppercase_first_letter) -> String
+    def self.deconstantize: (String text) -> String
+    def self.foreign_key: (String class_name, ?bool separate_class_name_and_id_with_underscore) -> String
+    def self.upcase_first: (String text) -> String
+    def self.downcase_first: (String text) -> String
+  end
 end

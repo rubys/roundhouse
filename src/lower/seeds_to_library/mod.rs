@@ -173,17 +173,36 @@ fn assoc_create_rewrite(e: &Expr, models: &[crate::dialect::Model]) -> Option<Ex
 
     // Merge FK entry with original kwargs/hash. Real-blog's
     // `article.comments.create!(commenter:, body:)` parses the
-    // trailing kwargs as a single Hash arg.
-    let merged_hash = match outer_args.first().map(|a| (&*a.node, a.span)) {
-        Some((ExprNode::Hash { entries, kwargs }, span)) => {
-            let mut new_entries = vec![fk_entry];
-            new_entries.extend(entries.iter().cloned());
-            Expr::new(span, ExprNode::Hash { entries: new_entries, kwargs: *kwargs })
-        }
-        _ => Expr::new(
-            e.span,
-            ExprNode::Hash { entries: vec![fk_entry], kwargs: true },
-        ),
+    // trailing kwargs as a single Hash arg. The FK goes LAST: the
+    // association's scope wins over the caller's attributes in Rails.
+    // Any other single argument is an attribute Hash held in a value —
+    // campfire's `rooms(:pets).messages.create!(attributes)` — and the
+    // FK merges onto it. That arm used to fall through to the FK alone,
+    // DROPPING the caller's attributes (every message the helper made
+    // failed "Creator must exist"). Two or more arguments decline.
+    let merged_hash = match outer_args.as_slice() {
+        [] => Expr::new(e.span, ExprNode::Hash { entries: vec![fk_entry], kwargs: true }),
+        [arg] => match &*arg.node {
+            ExprNode::Hash { entries, kwargs } => {
+                let mut new_entries = entries.clone();
+                new_entries.push(fk_entry);
+                Expr::new(arg.span, ExprNode::Hash { entries: new_entries, kwargs: *kwargs })
+            }
+            _ => Expr::new(
+                arg.span,
+                ExprNode::Send {
+                    recv: Some(arg.clone()),
+                    method: Symbol::from("merge"),
+                    args: vec![Expr::new(
+                        e.span,
+                        ExprNode::Hash { entries: vec![fk_entry], kwargs: true },
+                    )],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+        },
+        _ => return None,
     };
 
     Some(Expr::new(

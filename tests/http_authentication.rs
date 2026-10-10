@@ -112,11 +112,13 @@ fn the_spinel_tree_defines_the_http_auth_helpers_and_reads_the_header() {
     }
     assert!(file(&files, "runtime/http_authentication.rbs").contains("def authenticate_with_http_token:"));
     assert!(file(&files, "boot.rb").contains("require_relative \"runtime/http_authentication\""));
-    // The dispatcher fills `request.env` from an allowlist of headers;
-    // without this one the helpers would always see no credentials.
+    // The dispatcher maps every parsed wire header into Rails' request env;
+    // this must include Authorization for the auth helpers to see credentials.
     assert!(
-        file(&files, "main.rb").contains("request_obj.env[\"HTTP_AUTHORIZATION\"]"),
-        "main.rb does not copy the Authorization header into the request env"
+        file(&files, "main.rb").contains(
+            "request_obj.env[ActionDispatch::Http::Headers.env_name(name)] = value"
+        ),
+        "main.rb does not map parsed headers into the request env"
     );
 }
 

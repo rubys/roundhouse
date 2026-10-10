@@ -123,6 +123,7 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let jobs = &ci["jobs"];
+    assert!(jobs.get("writebook-inventory").is_none());
     assert_eq!(jobs["unit"]["needs"].as_str(), Some("generate-fixture"));
     assert_eq!(jobs["generate-fixture"]["needs"].as_str(), Some("plan"));
     assert!(jobs["generate-fixture"].get("if").is_none());
@@ -131,7 +132,6 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
         "build-roundhouse",
         "build-wasm",
         "spinel-build",
-        "writebook-inventory",
     ] {
         assert_eq!(jobs[name]["needs"].as_str(), Some("plan"), "{name}");
     }
@@ -154,7 +154,6 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
         "build-roundhouse",
         "build-wasm",
         "spinel-build",
-        "writebook-inventory",
         "store-check",
         "browser-smoke-typescript",
         "compare",

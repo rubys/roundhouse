@@ -209,6 +209,12 @@ module ActiveRecord
     def last_n: (Integer | Float | String n) -> Array[Base]
     def count: () -> Integer
     def sum: (String | Symbol expr) -> Float
+    def minimum: (String | Symbol expr) -> untyped
+    def maximum: (String | Symbol expr) -> untyped
+    private def extreme: (String | Symbol expr, String function) -> untyped
+    private def grouped_extreme: (String column, String function) -> Hash[untyped, untyped]
+    private def schema_group_column: (String group) -> Symbol?
+    private def cast_schema_value: (untyped value, Symbol column) -> untyped
     def group_count: () -> Hash[untyped, Integer]
     def empty?: () -> bool
     def any?: () -> bool

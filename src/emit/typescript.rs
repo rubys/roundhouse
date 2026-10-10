@@ -599,9 +599,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     let mut all_app_classes: Vec<crate::dialect::LibraryClass> =
-        Vec::with_capacity(model_lcs.len() + view_lcs.len() + controller_lcs.len() + fixture_lcs.len() + test_lcs.len() + test_inner_lcs.len());
+        Vec::with_capacity(model_lcs.len() + view_lcs.len() + jbuilder_lcs.len() + controller_lcs.len() + fixture_lcs.len() + test_lcs.len() + test_inner_lcs.len());
     all_app_classes.extend(model_lcs.iter().cloned());
     all_app_classes.extend(view_lcs.iter().cloned());
+    // jbuilder views call into the runtime too
+    // (`ViewHelpers.url_for_path` for a `_url`, `JsonBuilder.*`); a
+    // method only they reach was shaken out, and `/articles.json`
+    // answered 500.
+    all_app_classes.extend(jbuilder_lcs.iter().cloned());
     all_app_classes.extend(controller_lcs.iter().cloned());
     all_app_classes.extend(fixture_lcs.iter().cloned());
     all_app_classes.extend(test_lcs.iter().cloned());

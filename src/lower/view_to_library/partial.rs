@@ -514,18 +514,15 @@ fn wrap_cached_collection(
         false,
     );
 
+    // Through the controller on the ruby family and spinel, as the
+    // single-fragment `<% cache %>` is (`ActionView::ViewHelpers.
+    // fragment_read`); the runtime's own store elsewhere.
     let store = || {
-        send(
-            Some(Expr::new(
-                span,
-                ExprNode::Const {
-                    path: vec![Symbol::from("Rails")],
-                },
-            )),
-            "cache",
-            Vec::new(),
-            None,
-            false,
+        Expr::new(
+            span,
+            ExprNode::Const {
+                path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
+            },
         )
     };
     let key_ref = || var_ref(key_name.clone());
@@ -539,7 +536,7 @@ fn wrap_cached_collection(
             },
             value: send(
                 Some(store()),
-                "read_str",
+                "fragment_read",
                 vec![key_ref()],
                 None,
                 true,
@@ -564,7 +561,7 @@ fn wrap_cached_collection(
         accumulator_append_call(
             send(
                 Some(store()),
-                "write_str",
+                "fragment_write",
                 vec![
                     key_ref(),
                     super::accumulator_result_ref(&cap),

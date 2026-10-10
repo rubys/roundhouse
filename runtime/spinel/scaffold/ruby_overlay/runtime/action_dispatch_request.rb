@@ -14,6 +14,7 @@
 # write scratch keys into it (`exception_notifier.exception_data`),
 # which the real ENV object would reject for non-String values.
 require "stringio"
+require_relative "action_dispatch/headers"
 
 module ActionDispatch
   # `ActionDispatch::TestRequest.create(env)` — see the twin in
@@ -48,6 +49,12 @@ module ActionDispatch
 
     def session_skip?
       @session_options[:skip] == true
+    end
+
+    # `request.headers["Accept-Encoding"]` — the shared
+    # `ActionDispatch::Http::Headers` over this request's env.
+    def headers
+      ActionDispatch::Http::Headers.new(env)
     end
 
     def [](key)

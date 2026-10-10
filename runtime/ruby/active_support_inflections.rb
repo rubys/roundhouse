@@ -77,3 +77,87 @@ module ActiveSupport
     out
   end
 end
+
+# Rails 8.1.4's pure-string Inflector methods that do not depend on the
+# pluralization, transliteration, or locale-specific rule catalogs. These
+# match the default ASCII identifier behavior; configured acronym tables are
+# intentionally not modeled here. `classify`/`tableize`, locale mutation,
+# constantization, transliteration, and parameterization are deliberately not
+# exposed: they need pluralization catalogs, constant lookup, or Rails' other
+# locale/transliteration rules, none of which this pure-string slice models.
+module ActiveSupport
+  module Inflector
+    # Rails' camelize with the default (upper camel case) and lower-camel
+    # option. A slash separates namespaces; an underscore starts a new word.
+    def self.camelize(text, uppercase_first_letter = true)
+      s = text.to_s
+      out = +""
+      n = s.length
+      i = 0
+      capitalize = uppercase_first_letter
+      normalize_word = false
+
+      if s.start_with?("::")
+        out << "::"
+        i = 2
+        capitalize = false
+      elsif s.start_with?("/")
+        out << "::"
+        i = 1
+        capitalize = true
+        normalize_word = true
+      end
+
+      while i < n
+        c = s[i].to_s
+        if c == "/"
+          out << "::"
+          capitalize = true
+          normalize_word = true
+        elsif c == "_"
+          capitalize = true
+          normalize_word = true
+        else
+          ascii_word_character = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9")
+          normalize_word = false if normalize_word && !ascii_word_character
+          if i == 0 && !uppercase_first_letter
+            out << c.downcase
+          else
+            out << (capitalize ? c.upcase : (normalize_word ? c.downcase : c))
+          end
+          capitalize = false
+        end
+        i = i + 1
+      end
+      out
+    end
+
+    # Rails' String-based namespace removal; this does not resolve constants.
+    def self.deconstantize(text)
+      s = text.to_s
+      idx = s.rindex("::")
+      idx ? s[0, idx].to_s : ""
+    end
+
+    # Rails assumes a top-level class name and removes its namespace before
+    # underscoring. The optional separator flag is significant to callers.
+    def self.foreign_key(class_name, separate_class_name_and_id_with_underscore = true)
+      base = ActiveSupport.underscore(ActiveSupport.demodulize(class_name))
+      base + (separate_class_name_and_id_with_underscore ? "_id" : "id")
+    end
+
+    # Uppercase only the first character; preserve the remainder unchanged.
+    def self.upcase_first(text)
+      s = text.to_s
+      return s if s.empty?
+      s[0].to_s.upcase + s[1, s.length - 1].to_s
+    end
+
+    # Lowercase only the first character; preserve the remainder unchanged.
+    def self.downcase_first(text)
+      s = text.to_s
+      return s if s.empty?
+      s[0].to_s.downcase + s[1, s.length - 1].to_s
+    end
+  end
+end

@@ -1621,6 +1621,7 @@ mod tests {
             dyn_pools: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            str_ivars: Default::default(),
             ivar_models: Rc::new(
                 ivar_models
                     .iter()

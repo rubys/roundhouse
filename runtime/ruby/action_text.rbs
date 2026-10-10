@@ -56,6 +56,8 @@ module ActionText
     def content_type: () -> String
     def caption: () -> String?
     def filename: () -> ActiveStorage::Filename
+    def byte_size: () -> Integer
+    def blob: () -> ActiveStorage::Blob?
     def url: () -> String
     def to_plain_text: () -> String
   end

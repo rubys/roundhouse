@@ -36,6 +36,14 @@ class ActiveStoragePreviewerTest < Minitest::Test
     end
   end
 
+  def test_a_videos_dimensions_come_from_ffprobe
+    skip "ffmpeg not installed" unless FFMPEG
+    with_clip do |path|
+      assert_equal [32, 24], ActiveStorage::Previewer.video_dimensions(File.binread(path))
+    end
+    assert_equal [0, 0], ActiveStorage::Previewer.video_dimensions("not a video")
+  end
+
   def test_a_file_that_is_not_a_video_raises_rather_than_answering_bytes
     skip "ffmpeg not installed" unless FFMPEG
     path = File.join(Dir.tmpdir, "roundhouse-previewer-#{$$}.txt")

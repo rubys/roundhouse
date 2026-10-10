@@ -54,22 +54,32 @@ pub(super) fn register(
             return;
         };
         // Rehomed constants are not emitted in their original source scope.
-        if id.0.as_str() != format!("{}::{}", owner.0.as_str(), name.as_str())
-            || classes.contains_key(&id)
-        {
+        if id.0.as_str() != format!("{}::{}", owner.0.as_str(), name.as_str()) {
+            return;
+        }
+        // The one class that may already be registered under this name is
+        // the factory's own block (`Data.define(:a) do def … end`, ingested
+        // as a parentless library class of that name): the factory adds
+        // `new` and the readers beside its methods. Anything else — a
+        // source class that happens to share the name — is not this Data.
+        let reopened = app.library_classes.iter().any(|class| {
+            class.name == id && !class.is_module && class.parent.is_none()
+        });
+        if classes.contains_key(&id) && !reopened {
             return;
         }
         let instance = Ty::Class {
             id: id.clone(),
             args: vec![],
         };
-        let mut info = ClassInfo::default();
+        let mut info = classes.remove(&id).unwrap_or_default();
         info.class_methods
             .insert(Symbol::from("new"), instance.clone());
         // A member declaration establishes a reader, not its value type.
-        // Data has no generated writers.
+        // Data has no generated writers. A block method of the same name
+        // overrides the reader, as it does in Ruby.
         for member in members {
-            info.instance_methods.insert(member, Ty::Untyped);
+            info.instance_methods.entry(member).or_insert(Ty::Untyped);
         }
         classes.insert(id, info);
         factories.insert(value.span, instance);

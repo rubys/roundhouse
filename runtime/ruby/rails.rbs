@@ -62,11 +62,14 @@ module Rails
   class Application
     def session_cookie_key: () -> String
     def forgery_protection_verification_strategy: () -> String
+    def token_fields_omitted: () -> bool
     def global_id_app: () -> String
     def secret_key_base: () -> String
     def domain: () -> String
     def protocol: () -> String
     def credentials: () -> Hash[Symbol, untyped]
+    ENV_CONFIG: Hash[String, Symbol?]
+    def env_config: () -> Hash[String, Symbol?]
     def config_time_zone: () -> String
     def active_storage_excluded_content_types: () -> Array[String]
     def active_storage_video_preview_arguments: () -> String

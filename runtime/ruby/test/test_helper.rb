@@ -60,6 +60,7 @@ $LOAD_PATH.unshift(File.expand_path("..", FRAMEWORK_RUBY))
 end
 
 require "active_record"
+require "active_support_number_helper"
 require "action_view/slots"
 require "action_view/view_helpers"
 # The ruby-family ViewHelpers reopen (date_helper_test.rb). Same

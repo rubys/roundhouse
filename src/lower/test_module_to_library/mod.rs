@@ -38,6 +38,78 @@ pub struct LoweredTestModule {
     pub constants: Vec<(crate::ident::Symbol, crate::expr::Expr)>,
 }
 
+/// A test body's `x_url(…)` as the Ruby family answers it:
+/// `ActionView::ViewHelpers.url_for_path(x_path(…))`, the same seam a
+/// jbuilder `_url` goes through. In a Rails integration test both are
+/// absolute on the session's host (`http://www.example.com/…`), and
+/// campfire's bot API tests compare the two
+/// (`assert_equal room_message_url(@room, m), json["url"]`). The Ruby
+/// family's `url_for_path` reads the origin the test harness sets from
+/// its session (`host!`, `https!`), so the test side matches the view.
+///
+/// Only the Ruby emitter calls this. The strict targets' harnesses
+/// model no session host and their jbuilder answers the path, so their
+/// test bodies keep the path the shared lowering gives them, and the
+/// two sides agree there too. The inner `x_path(…)` is left bare for
+/// `rewrite_route_helpers` to namespace and id-project as usual. A test
+/// class's own `*_url` helper shadows the route helper and is left
+/// alone.
+pub fn ruby_family_absolute_test_urls(modules: &[TestModule]) -> Vec<TestModule> {
+    modules
+        .iter()
+        .map(|tm| {
+            let shadows: std::collections::HashSet<Symbol> =
+                tm.helpers.iter().map(|h| h.name.clone()).collect();
+            let rewrite = |e: &Expr| absolute_test_url(e, &shadows);
+            let mut tm = tm.clone();
+            for t in &mut tm.tests {
+                t.body = rewrite(&t.body);
+            }
+            tm.setup = tm.setup.as_ref().map(rewrite);
+            for h in &mut tm.helpers {
+                h.body = rewrite(&h.body);
+            }
+            tm
+        })
+        .collect()
+}
+
+fn absolute_test_url(expr: &Expr, shadows: &std::collections::HashSet<Symbol>) -> Expr {
+    crate::lower::controller_to_library::util::map_expr(expr, &|e| match &*e.node {
+        ExprNode::Send { recv: None, method, args, block, parenthesized }
+            if method.as_str().ends_with("_url") && !shadows.contains(method) =>
+        {
+            let stem = method.as_str().strip_suffix("_url").unwrap_or_default();
+            let path_call = Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from(format!("{stem}_path")),
+                    args: args.iter().map(|a| absolute_test_url(a, shadows)).collect(),
+                    block: block.as_ref().map(|b| absolute_test_url(b, shadows)),
+                    parenthesized: *parenthesized,
+                },
+            );
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        e.span,
+                        ExprNode::Const {
+                            path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
+                        },
+                    )),
+                    method: Symbol::from("url_for_path"),
+                    args: vec![path_call],
+                    block: None,
+                    parenthesized: true,
+                },
+            ))
+        }
+        _ => None,
+    })
+}
+
 /// Bulk entry. Lower every test module against a shared class
 /// registry (typically the merged map from model + view + controller
 /// lowerings) so test bodies dispatch on real receivers — `@article

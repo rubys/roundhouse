@@ -1,8 +1,10 @@
 module ActiveSupport
   module JSON
-    def self.encode: (Hash[untyped, untyped] value) -> String
-    def self.encode_scalar: (untyped item) -> String
+    def self.encode: (untyped value) -> String
+    def self.decode: (String text) -> untyped
+    def self.jsonable: (untyped value) -> untyped
   end
+  def self.deep_dup: (untyped value) -> untyped
   def self.blank?: (untyped value) -> bool
 
   def self.present?: (untyped value) -> bool
@@ -21,20 +23,17 @@ module ActiveSupport
     end
   end
   def self.index_by: (untyped list) { (untyped) -> untyped } -> Hash[untyped, untyped]
-  # `untyped`, not `Array[untyped]`: the body reads `length` and
-  # nothing else, and campfire calls it on an ASSOCIATION —
-  # `many?(room.users)` hands it a Relation. A container element type
-  # on a parameter is a claim about the argument's REPRESENTATION, and
-  # spinel acts on it: the Relation was coerced to `sp_PolyArray *` at
-  # the call. Same over-claim `Relation#preloaded`'s `records` carried
-  # (5592abe8); `index_by` above already says `untyped` for the same
-  # reason.
-  def self.many?: (untyped list) -> bool
+  # The lowerer routes only Array receivers to this helper. Relation
+  # receivers keep their typed method, and Array/Relation unions use
+  # the existing size lowering, so an Array contract here cannot coerce
+  # an association into Spinel's poly-array representation.
+  def self.many?: (Array[Object] list) ?{ (Object item) -> Object } -> bool
   def self.to_sentence: (Array[untyped] list, String words_connector, String two_words_connector, String last_word_connector) -> String
   def self.symbolize_keys: (Hash[String, untyped] hash) -> Hash[Symbol, untyped]
   def self.stringify_keys: (Hash[Symbol, untyped] hash) -> Hash[String, untyped]
   def self.cast_boolean: (untyped value) -> bool?
   def self.squish: (String text) -> String
+  def self.squish!: (String text) -> String
   # `untyped`, and this one was learned the hard way: it said
   # `Array[untyped]` for a day, on the reasoning that the only receiver
   # is a channel's `streams`, a plain Array. It is — an
@@ -68,6 +67,7 @@ module ActiveSupport
   def self.noon: (Time t) -> Time
   def self.beginning_of_week: (Time t, ?Integer start) -> Time
   def self.end_of_week: (Time t, ?Integer start) -> Time
+  def self.float_decimal_text: (Float f) -> String
   def self.next_week: (Time t) -> Time
   def self.prev_week: (Time t) -> Time
   def self.beginning_of_month: (Time t) -> Time

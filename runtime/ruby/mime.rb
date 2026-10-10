@@ -9,6 +9,8 @@
 # really does answer the vtt type upstream — a quirk a from-scratch
 # table would have "fixed" into a divergence. Re-port, don't edit, when
 # the pinned version moves.
+# The Turbo Rails `:turbo_stream` registration is included as well,
+# since the controller runtime already negotiates that format.
 #
 # Only `lookup`, `lookup_by_extension` and `Mime.[]` are implemented;
 # a call beyond them stays an honest gap rather than a method that
@@ -34,6 +36,7 @@ module Mime
           "text/vtt" => "text/vtt",
           "vtt" => "text/vtt",
           "text/markdown" => "text/markdown",
+          "text/vnd.turbo-stream.html" => "text/vnd.turbo-stream.html",
           "image/png" => "image/png",
           "image/jpeg" => "image/jpeg",
           "image/gif" => "image/gif",
@@ -81,6 +84,7 @@ module Mime
           "text/vcard" => :vcf,
           "text/vtt" => :vtt,
           "text/markdown" => :md,
+          "text/vnd.turbo-stream.html" => :turbo_stream,
           "image/png" => :png,
           "image/jpeg" => :jpeg,
           "image/gif" => :gif,
@@ -123,6 +127,7 @@ module Mime
           "vtt" => "text/vtt",
           "md" => "text/markdown",
           "markdown" => "text/markdown",
+          "turbo_stream" => "text/vnd.turbo-stream.html",
           "png" => "image/png",
           "jpeg" => "image/jpeg",
           "jpg" => "image/jpeg",

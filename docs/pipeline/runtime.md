@@ -711,18 +711,21 @@ Analyze additionally types the column reader `untyped` where the emitted
 reader returns `String`: that is the source-shaped accessor object, and
 it exists only between the two hops the lowering erases.
 
-### `insert_all` runs save callbacks and issues one INSERT per row
+### `insert_all` / `insert_all!` issue one INSERT per row
 
 `Model.insert_all(rows)` is INLINED at the call site (Ruby family,
-`scope_chain.rs`) as `rows.each { |a| Model.new(a)
-.save_after_validation }`. Rails issues ONE multi-row INSERT and skips
-validations *and* callbacks; this skips validations and their callbacks,
-fills timestamps, and runs the save callbacks.
+`scope_chain.rs`) as `rows.each { |a| Model.new(a)._insert_row }`, and
+`Model.insert_all!(rows, returning: cols)` as
+`ActiveRecord::Result.new(rows.map { |a| r = Model.new(a); r._insert_row;
+{ "id" => r.id, … } })`. Rails issues ONE multi-row INSERT; this issues
+one per row. Like Rails, neither runs validations or callbacks, and both
+fill timestamps.
 
-**Why `save_after_validation`.** It is the seam Rails' own
-validation-skipping writes (`update_attribute`) already enter at, so
-this reuses one definition of "write without validating" rather than
-adding a second path that has to be kept in step.
+**Why `_insert_row`.** It is the raw insert the fixture loader uses too
+(Rails' `insert_fixtures_set` is the same kind of write): timestamps the
+attributes left out, then the INSERT, nothing else. Until 2026-10-09 both
+bulk inserts entered at `save_after_validation` and so ran the save
+callbacks Rails skips.
 
 **Why inlined, not a synthesized method.** A per-model `insert_all`
 would land on every model of every app to serve the handful that call
@@ -756,13 +759,16 @@ as a conflict. The check reads the existing row, not the new one, so a
 new row the predicate does not cover is still skipped when a covered row
 shares its key; Rails inserts it.
 
-**What it costs.** N statements instead of one, plus one SELECT per row
-for the conflict check, and callbacks Rails would not run — visible on
-any model whose `after_create` has side effects. The corpus caller
-(campfire's `Room has_many :memberships do def grant_to … end end`)
-inserts Membership rows whose callbacks are inert.
+**`insert_all!` has no guard.** A duplicate raises, as Rails'
+`RecordNotUnique` does. Its value is Rails': an `ActiveRecord::Result`
+of the RETURNING columns (the primary key when `returning:` is left
+out, SQLite's default), whose `rows` are Arrays of values. Only a
+literal column list lowers; anything else declines.
 
-**And it answers a different value.** Rails returns an
+**What it costs.** N statements instead of one, plus, for `insert_all`,
+one SELECT per row for the conflict check.
+
+**And `insert_all` answers a different value.** Rails returns an
 `ActiveRecord::Result`; the inlined `rows.each { … }` returns `rows`,
 the Array of attribute hashes it was given. The catalog says
 `ArrayOfUntyped` for that reason — the type of what this pipeline
@@ -948,10 +954,21 @@ previewer here. ffmpeg is a runtime prerequisite the way libvips is:
 campfire's Dockerfile installs it, so does the archive's, and the
 conformance job. Without it the previewer raises, as Rails does. The
 image DIMENSIONS are read from the file header at upload
-(`ImageAnalyzer`, ruby family: PNG/GIF/JPEG/BMP/WebP), so
-`metadata[:width]` answers what Rails' analyzer would.
+(`ImageAnalyzer`, ruby family: PNG/GIF/JPEG/BMP/WebP), and a video's
+from ffprobe on its first stream (Rails' `VideoAnalyzer`; no ffprobe
+leaves them empty, as a failed analyzer does), so `metadata[:width]`
+answers what Rails' analyzer would. A named preview (`preview(:poster)`)
+resolves the variant the `has_one_attached` block declares, and
+`processed` draws the frame and then makes that variant, as Rails'
+`variant.processed if variant?` does. `processed?` and a variant's
+`image` look the record up and make nothing, so a view that asks "was it
+made?" never makes one.
 
-**Where the preview still differs.** `representation(...)` answers the
+**Where the preview still differs.** The poster is drawn by
+`Previewer.poster`, not through the app's previewer class: an app
+subclass that overrides Rails' private `capture` (campfire's
+`TimeLimitedVideoPreviewer`, which kills ffmpeg past a time limit) is
+not what runs, and `ActiveStorage.paths[:ffmpeg]` is not modeled. `representation(...)` answers the
 variant whatever the blob is, where Rails answers a `Preview` for a
 previewable one — kept so the reader has one type (a union would box
 every image on the room page); campfire only asks for a representation
@@ -2535,6 +2552,30 @@ has three filled cells and one empty one:
   accepts both spellings and we accept only the first.
   `x_url(…, only_path: true)` is Rails asking the URL spelling for a
   path, and gets one.
+
+  A hostless `_url` in a **controller** body is
+  `url_from_path(RouteHelpers.x_path(…))`
+  (`controller_to_library::rewrites::rewrite_controller_route_helpers`).
+  `ActionController::Base#url_from_path` is Rails' `url_options` merge:
+  the request's protocol, host and optional port, each replaced by the
+  key the controller's `default_url_options` names (a nil value removes
+  it), then `build_host_url` drops the scheme's standard port. So
+  `render plain: articles_url` in an integration test answers
+  `http://www.example.com/articles`, as Rails does; it used to answer
+  `/articles`. With no host at all it answers the path, where Rails
+  raises "Missing host to link to!". A TEST body's `_url` still renders
+  the path, and the harness meets Rails halfway: `assert_redirected_to`
+  compares both sides as absolute URLs, and `get`/`follow_redirect!`
+  accept an absolute one. Targets whose controller runtime has no
+  request (`request_host_for_redirect` is `""` there) keep the path.
+  A jbuilder template's `_url` (`json.url article_url(a, format:
+  :json)`) is `ActionView::ViewHelpers.url_for_path(RouteHelpers
+  .article_path(…) + ".json")`. The universal body answers the path,
+  because a strict target's view has no request in scope. The ruby
+  family reopens it (`view_helpers_ext.rb`) over
+  `Rails.application.protocol` + `.domain`, the grounding an ERB
+  view's `_url` gets, and so renders Rails' absolute URL. Neither sees
+  a controller's `default_url_options` yet.
 * **`anchor:`** is rendered, `#tag`, after the query string — the order
   `path_for` applies `add_params` and then `add_anchor` in.
 * **`format:`** is `lower::route_format_suffix`'s, which monomorphizes

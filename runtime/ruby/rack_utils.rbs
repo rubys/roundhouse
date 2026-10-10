@@ -1,0 +1,6 @@
+module Rack
+  module Utils
+    def self.q_values: (String? q_value_header) -> Array[[String?, Float]]
+    def self.select_best_encoding: (Array[String] available_encodings, Array[[String?, Float]] accept_encoding) -> String?
+  end
+end

@@ -220,8 +220,8 @@ def focus_plan(extras=(), jruby=False, spinel=False, compare=()):
     """BASE plus selected focus lanes; path ownership suppressed.
 
     Focused extras / jruby / CORE Spinel are merge-gate required for the
-    fix round. Unrelated extras, WASM, rust/ts compare, Writebook, and the
-    heavy Spinel11 Campfire suite stay off.
+    fix round. Unrelated extras, WASM, rust/ts compare, and the heavy
+    Spinel11 Campfire suite stay off.
     """
     extra = [t for t in EXTRA_COMPARE_TARGETS if t in extras]
     compare = [t for t in COMPARE_TARGETS if t in compare]
@@ -483,13 +483,12 @@ def select(
         )
     targets, smoke = set(), set()
     jobs_selected, spinel_tests = set(), set()
-    wasm = site = spinel = writebook = False
+    wasm = site = spinel = False
     reasons = []
     for path in paths:
         if path == "src/project.rs" and project_scope in PROJECT_BUILDERS.values():
             targets.update(("ruby", "jruby"))
             smoke.update(("ruby", "jruby"))
-            writebook = True
             if project_scope == "ruby-family":
                 spinel = True
                 jobs_selected.update(SPINEL11)
@@ -573,12 +572,10 @@ def select(
         if archive_jobs:
             spinel = True
             jobs_selected.update(archive_jobs)
-        if path in {"tests/writebook.rs", "tests/fixtures/writebook-inventory.json"}:
-            writebook = True
     if full:
         targets.update(TARGETS)
         smoke.update(TARGETS)
-        wasm = site = spinel = writebook = True
+        wasm = site = spinel = True
         reasons.append("full validation requested")
         jobs_selected.update(SPINEL11)
         if campfire_latest:
@@ -615,9 +612,9 @@ def select(
         jobs.append("build-site")
     if "build-site" in jobs or {"build-site", "campfire-archive-build"} & jobs_selected:
         jobs_selected.add("archive-results")
-    jobs.extend(j for j in [*SPINEL11, "archive-results", "campfire-latest"] if j in jobs_selected)
-    if writebook:
-        jobs.append("writebook-inventory")
+    jobs.extend(
+        j for j in [*SPINEL11, "archive-results", "campfire-latest"] if j in jobs_selected
+    )
     if publish:
         if not full:
             raise ValueError("publication requires full validation mode")

@@ -59,3 +59,101 @@ module ActionCable
     end
   end
 end
+
+# `ActiveSupport::Notifications.subscribe(pattern) { |name, start,
+# finish, id, payload| … }` / `unsubscribe(subscriber)` for the cache
+# events, `cache_read` / `cache_write.active_support` with the key in
+# the payload, which campfire's caching test reads to learn which
+# fragments were cached. The store's typed seam (`read_str` /
+# `write_str`, every view `cache` and `cached: true` render) reports
+# them while anyone listens. The keys are Rails' shape
+# (`views/messages/_message/messages/4-…`), template path included.
+# A pattern is a String (the exact name) or a Regexp, as in Rails.
+# The spinel tree has no subscriber list; there the call is the gap.
+module ActiveSupport
+  module Notifications
+    @subscribers = []
+
+    def self.subscribe(pattern, callback = nil, &block)
+      subscriber = [pattern, callback || block]
+      @subscribers << subscriber
+      subscriber
+    end
+
+    def self.unsubscribe(subscriber)
+      @subscribers.delete(subscriber)
+      nil
+    end
+
+    def self.listening?(name)
+      @subscribers.any? { |pattern, _| pattern === name }
+    end
+
+    def self.instrument(name, payload)
+      return unless listening?(name)
+      now = Time.now
+      @subscribers.each do |pattern, callback|
+        callback.call(name, now, now, nil, payload) if pattern === name
+      end
+    end
+  end
+end
+
+module Rails
+  class MemoryStore
+    module Instrumented
+      def read_str(key)
+        value = super
+        ActiveSupport::Notifications.instrument("cache_read.active_support", { key: key.to_s, hit: !value.nil? })
+        value
+      end
+
+      def write_str(key, value, ttl)
+        stored = super
+        ActiveSupport::Notifications.instrument("cache_write.active_support", { key: key.to_s })
+        stored
+      end
+    end
+    prepend Instrumented
+  end
+end
+
+# Rails' time helpers stub `Time.now`: under `travel_to` / `freeze_time`
+# app and test code that asks the stdlib clock — `Time.current`, which
+# the lowering grounds to `Time.now.utc`, included — reads the traveled
+# instant, the same one `ActiveSupport.now` (and so every stamped
+# `created_at`) reads. The harness's helpers move `ActiveSupport`'s
+# clock; this lets `Time.now` follow it while one is set, and reads
+# the real clock otherwise. A compiled tree cannot redefine `Time.now`;
+# there the test clock reaches only what goes through `ActiveSupport`.
+class << Time
+  alias_method :__roundhouse_real_now, :now
+
+  def now(**options)
+    traveling = ActiveSupport::FROZEN_AT[0] != 0 || ActiveSupport::TRAVEL_OFFSET[0] != 0
+    return __roundhouse_real_now(**options) unless traveling && options.empty?
+    ActiveSupport.clock
+  end
+end
+
+module ActiveSupport
+  def self.clock
+    frozen = FROZEN_AT[0]
+    return Time.at(frozen) if frozen != 0
+    Time.__roundhouse_real_now + TRAVEL_OFFSET[0]
+  end
+end
+
+class TestBase
+  # Relative to the REAL clock, which is what the offset is kept against;
+  # `Time.now` may already be traveled.
+  def travel_to(target)
+    ActiveSupport.travel(target.to_i - Time.__roundhouse_real_now.to_i)
+    return unless block_given?
+    begin
+      yield
+    ensure
+      travel_back
+    end
+  end
+end

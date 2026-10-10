@@ -11,6 +11,10 @@ fn app() -> emit_and_run::Overlay {
   def self.match(left, right)
     ActiveSupport::SecurityUtils.secure_compare(left, right)
   end
+
+  def self.fixed_length_match(left, right)
+    ActiveSupport::SecurityUtils.fixed_length_secure_compare(left, right)
+  end
 end
 "#)
         .write("app/controllers/comparisons_controller.rb", r#"class ComparisonsController < ApplicationController
@@ -40,9 +44,34 @@ end
 puts "SecurityUtils comparison passed (13 vectors and controller)"
 "#;
 
+const FIXED_LENGTH_COMPARISONS: &str = r#"
+cases = [
+  ["abc", "abc", true], ["abc", "abd", false], ["", "", true],
+  ["é", "\xc3\xa9".b, true], ["é", "ê", false],
+  ["a\0b", "a\0b", true], ["a\0b", "a\0c", false]
+]
+cases.each do |left, right, expected|
+  actual = Signatures.fixed_length_match(left, right)
+  raise "fixed-length comparison changed: #{[left, right, actual].inspect}" unless actual == expected
+end
+begin
+  Signatures.fixed_length_match("é", "x")
+rescue ArgumentError => error
+  raise "wrong mismatch error: #{error.message.inspect}" unless error.message == "string length mismatch."
+else
+  raise "different byte lengths were accepted"
+end
+puts "SecurityUtils fixed-length comparison passed (7 vectors and byte-length error)"
+"#;
+
 #[test]
 fn a_security_utils_comparison_runs_in_the_emitted_app() {
     app().run_ruby(STRING_COMPARISONS).assert_passes();
+}
+
+#[test]
+fn a_fixed_length_security_utils_comparison_runs_in_the_emitted_app() {
+    app().run_ruby(FIXED_LENGTH_COMPARISONS).assert_passes();
 }
 
 #[test]
@@ -52,8 +81,16 @@ fn a_security_utils_comparison_runs_natively() {
 }
 
 #[test]
+#[ignore = "requires the native Spinel compiler"]
+fn a_fixed_length_security_utils_comparison_runs_natively() {
+    app().run_spinel(FIXED_LENGTH_COMPARISONS).assert_passes();
+}
+
+#[test]
 fn secure_compare_rejects_ordinary_non_string_arguments() {
-    app().run_ruby(r#"
+    app()
+        .run_ruby(
+            r#"
 [nil, 1, :abc, [], {}, true].each do |invalid|
   [[invalid, "abc"], ["abc", invalid]].each do |left, right|
     begin
@@ -65,7 +102,9 @@ fn secure_compare_rejects_ordinary_non_string_arguments() {
   end
 end
 puts "SecurityUtils rejects ordinary non-string arguments (12 cases)"
-"#).assert_passes();
+"#,
+        )
+        .assert_passes();
 }
 
 #[test]

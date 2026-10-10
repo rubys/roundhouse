@@ -51,6 +51,8 @@ mod lambda_signatures_contract;
 mod lambda_signatures;
 #[path = "support/native_http.rs"]
 mod native_http;
+#[path = "spinel_toolchain/action_controller_head.rs"]
+mod action_controller_head;
 #[path = "spinel_toolchain/strong_params.rs"]
 mod strong_params;
 #[path = "spinel_toolchain/params_wrapper.rs"]
@@ -59,6 +61,10 @@ mod params_wrapper;
 mod io_process_constants_contract;
 #[path = "spinel_toolchain/io_process_constants.rs"]
 mod io_process_constants;
+#[path = "support/campfire_caches.rs"]
+mod campfire_caches_contract;
+#[path = "spinel_toolchain/campfire_caches.rs"]
+mod campfire_caches;
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]
@@ -76,6 +82,38 @@ fn anonymous_keyword_forwarding_runs_natively() {
         .expect("emitted keyword forwarding class");
     assert!(emitted.contains("class KeywordForwarder"), "{emitted}");
     assert!(emitted.contains("request(kind: :get, path: path, **)"), "{emitted}");
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn active_support_many_block_and_squish_bang_run_natively() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/active_support_probe.rb",
+            r#"class ActiveSupportProbe
+  def self.many_matches
+    seen = []
+    zero = [1, 2, 3].many? { |n| n > 9 }
+    one = [1, 2, 3].many? { |n| n == 2 }
+    multiple = [1, 2, 3, 4].many? { |n| seen << n; n > 1 }
+    [zero, one, multiple, seen.length]
+  end
+
+  def self.squish_bang
+    text = "\u00a0foo\u2003bar\u2028".dup
+    text.squish!
+  end
+end
+"#,
+        )
+        .run_spinel(
+            r#"raise "many? block zero/one/multiple or short circuit failed" unless ActiveSupportProbe.many_matches == [false, false, true, 3]
+raise "squish! did not match Unicode whitespace semantics" unless ActiveSupportProbe.squish_bang == "foo bar"
+puts "ActiveSupport core extensions native passed"
+"#,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("ActiveSupport core extensions native passed"));
 }
 
 #[path = "support/engine_mount.rs"]

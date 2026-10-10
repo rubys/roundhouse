@@ -95,6 +95,19 @@ pub fn apply_helper_kwarg_positional_lowering(app: &mut App) -> Vec<crate::diagn
                 &mut diagnostics,
             );
         }
+        // A test calls the app's methods the same way the app does
+        // (`@comment.announce(html: "…")`), against the same flattened
+        // definitions.
+        for tm in &mut app.test_modules {
+            let bodies = tm
+                .setup
+                .iter_mut()
+                .chain(tm.tests.iter_mut().map(|t| &mut t.body))
+                .chain(tm.helpers.iter_mut().map(|m| &mut m.body));
+            for body in bodies {
+                rewrite_class_and_instance(body, &class_params, &instance_params, &mut diagnostics);
+            }
+        }
     }
     super::kwsplat::restore_kwrest_in_test_helpers(app);
     let params = helper_param_names(app);

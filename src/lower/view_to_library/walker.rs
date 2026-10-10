@@ -200,14 +200,16 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             )]
         }
         // `<% cache <key> do %> … <% end %>` — Rails fragment caching,
-        // served from `Rails.cache` when the key can be built and
-        // rendered transparently when it cannot:
+        // served through `ActionView::ViewHelpers.fragment_read/_write`
+        // (the runtime's store, or on the ruby family and spinel the
+        // controller's) when the key can be built, and rendered
+        // transparently when it cannot:
         //
-        //   __cache_hit_1 = Rails.cache.read_str("views/messages/_message/…")
+        //   __cache_hit_1 = ActionView::ViewHelpers.fragment_read("views/messages/_message/…")
         //   if __cache_hit_1.nil?
         //     __cache_io_1 = String.new
         //     … body …
-        //     io << Rails.cache.write_str(<same key>, __cache_io_1, 0)
+        //     io << ActionView::ViewHelpers.fragment_write(<same key>, __cache_io_1, 0)
         //   else
         //     io << __cache_hit_1
         //   end
@@ -1504,6 +1506,19 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
                     return call;
                 }
             }
+            // ERB can interpolate a route `_url` directly, not only as
+            // the URL argument to link_to/button_to. Ground it at the
+            // shared seam here so Ruby-family views use the request
+            // origin while strict targets keep the path-only runtime
+            // implementation. Leave unknown route helpers untouched.
+            if let Some(stem) = method.as_str().strip_suffix("_url") {
+                let path_helper = format!("{stem}_path");
+                if ctx.route_helper_names.contains(&path_helper) {
+                    let mut call = super::absolute_url_interp(stem, args.clone());
+                    call.inherit_span(e.span);
+                    return call;
+                }
+            }
             // ERB's `h` alias, in a nested/statement position: an explicit
             // escape call. (Nested `h` inside an escaped interpolation
             // double-escapes — as it does in Rails, where interpolating a
@@ -1733,6 +1748,7 @@ mod tests {
             strict_locals: Default::default(),
             view_name: "messages/_message".to_string(),
             ivar_models: Default::default(),
+            str_ivars: Default::default(),
         }
     }
 
@@ -1798,8 +1814,8 @@ mod tests {
         );
         let emitted = cache_emit(vec![key]);
 
-        assert!(emitted.contains("Rails.cache.read_str("), "the read leads:\n{emitted}");
-        assert!(emitted.contains("Rails.cache.write_str("), "the miss arm writes:\n{emitted}");
+        assert!(emitted.contains("ActionView::ViewHelpers.fragment_read("), "the read leads:\n{emitted}");
+        assert!(emitted.contains("ActionView::ViewHelpers.fragment_write("), "the miss arm writes:\n{emitted}");
         assert!(
             emitted.contains("message.cache_key_with_version"),
             "the record contributes its versioned key:\n{emitted}"
@@ -1855,7 +1871,7 @@ mod tests {
             ExprNode::Array { elements: vec![var("ma")], style: Default::default() },
         );
         let emitted = cache_emit(vec![key]);
-        assert!(!emitted.contains("read_str"), "no cache:\n{emitted}");
+        assert!(!emitted.contains("fragment_read"), "no cache:\n{emitted}");
         assert!(
             emitted.contains("inner"),
             "but the body still renders — transparent, never DROPPED:\n{emitted}"
@@ -1872,7 +1888,7 @@ mod tests {
         );
         let emitted = cache_emit(vec![key]);
         assert!(
-            !emitted.contains("read_str"),
+            !emitted.contains("fragment_read"),
             "`room` is a model singular but not one of THIS view's locals:\n{emitted}"
         );
     }
@@ -2572,13 +2588,13 @@ fn emit_cached_fragment(
     let cap = format!("__cache_io_{uniq}");
 
     let key = || Expr::new(span, ExprNode::StringInterp { parts: parts.to_vec() });
+    // `ActionView::ViewHelpers.fragment_read/fragment_write`: the
+    // runtime's store on every target, reopened on the ruby family and
+    // spinel to ask the controller as Rails' CacheHelper does.
     let store = || {
-        send(
-            Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Rails")] })),
-            "cache",
-            Vec::new(),
-            None,
-            false,
+        Expr::new(
+            span,
+            ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] },
         )
     };
     let hit_ref = || Expr::new(span, ExprNode::Var { id: VarId(0), name: hit.clone() });
@@ -2587,7 +2603,7 @@ fn emit_cached_fragment(
         span,
         ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: hit.clone() },
-            value: send(Some(store()), "read_str", vec![key()], None, true),
+            value: send(Some(store()), "fragment_read", vec![key()], None, true),
         },
     );
 
@@ -2599,7 +2615,7 @@ fn emit_cached_fragment(
     miss.push(accumulator_append_call(
         send(
             Some(store()),
-            "write_str",
+            "fragment_write",
             vec![key(), accumulator_result_ref(&cap), ttl],
             None,
             true,

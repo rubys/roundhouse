@@ -157,14 +157,17 @@ fn the_local_is_kept_before_the_statements_that_read_it() {
 }
 
 /// A local's value gets the rewrites a pair's value gets: the emitted
-/// view has `RouteHelpers.<x>_path`, not `<x>_url`. A value with no
-/// helper in it (`summary`'s `widgets.size`) is kept as written.
+/// view has `url_for_path` over `RouteHelpers.<x>_path`, not
+/// `<x>_url`. A value with no helper in it (`summary`'s `widgets.size`)
+/// is kept as written.
 #[test]
 fn a_route_helper_in_a_local_is_rewritten() {
     let files = emitted();
     let src = view(&files, "widgets/linked_json.rb");
     assert!(
-        src.contains("link = RouteHelpers.widget_path(first.id)"),
+        src.contains(
+            "link = ActionView::ViewHelpers.url_for_path(RouteHelpers.widget_path(first.id))"
+        ),
         "the route helper is the runtime's path helper:\n{src}"
     );
     assert!(!src.contains("widget_url"), "no `_url` helper is left:\n{src}");

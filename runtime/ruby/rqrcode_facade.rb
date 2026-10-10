@@ -11,6 +11,18 @@
 #
 # Own file rather than a gem_facades.rb section so the swap is
 # whole-file — the same grain bcrypt_facade.rb uses.
+# rqrcode_core's errors, which an app rescues by name: `QRCodeRunTimeError`
+# for data too long to encode, `QRCodeArgumentError` for a bad level or
+# size. Defined here so the name resolves where the façade stands; the
+# gem and the spin package define the same two.
+module RQRCodeCore
+  class QRCodeArgumentError < ArgumentError
+  end
+
+  class QRCodeRunTimeError < RuntimeError
+  end
+end
+
 module RQRCode
   class QRCode
     def initialize(_data)

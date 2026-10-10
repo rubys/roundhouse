@@ -235,6 +235,15 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 "assert_kind_of failed".to_string(),
             ))
         }
+        "assert_not_kind_of" | "refute_kind_of" if args.len() >= 2 => {
+            let klass = args[0].clone();
+            let val = args[1].clone();
+            Some(raise_if(
+                span,
+                send_method(span, val, "is_a?", vec![klass]),
+                "refute_kind_of failed".to_string(),
+            ))
+        }
         // OBJECT IDENTITY, which is a different question from `==` and
         // the only one these tests are asking: campfire's
         // `content_filters_test` proves `SanitizeAttributes` builds a

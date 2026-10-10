@@ -200,3 +200,52 @@ end
         .run_test("test/models/article_loaded_test.rb")
         .assert_passes();
 }
+
+/// An embedded file renders through the app's `active_storage/blobs/
+/// _blob` partial, as campfire's does: the node names its blob only by
+/// sgid (`blob.attachable_sgid`), the partial is handed the Attachment
+/// and reads the blob's filename and size through it, and the size is
+/// Rails' `number_to_human_size`. `embeds.first.blob.variant(…)` with an
+/// inline transformation is the blob under that Variation.
+#[test]
+fn an_embedded_blob_renders_through_the_apps_blob_partial() {
+    overlay()
+        .edit(
+            "app/models/article.rb",
+            "  def content_loaded?\n",
+            "  def first_embed_variant\n    content.embeds.first.blob.variant(resize_to_limit: [ 10, 20 ])\n  end\n\n  def content_loaded?\n",
+        )
+        .write(
+            "app/views/active_storage/blobs/_blob.html.erb",
+            r##"<figure class="attachment attachment--file attachment--<%= blob.filename.extension %>">
+  <figcaption class="attachment__caption">
+    <% if caption = blob.try(:caption) %>
+      <%= caption %>
+    <% else %>
+      <span class="attachment__name"><%= blob.filename %></span>
+      <span class="attachment__size"><%= number_to_human_size blob.byte_size %></span>
+    <% end %>
+  </figcaption>
+</figure>
+"##,
+        )
+        .run_ruby(
+            r##"
+blob = ActiveStorage::Blob.create_and_upload!("x" * 1234, "notes.txt", "text/plain")
+article = Article.new(title: "Embedded", body: "A body long enough to pass.")
+article.content = %(<div>Here: <action-text-attachment sgid="#{blob.attachable_sgid}"></action-text-attachment></div>)
+article.save!
+html = Article.find(article.id).content.to_s
+raise "no file name: #{html}" unless html.include?(%(<span class="attachment__name">notes.txt</span>))
+raise "no human size: #{html}" unless html.include?(%(<span class="attachment__size">1.21 KB</span>))
+raise "no extension class: #{html}" unless html.include?("attachment--txt")
+variant = Article.find(article.id).first_embed_variant
+raise "variant of #{variant.blob.id}" unless variant.blob.id == blob.id
+raise "variation #{variant.variation.inspect}" unless variant.variation.encode.include?("10")
+sizes = [ 1, 123, 1024, 12345, 1234567 ].map { |n| ActionView::ViewHelpers.number_to_human_size(n) }
+raise "sizes #{sizes.inspect}" unless sizes == [ "1 Byte", "123 Bytes", "1 KB", "12.1 KB", "1.18 MB" ]
+puts "blob partial ok"
+"##,
+        )
+        .assert_passes();
+}

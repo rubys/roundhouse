@@ -43,7 +43,7 @@ use crate::ty::{Row, Ty};
 use self::associations::{push_association_methods, push_dependent_destroy};
 pub(crate) use self::associations::model_defines_instance_method;
 pub(crate) use self::markers::attribute_api_decls;
-pub(crate) use self::markers::BLOCK_CALLBACK_HOOKS;
+pub(crate) use self::markers::block_callback_shape;
 
 /// Push a synthesized instance method unless the model body defines the
 /// name (custom methods win — `push_user_methods` runs after the
@@ -648,7 +648,7 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         if matches!(&*expr.node, ExprNode::Assign { target: LValue::Const { .. }, .. }) {
             continue;
         }
-        let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else {
+        let ExprNode::Send { recv, method, args, .. } = &*expr.node else {
             continue;
         };
         let name = method.as_str();
@@ -801,19 +801,10 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         // (`before_create -> { … }`) — both claimed by
         // markers::push_block_callback, on the shape it reads: a block,
         // or a parameterless lambda as the first argument.
-        if self::markers::BLOCK_CALLBACK_HOOKS.contains(&name) {
-            // A block declaring optional/keyword parameters is declined
-            // there, so it reports here like any unlowered DSL call.
-            if block.as_ref().is_some_and(|b| {
-                !matches!(&*b.node, ExprNode::Lambda { extra_params, .. } if !extra_params.is_empty())
-            }) {
-                continue;
-            }
-            if let ExprNode::Send { args, .. } = &*expr.node {
-                if matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lambda { params, extra_params, .. }) if params.is_empty() && extra_params.is_empty()) {
-                    continue;
-                }
-            }
+        // Exactly the shapes `markers::push_block_callback` lowers
+        // (`block_callback_shape`); a declined one reports below.
+        if self::markers::block_callback_shape(expr).is_some() {
+            continue;
         }
         // sorbet's pure ANNOTATIONS. The library-class walk drops
         // these at ingest; a model never saw them until an abstract

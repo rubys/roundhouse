@@ -132,6 +132,96 @@ fn destructure_target(
     Ok(out)
 }
 
+/// Ruby writes a nested multi-write's targets depth first, in source
+/// order; the desugar above writes one level at a time (the flat level,
+/// then each group). The two agree unless a variable is written twice
+/// and its LAST write moves — `(x, y), x = [1, 2], 3` leaves `x` at 3 in
+/// Ruby and would leave it at 1 here — so that shape is refused rather
+/// than answered wrong.
+fn reject_reordered_rewrite(mw: &ruby_prism::MultiWriteNode<'_>, file: &str) -> IngestResult<()> {
+    fn name_of(node: &Node<'_>) -> Option<String> {
+        if let Some(t) = node.as_local_variable_target_node() {
+            return Some(constant_id_str(&t.name()).to_string());
+        }
+        if let Some(t) = node.as_instance_variable_target_node() {
+            return Some(constant_id_str(&t.name()).to_string());
+        }
+        None
+    }
+    fn source_order<'pr>(
+        lefts: impl Iterator<Item = Node<'pr>>,
+        writes: &mut Vec<(String, usize)>,
+        targets: &mut Vec<usize>,
+    ) {
+        for left in lefts {
+            if let Some(group) = left.as_multi_target_node() {
+                source_order(group.lefts().iter(), writes, targets);
+            } else {
+                let at = left.location().start_offset();
+                targets.push(at);
+                if let Some(name) = name_of(&left) {
+                    writes.push((name, at));
+                }
+            }
+        }
+    }
+    // The desugar's order: this level's plain targets, then each group's
+    // (recursively, in the same shape).
+    fn desugar_order<'pr>(
+        lefts: Vec<Node<'pr>>,
+        writes: &mut Vec<(String, usize)>,
+        targets: &mut Vec<usize>,
+    ) {
+        let mut groups = Vec::new();
+        for left in lefts {
+            if let Some(group) = left.as_multi_target_node() {
+                groups.push(group);
+            } else {
+                let at = left.location().start_offset();
+                targets.push(at);
+                if let Some(name) = name_of(&left) {
+                    writes.push((name, at));
+                }
+            }
+        }
+        for group in groups {
+            desugar_order(group.lefts().iter().collect(), writes, targets);
+        }
+    }
+    fn has_setter_target<'pr>(lefts: impl Iterator<Item = Node<'pr>>) -> bool {
+        lefts.into_iter().any(|left| {
+            if let Some(group) = left.as_multi_target_node() {
+                has_setter_target(group.lefts().iter())
+            } else {
+                left.as_call_target_node().is_some()
+            }
+        })
+    }
+    let mut ruby_targets = Vec::new();
+    let mut ruby = Vec::new();
+    source_order(mw.lefts().iter(), &mut ruby, &mut ruby_targets);
+    let mut ours_targets = Vec::new();
+    let mut ours = Vec::new();
+    desugar_order(mw.lefts().iter().collect(), &mut ours, &mut ours_targets);
+    let last = |writes: &[(String, usize)], name: &str| {
+        writes.iter().rev().find(|(n, _)| n == name).map(|(_, at)| *at)
+    };
+    if ruby.iter().any(|(name, _)| last(&ruby, name) != last(&ours, name)) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "nested multi-write that writes one variable twice out of source order is not modeled".into(),
+        });
+    }
+    let has_setter = has_setter_target(mw.lefts().iter());
+    if has_setter && ruby_targets != ours_targets {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "nested multi-write with assignment-method targets would reorder setter side effects".into(),
+        });
+    }
+    Ok(())
+}
+
 /// A fresh local for one nested destructuring level, unique by the
 /// node's offset and clear of every name the source already uses.
 fn nested_temp(node: &Node<'_>, _span: Span) -> Symbol {
@@ -158,6 +248,7 @@ fn ingest_multi_write(
     // destructured from it after the flat assignment. The whole
     // expression still answers the RHS, as Ruby's does.
     if mw.rest().is_none() && mw.lefts().iter().any(|l| l.as_multi_target_node().is_some()) {
+        reject_reordered_rewrite(mw, file)?;
         let rhs = nested_temp(&mw.as_node(), span);
         let rhs_read =
             || Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: rhs.clone() });
@@ -781,19 +872,51 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // (the IR has no safe-send flag). nil receiver → the And
             // yields nil without dispatching, matching `&.`; a plain
             // Send would have silently DROPPED the guard and crashed on
-            // nil at runtime. Two documented divergences: the receiver
-            // expression evaluates twice (harmless for the ivar/local
-            // receivers real templates use), and a `false` receiver
-            // skips the call where Ruby's `&.` would dispatch (nil is
-            // the only value `&.` guards) — acceptable until a real
-            // call site cares, at which point Send grows a `safe` flag.
+            // nil at runtime. A receiver that is not a plain read is
+            // bound once first — `(__safe_nav17 = a.pop) && __safe_nav17.b`
+            // — because evaluating it twice is not harmless: campfire's
+            // `@idle[address].pop&.first` popped two connections and
+            // handed back the wrong one. One divergence stays: a `false`
+            // receiver skips the call where Ruby's `&.` would dispatch
+            // (nil is the only value `&.` guards) — acceptable until a
+            // real call site cares, at which point Send grows a `safe`
+            // flag.
             match (c.is_safe_navigation(), recv) {
-                (true, Some(r)) => ExprNode::BoolOp {
+                (true, Some(r)) if is_plain_read(&r) => ExprNode::BoolOp {
                     op: crate::expr::BoolOpKind::And,
                     surface: crate::expr::BoolOpSurface::Symbol,
                     left: r,
                     right: Expr::new(span, send),
                 },
+                (true, Some(r)) => {
+                    // One local per site: a shared name would hold a
+                    // different type at each `&.` in a method, and a
+                    // local that does is polymorphic on spinel.
+                    let temp = Symbol::from(format!("__safe_nav{}", r.span.start));
+                    let read = Expr::new(
+                        r.span,
+                        ExprNode::Var { id: crate::ident::VarId(0), name: temp.clone() },
+                    );
+                    let bound = Expr::new(
+                        r.span,
+                        ExprNode::Assign {
+                            target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: temp },
+                            value: r,
+                        },
+                    );
+                    let ExprNode::Send { method, args, block, parenthesized, .. } = send else {
+                        unreachable!("built as a Send above")
+                    };
+                    ExprNode::BoolOp {
+                        op: crate::expr::BoolOpKind::And,
+                        surface: crate::expr::BoolOpSurface::Symbol,
+                        left: bound,
+                        right: Expr::new(
+                            span,
+                            ExprNode::Send { recv: Some(read), method, args, block, parenthesized },
+                        ),
+                    }
+                }
                 _ => send,
             }
         }
@@ -3447,5 +3570,18 @@ fn merge_call(recv: Expr, arg: Expr, span: Span) -> Expr {
             block: None,
             parenthesized: true,
         },
+    )
+}
+
+/// A receiver `&.` may read twice without changing what the program
+/// does: a local, an ivar, a constant, `self`, or a literal.
+fn is_plain_read(e: &Expr) -> bool {
+    matches!(
+        &*e.node,
+        ExprNode::Var { .. }
+            | ExprNode::Ivar { .. }
+            | ExprNode::Const { .. }
+            | ExprNode::SelfRef
+            | ExprNode::Lit { .. }
     )
 }

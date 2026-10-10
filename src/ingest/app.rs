@@ -872,6 +872,19 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 methods.append(&mut synth);
             }
         }
+        // A helper that overrides ActionView's `token_tag` to answer ""
+        // (campfire's ApplicationHelper: "Header-only forgery protection
+        // needs no secret in forms or cached HTML"). Rails' form helpers
+        // build their token field through it, so every form then has
+        // none; synthesized as the runtime's switch for that. Another
+        // body is not read.
+        if app_helpers_blank_token_tag(vfs, dir) {
+            if let Ok(mut synth) =
+                crate::runtime_src::parse_methods("def token_fields_omitted\n  true\nend\n")
+            {
+                methods.append(&mut synth);
+            }
+        }
         // `GlobalID.app` — the first segment of every `gid://<app>/
         // <Model>/<id>` this runtime mints, and half of every turbo
         // stream name that names a record. Rails takes it from the
@@ -1451,6 +1464,11 @@ end
     // the mixin means, and it needs nothing from a target's mixin
     // semantics.
     let shared_test_helpers = ingest_test_helper_modules(vfs, dir)?;
+    // The rest of `test/test_helpers/`: modules one test class includes
+    // itself (campfire's `include PushServiceTestHelper` in two web push
+    // tests). Kept whole — nested classes and module methods too — and
+    // carried into each including test's file as inner classes.
+    let included_test_helpers = ingest_included_test_helper_files(vfs, dir, &shared_test_helpers)?;
     // The app-wide `setup` the same file declares — see
     // `ingest_test_case_setup`. Prepended to every test module's own.
     let test_case_setup: Option<crate::expr::Expr> = {
@@ -1502,6 +1520,7 @@ end
         {
             for mut tm in tms {
                 splice_test_helpers(&mut tm, &shared_test_helpers);
+                carry_included_test_helpers(&mut tm, &included_test_helpers);
                 if let Some(case_setup) = &test_case_setup {
                     splice_test_case_setup(&mut tm, case_setup);
                 }
@@ -3190,12 +3209,49 @@ fn expand_class_body_macros(app: &mut App) {
     }
 
     let surfaces = controller_concern_surfaces(app);
+    let inherited_class_methods: HashMap<_, std::collections::HashSet<_>> = app
+        .controllers
+        .iter()
+        .map(|controller| {
+            let mut methods = std::collections::HashSet::new();
+            let mut current = Some(controller);
+            let mut seen = std::collections::HashSet::new();
+            while let Some(ancestor) = current {
+                if !seen.insert(&ancestor.name) {
+                    break;
+                }
+                methods.extend(ancestor.body.iter().filter_map(|item| match item {
+                    ControllerBodyItem::ClassMethod { method, .. } => Some(method.name.clone()),
+                    _ => None,
+                }));
+                current = ancestor
+                    .parent
+                    .as_ref()
+                    .and_then(|parent| app.controllers.iter().find(|candidate| &candidate.name == parent));
+            }
+            (controller.name.clone(), methods)
+        })
+        .collect();
 
     for controller in &mut app.controllers {
         let includes = &surfaces.controllers[&controller.name].direct_includes;
         if includes.is_empty() {
             continue;
         }
+        let surface = &surfaces.controllers[&controller.name];
+        let mut macro_definitions = HashMap::<crate::ident::Symbol, usize>::new();
+        for included in &surface.includes {
+            if let Some(methods) = macros.get(included) {
+                for method in methods {
+                    *macro_definitions.entry(method.name.clone()).or_default() += 1;
+                }
+            }
+        }
+        let mut shadowed_macros: std::collections::HashSet<_> = macro_definitions
+            .into_iter()
+            .filter_map(|(name, definitions)| (definitions > 1).then_some(name))
+            .collect();
+        shadowed_macros.extend(inherited_class_methods[&controller.name].iter().cloned());
         let mut expanded: Vec<ControllerBodyItem> = Vec::new();
         for item in std::mem::take(&mut controller.body) {
             let ControllerBodyItem::Unknown { expr, leading_comments, leading_blank_line } = &item
@@ -3256,6 +3312,25 @@ fn expand_class_body_macros(app: &mut App) {
                 }
             }
             let body = substitute_params(&macro_def, args);
+            let Some(body) = expand_nested_filter_macros(
+                &body,
+                &module,
+                &macros,
+                &shadowed_macros,
+                &mut Vec::new(),
+            )
+            else {
+                survey::record(&IngestError::Unsupported {
+                    file: format!("{}", controller.name.0.as_str()),
+                    message: format!(
+                        "class-body macro not expanded: `{}` from {} holds a statement that is not filter DSL",
+                        method.as_str(),
+                        module.0.as_str()
+                    ),
+                });
+                expanded.push(item);
+                continue;
+            };
             match expand_macro_filters(&body, &module) {
                 Some(items) => {
                     let mut comments = leading_comments.clone();
@@ -3304,6 +3379,76 @@ fn expand_class_body_macros(app: &mut App) {
         }
         controller.body = expanded;
     }
+}
+
+/// Inline same-concern class-method calls inside a filter macro before
+/// interpreting its body. Rails concerns commonly compose a macro from
+/// another macro (`require_unauthenticated_access` calls
+/// `allow_unauthenticated_access`, then adds its own redirect filter).
+/// Each nested call is substituted with the same literal-argument rules as
+/// the outer call; unknown calls, cycles, or non-filter statements remain a
+/// fail-closed refusal in `expand_macro_filters`.
+fn expand_nested_filter_macros(
+    body: &crate::expr::Expr,
+    module: &crate::ident::ClassId,
+    macros: &HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
+    shadowed: &std::collections::HashSet<crate::ident::Symbol>,
+    stack: &mut Vec<crate::ident::Symbol>,
+) -> Option<crate::expr::Expr> {
+    use crate::expr::{Expr, ExprNode};
+
+    const MAX_EXPANSION_STATEMENTS: usize = 4096;
+
+    fn expand_statements(
+        body: &Expr,
+        module: &crate::ident::ClassId,
+        macros: &HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
+        shadowed: &std::collections::HashSet<crate::ident::Symbol>,
+        stack: &mut Vec<crate::ident::Symbol>,
+        remaining: &mut usize,
+    ) -> Option<Vec<Expr>> {
+        let statements: Vec<&Expr> = match &*body.node {
+            ExprNode::Seq { exprs } => exprs.iter().collect(),
+            _ => vec![body],
+        };
+        let mut out = Vec::new();
+        for statement in statements {
+            if *remaining == 0 {
+                return None;
+            }
+            *remaining -= 1;
+            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*statement.node
+            else {
+                out.push(statement.clone());
+                continue;
+            };
+            let Some(def) = macros
+                .get(module)
+                .and_then(|methods| methods.iter().find(|candidate| &candidate.name == method))
+            else {
+                out.push(statement.clone());
+                continue;
+            };
+            // A call in a class method runs with the including controller
+            // as `self`; another concern or the controller itself may
+            // override this name. Inlining the lexical concern's version
+            // would change Ruby's lookup result, so refuse the whole macro.
+            if shadowed.contains(method) || stack.len() >= 32 || stack.contains(method) {
+                return None;
+            }
+            stack.push(method.clone());
+            let nested = substitute_params(def, args);
+            let expanded =
+                expand_statements(&nested, module, macros, shadowed, stack, remaining);
+            stack.pop();
+            out.extend(expanded?);
+        }
+        Some(out)
+    }
+
+    let mut remaining = MAX_EXPANSION_STATEMENTS;
+    let exprs = expand_statements(body, module, macros, shadowed, stack, &mut remaining)?;
+    Some(Expr::new(body.span, ExprNode::Seq { exprs }))
 }
 
 /// The macro's body with its parameters replaced by the call's
@@ -7575,6 +7720,49 @@ fn extract_default_per_page(source: &[u8], file: &str) -> Option<u64> {
 /// controllers and are not read.
 ///
 /// `None` = Rails' class default (`header_or_legacy_token`).
+/// Does a module under `app/helpers` define `token_tag` as exactly `""`?
+fn app_helpers_blank_token_tag<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool {
+    fn blank_token_tag(node: &ruby_prism::Node<'_>) -> bool {
+        if let Some(def) = node.as_def_node() {
+            if def.name().as_slice() == b"token_tag" {
+                let Some(body) = def.body() else { return false };
+                let stmts: Vec<_> = match body.as_statements_node() {
+                    Some(s) => s.body().iter().collect(),
+                    None => vec![body],
+                };
+                return stmts.len() == 1
+                    && stmts[0].as_string_node().is_some_and(|s| s.unescaped().is_empty());
+            }
+            return false;
+        }
+        let mut found = false;
+        if let Some(m) = node.as_module_node() {
+            if let Some(b) = m.body() {
+                found = blank_token_tag(&b);
+            }
+        } else if let Some(c) = node.as_class_node() {
+            if let Some(b) = c.body() {
+                found = blank_token_tag(&b);
+            }
+        } else if let Some(s) = node.as_statements_node() {
+            found = s.body().iter().any(|n| blank_token_tag(&n));
+        } else if let Some(p) = node.as_program_node() {
+            found = blank_token_tag(&p.statements().as_node());
+        }
+        found
+    }
+    let helpers = dir.join("app/helpers");
+    if !vfs.is_dir(&helpers) {
+        return false;
+    }
+    let Ok(files) = read_rb_files(vfs, &helpers) else { return false };
+    files.iter().any(|file| {
+        let Ok(source) = vfs.read(file) else { return false };
+        let result = super::prism::parse(&source, &file.display().to_string());
+        blank_token_tag(&result.node())
+    })
+}
+
 fn read_forgery_verification_strategy<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
     fn strategy_value(text: &str) -> Option<String> {
         let v = text.trim().trim_start_matches(':');
@@ -7846,6 +8034,80 @@ fn ingest_test_helper_modules<V: Vfs + ?Sized>(
             .unwrap_or(usize::MAX)
     });
     Ok(out)
+}
+
+/// Each `test/test_helpers/` file that is not spliced into every test
+/// case, as (its top-level module, every class the file defines). The
+/// file is read whole because a helper module can carry what a method
+/// splice cannot: campfire's `PushServiceTestHelper` defines a nested
+/// `Server` class and module methods with their own state.
+fn ingest_included_test_helper_files<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    shared: &[LibraryClass],
+) -> IngestResult<Vec<(crate::ident::ClassId, Vec<LibraryClass>)>> {
+    let helpers_dir = dir.join("test/test_helpers");
+    if !vfs.is_dir(&helpers_dir) {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in read_rb_files(vfs, &helpers_dir)? {
+        let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
+        let Some(classes) =
+            unwrap_or_record(ingest_library_classes(&source, &entry.display().to_string()))?
+        else {
+            continue;
+        };
+        let Some(top) = classes.iter().find(|c| c.is_module && !c.name.0.as_str().contains("::")) else {
+            continue;
+        };
+        if shared.iter().any(|lc| lc.name == top.name) {
+            continue;
+        }
+        let top = top.name.clone();
+        let mut classes = classes;
+        for lc in &mut classes {
+            for m in &mut lc.methods {
+                restore_source_keywords(&mut m.params);
+            }
+        }
+        out.push((top, classes));
+    }
+    Ok(out)
+}
+
+/// Undo the library-class flattening of keyword parameters: this code
+/// runs only as the test-side Ruby it was written as, called with the
+/// keywords its own source passes (`Server.new(**options)`,
+/// `server.hung_up?(within: 1)`), so the parameters stay keywords.
+fn restore_source_keywords(params: &mut [crate::dialect::Param]) {
+    for p in params {
+        if p.from_keyword {
+            p.from_keyword = false;
+            p.keyword = true;
+        } else if p.from_kwrest {
+            p.from_kwrest = false;
+            p.keyword = true;
+            p.rest = true;
+            p.default = None;
+        }
+    }
+}
+
+/// A test class that `include`s one of those modules gets the module's
+/// file as inner classes, so the include resolves in the test's own
+/// emitted file.
+fn carry_included_test_helpers(tm: &mut TestModule, helpers: &[(crate::ident::ClassId, Vec<LibraryClass>)]) {
+    for (module, classes) in helpers {
+        if !tm.includes.contains(module) {
+            continue;
+        }
+        for lc in classes {
+            if !tm.inner_classes.iter().any(|c| c.name == lc.name) {
+                tm.inner_classes.push(lc.clone());
+            }
+        }
+    }
 }
 
 /// Modules a file mixes into the test cases through a top-level

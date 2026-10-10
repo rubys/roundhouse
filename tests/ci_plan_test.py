@@ -48,6 +48,9 @@ def git_repository():
         git("init")
         git("config", "user.name", "CI test")
         git("config", "user.email", "test@example.invalid")
+        # Not left on: `git commit` detaches `git maintenance run --auto`, which can still be writing .git/objects when the temporary directory is removed.
+        git("config", "maintenance.auto", "false")
+        git("config", "gc.auto", "0")
         previous = os.getcwd()
         try:
             os.chdir(root)
@@ -69,6 +72,18 @@ class Routing(unittest.TestCase):
         self.assertNotIn("compare", plan["jobs"])
         self.assertNotIn("browser-smoke-typescript", plan["jobs"])
         self.assertNotIn("compare-extra", plan["jobs"])
+
+    def test_writebook_inventory_is_not_selected_by_paths_or_full_validation(self):
+        for paths, options in [
+            (["tests/writebook.rs"], {}),
+            (["tests/fixtures/writebook-inventory.json"], {}),
+            (["src/project.rs"], {"project_scope": "interpreted"}),
+            ([], {"full": True}),
+        ]:
+            with self.subTest(paths=paths, options=options):
+                self.assertNotIn(
+                    "writebook-inventory", ci.select(paths, **options)["jobs"]
+                )
 
     def test_ruby_floor_omits_rust_typescript_until_those_owners_change(self):
         self.assertEqual(
@@ -112,7 +127,7 @@ class Routing(unittest.TestCase):
                 self.assertTrue(plan["site"])
                 self.assertTrue(plan["wasm"])
                 self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
-                self.assertIn("writebook-inventory", plan["required"])
+                self.assertNotIn("writebook-inventory", plan["jobs"])
                 self.assertIn("archive-results", plan["jobs"])
                 self.assertNotIn("archive-results", plan["required"])
                 self.assertNotIn("compare-extra", plan["required"])
@@ -168,7 +183,6 @@ class Routing(unittest.TestCase):
         self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
         self.assertNotIn("compare-extra", plan["jobs"])
         self.assertNotIn("compare-jruby", plan["jobs"])
-        self.assertNotIn("writebook-inventory", plan["jobs"])
         self.assertNotIn("build-wasm", plan["jobs"])
         self.assertIn("generated_columns_spinel", plan["spinel_tests"])
 
@@ -841,7 +855,6 @@ class Routing(unittest.TestCase):
                 self.assertEqual(plan["smoke"], ["ruby", "jruby"])
                 self.assertEqual(plan["extra_compare"], [])
                 self.assertIn("compare-jruby", plan["required"])
-                self.assertIn("writebook-inventory", plan["required"])
                 self.assertIn("archive-results", plan["jobs"])
                 self.assertNotIn("archive-results", plan["required"])
                 self.assertFalse(plan["wasm"])
@@ -887,7 +900,6 @@ class Routing(unittest.TestCase):
         self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
         self.assertIn("archive-results", plan["jobs"])
         self.assertNotIn("archive-results", plan["required"])
-        self.assertIn("writebook-inventory", plan["required"])
         self.assertNotIn("deploy", plan["jobs"])
         published = ci.select([], full=True, publish=True)
         self.assertIn("assemble-site", published["required"])

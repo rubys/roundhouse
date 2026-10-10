@@ -975,6 +975,12 @@ pub enum LibraryClassOrigin {
         owner: Symbol,
         members: Vec<Symbol>,
     },
+    /// The class a `X = Struct.new(:a, :b)` constant in a class or
+    /// module body defines, named `<owner>::X`.
+    StructConstant {
+        members: Vec<Symbol>,
+        keyword_init: bool,
+    },
 }
 
 /// A graphql-ruby object type (a class descending from

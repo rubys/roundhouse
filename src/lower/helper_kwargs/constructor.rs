@@ -52,6 +52,44 @@ impl InstanceCallParams {
                 slots.insert(key, method.params.iter().map(slot_of).collect());
             }
         }
+        // A model's own instance methods, and a concern's methods under
+        // the one class that includes it: campfire's
+        // `@message.broadcast_create(html: @message_html)` against
+        // `Message::Broadcasts#broadcast_create(html: nil)`, which the
+        // receiver types as `Message`. With several includers the
+        // receiver still names one, but which module's definition wins
+        // is the includer's ancestry, so those are left alone.
+        let mut defined: HashSet<(String, Symbol)> = HashSet::new();
+        for model in &app.models {
+            for method in model.methods() {
+                if method.receiver != crate::dialect::MethodReceiver::Instance {
+                    continue;
+                }
+                let key = (model.name.0.as_str().to_string(), method.name.clone());
+                defined.insert(key.clone());
+                slots.remove(&key);
+                if let Some(params) = flattened_keyword_slots(method) {
+                    slots.insert(key, params);
+                }
+            }
+        }
+        for (module, includer) in app.sole_includer_of_modules() {
+            let Some(class) = app.library_classes.iter().find(|c| c.name == module) else {
+                continue;
+            };
+            for method in &class.methods {
+                if method.receiver != crate::dialect::MethodReceiver::Instance {
+                    continue;
+                }
+                let key = (includer.0.as_str().to_string(), method.name.clone());
+                if defined.contains(&key) || slots.contains_key(&key) {
+                    continue;
+                }
+                if let Some(params) = flattened_keyword_slots(method) {
+                    slots.insert(key, params);
+                }
+            }
+        }
 
         let mut custom_new = HashSet::new();
         let mut custom_new_slots = HashMap::new();
@@ -78,6 +116,17 @@ impl InstanceCallParams {
             model_names: names.model_names.clone(),
         }
     }
+}
+
+/// The positional slots of a method whose keywords ingest flattened, or
+/// `None` when it took none or kept a parameter this rule cannot move.
+fn flattened_keyword_slots(method: &crate::dialect::MethodDef) -> Option<Vec<Slot>> {
+    if method.params.iter().any(|param| param.rest || param.keyword || param.forwarding)
+        || !method.params.iter().any(|param| param.from_keyword)
+    {
+        return None;
+    }
+    Some(method.params.iter().map(slot_of).collect())
 }
 
 pub(super) fn lexical_refinement_calls(app: &App) -> HashSet<crate::span::Span> {

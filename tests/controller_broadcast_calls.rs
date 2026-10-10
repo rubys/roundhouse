@@ -23,6 +23,9 @@ use std::path::PathBuf;
 use roundhouse::emit::ruby;
 use roundhouse::ingest::ingest_app_from_tree;
 
+#[path = "support/emit_and_run.rs"]
+mod emit_and_run;
+
 fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
     files
         .iter()
@@ -64,6 +67,7 @@ end
     broadcast_per_user
     broadcast_gone
     broadcast_with_attributes
+    broadcast_helpers_dom_id
   end
 
   private
@@ -86,6 +90,10 @@ end
       broadcast_append_to :rooms, target: :shared_rooms,
         partial: "rooms/row", locals: { room: @room },
         attributes: { maintain_scroll: true, tone: "quiet", missing: nil }
+    end
+
+    def broadcast_helpers_dom_id
+      broadcast_remove_to :rooms, target: helpers.dom_id(@room, :boosts)
     end
 end
 "#,
@@ -129,7 +137,7 @@ fn a_record_streamable_names_the_stream_and_the_target_puts_the_prefix_first() {
     assert!(
         src.contains(
             "Broadcasts.replace(stream: \"#{user.to_gid_param}:rooms\", \
-             target: \"list_#{@room.dom_prefix}_#{@room.dom_record_key}\""
+             target: ActionView::ViewHelpers.dom_id(@room, :list)"
         ),
         "{src}",
     );
@@ -140,11 +148,11 @@ fn a_record_streamable_names_the_stream_and_the_target_puts_the_prefix_first() {
 fn remove_carries_no_html() {
     let src = controller_src();
     assert!(
-        src.contains("Broadcasts.remove(stream: \"rooms\", target: \"list_#{@room.dom_prefix}_#{@room.dom_record_key}\")"),
+        src.contains("Broadcasts.remove(stream: \"rooms\", target: ActionView::ViewHelpers.dom_id(@room, :list))"),
         "{src}",
     );
     assert!(
-        !src.contains("Broadcasts.remove(stream: \"rooms\", target: \"list_#{@room.dom_prefix}_#{@room.dom_record_key}\", html"),
+        !src.contains("Broadcasts.remove(stream: \"rooms\", target: ActionView::ViewHelpers.dom_id(@room, :list), html"),
         "remove must not carry html:\n{src}",
     );
 }
@@ -193,4 +201,64 @@ fn no_broadcast_to_call_survives_into_the_emit() {
     assert!(!src.contains("broadcast_prepend_to"), "{src}");
     assert!(!src.contains("broadcast_replace_to"), "{src}");
     assert!(!src.contains("broadcast_remove_to"), "{src}");
+}
+
+/// `target: helpers.dom_id(record, :prefix)` — campfire 8a6e429's boost
+/// broadcast — spells the same id as `target: [record, :prefix]`.
+#[test]
+fn a_helpers_dom_id_target_spells_rails_dom_id() {
+    let src = controller_src();
+    assert!(
+        src.contains("Broadcasts.remove(stream: \"rooms\", target: ActionView::ViewHelpers.dom_id(@room, :boosts))"),
+        "{src}",
+    );
+}
+
+/// The lowered target must keep Action View's persisted? branch: saved
+/// records include their key, while unsaved records use Rails' `new_`
+/// form (with a prefix replacing `new_`, not stacking onto it).
+#[test]
+fn broadcast_dom_id_matches_rails_for_saved_and_unsaved_records() {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/dom_id_targets_controller.rb",
+            r#"class DomIdTargetsController < ApplicationController
+  def show
+    saved = Article.find(params[:id])
+    unsaved = Article.new(title: "Unsaved", body: "A body long enough to pass.")
+    broadcast_remove_to :articles, target: helpers.dom_id(saved)
+    broadcast_remove_to :articles, target: helpers.dom_id(saved, :edit)
+    broadcast_remove_to :articles, target: helpers.dom_id(unsaved)
+    broadcast_remove_to :articles, target: helpers.dom_id(unsaved, :edit)
+    render plain: "ok"
+  end
+end
+"#,
+        )
+        .edit(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n",
+            "Rails.application.routes.draw do\n  get \"dom-id-targets/:id\", to: \"dom_id_targets#show\"\n",
+        )
+        .write(
+            "test/controllers/dom_id_targets_controller_test.rb",
+            r#"require "test_helper"
+
+class DomIdTargetsControllerTest < ActionDispatch::IntegrationTest
+  test "broadcast targets use Rails dom_id for saved and unsaved records" do
+    article = Article.create!(title: "Saved", body: "A body long enough to pass.")
+    get "/dom-id-targets/#{article.id}"
+    assert_response :success
+    assert_equal [
+      "article_#{article.id}",
+      "edit_article_#{article.id}",
+      "new_article",
+      "edit_article",
+    ], Broadcasts.log.last(4).map { |entry| entry[:target] }
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/dom_id_targets_controller_test.rb")
+        .assert_passes();
 }

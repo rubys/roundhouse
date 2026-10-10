@@ -6,26 +6,10 @@ use crate::{App, ClassId, Expr, ExprNode, Symbol};
 use crate::diagnostic::Diagnostic;
 use crate::dialect::MethodReceiver;
 use crate::ty::Ty;
-use std::collections::HashSet;
 
 pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
     if app.models.iter().all(|model| model.enums.is_empty()) {
         return Vec::new();
-    }
-    fn source_method(app: &App, owner: &ClassId, name: &Symbol, seen: &mut HashSet<ClassId>) -> bool {
-        if !seen.insert(owner.clone()) { return false; }
-        if let Some(model) = app.models.iter().find(|model| &model.name == owner) {
-            if model.methods().any(|m| m.receiver == MethodReceiver::Instance && &m.name == name) {
-                return true;
-            }
-            return model.parent.as_ref().is_some_and(|p| source_method(app, p, name, seen))
-                || crate::analyze::model_includes(model).iter().any(|p| source_method(app, p, name, seen));
-        }
-        app.library_classes.iter().filter(|class| &class.name == owner).any(|class| {
-            class.methods.iter().any(|m| m.receiver == MethodReceiver::Instance && &m.name == name)
-                || class.parent.as_ref().is_some_and(|p| source_method(app, p, name, seen))
-                || class.includes.iter().any(|p| source_method(app, p, name, seen))
-        })
     }
     fn walk(expr: &Expr, owner: Option<&ClassId>, app: &App, out: &mut Vec<Diagnostic>) {
         if let ExprNode::Send { recv, method, .. } = &*expr.node {
@@ -36,7 +20,7 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
                 };
                 if let Some(id) = receiver {
                     if app.models.iter().any(|m| &m.name == id && m.enums.contains_key(&Symbol::from(column)))
-                        && !source_method(app, id, method, &mut HashSet::new())
+                        && !crate::analyze::source_instance_method(app, id, method.as_str())
                     {
                         out.push(Diagnostic::unsupported(expr.span, None, "enum_before_type_cast",
                             format!("{}#{} requires original enum assignment inputs, which are not modeled; a stored-value reader is not equivalent", id.0, method)));

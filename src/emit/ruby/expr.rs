@@ -1263,7 +1263,7 @@ fn emit_local_read(name: &str) -> String {
 /// Ruby reserved words. A method whose name collides with one (the
 /// callable cases are `class` / `then`; the rest can't be implicit either)
 /// must keep an explicit receiver — a bare keyword doesn't parse as a call.
-fn is_ruby_keyword(m: &str) -> bool {
+pub(crate) fn is_ruby_keyword(m: &str) -> bool {
     matches!(
         m,
         "__ENCODING__" | "__LINE__" | "__FILE__" | "BEGIN" | "END" | "alias" | "and" | "begin"
