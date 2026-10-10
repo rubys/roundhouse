@@ -304,7 +304,8 @@ fn merge_text(parts: Vec<Part>) -> Vec<Part> {
 
 /// Every app model's `lookup_ancestors` as i18n keys and its scope:
 /// itself, then each parent that is an app model, `ApplicationRecord`
-/// aside (abstract).
+/// aside (abstract). A chain that never reaches Active Record is a plain
+/// ActiveModel class, looked up under `activemodel`.
 pub fn model_i18n_keys(
     app: &crate::app::App,
 ) -> std::collections::HashMap<crate::ident::ClassId, (String, Vec<String>)> {
@@ -329,8 +330,7 @@ pub fn model_i18n_keys(
                 keys.push(i18n_key(name));
                 parent = model.parent.as_ref();
             }
-            let _ = record;
-            let scope = "activerecord";
+            let scope = if record { "activerecord" } else { "activemodel" };
             (m.name.clone(), (scope.to_string(), keys))
         })
         .collect()

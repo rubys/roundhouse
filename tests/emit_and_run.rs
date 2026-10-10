@@ -703,6 +703,37 @@ fn localized_error_kinds_reach_validations_and_errors_add_on_spinel() {
     localized_error_kinds_app().run_spinel(LOCALIZED_ERROR_KINDS_ASSERTIONS).assert_passes();
 }
 
+/// A plain ActiveModel class reads its attribute names under
+/// `activemodel`, not `activerecord`, as Rails' i18n_scope says.
+fn active_model_scope_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  activemodel:\n    attributes:\n      search:\n        query: \"Keywords\"\n  activerecord:\n    attributes:\n      search:\n        query: \"Wrong scope\"\n",
+        )
+        .write(
+            "app/models/search.rb",
+            "class Search\n  include ActiveModel::Model\n\n  attr_accessor :query\n\n  validates :query, presence: true\nend\n",
+        )
+}
+
+const ACTIVE_MODEL_SCOPE_ASSERTIONS: &str = r#"search = Search.new(query: "")
+raise "valid" if search.valid?
+raise "messages: #{search.errors.inspect}" unless search.errors == ["Keywords can't be blank"]
+puts "active model scope passed"
+"#;
+
+#[test]
+fn an_active_model_class_reads_the_activemodel_scope() {
+    active_model_scope_app().run_ruby(ACTIVE_MODEL_SCOPE_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_active_model_class_reads_the_activemodel_scope_on_spinel() {
+    active_model_scope_app().run_spinel(ACTIVE_MODEL_SCOPE_ASSERTIONS).assert_passes();
+}
+
 /// A field the lowering cannot humanize at compile time keeps its error.
 #[test]
 fn errors_full_message_on_a_dynamic_field_stays_an_error() {
