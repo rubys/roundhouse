@@ -23,13 +23,13 @@
 use std::net::SocketAddr;
 
 use axum::{
+    Router,
     body::Body,
     extract::Request,
-    http::{header, HeaderValue, Method, StatusCode},
+    http::{HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::Response,
     routing::get,
-    Router,
 };
 use tower_http::services::ServeDir;
 
@@ -76,12 +76,30 @@ pub async fn start(router: Router, opts: StartOptions<'_>) {
             .unwrap_or(3000)
     });
 
-    if let Some(layout) = opts.layout {
-        let _ = LAYOUT_FN.set(layout);
-    }
-
     db::open_production_db(&db_path, opts.schema_sql);
 
+    let app = production_router(router, opts.layout);
+
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("bind listener");
+    println!("Roundhouse server listening on http://localhost:{}", port);
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("axum serve");
+}
+
+/// Assemble the production router middleware stack. Kept separate from
+/// listener setup so the production cookie lifecycle can be exercised with
+/// an in-process router in the runtime regression harness.
+pub(crate) fn production_router(router: Router, layout: Option<fn() -> String>) -> Router {
+    if let Some(layout) = layout {
+        let _ = LAYOUT_FN.set(layout);
+    }
     // Static assets: serve `static/assets/<name>` for `/assets/*`
     // requests via tower-http's ServeDir. Mirrors Rails' Propshaft URL
     // shape — the importmap pins and `stylesheet_link_tag("tailwind")`
@@ -101,21 +119,9 @@ pub async fn start(router: Router, opts: StartOptions<'_>) {
     // DELETE cleanup 405s). Wrapping the whole router as the fallback of
     // an outer, route-less Router puts the override ahead of all real
     // routing, so `next.run()` re-enters routing with the corrected verb.
-    let app = Router::new()
+    Router::new()
         .fallback_service(app)
-        .layer(middleware::from_fn(method_override));
-
-    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("bind listener");
-    println!("Roundhouse server listening on http://localhost:{}", port);
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .expect("axum serve");
+        .layer(middleware::from_fn(method_override))
 }
 
 // ── method override middleware ─────────────────────────────────
