@@ -402,15 +402,19 @@ calls in deferred lambdas (but never treat a nested forwarded Var as proof of
 the enclosing method's block), reject loop/yield/super/rebinding flows, and
 invalidate a candidate on unresolved candidate-named targets. Added negative
 tests for deferred non-String callsites, repeated/implicit/rebound consumption,
-and unresolved inherited dispatch. Focused classifier tests pass 6/6 after
-these changes. These are test-only eligibility checks; the production emitter
-is still untouched and the D0 emitted-crate test remains a known red
-reproduction (five generated Cargo errors on the last run). One Oracle finding
-remains open before production wiring: the classifier recognizes a bare method
-named `capture` without proving that it resolves to the intended shared
-`ViewHelpers.capture` implementation. Add that target-identity proof and a
-shadowing regression before treating any candidate as eligible. No Campfire
-inventory was rerun, so there is no compiler-wall delta or support claim.
+and unresolved inherited dispatch. Focused classifier tests initially passed
+6/6. The first audit also found that the classifier recognized a bare method
+named `capture` without proving that it resolves to the shared
+`ActionView::ViewHelpers.capture` implementation. A subsequent local-only
+refinement requires the owner resolver to identify that exact class method and
+requires exactly one matching method in the analysis inventory; a regression
+rejects a local `capture` override and a missing owner. The classifier suite is
+now 7/7. The production emitter is still untouched, and the D0 emitted-crate
+test remains a known red reproduction (five generated Cargo errors on the last
+run). Production wiring must construct the owner map from the complete lowered
+class inventory and preserve the same dispatch choice at emit time. No
+Campfire inventory was rerun, so there is no compiler-wall delta or support
+claim.
 
 For cookies, existing request/task metadata and `process_action` dispatch are
 already present. F0 must extend that request lifecycle and decide whether the

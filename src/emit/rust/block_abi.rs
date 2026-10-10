@@ -72,7 +72,13 @@ pub(crate) fn capture_forwarder_candidates<'a>(
             let block_param = method.block_param?;
             (count_var_uses(method.body, block_param) == 2
                 && !has_unsupported_block_flow(method.body, block_param)
-                && has_one_guarded_capture(method.body, block_param))
+                && has_one_guarded_capture(
+                    method.body,
+                    block_param,
+                    &method.key,
+                    &methods,
+                    helper_owners,
+                ))
             .then(|| method.key.clone())
         })
         .collect();
@@ -352,20 +358,47 @@ fn has_unsupported_block_flow_in_children(expr: &Expr, block_param: &str) -> boo
     found
 }
 
-fn has_one_guarded_capture(body: &Expr, block_param: &str) -> bool {
-    count_guarded_captures(body, block_param) == 1
+fn has_one_guarded_capture(
+    body: &Expr,
+    block_param: &str,
+    caller: &MethodKey,
+    methods: &[MethodRef<'_>],
+    helper_owners: &HashMap<String, String>,
+) -> bool {
+    let Some(owner) = helper_owners.get("capture") else {
+        return false;
+    };
+    if owner != "ActionView::ViewHelpers" {
+        return false;
+    }
+    let capture_target = MethodKey::new(owner, MethodReceiver::Class, "capture");
+    let unique_target_exists = methods
+        .iter()
+        .filter(|method| method.key == capture_target)
+        .count()
+        == 1;
+    unique_target_exists
+        && resolve_target(caller, None, "capture", helper_owners).as_ref() == Some(&capture_target)
+        && count_guarded_captures(body, block_param, caller, helper_owners, &capture_target) == 1
 }
 
-fn count_guarded_captures(expr: &Expr, block_param: &str) -> usize {
-    if is_guarded_capture(expr, block_param) {
+fn count_guarded_captures(
+    expr: &Expr,
+    block_param: &str,
+    caller: &MethodKey,
+    helper_owners: &HashMap<String, String>,
+    capture_target: &MethodKey,
+) -> usize {
+    if is_guarded_capture(expr, block_param, caller, helper_owners, capture_target) {
         return 1;
     }
     if matches!(&*expr.node, ExprNode::Lambda { .. }) {
         return 0;
     }
     let mut count = 0;
-    expr.node
-        .for_each_child(&mut |child| count += count_guarded_captures(child, block_param));
+    expr.node.for_each_child(&mut |child| {
+        count += count_guarded_captures(child, block_param, caller, helper_owners, capture_target)
+    });
     count
 }
 
@@ -379,7 +412,13 @@ fn body_expression(body: &Expr) -> Option<&Expr> {
     }
 }
 
-fn is_guarded_capture(expr: &Expr, block_param: &str) -> bool {
+fn is_guarded_capture(
+    expr: &Expr,
+    block_param: &str,
+    caller: &MethodKey,
+    helper_owners: &HashMap<String, String>,
+    capture_target: &MethodKey,
+) -> bool {
     let ExprNode::If {
         cond,
         then_branch,
@@ -409,13 +448,15 @@ fn is_guarded_capture(expr: &Expr, block_param: &str) -> bool {
     let else_is_capture = matches!(
         &*else_branch.node,
         ExprNode::Send {
-            recv: None,
+            recv,
             method,
             args,
             block: Some(block),
             ..
         } if method.as_str() == "capture"
             && args.is_empty()
+            && resolve_target(caller, recv.as_ref(), method.as_str(), helper_owners).as_ref()
+                == Some(capture_target)
             && matches!(&*block.node, ExprNode::Var { name, .. } if name.as_str() == block_param)
     );
     cond_is_nil_check && then_is_empty_string && else_is_capture
@@ -742,6 +783,23 @@ mod tests {
         }
     }
 
+    fn classify_with_framework_capture(classes: &[LibraryClass]) -> HashSet<MethodKey> {
+        let mut capture_class = class(
+            "ActionView::ViewHelpers",
+            &[MethodDefStub {
+                name: "capture",
+                block: None,
+                body: string_lit("captured"),
+            }],
+        );
+        capture_class.methods[0].receiver = MethodReceiver::Class;
+        let mut classes = classes.to_vec();
+        classes.push(capture_class);
+        let owners =
+            HashMap::from([("capture".to_string(), "ActionView::ViewHelpers".to_string())]);
+        capture_forwarder_candidates(classes.iter(), &owners)
+    }
+
     struct MethodDefStub<'a> {
         name: &'a str,
         block: Option<&'a str>,
@@ -787,7 +845,7 @@ mod tests {
             },
         ];
         let classes = [class("Probe", &methods)];
-        let proven = capture_forwarder_candidates(classes.iter(), &HashMap::new());
+        let proven = classify_with_framework_capture(&classes);
         assert_eq!(proven.len(), 3, "proven methods: {proven:?}");
         for name in ["source", "middle", "outer"] {
             assert!(
@@ -843,7 +901,7 @@ mod tests {
             },
         ];
         let classes = [class("Probe", &duplicate_targets)];
-        let proven = capture_forwarder_candidates(classes.iter(), &HashMap::new());
+        let proven = classify_with_framework_capture(&classes);
         assert!(
             proven.is_empty(),
             "ambiguous identities must not be proven: {proven:?}"
@@ -980,7 +1038,7 @@ mod tests {
                 },
             ];
             let classes = [class("Probe", &methods)];
-            let proven = capture_forwarder_candidates(classes.iter(), &HashMap::new());
+            let proven = classify_with_framework_capture(&classes);
             assert!(
                 !proven.contains(&MethodKey::new("Probe", MethodReceiver::Instance, name)),
                 "unsafe block flow `{name}` was classified: {proven:?}"
@@ -1020,7 +1078,7 @@ mod tests {
             },
         ];
         let classes = [class("Probe", &methods)];
-        let proven = capture_forwarder_candidates(classes.iter(), &HashMap::new());
+        let proven = classify_with_framework_capture(&classes);
         assert!(
             !proven.contains(&MethodKey::new("Probe", MethodReceiver::Instance, "source")),
             "deferred non-String callsite was not considered: {proven:?}"
@@ -1054,7 +1112,7 @@ mod tests {
             class("Parent", &parent_methods),
             class("Child", &child_methods),
         ];
-        let proven = capture_forwarder_candidates(classes.iter(), &HashMap::new());
+        let proven = classify_with_framework_capture(&classes);
         assert!(
             !proven.contains(&MethodKey::new(
                 "Parent",
@@ -1062,6 +1120,45 @@ mod tests {
                 "source"
             )),
             "unresolved inherited call was ignored: {proven:?}"
+        );
+    }
+
+    #[test]
+    fn guarded_terminal_requires_the_unique_shared_view_helpers_capture() {
+        let methods = [
+            MethodDefStub {
+                name: "source",
+                block: Some("block"),
+                body: terminal("block"),
+            },
+            MethodDefStub {
+                name: "good_callsite",
+                block: None,
+                body: call_with_block("source", None, string_lambda(&[], string_lit("valid"))),
+            },
+        ];
+        let mut local_capture = class(
+            "Probe",
+            &[MethodDefStub {
+                name: "capture",
+                block: None,
+                body: string_lit("not the framework implementation"),
+            }],
+        );
+        local_capture.methods[0].receiver = MethodReceiver::Class;
+        let mut classes = vec![class("Probe", &methods), local_capture];
+        let owners = HashMap::from([("capture".to_string(), "Probe".to_string())]);
+        let proven = capture_forwarder_candidates(classes.iter(), &owners);
+        assert!(
+            !proven.contains(&MethodKey::new("Probe", MethodReceiver::Instance, "source")),
+            "local capture override was accepted as the framework terminal: {proven:?}"
+        );
+
+        classes.pop();
+        let no_owner = capture_forwarder_candidates(classes.iter(), &HashMap::new());
+        assert!(
+            !no_owner.contains(&MethodKey::new("Probe", MethodReceiver::Instance, "source")),
+            "unresolved capture terminal was accepted: {no_owner:?}"
         );
     }
 }
