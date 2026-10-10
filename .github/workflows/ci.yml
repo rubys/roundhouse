@@ -572,6 +572,41 @@ jobs:
         run: |
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/tests" -- \
             python3 scripts/ci-unit-tests.py --shard-index ${{ strategy.job-index }} --shard-count ${{ strategy.job-total }}
+      # Host-only research input: keep its exact Rails/Prism control separate
+      # from the generated blog's own locked bundle. Neither check nor the LSP
+      # executes these manifests. Run once, not in every Cargo shard.
+      - name: Prepare experimental Core Ruby input controls
+        if: matrix.shard == 0
+        run: |
+          gem install --no-document prism -v 1.9.0
+          gem install --no-document activemodel -v 8.1.4
+          mkdir -p "$RUNNER_TEMP/core-observer"
+          (cd "$RUNNER_TEMP/core-observer" && ruby "$GITHUB_WORKSPACE/tools/native-observer/extconf.rb" && make)
+          echo "RUBYLIB=$RUNNER_TEMP/core-observer" >> "$GITHUB_ENV"
+          (cd fixtures/real-blog && bundle install)
+          cargo build --locked --bin roundhouse --bin dump_ir
+      - name: Compare original, materialized and emitted Ruby; exercise real-blog
+        if: matrix.shard == 0
+        run: |
+          ruby tools/native-observer/contract.rb
+          RUBYOPT=--yjit ruby tools/native-observer/contract.rb
+          ruby tests/rh_materialize_test.rb
+          ruby tools/boot-to-core/try_input.rb "$RUNNER_TEMP/core-input"
+          ruby tools/boot-to-core/try_blog.rb "$RUNNER_TEMP/core-blog"
+      - name: Upload experimental Core input evidence
+        if: always() && matrix.shard == 0
+        uses: actions/upload-artifact@v7
+        with:
+          name: core-ruby-input-evidence
+          path: |
+            ${{ runner.temp }}/core-input/*.stdout
+            ${{ runner.temp }}/core-input/*.stderr
+            ${{ runner.temp }}/core-input/results.json
+            ${{ runner.temp }}/core-blog/*.stdout
+            ${{ runner.temp }}/core-blog/*.stderr
+            ${{ runner.temp }}/core-blog/results.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Upload test build timings
         if: always()
         uses: actions/upload-artifact@v7
