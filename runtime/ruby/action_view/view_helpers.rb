@@ -359,12 +359,14 @@ module ActionView
       "#{s[0, cutoff]}#{omission}"
     end
 
-    # Rails 8.1.4's ActionView::TextHelper#word_wrap. The regexp wraps
-    # at whitespace/newline boundaries and deliberately leaves an
-    # unbroken word longer than `line_width` intact. Keep the options
-    # narrow and typed; callers needing other coercions should do them
-    # before calling this helper.
+    # Rails 8.1.4's ActionView::TextHelper#word_wrap for positive widths.
+    # The regexp wraps at whitespace/newline boundaries and deliberately
+    # leaves an unbroken word longer than `line_width` intact. Rails'
+    # zero/negative-width behavior is inconsistent (RegexpError or nil),
+    # so reject those values rather than weakening this helper's String
+    # return contract.
     def self.word_wrap(text, line_width: 80, break_sequence: "\n")
+      raise ArgumentError, "line_width must be positive" if line_width <= 0
       return +"" if text.empty?
 
       pattern = /(.{1,#{line_width}})(?:[^\S\n]+\n?|\n*\Z|\n)|\n/

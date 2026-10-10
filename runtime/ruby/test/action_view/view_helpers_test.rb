@@ -154,6 +154,14 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "één|twee", ViewHelpers.word_wrap("één twee", line_width: 5, break_sequence: "|")
   end
 
+  # Rails raises for zero but returns nil for a negative width. Keep the
+  # shared helper's String contract explicit instead of exposing that
+  # inconsistent edge behavior across targets.
+  def test_word_wrap_rejects_non_positive_widths
+    assert_raises(ArgumentError) { ViewHelpers.word_wrap("text", line_width: 0) }
+    assert_raises(ArgumentError) { ViewHelpers.word_wrap("text", line_width: -1) }
+  end
+
   # ── slot store ─────────────────────────────────────────────
 
   def test_content_for_set_and_get
