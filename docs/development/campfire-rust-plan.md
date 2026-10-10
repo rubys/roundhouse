@@ -19,7 +19,7 @@ falling, or a test being selected is not completion evidence.
 
 | Input | Snapshot / status |
 |---|---|
-| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`; status inspected 2026-10-10 at head `aecb0b8216a823748eb752e72aa674f90be81515`; head is unchanged; `CodeRabbit` commit status is SUCCESS but GitHub reports zero check-runs, so there is no exact-head CI validation; keep Draft unless Thomas explicitly says otherwise |
+| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`; status inspected 2026-10-10 at head `cecdec8b71f3b10825d9e6158c45c381aa76d6e2`; head is unchanged; `CodeRabbit` commit status is SUCCESS but GitHub reports zero check-runs, so there is no exact-head CI validation; keep Draft unless Thomas explicitly says otherwise |
 | Baseline implementation SHA | `3b6d1b7576036382f82aa936fef8bcbd5b65272c`; the first plan commit `609248bcf7f51c94d56f91fbdaaf6675dd5b71fe` changed docs only |
 | Campfire | CI pin and checked-out SHA `32b4144b5206304fa8d4c67455a753e2d3c16635` |
 | Strict analyzer | `roundhouse check --strict`: exit 0, 0 errors, 404 warnings |
@@ -190,13 +190,18 @@ See the latest evidence-ledger row for exact counts and commands.
 now generates a synthetic Ruby class with a nil-guarded terminal `capture`,
 two `&block` forwarding edges, and a generated-crate executable check for
 absence, exactly-once execution, borrowed state, and a moved non-`Clone`
-capture. It currently fails during compilation, as intended for this
-pre-fix reproduction: the emitted helper accepts `Box<dyn FnOnce()>` and
-returns `serde_json::Value`, while shared `ViewHelpers::capture` expects a
-callable returning `serde_json::Value`; the forwarded block currently has
-unit return. This is not a passing regression test and does not establish
-support. A focused Oracle review (2026-10-09) recommends adapting only a
-proven D0 String-returning callable at the terminal capture boundary as
+capture. A rerun at Roundhouse
+`cecdec8b71f3b10825d9e6158c45c381aa76d6e2` failed in the generated crate at
+`cargo test --test forwarded_optional_block`: five Rust errors remain (E0599
+for treating the required `Box<dyn FnOnce()>` as optional; E0271 because that
+callback returns unit where shared `ViewHelpers::capture` requires
+`serde_json::Value`; and three E0308 mismatches across the method's
+`String`/`Value` result and direct closure-versus-boxed callsite). This is the
+intended pre-fix reproduction, not a passing regression test and not support
+evidence. The emitted methods still return `serde_json::Value`, and no
+Campfire compiler-wall reduction is established. A focused Oracle review
+(2026-10-09) recommends adapting only a proven D0 String-returning callable at
+the terminal capture boundary as
 `FnOnce() -> String` → `FnOnce() -> serde_json::Value::String`, leaving the
 general shared RBS/runtime contract unchanged. The lowered nil guard must
 preserve `None` as empty content; direct unguarded capture must not gain an
@@ -408,13 +413,24 @@ named `capture` without proving that it resolves to the shared
 `ActionView::ViewHelpers.capture` implementation. A subsequent local-only
 refinement requires the owner resolver to identify that exact class method and
 requires exactly one matching method in the analysis inventory; a regression
-rejects a local `capture` override and a missing owner. The classifier suite is
-now 7/7. The production emitter is still untouched, and the D0 emitted-crate
-test remains a known red reproduction (five generated Cargo errors on the last
-run). Production wiring must construct the owner map from the complete lowered
-class inventory and preserve the same dispatch choice at emit time. No
-Campfire inventory was rerun, so there is no compiler-wall delta or support
-claim.
+rejects a local `capture` override and a missing owner. The classifier suite
+was 7/7 before the latest hardening. A follow-up Oracle review found two more
+prerequisites: candidate call resolution must honor local-method shadowing
+before global-helper fallback, matching Rust emission precedence; and
+forwarding candidates must reject implicit yield, super, rebinding, and other
+unsupported block flow in the forwarded send's arguments, not only in terminal
+methods. The test-only classifier now applies both guards and has regressions
+for a local instance `capture` shadowing the registered framework helper,
+`yield` in forward-call arguments, and block rebinding before the forward. The
+focused classifier suite passes 8/8. Production wiring is still untouched.
+The emitted-crate test was rerun at
+`cecdec8b71f3b10825d9e6158c45c381aa76d6e2` and remains a red reproduction
+(five generated Cargo errors). Before wiring, separately prove effective
+method returns and authored RBS provenance; the classifier's callback-flow
+proof alone cannot authorize a `String` return. Production analysis must use
+the complete final Rust-owned inventory and preserve dispatch identity at emit
+time. No Campfire inventory was rerun, so there is no compiler-wall delta or
+support claim.
 
 For cookies, existing request/task metadata and `process_action` dispatch are
 already present. F0 must extend that request lifecycle and decide whether the

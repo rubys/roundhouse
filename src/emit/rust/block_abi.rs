@@ -92,7 +92,9 @@ pub(crate) fn capture_forwarder_candidates<'a>(
             let Some(block_param) = method.block_param else {
                 continue;
             };
-            if count_var_uses(method.body, block_param) != 1 {
+            if count_var_uses(method.body, block_param) != 1
+                || has_unsupported_block_flow(method.body, block_param)
+            {
                 continue;
             }
             let forwards: Vec<MethodKey> = collect_forwarded_targets(method.body, block_param)
@@ -159,7 +161,7 @@ fn prove_string_callsites(
             caller.body,
             false,
             &mut |recv, name, block, inside_lambda| {
-                let target = resolve_target(&caller.key, recv, name, helper_owners);
+                let target = resolve_target(&caller.key, recv, name, methods, helper_owners);
                 let Some(target) = target else {
                     if candidate_names.contains(name) {
                         unresolved_names.insert(name.to_string());
@@ -266,13 +268,23 @@ fn resolve_target(
     caller: &MethodKey,
     recv: Option<&Expr>,
     name: &str,
+    methods: &[MethodRef<'_>],
     helper_owners: &HashMap<String, String>,
 ) -> Option<MethodKey> {
     let (owner, receiver) = match recv.map(|recv| &*recv.node) {
-        None => match helper_owners.get(name) {
-            Some(owner) => (owner.clone(), MethodReceiver::Class),
-            None => (caller.owner.clone(), caller.receiver),
-        },
+        None => {
+            let local = MethodKey::new(&caller.owner, caller.receiver, name);
+            let local_count = methods.iter().filter(|method| method.key == local).count();
+            if local_count == 1 {
+                (local.owner, local.receiver)
+            } else if local_count > 1 {
+                return None;
+            } else if let Some(owner) = helper_owners.get(name) {
+                (owner.clone(), MethodReceiver::Class)
+            } else {
+                return None;
+            }
+        }
         Some(ExprNode::SelfRef) => (caller.owner.clone(), caller.receiver),
         Some(ExprNode::Const { path }) => (
             path.iter()
@@ -378,18 +390,34 @@ fn has_one_guarded_capture(
         .count()
         == 1;
     unique_target_exists
-        && resolve_target(caller, None, "capture", helper_owners).as_ref() == Some(&capture_target)
-        && count_guarded_captures(body, block_param, caller, helper_owners, &capture_target) == 1
+        && resolve_target(caller, None, "capture", methods, helper_owners).as_ref()
+            == Some(&capture_target)
+        && count_guarded_captures(
+            body,
+            block_param,
+            caller,
+            methods,
+            helper_owners,
+            &capture_target,
+        ) == 1
 }
 
 fn count_guarded_captures(
     expr: &Expr,
     block_param: &str,
     caller: &MethodKey,
+    methods: &[MethodRef<'_>],
     helper_owners: &HashMap<String, String>,
     capture_target: &MethodKey,
 ) -> usize {
-    if is_guarded_capture(expr, block_param, caller, helper_owners, capture_target) {
+    if is_guarded_capture(
+        expr,
+        block_param,
+        caller,
+        methods,
+        helper_owners,
+        capture_target,
+    ) {
         return 1;
     }
     if matches!(&*expr.node, ExprNode::Lambda { .. }) {
@@ -397,7 +425,14 @@ fn count_guarded_captures(
     }
     let mut count = 0;
     expr.node.for_each_child(&mut |child| {
-        count += count_guarded_captures(child, block_param, caller, helper_owners, capture_target)
+        count += count_guarded_captures(
+            child,
+            block_param,
+            caller,
+            methods,
+            helper_owners,
+            capture_target,
+        )
     });
     count
 }
@@ -416,6 +451,7 @@ fn is_guarded_capture(
     expr: &Expr,
     block_param: &str,
     caller: &MethodKey,
+    methods: &[MethodRef<'_>],
     helper_owners: &HashMap<String, String>,
     capture_target: &MethodKey,
 ) -> bool {
@@ -455,7 +491,7 @@ fn is_guarded_capture(
             ..
         } if method.as_str() == "capture"
             && args.is_empty()
-            && resolve_target(caller, recv.as_ref(), method.as_str(), helper_owners).as_ref()
+            && resolve_target(caller, recv.as_ref(), method.as_str(), methods, helper_owners).as_ref()
                 == Some(capture_target)
             && matches!(&*block.node, ExprNode::Var { name, .. } if name.as_str() == block_param)
     );
@@ -695,6 +731,22 @@ mod tests {
                 recv: None,
                 method: Symbol::from(target),
                 args: Vec::new(),
+                block: Some(var(block)),
+                parenthesized: false,
+            },
+        )
+    }
+
+    fn forward_with_yield_argument(target: &str, block: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from(target),
+                args: vec![Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Yield { args: Vec::new() },
+                )],
                 block: Some(var(block)),
                 parenthesized: false,
             },
@@ -1047,6 +1099,61 @@ mod tests {
     }
 
     #[test]
+    fn forwarding_rejects_implicit_yield_and_rebinding() {
+        for (name, body) in [
+            (
+                "yield_in_forward_args",
+                forward_with_yield_argument("source", "block"),
+            ),
+            (
+                "rebound_before_forward",
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Seq {
+                        exprs: vec![
+                            Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Assign {
+                                    target: crate::expr::LValue::Var {
+                                        id: crate::ident::VarId(0),
+                                        name: Symbol::from("block"),
+                                    },
+                                    value: string_lambda(&[], string_lit("replacement")),
+                                },
+                            ),
+                            forward("source", "block"),
+                        ],
+                    },
+                ),
+            ),
+        ] {
+            let methods = [
+                MethodDefStub {
+                    name: "source",
+                    block: Some("block"),
+                    body: terminal("block"),
+                },
+                MethodDefStub {
+                    name,
+                    block: Some("block"),
+                    body,
+                },
+                MethodDefStub {
+                    name: "good_callsite",
+                    block: None,
+                    body: call_with_block(name, None, string_lambda(&[], string_lit("valid"))),
+                },
+            ];
+            let classes = [class("Probe", &methods)];
+            let proven = classify_with_framework_capture(&classes);
+            assert!(
+                !proven.contains(&MethodKey::new("Probe", MethodReceiver::Instance, name)),
+                "unsafe forwarding flow `{name}` was classified: {proven:?}"
+            );
+        }
+    }
+
+    #[test]
     fn candidate_callsite_proof_descends_into_deferred_blocks() {
         let invalid_call = call_with_block("source", None, string_lambda(&[], int_lit(42)));
         let deferred = Expr::new(
@@ -1137,7 +1244,7 @@ mod tests {
                 body: call_with_block("source", None, string_lambda(&[], string_lit("valid"))),
             },
         ];
-        let mut local_capture = class(
+        let local_capture = class(
             "Probe",
             &[MethodDefStub {
                 name: "capture",
@@ -1145,9 +1252,9 @@ mod tests {
                 body: string_lit("not the framework implementation"),
             }],
         );
-        local_capture.methods[0].receiver = MethodReceiver::Class;
         let mut classes = vec![class("Probe", &methods), local_capture];
-        let owners = HashMap::from([("capture".to_string(), "Probe".to_string())]);
+        let owners =
+            HashMap::from([("capture".to_string(), "ActionView::ViewHelpers".to_string())]);
         let proven = capture_forwarder_candidates(classes.iter(), &owners);
         assert!(
             !proven.contains(&MethodKey::new("Probe", MethodReceiver::Instance, "source")),
