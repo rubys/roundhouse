@@ -15,6 +15,7 @@
 # which the real ENV object would reject for non-String values.
 require "stringio"
 require_relative "action_dispatch/headers"
+require_relative "action_dispatch/request_path_parameters"
 
 module ActionDispatch
   # `ActionDispatch::TestRequest.create(env)` — see the twin in
@@ -25,32 +26,6 @@ module ActionDispatch
   module TestRequest
     def self.create(env)
       Request.new(env.each_with_object({}) { |(k, v), h| h[k.to_s] = v })
-    end
-  end
-
-  # Route captures are exposed with String/Symbol-indifferent reads, like
-  # Rails' path_parameters. The Router supplies String keys; do not merge
-  # query parameters into this map.
-  class RequestPathParameters
-    def initialize(values)
-      @values = {}
-      values.each { |key, value| @values[key.to_s] = value }
-    end
-
-    def [](key)
-      @values[key.to_s]
-    end
-
-    def fetch(key, *defaults)
-      name = key.to_s
-      return @values[name] if @values.key?(name)
-      raise ArgumentError, "wrong number of arguments" if defaults.length > 1
-      return defaults[0] unless defaults.empty?
-      raise KeyError, "key not found: #{key}"
-    end
-
-    def key?(key)
-      @values.key?(key.to_s)
     end
   end
 
@@ -90,7 +65,7 @@ module ActionDispatch
     end
 
     def authorization
-      headers["Authorization"] || @env["X-HTTP-AUTHORIZATION"] || @env["X_HTTP-AUTHORIZATION"] || @env["REDIRECT_X_HTTP_AUTHORIZATION"] || headers["X-HTTP-Authorization"]
+      ActionDispatch::Http::Headers.authorization(@env)
     end
 
     def path_parameters=(values)

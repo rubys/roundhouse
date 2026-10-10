@@ -14,14 +14,6 @@ module ActionDispatch
     def eof?: () -> bool
   end
 
-  class RequestPathParameters
-    @values: Hash[String, String]
-    def initialize: (Hash[String, String] values) -> void
-    def []: (untyped key) -> String?
-    def fetch: (untyped key, *untyped defaults) -> String?
-    def key?: (untyped key) -> bool
-  end
-
   # See the .rb. A Rack env's KEYS are Strings by the spec, which is
   # what lets the mapping compare them without coercing; its VALUES are
   # not (`rack.input` is an IO, `rack.errors` a stream), so they stay

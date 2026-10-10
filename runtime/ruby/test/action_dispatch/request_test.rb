@@ -22,7 +22,7 @@ class ActionDispatchRequestTest < Minitest::Test
     # without a value here is what this test is for.
     %i[
       @remote_ip @path @query_string @script_name @request_method
-      @referer @host @format @body @env @user_agent @params
+      @referer @host @format @body @env @user_agent @params @path_parameters
     ].each do |name|
       assert !r.instance_variable_get(name).nil?,
              "#{name} is unset after `new` — `Request.for` reads it before writing"
@@ -101,6 +101,12 @@ class ActionDispatchRequestTest < Minitest::Test
     assert_equal "Bearer legacy", ActionDispatch::Request.for(
       { "X-HTTP-AUTHORIZATION" => "Bearer legacy" }
     ).authorization
+    assert_equal "Bearer rails legacy", ActionDispatch::Request.for(
+      { "X-HTTP_AUTHORIZATION" => "Bearer rails legacy" }
+    ).authorization
+    assert_equal "Bearer underscore legacy", ActionDispatch::Request.for(
+      { "X_HTTP_AUTHORIZATION" => "Bearer underscore legacy" }
+    ).authorization
     assert_equal "Bearer redirect", ActionDispatch::Request.for(
       { "REDIRECT_X_HTTP_AUTHORIZATION" => "Bearer redirect" }
     ).authorization
@@ -108,6 +114,7 @@ class ActionDispatchRequestTest < Minitest::Test
 
   def test_path_parameters_are_route_only_and_indifferent
     r = ActionDispatch::Request.new
+    assert !r.path_parameters.key?(:bot_key)
     r.path_parameters = { "bot_key" => "route-secret" }
     assert_equal "route-secret", r.path_parameters[:bot_key]
     assert_equal "route-secret", r.path_parameters.fetch("bot_key", "missing")

@@ -147,16 +147,16 @@ fn the_spinel_tree_defines_the_http_auth_helpers_and_reads_the_header() {
             .contains("controller.request.path_parameters = matched.path_params")
     );
     let request = file(&files, "runtime/action_dispatch/request.rb");
-    for feature in [
-        "class RequestPathParameters",
-        "def authorization",
-        "def path_parameters",
-    ] {
+    for feature in ["def authorization", "def path_parameters"] {
         assert!(
             request.contains(feature),
             "request runtime lacks `{feature}`"
         );
     }
+    assert!(
+        file(&files, "runtime/action_dispatch/request_path_parameters.rb")
+            .contains("class RequestPathParameters")
+    );
     let headers = file(&files, "runtime/action_dispatch/headers.rb");
     for feature in [
         "class Headers",
@@ -275,6 +275,9 @@ raise "path parameters failed" unless request.path_parameters[:bot_key] == "rout
 legacy = ActionDispatch::Request.new
 legacy.env["X-HTTP-AUTHORIZATION"] = "Basic legacy"
 raise "legacy authorization fallback failed" unless legacy.authorization == "Basic legacy"
+rails_legacy = ActionDispatch::Request.new
+rails_legacy.env["X-HTTP_AUTHORIZATION"] = "Bearer rails legacy"
+raise "Rails legacy authorization fallback failed" unless rails_legacy.authorization == "Bearer rails legacy"
 redirect = ActionDispatch::Request.new
 redirect.env["REDIRECT_X_HTTP_AUTHORIZATION"] = "Bearer redirected"
 raise "redirect authorization fallback failed" unless redirect.authorization == "Bearer redirected"

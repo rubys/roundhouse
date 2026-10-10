@@ -13,6 +13,7 @@
 # Request (CGI-env-backed, runtime/action_dispatch_request.rb) and must
 # not blend the two shapes.
 require_relative "headers"
+require_relative "request_path_parameters"
 
 module ActionDispatch
   # `request.body` — the raw body as Rails hands it back: an IO, not the
@@ -64,32 +65,6 @@ module ActionDispatch
 
     def eof?
       @pos >= @text.length
-    end
-  end
-
-  # Rails exposes route captures through an indifferent-access hash:
-  # app code may use either :bot_key or "bot_key". Keep the stored route
-  # map String-keyed (as the router supplies it) and normalize reads.
-  class RequestPathParameters
-    def initialize(values)
-      @values = {}
-      values.each { |key, value| @values[key.to_s] = value }
-    end
-
-    def [](key)
-      @values[key.to_s]
-    end
-
-    def fetch(key, *defaults)
-      name = key.to_s
-      return @values[name] if @values.key?(name)
-      raise ArgumentError, "wrong number of arguments" if defaults.length > 1
-      return defaults[0] unless defaults.empty?
-      raise KeyError, "key not found: #{key}"
-    end
-
-    def key?(key)
-      @values.key?(key.to_s)
     end
   end
 
@@ -245,7 +220,7 @@ module ActionDispatch
     # Rails checks the ordinary Rack Authorization key, legacy server
     # spellings, and the CGI redirect fallback.
     def authorization
-      headers["Authorization"] || @env["X-HTTP-AUTHORIZATION"] || @env["X_HTTP_AUTHORIZATION"] || @env["REDIRECT_X_HTTP_AUTHORIZATION"] || headers["X-HTTP-Authorization"]
+      ActionDispatch::Http::Headers.authorization(@env)
     end
 
     def path_parameters
