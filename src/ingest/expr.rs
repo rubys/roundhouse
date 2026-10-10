@@ -403,6 +403,42 @@ fn ingest_multi_write(
     Ok(ExprNode::Seq { exprs })
 }
 
+/// The statements `nodes` of one statement list, ingested in order.
+/// `block_start`/`block_bytes` are the list's own source, where a blank
+/// line between two statements marks the second's `leading_blank_line`.
+/// With `reads_bindings`, a `#: self as Type` comment above a statement
+/// becomes the self binding it declares, placed before that statement
+/// (see `type_ascription::leading_self_binding`).
+fn ingest_statement_list(
+    nodes: &[Node<'_>],
+    file: &str,
+    block_start: usize,
+    block_bytes: &[u8],
+    reads_bindings: bool,
+) -> IngestResult<Vec<Expr>> {
+    let mut exprs: Vec<Expr> = Vec::with_capacity(nodes.len());
+    let mut prev_end: Option<usize> = None;
+    for child in nodes {
+        let child_start = child.location().start_offset();
+        if reads_bindings {
+            if let Some(binding) = super::type_ascription::leading_self_binding(file, child_start) {
+                exprs.push(binding);
+            }
+        }
+        let mut expr = ingest_expr(child, file)?;
+        if let Some(pe) = prev_end {
+            let from = pe - block_start;
+            let to = child_start - block_start;
+            if slice_has_blank_line(block_bytes, from, to) {
+                expr.leading_blank_line = true;
+            }
+        }
+        exprs.push(expr);
+        prev_end = Some(child.location().end_offset());
+    }
+    Ok(exprs)
+}
+
 /// The argument a sorbet-runtime assertion evaluates to, when `node`
 /// is one: `T.let(x, Type)` / `T.cast` / `T.must` / `T.must_because` /
 /// `T.unsafe` / `T.bind` / `T.assert_type!` → `x`. `T.nilable(...)` and
@@ -430,6 +466,11 @@ pub(super) fn sorbet_assertion_argument<'pr>(node: &Node<'pr>) -> Option<Node<'p
 fn sorbet_assertion_rules_out_nil(node: &Node<'_>) -> bool {
     node.as_call_node()
         .is_some_and(|c| matches!(constant_id_str(&c.name()), "must" | "must_because"))
+}
+
+/// Whether `node` is `T.bind(self, Type)`.
+fn sorbet_assertion_is_bind(node: &Node<'_>) -> bool {
+    node.as_call_node().is_some_and(|c| constant_id_str(&c.name()) == "bind")
 }
 
 /// Whether `node` is `T.must(x)` (not `T.must_because`).
@@ -674,7 +715,12 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         } else {
             value
         };
-        return Ok(super::type_ascription::ascribe(value, declared));
+        let ascribed = super::type_ascription::ascribe(value, declared);
+        if sorbet_assertion_is_bind(node) {
+            let class_object = super::type_ascription::sorbet_binds_class_object(node);
+            return Ok(super::type_ascription::bind_self(ascribed, class_object));
+        }
+        return Ok(ascribed);
     }
 
     // `T.absurd(x)` is NOT an assertion that evaluates to its argument:
@@ -1228,6 +1274,9 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let block_bytes = block_loc.as_slice();
 
             let body_nodes: Vec<Node<'_>> = stmts.body().iter().collect();
+            // A modifier's body (`stmt if cond`) begins where its statement
+            // does, so the `#: self as` above it was read one list up.
+            let reads_bindings = !super::type_ascription::is_modifier_body(file, body_nodes.len(), block_loc.end_offset());
 
             // Guard-clause rewrite: if the first child is
             // `if COND; return; end` followed by more statements,
@@ -1241,23 +1290,12 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // idempotent seed scripts).
             if body_nodes.len() >= 2 {
                 if let Some(guard_cond_node) = detect_leading_guard(&body_nodes[0]) {
+                    let binding = reads_bindings
+                        .then(|| super::type_ascription::leading_self_binding(file, body_nodes[0].location().start_offset()))
+                        .flatten();
                     let cond = ingest_expr(&guard_cond_node, file)?;
                     let rest_nodes = &body_nodes[1..];
-                    let mut rest_exprs: Vec<Expr> = Vec::with_capacity(rest_nodes.len());
-                    let mut prev_end: Option<usize> = None;
-                    for child in rest_nodes {
-                        let child_start = child.location().start_offset();
-                        let mut expr = ingest_expr(child, file)?;
-                        if let Some(pe) = prev_end {
-                            let from = pe - block_start;
-                            let to = child_start - block_start;
-                            if slice_has_blank_line(block_bytes, from, to) {
-                                expr.leading_blank_line = true;
-                            }
-                        }
-                        rest_exprs.push(expr);
-                        prev_end = Some(child.location().end_offset());
-                    }
+                    let rest_exprs = ingest_statement_list(rest_nodes, file, block_start, block_bytes, reads_bindings)?;
                     let else_branch = if rest_exprs.len() == 1 {
                         rest_exprs.into_iter().next().unwrap()
                     } else {
@@ -1267,32 +1305,22 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                         Span::synthetic(),
                         ExprNode::Lit { value: Literal::Nil },
                     );
-                    return Ok(Expr::new(
+                    let guard = Expr::new(
                         Span::synthetic(),
                         ExprNode::If {
                             cond,
                             then_branch: nil_expr,
                             else_branch,
                         },
-                    ));
+                    );
+                    return Ok(match binding {
+                        Some(binding) => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![binding, guard] }),
+                        None => guard,
+                    });
                 }
             }
 
-            let mut exprs: Vec<Expr> = Vec::with_capacity(body_nodes.len());
-            let mut prev_end: Option<usize> = None;
-            for child in &body_nodes {
-                let child_start = child.location().start_offset();
-                let mut expr = ingest_expr(child, file)?;
-                if let Some(pe) = prev_end {
-                    let from = pe - block_start;
-                    let to = child_start - block_start;
-                    if slice_has_blank_line(block_bytes, from, to) {
-                        expr.leading_blank_line = true;
-                    }
-                }
-                exprs.push(expr);
-                prev_end = Some(child.location().end_offset());
-            }
+            let exprs = ingest_statement_list(&body_nodes, file, block_start, block_bytes, reads_bindings)?;
             if exprs.len() == 1 {
                 return Ok(exprs.into_iter().next().unwrap());
             }

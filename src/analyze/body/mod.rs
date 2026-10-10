@@ -103,6 +103,11 @@ impl ConstScope {
 #[derive(Clone, Default)]
 pub struct Ctx {
     pub self_ty: Option<Ty>,
+    /// What `self_ty` was before a self binding (`T.bind(self, T)`,
+    /// `#: self as T`) replaced it for the rest of a body. Names in a
+    /// declared type still resolve in the lexical namespace, not in
+    /// the one `self` was bound to. `None` while nothing is bound.
+    pub lexical_self: Option<Ty>,
     /// Ivar bindings observed as a `Seq` walks its statements in order.
     /// `@post = Post.find(...)` in stmt 1 lets `@post.destroy` in stmt 2
     /// dispatch correctly.
@@ -1898,6 +1903,19 @@ impl<'a> BodyTyper<'a> {
                         forget_class_object_writes(e, &mut local_ctx);
                     }
                     last = self.analyze_expr(e, &local_ctx);
+                    // A self binding gives `self` its declared type from
+                    // the next statement to the end of this body, blocks
+                    // inside included. It changes only how `self` types:
+                    // which class a method defined below belongs to is
+                    // settled at ingest, lexically. A class-object binding
+                    // puts `self` on the class side, as in a `def self.x`.
+                    if crate::expr::is_self_binding(e) {
+                        if local_ctx.lexical_self.is_none() {
+                            local_ctx.lexical_self = local_ctx.self_ty.clone();
+                        }
+                        local_ctx.self_ty = e.ty.clone();
+                        local_ctx.class_side = e.decisions & crate::expr::SELF_BINDING_CLASS_OBJECT != 0;
+                    }
                     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
                         let proven = self.is_class_object(value, &local_ctx);
                         forget_class_object_writes(value, &mut local_ctx);
@@ -2457,7 +2475,7 @@ impl<'a> BodyTyper<'a> {
                 // nearest one (`Capabilities::Charge` in
                 // `ShopifyPayments::Capability` is
                 // `ShopifyPayments::Capabilities::Charge`).
-                let resolved = match &ctx.self_ty {
+                let resolved = match ctx.lexical_self.as_ref().or(ctx.self_ty.as_ref()) {
                     Some(Ty::Class { id: scope, .. }) => target_ty.map_class_ids(&|id| {
                         lexical_class(id, scope.0.as_str(), self.classes).unwrap_or_else(|| id.clone())
                     }),

@@ -131,12 +131,23 @@ same table:
   parameter name the `def` does not have — is dropped whole and the
   method is inferred as before; a `sig` above `attr_reader` or above
   `private def` is not paired.
-  `T.let`, `T.cast`, `T.bind`,
-  `T.unsafe` and `T.assert_type!` unwrap to the value they wrap so its
-  own inferred type flows on; the annotation on those is discarded.
+  `T.let`, `T.cast`, `T.unsafe` and `T.assert_type!` unwrap to the value
+  they wrap so its own inferred type flows on; the annotation on those is discarded.
   `T.must(x)` lowers to the check sorbet-runtime makes, `x` unless it
   is nil and a `TypeError` otherwise, so what follows reads `x` with nil
   removed; `T.must_because` stays refused.
+  `T.bind(self, Type)`, and its RBS inline form, a `#: self as Type`
+  line, give `self` that type from that statement to the end of the
+  enclosing body, blocks inside it included: sends on `self`, implicit
+  or explicit, are typed against it. `singleton(X)` and
+  `T.class_of(X)` put `self` on X's class side, as in a `def self.x`.
+  `untyped` makes `self` gradual; a class nothing declares is reported
+  as an unsupported declared type. Only typed bodies read a binding:
+  a method body and the blocks inside it. A block passed in a class
+  body (`included do`, `on_complete do`, `validates ..., if: -> { }`)
+  is not typed, so a binding there changes nothing and its type is not
+  checked. The Ruby targets emit neither form (a `T.bind` whose value
+  is used stays `self`); every other target refuses both by name.
 
 The two sources above settle against each other — the sidecar wins
 where both declare the same method. Against INFERENCE, neither wins:

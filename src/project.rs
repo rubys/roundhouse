@@ -1445,6 +1445,28 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
 }
 
+/// A self binding (`T.bind(self, T)`, `#: self as T`) retypes `self` for
+/// the rest of a body, and the analyzer types the sends after it against
+/// that type. The Ruby emitters drop the binding and leave those sends to
+/// Ruby's dynamic `self`. Every other target emits them on the method's
+/// own receiver, which the binding does not change, so it refuses it.
+fn report_self_bindings(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        if crate::expr::is_self_binding(expr) {
+            crate::emit::diagnostics::report_unsupported(
+                expr.span, target.as_str(), "self binding",
+                "the sends after it are typed against the bound type, which `self` does not take on in this target",
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+}
+
 /// `case/in` is not equivalent to the targets' existing `case/when`
 /// renderers, even for nil or a plain binding. Refuse before file emission
 /// rather than lose bindings, skip evaluation, or turn a test into a wildcard.
@@ -1567,6 +1589,7 @@ pub fn target_files(
     report_unemitted_library_classes(app, target);
     report_sqlite_index_predicates(app, target);
     report_native_ruby_syntax(app, target);
+    report_self_bindings(app, target);
     // Full forwarding currently has a native Ruby contract only. A
     // declaration must be gated even when its body never forwards.
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {

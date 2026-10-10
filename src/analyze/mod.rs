@@ -1745,6 +1745,7 @@ impl Analyzer {
             }
             let ctx = Ctx {
                 self_ty: None,
+                lexical_self: None,
                 ivar_bindings: HashMap::new(),
                 local_bindings,
                 class_objects: Default::default(),
@@ -2044,6 +2045,7 @@ impl Analyzer {
             for (self_ty, name, id, value, production) in entries.iter_mut() {
                 let ctx = Ctx {
                     self_ty: Some(self_ty.clone()),
+                    lexical_self: None,
                     ivar_bindings: HashMap::new(),
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
@@ -2314,6 +2316,7 @@ impl Analyzer {
             // (`days` on `Class { NEW_USER_DAYS }`).
             let const_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+                lexical_self: None,
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
@@ -2330,6 +2333,7 @@ impl Analyzer {
 
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+                lexical_self: None,
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
@@ -2390,6 +2394,7 @@ impl Analyzer {
                 }
                 let reseeded_ctx = Ctx {
                     self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+                    lexical_self: None,
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
@@ -2438,6 +2443,7 @@ impl Analyzer {
             };
             let const_ctx = Ctx {
                 self_ty: Some(self_ty.clone()),
+                lexical_self: None,
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
@@ -2458,6 +2464,7 @@ impl Analyzer {
 
             let ctx = Ctx {
                 self_ty: Some(self_ty.clone()),
+                lexical_self: None,
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
@@ -3032,6 +3039,7 @@ impl Analyzer {
                         }
                         let base_ctx = Ctx {
                             self_ty: Some(meta.self_ty.clone()),
+                            lexical_self: None,
                             ivar_bindings: seed,
                             local_bindings: HashMap::new(),
                             class_objects: Default::default(),
@@ -3553,6 +3561,7 @@ impl Analyzer {
                     }
                     let base_ctx = Ctx {
                         self_ty: Some(self_ty.clone()),
+                        lexical_self: None,
                         ivar_bindings: seed,
                         local_bindings: HashMap::new(),
                         class_objects: Default::default(),
@@ -3735,6 +3744,7 @@ impl Analyzer {
             };
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: self_id, args: vec![] }),
+                lexical_self: None,
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
@@ -3879,6 +3889,7 @@ impl Analyzer {
                 }
                 let reseeded_ctx = Ctx {
                     self_ty: class_ctx.self_ty.clone(),
+                    lexical_self: None,
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),

@@ -69,6 +69,22 @@ pub const ERASED_KEYWORD_SPLAT: u64 = 1 << 12;
 /// reaches the files carried there. Other targets emit the literal.
 pub const SOURCE_FILE_PATH: u64 = 1 << 13;
 
+/// A source `T.bind(self, T)` / `#: self as T`: a `Cast` of `self` whose
+/// target is the type `self` has for the rest of the enclosing body. As a
+/// statement it only informs the typer; its value is `self`.
+pub const SELF_BINDING: u64 = 1 << 14;
+
+/// A [`SELF_BINDING`] to a class object (`T.bind(self, T.class_of(X))`,
+/// `#: self as singleton(X)`): `self` is then the class side of its type,
+/// which `Ty` alone does not tell apart from an instance.
+pub const SELF_BINDING_CLASS_OBJECT: u64 = 1 << 15;
+
+/// Whether `expr` is a [`SELF_BINDING`] cast.
+pub fn is_self_binding(expr: &Expr) -> bool {
+    expr.decisions & SELF_BINDING != 0
+        && matches!(&*expr.node, ExprNode::Cast { value, .. } if matches!(&*value.node, ExprNode::SelfRef))
+}
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by

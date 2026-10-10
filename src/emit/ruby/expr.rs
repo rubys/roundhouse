@@ -292,8 +292,16 @@ fn emit_node(n: &ExprNode) -> String {
         }
         ExprNode::Seq { exprs } => {
             let mut out = String::new();
+            let last = exprs.len().saturating_sub(1);
+            let mut first = true;
             for (i, e) in exprs.iter().enumerate() {
-                if i > 0 {
+                // A self binding whose value nothing reads only informs
+                // the typer: a `#: self as T` comment never runs, and a
+                // `T.bind` keeps just its value, `self`, as `T.cast` does.
+                if i < last && crate::expr::is_self_binding(e) {
+                    continue;
+                }
+                if !first {
                     out.push('\n');
                     if e.leading_blank_line {
                         out.push('\n');
@@ -306,6 +314,7 @@ fn emit_node(n: &ExprNode) -> String {
                         out.push('\n');
                     }
                 }
+                first = false;
                 out.push_str(&emit_expr(e));
             }
             out
