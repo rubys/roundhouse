@@ -662,6 +662,9 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Return { value } => {
             if matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Nil }) {
                 "return".to_string()
+            } else if matches!(&*value.node, ExprNode::If { .. }) {
+                // `return if ...` would parse as a modifier `if`.
+                format!("return ({})", emit_expr(value))
             } else {
                 format!("return {}", emit_expr(value))
             }
@@ -1559,6 +1562,11 @@ pub(super) fn emit_send_base(
                 // `return i` where `i = hay.size - n` was Int32.
                 if method == "size" {
                     format!("{recv_s}.{method}.to_i64")
+                } else if method == "to_i"
+                    && matches!(r.ty.as_ref(), Some(Ty::Str | Ty::Float))
+                {
+                    // `String#to_i` / `Float64#to_i` are `Int32` too.
+                    format!("{recv_s}.to_i64")
                 } else {
                     format!("{recv_s}.{method}")
                 }

@@ -1289,11 +1289,20 @@ fn emit_expr_inner(e: &Expr) -> String {
                         // takes the read-only `.iter().flatten()` chain
                         // below; the mutating no-clone path applies only
                         // to the plain-Vec `.iter_mut()` case.
-                        let was_option = matches!(
-                            r.ty.as_ref(),
-                            Some(crate::ty::Ty::Union { variants })
-                                if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
-                        );
+                        let is_option = |t: &crate::ty::Ty| {
+                            matches!(t, crate::ty::Ty::Union { variants }
+                                if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil)))
+                        };
+                        // An ivar read can carry `| nil` while its field is
+                        // a plain `Vec`; the field table is the authority.
+                        let field_ty = match &*r.node {
+                            ExprNode::Ivar { name } => ivar_field_ty(name.as_str()),
+                            _ => None,
+                        };
+                        let was_option = match field_ty {
+                            Some(t) => is_option(&t),
+                            None => r.ty.as_ref().is_some_and(is_option),
+                        };
                         // A block that mutates its element (calls a
                         // `mutates_self` method on the param — the
                         // `_preload_<assoc>` distribute loop) must

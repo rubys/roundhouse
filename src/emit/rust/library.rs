@@ -1967,8 +1967,8 @@ end
         );
         let val_at = method_body(&src, "val_at");
         assert!(
-            val_at.contains(".map(|v| v.to_string()).unwrap_or_default()"),
-            "nil in HeaderStore's String? values must stringify to the empty String:\n{val_at}"
+            !val_at.contains(".map("),
+            "vals[i].to_s on Array[String] must not Option-map a plain String:\n{val_at}"
         );
         let render = method_body(&src, "render");
         assert!(

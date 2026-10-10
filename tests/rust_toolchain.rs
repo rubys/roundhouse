@@ -423,14 +423,15 @@ fn real_blog_cargo_test_passes() {
     generate_project(fixture, &scratch);
     let article_source = std::fs::read_to_string(scratch.join("src/models/article.rs"))
         .expect("read emitted Article model");
+    let insert_row_count = article_source.matches("pub fn _insert_row(").count();
     assert!(
-        article_source.contains("pub fn _insert_row(&mut self) -> bool"),
-        "the Rust model shim must expose callback-free fixture insertion:\n{article_source}"
+        insert_row_count == 1,
+        "the lowered Rust model must expose one callback-free fixture insertion method, got {insert_row_count}:\n{article_source}"
     );
     assert!(
-        article_source.contains(
-            "self.fill_timestamps(true); self.id = self._adapter_insert(); self._note_hydrated(); true"
-        ),
+        article_source.contains("self.fill_timestamps(true);")
+            && article_source.contains("self.id = self._adapter_insert();")
+            && article_source.contains("self._note_hydrated();"),
         "fixture insertion must fill timestamps and use the raw adapter path:\n{article_source}"
     );
     // Pin the shared Inflector's new String seam on the live backend,

@@ -246,7 +246,15 @@ pub(super) fn emit_send(
     } else {
         method.to_string()
     };
-    let rewritten_method = rewrite_method_name(&effective_method);
+    // `self.empty?` names the class's own method (`empty_pred`), not
+    // the collection builtin the bridge table maps `empty?` to.
+    let rewritten_method = if matches!(recv, Some(r) if matches!(&*r.node, ExprNode::SelfRef))
+        && effective_method == "empty?"
+    {
+        super::util::sanitize_ident(&effective_method)
+    } else {
+        rewrite_method_name(&effective_method)
+    };
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     // A class method can retain a nullable return type in its library
     // signature even when the call-site expression has lost that union.

@@ -1090,7 +1090,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     // from that Ruby file and inherits the split, but these
                     // model impls are generated here, so a tree-level grep
                     // for the name finds it in the runtime and still misses
-                    // the model. `smoke (rust)` is what caught that.
+                    // the model. `smoke (rust)` is what caught that, and
+                    // again for `_insert_row` (fixtures and bulk inserts:
+                    // timestamps filled, no validations, no callbacks).
                     let where_shim = adapter_where_shim(lc);
                     format!(
                         "\nimpl {name} {{\n\
