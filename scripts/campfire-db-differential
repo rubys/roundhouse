@@ -132,6 +132,28 @@ fi
 mkdir -p "$OUT/storage"
 cp "$WORK/fixtures.sqlite3" "$OUT/storage/development.sqlite3"
 rm -f "$OUT/storage/development.sqlite3-wal" "$OUT/storage/development.sqlite3-shm"
+# Rails' after_initialize installs SQLite triggers schema.rb cannot dump
+# (Room::MessagesCount.ensure!). The emit does not run those blocks, so
+# a copied fixtures DB has the triggers from db:prepare, but a write
+# that the emit then does without them (and that Rails later sees with
+# them) double-counts rooms.messages_count. Install the same triggers
+# before the scenario GET.
+sqlite3 "$OUT/storage/development.sqlite3" <<'SQL'
+CREATE TRIGGER IF NOT EXISTS messages_ai_rooms_messages_count AFTER INSERT ON messages
+BEGIN
+  UPDATE rooms SET messages_count = messages_count + 1 WHERE id = NEW.room_id;
+END;
+CREATE TRIGGER IF NOT EXISTS messages_ad_rooms_messages_count AFTER DELETE ON messages
+BEGIN
+  UPDATE rooms SET messages_count = messages_count - 1 WHERE id = OLD.room_id;
+END;
+CREATE TRIGGER IF NOT EXISTS messages_au_rooms_messages_count AFTER UPDATE OF room_id ON messages
+WHEN OLD.room_id IS NOT NEW.room_id
+BEGIN
+  UPDATE rooms SET messages_count = messages_count - 1 WHERE id = OLD.room_id;
+  UPDATE rooms SET messages_count = messages_count + 1 WHERE id = NEW.room_id;
+END;
+SQL
 
 PORT="${DB_DIFFERENTIAL_PORT:-4291}"
 # A stale server on the port answers in its place — a 404 from someone

@@ -2430,7 +2430,11 @@ pooled push delivery there raises where it reaches the class.
   two: `Room::MessagesCount.ensure!` (its counter triggers, which
   `schema.rb` cannot dump) and starting the WAL checkpointer outside
   tests. The test suite gets the first through its `load_fixtures`
-  override, which is read; a served tree gets neither.
+  override, which is read; a served tree gets neither. The campfire
+  model differential (`scripts/campfire-db-differential`) installs
+  those three SQLite triggers on the copied fixtures DB before the
+  emit runs the scenario, so `rooms.messages_count` is not compared
+  with Rails-side triggers and emit-side none.
 - **`Rails.application.env_config` holds what is set and is consulted
   for nothing**: a forgery failure always renders the 422 that
   `action_dispatch.show_exceptions = :rescuable` asks for.

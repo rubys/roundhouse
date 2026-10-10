@@ -1143,6 +1143,19 @@ fn spinel_model_differential_does_not_wait_for_the_gc_comparison_build() {
     assert_eq!(db["needs"][1].as_str(), Some("plan"));
     assert_eq!(db["continue-on-error"].as_bool(), Some(true));
 
+    let differential = fs::read_to_string("scripts/campfire-db-differential")
+        .expect("read campfire-db-differential");
+    for trigger in [
+        "messages_ai_rooms_messages_count",
+        "messages_ad_rooms_messages_count",
+        "messages_au_rooms_messages_count",
+    ] {
+        assert!(
+            differential.contains(trigger),
+            "the model differential must install {trigger} on the emit DB"
+        );
+    }
+
     let command = "scripts/campfire-db-differential --spinel /tmp/campfire";
     let db_steps = db["steps"].as_sequence().expect("DB job steps");
     let runs: Vec<_> = db_steps
