@@ -401,3 +401,42 @@ puts "included integer enum passed"
         )
         .assert_passes();
 }
+
+/// A role enum's spelling: `ROLE_B = ROLE_A`, so the mapping's
+/// first two keys fold to the same string. Ruby builds one entry, in the
+/// first key's position with the last value; the generated `kinds`
+/// literal must too, or Ruby warns "key duplicated" when the model file
+/// is parsed (a warnings-as-errors boot raises it at load).
+fn folded_label_enum_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            r#"class Article < ApplicationRecord
+  ROLE_A = "role_a"
+  ROLE_B = ROLE_A
+  ROLE_C = "role_c"
+  enum :kind, { ROLE_B => "role_b", ROLE_C => ROLE_C, ROLE_A => ROLE_A }
+"#,
+        )
+        .edit("db/schema.rb", "    t.string \"title\"", "    t.string \"title\"\n    t.string \"kind\"")
+}
+
+#[test]
+fn constant_labels_folding_to_one_key_build_one_entry() {
+    let (tree, _errors) = folded_label_enum_app().emit(roundhouse::project::BuildTarget::Ruby);
+    let check = emit_and_run::ruby().arg("-wc").arg(tree.join("app/models/article.rb")).output().expect("ruby -wc");
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    assert!(check.status.success() && !stderr.contains("duplicated"), "{stderr}");
+
+    folded_label_enum_app()
+        .run_ruby(
+            r#"
+expected = { "role_a" => "role_a", "role_c" => "role_c" }
+raise "kinds: #{Article.kinds.inspect}" unless Article.kinds == expected && Article.kinds.keys == expected.keys
+a = Article.new(title: "Hello world", body: "abcdefghij", kind: "role_a")
+raise "predicate" unless a.role_a?
+"#,
+        )
+        .assert_passes();
+}
