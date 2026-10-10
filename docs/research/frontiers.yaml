@@ -1,0 +1,152 @@
+# The open problems behind rubys/roundhouse#617, for people and tools that pick work.
+#
+# This file is the single source for each frontier's status, stands, skills, next
+# action, latest facts, check availability, pins and claims. tools/research/sync
+# renders the README's dashboard and each brief's Stands, Skills and Claims lines
+# from it: edit here, then run the script; `sync --check` fails on drift.
+# Briefs own the question, the check's commands and acceptance criteria, and the
+# leads. facts.md owns dated findings; attempts.md links fact IDs instead of
+# repeating their numbers.
+#
+# status:       open | blocked | solved
+# facts:        the latest facts on this frontier, newest first
+# check:        the brief's check; read it there, it is not restated here
+# check_public: public | partial | unavailable
+# pins:         the commits the latest result was measured or validated on
+# claims:       leases taken on #617 (README.md#claiming). status is active,
+#               review, done or released; a lease expires seven days after
+#               `since` unless its owner renews it, which moves `expires`.
+#
+# Quote any value that holds ": " or " #", or that YAML could read as a
+# number, date or boolean; sync rejects it otherwise.
+
+- id: any-order
+  name: Any order
+  brief: frontiers/any-order.md
+  status: open
+  stands: "On condition `structure-tools-38403140-s3-public-lab-v1-verify-off`, writer and route sets differ across unset/1/2 on all five apps; slot sets differ except on Campfire. Unset repeats preserve slots/writers but routes differ on four. Complete any-order remains open."
+  facts: [F31, F25, F24, F22, F16, F14, F5]
+  skills:
+    - Rust
+    - fixpoint and lattice theory
+    - the analyzer's harvest, dispatch and fold code
+  next: "Audit source mapping and undeclared reads/writes, retaining an unset repeat; use writer laws and differing facts to declare the whole structure before typing or discover it monotonically, then re-run the complete any-order check."
+  check: frontiers/any-order.md#the-check
+  check_public: public
+  pins:
+    compiler: "main c210f226; fixpoint-next 38403140; structure-dump abda389c; writer-law-harness bf2f052f"
+    lab: "76cdb1ea24b0c4c88af4c42c78f567d759b7731d; baseline 56255dd54bed3815b4774282ae92380524b13136"
+    runner: "structure-dump/tools/research/probe 42a29d21aedeafd48ce89b1287851b2478242b5828e963a0bf3f71c6652d6a9e"
+  claims:
+    - who: eddygarcas
+      scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
+      status: done
+      since: "2026-10-09T07:40Z"
+      expires: "2026-10-16T07:40Z"
+      pr: "https://github.com/rubys/roundhouse/pull/705"
+      source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589"
+      note: "Merged on 2026-10-09 as a1d038d8. Emitted output unchanged on all 12 targets; pooled fully typed 68.83% → 68.99% on S3, 69.02% → 69.20% with `PROBE_BASE=1` (https://github.com/rubys/roundhouse/issues/617#issuecomment-6083167837)."
+    - who: eddygarcas
+      scope: "items 1–2 of the claim: one join for parameter slots over the classified arm set, built on #674's rows; not item 7, `decide_harvested_return`. Changes to gradual absorption wait for S2a's tag."
+      status: done
+      since: "2026-10-09T07:40Z"
+      expires: "2026-10-16T07:40Z"
+      pr: "https://github.com/rubys/roundhouse/pull/724"
+      source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589"
+      note: "Merged on 2026-10-09 as 736dff85. Uses option (a): only a non-nil concrete type absorbs `untyped`, so `Nil | untyped` stays. Also bounds each parameter row once after its fold. Emitted output byte-identical on three apps × 12 targets; with #705 on `fixpoint-next`, fully typed 69.01% → 69.45% (S3) and 69.22% → 69.84% (`PROBE_BASE=1`), base verify moved 652 → 475."
+
+- id: soundness
+  name: Soundness
+  brief: frontiers/soundness.md
+  status: open
+  stands: "On condition `sound-traces-20261010-c210f226`, three Discourse tests cover 27/28 selected `@data` reads. The first records main 24/0 and S3 17/7 accepted/rejected. Every acceptance involves uncertain or unsupported types; this is witnessed coverage, not general soundness."
+  facts: [F29, F28, F27, F25, F20, F19, F18, F17, F14, F8]
+  skills:
+    - Ruby and Rails semantics
+    - Runtime tracing on CRuby 4.0.7
+    - Type systems
+  next: "Isolate F29's remaining String omission and nil job_id rejections, cover the interval-tick read at 145:9, and expand app-test traces; retain the fixed denominator and uncertain/unsupported coverage while checking repairs."
+  check: frontiers/soundness.md#the-check
+  check_public: partial
+  pins:
+    compiler: "main c210f226 and fixpoint-next 38403140 (F29); main 1ce99695 (F17); fixpoint-staged 92844f68 (F8)"
+    lab: "0bdc69712c69c6c200066fdbe84651d10694f8ab"
+    adapter: "sound-exporter 48c652873a88d8bc291df1d606ad1464f9168ae3"
+  claims:
+    - who: dai199
+      scope: "parameter rows keyed by receiver side, the follow-up named in #551 (the lab's `name_collision`), in one PR against main."
+      status: done
+      since: "2026-10-09T08:52Z"
+      expires: "2026-10-16T08:52Z"
+      pr: "https://github.com/rubys/roundhouse/pull/674"
+      source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6077674666"
+      note: "Merged on 2026-10-09 as c19524c7, with the owner walk looking on the call's side first (https://github.com/rubys/roundhouse/issues/617#issuecomment-6081357575)."
+
+- id: precision
+  name: Precision
+  brief: frontiers/precision.md
+  status: open
+  stands: "On condition `fixpoint-current-main-20261010-c210f226`, S3 is 69.8135% fully typed against the base's 70.1619%, a gap of 0.3484 percentage points. Paired loss attribution remains open; F29's later Discourse trace witnesses S3 runtime omissions."
+  facts: [F29, F27, F23, F19, F18, F14, F7]
+  skills:
+    - Rust
+    - type inference
+    - "Rails idioms such as guards, memoization and `Array(…)`"
+  next: "Repeat paired loss attribution on the October 10 pins; test F18's missing dispatch models and the historical class-guard and `Array(…)` candidates there, with the error census and runtime oracle beside each precision result."
+  check: frontiers/precision.md#the-check
+  check_public: public
+  pins:
+    compiler: "main c210f226; fixpoint-next 38403140"
+    lab: "baseline 56255dd54bed3815b4774282ae92380524b13136; F29 trace 0bdc69712c69c6c200066fdbe84651d10694f8ab"
+    runner: "baseline-2026-10-10/probe 42a29d21aedeafd48ce89b1287851b2478242b5828e963a0bf3f71c6652d6a9e"
+
+- id: incremental
+  name: Incremental
+  brief: frontiers/incremental.md
+  status: open
+  stands: "On condition `warm-next-F15-profile-20261010-c210f226`, all six edits match shadow and cold. Fingerprint construction dominates: Mastodon spends 131–135 s there against 6.14–6.25 s for cold analysis; these are shared-host profiles."
+  facts: [F30, F15]
+  skills:
+    - Incremental computation
+    - Rust performance
+    - serialization
+  next: "Reduce repeated expression/context serialization and global metadata construction in input fingerprints, then re-check all six edits and measure five interleaved pairs against the cost and 100 ms gates."
+  check: frontiers/incremental.md#the-check
+  check_public: public
+  pins:
+    compiler: "warm-next d9ec78c3"
+    lab: "d0b2e5dd689c04221295b9a4037dede07984c770"
+    runner: "warm-profile-2026-10-10/rerun.py at d0b2e5dd689c04221295b9a4037dede07984c770"
+
+- id: typed-recursion
+  name: Typed recursion
+  brief: frontiers/typed-recursion.md
+  status: open
+  stands: "The historical Rust `enum` and Crystal `alias` demo covers three of #589's four shapes, behind a flag. F21's separate Spinel probe loses a required recursive-alias signature; alias consumption remains open."
+  facts: [F21, F13]
+  skills:
+    - Code generation
+    - the type systems of Rust, Crystal and the other targets
+  next: "Cover the fourth emitted-code shape, mutual recursion between two class methods; check recursive-alias signature extraction before claiming Spinel alias support."
+  check: frontiers/typed-recursion.md#the-check
+  check_public: public
+  pins:
+    compiler: "main b28b17b6 with the lab's patches"
+    lab: "0cc656a6"
+
+- id: cost
+  name: Cost
+  brief: frontiers/cost.md
+  status: open
+  stands: "In F11's October 8 condition, exact type identities and a union memo at `96519abf` make the large app faster than main `194f26cf`; the pre-identity profiles point at unification and expression walks. This is historical, not a current-main timing."
+  facts: [F12, F11, F10]
+  skills:
+    - Rust performance and profiling
+    - hash-consing
+    - data-structure design
+  next: "Re-profile with type identities on, then choose the next target."
+  check: frontiers/cost.md#the-check
+  check_public: public
+  pins:
+    compiler: "fixpoint-arena 96519abf"
+    lab: "0cc656a6"

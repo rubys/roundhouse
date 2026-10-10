@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Replay six pinned public method-body edits against the mandatory cold shadow.
+
+Requires Python 3 and CRuby 4.0.7 with Prism. Prints one JSON line per edit;
+seconds are analyzer time, excluding ingest and cache load/save. A mismatch
+returns nonzero. All changes and caches live in scratch copies of the apps.
+"""
+import argparse
+from contextlib import nullcontext
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+PINS = {
+    'mastodon': ('163f96cee4dea23365bff9b433871e68d20d9ee7',
+                 '56bbdec49cd7824261cb6b897004b59c45049652ec4f292b2fed08fc4a2f59c7'),
+    'discourse': ('343b20f97ef5f6bd70826ee0e993ba348b210fd5',
+                  'a567febb961d9a95967c0168a0dfc6a202562a64afd292632670369999ab7e07'),
+}
+EDITS = [
+    ('mastodon', 'boolean', 'app/models/account.rb', 'sign?', 'false'),
+    ('mastodon', 'return-type', 'app/models/domain_block.rb', 'to_log_human_identifier', 'domain.length'),
+    ('mastodon', 'withdraw-read', 'app/services/clear_domain_media_service.rb', 'blocked_domain', 'nil'),
+    ('discourse', 'boolean', 'app/models/bookmark.rb', 'auto_delete_when_reminder_sent?',
+     '!(auto_delete_preference == Bookmark.auto_delete_preferences[:when_reminder_sent])'),
+    ('discourse', 'return-type', 'app/models/category.rb', 'slug_url_without_id', '0'),
+    ('discourse', 'withdraw-read', 'app/services/username_checker_service.rb', 'is_developer?', 'nil'),
+]
+FLAGS = dict(RH_SCHED='sccq', RH_BRK_ALLARMS='1', RH_FOLD_JOIN='1',
+             RH_FOLD='1', RH_FOLD_SLOTS='1', RH_FOLD_TAIL='1', RH_FIXPOINT_DIGEST='1',
+             RH_WARM_SHADOW='1', RH_WARM_TIMINGS='1')
+PRISM = r'''
+require 'prism'
+require 'json'
+file, name = ARGV
+result = Prism.parse(File.binread(file))
+abort result.errors.map(&:message).join("\n") unless result.errors.empty?
+defs = []
+visit = ->(node) do
+  if node.is_a?(Prism::DefNode) && node.name.to_s == name && node.receiver.nil? && node.body
+    defs << [node.body.location.start_offset, node.body.location.end_offset]
+  end
+  node.compact_child_nodes.each { |child| visit.call(child) }
+end
+visit.call(result.value)
+abort "expected one instance method #{name}: #{defs.size}" unless defs.size == 1
+puts JSON.generate(defs.first)
+'''
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def inventory(root):
+    """Hash paths, executable bits, symlinks and bytes, omitting only Git metadata."""
+    rows = []
+    for base, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d != '.git')
+        links = [d for d in dirs if (Path(base) / d).is_symlink()]
+        dirs[:] = [d for d in dirs if d not in links]
+        for name in sorted(files + links):
+            if name == '.git':
+                continue
+            path = Path(base) / name
+            row = dict(path=path.relative_to(root).as_posix())
+            if path.is_symlink():
+                row.update(kind='symlink', target=os.readlink(path))
+            else:
+                row.update(kind='file', sha256=sha(path.read_bytes()), bytes=path.stat().st_size,
+                           executable=bool(path.stat().st_mode & 0o111))
+            rows.append(row)
+    rows.sort(key=lambda row: row['path'])
+    return rows
+
+
+def tree_sha(rows):
+    return sha(json.dumps(rows, sort_keys=True, separators=(',', ':')).encode())
+
+
+def write_json(path, value):
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
+
+
+def environment():
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(('RH_', 'ROUNDHOUSE_', 'BUNDLE_'))
+           and k not in ('RUBYOPT', 'RUBYLIB', 'GEM_HOME', 'GEM_PATH')}
+    env.update(FLAGS, RBENV_VERSION='4.0.7', NO_COLOR='1')
+    return env
+
+
+def check(binary, app, cache, logs, env, lock_path):
+    logs.mkdir()
+    run_env = dict(env, RH_WARM=str(cache))
+    with lock_path.open('r') if lock_path else nullcontext() as lock:
+        if lock is not None:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        with (logs / 'stdout.log').open('wb') as out, (logs / 'stderr.log').open('wb') as err:
+            completed = subprocess.run([str(binary), 'check', '--continue', '.'], cwd=app,
+                                       env=run_env, stdout=out, stderr=err)
+    reports = []
+    for line in (logs / 'stderr.log').read_text().splitlines():
+        if line.startswith('rh-warm: {'):
+            reports.append(json.loads(line[len('rh-warm: '):]))
+    if completed.returncode not in (0, 1, 3) or len(reports) != 1:
+        raise RuntimeError('check did not complete; see ' + str(logs / 'stderr.log'))
+    report = reports[0]
+    matches = report['shadow'] == 'pass' and report['warm_digest'] == report['cold_digest']
+    if (completed.returncode == 3) == matches:
+        raise RuntimeError('inconsistent shadow status; see ' + str(logs / 'stderr.log'))
+    write_json(logs / 'report.json', report)
+    return report, matches
+
+
+def series(args, work):
+    env = environment()
+    ruby = os.environ.get('RUBY', 'ruby')
+    version = subprocess.check_output([ruby, '-e', 'require "prism"; print RUBY_ENGINE, " ", RUBY_VERSION'],
+                                      env=env, text=True)
+    if version != 'ruby 4.0.7':
+        raise RuntimeError('expected CRuby 4.0.7 with Prism; found ' + version)
+    binary = args.binary.resolve()
+    if not binary.is_file():
+        raise RuntimeError('missing binary: ' + str(binary))
+    binary_sha = sha(binary.read_bytes())
+    frozen = []
+    passed = True
+    for name in args.apps_to_run or PINS:
+        source = args.apps.resolve() / name
+        original_rows = inventory(source)
+        commit, expected_tree = PINS[name]
+        if tree_sha(original_rows) != expected_tree:
+            raise RuntimeError('input differs from the pinned tree: ' + name)
+        app = work / name
+        shutil.copytree(source, app, symlinks=True, ignore=shutil.ignore_patterns('.git'))
+        edits = []
+        for app_name, kind, relative, method, replacement in EDITS:
+            if app_name != name or (args.edit and kind not in args.edit):
+                continue
+            path = app / relative
+            path.resolve().relative_to(app.resolve())
+            if path.is_symlink():
+                raise RuntimeError('edit target is a symlink: ' + relative)
+            original = path.read_bytes()
+            start, end = json.loads(subprocess.check_output([ruby, '-e', PRISM, str(path), method], env=env))
+            changed = original[:start] + replacement.encode() + original[end:]
+            edited_rows = [dict(row) for row in original_rows]
+            next(row for row in edited_rows if row['path'] == relative).update(
+                sha256=sha(changed), bytes=len(changed))
+            entry = dict(app=name, edit=kind, file=relative, method=method, replacement=replacement,
+                         commit=commit, original_tree_sha256=expected_tree, edited_tree_sha256=tree_sha(edited_rows),
+                         original_file_sha256=sha(original), edited_file_sha256=sha(changed))
+            frozen.append(entry)
+            edits.append((entry, original, changed))
+        write_json(work / 'inputs.json', dict(condition='public-warm-edits-v1', cases=frozen))
+        seed = work / (name + '-seed')
+        seed.mkdir()
+        print('Seeding ' + name + ' in ' + str(work), file=sys.stderr, flush=True)
+        _, seed_matches = check(binary, app, seed, work / (name + '-seed-logs'), env, args.lock)
+        if not seed_matches or not (seed / 'evaluations.json').is_file():
+            raise RuntimeError('unedited seed failed its cold shadow: ' + name)
+        for entry, original, changed in edits:
+            label = name + '-' + entry['edit']
+            cache = work / (label + '-cache')
+            cache.mkdir()
+            shutil.copyfile(seed / 'evaluations.json', cache / 'evaluations.json')
+            path = app / entry['file']
+            path.write_bytes(changed)
+            try:
+                subprocess.run([ruby, '-c', str(path)], env=env, stdout=subprocess.DEVNULL, check=True)
+                print('Checking ' + label, file=sys.stderr, flush=True)
+                report, matches = check(binary, app, cache, work / (label + '-logs'), env, args.lock)
+                if report['evaluations']['loaded'] == 0:
+                    raise RuntimeError('edited check did not load the seed trace: ' + label)
+                result = dict(entry, result='match' if matches else 'mismatch',
+                              warm_seconds=report['warm_analyze_seconds'], cold_seconds=report['cold_analyze_seconds'],
+                              evaluations=report['evaluations'], binary_sha256=binary_sha)
+                write_json(work / (label + '.json'), result)
+                print(json.dumps(result, sort_keys=True), flush=True)
+                passed = passed and matches
+            finally:
+                path.write_bytes(original)
+    return 0 if passed else 1
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('apps_to_run', nargs='*', metavar='APP', help='mastodon and/or discourse (default: both).')
+    parser.add_argument('--apps', type=Path, default=Path(os.environ.get('APPS', 'lab/corpus/apps')))
+    parser.add_argument('--binary', type=Path,
+                        default=Path(os.environ.get('RH_BIN', 'rh-warm/target/release/roundhouse')))
+    parser.add_argument('--edit', action='append', choices=['boolean', 'return-type', 'withdraw-read'])
+    parser.add_argument('--work-dir', type=Path, help='Keep scratch inputs, caches and logs in a new directory.')
+    parser.add_argument('--lock', type=Path, help='Existing advisory lock, held for one check at a time.')
+    args = parser.parse_args()
+    if any(app not in PINS for app in args.apps_to_run) or len(args.apps_to_run) != len(set(args.apps_to_run)):
+        parser.error('choose mastodon and/or discourse once each')
+    try:
+        if args.work_dir:
+            work = args.work_dir.resolve()
+            work.mkdir(parents=True, exist_ok=False)
+            return series(args, work)
+        with tempfile.TemporaryDirectory(prefix='roundhouse-warm-') as directory:
+            return series(args, Path(directory))
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        print('warm-edits: ' + str(error), file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())
