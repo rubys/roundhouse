@@ -57,7 +57,7 @@ mod inferred_types;
 pub mod inquiry;
 pub use inferred_types::inferred_types;
 pub use inquiry::inquirer_methods;
-pub use diagnostics::{diagnose, diagnose_with_coverage};
+pub use diagnostics::{diagnose, diagnose_with_coverage, unknown_receiver_sends, UnknownReceiverSend};
 
 pub use body::{BodyTyper, ClassInfo, ConstScope, Ctx};
 pub(crate) use body::PARAM_VALUE;

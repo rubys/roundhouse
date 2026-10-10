@@ -190,10 +190,13 @@ guide builds, checked in at `fixtures/store` — checks clean:
 ```
 $ roundhouse check fixtures/store
 roundhouse-check: 24 gems: 9 framework, 2 modeled, 13 infrastructure, 0 unknown
+roundhouse-check: 13 send(s) on unknown receivers, 9 on gradual receivers, 0 unresolved on known receivers (unchecked, not errors)
 roundhouse-check: fixtures/store — 0 parse error(s), 0 error(s), 0 warning(s), 0 gap-attributed note(s), 0 survey gap(s)
 ```
 
-Exit status 0. Everything the analyzer saw, it typed.
+Exit status 0. Everything the analyzer saw, it typed. The send counts are
+not errors: they are sends on a receiver the analyzer could not type,
+which nothing checked (see below).
 
 ## Reading the output of a real app
 
@@ -262,6 +265,29 @@ error count above means "findings", not "shadows of gaps".
 Unresolved source constants keep their error severity even when the
 gem census identifies a likely owner: their emitted expression is a
 refusal stub. Gem context is added without certifying runtime support.
+
+**The unchecked-send line** — printed on every run, between the gem
+census and the total:
+
+```text
+roundhouse-check: N send(s) on unknown receivers, N on gradual receivers, N unresolved on known receivers (unchecked, not errors)
+```
+
+An explicit receiver the analysis could not type (including one whose
+signature names a class the registry does not hold), or one typed
+`untyped` through RBS or `T.unsafe`, consults no method table, so a
+misspelled or unimplemented method on it passes. The same holds for a
+send that resolves to nothing on a known receiver outside the model and
+controller bodies `check` diagnoses. These sends are not errors and
+never change the exit status; the counts sit beside the error total so
+that an error which disappears by becoming one of these reads as a
+reclassification rather than progress. A send already reported as an
+error is not counted again. `--unknown-sends` lists each site as an
+`info` line:
+
+```sh
+roundhouse check --unknown-sends /path/to/your/rails/app
+```
 
 **The survey report** — printed only with `--continue`: every construct
 ingest skipped, bucketed by kind, most frequent first, with the files
