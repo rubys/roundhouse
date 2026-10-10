@@ -23,6 +23,7 @@
 # TS: better-sqlite3 / libsql; Rust: rusqlite; Go: modernc.org/sqlite).
 
 require "minitest/autorun"
+require "i18n"
 
 # Base64 / JSON are CRuby stdlib here (the framework tests run under
 # stock CRuby with no transpile step). Required up-front so

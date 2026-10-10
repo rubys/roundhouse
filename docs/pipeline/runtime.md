@@ -591,8 +591,13 @@ was spelled, so an untouched node is still the source bytes), and
 write-through — the two shapes campfire's mutating filters use
 (`fragment.replace("div") { |n| n.tap { |x| x.inner_html = … } }`,
 `fragment.update { |s| s.at_css("div")["class"] = … }`). `find_all`
-stays a read. Every expectation in `runtime/ruby/test/action_text_test.rb`
-for these was measured against Rails' Nokogiri-backed Fragment.
+stays a read. An update block can also scan `css("*")` and call
+`Node#remove`; that removes each disallowed element with its contents while
+leaving allowed nodes in the copied fragment. This is a removal primitive,
+not a general sanitizer: the caller supplies the allowlist, and allowed-node
+attributes are not filtered. Every expectation in
+`runtime/ruby/test/action_text_test.rb` for these was measured against Rails'
+Nokogiri-backed Fragment.
 
 **What always worked.** The PARSE: `#attachments` returns every node
 with every attribute it carried (`sgid`, `content_type`, `caption`,

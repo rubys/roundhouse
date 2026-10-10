@@ -970,15 +970,11 @@ fn every_runtime_method_body_concretely_typed() {
     // adapter value is column-dependent, and its `to_f` conversion is the
     // schema-selected Ruby boundary that matches the model's Float contract.
     // The emitted regression covers scalar and grouped decimal extrema.
-    // Canonical main ae7bf6cf measures 334 sites; #720's Ruby runtime
-    // additions contribute 39 more, primarily from generic JSON, deep_dup,
-    // session and request-environment values. Keep those intentional dynamic
-    // boundaries visible in the measured combined ceiling.
-    // `transaction(requires_new: true)` savepoints add 3 in
-    // `self.transaction`, MEASURED 373 -> 376 on main 9d577c24: the
-    // `requires_new` option is `untyped` (as `with_lock` forwards it), and
-    // the nested block's value is now read back after its RELEASE.
-    const CEILING: usize = 376;
+    // Canonical main 99dd482b measures 374 sites. The ActionText fragment
+    // mutation runtime adds 47 measured sites on that baseline (45 range/edit
+    // and 2 pending-index writes); the merged tree measures 421. Bar A still
+    // requires zero untyped method bodies.
+    const CEILING: usize = 421;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

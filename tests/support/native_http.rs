@@ -120,8 +120,8 @@ impl Server {
 
     /// A GET with additional request headers.
     pub fn get_with_headers(&self, path: &str, headers: &[(&str, &str)]) -> Response {
-        let (status, _, headers, body) = self.send("GET", path, headers, "");
-        Response { status, headers, body }
+        let (status, _, response_headers, body) = self.send("GET", path, headers, "");
+        Response { status, headers: response_headers, body }
     }
 
     /// A POST with neither cookie nor token.
