@@ -1,4 +1,6 @@
 require_relative "test_helper"
+# Not the load path test_helper leaves: runtime/ruby/i18n.rb would answer ActiveSupport's `require "i18n"` in place of the gem.
+$LOAD_PATH.unshift(*Gem::Specification.find_by_name("i18n").full_require_paths)
 require "active_support/inflector"
 
 # Rails 8.1.4 default-config differential only. Custom acronym tables,
