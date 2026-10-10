@@ -224,6 +224,14 @@ module ActiveSupport
     h
   end
 
+  # Rails' `Array#excluding` (`Array#without` is its alias): Array#-
+  # preserves the receiver's order and any non-excluded duplicates.
+  # Rails flattens one level of the excluded arguments before
+  # subtracting them.
+  def self.excluding(list, *elements)
+    list - elements.flatten(1)
+  end
+
   # AS `Enumerable#many?`: the materialized no-block form is a length
   # check; the block form counts matches and stops at the second hit.
   # Another core_ext reopen the transpiled runtimes cannot host — same

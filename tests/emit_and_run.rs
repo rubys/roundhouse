@@ -9,6 +9,10 @@
 mod emit_and_run;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
+#[path = "support/array_excluding.rs"]
+mod array_excluding;
+#[path = "emit_and_run/array_excluding.rs"]
+mod array_excluding_runs;
 #[path = "emit_and_run/integer_query_find_by.rs"]
 mod integer_query_find_by;
 #[path = "support/lambda_signatures.rs"]
