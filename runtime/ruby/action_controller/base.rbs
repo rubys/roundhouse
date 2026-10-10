@@ -5,6 +5,7 @@ end
 
 module ActionController
   def self.header_key_ok?: (String? k) -> bool
+  def self.header_key_byte_ok?: (Integer byte) -> bool
   def self.header_value_ok?: (String? v) -> bool
   def self.header_control?: (String c) -> bool
   def self.sanitize_location: (String path) -> String
@@ -27,12 +28,13 @@ module ActionController
   class HeaderStore
     @keys: Array[String]
     @lower: Array[String]
-    @vals: Array[String]
+    @vals: Array[String?]
     def initialize: () -> void
     def []: (String key) -> String?
     def []=: (String key, String? value) -> void
+    def store_value: (String key, String? value) -> void
     def slice: (*String names) -> Hash[String, String]
-    def merge!: (Hash[String, String] other) -> HeaderStore
+    def merge!: (Hash[String, String?] other) -> HeaderStore
     def delete: (String key) -> String?
     def size: () -> Integer
     def key_at: (Integer i) -> String
@@ -110,6 +112,7 @@ module ActionController
     # each filter that can render or redirect (Rails: a filter that
     # responds halts the chain and skips the action).
     def performed?: () -> bool
+    def head_response?: () -> bool
 
     def initialize: () -> void
 
@@ -142,15 +145,10 @@ module ActionController
       ?status: Symbol
     ) -> void
 
-    # Rails 8.1.4's positional status + optional options hash. Status is
-    # usually a Symbol; Integer and nil mirror Rails' response behavior.
-    def head: ((Symbol | Integer | nil) status, ?(Hash[String | Symbol, Object?] | nil) options) -> bool
-    def head_response?: () -> bool
-    def head_status_code: (Symbol | Integer status) -> Integer
-    def head_includes_content?: (Integer status) -> bool
-    def head_format_content_type: () -> String
-    def head_option_content_type: (Object? content_type) -> String
-    def normalize_head_header_name: (String name) -> String
+    # The shared strict-target implementation supports the bounded
+    # keyword form. The Ruby/Spinel options-hash extension has its own
+    # signature in runtime/spinel/action_controller_head.rbs.
+    def head: (Symbol status, ?content_type: String?, ?location: String?) -> void
     def response: () -> Base
     def fresh_when: (untyped subject) -> void
     def stale?: (?etag: untyped) -> bool
