@@ -1927,6 +1927,52 @@ impl Analyzer {
                 entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), true));
             }
         }
+        // `setup do |t| LABEL = t.option(…) end` in a class body
+        // declares LABEL in the class, the block's cref, as Sorbet
+        // reads it.
+        // Whether the block runs is the call's business: the emitted body
+        // makes the same call, so a read before it ran raises as the source
+        // does. Not a bare name of the class, so no generated-expression
+        // fallback.
+        fn block_const_writes<'e>(call: &'e Expr, out: &mut Vec<(&'e Symbol, &'e Expr)>) {
+            let ExprNode::Send { block: Some(block), .. } = &*call.node else { return };
+            let ExprNode::Lambda { body, .. } = &*block.node else { return };
+            let stmts = match &*body.node {
+                ExprNode::Seq { exprs } => exprs.as_slice(),
+                _ => std::slice::from_ref(body),
+            };
+            for stmt in stmts {
+                match &*stmt.node {
+                    ExprNode::Assign { target: LValue::Const { path }, value } => {
+                        if let [name] = path.as_slice() {
+                            out.push((name, value));
+                        }
+                    }
+                    ExprNode::Send { .. } => block_const_writes(stmt, out),
+                    _ => {}
+                }
+            }
+        }
+        let class_body_calls = app
+            .models
+            .iter()
+            .flat_map(|m| m.body.iter().filter_map(move |item| match item {
+                ModelBodyItem::Unknown { expr, .. } => Some((&m.name, expr)),
+                _ => None,
+            }))
+            .chain(app.controllers.iter().flat_map(|c| c.body.iter().filter_map(move |item| match item {
+                ControllerBodyItem::Unknown { expr, .. } => Some((&c.name, expr)),
+                _ => None,
+            })))
+            .chain(app.library_classes.iter().flat_map(|lc| lc.unknown_calls.iter().map(move |call| (&lc.name, call))));
+        for (owner, call) in class_body_calls {
+            let mut writes = Vec::new();
+            block_const_writes(call, &mut writes);
+            for (name, value) in writes {
+                let self_ty = Ty::Class { id: owner.clone(), args: vec![] };
+                entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), false));
+            }
+        }
         // Original source tests use the same DeclarationId contract.
         // Their constants participate in the value fixpoint, but must
         // not change the bare-name fallback used by production views.
