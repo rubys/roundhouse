@@ -977,4 +977,25 @@ mod tests {
         assert_eq!(resolved_name(&reordered, &sources, 0, "Second"), "Second");
         assert_eq!(resolved_name(&reordered, &sources, 1, "Third"), "Third");
     }
+
+    /// An app that reads a scalar constant of a runtime module
+    /// (`ActiveRecord::SignedId::SALT = "active_record/signed_id"`, nested
+    /// two modules deep) must get the constant's literal type, or the
+    /// read is refused as an unsupported constant.
+    #[test]
+    fn a_runtime_module_scalar_constant_resolves_with_its_literal_type() {
+        let text = "module SaltProbe\n  R = \"#{ActiveRecord::SignedId::SALT}\".freeze\nend\n";
+        let sources = vec![SourceFile { path: "lib/salt_probe.rb".into(), text: text.into() }];
+        let resolver = ConstResolver::from_app_sources(&sources);
+        let end = (text.find("SALT}").unwrap() + "SALT".len()) as u32;
+        let span = Span { file: FileId(1), start: end - 40, end };
+        let path: Vec<Symbol> = ["ActiveRecord", "SignedId", "SALT"].into_iter().map(Symbol::from).collect();
+        match resolver.reference(span, &path) {
+            Some(Some(ResolvedConstant::Value { name, runtime, .. })) => {
+                assert_eq!(name.0.as_str(), "ActiveRecord::SignedId::SALT");
+                assert_eq!(runtime.as_deref(), Some(&crate::ty::Ty::Str));
+            }
+            _ => panic!("ActiveRecord::SignedId::SALT must resolve to the runtime value"),
+        }
+    }
 }
