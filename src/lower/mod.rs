@@ -86,6 +86,7 @@ pub mod dead_default;
 pub mod errors_add;
 pub mod errors_full_messages;
 pub mod human_attribute_name;
+pub mod i18n_translate;
 pub mod assoc_attr_key;
 pub mod attachable;
 pub mod attachables_grep;
@@ -585,6 +586,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // projection this pass emits reads that text.
     ("errors_index", &["errors_add"]),
     ("human_attribute_name", &[]),
+    ("i18n_translate", &[]),
     ("create_block", &["secure_password_super"]),
     // `<params>.merge(k: v)` written a method away from the permit
     // chain → `Model.from_params(p)` + per-key setters, hoisted above
@@ -944,6 +946,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("errors_index");
     human_attribute_name::apply_human_attribute_name_lowering(app);
     ran!("human_attribute_name");
+    i18n_translate::apply_i18n_translate_lowering(app);
+    ran!("i18n_translate");
     diags.extend(create_block::apply_create_block_inline(app));
     ran!("create_block");
     diags.extend(params_merge::apply_params_merge_lowering(app));

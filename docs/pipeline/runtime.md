@@ -2421,9 +2421,12 @@ Three gaps remain, all on spinel's side:
 ### Smaller shapes campfire main reaches, each narrower than Rails
 
 - **`I18n.locale` / `default_locale` answer `:en`** (`runtime/ruby/i18n_locale.rb`),
-  Rails' default when nothing sets one. Setting a locale (`I18n.locale =`,
-  `with_locale`, `config.i18n.default_locale`) and translation (`I18n.t`)
-  are not modeled.
+  Rails' default when nothing sets one. Setting a locale at run time
+  (`I18n.locale =`, `with_locale`) is not modeled. Translation is answered
+  at compile time from the default locale (`src/i18n`): `t` / `I18n.t`
+  with a literal key, attribute names, validation messages and form
+  labels. A key computed at run time, or one the locale lacks, is an
+  error rather than a guess.
 - **`fragment_name_with_digest(name, digest_path)` adds no template
   digest**: templates carry none here (see
   `runtime/spinel/action_controller_fragment_caching.rb`), so an omitted

@@ -143,6 +143,8 @@ pub struct Ctx {
     /// it `String` instead of the generic `Untyped`. Off elsewhere, where a
     /// block's return type isn't tracked through the method signature.
     pub in_view: bool,
+    /// The template being typed (`articles/_form`), for a lazy `t(".key")`.
+    pub view_name: Option<Symbol>,
     /// Set while typing the body of a class-side method (`def self.x`,
     /// `class << self; def x`). `self` there is the class object, so an
     /// implicit-self `new` answers "an instance of whichever class
@@ -343,6 +345,8 @@ pub struct BodyTyper<'a> {
     /// [`crate::analyze::inquiry`]); empty for the bare constructor,
     /// which the runtime-source typer and tests use.
     inquirers: Option<&'a std::collections::HashSet<Symbol>>,
+    /// The app's translations; Rails' English when absent.
+    i18n: Option<&'a crate::i18n::Catalog>,
 }
 
 impl<'a> BodyTyper<'a> {
@@ -386,7 +390,12 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None }
+        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None, i18n: None }
+    }
+
+    pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog) -> Self {
+        self.i18n = Some(catalog);
+        self
     }
 
     /// Share the analyzer's immutable source index across typing passes.
@@ -1665,6 +1674,22 @@ impl<'a> BodyTyper<'a> {
                 {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
                     return Ty::Array { elem: Box::new(elem.unwrap_or_else(unknown)) };
+                }
+                if let Some(call) = crate::lower::i18n_translate::parse(
+                    recv.as_ref(), method.as_str(), args, ctx.in_view, ctx.view_name.as_ref().map(|v| v.as_str()),
+                ) {
+                    let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
+                    let resolved = call.and_then(|c| catalog.resolve(&c.lookup).map(|_| ()));
+                    if let Err(reason) = resolved {
+                        if expr.diagnostic.is_none() {
+                            expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                                target: None,
+                                construct: Symbol::from("I18n"),
+                                detail: format!("`{method}` cannot be resolved from the app's locale: {reason}"),
+                            });
+                        }
+                    }
+                    return Ty::Str;
                 }
                 if method.as_str() == "human_attribute_name"
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)

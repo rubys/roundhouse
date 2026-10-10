@@ -811,6 +811,91 @@ fn localized_form_labels_and_submit_text() {
     localized_form_app().run_test("test/controllers/localized_forms_controller_test.rb").assert_passes();
 }
 
+/// `I18n.t` and a template's `t` answer the locale at compile time:
+/// interpolation, plural forms chosen by a run-time count, `scope:`,
+/// `default:` and a view's lazy `.key`.
+fn translate_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  greet: \"Hi %{name}\"\n  inbox:\n    zero: \"No messages\"\n    one: \"1 message\"\n    other: \"%{count} messages\"\n  shop:\n    title: \"Store\"\n  intro_html: \"<b>Hi</b> %{name}\"\n  articles:\n    index:\n      heading: \"All the articles\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def self.greeting(name)
+    I18n.t(\"greet\", name: name)
+  end
+
+  def self.inbox(count)
+    I18n.t(\"inbox\", count: count)
+  end
+
+  def self.scoped_title
+    I18n.t(:title, scope: :shop)
+  end
+
+  def self.fallbacks
+    [I18n.t(:nope, default: :greet, name: \"Bo\"), I18n.t(:nope, default: \"Plain\")]
+  end
+
+  def self.intro
+    I18n.t(\"intro_html\", name: \"<i>\")
+  end
+",
+        )
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<h1",
+            "<p id=\"lazy\"><%= t(\".heading\") %></p><p id=\"inbox\"><%= t(\"inbox\", count: @articles.size) %></p><p id=\"intro\"><%= t(\"intro_html\", name: \"<i>\") %></p>\n<h1",
+        )
+        .write(
+            "test/controllers/translations_controller_test.rb",
+            "require \"test_helper\"\n\nclass TranslationsControllerTest < ActionDispatch::IntegrationTest\n  test \"templates translate\" do\n    get articles_url\n    assert_includes response.body, \"<p id=\\\"lazy\\\">All the articles</p>\"\n    assert_includes response.body, \" messages</p>\"\n    assert_includes response.body, \"<p id=\\\"intro\\\"><b>Hi</b> &lt;i&gt;</p>\"\n  end\nend\n",
+        )
+}
+
+const TRANSLATE_ASSERTIONS: &str = r#"raise "greet: #{Article.greeting("Ann")}" unless Article.greeting("Ann") == "Hi Ann"
+raise "zero: #{Article.inbox(0)}" unless Article.inbox(0) == "No messages"
+raise "one: #{Article.inbox(1)}" unless Article.inbox(1) == "1 message"
+raise "other: #{Article.inbox(3)}" unless Article.inbox(3) == "3 messages"
+raise "scope: #{Article.scoped_title}" unless Article.scoped_title == "Store"
+raise "fallbacks: #{Article.fallbacks.inspect}" unless Article.fallbacks == ["Hi Bo", "Plain"]
+raise "intro: #{Article.intro}" unless Article.intro == "<b>Hi</b> <i>"
+puts "translate passed"
+"#;
+
+#[test]
+fn i18n_t_answers_the_locale() {
+    translate_app().run_ruby(TRANSLATE_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn i18n_t_answers_the_locale_on_spinel() {
+    translate_app().run_spinel(TRANSLATE_ASSERTIONS).assert_passes();
+}
+
+#[test]
+fn template_t_answers_the_locale() {
+    translate_app().run_test("test/controllers/translations_controller_test.rb").assert_passes();
+}
+
+/// A key the locale lacks, or one computed at run time, stays an error.
+#[test]
+fn unresolvable_translations_stay_errors() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def self.missing\n    I18n.t(\"no.such.key\")\n  end\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 2, "{errors:?}");
+}
+
 /// A field the lowering cannot humanize at compile time keeps its error.
 #[test]
 fn errors_full_message_on_a_dynamic_field_stays_an_error() {

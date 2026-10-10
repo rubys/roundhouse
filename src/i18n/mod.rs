@@ -240,6 +240,112 @@ pub fn format_full(format: &str, attribute: &str, message: &str) -> String {
     format.replace("%{attribute}", attribute).replace("%{message}", message)
 }
 
+/// A `t` / `I18n.t` call reduced to what its lookup needs.
+#[derive(Clone, Debug, Default)]
+pub struct Translate {
+    /// The key as written; a leading `.` is a view's lazy lookup.
+    pub key: String,
+    /// The template the call sits in (`articles/_form`), for a lazy key.
+    pub view: Option<String>,
+    /// `scope:`, dotted.
+    pub scope: Option<String>,
+    /// `default:` entries in order: a key (`Symbol`) or literal text.
+    pub defaults: Vec<Fallback>,
+    /// `count:` given.
+    pub counted: bool,
+    /// The other keywords, each an interpolation value.
+    pub values: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Fallback {
+    Key(String),
+    Text(String),
+}
+
+/// What a resolved translation renders: one template, or the plural
+/// forms a run-time `count` picks between.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Translation {
+    One(String),
+    Plural { zero: Option<String>, one: String, other: String },
+}
+
+impl Catalog {
+    /// Resolve `call` as I18n's simple backend does, or say why it
+    /// cannot be answered at compile time.
+    pub fn resolve(&self, call: &Translate) -> Result<Translation, String> {
+        let full = |key: &str| -> Result<String, String> {
+            let key = match key.strip_prefix('.') {
+                Some(rest) => {
+                    let view = call.view.as_deref().ok_or("a lazy key outside a template")?;
+                    format!("{}.{rest}", view.replace("/_", ".").replace('/', "."))
+                }
+                None => key.to_string(),
+            };
+            Ok(match &call.scope {
+                Some(scope) => format!("{scope}.{key}"),
+                None => key,
+            })
+        };
+        let mut candidates: Vec<Result<String, String>> = vec![Ok(full(&call.key)?)];
+        for default in &call.defaults {
+            candidates.push(match default {
+                Fallback::Key(k) => Ok(full(k)?),
+                Fallback::Text(t) => Err(t.clone()),
+            });
+        }
+        let found = candidates.iter().find_map(|c| match c {
+            Ok(key) => self.entry(key, call.counted),
+            Err(text) => Some(Translation::One(text.clone())),
+        });
+        let translation = found.ok_or_else(|| format!("translation missing: {}.{}", self.locale, full(&call.key).unwrap_or_default()))?;
+        let templates: Vec<&String> = match &translation {
+            Translation::One(t) => vec![t],
+            Translation::Plural { zero, one, other } => zero.iter().chain([one, other]).collect(),
+        };
+        for template in templates {
+            for name in placeholders(template) {
+                let given = (name == "count" && call.counted) || call.values.iter().any(|v| v == &name);
+                if !given {
+                    return Err(format!("missing interpolation argument %{{{name}}}"));
+                }
+            }
+        }
+        Ok(translation)
+    }
+
+    fn entry(&self, key: &str, counted: bool) -> Option<Translation> {
+        if let Some(text) = self.lookup(key) {
+            return Some(Translation::One(text.to_string()));
+        }
+        if !counted {
+            return None;
+        }
+        let form = |f: &str| self.lookup(&format!("{key}.{f}")).map(str::to_string);
+        Some(Translation::Plural { zero: form("zero"), one: form("one")?, other: form("other")? })
+    }
+}
+
+/// `ActiveSupport::HtmlSafeTranslation.html_safe_translation_key?`: a
+/// key ending in `html` after `_`, `.` or a word boundary.
+pub fn is_html_safe_key(key: &str) -> bool {
+    key == "html" || key.ends_with("_html") || key.ends_with(".html")
+}
+
+/// The `%{name}`s in `template`.
+pub fn placeholders(template: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = template;
+    while let Some(i) = rest.find("%{") {
+        let after = &rest[i + 2..];
+        let Some(j) = after.find('}') else { break };
+        out.push(after[..j].to_string());
+        rest = &after[j + 1..];
+    }
+    out
+}
+
 /// What one model's messages need from the catalog: its i18n scope
 /// (`activerecord`, or `activemodel` for a plain ActiveModel class), its
 /// `lookup_ancestors` as i18n keys, and the entries those can reach.
@@ -518,6 +624,28 @@ mod tests {
         let custom = ErrorOpts { count: Some("4".into()), message: Some("needs %{count}".into()), attribute: None };
         assert_eq!(text(c.error_message("activerecord", &k, "body", "too_short", &custom)), vec![Part::Text("needs 4".into())]);
         assert_eq!(text(c.error_message("activerecord", &k, "body", "greater_than", &ErrorOpts::count("0.5"))), vec![Part::Text("must be greater than 0.5".into())]);
+    }
+
+    #[test]
+    fn translate_resolves_scope_lazy_keys_defaults_and_plurals() {
+        let c = catalog(&[(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  greet: \"Hi %{name}\"\n  inbox:\n    one: \"1 message\"\n    other: \"%{count} messages\"\n  articles:\n    form:\n      title: \"Write\"\n",
+        )]);
+        let t = |key: &str| Translate { key: key.into(), ..Default::default() };
+        assert_eq!(c.resolve(&t("hello")), Ok(Translation::One("Hello world".into())));
+        assert_eq!(c.resolve(&Translate { scope: Some("articles.form".into()), ..t("title") }), Ok(Translation::One("Write".into())));
+        assert_eq!(c.resolve(&Translate { view: Some("articles/_form".into()), ..t(".title") }), Ok(Translation::One("Write".into())));
+        assert_eq!(c.resolve(&Translate { defaults: vec![Fallback::Key("hello".into())], ..t("nope") }), Ok(Translation::One("Hello world".into())));
+        assert_eq!(c.resolve(&Translate { defaults: vec![Fallback::Text("Fallback".into())], ..t("nope") }), Ok(Translation::One("Fallback".into())));
+        assert_eq!(
+            c.resolve(&Translate { counted: true, ..t("inbox") }),
+            Ok(Translation::Plural { zero: None, one: "1 message".into(), other: "%{count} messages".into() })
+        );
+        assert!(c.resolve(&t("greet")).is_err());
+        assert!(c.resolve(&Translate { values: vec!["name".into()], ..t("greet") }).is_ok());
+        assert!(c.resolve(&t("nope")).is_err());
+        assert!(c.resolve(&t(".title")).is_err());
     }
 
     #[test]
