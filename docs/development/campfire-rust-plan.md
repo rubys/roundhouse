@@ -438,6 +438,36 @@ the complete final Rust-owned inventory and preserve dispatch identity at emit
 time. No Campfire inventory was rerun, so there is no compiler-wall delta or
 support claim.
 
+**Immediate D0 implementation boundary (reconfirmed at `bdb0651b`, 2026-10-10):**
+the fresh ignored emitted-project test still fails with five errors, all in the
+synthetic `BlockForwardingProbe` crate. The generated source identifies three
+independent ABI mismatches: (1) the guarded optional block parameter is emitted
+as required `Box<dyn FnOnce()>`, and the guard consequently emits an invalid
+`.clone().is_none()`; (2) the body and the shared terminal disagree about
+`String` versus `serde_json::Value`; and (3) the source literal closure is
+passed directly where the forwarding method expects a boxed trait object.
+Do not start by changing the generic block placeholder or `ViewHelpers::capture`:
+that would broaden the contract beyond the proven zero-argument HTML subset.
+The first production slice must instead carry one conservative, canonical
+method contract into both definition and call emission, with separate plans
+for required versus optional slot and return shape. The optionality guard must
+borrow (`is_none()`), forwarding must move the `Option` without cloning, and
+only eligible literal closures may become `Some(Box::new(...))`. Preserve the
+ordinary argument-bearing form-builder block path as a negative control.
+
+Before editing emitter behavior, turn the test-only analysis into a production
+plan builder with these gates: [ ] full owner + receiver + method identity;
+[ ] complete final Rust-owned class inventory, including route/import/view,
+controller, and fixture/helper classes; [ ] identical resolution precedence
+for classifier and emitter, with local shadowing before global helper lookup;
+[ ] source-proven String return shapes and callsite evidence; [ ] an authored
+RBS return-contract veto (including explicit `untyped`) while allowing only
+compatible declarations; [ ] duplicate/ambiguous methods and unresolved
+inheritance excluded. Then apply that plan symmetrically to static-safe
+implementation functions and instance wrappers. Keep the native generated
+crate regression red until all paths work; the classifier's 9/9 unit results
+alone are not a feature gate.
+
 For cookies, existing request/task metadata and `process_action` dispatch are
 already present. F0 must extend that request lifecycle and decide whether the
 same jar is available through outer layout rendering before deciding when
@@ -551,6 +581,7 @@ review artifacts; avoid committing large generated projects or sensitive data.
 | 2026-10-09 (shared capture runtime placement, working tree based on `1e5b8288`) | Parent `1e5b828895dcafaa687334756ed0f8c908c27451` plus uncommitted changes | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; reused generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55`; dirty worktree | `ruby -Iruntime/ruby runtime/ruby/test/action_view/view_helpers_ext_test.rb`; `cargo test --locked --test runtime_src_integration every_runtime_method_body_is_fully_typed`; fresh survey generation and `cargo check --locked --lib --bin app --message-format=json`; generated Rust framework test with `--ignored`, before and after moving direct generic capture probes | CRuby suite passed 21 tests / 38 assertions; runtime typed-body gate passed 1/1. Fresh survey Cargo check: exit 101, 2,510 errors / 554 warnings (baseline `1e5b8288`: 2,496 / 555). Diagnostic-set comparison by code/message/source span: 14 `capture` E0425s and one clone diagnostic disappeared; 14 E0271 callable-result mismatches, 14 E0308 branch mismatches, and one relocated clone diagnostic appeared. This is not a net compiler improvement; it replaces unresolved capture names with concrete evidence that the current closure is `FnOnce() -> ()` where the runtime expects a value, while the survey output still fails. Rust framework harness failed with 24 generated-test compilation errors before probe relocation and 21 after; the three removed errors were from those new probes. Remaining failures include fixture/type-shape mismatches whose baseline status was not tested, so the Rust framework lane remains red. CRuby syntax checks and `git diff --check` passed. | Shared runtime placement locally implemented; capture ABI is now more directly localized; D0 behavior remains unproven |
 | 2026-10-10 (D0 source-callsite regression expansion; dirty worktree) | `83f6d67acd5b4e38dc4a045f4c8cac20ccee20a9` plus local test/plan/recognizer changes | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; current Roundhouse checkout `pr688-prep`; generated scratch project at `/tmp/roundhouse-rust-check-optional-string-forwarded-block` | `cargo test --lib emit::rust::block_abi::tests -- --nocapture`; `cargo check --lib`; ignored emitted-Rust test `forwarded_optional_string_block_runs_through_two_edges` with the source-authored `render_html` literal-block callsite; `git diff --check` | ABI probe unit tests passed 2/2; library check passed; `git diff --check` passed. The emitted-project test intentionally remains red (exit 101): five app compile errors, including the new source literal closure not matching the current required `Box<dyn FnOnce()>` signature, plus the pre-existing optionality, closure result, and `String`/`Value` mismatches. This reproduces the pre-fix path and expands evidence; no feature behavior is fixed and no Campfire inventory was rerun. | D0 positive source-callsite fixture added; production ABI integration and Campfire claim remain open |
 | 2026-10-10 (D0 proof-path check; dirty worktree) | `3fdeda76496c31a3b2e45d4d0fcf444ccaea5cc4` plus local test/plan edits | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; emitted scratch project `/tmp/roundhouse-rust-check-optional-string-forwarded-block` | Re-ran the ignored D0 compile/run test after switching fixture generation to `session::analyze_and_lower`; inspected lowering order and lambda typing in `src/session.rs`, `src/lower/mod.rs`, `src/lower/tag_builder.rs`, `src/lower/capture_inline.rs`, `src/lower/view_to_library/walker.rs`, and `src/analyze/body/mod.rs` | The full emitted test still fails at Cargo with the same five app errors; shared lowerings do not change this synthetic handwritten `capture` fixture. This run proves the shared lowering path is exercised but does not exercise Campfire tag-builder rewrites, view templates, escaping, or a real Campfire compile improvement. Local source confirms `Ty::Fn.params` is empty for analyzed lambdas; lambda arity must be read from its own parameter fields. No new feature behavior is claimed. | Production-path repro harness verified; no ABI integration yet |
+| 2026-10-10 (D0 reproduction refreshed at `bdb0651b`) | `bdb0651b6f4dd81515ad3de3bb7509edd340213a` | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; focused test generated fresh project under `/tmp/roundhouse-rust-check-optional-string-forwarded-block` | `CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_TEST_STRIP=symbols cargo test --locked --test rust_toolchain forwarded_optional_string_block_runs_through_two_edges -- --ignored --exact --nocapture` | Exit 101 after emitted app compilation: five errors remain—one E0599 for `.clone().is_none()` on required `Box<dyn FnOnce()>`, one E0271 because the closure returns `()` instead of `Value`, and three E0308 mismatches across String/Value returns and direct closure/boxed callback. The test did not reach behavior assertions. No production behavior changed, no Campfire survey was run, and no compiler-wall improvement is established. | Confirms exact D0 pre-implementation failure at current code head |
 
 | Date | Roundhouse SHA | Campfire SHA | Toolchain / locks | Commands and executed scope | Result / artifact links | Checklist updated |
 |---|---|---|---|---|---|---|
