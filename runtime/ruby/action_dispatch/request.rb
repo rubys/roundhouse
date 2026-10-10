@@ -223,6 +223,10 @@ module ActionDispatch
       @request_method == "POST"
     end
 
+    def put?
+      @request_method == "PUT"
+    end
+
     # `head?` sits beside `get?` because Rails' "is this a safe
     # request" idiom is `request.get? || request.head?` and campfire
     # writes exactly that (`BlockBannedRequests#safe_request?`). It had

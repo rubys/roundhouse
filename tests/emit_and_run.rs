@@ -48,6 +48,8 @@ mod controller_response_body;
 mod render_to_string_partial_ivar;
 #[path = "emit_and_run/request_optional_port.rs"]
 mod request_optional_port;
+#[path = "emit_and_run/action_dispatch_request_put.rs"]
+mod action_dispatch_request_put;
 #[path = "emit_and_run/controller_url_helpers.rs"]
 mod controller_url_helpers;
 #[path = "emit_and_run/controller_super_ivars.rs"]
