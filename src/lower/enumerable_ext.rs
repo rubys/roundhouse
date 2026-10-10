@@ -109,6 +109,9 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     if method.as_str() == "wrap" {
         return ground_array_wrap(expr);
     }
+    if method.as_str() == "pluck" && block.is_none() {
+        return ground_indexed_pluck(expr);
+    }
     let wants_block = match method.as_str() {
         "index_by" => true,
         "many?" => block.is_some(),
@@ -213,6 +216,62 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     if method.as_str() == "squish!" {
         expr.ty = Some(Ty::Str);
     }
+    true
+}
+
+/// Not a reader call per key, as `lower::assoc_pluck` writes for records:
+/// a Hash answers a key only through `[]`, which is what ActiveSupport's
+/// `pluck` sends to every element.
+fn ground_indexed_pluck(expr: &mut Expr) -> bool {
+    let span = expr.span;
+    let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node else {
+        return false;
+    };
+    let Some(Ty::Array { elem }) = &recv.ty else { return false };
+    if crate::analyze::indexed_pluck(method, elem, args).is_none() {
+        return false;
+    }
+    let var = Symbol::from("__pluck");
+    let mut element = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: var.clone() });
+    element.ty = Some((**elem).clone());
+    let mut value = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(element),
+            method: Symbol::from("[]"),
+            args: args.clone(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    value.ty = match &expr.ty {
+        Some(Ty::Array { elem }) => Some((**elem).clone()),
+        _ => None,
+    };
+    let block = Expr::new(
+        span,
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
+            params: vec![var],
+            rest_param: None,
+            block_param: None,
+            body: value,
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    );
+    let recv = recv.clone();
+    let ty = expr.ty.clone();
+    *expr = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from("map"),
+            args: vec![],
+            block: Some(block),
+            parenthesized: false,
+        },
+    );
+    expr.ty = ty;
     true
 }
 

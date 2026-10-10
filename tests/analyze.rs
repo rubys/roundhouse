@@ -2266,6 +2266,30 @@ end
 }
 
 #[test]
+fn time_zone_lookup_error_report_and_array_pluck_type_without_errors() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"widgets\" do |t|\n    t.datetime \"created_at\"\n  end\nend\n",
+        ),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def local_time(zone_name) = created_at.in_time_zone(ActiveSupport::TimeZone[zone_name])
+  def report(error) = Rails.error.report(error, handled: true)
+  def self.option_labels(options) = Array(options).pluck("label")
+end
+"#,
+        ),
+    ]);
+    assert_eq!(errors_of(&app), Vec::<String>::new());
+}
+
+#[test]
 fn rails_env_is_a_string_inquirer() {
     // `Rails.env` is an ActiveSupport::StringInquirer: `development?` /
     // `production?` (any `<word>?`) resolve to Bool via method_missing,

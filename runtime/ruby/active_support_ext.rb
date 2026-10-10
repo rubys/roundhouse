@@ -816,6 +816,33 @@ module ActiveSupport
     t.getlocal(find_zone!(zone).offset_at(t.to_i))
   end
 
+  def self.zone_name(zone)
+    zone.nil? ? nil : zone.name
+  end
+
+  class TimeZone
+    attr_reader :name
+
+    def self.[](name)
+      ActiveSupport.find_zone!(name)
+      new(name)
+    rescue ArgumentError
+      nil
+    end
+
+    def initialize(name)
+      @name = name
+    end
+  end
+
+  # Not Rails' subscriber list: nothing in the runtime subscribes, so a report goes to the log.
+  class ErrorReporter
+    def report(error, handled: true, severity: nil, context: {}, source: nil)
+      Rails.logger.error("#{error.class}: #{error.message}")
+      nil
+    end
+  end
+
   # Numeric#in_time_zone: epoch seconds before the zone remapping above.
   def self.time_at_epoch(n)
     Time.at(n)
