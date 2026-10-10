@@ -435,11 +435,6 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
     let flat = crate::lower::routes::flatten_routes(app);
     let mut header = String::new();
     use std::fmt::Write;
-    writeln!(
-        header,
-        "require_relative \"../app/controllers/application_controller\""
-    )
-    .unwrap();
     let mut seen: Vec<String> = vec!["application_controller".to_string()];
     // Only controllers the app actually DEFINES. Rails resolves a
     // controller lazily at dispatch, so a route naming one that does not
@@ -452,6 +447,15 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
     // and it fails where Rails fails it.
     let defined: std::collections::HashSet<&str> =
         app.controllers.iter().map(|c| c.name.0.as_str()).collect();
+    // The same holds for the base: a model-only app (an engine or library
+    // app with no controllers) has no application_controller to require.
+    if defined.contains("ApplicationController") {
+        writeln!(
+            header,
+            "require_relative \"../app/controllers/application_controller\""
+        )
+        .unwrap();
+    }
     for r in &flat {
         let class_name = r.controller.0.as_str();
         if !defined.contains(class_name) {

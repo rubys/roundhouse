@@ -10797,3 +10797,44 @@ raise "the cached copy is the caller's object" if again.equal?(body)
 "##)
         .assert_passes();
 }
+
+/// A model-only app (no controllers) must boot: `config/routes.rb`
+/// requires `application_controller` only when the app defines one, the
+/// same defined-only rule the per-controller requires follow.
+#[test]
+fn a_model_only_app_boots_without_an_application_controller() {
+    emit_and_run::empty_app()
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets" do |t|
+    t.integer "owner_id", null: false
+    t.boolean "enabled", default: false, null: false
+    t.string "name", null: false
+  end
+end
+"#)
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  validates :name, presence: true\nend\n")
+        .write("test/fixtures/widgets.yml", "on:\n  owner_id: 7\n  name: a\n  enabled: true\n\noff:\n  owner_id: 8\n  name: b\n  enabled: false\n")
+        .write("test/models/widget_test.rb", r#"require "test_helper"
+
+class WidgetTest < ActiveSupport::TestCase
+  test "enabled defaults to false" do
+    refute Widget.new(owner_id: 1).enabled
+  end
+
+  test "requires name" do
+    record = Widget.new(owner_id: 1, name: nil)
+    refute_predicate record, :valid?
+    assert_includes record.errors[:name], "can't be blank"
+  end
+
+  test "can query by owner_id and enabled status" do
+    record = widgets(:on)
+    assert Widget.exists?(owner_id: record.owner_id, enabled: true)
+    refute Widget.exists?(owner_id: record.owner_id, enabled: false)
+  end
+end
+"#)
+        .run_test("test/models/widget_test.rb")
+        .assert_passes();
+}
