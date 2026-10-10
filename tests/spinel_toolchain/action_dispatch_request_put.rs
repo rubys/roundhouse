@@ -4,12 +4,12 @@ use super::emit_and_run;
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn request_put_predicate_runs_natively() {
     let run = emit_and_run::real_blog()
-        // Runtime tree shaking sees application/test source before the
-        // native consumer is appended, so keep this otherwise-unused
-        // request predicate reachable in the emitted framework runtime.
+        // Runtime tree shaking drops unused framework methods. The
+        // native consumer is appended after shaking, so add an app-level
+        // caller to keep this predicate in the emitted runtime.
         .write(
-            "test/request_put_predicate_probe.rb",
-            "request = ActionDispatch::Request.new\nrequest.put?\n",
+            "app/controllers/request_put_probe_controller.rb",
+            "class RequestPutProbeController < ApplicationController\n  def probe\n    request.put?\n  end\nend\n",
         )
         .run_spinel(
             r#"request = ActionDispatch::Request.new
