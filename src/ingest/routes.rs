@@ -13,7 +13,10 @@
 //! forces a recognizer. Not-modeled ≠ absent: a dropped entry is a
 //! ledger line, never a silently empty route table. Engine mounts recover
 //! in every mode with a located error carried on the route table; strict
-//! emission refuses it unless explicitly overridden.
+//! emission refuses it unless explicitly overridden. A route-body
+//! statement that is not a call and is not a walked `if`/`unless` or a
+//! local write (`case`, and the rest) records that same gap; `if` and
+//! `unless` are kept, both arms, so they are not gaps.
 //!
 //! `devise_scope` is path-transparent and its routes are kept. The
 //! authentication guards (`authenticate`, `authenticated`, and
@@ -1002,6 +1005,8 @@ fn ingest_route_stmts<'pr>(
         // A conditional around routes (`if Rails.env.development?`) is
         // decided at boot, not here: both arms are walked, so the
         // helpers of every environment's table exist in the model.
+        // Includes the modifier form `get "/x" if flag`. A mount inside
+        // is nested, so the runtime cable exemption does not apply.
         if let Some(cond) = stmt.as_if_node() {
             let mut arms: Vec<Node<'pr>> = Vec::new();
             if let Some(body) = cond.statements() {
@@ -1040,7 +1045,18 @@ fn ingest_route_stmts<'pr>(
             eval::bind(constant_id_str(&write.name()), value);
             continue;
         }
-        let Some(call) = stmt.as_call_node() else { continue };
+        // `case` / `case in`, and any other non-call, used to fall
+        // through a bare `continue`: the routes inside vanished with
+        // no record. Same treatment as an unknown DSL call. The
+        // predicate is not evaluated.
+        let Some(call) = stmt.as_call_node() else {
+            let err = non_call_route_stmt(&stmt, file);
+            if super::survey::is_active() {
+                super::survey::record(&err);
+                continue;
+            }
+            return Err(err);
+        };
         // `Dir.glob('rest_routes/**/*.rb', base: 'config/routes').each
         // do |r| draw(r.sub(/\.rb$/, '')) end` (and `Dir[...]`) — the
         // idiom a Mastodon-class app uses to mass-`draw` a whole
@@ -1409,6 +1425,36 @@ fn retag_scope(entries: &mut [RouteSpec], scope: ResourceScope) {
             }
             _ => {}
         }
+    }
+}
+
+/// The `Unsupported` error for a route-body statement that is not a
+/// call and not a form the walker already keeps (`if`/`unless`, a
+/// local write). Names the construct and its line so the ledger entry
+/// points at the routes that went missing. The line comes from this
+/// parse's bytes first: a test or a re-ingest can register a second
+/// text under the same path, and `line_at` keeps the first.
+fn non_call_route_stmt(stmt: &Node<'_>, file: &str) -> IngestError {
+    let location = stmt.location();
+    let line = super::sources::line_at_parse(&location)
+        .or_else(|| super::sources::line_at(file, location.start_offset()))
+        .map(|line| format!(", line {line}"))
+        .unwrap_or_default();
+    let construct = match conditional_keyword(stmt) {
+        Some(keyword) => format!("conditional `{keyword}` block (predicate not statically known)"),
+        None => "non-call statement".to_string(),
+    };
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!("unsupported routes DSL: {construct}{line}"),
+    }
+}
+
+fn conditional_keyword(stmt: &Node<'_>) -> Option<&'static str> {
+    if stmt.as_case_node().is_some() || stmt.as_case_match_node().is_some() {
+        Some("case")
+    } else {
+        None
     }
 }
 
