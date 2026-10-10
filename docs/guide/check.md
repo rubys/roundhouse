@@ -131,10 +131,12 @@ same table:
   parameter name the `def` does not have — is dropped whole and the
   method is inferred as before; a `sig` above `attr_reader` or above
   `private def` is not paired.
-  `T.let`, `T.cast`, `T.must`, `T.bind`,
+  `T.let`, `T.cast`, `T.bind`,
   `T.unsafe` and `T.assert_type!` unwrap to the value they wrap so its
-  own inferred type flows on; the annotation on those is discarded, so
-  `T.must(x)` does not narrow `x` past what inference already knows.
+  own inferred type flows on; the annotation on those is discarded.
+  `T.must(x)` lowers to the check sorbet-runtime makes, `x` unless it
+  is nil and a `TypeError` otherwise, so what follows reads `x` with nil
+  removed; `T.must_because` stays refused.
 
 The two sources above settle against each other — the sidecar wins
 where both declare the same method. Against INFERENCE, neither wins:

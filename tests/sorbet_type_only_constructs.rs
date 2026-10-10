@@ -170,13 +170,31 @@ fn an_unimplemented_assertion_emits_a_named_refusal() {
     let emitted = emitted(
         r#"class Gauge
   def label(kind)
-    T.must(kind).to_s
+    T.must_because(kind) { "a kind" }.to_s
   end
 end
 "#,
         "gauge.rb",
     );
     assert!(emitted.contains("raise"), "got:\n{emitted}");
-    assert!(!emitted.contains("T.must"), "got:\n{emitted}");
+    assert!(!emitted.contains("T.must_because"), "got:\n{emitted}");
     assert!(emitted.contains("non-nil assertion"), "got:\n{emitted}");
+}
+
+#[test]
+fn t_must_lowers_to_sorbets_nil_check() {
+    let emitted = emitted(
+        r#"class Gauge
+  def label(kind)
+    T.must(kind).to_s
+  end
+end
+"#,
+        "gauge.rb",
+    );
+    // The call is gone; the name survives inside sorbet's own message.
+    assert!(!emitted.contains("T.must("), "got:\n{emitted}");
+    assert!(emitted.contains("kind.nil?"), "got:\n{emitted}");
+    assert!(emitted.contains("Passed `nil` into T.must"), "got:\n{emitted}");
+    assert!(!emitted.contains("non-nil assertion"), "got:\n{emitted}");
 }

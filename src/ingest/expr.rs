@@ -432,6 +432,54 @@ fn sorbet_assertion_rules_out_nil(node: &Node<'_>) -> bool {
         .is_some_and(|c| matches!(constant_id_str(&c.name()), "must" | "must_because"))
 }
 
+/// Whether `node` is `T.must(x)` (not `T.must_because`).
+fn sorbet_assertion_is_must(node: &Node<'_>) -> bool {
+    node.as_call_node().is_some_and(|c| constant_id_str(&c.name()) == "must")
+}
+
+/// `T.must(x)` as sorbet-runtime runs it: the value when it is not nil
+/// (`false` included), else `raise TypeError.new("Passed `nil` into
+/// T.must")` (through `T::Configuration`'s inline type error handler,
+/// whose default re-raises that error). The value is
+/// evaluated once: a local read is tested directly, anything else is
+/// bound to a generated local inside the condition,
+/// `if (__must_N = x).nil? then raise ... else __must_N end`, so the
+/// else side reads it with nil narrowed away.
+fn must_check(span: Span, value: Expr, location: &ruby_prism::Location<'_>) -> Expr {
+    let (tested, read) = match &*value.node {
+        ExprNode::Var { .. } => (value.clone(), value),
+        _ => {
+            let stem = format!("__must_{}", span.start);
+            let mut name = stem.clone();
+            let mut suffix = 0;
+            while super::sources::generated_local_is_reserved(location, &name) {
+                suffix += 1;
+                name = format!("{stem}_{suffix}");
+            }
+            let name = Symbol::from(name);
+            let bind = Expr::new(
+                span,
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: name.clone() },
+                    value,
+                },
+            );
+            (bind, Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name }))
+        }
+    };
+    let send = |recv: Option<Expr>, method: &str, args: Vec<Expr>, parenthesized: bool| {
+        Expr::new(span, ExprNode::Send { recv, method: Symbol::from(method), args, block: None, parenthesized })
+    };
+    let message = Expr::new(
+        span,
+        ExprNode::Lit { value: crate::expr::Literal::Str { value: "Passed `nil` into T.must".to_string() } },
+    );
+    let type_error = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("TypeError")] });
+    let raise = send(None, "raise", vec![send(Some(type_error), "new", vec![message], true)], true);
+    let cond = send(Some(tested), "nil?", Vec::new(), false);
+    Expr::new(span, ExprNode::If { cond, then_branch: raise, else_branch: read })
+}
+
 /// The argument of a `T.absurd(x)`, which raises rather than
 /// evaluating to it. See the call site in `ingest_expr_strict`.
 fn sorbet_absurd_argument<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
@@ -613,12 +661,15 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         end: loc.end_offset() as u32,
     };
     // Type ascriptions retain the value and its declared type. Nil assertions
-    // are behavior: until a shared nil-check lowerer exists, retain their
-    // explicit Unsupported annotation instead of erasing a possible raise.
+    // are behavior: `T.must` lowers to the check sorbet-runtime performs;
+    // `T.must_because` keeps its explicit Unsupported annotation instead of
+    // erasing a possible raise.
     if let Some(inner) = sorbet_assertion_argument(node) {
         let declared = super::type_ascription::sorbet_declared_type(node);
         let value = ingest_expr_strict(&inner, file)?;
-        let value = if sorbet_assertion_rules_out_nil(node) {
+        let value = if sorbet_assertion_is_must(node) {
+            must_check(span, value, &node.location())
+        } else if sorbet_assertion_rules_out_nil(node) {
             super::type_ascription::not_nil(value)
         } else {
             value
