@@ -8131,6 +8131,60 @@ end
         .assert_passes();
 }
 
+/// lobsters keeps its site settings in a top-level
+/// `class << Rails.application` block. Rubydex records no constant
+/// references inside a singleton class opened on an expression, so the
+/// `ENV` and `Rails` written there have no source answer; they must still
+/// resolve as the modeled constants, not emit as refusal stubs.
+#[test]
+fn rails_application_singleton_settings_read_env_and_rails() {
+    let run = emit_and_run::empty_app()
+        .write(
+            "config/application.rb",
+            r#"module TestApp
+  class Application < Rails::Application
+  end
+end
+
+class << Rails.application
+  def open_signups?
+    ENV["OPEN_SIGNUPS"] == "true"
+  end
+
+  def domain
+    "example.test"
+  end
+
+  def root_url
+    "https://#{Rails.application.domain}/"
+  end
+end
+"#,
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"ENV["OPEN_SIGNUPS"] = "true"
+raise "ENV read: open_signups? must be true" unless Rails.application.open_signups?
+ENV["OPEN_SIGNUPS"] = "false"
+raise "ENV read: open_signups? must be false" if Rails.application.open_signups?
+url = Rails.application.root_url
+raise "Rails.application chain: #{url.inspect}" unless url == "https://example.test/"
+"#,
+        );
+    run.assert_passes();
+}
+
 /// `if:` / `unless:` guards a callback. Ingest used to reject the
 /// declaration outright, so the callback was silently dropped and ran in
 /// no circumstance. A zero-arity lambda body (`if: -> { color.blank? }`)

@@ -766,7 +766,11 @@ impl<'a> BodyTyper<'a> {
                     Some(None) => exact_modeled_class(path),
                     // A borrowed span is not evidence of a written constant
                     // only when the producer marked its generated origin.
-                    None if indexed_source && generated => exact_modeled_class(path),
+                    None if indexed_source
+                        && (generated || expr.decisions & crate::expr::UNINDEXED_SCOPE_CONST_REF != 0) =>
+                    {
+                        exact_modeled_class(path)
+                    }
                     None if indexed_source => unknown(),
                     // Views and generated IR have no Rubydex answer. A
                     // bare name can use the app's bare-name values. A
