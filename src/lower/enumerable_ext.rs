@@ -111,11 +111,15 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     }
     // Rails' Array#excluding and its #without alias share this helper.
     // Keep Relation calls on ActiveRecord::Relation's typed methods, and
-    // leave unions/untyped receivers alone: only a proven Array fits the
-    // helper's generic signature without erasing its element type.
+    // leave unions/untyped or computed receivers alone. Some dynamic Rails
+    // scopes are inferred as Arrays even though they return Relations, so
+    // route only direct Array values whose shape we can prove here.
     if matches!(method.as_str(), "excluding" | "without") && block.is_none() {
         let Some(receiver) = recv.as_ref() else { return false };
         if !matches!(receiver.ty.as_ref(), Some(Ty::Array { .. })) {
+            return false;
+        }
+        if !matches!(&*receiver.node, ExprNode::Var { .. } | ExprNode::Array { .. }) {
             return false;
         }
         let receiver = recv.take().expect("checked above");
@@ -527,6 +531,26 @@ mod tests {
         assert_eq!(method_of(&e), "excluding");
         let ExprNode::Send { recv: Some(receiver), .. } = &*e.node else { panic!() };
         assert!(matches!(&*receiver.node, ExprNode::Var { .. }));
+    }
+
+    #[test]
+    fn computed_array_typed_receiver_is_not_assumed_to_be_an_array() {
+        let mut e = array_exclusion("excluding", array_of_users(), 1);
+        let ExprNode::Send { recv: Some(receiver), .. } = &mut *e.node else { panic!() };
+        let mut computed = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("all_positioned_siblings"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        );
+        computed.ty = Some(array_of_users());
+        *receiver = computed;
+        assert!(!rewrite_node(&mut e));
+        assert_eq!(method_of(&e), "excluding");
     }
 
     /// campfire's direct-room sidebar: `presence || [user]` types
