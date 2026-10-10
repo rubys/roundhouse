@@ -10925,3 +10925,55 @@ end
         .run_test("test/models/teardown_order_test.rb")
         .assert_passes();
 }
+
+/// One test file whose teardown prints how many times the block's
+/// effect (`Widget.hit`) ran, so a failing run shows where it stopped.
+fn destructured_block_app(name: &str, members: &str) -> emit_and_run::Overlay {
+    bare_test_app()
+        .write(
+            "app/models/widget.rb",
+            "class Widget\n  HITS = []\n\n  def self.flag\n    false\n  end\n\n  def self.hit\n    HITS << 1\n  end\n\n  def self.hits\n    HITS.size\n  end\n\n  def self.reset\n    HITS.clear\n  end\nend\n",
+        )
+        .write("test/test_helper.rb", "require \"active_support\"\n")
+        .write(
+            "test/models/widget_test.rb",
+            &format!(
+                "require \"test_helper\"\n\nclass WidgetTest < ActiveSupport::TestCase\n  setup do\n    Widget.reset\n  end\n\n  teardown do\n    puts \"CASE {name} HITS=#{{Widget.hits}}\"\n  end\n\n{members}\nend\n"
+            ),
+        )
+}
+
+/// Assertions inside the block on the right of `a, b = call do … end`
+/// are lowered where they are written, and a test class's own
+/// `assert_includes` is the one called, not Minitest's. Each case's
+/// outcome is the native Minitest run's.
+#[test]
+fn assertions_inside_a_destructured_block_run_where_they_are_written() {
+    let cases = [
+        ("plain", "  test \"t\" do\n    first, second = [1, 2].map do |x|\n      assert_equal x, x\n      Widget.hit\n      x * 10\n    end\n    assert_equal [10, 20], [first, second]\n    assert_equal 2, Widget.hits\n  end\n"),
+        ("own", "  def assert_includes(collection, item)\n    Widget.hit\n    assert collection.downcase.include?(item.downcase)\n  end\n\n  def assert_shouted(text)\n    assert_equal text.upcase, text\n  end\n\n  test \"t\" do\n    first, second = [\"HELLO\", \"LOUD\"].map do |text|\n      assert_includes text, \"hello\" if text == \"HELLO\"\n      assert_shouted text\n      text\n    end\n    assert_includes first, \"hello\"\n    assert_equal 2, Widget.hits\n  end\n"),
+        ("splat", "  test \"t\" do\n    first, *rest = [1, 2, 3].map do |x|\n      assert_equal x, x\n      Widget.hit\n      x\n    end\n    assert_equal 1, first\n    assert_equal [2, 3], rest\n    assert_equal 3, Widget.hits\n  end\n"),
+    ];
+    for (name, members) in cases {
+        let run = destructured_block_app(name, members).run_test("test/models/widget_test.rb");
+        run.assert_passes();
+        assert!(run.stdout.contains(&format!("CASE {name} HITS=")), "{name}: {}", run.stdout);
+    }
+}
+
+/// A failing assertion inside that block fails the test and stops what
+/// follows it, inside the block and after it; the effect count is the
+/// native run's.
+#[test]
+fn a_failing_assertion_inside_a_destructured_block_stops_what_follows() {
+    let cases = [
+        ("plain_fail", 1, "  test \"t\" do\n    first, second = [1, 2].map do |x|\n      assert_equal 1, x\n      Widget.hit\n      x\n    end\n    Widget.hit\n  end\n"),
+        ("own_fail", 0, "  def assert_shouted(text)\n    assert_equal text.upcase, text\n  end\n\n  test \"t\" do\n    first, second = [\"quiet\"].map do |text|\n      assert_shouted text\n      Widget.hit\n      text\n    end\n    Widget.hit\n  end\n"),
+    ];
+    for (name, hits, members) in cases {
+        let run = destructured_block_app(name, members).run_test("test/models/widget_test.rb");
+        assert!(run.errors.is_empty(), "{name}: {:?}", run.errors);
+        assert!(!run.success, "{name}: the failing assertion passed\n{}", run.stdout);
+        assert!(run.stdout.contains(&format!("CASE {name} HITS={hits}\n")), "{name}: {}", run.stdout);
+    }
+}

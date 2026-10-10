@@ -423,7 +423,9 @@ pub fn lower_test_modules_with_inner(
             // ExprNode::Raise as its native halt-with-message (Ruby
             // `raise`, Crystal `raise`, TS `throw`, …) — see the
             // issue's "Cross-target benefits" table.
-            rewritten |= inline_assertions::inline_assertions_in_place(&mut method.body);
+            rewritten |= inline_assertions::inline_assertions_in_place(&mut method.body, &|name| {
+                test_modules[idx].defines_instance_method(test_modules, name)
+            });
             // Ground `blank?`/`present?`/`presence` by receiver type,
             // AFTER the assertion inlining that wraps them in a `raise
             // … if !(…)` and BEFORE the re-type that stamps the result.

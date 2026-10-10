@@ -1911,6 +1911,25 @@ pub struct TestModule {
     pub includes: Vec<ClassId>,
 }
 
+impl TestModule {
+    /// Whether an instance call of `method` on this test class reaches
+    /// a `def` of its own or of a test class it inherits from (among
+    /// `modules`), before the framework's method of that name. A `def
+    /// self.<method>` is not one: the call is sent to the test instance.
+    pub fn defines_instance_method(&self, modules: &[TestModule], method: &str) -> bool {
+        let mut current = Some(self);
+        for _ in 0..32 {
+            let Some(tm) = current else { break };
+            if tm.helpers.iter().any(|helper| helper.name.as_str() == method && helper.receiver == MethodReceiver::Instance) {
+                return true;
+            }
+            current = tm.parent.as_ref()
+                .and_then(|parent| modules.iter().find(|other| other.name == *parent && other.name != tm.name));
+        }
+        false
+    }
+}
+
 /// A single `test "name" do ... end` block. `name` is the literal
 /// string passed to the `test` macro; `body` is the block body.
 /// Emission snake-cases `name` for the target's function-name form
