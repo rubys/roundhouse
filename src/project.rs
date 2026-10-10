@@ -3502,6 +3502,14 @@ fn apply_instantiate_named(files: &mut [(String, String)], app: &App) {
     const TAIL: &str = "      # <<< generated: instantiate-named\n";
     let mut arms: Vec<(String, String)> = Vec::new();
     for model in &app.models {
+        // Only a class with a table has rows to snapshot, and only it has
+        // `instantiate`: an ActiveModel class (campfire's
+        // `Opengraph::Location`) or the abstract `ApplicationRecord` in
+        // the list was a call to a method nothing defines — spinel
+        // refused the whole build over it.
+        if !app.schema.tables.contains_key(&model.table.0) {
+            continue;
+        }
         let name = model.name.0.as_str().to_string();
         arms.push((name.clone(), name.clone()));
         for sub in &model.sti_subclass_names {
@@ -5285,7 +5293,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         // `I18n.locale` / `default_locale` — the locale campfire folds
         // into its cache keys. Rails' default, `:en`; setting one is
         // not modeled (see the file's header).
-        "i18n",
+        "i18n_locale",
     ] {
         let rb = format!("runtime/ruby/{stem}.rb");
         let content = crate::runtime_files::read_to_string(&rb)?;

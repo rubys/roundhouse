@@ -591,8 +591,13 @@ was spelled, so an untouched node is still the source bytes), and
 write-through — the two shapes campfire's mutating filters use
 (`fragment.replace("div") { |n| n.tap { |x| x.inner_html = … } }`,
 `fragment.update { |s| s.at_css("div")["class"] = … }`). `find_all`
-stays a read. Every expectation in `runtime/ruby/test/action_text_test.rb`
-for these was measured against Rails' Nokogiri-backed Fragment.
+stays a read. An update block can also scan `css("*")` and call
+`Node#remove`; that removes each disallowed element with its contents while
+leaving allowed nodes in the copied fragment. This is a removal primitive,
+not a general sanitizer: the caller supplies the allowlist, and allowed-node
+attributes are not filtered. Every expectation in
+`runtime/ruby/test/action_text_test.rb` for these was measured against Rails'
+Nokogiri-backed Fragment.
 
 **What always worked.** The PARSE: `#attachments` returns every node
 with every attribute it carried (`sgid`, `content_type`, `caption`,
@@ -2372,6 +2377,63 @@ arrived at the tail of a session that had already changed the escape
 surface twice. Do it with the golden dumps regenerated in the same
 commit, and check `compare-*` on every target rather than assuming a
 DOM comparison cannot see it.
+
+### Pooled web push connections do not track their stage on spinel — not yet
+
+campfire's `WebPush::Connections` (upstream since #351) opens pooled push
+connections as `class HTTP < Net::HTTP; include Stages; end`, where
+`Stages` overrides two private methods of CRuby's net/http to learn how
+far a request got before it failed:
+
+```ruby
+def begin_transport(...); @stage = :checking; super.tap { @stage = :sent }; end
+def connect(...);        @stage = :connecting if @stage == :checking; super;  end
+```
+
+On the ruby family this runs as written, against Ruby's own net/http
+(19 of campfire's 20 push tests pass against the TLS server its own
+test helper starts; the twentieth mixes a module into one connection
+with `extend`, the per-object mixin no compiled target has).
+
+On spinel it does not, for two reasons, and both are work not done
+rather than a subset boundary:
+
+- **Our side.** The spinel emit refuses `def m(...)` forwarding into
+  `super` (`full argument forwarding not supported`), which is two of
+  the strict-emit errors CI's ceiling counts. The parent methods'
+  signatures are known (`begin_transport(req)`, `connect()`), so the
+  forwarding can be spelled out.
+- **Spinel's side.** `packages/net`'s `Net::HTTP` has neither method:
+  its request path is `request` → `perform` → `reconnect`, and it has no
+  `keep_alive_timeout`. The hooks have to exist there, shaped as CRuby's,
+  for an override of them to mean anything.
+
+Until both land, `WebPush::Connections::HTTP` is not defined in the
+spinel binary (spinel warns "defined nowhere in the program"), so a
+pooled push delivery there raises where it reaches the class.
+
+### Smaller shapes campfire main reaches, each narrower than Rails
+
+- **`I18n.locale` / `default_locale` answer `:en`** (`runtime/ruby/i18n_locale.rb`),
+  Rails' default when nothing sets one. Setting a locale (`I18n.locale =`,
+  `with_locale`, `config.i18n.default_locale`) and translation (`I18n.t`)
+  are not modeled.
+- **`fragment_name_with_digest(name, digest_path)` adds no template
+  digest**: templates carry none here (see
+  `runtime/spinel/action_controller_fragment_caching.rb`), so an omitted
+  `digest_path` adds nothing and an explicit one is kept in front.
+- **Token-free forms are read from one shape only**: an app helper whose
+  `token_tag` body is exactly `""` (campfire's header-only forgery
+  protection) synthesizes `token_fields_omitted`. Another `token_tag`
+  body is not read, and the forms keep their token field.
+- **`config.after_initialize` blocks do not run at boot.** campfire has
+  two: `Room::MessagesCount.ensure!` (its counter triggers, which
+  `schema.rb` cannot dump) and starting the WAL checkpointer outside
+  tests. The test suite gets the first through its `load_fixtures`
+  override, which is read; a served tree gets neither.
+- **`Rails.application.env_config` holds what is set and is consulted
+  for nothing**: a forgery failure always renders the 422 that
+  `action_dispatch.show_exceptions = :rescuable` asks for.
 
 ## Related docs
 

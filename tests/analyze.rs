@@ -1841,9 +1841,12 @@ fn set_enumerable_and_operator_surface_resolves() {
     b = [2, 3].to_set
     picked = a.select { |x| x > 1 }
     found = a.find { |x| x > 1 }
+    membership = b.include?(2)
     both = (a | b) - b + [4]
     b.subtract([3])
-    [a.any?, a.intersect?(b), a.exclude?(9), [1].exclude?(2), picked, found, both, a.max]
+    [
+      a.any?, membership, a.intersect?(b), a.exclude?(9), [1].exclude?(2), picked, found, both, a.max
+    ]
   end
 end
 "#,
@@ -1852,7 +1855,8 @@ end
 
     let failures = send_dispatch_failures(&app);
     for m in [
-        "[]", "to_set", "select", "find", "|", "-", "+", "subtract", "any?", "intersect?",
+        "[]", "to_set", "select", "find", "include?", "|", "-", "+", "subtract", "any?",
+        "intersect?",
         "exclude?", "max",
     ] {
         assert!(
