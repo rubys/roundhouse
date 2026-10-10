@@ -22,6 +22,13 @@ require_relative "action_controller/message_verifier"
 # digest primitives it consumes.
 require_relative "action_controller/authenticity_token"
 require_relative "action_controller/cookies"
+# `response.cache_control`'s Hash-like surface (`[]`, `[]=`, `delete`,
+# `merge!`, `replace`) + `commit_cache_control!` — another reopen
+# outside the strict-target tables, for the reason its own header
+# gives (the typed `CacheControlStore` class lives in base.rb and
+# transpiles everywhere; this Hash-subscript surface over it does
+# not).
+require_relative "action_controller/cache_control"
 # The error `Params.require_key` raises; travels with its consumer for
 # the same reason message_digest does.
 require_relative "action_controller/parameter_missing"

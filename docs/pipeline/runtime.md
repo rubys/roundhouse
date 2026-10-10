@@ -1581,51 +1581,43 @@ EMPTY rather than a bare `nil` — a lone `nil` gives Rust an `Option`
 with nothing to infer from (`E0282` on `None;`), where an empty body is
 a plain `void`.
 
-### `expires_in` records Cache-Control but emits no header
+### `expires_in` records Cache-Control but emits no header — FIXED
 
-`expires_in 1.year, public: true` records the max-age and the
-public/private flag on the controller and stops there. No
-`Cache-Control` header is produced, so a real client is told nothing
-about caching and re-fetches every time.
+**FIXED 2026-10-09** (rubys/roundhouse#679). `expires_in 1.year, public:
+true` — and `response.cache_control.replace(private: true, no_store:
+true)`, the shape a `before_action :set_cache_control_defaults` filter
+actually writes — now both reach the wire. The two TYPED
+`cache_control_max_age` / `cache_control_public` readers remain, now
+delegating to `ActionController::CacheControlStore`
+(`action_controller/base.rb`): one bool/Integer field per Rails option
+(`public`, `private`, `no_store`, `no_cache`, `must_revalidate`,
+`must_understand`, `immutable`, `max_age`, `stale_while_revalidate`,
+`stale_if_error`, `extras`) rather than Rails' one mixed Hash, so no
+strict target pays for an `untyped cache_control`. `to_header` composes
+the `Cache-Control` string in Rails 8.1.4's own branch order (pinned
+against the gem in `cache_control_test.rb`); `commit_cache_control!` (a
+ruby-family reopen, `action_controller/cache_control.rb`, beside
+`cookies.rb`) writes it onto the buffered header store right before
+each wire path's existing header copy — the CRuby overlay's `main.rb`,
+the spinel scaffold's `main.rb`, and the spinel test harness all call
+it. That reopen is also where `response.cache_control`'s Hash-like
+`[]`/`[]=`/`delete`/`merge!`/`replace` surface lives, over the typed
+store.
 
-**Why.** The same unsent extra-header seam the conditional-GET entry
-above describes, approached from the writing side rather than the
-reading side: the CGI harness emits status, body and content type, and
-nothing else. Composing the header string into the buffered `headers`
-hash ahead of that would be work nothing reads — and `@headers[k] = v`
-does not survive the Rust emitter, which renders a Hash index-assign as
-`self.headers[k] = v` where `HashMap` wants `.insert()` (E0594:
-`IndexMut` is not implemented for `HashMap`). That emitter gap is worth
-closing on its own; it is not worth carrying dead code to reach.
+Before this, the previously-described emitter gap (`@headers[k] = v`
+not surviving the Rust emitter as a Hash index-assign) was the blocker
+for EVERY strict target having a header-writing seam at all, not just
+Cache-Control; it stands as a separate gap for those targets, which
+`expires_in` still records into the typed store (reachable from
+`cache_control_max_age` / `cache_control_public`) without writing a
+header, same as before.
 
-**What it costs.** Bandwidth, and only bandwidth — an uncached response
-is a correct response. Nothing an app does depends on the client
-honoring it.
-
-**Where a test differs from a client.** `response.cache_control` reads
-the controller's recorded values directly, not a parsed header, so a
-test asserting `cache_control[:max_age]` sees the right answer while an
-HTTP client sees no header at all. That is the honest reading of what is
-implemented: the VALUE is computed, the TRANSPORT is not.
-
-`stale_while_revalidate:` is accepted and recorded nowhere for the same
-reason — it exists so that campfire's logos and avatars actions, two of
-its three call sites, do not raise ArgumentError on an option this
-method would otherwise not know.
-
-**Shape.** Rails' `response.cache_control` is `{public: true, max_age:
-31556952}` — an Integer and a boolean in one Hash, the type bag every
-strict target pays for. The controller keeps the two facts apart as
-`cache_control_max_age` (Integer) and `cache_control_public` (bool), and
-only the TEST harness reassembles Rails' Hash, since the subscript
-spelling is what a test writes and the harness ships to the Ruby family
-alone. The rest of Rails' options (`must_revalidate:`,
-`stale_if_error:`) join `stale_while_revalidate:` when a call site asks,
-rather than as a splat nothing can type. The seconds argument is
-grounded at the CALL SITE by `lower::duration::rewrite_expires_in` —
-the same `.to_i` unwrap `signed_id(expires_in:)` gets — so the runtime
-signature stays `Integer` and no strict target pays for an `untyped`
-parameter.
+`stale_if_error:` reaches the runtime the same way
+`stale_while_revalidate:` and the seconds argument itself do: grounded
+to seconds at the CALL SITE by `lower::duration::rewrite_expires_in`
+(`1.day` → `86400`), the same `.to_i` unwrap `signed_id(expires_in:)`
+gets, so the runtime signature stays `Integer` and no strict target
+pays for an `untyped` parameter.
 
 ### `Relation#find` raises `RecordNotFound` — as Rails does
 
