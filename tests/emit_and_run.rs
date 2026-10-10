@@ -791,6 +791,26 @@ fn human_attribute_name_on_a_dynamic_attribute_stays_an_error() {
     assert!(errors.iter().any(|e| e.contains("human_attribute_name")), "{errors:?}");
 }
 
+/// Form labels and submit text come from the locale as Action View finds
+/// them: `helpers.label`, then the model's attribute name, then the
+/// humanized method; `helpers.submit` over the model's human name.
+fn localized_form_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  helpers:\n    label:\n      article:\n        title: \"Your headline\"\n    submit:\n      create: \"Publish %{model}\"\n  activerecord:\n    attributes:\n      article:\n        body: \"Content\"\n",
+        )
+        .write(
+            "test/controllers/localized_forms_controller_test.rb",
+            "require \"test_helper\"\n\nclass LocalizedFormsControllerTest < ActionDispatch::IntegrationTest\n  test \"labels and submit read the locale\" do\n    get new_article_url\n    assert_includes response.body, \">Your headline</label>\"\n    assert_includes response.body, \">Content</label>\"\n    assert_includes response.body, \"value=\\\"Publish Article\\\"\"\n    get edit_article_url(articles(:one))\n    assert_includes response.body, \"value=\\\"Update Article\\\"\"\n  end\nend\n",
+        )
+}
+
+#[test]
+fn localized_form_labels_and_submit_text() {
+    localized_form_app().run_test("test/controllers/localized_forms_controller_test.rb").assert_passes();
+}
+
 /// A field the lowering cannot humanize at compile time keeps its error.
 #[test]
 fn errors_full_message_on_a_dynamic_field_stays_an_error() {

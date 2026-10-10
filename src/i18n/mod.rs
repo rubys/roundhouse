@@ -42,6 +42,16 @@ impl Catalog {
         self.entries.is_empty()
     }
 
+    /// Rails' English alone, for an app or model built outside ingest.
+    pub fn rails_default() -> &'static Catalog {
+        static DEFAULT: std::sync::OnceLock<Catalog> = std::sync::OnceLock::new();
+        DEFAULT.get_or_init(|| Catalog::load("en", &mut Vec::new()).0)
+    }
+
+    pub fn or_rails_default(&self) -> &Catalog {
+        if self.locale.is_empty() { Catalog::rails_default() } else { self }
+    }
+
     /// Rails' English, then `files` (path, source), for `locale`. A file
     /// that does not parse is skipped and reported.
     pub fn load(locale: &str, files: &mut Vec<(String, String)>) -> (Catalog, Vec<String>) {
@@ -249,14 +259,12 @@ impl ModelI18n {
         if self.scope.is_empty() { "activerecord" } else { &self.scope }
     }
 
-    /// Rails' English with no app catalog, for a model built outside ingest.
-    fn rails_default() -> &'static Catalog {
-        static DEFAULT: std::sync::OnceLock<Catalog> = std::sync::OnceLock::new();
-        DEFAULT.get_or_init(|| Catalog::load("en", &mut Vec::new()).0)
+    fn catalog(&self) -> &Catalog {
+        self.catalog.or_rails_default()
     }
 
-    fn catalog(&self) -> &Catalog {
-        if self.catalog.locale.is_empty() { Self::rails_default() } else { &self.catalog }
+    pub fn model_human_name(&self) -> String {
+        self.catalog().model_human_name(self.scope(), &self.keys)
     }
 
     pub fn human_attribute_name(&self, attr: &str) -> String {
@@ -300,6 +308,60 @@ fn merge_text(parts: Vec<Part>) -> Vec<Part> {
         }
     }
     out
+}
+
+/// What form helpers translate: the app's catalog, and each model's i18n
+/// by the param key a form names it with (`article`, `admin_user`).
+#[derive(Clone, Debug, Default)]
+pub struct FormI18n {
+    catalog: Catalog,
+    models: std::collections::HashMap<String, ModelI18n>,
+}
+
+impl FormI18n {
+    pub fn of(app: &crate::app::App) -> Self {
+        FormI18n {
+            catalog: app.i18n.clone(),
+            models: app
+                .models
+                .iter()
+                .map(|m| (crate::naming::underscore(m.name.0.as_str()).replace('/', "_"), m.i18n.clone()))
+                .collect(),
+        }
+    }
+
+    /// `form.label :method`'s text, as `Tags::Label#translation` finds it:
+    /// `helpers.label.<object_name>.<method>`, then the model's
+    /// `helpers.label.<i18n_key>.<method>`, then its `human_attribute_name`,
+    /// then `method.humanize`.
+    pub fn label(&self, object_name: &str, method: &str) -> String {
+        let catalog = self.catalog.or_rails_default();
+        let model = self.models.get(object_name);
+        let keys = std::iter::once(format!("helpers.label.{object_name}.{method}"))
+            .chain(model.and_then(|m| m.keys.first()).map(|k| format!("helpers.label.{k}.{method}")));
+        keys.filter_map(|k| catalog.lookup(&k))
+            .find(|t| !t.is_empty())
+            .map(str::to_string)
+            .or_else(|| model.map(|m| m.human_attribute_name(method)))
+            .unwrap_or_else(|| humanize(method))
+    }
+
+    /// `form.submit`'s default text for `key` (`create`/`update`), as
+    /// `submit_default_value` finds it: `helpers.submit.<object_name>.<key>`,
+    /// `helpers.submit.<key>`, then "<Key> <model>", over the model's human name.
+    pub fn submit(&self, object_name: &str, key: &str) -> String {
+        let catalog = self.catalog.or_rails_default();
+        let model = self
+            .models
+            .get(object_name)
+            .map(|m| m.model_human_name())
+            .unwrap_or_else(|| humanize(object_name));
+        [format!("helpers.submit.{object_name}.{key}"), format!("helpers.submit.{key}")]
+            .iter()
+            .find_map(|k| catalog.lookup(k))
+            .map(|t| t.replace("%{model}", &model))
+            .unwrap_or_else(|| format!("{} {model}", humanize(key)))
+    }
 }
 
 /// Every app model's `lookup_ancestors` as i18n keys and its scope:

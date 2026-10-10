@@ -1734,6 +1734,7 @@ mod tests {
             bool_readers: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
+            i18n: Default::default(),
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
             stylesheets: Vec::new(),
