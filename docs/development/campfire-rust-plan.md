@@ -19,7 +19,7 @@ falling, or a test being selected is not completion evidence.
 
 | Input | Snapshot / status |
 |---|---|
-| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`; status inspected 2026-10-10 at head `cecdec8b71f3b10825d9e6158c45c381aa76d6e2`; head is unchanged; `CodeRabbit` commit status is SUCCESS but GitHub reports zero check-runs, so there is no exact-head CI validation; keep Draft unless Thomas explicitly says otherwise |
+| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`; status inspected 2026-10-10 at head `f74c2d17a44fb227be2014cbfa8729e728a3e217`; `CodeRabbit` and workflow check-runs/statuses are not yet present on this new head, so there is no exact-head CI or review validation; keep Draft unless Thomas explicitly says otherwise |
 | Baseline implementation SHA | `3b6d1b7576036382f82aa936fef8bcbd5b65272c`; the first plan commit `609248bcf7f51c94d56f91fbdaaf6675dd5b71fe` changed docs only |
 | Campfire | CI pin and checked-out SHA `32b4144b5206304fa8d4c67455a753e2d3c16635` |
 | Strict analyzer | `roundhouse check --strict`: exit 0, 0 errors, 404 warnings |
@@ -422,7 +422,13 @@ unsupported block flow in the forwarded send's arguments, not only in terminal
 methods. The test-only classifier now applies both guards and has regressions
 for a local instance `capture` shadowing the registered framework helper,
 `yield` in forward-call arguments, and block rebinding before the forward. The
-focused classifier suite passes 8/8. Production wiring is still untouched.
+focused classifier suite passes 9/9. A separate structural return-shape probe
+now follows the real tail across the terminal, same-owner forwarding chain,
+and caller; it rejects a method whose guarded capture is followed by a
+non-String tail and accepts a verified string-builder tail. This is still only
+test scaffolding: it does not inspect `App::rbs_signatures`, and explicit
+authored return contracts (including `untyped`) must veto any future Rust
+return override. Production wiring is still untouched.
 The emitted-crate test was rerun at
 `cecdec8b71f3b10825d9e6158c45c381aa76d6e2` and remains a red reproduction
 (five generated Cargo errors). Before wiring, separately prove effective

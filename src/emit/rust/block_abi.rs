@@ -47,16 +47,7 @@ pub(crate) fn capture_forwarder_candidates<'a>(
     classes: impl IntoIterator<Item = &'a LibraryClass>,
     helper_owners: &HashMap<String, String>,
 ) -> HashSet<MethodKey> {
-    let methods: Vec<MethodRef<'_>> = classes
-        .into_iter()
-        .flat_map(|class| {
-            class.methods.iter().map(|method| MethodRef {
-                key: MethodKey::new(class.name.0.as_str(), method.receiver, method.name.as_str()),
-                block_param: method.block_param.as_ref().map(|param| param.name.as_str()),
-                body: &method.body,
-            })
-        })
-        .collect();
+    let methods = collect_method_refs(classes);
 
     let mut key_counts: HashMap<MethodKey, usize> = HashMap::new();
     for method in &methods {
@@ -127,6 +118,122 @@ pub(crate) fn capture_forwarder_candidates<'a>(
     }
 
     prove_string_callsites(&methods, proven, helper_owners)
+}
+
+/// Prove effective Rust `String` return shapes separately from block-flow
+/// eligibility. This is structural evidence only; production must still veto
+/// methods with an authoritative authored RBS return contract.
+fn proven_string_returns<'a>(
+    classes: impl IntoIterator<Item = &'a LibraryClass>,
+    candidates: &HashSet<MethodKey>,
+    helper_owners: &HashMap<String, String>,
+) -> HashSet<MethodKey> {
+    let methods = collect_method_refs(classes);
+    let mut returns = HashSet::new();
+    loop {
+        let before = returns.len();
+        for method in &methods {
+            if !returns.contains(&method.key)
+                && !has_nonlocal_exit(method.body)
+                && is_proven_string_return(
+                    method.body,
+                    method,
+                    &methods,
+                    candidates,
+                    &returns,
+                    helper_owners,
+                )
+            {
+                returns.insert(method.key.clone());
+            }
+        }
+        if returns.len() == before {
+            return returns;
+        }
+    }
+}
+
+fn collect_method_refs<'a>(
+    classes: impl IntoIterator<Item = &'a LibraryClass>,
+) -> Vec<MethodRef<'a>> {
+    classes
+        .into_iter()
+        .flat_map(|class| {
+            class.methods.iter().map(|method| MethodRef {
+                key: MethodKey::new(class.name.0.as_str(), method.receiver, method.name.as_str()),
+                block_param: method.block_param.as_ref().map(|param| param.name.as_str()),
+                body: &method.body,
+            })
+        })
+        .collect()
+}
+
+fn is_proven_string_return(
+    expr: &Expr,
+    method: &MethodRef<'_>,
+    methods: &[MethodRef<'_>],
+    candidates: &HashSet<MethodKey>,
+    returns: &HashSet<MethodKey>,
+    helper_owners: &HashMap<String, String>,
+) -> bool {
+    if is_string_body(expr) {
+        return true;
+    }
+    match &*expr.node {
+        ExprNode::Lit {
+            value: Literal::Str { .. },
+        }
+        | ExprNode::StringInterp { .. } => true,
+        ExprNode::Seq { exprs } => exprs.last().is_some_and(|tail| {
+            is_proven_string_return(tail, method, methods, candidates, returns, helper_owners)
+        }),
+        ExprNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            method.block_param.is_some_and(|block_param| {
+                candidates.contains(&method.key)
+                    && is_guarded_capture(
+                        expr,
+                        block_param,
+                        &method.key,
+                        methods,
+                        helper_owners,
+                        &MethodKey::new(
+                            "ActionView::ViewHelpers",
+                            MethodReceiver::Class,
+                            "capture",
+                        ),
+                    )
+            }) || (is_proven_string_return(
+                then_branch,
+                method,
+                methods,
+                candidates,
+                returns,
+                helper_owners,
+            ) && is_proven_string_return(
+                else_branch,
+                method,
+                methods,
+                candidates,
+                returns,
+                helper_owners,
+            ))
+        }
+        ExprNode::Send {
+            recv, method: name, ..
+        } => resolve_target(
+            &method.key,
+            recv.as_ref(),
+            name.as_str(),
+            methods,
+            helper_owners,
+        )
+        .is_some_and(|target| candidates.contains(&target) && returns.contains(&target)),
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -836,6 +943,13 @@ mod tests {
     }
 
     fn classify_with_framework_capture(classes: &[LibraryClass]) -> HashSet<MethodKey> {
+        let (classes, owners) = classes_with_framework_capture(classes);
+        capture_forwarder_candidates(classes.iter(), &owners)
+    }
+
+    fn classes_with_framework_capture(
+        classes: &[LibraryClass],
+    ) -> (Vec<LibraryClass>, HashMap<String, String>) {
         let mut capture_class = class(
             "ActionView::ViewHelpers",
             &[MethodDefStub {
@@ -849,7 +963,7 @@ mod tests {
         classes.push(capture_class);
         let owners =
             HashMap::from([("capture".to_string(), "ActionView::ViewHelpers".to_string())]);
-        capture_forwarder_candidates(classes.iter(), &owners)
+        (classes, owners)
     }
 
     struct MethodDefStub<'a> {
@@ -906,6 +1020,15 @@ mod tests {
             );
         }
         assert!(!proven.contains(&MethodKey::new("Probe", MethodReceiver::Instance, "opaque")));
+
+        let (all_classes, owners) = classes_with_framework_capture(&classes);
+        let string_returns = proven_string_returns(all_classes.iter(), &proven, &owners);
+        for name in ["source", "middle", "outer", "render_html"] {
+            assert!(
+                string_returns.contains(&MethodKey::new("Probe", MethodReceiver::Instance, name)),
+                "{name} should have a proven String tail: {string_returns:?}"
+            );
+        }
     }
 
     #[test]
@@ -1151,6 +1274,52 @@ mod tests {
                 "unsafe forwarding flow `{name}` was classified: {proven:?}"
             );
         }
+    }
+
+    #[test]
+    fn return_proof_uses_the_real_tail_not_a_nested_capture_occurrence() {
+        let body = Expr::new(
+            Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![terminal("block"), int_lit(7)],
+            },
+        );
+        let methods = [
+            MethodDefStub {
+                name: "source",
+                block: Some("block"),
+                body,
+            },
+            MethodDefStub {
+                name: "callsite",
+                block: None,
+                body: call_with_block("source", None, string_lambda(&[], string_lit("html"))),
+            },
+            MethodDefStub {
+                name: "string_builder_tail",
+                block: None,
+                body: accumulator_lambda_body("buf", "buf"),
+            },
+        ];
+        let classes = [class("Probe", &methods)];
+        let (all_classes, owners) = classes_with_framework_capture(&classes);
+        let candidates = capture_forwarder_candidates(all_classes.iter(), &owners);
+        let source = MethodKey::new("Probe", MethodReceiver::Instance, "source");
+        assert!(candidates.contains(&source), "block flow should be proven");
+
+        let string_returns = proven_string_returns(all_classes.iter(), &candidates, &owners);
+        assert!(
+            !string_returns.contains(&source),
+            "the capture inside a non-String tail must not prove the method's return: {string_returns:?}"
+        );
+        assert!(
+            string_returns.contains(&MethodKey::new(
+                "Probe",
+                MethodReceiver::Instance,
+                "string_builder_tail"
+            )),
+            "a verified string-builder tail should prove String: {string_returns:?}"
+        );
     }
 
     #[test]
