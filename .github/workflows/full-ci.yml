@@ -13,10 +13,13 @@ on:
 permissions:
   contents: read
 
-# Keep a started snapshot; replace obsolete pending requests. This literal
-# namespace is different from the reusable validation workflow's lock.
+# One lock per snapshot, not per branch. `github.ref` is always
+# refs/heads/main on schedule/dispatch, so a later merge queued another
+# Full validation and GitHub replaced the pending one even with
+# cancel-in-progress: false (pending, not in-progress). SHA keeps the
+# extra-language ledger for the SHA it was asked to measure.
 concurrency:
-  group: full-background-${{ github.ref }}
+  group: full-background-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:

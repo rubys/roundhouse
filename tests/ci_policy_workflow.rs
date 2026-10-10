@@ -1153,6 +1153,11 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
         full["concurrency"]["cancel-in-progress"].as_bool(),
         Some(false)
     );
+    assert_eq!(
+        full["concurrency"]["group"].as_str(),
+        Some("full-background-${{ github.sha }}"),
+        "Full validation must not share a branch lock; a merge would replace a pending ledger run"
+    );
     let jobs = &full["jobs"];
     let preflight = &jobs["preflight"];
     assert!(preflight["outputs"].get("run").is_none());
