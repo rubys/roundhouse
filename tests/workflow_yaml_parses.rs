@@ -592,7 +592,7 @@ fn head_and_label_changes_replace_the_previous_pr_run_without_draft_churn() {
     assert_eq!(
         ci["concurrency"]["group"].as_str(),
         Some(
-            "validation-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}"
+            "validation-${{ github.event_name }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.sha || github.event.pull_request.number || github.ref }}"
         )
     );
     assert_eq!(

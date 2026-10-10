@@ -13,11 +13,11 @@ on:
 permissions:
   contents: read
 
-# One lock per snapshot, not per branch. `github.ref` is always
-# refs/heads/main on schedule/dispatch, so a later merge queued another
-# Full validation and GitHub replaced the pending one even with
-# cancel-in-progress: false (pending, not in-progress). SHA keeps the
-# extra-language ledger for the SHA it was asked to measure.
+# Caller lock is per SHA so two Full validation calls on main do not
+# share a group. Merge to main is a push and does not start this
+# workflow; a later schedule or dispatch on a new SHA must not replace
+# a pending call for an earlier SHA. The reusable ci.yml lock for
+# schedule/dispatch is also SHA-keyed.
 concurrency:
   group: full-background-${{ github.sha }}
   cancel-in-progress: false

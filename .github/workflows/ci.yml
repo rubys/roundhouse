@@ -25,12 +25,15 @@ on:
       publication-ready:
         value: ${{ jobs.compact-required.outputs.passed == 'true' && jobs.assemble-site.outputs.ready == 'true' }}
 
-# Separate from the full-ci caller's lock: workflow_call inherits its context.
-# Push-to-main is Ruby+Spinel, not the extra-language matrix; cancel
-# superseded SHAs so merge trains do not stack. Scheduled/manual full-ci
-# is the extra-SDK ledger and keeps its own lock.
+# Separate from the full-ci caller's lock: workflow_call inherits its
+# context (`github.event_name` is schedule / workflow_dispatch, not push).
+# Push and PR still share one lock per ref/PR so a later SHA cancels the
+# previous compact run. Schedule and dispatch are the extra-SDK ledger:
+# key those on SHA so a later Full validation call does not replace a
+# pending one for an earlier snapshot (GitHub replaces pending members
+# of a group even when cancel-in-progress is false).
 concurrency:
-  group: validation-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: validation-${{ github.event_name }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.sha || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 permissions:

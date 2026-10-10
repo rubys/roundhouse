@@ -1156,7 +1156,16 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
     assert_eq!(
         full["concurrency"]["group"].as_str(),
         Some("full-background-${{ github.sha }}"),
-        "Full validation must not share a branch lock; a merge would replace a pending ledger run"
+        "Full validation caller lock is per SHA so a later schedule/dispatch does not replace a pending ledger"
+    );
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    assert_eq!(
+        ci["concurrency"]["group"].as_str(),
+        Some(
+            "validation-${{ github.event_name }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.sha || github.event.pull_request.number || github.ref }}"
+        ),
+        "schedule/dispatch reusable calls must not share a branch lock"
     );
     let jobs = &full["jobs"];
     let preflight = &jobs["preflight"];
