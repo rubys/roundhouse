@@ -1,31 +1,43 @@
 # Campfire on Rust: compile-to-working plan
 
 **Current working state (2026-10-10, latest local verification):** PR #688 is
-OPEN and Draft at published head `74dce7306cdc70eb3af7f4068a8c7af677d894a2`,
-base `main` (verified with `gh pr view`). The reported status rollup contains
-CodeRabbit SUCCESS only; there are no required workflow checks on this head.
-Do not mark ready or merge. Canonical main `aaff26906c66300a7ff0a3d1b1d96e7a391786e9`
-has been fetched and is merged in the local worktree, but the merge commit has
-not yet been created. The worktree has staged and unstaged changes; no current
-local changes are validated by GitHub CI. `cargo check --locked --all-targets`
-passes. Focused Rust iteration tests pass 3/3, including a custom `empty?`
-predicate regression; Cache-Control integration tests pass 4/4, with one
-native-Spinel test explicitly ignored, and the runtime unit file passes 40 runs
-/ 48 assertions. The ignored real-blog Rust Cargo gate
-passes 1/1, compiling and executing its generated project after correcting
-CacheControlStore constructor initialization, custom predicate dispatch, and
-optional-array iteration. These fixes restore the real-blog gate; they do not
-reduce the Campfire compiler wall. On the pinned Campfire revision
-`edbc779f4dfc9b26c36310881711ddc976a9dfc8`, fresh strict analysis is 0 errors /
-460 warnings. Fresh strict Rust generation exits 1 with 132 unsupported/syntax
-+ 113 type errors (245 frontend diagnostics) and refuses `Data.define` before
-writing a project. Therefore **there is no current-pin Campfire Cargo/rustc
-error count**. The strongest comparable result remains historical: 2,577
-errors / 575 warnings / 2,339 fingerprints on older Campfire `32b4144b` at
-Roundhouse `863dd24b`; do not report it as a current count. Next is the narrow
-nominal `ContentKey` Data factory path through the real heterogeneous cache-key
-consumer and `is_a?`; keep the generation gate until emitted behavior is
-compiled and executed.
+OPEN and Draft at published head `0c66e7a95b8dba5055b4116c7604dc6c9a796faf`,
+base `main`; it must remain Draft and must not be merged. The local branch is
+`pr688-prep` at `bd85467b`, with canonical `main`
+`ee70dd318ca3fb7c23428e61d74d80fd740991e2` integrated by merge commit
+`bd85467b`. The branch contains three unpublished commits: the Elixir-safe
+CacheControlStore fix, the prior main integration, and this latest main
+integration. The only uncommitted path is this plan. Exact-head run
+[38069192191](https://github.com/rubys/roundhouse/actions/runs/38069192191)
+finished **red** on the older published head `0c66e7a9`: `unit (3)` failed two
+Elixir lowering tests because `While` is unsupported in that target; other
+unit shards and Rust compare/smoke passed. `compact-required` and `CI summary`
+failed as consequences. Campfire compare and conformance passed; Campfire
+smoke and Spinel lanes were skipped. The Elixir regression is fixed locally
+in `1596a8af`; after merging canonical `main` through `ee70dd31`,
+`cargo test --locked --test route_path_decoding --test cache_control_header`
+passes (route 8/8 with 3 ignored; cache-control 4 passed with 1 native Spinel
+test ignored). The ignored emitted real-blog Rust Cargo gate passes 1/1, and
+`cargo check --locked --all-targets` passes. A new exact-head hosted run has
+not yet validated the unpublished commits. These checks restore the real-blog
+compiler/execution forcing gate but do not reduce Campfire's compiler wall. On pinned Campfire
+`edbc779f4dfc9b26c36310881711ddc976a9dfc8`, strict analysis is 0 errors / 460
+warnings. Strict Rust generation reports 132 unsupported/syntax + 113 type
+diagnostics (245 total), then refuses `Data.define` before writing a project.
+Therefore **there is no current-pin Campfire Cargo/rustc error count**. The
+historical 2,577 errors / 575 warnings / 2,339 fingerprints belong only to
+Campfire `32b4144b` at Roundhouse `863dd24b`. Among current generation
+diagnostics, 111 are dynamic relation-residue entries, including six `active`
+and five `active_bots` scope entries; these are diagnostic sites, not eleven
+confirmed independent fixes. The immediate priority is the finite
+`Data.define` implementation because it blocks current-pin survey generation
+and therefore a measured Rust compiler baseline. Keep the gate until nominal
+`ContentKey` identity is compiled and exercised through the heterogeneous
+cache-key consumer and `is_a?`. In parallel, source tracing confirms
+`User.active` is an enum-generated scope whose persisted value is integer `0`;
+treat its shared-Arel implementation as the next bounded relation slice after
+a current-pin generated project can be measured. Neither opportunity has yet
+demonstrated a current-pin Cargo reduction.
 
 **Historical snapshot (superseded 2026-10-10):** PR #688
 was verified OPEN and Draft at `83be1d4054d5e2ae4f289d0409f382188d3a6aff`, based on
@@ -129,8 +141,8 @@ falling, or a test being selected is not completion evidence.
 
 | Input | Snapshot / status |
 |---|---|
-| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`, published head `74dce7306cdc70eb3af7f4068a8c7af677d894a2` (verified with `gh pr view` on 2026-10-10). The reported rollup contains CodeRabbit SUCCESS only; no required workflow checks are reported on this head. Do not treat this as substantive review or current CI validation. Keep Draft and do not merge |
-| Local integration base | Canonical `main` `aaff26906c66300a7ff0a3d1b1d96e7a391786e9` is merged locally; `MERGE_HEAD` remains present while conflict resolutions and follow-up edits are staged/unstaged. The merge commit is not yet created. `cargo check --locked --all-targets` and the emitted real-blog Rust Cargo gate pass on the working tree; see the newest ledger row |
+| PR status | [#688, Draft](https://github.com/rubys/roundhouse/pull/688), OPEN, base `main`, published head `0c66e7a95b8dba5055b4116c7604dc6c9a796faf` (verified locally with `gh pr view`). Exact-head run [38069192191](https://github.com/rubys/roundhouse/actions/runs/38069192191) completed red as summarized above; it is not validation of unpublished commits `1596a8af` and `b9b88ef6`. Keep Draft and do not merge |
+| Local integration base | Canonical `main` `ee70dd318ca3fb7c23428e61d74d80fd740991e2` is merged in local commit `bd85467b` without unresolved conflicts. The uncommitted change is this plan only. `cargo check --locked --all-targets`, Rust route/cache-control tests, and the emitted real-blog Rust Cargo gate pass on the local branch; see the newest ledger row |
 | Campfire target | Current canonical CI pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8`; earlier measured comparison pin `32b4144b5206304fa8d4c67455a753e2d3c16635` |
 | Strict analyzer | On current pin `edbc779f`, `roundhouse check --strict` exits 0 with 0 errors / 460 warnings. This does not imply Rust generation or Cargo success |
 | Strict Rust generation / current pin | Fresh production generation exits 1 before writing files after reporting 132 unsupported/syntax and 113 type errors (245 total), including `FragmentCache::ContentKey = Data.define(:digest) { def cache_key = digest }`. `--survey --allow-unsupported` also exits at `rust: Data.define is not supported; use Ruby or Spinel`. This is an explicit target representation gate, not a rustc count. Current-pin Cargo inventory is unavailable until the factory and its nominal cache-key consumer have a sound Rust representation |
@@ -143,9 +155,68 @@ falling, or a test being selected is not completion evidence.
 | Historical estimate | ~2,468 was a prior rough figure with unknown scope. Use 2,597 as the clean merged-base `32b4144b` baseline, 2,577 as the current merged `32b4144b` comparison, and leave current-pin `edbc779f` Cargo count unavailable until generation succeeds |
 | Environment | Debian 12, Linux x86_64; `rustc 1.98.1 (48a229cea 2026-09-01)`, host `x86_64-unknown-linux-gnu`; compiler binary SHA-256 `859254978c0a0402c32f949f6de0d99aee73be8d15f45aac00ae1448aac51e74`; Cargo 1.98.1 binary SHA-256 `da77c8b33849312255ccde3179198ada4c8deb370488d050286146b1d1b27e14`; Roundhouse root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a8e8a5981`; generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` |
 | Rails oracle | Partial probe on `32b4144b`: standalone Action Controller dispatch loaded the version initializer and `VersionHeaders` callback; five environment cases returned 200. Full pinned Rails boot and on-wire nil `X-Rev` behavior remain unverified |
-| Exact-head CI | Published head `ee9a718f` has 0 check-runs; its only status is CodeRabbit SUCCESS explicitly because review was skipped for a draft. The red `ci:rust` observations on `f228175` / `0b2323e`, skipped Campfire smoke, and canonical-main comparison run on `c210f226` belong to older heads and are not current exact-head validation |
-| Review state | CodeRabbit's latest substantive report observed here covers `0b2323e`, not published head `ee9a718f` or local merge `03005282`. Earlier findings have follow-up confirmations as addressed; low-priority performance observations remain deferred. No review covers the current local edits. The Campfire browser room-delete journey remains explicitly unverified |
-| Scratch evidence | Older-pin generation and JSON inventory are under `/tmp/rh688-863-32b-*`; latest-pin strict check and failed generation captures are `/tmp/rh688-edbc779-check.out` and `/tmp/rh688-edbc779-generate.stderr`. Previous baseline captures remain under `/tmp/rh688-baseline` and `/tmp/rh688-898-*`; do not commit generated output or scratch logs |
+| Exact-head CI | Published head `0c66e7a9` has completed run [38069192191](https://github.com/rubys/roundhouse/actions/runs/38069192191): `unit (3)`, `compact-required`, and `CI summary` failed; the remaining selected unit shards and Rust compare/smoke passed; Campfire compare/conformance passed; Campfire smoke and Spinel jobs were skipped. The failing Elixir loop regression has a local fix at `1596a8af`, but the fix has no hosted validation until the branch is pushed. CodeRabbit SUCCESS on a Draft is a skipped review, not substantive review |
+| Review state | The latest substantive review observations in the retained evidence cover older heads; no review covers unpublished `1596a8af`, `b9b88ef6`, or `bd85467b`. CodeRabbit SUCCESS on the published Draft is explicitly a skipped review. Earlier review points have follow-up confirmations as addressed; low-priority performance observations remain deferred. The Campfire browser room-delete journey remains unverified |
+| Scratch evidence | Current-pin strict check and generation captures after merging `ee70dd31` are `/tmp/rh688-bd854-strict-check.out`, `/tmp/rh688-bd854-strict-rust.out`, and `/tmp/rh688-bd854-survey.out`; the historical older-pin project and inventory remain under `/tmp/rh688-863-32b-*`. Do not commit generated projects or scratch logs |
+
+## Next compiler-wall reduction wave
+
+The exact current-pin counts are **0 strict-analysis errors / 460 warnings**,
+**245 strict Rust-generation diagnostics** (132 unsupported/syntax + 113 type),
+and **no current-pin Cargo count**, because the generation gate refuses
+`Data.define` before producing a project. The 2,577-error survey is historical
+and uses a different Campfire SHA; it is not a valid denominator for this
+wave. Current generation reports 111 dynamic-relation residue sites, but one
+site is not necessarily one independent cause.
+
+Prioritize the finite `Data.define` gate first: it blocks current-pin survey
+generation, so no honest Campfire Cargo baseline exists yet. The minimal
+`User.active` relation experiment is prepared as the next bounded slice, not
+generic Relation runtime support:
+
+1. [x] Confirm the exact Campfire SHA, strict logs, dynamic-relation site
+   count, and the six `active` / five `active_bots` diagnostic entries.
+2. [x] Trace pinned `app/models/user.rb`'s `enum :status, %i[active
+   deactivated banned], default: :active`: `src/ingest/model.rs::expand_enum_decl`
+   expands `active` to `where(status: 0)`. Confirm the six strict diagnostic
+   sites say the `Relation[User]` call was not folded to SQL.
+3. [ ] Complete D-Data.1–D-Data.3 below: represent the pinned immutable
+   `ContentKey` record, preserve owner-constant binding and nominal
+   `is_a?` identity in the heterogeneous cache-key consumer, execute the real
+   cache-key path, and only then permit production survey generation.
+4. [ ] Add a minimal emitted-Rust integration fixture for an enum-backed
+   model: active rows included; deactivated/banned rows excluded; persisted
+   enum values compared, not display labels. Pin a failing behavior first.
+5. [ ] Implement only the proven no-argument `User.active` predicate in the
+   shared query/lowering path. Do not add arbitrary named-scope expansion,
+   change unrelated emitters, or claim `active_bots` as a side effect.
+6. [ ] Exercise a supported consumer chain and verify that relation
+   composition does not materialize an array before a later refiner/finder.
+   Keep unsupported or ambiguous chain shapes as strict errors.
+7. [ ] Run focused Data and Arel/enum tests, `cargo check --locked
+   --all-targets`, and both emitted-Rust compile-and-run fixtures. Only then
+   re-run strict Campfire generation and compare diagnostic
+   identities/multiplicities; report exact removed/retained/new entries, not
+   only a reduced total.
+8. [ ] Reassess whether the `User.active` slice materially reduces the
+   relation residue. If it does not, stop expanding enum scopes and return to
+   another measured root cause rather than broadening the abstraction.
+
+This relation candidate has six observed `active` sites, with five additional
+`active_bots` sites explicitly outside the initial claim. `src/lower/arel/build.rs`
+recognizes model-rooted `where`/`all` and composes recognized chains, but does
+not currently recognize an enum scope as a query root; the corresponding
+`Relation[User]` residue is rejected in strict Rust because Rust has no runtime
+Relation implementation. The Ruby model-to-library scope seam is explicitly
+Ruby-only, so it cannot be assumed to supply Rust behavior. Relation-ID array
+predicates are a separate later experiment: `where(id: ids)` needs a typed
+integer-array contract plus correct empty-list SQL semantics and an executed
+behavior test. The current Arel value builder intentionally declines locals
+whose scalar/array/nil shape is not proven. A lower diagnostic count is not
+completion evidence without generated behavior. Scope chaining must preserve
+lazy query composition; eager array materialization before a subsequent
+filter/finder is not acceptable. The Data gate is first because it currently
+prevents a current-pin generated project and measured Cargo baseline.
 
 The PR already contains substantial Rust Campfire work, including app/helper
 class emission, namespace-aware controller structure, reachable inherited
@@ -930,6 +1001,7 @@ review artifacts; avoid committing large generated projects or sensitive data.
 
 | Date | Roundhouse SHA | Campfire SHA | Toolchain / locks | Commands and executed scope | Result / artifact links | Checklist updated |
 |---|---|---|---|---|---|---|
+| 2026-10-10 (canonical main `ee70dd31` integration + Elixir regression repair; local unpublished state) | Local merge `bd85467b` (parents include prior local `b9b88ef6` and canonical `main` `ee70dd318ca3fb7c23428e61d74d80fd740991e2`), preceded by `1596a8af`; published PR head remains `0c66e7a9` | Current pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8` | rustc/Cargo 1.98.1; Linux x86_64; root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a3e8a5981` | `cargo test --locked --test route_path_decoding --test cache_control_header`; focused `action_controller_runtime_emit_typechecks_hotspots`; ignored emitted real-blog Rust gate `cargo test --locked --test rust_toolchain real_blog_cargo_test_passes -- --ignored --exact --nocapture`; `cargo check --locked --all-targets`; Ruby syntax/cache-control suite; strict Campfire check, strict Rust generation, and survey attempt | Route 8/8 passed (3 ignored); Cache-Control integration 4/4 (1 native Spinel ignored); focused emitter test 1/1; emitted real-blog Rust Cargo gate 1/1; all-target check passed; Ruby syntax OK and runtime suite 41 tests / 49 assertions passed. The merge conflict resolution retains the current Rust app/model emission and includes main's Array iteration field-shape fix; duplicate `_insert_row` generation was removed in favor of the single existing lowered method, and its test now asserts uniqueness plus timestamp/raw-insert markers. The CacheControlStore extras helper now mutates a local alias of its parameter, so generated Rust compiles without adding a second `while` to `to_header` (Elixir rejected that shape). Current pinned Campfire strict analysis: 0 errors / 460 warnings; strict generation: 132 unsupported/syntax + 113 type diagnostics (245 total), then refuses `Data.define`; survey refuses the same gate without creating output. Current relation residue: 111 entries (six `active`, five `active_bots`). No current-pin Cargo count and no Campfire Rust output delta. Exact-head run [38069192191](https://github.com/rubys/roundhouse/actions/runs/38069192191) predates local changes and remains red on the two Elixir tests; the local fix passes its regression suite but awaits hosted validation. Captures: `/tmp/rh688-bd854-strict-check.out`, `/tmp/rh688-bd854-strict-rust.out`, `/tmp/rh688-bd854-survey.out`, `/tmp/rh688-b9b88-real-blog-after-ee70-fixed2.log` | Canonical main synchronized twice (latest `ee70dd31`) and locally tested; no Campfire Cargo reduction established. Keep PR Draft; next plan wave targets bounded `User.active` scope study, while retaining Data factory as generation gate |
 | 2026-10-10 (canonical-main integration and CacheControlStore Rust gate repair; local working tree) | Published base `74dce7306cdc70eb3af7f4068a8c7af677d894a2` + staged merge of canonical `main` `aaff26906c66300a7ff0a3d1b1d96e7a391786e9` and unstaged fixes | Current pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8` | rustc/Cargo 1.98.1, Linux x86_64; generated real-blog project lock is fixture-managed | `cargo test --locked --test rust_each_iteration`; `cargo test --locked --test cache_control_header`; `ruby -Iruntime/ruby runtime/ruby/test/action_controller/cache_control_test.rb`; ignored generated real-blog `cargo test --locked --test rust_toolchain real_blog_cargo_test_passes -- --ignored --exact --nocapture`; `cargo check --locked --all-targets`; fresh strict analyzer and Rust generation on Campfire | Rust iteration tests 3/3; Cache-Control integration tests 4/4 with 1 native-Spinel test ignored; CacheControlStore runtime unit suite 40 runs / 48 assertions; generated real-blog Rust Cargo gate 1/1; all-target check passed. The prior real-blog failure is fixed by initializing fields directly in `new`, routing custom `empty?` calls to the emitted predicate name while preserving typed Array `is_empty`, and using indexed loops for the nullable-array iteration emitter mismatch. Strict Campfire analysis is 0 errors / 460 warnings. Strict Rust generation remains blocked at 132 unsupported/syntax + 113 type errors (245 total) on `Data.define`; no generated Cargo project or current-pin rustc count. PR #688 remains OPEN/Draft at published `74dce730`; GitHub reported CodeRabbit SUCCESS only and no required checks on that head. Canonical main has been merged locally but merge commit is not yet created. | Restored the real-blog Rust compiler/execution forcing gate; no Campfire count delta claimed; keep the Data factory gate until nominal cache-key behavior is proven |
 | 2026-10-10 (Data member inference repair; published at `756ec909`, docs refreshed at `83be1d40`) | Code batch `756ec909929f9165ade62d45179ee1c431a779ba`; docs-only `83be1d4054d5e2ae4f289d0409f382188d3a6aff` | Current CI pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8` | rustc/Cargo 1.98.1; Linux x86_64; root lock unchanged | `cargo test --locked --test emit_and_run data_define_block_methods_belong_to_the_data_class -- --nocapture`; `cargo test --locked --test data_factory_constants block_data_classes_retain_ordered_members_as_nominal_origin -- --exact`; `cargo test --locked --test rust_toolchain real_blog_controller_identity_values_match_rails -- --ignored --nocapture --exact`; `cargo test --locked --lib action_controller_runtime_emit_typechecks_hotspots -- --nocapture`; `cargo check --locked --all-targets`; strict `cargo run --locked --bin roundhouse -- --target rust /tmp/campfire-edbc779-clean -o /tmp/rh688-83be-strict`; clean-target c20 identity test and `emit_preview` + generated release build with exact CI fixture; `git diff --check`; PR status | The Campfire Data block runtime journey passes 1/1 after excluding synthetic Data member-reader harvests whose inferred type has no informative core beyond Nil; the constructor-typed member inference regression passes 1/1. The fixed-head ActionController identity test passes locally 1/1 and the emitter assertion passes 1/1. Roundhouse `cargo check --locked --all-targets` and `git diff --check` pass. Strict generation at the updated code state exits 1 with exactly 132 unsupported/syntax and 113 type diagnostics (245 total), still refusing `Data.define` before project emission; no current-pin Cargo count is available. The prior exact-head run [38063332818](https://github.com/rubys/roundhouse/actions/runs/38063332818) remains red on unit shards 0/2, Rust compare/smoke and `compact-required`; Campfire compare/conformance pass and Campfire smoke is skipped. We downloaded the exact CI fixture artifact (SHA-256 `6199e048b38b866790c5956868b9e1960497e2ddded3d2b67e6b994cad06350a`); at c20 with this fixture and a fresh Cargo target, the identity test passed 1/1 and the compare lane's emitted release app built successfully. The local `action_controller_base.rs` SHA-256 is `6fa7b2ea02c1cbaadcbb9dd96c9746f13d53f2bfa2d2e51b86314c5e7fffe7db`; it contains neither `CacheControlStore` nor `self.extras`. The CI failure remains unresolved and not reproducible. PR was verified OPEN/Draft at `fb2144e7`; only CodeRabbit SUCCESS was present and review was explicitly skipped for Draft. | Fixes the Data method journey's `String + nil` error without weakening its test; strict-generation boundary and CI discrepancy remain open |
 | 2026-10-10 (canonical-main integration + local Rust check repairs; unpublished working tree) | Merge `030052820334dbcc9883f4763c43cd6e3e2f3e39` plus four uncommitted files | Current CI pin `edbc779f4dfc9b26c36310881711ddc976a9dfc8` | rustc/Cargo 1.98.1; root lock SHA-256 `206b0c494651b039351ec2a3e6232041e87e4f36232a111ea6086d4a3e8a5981`; Linux x86_64 | `cargo check --locked --all-targets`; `cargo test --locked --test rust_toolchain --test route_path_decoding`; ignored emitted-real-blog gate `cargo test --locked --test rust_toolchain real_blog_cargo_test_passes -- --ignored --exact --nocapture`; strict current-pin generation; `git diff --check` | Canonical main merged locally with no unresolved conflicts. All-target check passed; regular Rust toolchain tests 3/3 and route-path tests 8/8 passed (7 ignored); emitted real-blog Rust Cargo test 1/1 passed. Local generated-model assertion confirms `_insert_row` fills timestamps and uses the raw adapter insertion path; route matcher fixture was updated to its four-argument API; view partial inference now has an explicit collected vector type. Latest strict generation still reports 245 frontend diagnostics (132 unsupported/syntax + 113 type) and refuses `Data.define` before project emission, so the current-pin Rust/Cargo error count is unavailable. The ignored forwarded optional String block regression remains red with five generated Rust errors; this integration is not a Campfire compile milestone. `cargo check` emits existing unused-code warnings. | Mainline integration locally checked; current compiler boundary and D0 failure remain accurately open |
