@@ -2171,10 +2171,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_while_node().is_some() => {
             let w = n.as_while_node().unwrap();
             if w.is_begin_modifier() {
-                return Err(IngestError::Unsupported {
-                    file: file.into(),
-                    message: "`begin … end while` (do-while) form not yet supported".into(),
-                });
+                return Ok(Expr::new(span, do_loop(w.statements(), &w.predicate(), false, file)?));
             }
             let cond = ingest_expr(&w.predicate(), file)?;
             let body = match w.statements() {
@@ -2186,10 +2183,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_until_node().is_some() => {
             let u = n.as_until_node().unwrap();
             if u.is_begin_modifier() {
-                return Err(IngestError::Unsupported {
-                    file: file.into(),
-                    message: "`begin … end until` (do-until) form not yet supported".into(),
-                });
+                return Ok(Expr::new(span, do_loop(u.statements(), &u.predicate(), true, file)?));
             }
             let cond = ingest_expr(&u.predicate(), file)?;
             let body = match u.statements() {
@@ -3264,6 +3258,91 @@ fn try_ingest_method_ref(
         Span::synthetic(),
         ExprNode::MethodRef { recv, name: Symbol::from(name) },
     )))
+}
+
+/// `begin … end while cond` / `begin … end until cond`: the body runs
+/// once before the first test (Ruby's do-while; a plain `while`
+/// modifier on a non-`begin` statement tests first). Lowered to
+///
+/// ```ruby
+/// while true
+///   body
+///   break unless cond   # `break if cond` for `until`
+/// end
+/// ```
+///
+/// which keeps the enclosing local scope (a `loop do` block would make
+/// the body's first assignments block-local) and, like the source,
+/// evaluates to nil. A `next` or `redo` aimed at the loop itself is
+/// refused: in the source `next` goes to the test, and here it would
+/// skip it.
+fn do_loop(
+    statements: Option<ruby_prism::StatementsNode<'_>>,
+    predicate: &Node<'_>,
+    until: bool,
+    file: &str,
+) -> IngestResult<ExprNode> {
+    let form = if until { "until" } else { "while" };
+    if let Some(statements) = &statements {
+        if let Some(jump) = loop_level_jump(&statements.as_node()) {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!(
+                    "`{jump}` in a `begin … end {form}` body: it would skip the loop test the source runs"
+                ),
+            });
+        }
+    }
+    let body = match statements {
+        Some(s) => ingest_expr(&s.as_node(), file)?,
+        None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+    };
+    let cond = ingest_expr(predicate, file)?;
+    let nil = || Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil });
+    let brk = Expr::new(Span::synthetic(), ExprNode::Break { value: None });
+    let test = if until {
+        ExprNode::If { cond, then_branch: brk, else_branch: nil() }
+    } else {
+        ExprNode::If { cond, then_branch: nil(), else_branch: brk }
+    };
+    let test = Expr::new(Span::synthetic(), test);
+    let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![body, test] });
+    let always = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: true } });
+    Ok(ExprNode::While { cond: always, body, until_form: false })
+}
+
+/// A `next` or `redo` in `node` that targets the loop `node` is the
+/// body of, rather than a block, lambda, method or loop inside it.
+fn loop_level_jump(node: &Node<'_>) -> Option<&'static str> {
+    use ruby_prism::Visit;
+    struct Jumps(Option<&'static str>);
+    impl<'pr> Visit<'pr> for Jumps {
+        fn visit_next_node(&mut self, _: &ruby_prism::NextNode<'pr>) {
+            self.0.get_or_insert("next");
+        }
+        fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) {
+            self.0.get_or_insert("redo");
+        }
+        fn visit_block_node(&mut self, _: &ruby_prism::BlockNode<'pr>) {}
+        fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {}
+        fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {}
+        fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'pr>) {}
+        fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'pr>) {}
+        fn visit_singleton_class_node(&mut self, _: &ruby_prism::SingletonClassNode<'pr>) {}
+        fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
+            // The predicate is outside the inner loop's body.
+            self.visit(&node.predicate());
+        }
+        fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
+            self.visit(&node.predicate());
+        }
+        fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {
+            self.visit(&node.collection());
+        }
+    }
+    let mut jumps = Jumps(None);
+    jumps.visit(node);
+    jumps.0
 }
 
 /// Classify a block's `opening_loc` bytes as `{` (brace form) or `do`.
