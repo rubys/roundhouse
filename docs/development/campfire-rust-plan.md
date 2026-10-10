@@ -331,6 +331,45 @@ control; (5) a minimal real-blog overlay if shared lowering changes; then
 (6) fresh Campfire generation and inspection of all 14 sites. Only after this
 proof should the broader D0 implementation be dispatched/integrated.
 
+**D0 progress (2026-10-10):** [x] Added a test-only conservative seed/forwarder
+recognizer probe for a direct optional nil-guarded `capture` terminal embedded
+in a string interpolation, plus two same-owner forwarding edges. It rejects
+duplicate method identities, extra block reads, unknown targets, and deferred
+forwarding under a nested lambda. The focused two-test suite passes. This probe
+is intentionally not compiled into production and does not prove caller block
+result types, resolve cross-owner callsites, establish per-path consumption,
+or change emitted Rust; it is scaffolding only, not D0 completion or Campfire
+progress.
+
+[x] Extended the ignored emitted-Rust acceptance fixture with an actual Ruby
+source callsite whose literal block returns `String`; this will exercise the
+positive callsite evidence needed by the eventual ABI classifier rather than
+relying only on a Rust-authored callback. Re-ran
+`forwarded_optional_string_block_runs_through_two_edges` from dirty worktree
+based on `83f6d67a`. The generated crate fails with five errors: optionality
+checking tries to clone `Box<dyn FnOnce()>`; the terminal's closure is unit-
+returning where shared `capture` requires `Value`; guard branches and inferred
+method return disagree between `String` and `Value`; and the newly included
+source callsite passes a closure where the current method signature requires
+`Box<dyn FnOnce()>`. This is a more informative pre-fix failure, not a Campfire
+inventory change.
+
+The pinned Campfire source audit at `32b4144b5206304fa8d4c67455a753e2d3c16635`
+shows that the 14 listed sites have zero-argument HTML-content blocks; the
+two `sidebar_turbo_frame_tag` calls without a block are real optional `None`
+cases, and the two dimension-constraint capture calls are mutually exclusive.
+Form-builder block forwarding remains a negative control. The next vertical
+slice is the structurally guarded sidebar frame method, with the actual
+generated view callsites proving content-block shape and omission. Implement
+one exact method/callsite resolver and carry its decision through signature,
+call, and terminal consumption; do not change generic `capture` or claim the
+other 12 methods by association.
+
+`cargo check --lib` passes without warnings after isolating the probe under
+`cfg(test)`. `rustfmt --check` passes on the new probe, while a direct check
+through `rust.rs` still reports pre-existing formatting drift across the
+emitter tree; no broad formatting was applied.
+
 For cookies, existing request/task metadata and `process_action` dispatch are
 already present. F0 must extend that request lifecycle and decide whether the
 same jar is available through outer layout rendering before deciding when
@@ -442,6 +481,7 @@ review artifacts; avoid committing large generated projects or sensitive data.
 | 2026-10-09 (repeatability check) | `609248bcf7f51c94d56f91fbdaaf6675dd5b71fe` (docs-only difference from baseline code SHA `3b6d1b7`) | `32b4144b5206304fa8d4c67455a753e2d3c16635` | Same captured generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55`; Roundhouse binary reported `2026.9.18 (609248bc)` | Two fresh survey generations with `--survey --allow-unsupported`; generated-file manifests compared before Cargo. Both then ran `cargo check --locked --lib --bin app --message-format=json` with a shared Cargo target cache | Both generated 487 files with identical manifest SHA-256 `955ffa2ca632700fe2c0697c7346df29956299b97e964a6ec45a4e17e650c71b`; both Cargo runs exit 101 with 2,496 errors, 2,252 groups and no malformed JSON; normalized fingerprint+count lists identical. Outputs/captures in `/tmp/rh688-repeat` | P0.3, P0.7 |
 | 2026-10-09 (signature-map fix inventory) | `1e5b828895dcafaa687334756ed0f8c908c27451` | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; reused generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` and baseline Cargo target cache; fresh generated project in `/tmp/rh688-1e5b8288-survey` | Fresh `roundhouse --target rust --survey --allow-unsupported` then `cargo check --locked --lib --bin app --message-format=json` | Exit 101, 2,496 errors, 2,252 fingerprints, 555 warnings; fingerprint+count inventory exactly matches baseline (0 groups removed/added/changed). The 14 unresolved `capture` occurrences in 13 groups are unchanged. This narrow parameter-map fix is correct but does not reduce the Campfire wall; no support claim. Capture JSON/inventory in `/tmp/rh688-1e5b8288-cargo.json` and `/tmp/rh688-1e5b8288-inventory.json` | D0 adjacent signature-map defect covered; D0 ABI remains open |
 | 2026-10-09 (shared capture runtime placement, working tree based on `1e5b8288`) | Parent `1e5b828895dcafaa687334756ed0f8c908c27451` plus uncommitted changes | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; reused generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55`; dirty worktree | `ruby -Iruntime/ruby runtime/ruby/test/action_view/view_helpers_ext_test.rb`; `cargo test --locked --test runtime_src_integration every_runtime_method_body_is_fully_typed`; fresh survey generation and `cargo check --locked --lib --bin app --message-format=json`; generated Rust framework test with `--ignored`, before and after moving direct generic capture probes | CRuby suite passed 21 tests / 38 assertions; runtime typed-body gate passed 1/1. Fresh survey Cargo check: exit 101, 2,510 errors / 554 warnings (baseline `1e5b8288`: 2,496 / 555). Diagnostic-set comparison by code/message/source span: 14 `capture` E0425s and one clone diagnostic disappeared; 14 E0271 callable-result mismatches, 14 E0308 branch mismatches, and one relocated clone diagnostic appeared. This is not a net compiler improvement; it replaces unresolved capture names with concrete evidence that the current closure is `FnOnce() -> ()` where the runtime expects a value, while the survey output still fails. Rust framework harness failed with 24 generated-test compilation errors before probe relocation and 21 after; the three removed errors were from those new probes. Remaining failures include fixture/type-shape mismatches whose baseline status was not tested, so the Rust framework lane remains red. CRuby syntax checks and `git diff --check` passed. | Shared runtime placement locally implemented; capture ABI is now more directly localized; D0 behavior remains unproven |
+| 2026-10-10 (D0 source-callsite regression expansion; dirty worktree) | `83f6d67acd5b4e38dc4a045f4c8cac20ccee20a9` plus local test/plan/recognizer changes | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; current Roundhouse checkout `pr688-prep`; generated scratch project at `/tmp/roundhouse-rust-check-optional-string-forwarded-block` | `cargo test --lib emit::rust::block_abi::tests -- --nocapture`; `cargo check --lib`; ignored emitted-Rust test `forwarded_optional_string_block_runs_through_two_edges` with the source-authored `render_html` literal-block callsite; `git diff --check` | ABI probe unit tests passed 2/2; library check passed; `git diff --check` passed. The emitted-project test intentionally remains red (exit 101): five app compile errors, including the new source literal closure not matching the current required `Box<dyn FnOnce()>` signature, plus the pre-existing optionality, closure result, and `String`/`Value` mismatches. This reproduces the pre-fix path and expands evidence; no feature behavior is fixed and no Campfire inventory was rerun. | D0 positive source-callsite fixture added; production ABI integration and Campfire claim remain open |
 
 | Date | Roundhouse SHA | Campfire SHA | Toolchain / locks | Commands and executed scope | Result / artifact links | Checklist updated |
 |---|---|---|---|---|---|---|

@@ -74,7 +74,7 @@ fn generate_project_from_tree(tree: std::collections::HashMap<PathBuf, Vec<u8>>,
 fn forwarded_optional_string_block_runs_through_two_edges() {
     let tree = [(
         PathBuf::from("app/lib/block_forwarding_probe.rb"),
-        b"class BlockForwardingProbe\n  def block_source(&block)\n    block.nil? ? \"\" : capture(&block)\n  end\n\n  def block_middle(&block)\n    block_source(&block)\n  end\n\n  def block_outer(&block)\n    block_middle(&block)\n  end\nend\n".to_vec(),
+        b"class BlockForwardingProbe\n  def block_source(&block)\n    block.nil? ? \"\" : capture(&block)\n  end\n\n  def block_middle(&block)\n    block_source(&block)\n  end\n\n  def block_outer(&block)\n    block_middle(&block)\n  end\n\n  def render_html\n    block_outer { \"from source callsite\" }\n  end\nend\n".to_vec(),
     )]
     .into_iter()
     .collect();
@@ -90,6 +90,7 @@ struct NotClone(String);
 fn optional_string_block_forwards_and_runs_once() {
     let probe = BlockForwardingProbe::default();
     assert_eq!(probe.block_outer(None), "");
+    assert_eq!(probe.render_html(), "from source callsite");
 
     let borrowed = String::from("borrowed");
     let calls = std::cell::Cell::new(0);

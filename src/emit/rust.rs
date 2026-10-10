@@ -16,6 +16,8 @@ pub(crate) mod ctx;
 pub(crate) mod decide;
 pub(crate) mod expr;
 pub(crate) mod library;
+#[cfg(test)]
+mod block_abi;
 mod method;
 mod runtime_method;
 mod shared;
