@@ -1586,7 +1586,11 @@ jobs:
       #             cannot silently take the pool with it.
       - &campfire-suite-gems
         name: Install the gems the emitted suite loads
-        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent concurrent-ruby net-http-persistent web-push rails-html-sanitizer --no-document
+        # rack: the ruby-family swap of runtime/rack_utils.rb is
+        # `require "rack/utils"`. Without the gem every controller
+        # integration test aborts at load (`cannot load such file --
+        # rack/utils`). campfire-compare already installs it.
+        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent concurrent-ruby net-http-persistent web-push rails-html-sanitizer rack --no-document
       - name: Verify the suite's bcrypt test configuration
         run: ruby tests/campfire_suite_bcrypt.rb
       - name: Fetch once-campfire at the pinned SHA

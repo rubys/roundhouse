@@ -301,6 +301,16 @@ fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
             .iter()
             .filter_map(|step| step["run"].as_str())
             .collect();
+        let suite_gems = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Install the gems the emitted suite loads"))
+            .and_then(|step| step["run"].as_str());
+        if let Some(run) = suite_gems {
+            assert!(
+                run.split_whitespace().any(|w| w == "rack"),
+                "{job_name} must install rack: ruby-family rack_utils.rb is require \"rack/utils\""
+            );
+        }
         for run in &runs {
             for line in run.lines() {
                 let trimmed = line.trim();
