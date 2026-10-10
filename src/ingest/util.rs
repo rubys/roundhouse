@@ -204,6 +204,10 @@ fn collect_classes<'pr, F: FnMut(&[String], &[String], ruby_prism::ClassNode<'pr
         }
         return;
     }
+    if let Some(body) = hoisted_singleton_body(node) {
+        collect_classes(&body, scope, nesting, out);
+        return;
+    }
     if let Some(m) = node.as_module_node() {
         // Push the module's name onto the scope before descending —
         // bare class declarations inside qualify with the module
@@ -294,7 +298,57 @@ fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
         for stmt in s.body().iter() {
             collect_modules(&stmt, scope, out);
         }
+        return;
     }
+    if let Some(body) = hoisted_singleton_body(node) {
+        collect_modules(&body, scope, out);
+    }
+}
+
+/// The body of a `class << self` inside a class or module. Ruby puts
+/// the classes and modules declared there on the singleton class
+/// (a namespace keeps helper modules there and its class methods read
+/// them bare). Like the constants such a body writes, they are hoisted
+/// into the enclosing scope. This is a deliberate widening: natively
+/// `Outer::Helper` raises NameError from outside (the constant lives on
+/// the singleton class), while the hoisted declaration is reachable by
+/// that name. Programs that run natively read it bare from the singleton
+/// body, which still works. [`hoisted_name_collision`] refuses the one
+/// case where hoisting would change which declaration a bare read finds.
+fn hoisted_singleton_body<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
+    let sc = node.as_singleton_class_node()?;
+    sc.expression().as_self_node()?;
+    sc.body()
+}
+
+/// The first name that both a `class << self` body in `statements` and
+/// the enclosing body itself declare as a class, module or constant.
+/// Natively the two are different constants (one on the singleton class,
+/// one on the namespace); hoisting merges them, and a bare read in the
+/// singleton body would find the wrong one. The caller refuses.
+pub(super) fn hoisted_name_collision(statements: &[Node<'_>]) -> Option<String> {
+    let declared = |node: &Node<'_>| -> Option<String> {
+        if let Some(c) = node.as_class_node() {
+            return class_name_path(&c).map(|p| p.join("::"));
+        }
+        if let Some(m) = node.as_module_node() {
+            return module_name_path(&m).map(|p| p.join("::"));
+        }
+        node.as_constant_write_node().map(|w| constant_id_str(&w.name()).to_string())
+    };
+    let outer: Vec<String> = statements.iter().filter_map(|s| declared(s)).collect();
+    for stmt in statements {
+        let Some(body) = hoisted_singleton_body(stmt) else { continue };
+        for inner in flatten_statements(body) {
+            if inner.as_constant_write_node().is_some() {
+                continue;
+            }
+            if let Some(name) = declared(&inner).filter(|n| outer.contains(n)) {
+                return Some(name);
+            }
+        }
+    }
+    None
 }
 
 fn module_has_direct_def(m: &ruby_prism::ModuleNode<'_>) -> bool {

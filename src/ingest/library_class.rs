@@ -1755,6 +1755,15 @@ fn walk_decl_body_with_visibility<'pr>(
     };
 
     let statements = flatten_statements(b);
+    if let Some(name) = super::util::hoisted_name_collision(&statements) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "`{name}` is declared both in this body and inside its `class << self`; \
+                 the two are different constants in Ruby and are not kept apart"
+            ),
+        });
+    }
     let has_class_methods = statements.iter().any(|stmt| stmt.as_module_node()
         .is_some_and(|m| module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])));
     for statement in statements {
