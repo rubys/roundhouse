@@ -2830,6 +2830,7 @@ fn parse_association(
 
     let mut class_name: Option<String> = None;
     let mut foreign_key: Option<String> = None;
+    let mut primary_key: Option<String> = None;
     let mut through: Option<String> = None;
     let mut source: Option<String> = None;
     let mut source_type: Option<String> = None;
@@ -2873,6 +2874,9 @@ fn parse_association(
                 "class_name" => class_name = string_value(&value).map(|s| s.trim_start_matches("::").to_string()),
                 "foreign_key" => {
                     foreign_key = string_value(&value).or_else(|| symbol_value(&value))
+                }
+                "primary_key" => {
+                    primary_key = string_value(&value).or_else(|| symbol_value(&value))
                 }
                 "through" => through = symbol_value(&value),
                 "source" => source = symbol_value(&value),
@@ -3023,7 +3027,7 @@ fn parse_association(
             default: belongs_to_default,
             touch,
             foreign_type: None,
-            primary_key: None,
+            primary_key: primary_key.as_deref().map(Symbol::from),
         }),
         "has_and_belongs_to_many" => Some(Association::HasAndBelongsToMany {
             name: name.clone(),

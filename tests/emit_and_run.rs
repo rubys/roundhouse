@@ -11033,3 +11033,37 @@ end
         .run_test("test/models/article_exists_test.rb")
         .assert_passes();
 }
+
+/// Rails' `association_primary_key` is the `belongs_to`'s `primary_key:`,
+/// else the target's primary key: the reader looks the target up by that
+/// column, the writer stores that column's value in the foreign key, and
+/// `joins` compares the foreign key with it.
+#[test]
+fn belongs_to_primary_key_option_names_the_key_the_foreign_key_holds() {
+    emit_and_run::empty_app()
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"products\", force: :cascade do |t|\n    t.string \"uuid\"\n    t.string \"name\"\n  end\n  create_table \"prices\", force: :cascade do |t|\n    t.string \"product_uuid\"\n    t.integer \"cents\"\n  end\nend\n",
+        )
+        .write("app/models/product.rb", "class Product < ApplicationRecord\nend\n")
+        .write(
+            "app/models/price.rb",
+            "class Price < ApplicationRecord\n  belongs_to :product, foreign_key: \"product_uuid\", primary_key: \"uuid\"\n\n  def self.for_product_named(name)\n    joins(:product).where(products: { name: name }).count\n  end\nend\n",
+        )
+        .run_ruby(
+            "a = Product.create!(uuid: \"u-a\", name: \"A\")\n\
+             b = Product.create!(uuid: \"u-b\", name: \"B\")\n\
+             price = Price.create!(product_uuid: \"u-a\", cents: 5)\n\
+             raise \"reader: #{price.product&.name.inspect}\" unless price.product.name == \"A\"\n\
+             price.product = b\n\
+             raise \"writer: #{price.product_uuid.inspect}\" unless price.product_uuid == \"u-b\"\n\
+             price.save!\n\
+             joined = Price.for_product_named(\"B\")\n\
+             raise \"join: #{joined}\" unless joined == 1\n\
+             puts \"belongs_to primary_key passed\"\n",
+        )
+        .assert_passes();
+}
