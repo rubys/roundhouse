@@ -65,9 +65,7 @@ pub fn propagate_one(class: &mut LibraryClass) {
     }
 
     for m in class.methods.iter_mut() {
-        if matches!(m.receiver, MethodReceiver::Instance)
-            && mutating.contains(m.name.as_str())
-        {
+        if matches!(m.receiver, MethodReceiver::Instance) && mutating.contains(m.name.as_str()) {
             m.mutates_self = true;
         }
     }
@@ -81,28 +79,50 @@ fn has_local_mutation(body: &Expr) -> bool {
             ExprNode::Assign { target, .. } => match target {
                 LValue::Ivar { .. } => true,
                 LValue::Attr { recv, .. } | LValue::Index { recv, .. } => {
-                    matches!(&*recv.node, ExprNode::SelfRef | ExprNode::Ivar { .. })
-                        || walk(recv)
+                    matches!(&*recv.node, ExprNode::SelfRef | ExprNode::Ivar { .. }) || walk(recv)
                 }
                 LValue::Var { .. } | LValue::Const { .. } => false,
             },
+            ExprNode::OpAssign { target, value, .. } => {
+                let writes_self = match target {
+                    LValue::Ivar { .. } => true,
+                    LValue::Attr { recv, .. } => {
+                        matches!(&*recv.node, ExprNode::SelfRef | ExprNode::Ivar { .. })
+                            || walk(recv)
+                    }
+                    LValue::Index { recv, index } => {
+                        matches!(&*recv.node, ExprNode::SelfRef | ExprNode::Ivar { .. })
+                            || walk(recv)
+                            || walk(index)
+                    }
+                    LValue::Var { .. } | LValue::Const { .. } => false,
+                };
+                writes_self || walk(value)
+            }
             // `self[k] = v` and `self.foo = v` lower as `Send`s to
             // `[]=` / setter-suffixed methods, not Assign. Same for
             // `@data[k] = v` — direct ivar mutation via index assign
             // (HWIA `set` / `delete`). Treat all as mutation.
-            ExprNode::Send { recv: Some(recv), method, .. }
-                if matches!(&*recv.node, ExprNode::SelfRef | ExprNode::Ivar { .. })
-                    && (method.as_str() == "[]=" || method.as_str().ends_with('='))
-                    && !is_comparison_method(method.as_str()) =>
+            ExprNode::Send {
+                recv: Some(recv),
+                method,
+                ..
+            } if matches!(&*recv.node, ExprNode::SelfRef | ExprNode::Ivar { .. })
+                && (method.as_str() == "[]=" || method.as_str().ends_with('='))
+                && !is_comparison_method(method.as_str()) =>
             {
                 true
             }
             ExprNode::Seq { exprs } => exprs.iter().any(walk),
-            ExprNode::If { cond, then_branch, else_branch } => {
-                walk(cond) || walk(then_branch) || walk(else_branch)
-            }
+            ExprNode::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => walk(cond) || walk(then_branch) || walk(else_branch),
             ExprNode::While { cond, body, .. } => walk(cond) || walk(body),
-            ExprNode::Send { recv, args, block, .. } => {
+            ExprNode::Send {
+                recv, args, block, ..
+            } => {
                 recv.as_ref().map(|r| walk(r)).unwrap_or(false)
                     || args.iter().any(walk)
                     || block.as_ref().map(|b| walk(b)).unwrap_or(false)
@@ -133,17 +153,27 @@ fn has_local_mutation(body: &Expr) -> bool {
 fn calls_self_method_in(body: &Expr, mutating: &HashSet<String>) -> bool {
     fn walk(e: &Expr, mutating: &HashSet<String>) -> bool {
         match &*e.node {
-            ExprNode::Send { recv: Some(recv), method, args, block, .. } => {
-                if matches!(&*recv.node, ExprNode::SelfRef)
-                    && mutating.contains(method.as_str())
-                {
+            ExprNode::Send {
+                recv: Some(recv),
+                method,
+                args,
+                block,
+                ..
+            } => {
+                if matches!(&*recv.node, ExprNode::SelfRef) && mutating.contains(method.as_str()) {
                     return true;
                 }
                 walk(recv, mutating)
                     || args.iter().any(|a| walk(a, mutating))
                     || block.as_ref().map(|b| walk(b, mutating)).unwrap_or(false)
             }
-            ExprNode::Send { recv: None, method, args, block, .. } => {
+            ExprNode::Send {
+                recv: None,
+                method,
+                args,
+                block,
+                ..
+            } => {
                 if mutating.contains(method.as_str()) {
                     return true;
                 }
@@ -151,16 +181,21 @@ fn calls_self_method_in(body: &Expr, mutating: &HashSet<String>) -> bool {
                     || block.as_ref().map(|b| walk(b, mutating)).unwrap_or(false)
             }
             ExprNode::Seq { exprs } => exprs.iter().any(|x| walk(x, mutating)),
-            ExprNode::If { cond, then_branch, else_branch } => {
-                walk(cond, mutating)
-                    || walk(then_branch, mutating)
-                    || walk(else_branch, mutating)
-            }
-            ExprNode::While { cond, body, .. } => {
-                walk(cond, mutating) || walk(body, mutating)
-            }
+            ExprNode::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => walk(cond, mutating) || walk(then_branch, mutating) || walk(else_branch, mutating),
+            ExprNode::While { cond, body, .. } => walk(cond, mutating) || walk(body, mutating),
             ExprNode::Return { value } => walk(value, mutating),
-            ExprNode::Assign { value, .. } => walk(value, mutating),
+            ExprNode::Assign { target, value } | ExprNode::OpAssign { target, value, .. } => {
+                let target_calls_mutating = match target {
+                    LValue::Attr { recv, .. } => walk(recv, mutating),
+                    LValue::Index { recv, index } => walk(recv, mutating) || walk(index, mutating),
+                    LValue::Var { .. } | LValue::Ivar { .. } | LValue::Const { .. } => false,
+                };
+                target_calls_mutating || walk(value, mutating)
+            }
             // `case scrutinee; when …; body; end` — each arm body can
             // call mutating sibling methods. The canonical case: the
             // controller lowerer-synthesized `process_action`'s body
@@ -172,8 +207,7 @@ fn calls_self_method_in(body: &Expr, mutating: &HashSet<String>) -> bool {
             // process_action emits as `&self`, blowing every action
             // dispatch with E0596.
             ExprNode::Case { scrutinee, arms } => {
-                walk(scrutinee, mutating)
-                    || arms.iter().any(|a| walk(&a.body, mutating))
+                walk(scrutinee, mutating) || arms.iter().any(|a| walk(&a.body, mutating))
             }
             ExprNode::Cast { value, .. } => walk(value, mutating),
             _ => false,

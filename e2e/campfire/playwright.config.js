@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
+import { join } from 'node:path'
 
 // Campfire's browser specs. The server lifecycle — transpile, `make
 // assets`, seed, boot Puma, complete `/first_run` — belongs to
@@ -14,8 +15,15 @@ import { defineConfig, devices } from '@playwright/test'
 // behavioural specs assert on. The blog harness runs `fullyParallel`
 // because its specs scope themselves to their own article; campfire has
 // one room and every spec is in it.
+// Resolved here, not only in global-setup.js: the config is evaluated in
+// the runner and in every worker, and specs that open their own browser
+// context read these two straight from the environment.
+process.env.CAMPFIRE_BASE_URL ||= 'http://localhost:3000'
+process.env.CAMPFIRE_AUTH_STATE ||= join(process.cwd(), '.auth', 'state.json')
+
 export default defineConfig({
   testDir: '.',
+  globalSetup: './global-setup.js',
   fullyParallel: false,
   // The 90s timeout override that used to live here worked around the
   // ~30s second-client stall, since closed (docs/pipeline/runtime.md
@@ -30,7 +38,8 @@ export default defineConfig({
   retries: 0,
   reporter: process.env.CI ? [['github'], ['list']] : 'list',
   use: {
-    baseURL: process.env.CAMPFIRE_BASE_URL || 'http://localhost:3000',
+    baseURL: process.env.CAMPFIRE_BASE_URL,
+    storageState: process.env.CAMPFIRE_AUTH_STATE,
     trace: 'on-first-retry',
     // Campfire's own system tests run 1400x1400; the room layout moves
     // its sidebar below a breakpoint and the composer is what most

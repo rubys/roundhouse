@@ -58,6 +58,8 @@ mod assoc_pluck_typed;
 mod action_controller_head;
 #[path = "emit_and_run/sti_global_id.rs"]
 mod sti_global_id;
+#[path = "emit_and_run/sti_form_route.rs"]
+mod sti_form_route;
 #[path = "support/campfire_caches.rs"]
 mod campfire_caches_contract;
 #[path = "emit_and_run/campfire_caches.rs"]

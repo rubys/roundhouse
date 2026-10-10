@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # scripts/campfire-e2e — drive the emitted campfire in a REAL BROWSER.
 #
-# Transpiles ONCE Campfire for the `ruby` target, builds its static
-# assets, seeds an empty schema, boots it under Puma, completes the
-# app's own `/first_run` to create the account, and runs the Playwright
-# specs in `e2e/campfire/` against it.
+# Transpiles ONCE Campfire for one server target, builds what that
+# target needs, seeds an empty schema, completes the app's own
+# `/first_run` to create the account, and runs the same Playwright specs
+# in `e2e/campfire/` against the resulting server.
 #
 # WHY THIS EXISTS, AND WHY IT IS NOT `campfire-cable-walk`. The walk
 # asserts the SERVER's contract — what goes on the wire, including
@@ -37,6 +37,7 @@
 #   APP_PATH   Rails app to transpile. Default: ~/git/once-campfire
 #
 # Options:
+#   --target T   ruby (default), spinel, or rust.
 #   --out DIR    Emit into DIR and keep it (default: a temp dir, removed).
 #   --keep       Keep the temp emit and print its path.
 #   --reuse DIR  Skip transpiling; run against an emit prepared earlier.
@@ -44,9 +45,10 @@
 #   --headed     Run the browser visibly (debugging).
 #   --spec PAT   Only run specs matching PAT (passed to `playwright test`).
 #
-# Requires: cargo, ruby, the sqlite3 CLI, node, and the puma /
-# websocket-driver / nio4r gems. Playwright's chromium is installed on
-# demand into `e2e/campfire/node_modules`.
+# Requires: the sqlite3 CLI, Python 3, node, and Playwright's Chromium.
+# Ruby needs Ruby + Bundler; Spinel needs Bundler + spinel + spin; Rust
+# needs cargo. The relevant emitted bundle is installed before builds.
+# Chromium is installed on demand into `e2e/campfire/node_modules`.
 
 set -euo pipefail
 
@@ -55,6 +57,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SPEC_DIR="$REPO_ROOT/e2e/campfire"
 
 APP="$HOME/git/once-campfire"
+TARGET=ruby
 OUT=""
 KEEP=0
 REUSE=""
@@ -64,6 +67,7 @@ SPEC=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --target) TARGET="$2"; shift 2 ;;
         --out)    OUT="$2"; KEEP=1; shift 2 ;;
         --keep)   KEEP=1;   shift ;;
         --reuse)  REUSE="$2"; shift 2 ;;
@@ -79,8 +83,28 @@ done
 step() { printf '\n\033[1;34m==>\033[0m %s\n' "$1"; }
 fail() { printf '\033[1;31m%s\033[0m\n' "$1"; exit 1; }
 
+case "$TARGET" in
+    ruby|spinel|rust) ;;
+    *) fail "campfire-e2e: --target must be ruby, spinel, or rust (got $TARGET)" ;;
+esac
+
 command -v sqlite3 >/dev/null || fail "campfire-e2e: needs the sqlite3 CLI"
 command -v node    >/dev/null || fail "campfire-e2e: needs node"
+command -v python3 >/dev/null || fail "campfire-e2e: needs python3"
+if [[ "$TARGET" == ruby ]]; then
+    command -v ruby  >/dev/null || fail "campfire-e2e: --target ruby needs ruby"
+    command -v bundle >/dev/null || fail "campfire-e2e: --target ruby needs bundler"
+elif [[ "$TARGET" == spinel ]]; then
+    command -v bundle >/dev/null || fail "campfire-e2e: --target spinel needs bundler for assets"
+fi
+if [[ "$TARGET" == spinel ]]; then
+    command -v spinel >/dev/null || fail "campfire-e2e: --target spinel needs spinel on PATH"
+    command -v spin   >/dev/null || fail "campfire-e2e: --target spinel needs spin on PATH"
+    . "$REPO_ROOT/scripts/lib/spinel-link-path.sh"
+    spinel_link_path
+elif [[ "$TARGET" == rust ]]; then
+    command -v cargo >/dev/null || fail "campfire-e2e: --target rust needs cargo"
+fi
 
 SERVER_PID=""
 cleanup() {
@@ -102,26 +126,48 @@ if [[ -n "$REUSE" ]]; then
 else
     [[ -d "$APP" ]] || fail "campfire-e2e: no app at $APP"
     [[ -z "$OUT" ]] && OUT="$(mktemp -d -t roundhouse-campfire-e2e.XXXXXX)"
-    step "transpiling $APP → $OUT (target: ruby)"
+    step "transpiling $APP → $OUT (target: $TARGET)"
     # `roundhouse -o` does not wipe, and a stale file from an older emit
     # outlives the run that wrote it. Always start clean.
     rm -rf "$OUT"
     roundhouse_run \
-        --target ruby "$APP" -o "$OUT" --allow-unsupported 2>"$OUT.log" | tail -1
+        --target "$TARGET" "$APP" -o "$OUT" --allow-unsupported 2>"$OUT.log" | tail -1
     echo "  emit diagnostics: $OUT.log"
 
-    step "building static assets (make assets)"
-    # The whole point of the harness: a browser asks for every one of
-    # these, and nothing else in the repo does.
-    (cd "$OUT" && make assets) >"$OUT/assets.log" 2>&1 \
-        || { tail -20 "$OUT/assets.log"; fail "make assets failed"; }
-    echo "  $(find "$OUT/static" -type f | wc -l | tr -d ' ') files under static/"
+    case "$TARGET" in
+        ruby)
+            step "installing the emitted Ruby bundle and building assets"
+            # The browser asks for every asset; a stale/missing asset is
+            # a real client failure, not a test-fixture concern.
+            (cd "$OUT" && bundle install && make assets) >"$OUT/build.log" 2>&1 \
+                || { tail -30 "$OUT/build.log"; fail "Ruby bundle/assets build failed"; }
+            ;;
+        spinel)
+            step "installing the emitted bundle, building assets and Spinel binary"
+            (cd "$OUT" && bundle install && make assets && make build) >"$OUT/build.log" 2>&1 \
+                || { tail -30 "$OUT/build.log"; fail "Spinel bundle/assets/build failed"; }
+            ;;
+        rust)
+            step "building the Rust application"
+            (cd "$OUT" && cargo build --release) >"$OUT/build.log" 2>&1 \
+                || { tail -40 "$OUT/build.log"; fail "Rust build failed"; }
+            ;;
+    esac
+    if [[ -d "$OUT/static" ]]; then
+        echo "  $(find "$OUT/static" -type f | wc -l | tr -d ' ') files under static/"
+    fi
 
     step "preparing storage/development.sqlite3 (schema only)"
     mkdir -p "$OUT/storage"
     rm -f "$OUT/storage/development.sqlite3"
     sqlite3 "$OUT/storage/development.sqlite3" < "$OUT/db/seed.sql"
 fi
+
+case "$TARGET" in
+    ruby)   [[ -f "$OUT/config.ru" ]] || fail "reused emit is not a Ruby app (missing config.ru)" ;;
+    spinel) [[ -x "$OUT/build/blog" ]] || fail "reused emit is not a built Spinel app (missing build/blog)" ;;
+    rust)   [[ -x "$OUT/target/release/app" ]] || fail "reused emit is not a built Rust app (missing target/release/app)" ;;
+esac
 
 # Same job posture as the cable walk, and for the same reason: this
 # runtime runs `perform_later` INLINE, so campfire's
@@ -130,7 +176,7 @@ fi
 # `Net::HTTP::Persistent` — a ledgered web-push gap standing in front of
 # a page render it has nothing to do with. Holding jobs is also the
 # closer of the two to Rails, which enqueues and lets a worker run it.
-if ! grep -q "enqueue_without_running" "$OUT/config.ru"; then
+if [[ "$TARGET" == ruby ]] && ! grep -q "enqueue_without_running" "$OUT/config.ru"; then
     step "holding background jobs (see scripts/campfire-cable-walk's header)"
     python3 - "$OUT/config.ru" <<'PY'
 import sys
@@ -146,18 +192,26 @@ fi
 # ── boot ─────────────────────────────────────────────────────────────
 
 if [[ -z "$PORT" ]]; then
-    PORT="$(ruby -rsocket -e 's = TCPServer.new("127.0.0.1", 0); print s.addr[1]; s.close')"
+    PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 fi
 BASE="http://127.0.0.1:$PORT"
 
 step "starting the emit on :$PORT"
 LOG="$OUT/e2e-server.log"
-(
-  cd "$OUT"
-  RAILS_ENV=development \
-  SECRET_KEY_BASE="$(ruby -e 'print "a" * 64')" \
-  exec ruby -S puma -p "$PORT" config.ru
-) >"$LOG" 2>&1 &
+case "$TARGET" in
+    ruby)
+        (cd "$OUT" && RAILS_ENV=development \
+            SECRET_KEY_BASE="$(ruby -e 'print "a" * 64')" \
+            exec ruby -S puma -p "$PORT" config.ru) >"$LOG" 2>&1 &
+        ;;
+    spinel)
+        (cd "$OUT" && BLOG_DB="$OUT/storage/development.sqlite3" PORT="$PORT" \
+            exec ./build/blog) >"$LOG" 2>&1 &
+        ;;
+    rust)
+        (cd "$OUT" && PORT="$PORT" exec ./target/release/app) >"$LOG" 2>&1 &
+        ;;
+esac
 SERVER_PID=$!
 
 for _ in $(seq 1 60); do
@@ -216,6 +270,7 @@ set +e
   CAMPFIRE_BASE_URL="$BASE" \
   CAMPFIRE_EMAIL="$E2E_EMAIL" \
   CAMPFIRE_PASSWORD="$E2E_PASSWORD" \
+  CAMPFIRE_AUTH_STATE="$OUT/e2e-auth-state.json" \
   npx playwright test $HEADED ${SPEC:+"$SPEC"}
 )
 STATUS=$?

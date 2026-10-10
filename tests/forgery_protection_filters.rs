@@ -51,6 +51,22 @@ fn emit(files: Vec<(&str, &str)>) -> Vec<(String, String)> {
         .collect()
 }
 
+fn emit_rust(files: Vec<(&str, &str)>) -> Vec<(String, String)> {
+    let mut all: Vec<(&str, &str)> = vec![
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"rooms\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n"),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+    ];
+    all.extend(files);
+    let tree: HashMap<PathBuf, Vec<u8>> =
+        all.into_iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    roundhouse::emit::rust::emit(&app)
+        .into_iter()
+        .map(|f| (f.path.to_string_lossy().to_string(), f.content))
+        .collect()
+}
+
 fn get(files: &[(String, String)], name: &str) -> String {
     files
         .iter()
@@ -95,7 +111,7 @@ fn the_concern_macro_runs_after_sign_in_under_its_guard_and_halts() {
     // `bot_key?` it is a NoMethodError on every request, which is what
     // the CRuby lane served before the inquirer fact reached controllers.
     assert!(
-        tail.contains(r#"verify_authenticity_token if !(authenticated_by == "bot_key")"#),
+        tail.contains(r#"verify_authenticity_token if !(self.authenticated_by == "bot_key")"#),
         "the `unless:` guard is kept and folded:\n{rooms}"
     );
     assert!(tail.contains("performed?"), "a refused request halts the chain:\n{rooms}");
@@ -105,6 +121,56 @@ fn the_concern_macro_runs_after_sign_in_under_its_guard_and_halts() {
 fn skip_forgery_protection_removes_the_check() {
     let pwa = get(&campfire_shape(), "pwa_controller.rb");
     assert!(!pwa.contains("verify_authenticity_token"), "{pwa}");
+}
+
+#[test]
+fn symbol_guards_emit_as_controller_instance_calls_in_rust() {
+    let input = vec![
+        (
+            "app/controllers/rooms_controller.rb",
+            "class RoomsController < ActionController::Base\n  before_action :verify_request, if: :safe_request_pred, unless: :authenticated_by\n\n  def index\n  end\n\n  def verify_request\n    @verified = true\n  end\n\n  private\n    def safe_request_pred\n      @safe_request\n    end\n\n    def authenticated_by\n      @authenticated\n    end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :rooms, only: [:index]\nend\n",
+        ),
+    ];
+    let ruby = get(&emit(input.clone()), "rooms_controller.rb");
+    assert!(ruby.contains("self.safe_request_pred"), "{ruby}");
+    assert!(ruby.contains("self.authenticated_by"), "{ruby}");
+
+    let rust = emit_rust(input);
+    let controller = rust
+        .iter()
+        .find(|(path, _)| path.ends_with("rooms_controller.rs"))
+        .map(|(_, content)| content)
+        .expect("Rust controller emitted");
+    assert!(controller.contains("self.safe_request_pred()"), "{controller}");
+    assert!(controller.contains("self.authenticated_by()"), "{controller}");
+}
+
+#[test]
+fn forgery_lambda_helper_reads_dispatch_through_the_inherited_controller() {
+    let rust = emit_rust(vec![
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  protect_from_forgery with: :exception, unless: -> { authenticated_by }\n\n  private\n    def authenticated_by\n      @authenticated_by\n    end\nend\n",
+        ),
+        (
+            "app/controllers/rooms_controller.rb",
+            "class RoomsController < ApplicationController\n  def index\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :rooms, only: [:index]\nend\n",
+        ),
+    ]);
+    let controller = rust
+        .iter()
+        .find(|(path, _)| path.ends_with("rooms_controller.rs"))
+        .map(|(_, content)| content)
+        .expect("Rust child controller emitted");
+    assert!(controller.contains("self.authenticated_by()"), "{controller}");
 }
 
 #[test]

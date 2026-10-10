@@ -40,6 +40,12 @@ fn emit_real_blog_rust() -> Vec<EmittedFile> {
 fn view_helpers_nil_pred_and_value_string_coercions_typecheck() {
     let files = emit_real_blog_rust();
     let vh = file(&files, "view_helpers.rs");
+    let http = file(&files, "http.rs");
+
+    assert!(
+        http.contains("impl<T: RubyToS> RubyToS for Option<T>"),
+        "Ruby nil/String union coercions need an Option-aware RubyToS bridge:\n{http}"
+    );
 
     let optional = method_body(&vh, "optional_value_attr");
     assert!(

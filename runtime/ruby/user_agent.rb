@@ -41,7 +41,7 @@ class UserAgentToken
   def initialize(product, version, comment)
     @product = product
     @version = version.nil? || version.empty? ? "" : version
-    @comment = comment.nil? ? [] : comment.split("; ")
+    @comment = comment.nil? ? "".split("; ") : comment.split("; ")
   end
 
   def product
@@ -113,7 +113,7 @@ class UserAgent
   # about the string, so it is computed here and carried.
   def self.parse(string)
     s = string.nil? ? "" : string.strip
-    s = DEFAULT_USER_AGENT if s.empty?
+    s = "#{DEFAULT_USER_AGENT}" if s.empty?
     tokens = []
     # Read through `String#[]` rather than the gem's `MatchData`, and a
     # `while` rather than its `loop do … break`. Same walk — consume the
@@ -125,15 +125,15 @@ class UserAgent
     # `MatchData` spelling left 21 untyped sub-expressions in this one
     # method. Four scans instead of one, on a string of about a dozen
     # tokens, once per request.
-    matched = s[MATCHER, 0]
-    while !matched.nil? && !matched.empty?
+    matched = s[MATCHER, 0].to_s
+    while !matched.empty?
       tokens << UserAgentToken.new(
         s[MATCHER, 1].to_s, s[MATCHER, 2].to_s, s[MATCHER, 3]
       )
       rest = s[matched.length, s.length - matched.length]
       s = rest.nil? ? "" : rest.strip
       break if s.empty?
-      matched = s[MATCHER, 0]
+      matched = s[MATCHER, 0].to_s
     end
     new(tokens, classify(tokens))
   end

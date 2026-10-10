@@ -56,8 +56,9 @@ use crate::diagnostic::Diagnostic;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
-use crate::ident::{ClassId, Symbol};
+use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
+use crate::ty::{Param as TyParam, ParamKind, Ty};
 
 const MODULE: &str = "ActiveModel::Model";
 
@@ -83,6 +84,10 @@ pub fn apply_active_model_model_synthesis(app: &mut App) -> Vec<Diagnostic> {
         }
         let writers = attribute_writers(&lc.methods);
         let owner = lc.name.clone();
+        // Analysis skips a writer with no call site. These writers are
+        // that case: the only assignment is the constructor this pass
+        // is about to add, and the value is the untyped hash slot.
+        stamp_untyped_attr_writers(&mut lc.methods);
         lc.methods.push(attributes_initialize(&owner, Span::synthetic(), &writers));
         if !defines(lc, "valid?") {
             lc.methods.push(constant_predicate(&owner, "valid?", true));
@@ -126,6 +131,39 @@ fn declares_validates(lc: &LibraryClass) -> bool {
     })
 }
 
+/// Fill an `attr_accessor` / `attr_writer` analysis left unsigned.
+///
+/// `stamp_inferred_method_signatures` skips a writer when no call site
+/// taught it a value type. That is the honest type of this declaration:
+/// `attr_accessor` names no column, so the param is `untyped`. A writer
+/// analysis already signed (`attr_writer id: String`) is left alone.
+fn stamp_untyped_attr_writers(methods: &mut [MethodDef]) {
+    for method in methods {
+        if method.kind != AccessorKind::AttributeWriter || method.signature.is_some() {
+            continue;
+        }
+        let Some(param) = method.params.first() else {
+            continue;
+        };
+        let value_ty = Ty::Untyped;
+        if let ExprNode::Assign { value, .. } = &mut *method.body.node {
+            if value.ty.is_none() {
+                value.ty = Some(value_ty.clone());
+            }
+        }
+        method.signature = Some(Ty::Fn {
+            params: vec![TyParam {
+                name: param.name.clone(),
+                ty: value_ty.clone(),
+                kind: ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(value_ty),
+            effects: EffectSet::default(),
+        });
+    }
+}
+
 /// The names a `attr_writer` / `attr_accessor` declared, in declaration
 /// order. Ingest tags those `AccessorKind::AttributeWriter`, so this
 /// reads the tag rather than re-deriving the shape from the body.
@@ -165,35 +203,51 @@ pub(crate) fn attributes_initialize(
     names: &[Symbol],
 ) -> MethodDef {
     let attrs = Symbol::from("attrs");
+    // Known by construction, same bag the schema constructor already
+    // declares: symbol keys, untyped values. Not inferred from `[]` —
+    // String and Array index too. The read is the hash's value type.
+    // Index emit turns a missing key into `Value::Null` for an untyped
+    // slot, so the field stays `Value` rather than a nilable union that
+    // the untyped getter cannot return.
+    let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let read_ty = Ty::Untyped;
     let assigns: Vec<Expr> = names
         .iter()
         .map(|name| {
-            let recv = Expr::new(
+            let mut recv = Expr::new(
                 span,
-                ExprNode::Var { id: crate::ident::VarId(0), name: attrs.clone() },
+                ExprNode::Var { id: VarId(0), name: attrs.clone() },
             );
+            recv.ty = Some(attrs_ty.clone());
+            let mut key = Expr::new(
+                span,
+                ExprNode::Lit { value: Literal::Sym { value: name.clone() } },
+            );
+            key.ty = Some(Ty::Sym);
             // `attrs[:name]` as the `[]` send every target already
-            // lowers — there is no Index node.
-            let read = Expr::new(
+            // lowers — there is no Index node. Receiver and result types
+            // are the signature's, stamped here. Index emit reads
+            // `recv.ty`; it does not infer a Hash from `[]`.
+            let mut read = Expr::new(
                 span,
                 ExprNode::Send {
                     recv: Some(recv),
                     method: Symbol::from("[]"),
-                    args: vec![Expr::new(
-                        span,
-                        ExprNode::Lit { value: Literal::Sym { value: name.clone() } },
-                    )],
+                    args: vec![key],
                     block: None,
                     parenthesized: true,
                 },
             );
-            Expr::new(
+            read.ty = Some(read_ty.clone());
+            let mut assign = Expr::new(
                 span,
                 ExprNode::Assign { target: LValue::Ivar { name: name.clone() }, value: read },
-            )
+            );
+            assign.ty = Some(read_ty.clone());
+            assign
         })
         .collect();
-    let mut param = Param::positional(attrs);
+    let mut param = Param::positional(attrs.clone());
     param.default =
         Some(Expr::new(span, ExprNode::Hash { entries: Vec::new(), kwargs: false }));
     MethodDef {
@@ -205,7 +259,16 @@ pub(crate) fn attributes_initialize(
         receiver: MethodReceiver::Instance,
         params: vec![param],
         body: Expr::new(span, ExprNode::Seq { exprs: assigns }),
-        signature: None,
+        signature: Some(Ty::Fn {
+            params: vec![TyParam {
+                name: attrs,
+                ty: attrs_ty,
+                kind: ParamKind::Optional,
+            }],
+            block: None,
+            ret: Box::new(Ty::Nil),
+            effects: EffectSet::default(),
+        }),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,

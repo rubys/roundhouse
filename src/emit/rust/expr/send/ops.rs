@@ -10,7 +10,7 @@
 
 use crate::expr::{Expr, ExprNode};
 
-use super::super::util::peel_nil;
+use super::super::util::{escape_rust_keyword, peel_nil};
 use super::super::{emit_expr, in_constructor, ivar_field_ty};
 use super::coerce::coerce_arg_for_field_ty;
 
@@ -41,7 +41,36 @@ pub(super) fn try_constructor_field_assign(
         Some(fty) => coerce_arg_for_field_ty(&args[0], &fty),
         None => emit_expr(&args[0]),
     };
-    Some(format!("let {field} = {rhs}"))
+    Some(format!("let {} = {rhs}", escape_rust_keyword(field)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::try_constructor_field_assign;
+    use crate::emit::rust::ctx::EmitCtx;
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::span::Span;
+
+    #[test]
+    fn constructor_field_assignment_escapes_rust_keywords() {
+        let span = Span::default();
+        let receiver = Expr::new(span, ExprNode::SelfRef);
+        let value = Expr::new(
+            span,
+            ExprNode::Lit {
+                value: Literal::Int { value: 1 },
+            },
+        );
+
+        crate::emit::rust::expr::with_emit_ctx(EmitCtx::default(), || {
+            crate::emit::rust::expr::with_constructor_mode(vec![], || {
+                assert_eq!(
+                    try_constructor_field_assign(Some(&receiver), "type=", &[value]),
+                    Some("let r#type = 1_i64".to_string()),
+                );
+            });
+        });
+    }
 }
 
 /// Stdlib class-method bridges: `Time.now`, `JSON.generate`,
@@ -59,7 +88,10 @@ pub(super) fn try_stdlib_class_method(
         match (last, method, args.len()) {
             ("Time", "now", 0) => return Some("chrono::Utc::now()".to_string()),
             ("JSON", "generate" | "dump" | "fast_generate", 1) => {
-                return Some(format!("serde_json::to_string(&{}).unwrap()", emit_expr(&args[0])));
+                return Some(format!(
+                    "serde_json::to_string(&{}).unwrap()",
+                    emit_expr(&args[0])
+                ));
             }
             ("JSON", "pretty_generate", 1) => {
                 return Some(format!(
@@ -121,7 +153,13 @@ fn recv_is_time(e: &Expr) -> bool {
     ) {
         return true;
     }
-    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node {
+    if let ExprNode::Send {
+        recv: Some(r),
+        method,
+        args,
+        ..
+    } = &*e.node
+    {
         if args.is_empty() {
             if let ExprNode::Const { path } = &*r.node {
                 if path.last().map(|s| s.as_str()) == Some("Time") && method.as_str() == "now" {
@@ -152,6 +190,25 @@ pub(super) fn try_binary_operator(
     if args.len() != 1 {
         return None;
     }
+    // Ruby's `string =~ /pattern/` returns the match offset or nil. In
+    // condition position the only observable distinction is truthiness;
+    // emit the regex predicate directly rather than the invalid Rust
+    // method spelling `. =~(...)` (the full offset/nil value semantics
+    // remain a separate coercion concern).
+    if method == "=~"
+        && matches!(
+            &*args[0].node,
+            ExprNode::Lit {
+                value: crate::expr::Literal::Regex { .. }
+            }
+        )
+    {
+        return Some(format!(
+            "({}).is_match(&({}))",
+            emit_expr(&args[0]),
+            emit_expr(r)
+        ));
+    }
     if method == "+"
         && matches!(
             r.ty.as_ref(),
@@ -170,7 +227,12 @@ pub(super) fn try_binary_operator(
     // `unwrap_or_default()` preserves the answer on both sides.
     if matches!(method, "==" | "!=") {
         let is_str_lit = |e: &Expr| {
-            matches!(&*e.node, ExprNode::Lit { value: crate::expr::Literal::Str { .. } })
+            matches!(
+                &*e.node,
+                ExprNode::Lit {
+                    value: crate::expr::Literal::Str { .. }
+                }
+            )
         };
         let is_nilable_str = |e: &Expr| {
             matches!(
@@ -267,11 +329,7 @@ pub(super) fn try_binary_operator(
 /// Unary `!` — `!cond` in Ruby lowers as `Send { recv: cond, method:
 /// "!", args: [] }`. Rust uses the same `!` operator syntactically
 /// but as a prefix unary, not a method call.
-pub(super) fn try_unary_not(
-    recv: Option<&Expr>,
-    method: &str,
-    args: &[Expr],
-) -> Option<String> {
+pub(super) fn try_unary_not(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Option<String> {
     if method != "!" {
         return None;
     }
@@ -293,21 +351,33 @@ pub(super) fn try_unary_not(
 /// is coerced to the elem type so `push()` type-checks:
 /// `Vec<String>::push` wants owned `String`, but the body-typer
 /// often hands us `&str` literals or borrowed `&str`.
-pub(super) fn try_array_push(
-    recv: Option<&Expr>,
-    method: &str,
-    args: &[Expr],
-) -> Option<String> {
+pub(super) fn try_array_push(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Option<String> {
     if method != "<<" || args.len() != 1 {
         return None;
     }
     let r = recv?;
+    // The generated Active Record shim's `errors()` returns a snapshot
+    // Vec, so `errors().push(...)` would mutate a discarded copy. The
+    // validation lowering uses `errors << message` for both Rails-style
+    // model validation errors and the ActiveModel validation module;
+    // route that reader shape to the shared buffer the generated `save`
+    // path consumes. Keep this narrow: arbitrary untyped `<<` calls must
+    // not be reinterpreted as vector appends.
+    if matches!(
+        &*r.node,
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "errors" && args.is_empty()
+    ) {
+        return Some(format!(
+            "crate::errors_ext::validation_errors_push(({}).to_string())",
+            emit_expr(&args[0])
+        ));
+    }
     let ivar_ty = match &*r.node {
         ExprNode::Ivar { name } => ivar_field_ty(name.as_str()),
         _ => None,
     };
-    let Some(crate::ty::Ty::Array { elem }) =
-        ivar_ty.as_ref().or(r.ty.as_ref()).map(peel_nil)
+    let Some(crate::ty::Ty::Array { elem }) = ivar_ty.as_ref().or(r.ty.as_ref()).map(peel_nil)
     else {
         return None;
     };
@@ -325,7 +395,11 @@ pub(super) fn try_array_push(
     // `comments()` body's `results << instance` loop — results
     // stayed empty across iterations and the cascade-delete in
     // `before_destroy` never reached the rows).
-    Some(format!("{}.push({})", super::super::emit_send_recv(r), arg_rendered))
+    Some(format!(
+        "{}.push({})",
+        super::super::emit_send_recv(r),
+        arg_rendered
+    ))
 }
 
 /// String append: `io << s` Ruby idiom → `io.push_str(&s)` in Rust.
@@ -353,6 +427,16 @@ pub(super) fn try_string_append(
         return None;
     }
     let r = recv?;
+    if matches!(
+        r.ty.as_ref(),
+        Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "StringIO"
+    ) {
+        return Some(format!(
+            "{}.append(&({}))",
+            super::super::emit_send_recv(r),
+            emit_expr(&args[0])
+        ));
+    }
     if !matches!(r.ty.as_ref(), Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)) {
         return None;
     }
@@ -382,10 +466,15 @@ pub(super) fn try_string_append(
     }
     let arg_rendered = match arg.ty.as_ref() {
         Some(crate::ty::Ty::Str | crate::ty::Ty::Sym) => match &*arg.node {
-            ExprNode::Lit { value: crate::expr::Literal::Str { .. } } => emit_expr(arg),
+            ExprNode::Lit {
+                value: crate::expr::Literal::Str { .. },
+            } => emit_expr(arg),
             _ => format!("&{}", emit_expr(arg)),
         },
         _ => format!("&{}.to_string()", emit_expr(arg)),
     };
-    Some(format!("{}.push_str({arg_rendered})", super::super::emit_send_recv(r)))
+    Some(format!(
+        "{}.push_str({arg_rendered})",
+        super::super::emit_send_recv(r)
+    ))
 }

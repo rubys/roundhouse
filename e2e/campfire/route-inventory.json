@@ -1,0 +1,1623 @@
+{
+  "schema_version": 1,
+  "source": {
+    "campfire_sha": "32b4144b5206304fa8d4c67455a753e2d3c16635",
+    "rails_version": "8.2.0.alpha",
+    "rails_revision": "e3d5c569d217c56c022b04acb127a8c24dbe9685",
+    "routes_sha256": "566178b1d7d9ad736f249f1836dd734d412920ebd1ca7b3f768769894ff4ecb7",
+    "gemfile_lock_sha256": "fb219391217fc7daf227e437b7bd7fcc0544c5c26ee08af5a8ac9d6f15b88be6"
+  },
+  "counts": {
+    "action_cable": 1,
+    "campfire": 150,
+    "rails_health": 1,
+    "turbo_native": 3,
+    "action_mailbox": 6,
+    "rails_conductor": 8,
+    "active_storage": 9
+  },
+  "routes": [
+    {
+      "order": 1,
+      "name": null,
+      "verb": "",
+      "path": "/cable",
+      "controller": null,
+      "action": null,
+      "scope": "action_cable"
+    },
+    {
+      "order": 2,
+      "name": "root",
+      "verb": "GET",
+      "path": "/",
+      "controller": "welcome",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 3,
+      "name": "new_first_run",
+      "verb": "GET",
+      "path": "/first_run/new(.:format)",
+      "controller": "first_runs",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 4,
+      "name": "edit_first_run",
+      "verb": "GET",
+      "path": "/first_run/edit(.:format)",
+      "controller": "first_runs",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 5,
+      "name": "first_run",
+      "verb": "GET",
+      "path": "/first_run(.:format)",
+      "controller": "first_runs",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 6,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/first_run(.:format)",
+      "controller": "first_runs",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 7,
+      "name": null,
+      "verb": "PUT",
+      "path": "/first_run(.:format)",
+      "controller": "first_runs",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 8,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/first_run(.:format)",
+      "controller": "first_runs",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 9,
+      "name": null,
+      "verb": "POST",
+      "path": "/first_run(.:format)",
+      "controller": "first_runs",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 10,
+      "name": "session_transfer",
+      "verb": "GET",
+      "path": "/session/transfers/:id(.:format)",
+      "controller": "sessions/transfers",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 11,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/session/transfers/:id(.:format)",
+      "controller": "sessions/transfers",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 12,
+      "name": null,
+      "verb": "PUT",
+      "path": "/session/transfers/:id(.:format)",
+      "controller": "sessions/transfers",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 13,
+      "name": "new_session",
+      "verb": "GET",
+      "path": "/session/new(.:format)",
+      "controller": "sessions",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 14,
+      "name": "edit_session",
+      "verb": "GET",
+      "path": "/session/edit(.:format)",
+      "controller": "sessions",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 15,
+      "name": "session",
+      "verb": "GET",
+      "path": "/session(.:format)",
+      "controller": "sessions",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 16,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/session(.:format)",
+      "controller": "sessions",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 17,
+      "name": null,
+      "verb": "PUT",
+      "path": "/session(.:format)",
+      "controller": "sessions",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 18,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/session(.:format)",
+      "controller": "sessions",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 19,
+      "name": null,
+      "verb": "POST",
+      "path": "/session(.:format)",
+      "controller": "sessions",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 20,
+      "name": "account_users",
+      "verb": "GET",
+      "path": "/account/users(.:format)",
+      "controller": "accounts/users",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 21,
+      "name": null,
+      "verb": "POST",
+      "path": "/account/users(.:format)",
+      "controller": "accounts/users",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 22,
+      "name": "new_account_user",
+      "verb": "GET",
+      "path": "/account/users/new(.:format)",
+      "controller": "accounts/users",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 23,
+      "name": "edit_account_user",
+      "verb": "GET",
+      "path": "/account/users/:id/edit(.:format)",
+      "controller": "accounts/users",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 24,
+      "name": "account_user",
+      "verb": "GET",
+      "path": "/account/users/:id(.:format)",
+      "controller": "accounts/users",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 25,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/account/users/:id(.:format)",
+      "controller": "accounts/users",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 26,
+      "name": null,
+      "verb": "PUT",
+      "path": "/account/users/:id(.:format)",
+      "controller": "accounts/users",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 27,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/account/users/:id(.:format)",
+      "controller": "accounts/users",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 28,
+      "name": "account_bot_key",
+      "verb": "PATCH",
+      "path": "/account/bots/:bot_id/key(.:format)",
+      "controller": "accounts/bots/keys",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 29,
+      "name": null,
+      "verb": "PUT",
+      "path": "/account/bots/:bot_id/key(.:format)",
+      "controller": "accounts/bots/keys",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 30,
+      "name": "account_bots",
+      "verb": "GET",
+      "path": "/account/bots(.:format)",
+      "controller": "accounts/bots",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 31,
+      "name": null,
+      "verb": "POST",
+      "path": "/account/bots(.:format)",
+      "controller": "accounts/bots",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 32,
+      "name": "new_account_bot",
+      "verb": "GET",
+      "path": "/account/bots/new(.:format)",
+      "controller": "accounts/bots",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 33,
+      "name": "edit_account_bot",
+      "verb": "GET",
+      "path": "/account/bots/:id/edit(.:format)",
+      "controller": "accounts/bots",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 34,
+      "name": "account_bot",
+      "verb": "GET",
+      "path": "/account/bots/:id(.:format)",
+      "controller": "accounts/bots",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 35,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/account/bots/:id(.:format)",
+      "controller": "accounts/bots",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 36,
+      "name": null,
+      "verb": "PUT",
+      "path": "/account/bots/:id(.:format)",
+      "controller": "accounts/bots",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 37,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/account/bots/:id(.:format)",
+      "controller": "accounts/bots",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 38,
+      "name": "account_join_code",
+      "verb": "POST",
+      "path": "/account/join_code(.:format)",
+      "controller": "accounts/join_codes",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 39,
+      "name": "account_logo",
+      "verb": "GET",
+      "path": "/account/logo(.:format)",
+      "controller": "accounts/logos",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 40,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/account/logo(.:format)",
+      "controller": "accounts/logos",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 41,
+      "name": "edit_account_custom_styles",
+      "verb": "GET",
+      "path": "/account/custom_styles/edit(.:format)",
+      "controller": "accounts/custom_styles",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 42,
+      "name": "account_custom_styles",
+      "verb": "PATCH",
+      "path": "/account/custom_styles(.:format)",
+      "controller": "accounts/custom_styles",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 43,
+      "name": null,
+      "verb": "PUT",
+      "path": "/account/custom_styles(.:format)",
+      "controller": "accounts/custom_styles",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 44,
+      "name": "new_account",
+      "verb": "GET",
+      "path": "/account/new(.:format)",
+      "controller": "accounts",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 45,
+      "name": "edit_account",
+      "verb": "GET",
+      "path": "/account/edit(.:format)",
+      "controller": "accounts",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 46,
+      "name": "account",
+      "verb": "GET",
+      "path": "/account(.:format)",
+      "controller": "accounts",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 47,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/account(.:format)",
+      "controller": "accounts",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 48,
+      "name": null,
+      "verb": "PUT",
+      "path": "/account(.:format)",
+      "controller": "accounts",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 49,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/account(.:format)",
+      "controller": "accounts",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 50,
+      "name": null,
+      "verb": "POST",
+      "path": "/account(.:format)",
+      "controller": "accounts",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 51,
+      "name": "join",
+      "verb": "GET",
+      "path": "/join/:join_code(.:format)",
+      "controller": "users",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 52,
+      "name": null,
+      "verb": "POST",
+      "path": "/join/:join_code(.:format)",
+      "controller": "users",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 53,
+      "name": "qr_code",
+      "verb": "GET",
+      "path": "/qr_code/:id(.:format)",
+      "controller": "qr_code",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 54,
+      "name": "user_avatar",
+      "verb": "GET",
+      "path": "/users/:user_id/avatar(.:format)",
+      "controller": "users/avatars",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 55,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/users/:user_id/avatar(.:format)",
+      "controller": "users/avatars",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 56,
+      "name": "user_ban",
+      "verb": "DELETE",
+      "path": "/users/:user_id/ban(.:format)",
+      "controller": "users/bans",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 57,
+      "name": null,
+      "verb": "POST",
+      "path": "/users/:user_id/ban(.:format)",
+      "controller": "users/bans",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 58,
+      "name": "user_sidebar",
+      "verb": "GET",
+      "path": "/users/:user_id/sidebar(.:format)",
+      "controller": "users/sidebars",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 59,
+      "name": "new_user_profile",
+      "verb": "GET",
+      "path": "/users/:user_id/profile/new(.:format)",
+      "controller": "users/profiles",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 60,
+      "name": "edit_user_profile",
+      "verb": "GET",
+      "path": "/users/:user_id/profile/edit(.:format)",
+      "controller": "users/profiles",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 61,
+      "name": "user_profile",
+      "verb": "GET",
+      "path": "/users/:user_id/profile(.:format)",
+      "controller": "users/profiles",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 62,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/users/:user_id/profile(.:format)",
+      "controller": "users/profiles",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 63,
+      "name": null,
+      "verb": "PUT",
+      "path": "/users/:user_id/profile(.:format)",
+      "controller": "users/profiles",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 64,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/users/:user_id/profile(.:format)",
+      "controller": "users/profiles",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 65,
+      "name": null,
+      "verb": "POST",
+      "path": "/users/:user_id/profile(.:format)",
+      "controller": "users/profiles",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 66,
+      "name": "user_push_subscription_test_notifications",
+      "verb": "POST",
+      "path": "/users/:user_id/push_subscriptions/:push_subscription_id/test_notifications(.:format)",
+      "controller": "users/push_subscriptions/test_notifications",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 67,
+      "name": "user_push_subscriptions",
+      "verb": "GET",
+      "path": "/users/:user_id/push_subscriptions(.:format)",
+      "controller": "users/push_subscriptions",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 68,
+      "name": null,
+      "verb": "POST",
+      "path": "/users/:user_id/push_subscriptions(.:format)",
+      "controller": "users/push_subscriptions",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 69,
+      "name": "new_user_push_subscription",
+      "verb": "GET",
+      "path": "/users/:user_id/push_subscriptions/new(.:format)",
+      "controller": "users/push_subscriptions",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 70,
+      "name": "edit_user_push_subscription",
+      "verb": "GET",
+      "path": "/users/:user_id/push_subscriptions/:id/edit(.:format)",
+      "controller": "users/push_subscriptions",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 71,
+      "name": "user_push_subscription",
+      "verb": "GET",
+      "path": "/users/:user_id/push_subscriptions/:id(.:format)",
+      "controller": "users/push_subscriptions",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 72,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/users/:user_id/push_subscriptions/:id(.:format)",
+      "controller": "users/push_subscriptions",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 73,
+      "name": null,
+      "verb": "PUT",
+      "path": "/users/:user_id/push_subscriptions/:id(.:format)",
+      "controller": "users/push_subscriptions",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 74,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/users/:user_id/push_subscriptions/:id(.:format)",
+      "controller": "users/push_subscriptions",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 75,
+      "name": "user",
+      "verb": "GET",
+      "path": "/users/:id(.:format)",
+      "controller": "users",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 76,
+      "name": "autocompletable_users",
+      "verb": "GET",
+      "path": "/autocompletable/users(.:format)",
+      "controller": "autocompletable/users",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 77,
+      "name": "room_messages",
+      "verb": "GET",
+      "path": "/rooms/:room_id/messages(.:format)",
+      "controller": "messages",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 78,
+      "name": null,
+      "verb": "POST",
+      "path": "/rooms/:room_id/messages(.:format)",
+      "controller": "messages",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 79,
+      "name": "new_room_message",
+      "verb": "GET",
+      "path": "/rooms/:room_id/messages/new(.:format)",
+      "controller": "messages",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 80,
+      "name": "edit_room_message",
+      "verb": "GET",
+      "path": "/rooms/:room_id/messages/:id/edit(.:format)",
+      "controller": "messages",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 81,
+      "name": "room_message",
+      "verb": "GET",
+      "path": "/rooms/:room_id/messages/:id(.:format)",
+      "controller": "messages",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 82,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/rooms/:room_id/messages/:id(.:format)",
+      "controller": "messages",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 83,
+      "name": null,
+      "verb": "PUT",
+      "path": "/rooms/:room_id/messages/:id(.:format)",
+      "controller": "messages",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 84,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/rooms/:room_id/messages/:id(.:format)",
+      "controller": "messages",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 85,
+      "name": "room_bot_message_boosts",
+      "verb": "POST",
+      "path": "/rooms/:room_id/:bot_key/messages/:message_id/boosts(.:format)",
+      "controller": "messages/boosts/by_bots",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 86,
+      "name": "room_bot_message_boost",
+      "verb": "DELETE",
+      "path": "/rooms/:room_id/:bot_key/messages/:message_id/boosts/:id(.:format)",
+      "controller": "messages/boosts/by_bots",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 87,
+      "name": "room_bot_messages",
+      "verb": "GET",
+      "path": "/rooms/:room_id/:bot_key/messages(.:format)",
+      "controller": "messages/by_bots",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 88,
+      "name": null,
+      "verb": "POST",
+      "path": "/rooms/:room_id/:bot_key/messages(.:format)",
+      "controller": "messages/by_bots",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 89,
+      "name": "room_bot_message",
+      "verb": "PATCH",
+      "path": "/rooms/:room_id/:bot_key/messages/:id(.:format)",
+      "controller": "messages/by_bots",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 90,
+      "name": null,
+      "verb": "PUT",
+      "path": "/rooms/:room_id/:bot_key/messages/:id(.:format)",
+      "controller": "messages/by_bots",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 91,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/rooms/:room_id/:bot_key/messages/:id(.:format)",
+      "controller": "messages/by_bots",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 92,
+      "name": "room_refresh",
+      "verb": "GET",
+      "path": "/rooms/:room_id/refresh(.:format)",
+      "controller": "rooms/refreshes",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 93,
+      "name": "room_settings",
+      "verb": "GET",
+      "path": "/rooms/:room_id/settings(.:format)",
+      "controller": "rooms/settings",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 94,
+      "name": "room_involvement",
+      "verb": "GET",
+      "path": "/rooms/:room_id/involvement(.:format)",
+      "controller": "rooms/involvements",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 95,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/rooms/:room_id/involvement(.:format)",
+      "controller": "rooms/involvements",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 96,
+      "name": null,
+      "verb": "PUT",
+      "path": "/rooms/:room_id/involvement(.:format)",
+      "controller": "rooms/involvements",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 97,
+      "name": "room_at_message",
+      "verb": "GET",
+      "path": "/rooms/:room_id/@:message_id(.:format)",
+      "controller": "rooms",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 98,
+      "name": "rooms",
+      "verb": "GET",
+      "path": "/rooms(.:format)",
+      "controller": "rooms",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 99,
+      "name": null,
+      "verb": "POST",
+      "path": "/rooms(.:format)",
+      "controller": "rooms",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 100,
+      "name": "new_room",
+      "verb": "GET",
+      "path": "/rooms/new(.:format)",
+      "controller": "rooms",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 101,
+      "name": "edit_room",
+      "verb": "GET",
+      "path": "/rooms/:id/edit(.:format)",
+      "controller": "rooms",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 102,
+      "name": "room",
+      "verb": "GET",
+      "path": "/rooms/:id(.:format)",
+      "controller": "rooms",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 103,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/rooms/:id(.:format)",
+      "controller": "rooms",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 104,
+      "name": null,
+      "verb": "PUT",
+      "path": "/rooms/:id(.:format)",
+      "controller": "rooms",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 105,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/rooms/:id(.:format)",
+      "controller": "rooms",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 106,
+      "name": "rooms_opens",
+      "verb": "GET",
+      "path": "/rooms/opens(.:format)",
+      "controller": "rooms/opens",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 107,
+      "name": null,
+      "verb": "POST",
+      "path": "/rooms/opens(.:format)",
+      "controller": "rooms/opens",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 108,
+      "name": "new_rooms_open",
+      "verb": "GET",
+      "path": "/rooms/opens/new(.:format)",
+      "controller": "rooms/opens",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 109,
+      "name": "edit_rooms_open",
+      "verb": "GET",
+      "path": "/rooms/opens/:id/edit(.:format)",
+      "controller": "rooms/opens",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 110,
+      "name": "rooms_open",
+      "verb": "GET",
+      "path": "/rooms/opens/:id(.:format)",
+      "controller": "rooms/opens",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 111,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/rooms/opens/:id(.:format)",
+      "controller": "rooms/opens",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 112,
+      "name": null,
+      "verb": "PUT",
+      "path": "/rooms/opens/:id(.:format)",
+      "controller": "rooms/opens",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 113,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/rooms/opens/:id(.:format)",
+      "controller": "rooms/opens",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 114,
+      "name": "rooms_closeds",
+      "verb": "GET",
+      "path": "/rooms/closeds(.:format)",
+      "controller": "rooms/closeds",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 115,
+      "name": null,
+      "verb": "POST",
+      "path": "/rooms/closeds(.:format)",
+      "controller": "rooms/closeds",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 116,
+      "name": "new_rooms_closed",
+      "verb": "GET",
+      "path": "/rooms/closeds/new(.:format)",
+      "controller": "rooms/closeds",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 117,
+      "name": "edit_rooms_closed",
+      "verb": "GET",
+      "path": "/rooms/closeds/:id/edit(.:format)",
+      "controller": "rooms/closeds",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 118,
+      "name": "rooms_closed",
+      "verb": "GET",
+      "path": "/rooms/closeds/:id(.:format)",
+      "controller": "rooms/closeds",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 119,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/rooms/closeds/:id(.:format)",
+      "controller": "rooms/closeds",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 120,
+      "name": null,
+      "verb": "PUT",
+      "path": "/rooms/closeds/:id(.:format)",
+      "controller": "rooms/closeds",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 121,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/rooms/closeds/:id(.:format)",
+      "controller": "rooms/closeds",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 122,
+      "name": "rooms_directs",
+      "verb": "GET",
+      "path": "/rooms/directs(.:format)",
+      "controller": "rooms/directs",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 123,
+      "name": null,
+      "verb": "POST",
+      "path": "/rooms/directs(.:format)",
+      "controller": "rooms/directs",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 124,
+      "name": "new_rooms_direct",
+      "verb": "GET",
+      "path": "/rooms/directs/new(.:format)",
+      "controller": "rooms/directs",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 125,
+      "name": "edit_rooms_direct",
+      "verb": "GET",
+      "path": "/rooms/directs/:id/edit(.:format)",
+      "controller": "rooms/directs",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 126,
+      "name": "rooms_direct",
+      "verb": "GET",
+      "path": "/rooms/directs/:id(.:format)",
+      "controller": "rooms/directs",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 127,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/rooms/directs/:id(.:format)",
+      "controller": "rooms/directs",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 128,
+      "name": null,
+      "verb": "PUT",
+      "path": "/rooms/directs/:id(.:format)",
+      "controller": "rooms/directs",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 129,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/rooms/directs/:id(.:format)",
+      "controller": "rooms/directs",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 130,
+      "name": "message_boosts",
+      "verb": "GET",
+      "path": "/messages/:message_id/boosts(.:format)",
+      "controller": "messages/boosts",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 131,
+      "name": null,
+      "verb": "POST",
+      "path": "/messages/:message_id/boosts(.:format)",
+      "controller": "messages/boosts",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 132,
+      "name": "new_message_boost",
+      "verb": "GET",
+      "path": "/messages/:message_id/boosts/new(.:format)",
+      "controller": "messages/boosts",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 133,
+      "name": "edit_message_boost",
+      "verb": "GET",
+      "path": "/messages/:message_id/boosts/:id/edit(.:format)",
+      "controller": "messages/boosts",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 134,
+      "name": "message_boost",
+      "verb": "GET",
+      "path": "/messages/:message_id/boosts/:id(.:format)",
+      "controller": "messages/boosts",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 135,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/messages/:message_id/boosts/:id(.:format)",
+      "controller": "messages/boosts",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 136,
+      "name": null,
+      "verb": "PUT",
+      "path": "/messages/:message_id/boosts/:id(.:format)",
+      "controller": "messages/boosts",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 137,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/messages/:message_id/boosts/:id(.:format)",
+      "controller": "messages/boosts",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 138,
+      "name": "messages",
+      "verb": "GET",
+      "path": "/messages(.:format)",
+      "controller": "messages",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 139,
+      "name": null,
+      "verb": "POST",
+      "path": "/messages(.:format)",
+      "controller": "messages",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 140,
+      "name": "new_message",
+      "verb": "GET",
+      "path": "/messages/new(.:format)",
+      "controller": "messages",
+      "action": "new",
+      "scope": "campfire"
+    },
+    {
+      "order": 141,
+      "name": "edit_message",
+      "verb": "GET",
+      "path": "/messages/:id/edit(.:format)",
+      "controller": "messages",
+      "action": "edit",
+      "scope": "campfire"
+    },
+    {
+      "order": 142,
+      "name": "message",
+      "verb": "GET",
+      "path": "/messages/:id(.:format)",
+      "controller": "messages",
+      "action": "show",
+      "scope": "campfire"
+    },
+    {
+      "order": 143,
+      "name": null,
+      "verb": "PATCH",
+      "path": "/messages/:id(.:format)",
+      "controller": "messages",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 144,
+      "name": null,
+      "verb": "PUT",
+      "path": "/messages/:id(.:format)",
+      "controller": "messages",
+      "action": "update",
+      "scope": "campfire"
+    },
+    {
+      "order": 145,
+      "name": null,
+      "verb": "DELETE",
+      "path": "/messages/:id(.:format)",
+      "controller": "messages",
+      "action": "destroy",
+      "scope": "campfire"
+    },
+    {
+      "order": 146,
+      "name": "clear_searches",
+      "verb": "DELETE",
+      "path": "/searches/clear(.:format)",
+      "controller": "searches",
+      "action": "clear",
+      "scope": "campfire"
+    },
+    {
+      "order": 147,
+      "name": "searches",
+      "verb": "GET",
+      "path": "/searches(.:format)",
+      "controller": "searches",
+      "action": "index",
+      "scope": "campfire"
+    },
+    {
+      "order": 148,
+      "name": null,
+      "verb": "POST",
+      "path": "/searches(.:format)",
+      "controller": "searches",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 149,
+      "name": "unfurl_link",
+      "verb": "POST",
+      "path": "/unfurl_link(.:format)",
+      "controller": "unfurl_links",
+      "action": "create",
+      "scope": "campfire"
+    },
+    {
+      "order": 150,
+      "name": "webmanifest",
+      "verb": "GET",
+      "path": "/webmanifest(.:format)",
+      "controller": "pwa",
+      "action": "manifest",
+      "scope": "campfire"
+    },
+    {
+      "order": 151,
+      "name": "service_worker",
+      "verb": "GET",
+      "path": "/service-worker(.:format)",
+      "controller": "pwa",
+      "action": "service_worker",
+      "scope": "campfire"
+    },
+    {
+      "order": 152,
+      "name": "rails_health_check",
+      "verb": "GET",
+      "path": "/up(.:format)",
+      "controller": "rails/health",
+      "action": "show",
+      "scope": "rails_health"
+    },
+    {
+      "order": 153,
+      "name": "turbo_recede_historical_location",
+      "verb": "GET",
+      "path": "/recede_historical_location(.:format)",
+      "controller": "turbo/native/navigation",
+      "action": "recede",
+      "scope": "turbo_native"
+    },
+    {
+      "order": 154,
+      "name": "turbo_resume_historical_location",
+      "verb": "GET",
+      "path": "/resume_historical_location(.:format)",
+      "controller": "turbo/native/navigation",
+      "action": "resume",
+      "scope": "turbo_native"
+    },
+    {
+      "order": 155,
+      "name": "turbo_refresh_historical_location",
+      "verb": "GET",
+      "path": "/refresh_historical_location(.:format)",
+      "controller": "turbo/native/navigation",
+      "action": "refresh",
+      "scope": "turbo_native"
+    },
+    {
+      "order": 156,
+      "name": "rails_postmark_inbound_emails",
+      "verb": "POST",
+      "path": "/rails/action_mailbox/postmark/inbound_emails(.:format)",
+      "controller": "action_mailbox/ingresses/postmark/inbound_emails",
+      "action": "create",
+      "scope": "action_mailbox"
+    },
+    {
+      "order": 157,
+      "name": "rails_relay_inbound_emails",
+      "verb": "POST",
+      "path": "/rails/action_mailbox/relay/inbound_emails(.:format)",
+      "controller": "action_mailbox/ingresses/relay/inbound_emails",
+      "action": "create",
+      "scope": "action_mailbox"
+    },
+    {
+      "order": 158,
+      "name": "rails_sendgrid_inbound_emails",
+      "verb": "POST",
+      "path": "/rails/action_mailbox/sendgrid/inbound_emails(.:format)",
+      "controller": "action_mailbox/ingresses/sendgrid/inbound_emails",
+      "action": "create",
+      "scope": "action_mailbox"
+    },
+    {
+      "order": 159,
+      "name": "rails_mandrill_inbound_health_check",
+      "verb": "GET",
+      "path": "/rails/action_mailbox/mandrill/inbound_emails(.:format)",
+      "controller": "action_mailbox/ingresses/mandrill/inbound_emails",
+      "action": "health_check",
+      "scope": "action_mailbox"
+    },
+    {
+      "order": 160,
+      "name": "rails_mandrill_inbound_emails",
+      "verb": "POST",
+      "path": "/rails/action_mailbox/mandrill/inbound_emails(.:format)",
+      "controller": "action_mailbox/ingresses/mandrill/inbound_emails",
+      "action": "create",
+      "scope": "action_mailbox"
+    },
+    {
+      "order": 161,
+      "name": "rails_mailgun_inbound_emails",
+      "verb": "POST",
+      "path": "/rails/action_mailbox/mailgun/inbound_emails/mime(.:format)",
+      "controller": "action_mailbox/ingresses/mailgun/inbound_emails",
+      "action": "create",
+      "scope": "action_mailbox"
+    },
+    {
+      "order": 162,
+      "name": "rails_conductor_inbound_emails",
+      "verb": "GET",
+      "path": "/rails/conductor/action_mailbox/inbound_emails(.:format)",
+      "controller": "rails/conductor/action_mailbox/inbound_emails",
+      "action": "index",
+      "scope": "rails_conductor"
+    },
+    {
+      "order": 163,
+      "name": null,
+      "verb": "POST",
+      "path": "/rails/conductor/action_mailbox/inbound_emails(.:format)",
+      "controller": "rails/conductor/action_mailbox/inbound_emails",
+      "action": "create",
+      "scope": "rails_conductor"
+    },
+    {
+      "order": 164,
+      "name": "new_rails_conductor_inbound_email",
+      "verb": "GET",
+      "path": "/rails/conductor/action_mailbox/inbound_emails/new(.:format)",
+      "controller": "rails/conductor/action_mailbox/inbound_emails",
+      "action": "new",
+      "scope": "rails_conductor"
+    },
+    {
+      "order": 165,
+      "name": "rails_conductor_inbound_email",
+      "verb": "GET",
+      "path": "/rails/conductor/action_mailbox/inbound_emails/:id(.:format)",
+      "controller": "rails/conductor/action_mailbox/inbound_emails",
+      "action": "show",
+      "scope": "rails_conductor"
+    },
+    {
+      "order": 166,
+      "name": "new_rails_conductor_inbound_email_source",
+      "verb": "GET",
+      "path": "/rails/conductor/action_mailbox/inbound_emails/sources/new(.:format)",
+      "controller": "rails/conductor/action_mailbox/inbound_emails/sources",
+      "action": "new",
+      "scope": "rails_conductor"
+    },
+    {
+      "order": 167,
+      "name": "rails_conductor_inbound_email_sources",
+      "verb": "POST",
+      "path": "/rails/conductor/action_mailbox/inbound_emails/sources(.:format)",
+      "controller": "rails/conductor/action_mailbox/inbound_emails/sources",
+      "action": "create",
+      "scope": "rails_conductor"
+    },
+    {
+      "order": 168,
+      "name": "rails_conductor_inbound_email_reroute",
+      "verb": "POST",
+      "path": "/rails/conductor/action_mailbox/:inbound_email_id/reroute(.:format)",
+      "controller": "rails/conductor/action_mailbox/reroutes",
+      "action": "create",
+      "scope": "rails_conductor"
+    },
+    {
+      "order": 169,
+      "name": "rails_conductor_inbound_email_incinerate",
+      "verb": "POST",
+      "path": "/rails/conductor/action_mailbox/:inbound_email_id/incinerate(.:format)",
+      "controller": "rails/conductor/action_mailbox/incinerates",
+      "action": "create",
+      "scope": "rails_conductor"
+    },
+    {
+      "order": 170,
+      "name": "rails_service_blob",
+      "verb": "GET",
+      "path": "/rails/active_storage/blobs/redirect/:signed_id/*filename(.:format)",
+      "controller": "active_storage/blobs/redirect",
+      "action": "show",
+      "scope": "active_storage"
+    },
+    {
+      "order": 171,
+      "name": "rails_service_blob_proxy",
+      "verb": "GET",
+      "path": "/rails/active_storage/blobs/proxy/:signed_id/*filename(.:format)",
+      "controller": "active_storage/blobs/proxy",
+      "action": "show",
+      "scope": "active_storage"
+    },
+    {
+      "order": 172,
+      "name": null,
+      "verb": "GET",
+      "path": "/rails/active_storage/blobs/:signed_id/*filename(.:format)",
+      "controller": "active_storage/blobs/redirect",
+      "action": "show",
+      "scope": "active_storage"
+    },
+    {
+      "order": 173,
+      "name": "rails_blob_representation",
+      "verb": "GET",
+      "path": "/rails/active_storage/representations/redirect/:signed_blob_id/:variation_key/*filename(.:format)",
+      "controller": "active_storage/representations/redirect",
+      "action": "show",
+      "scope": "active_storage"
+    },
+    {
+      "order": 174,
+      "name": "rails_blob_representation_proxy",
+      "verb": "GET",
+      "path": "/rails/active_storage/representations/proxy/:signed_blob_id/:variation_key/*filename(.:format)",
+      "controller": "active_storage/representations/proxy",
+      "action": "show",
+      "scope": "active_storage"
+    },
+    {
+      "order": 175,
+      "name": null,
+      "verb": "GET",
+      "path": "/rails/active_storage/representations/:signed_blob_id/:variation_key/*filename(.:format)",
+      "controller": "active_storage/representations/redirect",
+      "action": "show",
+      "scope": "active_storage"
+    },
+    {
+      "order": 176,
+      "name": "rails_disk_service",
+      "verb": "GET",
+      "path": "/rails/active_storage/disk/:encoded_key/*filename(.:format)",
+      "controller": "active_storage/disk",
+      "action": "show",
+      "scope": "active_storage"
+    },
+    {
+      "order": 177,
+      "name": "update_rails_disk_service",
+      "verb": "PUT",
+      "path": "/rails/active_storage/disk/:encoded_token(.:format)",
+      "controller": "active_storage/disk",
+      "action": "update",
+      "scope": "active_storage"
+    },
+    {
+      "order": 178,
+      "name": "rails_direct_uploads",
+      "verb": "POST",
+      "path": "/rails/active_storage/direct_uploads(.:format)",
+      "controller": "active_storage/direct_uploads",
+      "action": "create",
+      "scope": "active_storage"
+    }
+  ]
+}

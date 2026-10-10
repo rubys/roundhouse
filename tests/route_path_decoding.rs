@@ -84,6 +84,36 @@ fn emitted_rust_router_packages_error_imports() {
     assert!(router.contains("use crate::errors_ext::raise;"), "{router}");
     assert!(router.contains("use crate::errors_ext::ArgumentError;"), "{router}");
     assert!(router.contains("pub fn capture_byte("), "{router}");
+    // Internal capture reads reject out-of-range offsets explicitly before
+    // indexing. A bounds check (rather than `x = a[i]; raise if x.nil?`) keeps
+    // the element non-nullable on every target, including Go and Swift.
+    for (seq, message) in [
+        ("pairs", "Missing internal route capture part"),
+        ("bytes", "Invalid encoding for path parameter"),
+    ] {
+        assert!(
+            router.contains(&format!(
+                "if index >= {seq}.len() as i64 {{ raise(ArgumentError, \"{message}\") }};"
+            )),
+            "the {seq} read must reject an out-of-range offset explicitly:\n{router}"
+        );
+    }
+    assert!(
+        !router.contains("unwrap_or_default"),
+        "internal capture reads must not silently default a missing element:\n{router}"
+    );
+    assert!(
+        router.contains("format!(\"{}{}\", name.to_string(), \"\")"),
+        "Hash iteration keys must be owned before capture_pairs returns Vec<String>:\n{router}"
+    );
+    assert!(
+        router.contains("params.insert((name.clone()).to_string(), (seg.clone()).to_string())"),
+        "the capture value checked for integer constraints should be inserted without reusing a moved local:\n{router}"
+    );
+    assert!(
+        !router.contains("params.insert((name.clone()).to_string(), (ap.clone()).to_string())"),
+        "the original path segment should not be used after binding `seg`:\n{router}"
+    );
 }
 
 /// Python's host exception must be in scope for invalid UTF-8 and offset

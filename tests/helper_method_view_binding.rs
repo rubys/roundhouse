@@ -25,6 +25,10 @@ use std::path::PathBuf;
 
 use roundhouse::emit::ruby;
 use roundhouse::ingest::ingest_app_from_tree;
+use roundhouse::lower::controller_to_library::{
+    lower_controllers_with_arel_views_assocs_and_routes, LowerControllerOptions,
+};
+use roundhouse::ty::Ty;
 
 fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
     files
@@ -185,6 +189,15 @@ fn a_template_local_of_the_same_name_shadows_the_routing() {
         !badge.contains("ActionController::Current.controller.platform"),
         "and the parameter wins over the helper_method:\n{badge}"
     );
+    let mut app = app;
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let views = roundhouse::lower::view_to_library::lower_views_to_library_classes_with_controller_helpers(
+        &app.views, &app, Vec::new(), &app.view_visible_controller_methods,
+    );
+    let method = views.iter().flat_map(|lc| &lc.methods)
+        .find(|method| method.name.as_str() == "badge").expect("strict-local partial");
+    assert_eq!(method.params.iter().filter(|param| param.name.as_str() == "platform").count(), 1,
+        "the caller-provided strict local is the sole binding");
 }
 
 /// `params` in a view is the same seam one name over — a bare reference
@@ -217,4 +230,184 @@ fn a_view_params_read_coerces_its_symbol_key() {
         !body.contains("params[:id]"),
         "no symbol key may survive the grounding:\n{body}"
     );
+}
+
+fn analyzed_app(view: &str) -> roundhouse::App {
+    let mut app = app(view);
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    app
+}
+
+#[test]
+fn rust_view_signature_takes_typed_helper_value_and_rewrites_the_read() {
+    let app = analyzed_app("<p><%= platform %></p>\n");
+    let views = roundhouse::lower::view_to_library::lower_views_to_library_classes_with_controller_helpers(
+        &app.views, &app, Vec::new(), &app.view_visible_controller_methods,
+    );
+    let method = views.iter().flat_map(|lc| &lc.methods)
+        .find(|method| method.name.as_str() == "show").expect("show view method");
+    assert!(method.params.iter().any(|param| param.name.as_str() == "platform"));
+    let Ty::Fn { params, .. } = method.signature.as_ref().expect("typed signature") else {
+        panic!("view signature must be a function")
+    };
+    assert!(params.iter().any(|param| param.name.as_str() == "platform" && param.ty == Ty::Str));
+    fn has_bare_platform(expr: &roundhouse::expr::Expr) -> bool {
+        let mut found = matches!(&*expr.node, roundhouse::expr::ExprNode::Send {
+            recv: None, method, args, ..
+        } if method.as_str() == "platform" && args.is_empty());
+        expr.node.for_each_child(&mut |child| found |= has_bare_platform(child));
+        found
+    }
+    assert!(!has_bare_platform(&method.body));
+}
+
+#[test]
+fn controller_render_passes_helper_value_from_its_own_instance() {
+    let app = analyzed_app("<p><%= platform %></p>\n");
+    let lcs = lower_controllers_with_arel_views_assocs_and_routes(
+        &app.controllers,
+        Vec::new(),
+        LowerControllerOptions {
+            views: &app.views,
+            view_visible_controller_methods: Some(&app.view_visible_controller_methods),
+            ..Default::default()
+        },
+    );
+    let controller = lcs.iter().find(|lc| lc.name.0.as_str() == "RoomsController")
+        .expect("RoomsController lowered");
+    fn helper_call(expr: &roundhouse::expr::Expr) -> bool {
+        let mut found = matches!(&*expr.node, roundhouse::expr::ExprNode::Send {
+            recv: Some(receiver), method, args, ..
+        } if method.as_str() == "platform" && args.is_empty()
+            && matches!(&*receiver.node, roundhouse::expr::ExprNode::SelfRef));
+        expr.node.for_each_child(&mut |child| found |= helper_call(child));
+        found
+    }
+    let action = controller.methods.iter().find(|method| method.name.as_str() == "show")
+        .expect("show action");
+    assert!(helper_call(&action.body), "helper must be evaluated on controller self");
+}
+
+#[test]
+fn inherited_controller_helper_is_evaluated_on_the_child_instance() {
+    let app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+        ("app/controllers/concerns/set_platform.rb", SET_PLATFORM),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  include SetPlatform\nend\n",
+        ),
+        (
+            "app/controllers/rooms_controller.rb",
+            "class RoomsController < ApplicationController\n  def show; end\nend\n",
+        ),
+        ("app/views/rooms/show.html.erb", "<p><%= platform %></p>\n"),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :rooms\nend\n",
+        ),
+    ]))
+    .expect("ingest");
+    let mut app = app;
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    assert!(
+        app.view_visible_controller_methods
+            .iter()
+            .any(|name| name.as_str() == "platform"),
+        "inherited concern helper should be visible to views"
+    );
+    let controllers = lower_controllers_with_arel_views_assocs_and_routes(
+        &app.controllers,
+        Vec::new(),
+        LowerControllerOptions {
+            views: &app.views,
+            view_visible_controller_methods: Some(&app.view_visible_controller_methods),
+            ..Default::default()
+        },
+    );
+    let rooms = controllers
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "RoomsController")
+        .expect("RoomsController lowered");
+    let platform = rooms
+        .methods
+        .iter()
+        .find(|method| {
+            method.name.as_str() == "platform"
+                && method.receiver == roundhouse::dialect::MethodReceiver::Instance
+        })
+        .expect("inherited platform helper is flattened onto the Rust controller");
+    fn reads_platform_ivar(expr: &roundhouse::expr::Expr) -> bool {
+        let mut found = matches!(
+            &*expr.node,
+            roundhouse::expr::ExprNode::OpAssign {
+                target: roundhouse::expr::LValue::Ivar { name },
+                ..
+            } if name.as_str() == "platform"
+        );
+        expr.node
+            .for_each_child(&mut |child| found |= reads_platform_ivar(child));
+        found
+    }
+    assert!(
+        reads_platform_ivar(&platform.body),
+        "the inherited implementation must retain its per-controller memoized state: {:?}",
+        platform.body
+    );
+    let show = rooms
+        .methods
+        .iter()
+        .find(|method| method.name.as_str() == "show")
+        .expect("show action");
+    fn has_self_platform_call(expr: &roundhouse::expr::Expr) -> bool {
+        let mut found = matches!(&*expr.node, roundhouse::expr::ExprNode::Send {
+            recv: Some(receiver), method, args, ..
+        } if method.as_str() == "platform"
+            && args.is_empty()
+            && matches!(&*receiver.node, roundhouse::expr::ExprNode::SelfRef));
+        expr.node
+            .for_each_child(&mut |child| found |= has_self_platform_call(child));
+        found
+    }
+    assert!(
+        has_self_platform_call(&show.body),
+        "view render must dispatch inherited helper on the live child instance: {:?}",
+        show.body
+    );
+}
+
+#[test]
+fn controller_helper_values_are_threaded_through_partial_signatures() {
+    let app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+        ("app/controllers/concerns/set_platform.rb", SET_PLATFORM),
+        ("app/controllers/rooms_controller.rb", "class RoomsController < ApplicationController\n  include SetPlatform\n  def show; end\nend\n"),
+        ("app/views/rooms/show.html.erb", r#"<%= render "rooms/badge" %>
+"#),
+        ("app/views/rooms/_badge.html.erb", "<p><%= platform %></p>\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :rooms\nend\n"),
+    ])).expect("ingest");
+    let mut app = app;
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let views = roundhouse::lower::view_to_library::lower_views_to_library_classes_with_controller_helpers(
+        &app.views, &app, Vec::new(), &app.view_visible_controller_methods,
+    );
+    let mut methods = views.iter().flat_map(|lc| &lc.methods);
+    let action = methods.clone().find(|method| method.name.as_str() == "show").expect("action view");
+    let partial = methods.find(|method| method.name.as_str() == "badge").expect("partial view");
+    for method in [action, partial] {
+        assert!(method.params.iter().any(|param| param.name.as_str() == "platform"));
+    }
+    fn forwards_platform(expr: &roundhouse::expr::Expr) -> bool {
+        let mut found = matches!(&*expr.node, roundhouse::expr::ExprNode::Send {
+            recv: Some(_), method, args, ..
+        } if method.as_str() == "badge" && args.iter().any(|arg| matches!(
+            &*arg.node, roundhouse::expr::ExprNode::Var { name, .. } if name.as_str() == "platform"
+        )));
+        expr.node.for_each_child(&mut |child| found |= forwards_platform(child));
+        found
+    }
+    assert!(forwards_platform(&action.body));
 }

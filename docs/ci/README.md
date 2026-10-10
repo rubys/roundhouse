@@ -81,7 +81,7 @@ See the run's **plan** job for its selected jobs and reasons.
 Changing draft status does not restart checks or change coverage. `ci:draft`
 has no effect. Stacked labels prefer the broader lane:
 `ci:full` > any focus labels (`ci:<lang>` / `ci:extras` / `ci:jruby` /
-`ci:spinel`, unioned on `BASE`) > path ownership. Documentation-only PRs
+`ci:spinel` / `ci:rust` / `ci:typescript`, unioned on `BASE`) > path ownership. Documentation-only PRs
 still receive checks; changes to the rendered user guide also select
 site/browser coverage.
 
@@ -96,6 +96,7 @@ so fix rounds only queue the lanes under repair — and those lanes are
 | `ci:crystal` … `ci:python` | That language's `compare-extra` **and** `smoke-extra` (+ `build-site` / archives / `archive-results`) |
 | `ci:extras` | All seven of the above |
 | `ci:jruby` | `compare-jruby` + floor `smoke` jruby (+ site/archives) |
+| `ci:rust` / `ci:typescript` | That target's `compare` **and** floor `smoke` (+ `browser-smoke-typescript` for TypeScript, site/archives) — the same lanes path ownership selects for its emitter, but independent of which files the diff touches |
 | `ci:spinel` | CORE Spinel (`spinel-build`, `spinel-toolchain`, `spinel-compare`) + `spinel-framework` (+ site/archives). Not the heavy Campfire Spinel suite (`campfire-spinel-*`); not folded into `ci:extras`. |
 
 **Narrow semantics:** with any focus label set and `ci:full` **not** set, the
@@ -148,6 +149,10 @@ path, and floating-pin catch-up.
   only those `compare-extra` and `smoke-extra` lanes as **required**. Prefer
   this over `ci:full` when repairing a few red extras after Full validation.
 - **JRuby fix rounds:** `ci:jruby` — `compare-jruby` + smoke jruby, required.
+- **Rust / TypeScript workstreams:** `ci:rust` or `ci:typescript` — that
+  target's `compare` + floor smoke, required, without Spinel/WASM/extras even
+  when the diff touches shared lowering or runtime paths. Use `ci:full` before
+  merging a PR whose diff reaches beyond that target.
 - **Spinel-focused CI:** apply `ci:spinel` on a draft or ready PR. Runs the
   Ruby floor plus the CORE Spinel lane as **required**; skips Crystal/Go/… SDKs,
   WASM and the heavy Campfire Spinel suite. Prefer this over

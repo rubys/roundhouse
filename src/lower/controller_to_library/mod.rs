@@ -271,12 +271,21 @@ pub struct LowerControllerOptions<'a> {
     /// existed.
     pub inferred_params:
         Option<&'a std::collections::HashMap<(ClassId, Symbol), Vec<crate::ty::Ty>>>,
+    /// The analyzer's converged return per controller method
+    /// (`App::inferred_method_returns`) — types a private helper's
+    /// return in the built signature. `None` (the default) leaves it
+    /// `untyped`.
+    pub inferred_returns:
+        Option<&'a std::collections::HashMap<(ClassId, Symbol), crate::ty::Ty>>,
     /// The app's models — read for `has_one_attached` declarations, so
     /// a permitted field that is one (`:avatar`) is typed as an
     /// uploaded file on the synthesized params class
     /// (`ParamsSpecs::mark_file_fields`). Empty (the default) types
     /// every field a String, which is what it was before.
     pub models: &'a [crate::dialect::Model],
+    /// Controller `helper_method`s explicitly exposed to views. When
+    /// present, only helpers used by a view are passed from the live controller.
+    pub view_visible_controller_methods: Option<&'a std::collections::BTreeSet<Symbol>>,
     /// `App::wrap_parameters_by_default` - Rails' ParamsWrapper default
     /// for every controller. Read only when the tree
     /// `FormatBreadth::wraps_json_params`.
@@ -306,7 +315,9 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         format_breadth,
         route_id_segments,
         inferred_params,
+        inferred_returns,
         models,
+        view_visible_controller_methods,
         wrap_parameters_by_default,
         concern_spliced_actions,
     } = opts;
@@ -325,11 +336,16 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // The view↔controller ivar contract: each action view's read-ivars,
     // so the render rewrite passes `@<name>` for each (matching the view's
     // generated parameter list). See view_to_library::action_view_ivar_map.
-    let view_ivars = crate::lower::view_to_library::action_view_ivar_map(views, controllers, models);
+    let visible_helpers = view_visible_controller_methods.cloned().unwrap_or_default();
+    let view_ivars = crate::lower::view_to_library::action_view_ivar_map(
+        views, controllers, models, &visible_helpers,
+    );
     // Controller-side partial renders (`render partial: "commentbox",
     // locals: {…}`) bind against the partial's def-site parameter order.
     let partials: PartialMap =
-        crate::lower::view_to_library::partial_call_contracts(views, controllers, library_classes);
+        crate::lower::view_to_library::partial_call_contracts(
+            views, controllers, library_classes, &visible_helpers,
+        );
 
     let mut all_methods: Vec<(Vec<MethodDef>, &Controller)> = Vec::new();
     crate::timings::phase("lower: controllers build", || {
@@ -359,8 +375,11 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 library_classes,
                 concern_spliced_actions,
             );
-            let methods = build_methods(controller, controllers, &params_specs, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, wrapper.as_ref(), action_check.as_ref());
+            let methods = build_methods(controller, controllers, &params_specs, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, inferred_returns, wrapper.as_ref(), action_check.as_ref());
             all_methods.push((methods, controller));
+        }
+        if view_visible_controller_methods.is_some() {
+            inline_inherited_view_helpers(&mut all_methods, controllers, &visible_helpers);
         }
         subclass_template_hooks(&mut all_methods, controllers, &view_ivars, &partials);
     });
@@ -569,6 +588,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
         }
+        retype_cross_method_ivar_reads(&mut methods, &classes, &framework_ivars);
         methods.extend(collect_attr_accessor_methods(controller));
         apply_alias_methods(controller, &mut methods);
         apply_undef_methods(controller, &mut methods);
@@ -619,6 +639,77 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     out
 }
 
+/// A `before_action` helper writes `@message`; the action and its
+/// sibling helpers read it. Each body is typed alone, so the reader saw
+/// an unbound ivar (`Var`) and every call on it went untyped — in Rust
+/// the struct field itself fell to `serde_json::Value`. After the
+/// first pass, take each ivar's type from the writes across the
+/// controller's methods (when every write is fully known) and retype
+/// the methods that read one the first pass left open.
+fn retype_cross_method_ivar_reads(
+    methods: &mut [MethodDef],
+    classes: &std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
+    framework_ivars: &std::collections::HashMap<Symbol, Ty>,
+) {
+    fn walk(
+        e: &Expr,
+        writes: &mut std::collections::HashMap<Symbol, Option<Ty>>,
+        open_reads: &mut std::collections::HashSet<Symbol>,
+    ) {
+        match &*e.node {
+            ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } => {
+                let known = value.ty.clone().filter(|t| !t.mentions_unknown() && !matches!(t, Ty::Bottom));
+                let slot = writes.entry(name.clone()).or_insert_with(|| known.clone());
+                *slot = match (slot.take(), known) {
+                    (Some(a), Some(b)) if a == b => Some(a),
+                    // `T` and `nil` across branches is the one mix that
+                    // is a faithful single type; any other disagreement
+                    // stays unbound.
+                    (Some(Ty::Nil), Some(b)) | (Some(b), Some(Ty::Nil))
+                        if !matches!(b, Ty::Union { .. }) =>
+                    {
+                        Some(Ty::Union { variants: vec![b, Ty::Nil] })
+                    }
+                    _ => None,
+                };
+            }
+            ExprNode::Ivar { name } if e.ty.as_ref().is_none_or(|t| t.mentions_unknown()) => {
+                open_reads.insert(name.clone());
+            }
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| walk(c, writes, open_reads));
+    }
+    let mut writes: std::collections::HashMap<Symbol, Option<Ty>> = Default::default();
+    let mut open_reads: std::collections::HashSet<Symbol> = Default::default();
+    for m in methods.iter() {
+        if m.receiver == MethodReceiver::Instance {
+            walk(&m.body, &mut writes, &mut open_reads);
+        }
+    }
+    let mut bindings = framework_ivars.clone();
+    let mut learned = false;
+    for (name, ty) in writes {
+        if let (Some(ty), true) = (ty, open_reads.contains(&name)) {
+            if !framework_ivars.contains_key(&name) {
+                bindings.insert(name, ty);
+                learned = true;
+            }
+        }
+    }
+    if !learned {
+        return;
+    }
+    for m in methods.iter_mut().filter(|m| m.receiver == MethodReceiver::Instance) {
+        let mut writes = Default::default();
+        let mut reads: std::collections::HashSet<Symbol> = Default::default();
+        walk(&m.body, &mut writes, &mut reads);
+        if reads.iter().any(|n| bindings.contains_key(n) && !framework_ivars.contains_key(n)) {
+            crate::lower::typing::type_method_body(m, classes, &bindings);
+        }
+    }
+}
+
 /// Single-controller entry point — kept for tests and call sites that
 /// don't need cross-class typing. For whole-app emit, use
 /// `lower_controllers_to_library_classes`.
@@ -639,6 +730,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         &partials,
         FormatBreadth::NARROW,
         &std::collections::HashMap::new(),
+        None,
         None,
         None,
         None,
@@ -894,6 +986,50 @@ fn reads_instance_state(body: &Expr) -> bool {
     found
 }
 
+/// Rust controller structs do not inherit methods from their Rails
+/// superclass. When helper-aware lowering is enabled, copy the nearest
+/// inherited `helper_method` implementation onto each child controller
+/// that needs it. The method remains an instance method, so its ivars
+/// are per-controller state rather than shared or thread-local values.
+fn inline_inherited_view_helpers(
+    all_methods: &mut [(Vec<MethodDef>, &Controller)],
+    controllers: &[Controller],
+    visible_helpers: &std::collections::BTreeSet<Symbol>,
+) {
+    let lowered_by_controller: std::collections::HashMap<ClassId, Vec<MethodDef>> = all_methods
+        .iter()
+        .map(|(methods, controller)| (controller.name.clone(), methods.clone()))
+        .collect();
+
+    for (methods, controller) in all_methods.iter_mut() {
+        let ancestors = ancestor_chain(controller, controllers);
+        if ancestors.is_empty() {
+            continue;
+        }
+        for helper in visible_helpers {
+            if methods.iter().any(|method| {
+                method.name == *helper && method.receiver == MethodReceiver::Instance
+            }) {
+                continue;
+            }
+            let inherited = ancestors.iter().rev().find_map(|ancestor| {
+                lowered_by_controller
+                    .get(&ancestor.name)?
+                    .iter()
+                    .find(|method| {
+                        method.name == *helper && method.receiver == MethodReceiver::Instance
+                    })
+            });
+            let Some(inherited) = inherited.filter(|method| !calls_super(&method.body)) else {
+                continue;
+            };
+            let mut clone = inherited.clone();
+            clone.enclosing_class = Some(controller.name.0.clone());
+            methods.push(clone);
+        }
+    }
+}
+
 /// Define the virtual template hooks `rewrite_render_to_views` called.
 ///
 /// A body that met `render :show` with no `show` under its own views
@@ -1088,6 +1224,7 @@ fn build_methods(
     format_breadth: FormatBreadth,
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
     inferred_params: Option<&std::collections::HashMap<(ClassId, Symbol), Vec<Ty>>>,
+    inferred_returns: Option<&std::collections::HashMap<(ClassId, Symbol), Ty>>,
     // Rails' ParamsWrapper for this controller, when its requests get one.
     wrapper: Option<&self::params_wrapper::WrapperSpec>,
     action_check: Option<&std::collections::HashSet<Symbol>>,
@@ -1338,7 +1475,7 @@ fn build_methods(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ true,
             params_specs, json_actions,
             text_format_actions, view_ivars,
-            partials, format_breadth, &shadows, route_id_segments, inferred_params,
+            partials, format_breadth, &shadows, route_id_segments, inferred_params, inferred_returns,
             &deferred_renders, &mut deferred_tails,
         ));
     }
@@ -1373,7 +1510,7 @@ fn build_methods(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ false,
             params_specs, json_actions,
             text_format_actions, view_ivars,
-            partials, format_breadth, &shadows, route_id_segments, inferred_params,
+            partials, format_breadth, &shadows, route_id_segments, inferred_params, inferred_returns,
             &no_deferred, &mut std::collections::HashMap::new(),
         ));
     }
@@ -1386,7 +1523,7 @@ fn build_methods(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ false,
             params_specs, json_actions,
             text_format_actions, view_ivars,
-            partials, format_breadth, &shadows, route_id_segments, inferred_params,
+            partials, format_breadth, &shadows, route_id_segments, inferred_params, inferred_returns,
             &no_deferred, &mut std::collections::HashMap::new(),
         ));
     }
@@ -1711,6 +1848,13 @@ fn build_filter_preamble(
     own_privs_inlined: bool,
 ) -> (Vec<PreambleStmt>, process_action::WrapFilters) {
     let chain = ancestor_chain(controller, all_controllers);
+    // Filter lambdas execute inside the synthesized dispatcher rather
+    // than in the helper method that declared them. Keep known controller
+    // instance-helper reads bound to that dispatcher's live receiver.
+    let filter_helpers: std::collections::HashSet<Symbol> = std::iter::once(controller)
+        .chain(chain.iter().copied())
+        .flat_map(|c| c.actions().map(|action| action.name.clone()))
+        .collect();
 
     // Skips, kept whole rather than reduced to a set of names: a skip
     // carries `only:`/`except:` of its own, and campfire's
@@ -1777,6 +1921,15 @@ fn build_filter_preamble(
     };
     let push_call = |f: &Filter, preamble: &mut Vec<PreambleStmt>| {
         let Some(f) = narrow(f) else { return };
+        let mut f = f;
+        f.if_cond_expr = f
+            .if_cond_expr
+            .as_ref()
+            .map(|expr| rewrites::rewrite_filter_helper_reads(expr, &filter_helpers));
+        f.unless_cond_expr = f
+            .unless_cond_expr
+            .as_ref()
+            .map(|expr| rewrites::rewrite_filter_helper_reads(expr, &filter_helpers));
         let f = &f;
         let Some(target) = find_target(&f.target) else {
             // The one framework-defined target the chain carries: the
@@ -1898,15 +2051,24 @@ fn build_filter_preamble(
                     };
                     let is_after = target.is_after();
                     let is_prepend = target.is_prepend();
-                    let halt_check = can_respond(&target.body);
+                    let body = rewrites::rewrite_filter_helper_reads(&target.body, &filter_helpers);
+                    let if_cond_expr = target
+                        .if_cond_expr
+                        .as_ref()
+                        .map(|expr| rewrites::rewrite_filter_helper_reads(expr, &filter_helpers));
+                    let unless_cond_expr = target
+                        .unless_cond_expr
+                        .as_ref()
+                        .map(|expr| rewrites::rewrite_filter_helper_reads(expr, &filter_helpers));
+                    let halt_check = can_respond(&body);
                     let stmt = PreambleStmt::Block {
-                        body: target.body,
+                        body,
                         only: target.only,
                         except: target.except,
                         if_cond: target.if_cond,
                         unless_cond: target.unless_cond,
-                        if_cond_expr: target.if_cond_expr,
-                        unless_cond_expr: target.unless_cond_expr,
+                        if_cond_expr,
+                        unless_cond_expr,
                         halt_check,
                     };
                     if is_after {
@@ -2630,6 +2792,7 @@ fn action_to_method(
     shadows: &std::collections::HashSet<Symbol>,
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
     inferred_params: Option<&std::collections::HashMap<(ClassId, Symbol), Vec<Ty>>>,
+    inferred_returns: Option<&std::collections::HashMap<(ClassId, Symbol), Ty>>,
     deferred_renders: &std::collections::HashSet<Symbol>,
     deferred_out: &mut std::collections::HashMap<Symbol, Expr>,
 ) -> MethodDef {
@@ -2747,8 +2910,13 @@ fn action_to_method(
         // blanket Nil was a WRONG PIN the AOT trusted: spinel refused
         // `@a, @b = get_from_cache(...)` as a nil destructure (and the
         // massign repro matrix showed every honest shape passes).
-        // Untyped lets the compiler infer from the body instead.
-        Ty::Untyped
+        // The analyzer's converged return stands in when it is fully
+        // known (`find_session_by_cookie` → `Session | nil`); a body it
+        // left open stays `Untyped` and the compiler infers it.
+        inferred_returns
+            .and_then(|t| t.get(&(controller.name.clone(), a.name.clone())))
+            .cloned()
+            .unwrap_or(Ty::Untyped)
     };
     // Private-helper params take the analyzer's call-site-unified type
     // when one landed (campfire's `broadcast_create_room(room)` has one

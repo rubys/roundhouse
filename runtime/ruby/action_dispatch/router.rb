@@ -297,7 +297,10 @@ module ActionDispatch
           if !pattern_for_name.empty? && !segment_pattern_match(pattern_for_name, seg)
             return nil
           end
-          params[name] = ap
+          # Reuse the normalized capture that was checked above. This keeps
+          # integer and compiled segment constraints aligned with the stored
+          # route parameter on strict targets.
+          params[name] = seg
         elsif pp != ap
           # A literal PREFIX before the `:name` in the same segment —
           # lobsters' `/~:username` and `/@:username`. Rails binds the
@@ -369,7 +372,11 @@ module ActionDispatch
     def self.capture_pairs(params)
       pairs = []
       params.each do |name, value|
-        pairs << name.to_s
+        # Force an owned string on strict targets whose Hash iterator
+        # yields borrowed keys (Rust's `HashMap::iter`, for example).
+        # Concatenating the empty string preserves the value while making
+        # the snapshot independent of the borrowed map entry.
+        pairs << (name.to_s + "")
         pairs << value
       end
       pairs
@@ -378,6 +385,8 @@ module ActionDispatch
     # Internal String-only pair access. The caller visits an even-length
     # snapshot two entries at a time, proving both nonnegative indexes exist.
     def self.capture_part(pairs, index)
+      raise ArgumentError, "Missing internal route capture part" if index < 0
+      raise ArgumentError, "Missing internal route capture part" if index >= pairs.length
       pairs[index]
     end
 

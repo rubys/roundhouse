@@ -132,7 +132,10 @@ pub(crate) fn push_escaped_attr(parts: &mut Vec<InterpPart>, key: &str, value: &
             Span::synthetic(),
             ExprNode::If {
                 cond: send(Some(value.clone()), "nil?", Vec::new(), None, false),
-                then_branch: lit_str(String::new()),
+                // Both branches are rendered by Rust's format! path and
+                // therefore produce owned Strings; a string literal here
+                // would make the conditional's branch types disagree.
+                then_branch: string_interp(Vec::new()),
                 else_branch: string_interp(vec![open, escaped, close]),
             },
         ),
@@ -315,4 +318,36 @@ pub(super) fn default_method_sym() -> Expr {
 /// override is supplied.
 pub(super) fn default_form_class() -> Expr {
     lit_str("button_to".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optional_attribute_branches_both_emit_owned_strings() {
+        let value = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var {
+                id: crate::ident::VarId(0),
+                name: Symbol::from("content"),
+            },
+        );
+        let mut parts = Vec::new();
+        push_escaped_attr(&mut parts, "content", &value);
+
+        let [InterpPart::Expr { expr }] = parts.as_slice() else {
+            panic!("dynamic attributes should be guarded as one expression");
+        };
+        let ExprNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } = &*expr.node
+        else {
+            panic!("dynamic attributes should have a nil-check conditional");
+        };
+        assert!(matches!(&*then_branch.node, ExprNode::StringInterp { parts } if parts.is_empty()));
+        assert!(matches!(&*else_branch.node, ExprNode::StringInterp { .. }));
+    }
 }

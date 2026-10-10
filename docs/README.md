@@ -64,6 +64,7 @@ top. When one completes, it moves to [`archive/`](archive/).
 - [`with-adapter-split-plan.md`](with-adapter-split-plan.md)
 - [`lobsters-story-pages-plan.md`](lobsters-story-pages-plan.md)
 - [`roda-sequel-plan.md`](roda-sequel-plan.md)
+- [`development/campfire-rust-plan.md`](development/campfire-rust-plan.md)
 
 ## [`archive/`](archive/)
 

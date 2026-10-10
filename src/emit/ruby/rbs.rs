@@ -83,7 +83,7 @@ fn render_class(lc: &LibraryClass, classes: &[LibraryClass]) -> String {
 
     for (name, value) in &lc.constants {
         let factory = classes.iter().find(|class| {
-            matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span })
+            matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span, .. })
                 if declaration_span == value.span)
         });
         render_data_factory(&mut s, lc, name.as_str(), value, &body_pad, factory);

@@ -15,6 +15,12 @@ use super::{
     var_ref, view_helpers_call, ViewCtx,
 };
 
+fn view_const_path(module: &str) -> Vec<Symbol> {
+    std::iter::once(Symbol::from("Views"))
+        .chain(module.split("::").map(Symbol::from))
+        .collect()
+}
+
 pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Option<Expr> {
     match rp {
         // `render articles` (collection) — iterate, rendering one
@@ -43,7 +49,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                 Some(Expr::new(
                     Span::synthetic(),
                     ExprNode::Const {
-                        path: vec![Symbol::from("Views"), Symbol::from(plural_camel)],
+                        path: view_const_path(&plural_camel),
                     },
                 )),
                 &singular,
@@ -126,16 +132,17 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             // render-graph fold) plus nil-default extras. No
             // record-name dedup here: `story` is a plain closure param
             // on Views::Stories.show, not a separately-passed record.
-            let call_args: Vec<Expr> = ctx
+            let mut call_args: Vec<Expr> = ctx
                 .partial_ivars
                 .get(&(module_camel.clone(), method_sym.clone()))
                 .map(|ivars| ivars.iter().map(|n| var_ref(n.clone())).collect())
                 .unwrap_or_default();
+            call_args.extend(partial_helper_args(ctx, &module_camel, &method_sym));
             let render_call = send(
                 Some(Expr::new(
                     Span::synthetic(),
                     ExprNode::Const {
-                        path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
+                        path: view_const_path(&module_camel),
                     },
                 )),
                 &method_name,
@@ -197,7 +204,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                     Some(Expr::new(
                         Span::synthetic(),
                         ExprNode::Const {
-                            path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
+                            path: view_const_path(&module_camel),
                         },
                     )),
                     crate::lower::view::view_method_name(&method_sym).as_str(),
@@ -283,9 +290,19 @@ fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
                 // see `ivar_local_names`). The partial binds it by
                 // position, under its own name.
                 .map(|n| var_ref(Symbol::from(ctx.ivar_local(n.as_str()))))
-                .collect()
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+        .into_iter()
+        .chain(partial_helper_args(ctx, module, method))
+        .collect()
+}
+
+fn partial_helper_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
+    ctx.partial_helpers.get(&(module.to_string(), method.to_string()))
+        .into_iter().flatten()
+        .map(|name| var_ref(Symbol::from(crate::naming::safe_local(name.as_str()))))
+        .collect()
 }
 
 /// `render partial: "…", collection: xs, as: :x` — iterate `xs`, calling
@@ -319,7 +336,7 @@ fn emit_named_collection_each(
         Some(Expr::new(
             Span::synthetic(),
             ExprNode::Const {
-                path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
+                path: view_const_path(&module_camel),
             },
         )),
         crate::lower::view::view_method_name(&method_sym).as_str(),
@@ -685,9 +702,15 @@ fn partial_extra_named_args(
                     let safe = ctx.ivar_local(n.as_str());
                     (safe.clone(), var_ref(Symbol::from(safe)))
                 })
-                .collect()
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+        .into_iter()
+        .chain(ctx.partial_helpers.get(&key).into_iter().flatten().map(|helper| {
+            let name = crate::naming::safe_local(helper.as_str());
+            (name.clone(), var_ref(Symbol::from(name)))
+        }))
+        .collect()
 }
 
 /// Common shape for collection / association partial renders:
@@ -707,7 +730,7 @@ fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
         Some(Expr::new(
             Span::synthetic(),
             ExprNode::Const {
-                path: vec![Symbol::from("Views"), Symbol::from(plural_camel.clone())],
+                path: view_const_path(&plural_camel),
             },
         )),
         &singular,
@@ -859,7 +882,7 @@ pub(super) fn named_partial_call_with_record(
                 Some(Expr::new(
                     Span::synthetic(),
                     ExprNode::Const {
-                        path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
+                        path: view_const_path(&module_camel),
                     },
                 )),
                 // `view_method_name`, matching the DEF side and the
@@ -974,4 +997,17 @@ fn locals_extra_args(
         .take(last + 1)
         .map(|b| b.unwrap_or_else(nil_lit))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::view_const_path;
+
+    #[test]
+    fn view_const_path_preserves_each_nested_directory_segment() {
+        let path = view_const_path("Accounts::Bots");
+        let segments: Vec<_> = path.iter().map(|segment| segment.as_str()).collect();
+
+        assert_eq!(segments, ["Views", "Accounts", "Bots"]);
+    }
 }

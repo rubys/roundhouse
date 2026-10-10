@@ -19,6 +19,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITE = ROOT / "scripts/campfire-suite"
+CAMPFIRE_COMPARE = ROOT / "scripts/campfire-compare"
+CAMPFIRE_E2E = ROOT / "scripts/campfire-e2e"
 
 SHIM = textwrap.dedent(
     """\
@@ -284,6 +286,61 @@ exec "{shutil.which('mount')}" "$@"
                 self.assertEqual(result.tally_path.read_text().count("storage mount refused"), 3)
                 self.assertFalse((self.emit / "tmp/storage/shared-name").exists())
                 self.assertFalse((self.emit / "storage/files/sh/ar/shared-name").exists())
+
+
+class CampfireCompareTargetTests(unittest.TestCase):
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(CAMPFIRE_COMPARE), *args],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_help_documents_rust_target_and_alias(self):
+        result = self._run("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--target TARGET  ruby (default), spinel, or rust", result.stdout)
+        self.assertIn("--rust", result.stdout)
+
+    def test_rust_target_is_accepted_but_gc_options_stay_spinel_only(self):
+        result = self._run("--target", "rust", "--minor-gc")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--minor-gc is only valid with --target spinel", result.stdout)
+        self.assertNotIn("--target must be ruby, spinel, or rust", result.stdout)
+
+    def test_unknown_target_is_rejected_before_external_prerequisites(self):
+        result = self._run("--target", "not-a-target")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--target must be ruby, spinel, or rust", result.stdout)
+        self.assertNotIn("no oracle", result.stdout)
+
+
+class CampfireBrowserTargetTests(unittest.TestCase):
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(CAMPFIRE_E2E), *args],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_help_documents_shared_browser_targets(self):
+        result = self._run("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--target T   ruby (default), spinel, or rust", result.stdout)
+
+    def test_unknown_target_is_rejected_before_toolchain_checks(self):
+        result = self._run("--target", "not-a-target")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--target must be ruby, spinel, or rust", result.stdout)
+        self.assertNotIn("needs the sqlite3 CLI", result.stdout)
+
+    def test_reuse_rejects_an_unbuilt_rust_emit(self):
+        with tempfile.TemporaryDirectory() as emit:
+            result = self._run("--target", "rust", "--reuse", emit)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("reused emit is not a built Rust app", result.stdout)
 
 
 if __name__ == "__main__":

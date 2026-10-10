@@ -1,5 +1,4 @@
 import { test, expect } from '@playwright/test'
-import { signIn } from './helpers.js'
 
 // THE AUTHORIZATION GUARD, END TO END.
 //
@@ -30,7 +29,6 @@ import { signIn } from './helpers.js'
 // "nothing arrived" as success.
 
 test('the stock Turbo channel refuses a lifted stream name', async ({ page }) => {
-  await signIn(page)
   await page.goto('/rooms/1')
 
   const source = page.locator('turbo-cable-stream-source').first()

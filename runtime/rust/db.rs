@@ -221,7 +221,154 @@ thread_local! {
 /// Crystal target's `Roundhouse::Db` module member-for-member.
 pub struct Db;
 
+/// A value a `find_by` / `where` condition can compare a column to.
+/// `None` is SQL NULL, which the clause spells `IS NULL` (Rails does
+/// the same for `where(col: nil)`).
+pub trait SqlLiteral {
+    fn sql_literal(&self) -> Option<String>;
+}
+
+impl SqlLiteral for str {
+    fn sql_literal(&self) -> Option<String> {
+        Some(Db::escape_string(self))
+    }
+}
+impl SqlLiteral for String {
+    fn sql_literal(&self) -> Option<String> {
+        Some(Db::escape_string(self))
+    }
+}
+impl SqlLiteral for i64 {
+    fn sql_literal(&self) -> Option<String> {
+        Some(self.to_string())
+    }
+}
+impl SqlLiteral for i32 {
+    fn sql_literal(&self) -> Option<String> {
+        Some(self.to_string())
+    }
+}
+impl SqlLiteral for f64 {
+    fn sql_literal(&self) -> Option<String> {
+        Some(self.to_string())
+    }
+}
+impl SqlLiteral for bool {
+    fn sql_literal(&self) -> Option<String> {
+        Some(Db::escape_bool(*self))
+    }
+}
+impl SqlLiteral for serde_json::Value {
+    fn sql_literal(&self) -> Option<String> {
+        match self {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => Some(Db::escape_string(s)),
+            serde_json::Value::Bool(b) => Some(Db::escape_bool(*b)),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            other => Some(Db::escape_string(&other.to_string())),
+        }
+    }
+}
+impl<T: SqlLiteral> SqlLiteral for Option<T> {
+    fn sql_literal(&self) -> Option<String> {
+        self.as_ref().and_then(SqlLiteral::sql_literal)
+    }
+}
+impl<T: SqlLiteral + ?Sized> SqlLiteral for &T {
+    fn sql_literal(&self) -> Option<String> {
+        (**self).sql_literal()
+    }
+}
+
+/// A model row readable by column name, so association collections
+/// (`Vec<Model>`, already loaded) answer `find_by` / `find_by!` /
+/// `destroy_all` in memory with the same literal comparison the SQL
+/// `where_clause` would make.
+pub trait AttrRow {
+    /// `None` for an unknown column; `Some(None)` for a nil value.
+    fn attr_literal(&self, col: &str) -> Option<Option<String>>;
+    fn destroy_record(&mut self);
+}
+
+fn row_matches<T: AttrRow, K: AsRef<str>, V: SqlLiteral>(
+    row: &T,
+    conditions: &[(K, V)],
+) -> bool {
+    conditions.iter().all(|(k, v)| {
+        row.attr_literal(k.as_ref())
+            .unwrap_or_else(|| panic!("unknown column {}", k.as_ref()))
+            == v.sql_literal()
+    })
+}
+
+/// Collection-side finders for association results.
+pub trait CollectionRows<T: AttrRow + Clone> {
+    fn find_by<K: AsRef<str>, V: SqlLiteral>(
+        &self,
+        conditions: impl IntoIterator<Item = (K, V)>,
+    ) -> Option<T>;
+    fn find_by_bang<K: AsRef<str>, V: SqlLiteral>(
+        &self,
+        conditions: impl IntoIterator<Item = (K, V)>,
+    ) -> T;
+    fn destroy_all(&self) -> Vec<T>;
+}
+
+impl<T: AttrRow + Clone> CollectionRows<T> for Vec<T> {
+    fn find_by<K: AsRef<str>, V: SqlLiteral>(
+        &self,
+        conditions: impl IntoIterator<Item = (K, V)>,
+    ) -> Option<T> {
+        let conditions: Vec<(K, V)> = conditions.into_iter().collect();
+        self.iter().find(|r| row_matches(*r, &conditions)).cloned()
+    }
+    fn find_by_bang<K: AsRef<str>, V: SqlLiteral>(
+        &self,
+        conditions: impl IntoIterator<Item = (K, V)>,
+    ) -> T {
+        self.find_by(conditions).expect("record not found")
+    }
+    fn destroy_all(&self) -> Vec<T> {
+        let mut out = Vec::with_capacity(self.len());
+        for mut r in self.iter().cloned() {
+            r.destroy_record();
+            out.push(r);
+        }
+        out
+    }
+}
+
 impl Db {
+    /// The `WHERE` condition for `find_by(col: value, …)` / `where(…)`:
+    /// `"col" = value` joined by `AND`, `"col" IS NULL` for nil
+    /// (quoted, so a column named like an SQL keyword still parses). Column
+    /// names are identifiers by construction (hash keys in app source);
+    /// anything else is refused rather than spliced into SQL.
+    pub fn where_clause<K: AsRef<str>, V: SqlLiteral>(
+        conditions: impl IntoIterator<Item = (K, V)>,
+    ) -> String {
+        let parts: Vec<String> = conditions
+            .into_iter()
+            .map(|(column, value)| {
+                let column = column.as_ref();
+                assert!(
+                    !column.is_empty()
+                        && column.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                    "invalid column name in conditions: {column:?}"
+                );
+                match value.sql_literal() {
+                    Some(literal) => format!("\"{column}\" = {literal}"),
+                    None => format!("\"{column}\" IS NULL"),
+                }
+            })
+            .collect();
+        if parts.is_empty() {
+            "1 = 1".to_string()
+        } else {
+            parts.join(" AND ")
+        }
+    }
+
     /// Run a one-shot DDL/INSERT/UPDATE/DELETE. Captures
     /// `last_insert_rowid` so the subsequent accessor returns the
     /// freshly-inserted id (the typical `Db.exec(insert_sql);
@@ -561,5 +708,31 @@ CREATE TABLE widgets (
                 .expect("count")
         });
         assert_eq!(count, 0, "new connection should start empty");
+    }
+}
+
+#[cfg(test)]
+mod where_clause_tests {
+    use super::Db;
+
+    #[test]
+    fn conditions_become_a_quoted_clause() {
+        let clause = Db::where_clause([("token", "o'brien")]);
+        assert_eq!(clause, "\"token\" = 'o''brien'");
+        let clause = Db::where_clause([("user_id", 7_i64)]);
+        assert_eq!(clause, "\"user_id\" = 7");
+        let none: Option<String> = None;
+        assert_eq!(Db::where_clause([("ip", none)]), "\"ip\" IS NULL");
+        assert_eq!(
+            Db::where_clause([("a", serde_json::Value::Null)]),
+            "\"a\" IS NULL"
+        );
+        assert_eq!(Db::where_clause(Vec::<(&str, i64)>::new()), "1 = 1");
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid column name")]
+    fn a_column_name_is_never_spliced_into_sql() {
+        Db::where_clause([("id; DROP TABLE users", 1_i64)]);
     }
 }

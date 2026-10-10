@@ -1515,6 +1515,21 @@ impl Analyzer {
             .keys()
             .filter_map(|(c, m, _)| Some(((c.clone(), m.clone()), self.params_row(c, m)?.clone())))
             .collect();
+        app.inferred_method_returns = app
+            .controllers
+            .iter()
+            .flat_map(|controller| {
+                let table = self.classes.get(&controller.name).map(|ci| &ci.instance_methods);
+                controller.actions().filter_map(move |action| {
+                    let ty = table?.get(&action.name)?;
+                    let ty = match ty {
+                        Ty::Fn { ret, .. } => (**ret).clone(),
+                        other => other.clone(),
+                    };
+                    (!ty.mentions_unknown() && !matches!(ty, Ty::Bottom)).then(|| ((controller.name.clone(), action.name.clone()), ty))
+                })
+            })
+            .collect();
 
         // Render sites inside `app/helpers` modules seed partial locals
         // too — lobsters' ApplicationHelper#link_post renders
@@ -1768,9 +1783,10 @@ impl Analyzer {
                 if method.signature.is_some() {
                     continue;
                 }
-                if method.name.as_str() == "initialize" {
-                    continue;
-                }
+                // `initialize` takes the call-site param types (the
+                // `Klass.new(...)` sites feed it) but never a return:
+                // its body type is whatever the last assignment was.
+                let is_initialize = method.name.as_str() == "initialize";
                 let key = (owner.clone(), method.name.clone(), method.receiver);
                 let inferred = self.inferred_params.get(&key);
                 let has_params = inferred
@@ -1791,7 +1807,8 @@ impl Analyzer {
                     .filter(|t| !matches!(t, Ty::Fn { .. }))
                     .cloned()
                     .or_else(|| effective_return_ty(&method.body))
-                    .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped));
+                    .filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped))
+                    .filter(|_| !is_initialize);
 
                 if !has_params && ret.is_none() {
                     continue;
@@ -4616,6 +4633,25 @@ impl Analyzer {
             let class_id = &lc.name;
             for method in &lc.methods {
                 let ret = self.method_return_ty(class_id, method);
+                let uninformative_data_member_reader =
+                    matches!(method.kind, crate::dialect::AccessorKind::AttributeReader)
+                        && method.name_span.is_synthetic()
+                        && matches!(
+                            &lc.origin,
+                            Some(crate::dialect::LibraryClassOrigin::DataFactory { members, .. })
+                                if members.contains(&method.name)
+                        )
+                        && ret.as_ref().is_some_and(|ty| {
+                            ty.has_unknown_arm() && ty.clone().strip_unknown() == Ty::Nil
+                        });
+                if uninformative_data_member_reader {
+                    // The synthesized Data reader's only evidence can be the
+                    // nil-initialized synthetic ivar plus an unknown
+                    // constructor argument. Do not turn that lack of evidence
+                    // into a false `Nil` return; preserve any call-site type
+                    // information that produced a concrete reader type.
+                    continue;
+                }
                 let target = match method.receiver {
                     crate::dialect::MethodReceiver::Instance => {
                         &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -5337,10 +5373,50 @@ impl Analyzer {
         }
 
         self.apply_param_sites(sites, &params_by_method, &defined);
+        self.apply_current_attribute_write_sites(app);
         // Production signatures keep their production callers' shape.
         // Fold before adding test-owned observations: a same-named test
         // helper must not feed an included production concern either.
         self.fold_concern_param_sites(app);
+    }
+
+    /// Attribute writers synthesized for CurrentAttributes have their
+    /// only useful parameter observations at class-level assignment
+    /// sites (`Current.request = request`), not ordinary method calls
+    /// discoverable by `collect_send_sites`. Feed those observed RHS
+    /// types into the same parameter table so the generated instance
+    /// writer and its class-level forwarder retain one typed contract.
+    fn apply_current_attribute_write_sites(&mut self, app: &App) {
+        let targets: std::collections::HashSet<&ClassId> =
+            app.current_attribute_classes.iter().collect();
+        if targets.is_empty() {
+            return;
+        }
+        let mut writes = HashMap::new();
+        let mut collect = |body: &crate::expr::Expr| {
+            collect_const_attr_writes(body, &targets, &mut writes);
+        };
+        crate::lower::for_each_hook_body_ref(app, &mut collect);
+        for view in &app.views {
+            collect(&view.body);
+        }
+
+        for (class, attrs) in writes {
+            for (attr, ty) in attrs {
+                // Both sides: the instance writer and its class-level
+                // forwarder share the observed contract.
+                for side in [MethodReceiver::Instance, MethodReceiver::Class] {
+                    let key = (class.clone(), Symbol::from(format!("{attr}=")), side);
+                    let entry = self.inferred_params.entry(key).or_default();
+                    if entry.is_empty() {
+                        entry.push(ty.clone());
+                    } else {
+                        entry[0] =
+                            fixpoint_bound::bound(unify_param_ty(entry[0].clone(), ty.clone()));
+                    }
+                }
+            }
+        }
     }
 
     /// Replay production+view param observations, then overlay typed

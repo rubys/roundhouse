@@ -4,8 +4,8 @@ use crate::dialect::{LibraryClass, LibraryClassOrigin};
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 
-use super::library_class::ingest_library_method_with_keywords;
-use super::util::{constant_id_str, constant_path_of, flatten_statements, node_span};
+use super::library_class::{data_factory_methods, ingest_library_method_with_keywords};
+use super::util::{constant_id_str, constant_path_of, flatten_statements, node_span, symbol_value};
 use super::visibility::{self, Visibility};
 use super::{IngestError, IngestResult, ingest_expr};
 
@@ -96,6 +96,16 @@ pub(super) fn collect(
             return Err(unsupported());
         };
         let name = statement.as_constant_write_node().unwrap().name();
+        let members: Vec<Symbol> = call
+            .arguments()
+            .map(|arguments| {
+                arguments
+                    .arguments()
+                    .iter()
+                    .filter_map(|argument| symbol_value(&argument).map(Symbol::from))
+                    .collect()
+            })
+            .unwrap_or_default();
         let id = ClassId(Symbol::from(format!(
             "{}::{}",
             owner.0.as_str(),
@@ -129,6 +139,7 @@ pub(super) fn collect(
                 return Err(unsupported());
             }
         }
+        let methods = data_factory_methods(&id, &members, methods);
         factories.push(LibraryClass {
             name: id,
             is_module: false,
@@ -140,6 +151,7 @@ pub(super) fn collect(
             nullable_columns: Vec::new(),
             origin: Some(LibraryClassOrigin::DataFactory {
                 declaration_span: node_span(&call.as_node(), file),
+                members,
             }),
             constants: Vec::new(),
             unknown_calls: Vec::new(),

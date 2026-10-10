@@ -1,3 +1,9 @@
+# This remains the complete typed Rails facade used by non-Rust targets.
+# Rust currently emits only Rails.root/public_path and the
+# AppPath initialize/join/to_s/to_path operations; cache, environment,
+# logger, application config, and GlobalID are intentionally not
+# presented as Rust-supported APIs until their generated code and
+# app-specific values compile and run there. AppPath#+ is also omitted.
 module Rails
   def self.env: () -> Env
   def self.env_name: () -> String?

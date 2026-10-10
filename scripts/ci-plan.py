@@ -178,16 +178,21 @@ PROJECT_BUILDERS = {
 }
 
 # Coverage labels. Precedence: ci:full (or CI_FULL) > any focus labels
-# (ci:<lang> / ci:extras / ci:jruby / ci:spinel) > path ownership.
+# (ci:<lang> / ci:extras / ci:jruby / ci:spinel / ci:rust / ci:typescript)
+# > path ownership.
 # Focus mode is NARROW: BASE + selected focus lanes only.
 CI_FULL = "ci:full"
 CI_SPINEL = "ci:spinel"
 CI_JRUBY = "ci:jruby"
 CI_EXTRAS = "ci:extras"
 CI_FOCUS_BY_LABEL = {f"ci:{t}": t for t in EXTRA_COMPARE_TARGETS}
+# Rust / TypeScript ride the `compare` matrix (and the floor smoke), not
+# compare-extra, so they get their own focus labels.
+CI_COMPARE_FOCUS_BY_LABEL = {f"ci:{t}": t for t in COMPARE_TARGETS}
 
 CoverageLabels = namedtuple(
-    "CoverageLabels", "full focus_spinel focus_jruby focus_extras"
+    "CoverageLabels", "full focus_spinel focus_jruby focus_extras focus_compare",
+    defaults=((),),
 )
 
 
@@ -202,15 +207,19 @@ def parse_coverage_labels(names, *, env_full=False):
         if label in labels:
             focus.add(target)
     focus_extras = tuple(t for t in EXTRA_COMPARE_TARGETS if t in focus)
+    focus_compare = tuple(
+        t for label, t in CI_COMPARE_FOCUS_BY_LABEL.items() if label in labels
+    )
     return CoverageLabels(
         full=full,
         focus_spinel=CI_SPINEL in labels,
         focus_jruby=CI_JRUBY in labels,
         focus_extras=focus_extras,
+        focus_compare=focus_compare,
     )
 
 
-def focus_plan(extras=(), jruby=False, spinel=False):
+def focus_plan(extras=(), jruby=False, spinel=False, compare=()):
     """BASE plus selected focus lanes; path ownership suppressed.
 
     Focused extras / jruby / CORE Spinel are merge-gate required for the
@@ -218,11 +227,27 @@ def focus_plan(extras=(), jruby=False, spinel=False):
     Spinel11 Campfire suite stay off.
     """
     extra = [t for t in EXTRA_COMPARE_TARGETS if t in extras]
+    compare = [t for t in COMPARE_TARGETS if t in compare]
     jobs = list(BASE)
     smoke_floor = []
     reasons = []
+    if compare:
+        jobs.append("compare")
+        if "typescript" in compare:
+            jobs.append("browser-smoke-typescript")
+        jobs.extend(["build-site", "smoke", "archive-results"])
+        smoke_floor.extend(compare)
+        reasons.append(
+            "ci focus: BASE + "
+            + ", ".join(compare)
+            + " (compare and floor smoke; required)"
+        )
     if extra:
-        jobs.extend(["compare-extra", "build-site", "smoke-extra", "archive-results"])
+        jobs.extend(
+            j
+            for j in ["compare-extra", "build-site", "smoke-extra", "archive-results"]
+            if j not in jobs
+        )
         reasons.append(
             "ci focus: BASE + "
             + ", ".join(extra)
@@ -252,8 +277,8 @@ def focus_plan(extras=(), jruby=False, spinel=False):
         bool(spinel),
         reasons,
         smoke_extra=extra,
-        compare=[],
-        focus_required=bool(extra) or jruby,
+        compare=compare,
+        focus_required=bool(extra or compare) or jruby,
         hard_spinel=bool(spinel),
         spinel_tests=list(SPINEL_TESTS) if spinel else None,
     )
@@ -440,6 +465,7 @@ def select(
     focus_extras=(),
     focus_jruby=False,
     focus_spinel=False,
+    focus_compare=(),
     publish=False,
     project_scope=None,
     campfire_latest=True,
@@ -451,8 +477,9 @@ def select(
         raise ValueError("publication requires full validation mode")
     # Focus labels narrow the plan before path ownership or main-push Spinel.
     # ci:full still falls through to the full ledger below.
-    if not full and (focus_extras or focus_jruby or focus_spinel):
-        return focus_plan(focus_extras, focus_jruby, focus_spinel)
+    focus_compare = tuple(focus_compare or ())
+    if not full and (focus_extras or focus_jruby or focus_spinel or focus_compare):
+        return focus_plan(focus_extras, focus_jruby, focus_spinel, focus_compare)
     if spinel_lane and not full:
         return finish(
             [j for j in SPINEL_LANE if campfire_latest or j != "campfire-latest"],
@@ -899,7 +926,8 @@ def main():
     focus_extras = coverage.focus_extras
     focus_jruby = coverage.focus_jruby
     focus_spinel = coverage.focus_spinel
-    any_focus = bool(focus_extras or focus_jruby or focus_spinel)
+    focus_compare = coverage.focus_compare
+    any_focus = bool(focus_extras or focus_jruby or focus_spinel or focus_compare)
     # Main-push / unknown-input advisory Spinel suite (not the PR focus lane).
     spinel_lane = False
     if (
@@ -950,6 +978,7 @@ def main():
         focus_extras=focus_extras,
         focus_jruby=focus_jruby,
         focus_spinel=focus_spinel,
+        focus_compare=focus_compare,
         publish=publish,
         project_scope=project_scope,
         campfire_latest=not pr,

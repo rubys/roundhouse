@@ -7,11 +7,11 @@
 
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 
-use super::util::{arm_body_already_value, indent, peel_nil, try_emit_case_pattern};
+use super::util::{arm_body_already_value, indent, is_option_ty, peel_nil, try_emit_case_pattern};
 use super::{
-    current_return_is_option, current_return_is_unit, current_return_ty,
-    emit_expr, emit_expr_tail, in_constructor, in_return_tail, mark_rebound_var,
-    render_self_literal, with_declared_vars_scope, with_rebound_vars_scope,
+    current_return_is_option, current_return_is_unit, current_return_ty, emit_expr, emit_expr_tail,
+    in_constructor, in_return_tail, mark_rebound_var, render_self_literal,
+    with_declared_vars_scope, with_rebound_vars_scope,
 };
 
 /// Wrap a branch's emitted body in `{ … }` only when the IR shape is
@@ -23,6 +23,33 @@ fn wrap_as_block_if_multi(branch: &Expr, emitted: String) -> String {
     let multi = matches!(&*branch.node, ExprNode::Seq { exprs } if exprs.len() > 1);
     if multi {
         format!("{{ {emitted} }}")
+    } else {
+        emitted
+    }
+}
+
+fn terminate_new_local_assignment(branch: &Expr, emitted: String) -> String {
+    let terminal = match &*branch.node {
+        ExprNode::Seq { exprs } => exprs.last(),
+        _ => Some(branch),
+    };
+    let Some(Expr {
+        node,
+        ..
+    }) = terminal
+    else {
+        return emitted;
+    };
+    let ExprNode::Assign {
+        target: LValue::Var { .. } | LValue::Ivar { .. },
+        ..
+    } = &**node
+    else {
+        return emitted;
+    };
+    let last_line = emitted.rsplit('\n').next().unwrap_or(&emitted).trim_start();
+    if last_line.starts_with("let ") {
+        format!("{emitted};")
     } else {
         emitted
     }
@@ -43,11 +70,15 @@ pub(super) fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> St
     // else) keep the expression form.
     let else_is_nil = matches!(
         &*else_branch.node,
-        ExprNode::Lit { value: Literal::Nil }
+        ExprNode::Lit {
+            value: Literal::Nil
+        }
     );
     let then_is_nil = matches!(
         &*then_branch.node,
-        ExprNode::Lit { value: Literal::Nil }
+        ExprNode::Lit {
+            value: Literal::Nil
+        }
     );
     if else_is_nil {
         // In the tail position of an `Option<T>`-returning function,
@@ -64,6 +95,7 @@ pub(super) fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> St
         // `unused_braces` lint stays clean (Stage 1 of #22).
         let cond_s = emit_expr(cond);
         let then_s = with_declared_vars_scope(|| emit_expr_tail(then_branch));
+        let then_s = terminate_new_local_assignment(then_branch, then_s);
         let then_wrapped = wrap_as_block_if_multi(then_branch, then_s);
         if in_return_tail() && current_return_is_option() {
             // Skip the Some wrap when the inner branch already
@@ -82,8 +114,12 @@ pub(super) fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> St
     // branch mismatch (E0308 "if and else have incompatible types")
     // doesn't surface.
     if then_is_nil {
+        if let Some(guarded) = emit_nil_guarded_reads(cond, else_branch) {
+            return guarded;
+        }
         let cond_s = emit_expr(cond);
         let else_s = with_declared_vars_scope(|| emit_expr_tail(else_branch));
+        let else_s = terminate_new_local_assignment(else_branch, else_s);
         let else_wrapped = wrap_as_block_if_multi(else_branch, else_s);
         if in_return_tail() && current_return_is_option() {
             if tail_produces_option(else_branch) {
@@ -98,8 +134,68 @@ pub(super) fn emit_if(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> St
     // binding into the other branch or the statements after the if.
     let cond_s = emit_expr(cond);
     let then_s = with_declared_vars_scope(|| emit_expr_tail(then_branch));
+    let then_s = terminate_new_local_assignment(then_branch, then_s);
     let else_s = with_declared_vars_scope(|| emit_expr_tail(else_branch));
+    let else_s = terminate_new_local_assignment(else_branch, else_s);
     format!("if {cond_s} {{ {then_s} }} else {{ {else_s} }}")
+}
+
+/// Apply the nil refinement from `unless value.nil?` to structurally
+/// matching call receivers in the body. Each read remains a fresh
+/// evaluation, matching Ruby if the getter or body is stateful.
+fn emit_nil_guarded_reads(cond: &Expr, body: &Expr) -> Option<String> {
+    let ExprNode::Send {
+        recv: Some(guarded_value),
+        method,
+        args,
+        ..
+    } = &*cond.node
+    else {
+        return None;
+    };
+    if method.as_str() != "nil?"
+        || !args.is_empty()
+        || !guarded_value.ty.as_ref().is_some_and(is_option_ty)
+        || !matches!(
+            &*guarded_value.node,
+            ExprNode::Send { .. } | ExprNode::Ivar { .. } | ExprNode::Var { .. }
+        )
+        || !body_has_receiver(body, &guarded_value.node)
+    {
+        return None;
+    }
+
+    let cond_s = emit_expr(cond);
+    let body_s = with_declared_vars_scope(|| {
+        super::with_nil_guard_receiver((*guarded_value.node).clone(), || emit_expr_tail(body))
+    });
+    let body_s = wrap_as_block_if_multi(body, body_s);
+    if in_return_tail() && current_return_is_option() {
+        if tail_produces_option(body) {
+            return Some(format!("if !({cond_s}) {{ {body_s} }} else {{ None }}"));
+        }
+        return Some(format!(
+            "if !({cond_s}) {{ Some({body_s}) }} else {{ None }}"
+        ));
+    }
+    Some(format!("if !({cond_s}) {{ {body_s} }}"))
+}
+
+fn body_has_receiver(body: &Expr, receiver: &ExprNode) -> bool {
+    fn walk(expr: &Expr, receiver: &ExprNode) -> bool {
+        if matches!(&*expr.node, ExprNode::Send { recv: Some(recv), .. } if recv.node.as_ref() == receiver)
+        {
+            return true;
+        }
+        let mut found = false;
+        expr.node.for_each_child(&mut |child| {
+            if !found {
+                found = walk(child, receiver);
+            }
+        });
+        found
+    }
+    walk(body, receiver)
 }
 
 pub(super) fn emit_while(cond: &Expr, body: &Expr, until_form: bool) -> String {
@@ -162,7 +258,12 @@ pub(super) fn emit_seq(exprs: &[Expr]) -> String {
             // implicitly return `()` at the end of a block.
             if i == last
                 && current_return_is_unit()
-                && matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+                && matches!(
+                    &*e.node,
+                    ExprNode::Lit {
+                        value: Literal::Nil
+                    }
+                )
             {
                 if !lines.is_empty() {
                     let last_line = lines.last_mut().unwrap();
@@ -197,7 +298,12 @@ pub(super) fn emit_seq(exprs: &[Expr]) -> String {
 }
 
 pub(super) fn emit_return(value: &Expr) -> String {
-    let is_nil = matches!(&*value.node, ExprNode::Lit { value: Literal::Nil });
+    let is_nil = matches!(
+        &*value.node,
+        ExprNode::Lit {
+            value: Literal::Nil
+        }
+    );
     // Constructor early returns produce `Self { fields }` — Ruby's
     // `return if cond` lowers to `Return { Nil }`, but a `pub fn new
     // (...) -> Self` body returning bare `()` wouldn't typecheck.
@@ -226,7 +332,9 @@ pub(super) fn emit_return(value: &Expr) -> String {
         let needs_to_string = !str_color_handled
             && matches!(
                 &*value.node,
-                ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                ExprNode::Lit {
+                    value: Literal::Str { .. } | Literal::Sym { .. }
+                }
             )
             && matches!(
                 current_return_ty().as_ref(),
@@ -255,22 +363,27 @@ pub(super) fn emit_return(value: &Expr) -> String {
         // (E0507). Without this the eager-load guard `return
         // self.comments_cache` failed to compile (issue #27).
         if needs_to_string {
-            format!("return {}.to_string()", super::with_return_tail(true, || emit_expr_tail(value)))
+            format!(
+                "return {}.to_string()",
+                super::with_return_tail(true, || emit_expr_tail(value))
+            )
         } else if needs_self_clone {
             "return self.clone()".to_string()
         } else if needs_some_wrap {
-            format!("return Some({})", super::with_return_tail(true, || emit_expr_tail(value)))
+            format!(
+                "return Some({})",
+                super::with_return_tail(true, || emit_expr_tail(value))
+            )
         } else {
-            format!("return {}", super::with_return_tail(true, || emit_expr_tail(value)))
+            format!(
+                "return {}",
+                super::with_return_tail(true, || emit_expr_tail(value))
+            )
         }
     }
 }
 
-pub(super) fn emit_bool_op(
-    op: &crate::expr::BoolOpKind,
-    left: &Expr,
-    right: &Expr,
-) -> String {
+pub(super) fn emit_bool_op(op: &crate::expr::BoolOpKind, left: &Expr, right: &Expr) -> String {
     // Ruby `a && b` / `a || b` are truthy-on-non-nil-non-false, not
     // bool-typed. Rust's `||` / `&&` are bool-only — direct emit only
     // works when both operands are already Ty::Bool.
@@ -286,14 +399,19 @@ pub(super) fn emit_bool_op(
             Some(crate::ty::Ty::Union { variants })
                 if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
         );
-        let lhs_is_bool = matches!(left.ty.as_ref(), Some(crate::ty::Ty::Bool));
         if lhs_is_option {
             // `hash[k] || default` — the body-typer types `hash[k]` as
             // `Option<V>`, but rust emits Send `[]` as `hash[k]`
             // (panic-on-miss, returns &V). Detect and emit
             //   `recv.get(k).cloned().unwrap_or(default)`
             // directly — actually produces Option<V>.
-            if let ExprNode::Send { recv: Some(r), method, args, .. } = &*left.node {
+            if let ExprNode::Send {
+                recv: Some(r),
+                method,
+                args,
+                ..
+            } = &*left.node
+            {
                 if method.as_str() == "[]"
                     && args.len() == 1
                     && matches!(
@@ -316,9 +434,9 @@ pub(super) fn emit_bool_op(
                         coerce_to_value_default(right, emit_expr(right))
                     } else {
                         match &*right.node {
-                            ExprNode::Lit { value: Literal::Str { .. } }
-                                if !super::has_str_coercion(right) =>
-                            {
+                            ExprNode::Lit {
+                                value: Literal::Str { .. },
+                            } if !super::has_str_coercion(right) => {
                                 format!("{}.to_string()", emit_expr(right))
                             }
                             _ => emit_expr(right),
@@ -331,17 +449,13 @@ pub(super) fn emit_bool_op(
                         return format!("{get_s}.unwrap_or({default_s})");
                     }
                     let recv_s = emit_expr(r);
-                    return format!(
-                        "{recv_s}.get({key_s}).cloned().unwrap_or({default_s})"
-                    );
+                    return format!("{recv_s}.get({key_s}).cloned().unwrap_or({default_s})");
                 }
             }
             // `Option<Untyped>` (Value) `||` literal — the default
             // needs to be `Value`-shaped.
-            let lhs_inner_untyped = matches!(
-                left.ty.as_ref().map(peel_nil),
-                Some(crate::ty::Ty::Untyped)
-            );
+            let lhs_inner_untyped =
+                matches!(left.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Untyped));
             // `Option<Str>` (rust emits as `Option<String>`) `||`
             // literal-str — `unwrap_or` expects `String`, but Str
             // literal emits as `&'static str`. Force `.to_string()` on
@@ -356,7 +470,9 @@ pub(super) fn emit_bool_op(
             } else if lhs_inner_str
                 && matches!(
                     &*right.node,
-                    ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                    ExprNode::Lit {
+                        value: Literal::Str { .. } | Literal::Sym { .. }
+                    }
                 )
                 && !super::has_str_coercion(right)
             {
@@ -366,8 +482,11 @@ pub(super) fn emit_bool_op(
             };
             return format!("{}.unwrap_or({})", emit_expr(left), default_s);
         }
-        if !lhs_is_bool && left.ty.is_some() {
-            // Statically non-nil — RHS unreachable in Ruby semantics. Drop.
+        if left.ty.as_ref().is_some_and(is_always_truthy) {
+            // Statically truthy (never nil, never false) — the RHS is
+            // unreachable in Ruby semantics. Drop. A `Bool`, a union
+            // that may hold `false`, or anything untyped keeps it: a
+            // `true | false` left operand must still fall through.
             return emit_expr(left);
         }
     }
@@ -392,7 +511,11 @@ pub(super) fn emit_bool_op(
 /// as a bare `||` (which binds looser than `&&`). See `emit_bool_op`.
 fn emit_and_operand(e: &Expr) -> String {
     let s = emit_expr(e);
-    if emits_as_or_infix(e) { format!("({s})") } else { s }
+    if emits_as_or_infix(e) {
+        format!("({s})")
+    } else {
+        s
+    }
 }
 
 /// True iff `e` is an `Or` that `emit_bool_op` renders as the infix
@@ -402,7 +525,12 @@ fn emit_and_operand(e: &Expr) -> String {
 /// option LHS → unwrap_or (non-infix); non-bool *typed* LHS → RHS
 /// dropped (non-infix); bool or untyped LHS → falls through to infix.
 fn emits_as_or_infix(e: &Expr) -> bool {
-    let ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, .. } = &*e.node else {
+    let ExprNode::BoolOp {
+        op: crate::expr::BoolOpKind::Or,
+        left,
+        ..
+    } = &*e.node
+    else {
         return false;
     };
     let lhs_is_option = matches!(
@@ -410,8 +538,29 @@ fn emits_as_or_infix(e: &Expr) -> bool {
         Some(crate::ty::Ty::Union { variants })
             if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
     );
-    let lhs_is_bool = matches!(left.ty.as_ref(), Some(crate::ty::Ty::Bool));
-    !lhs_is_option && (lhs_is_bool || left.ty.is_none())
+    !lhs_is_option && !left.ty.as_ref().is_some_and(is_always_truthy)
+}
+
+/// A type whose every value is truthy in Ruby: no `nil`, no `false`.
+/// `Bool`, `Nil`, unions and untyped values may be falsy, so they are
+/// not listed.
+fn is_always_truthy(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    matches!(
+        ty,
+        Ty::Int
+            | Ty::Float
+            | Ty::Str
+            | Ty::Sym
+            | Ty::Date
+            | Ty::Time
+            | Ty::Array { .. }
+            | Ty::Hash { .. }
+            | Ty::Tuple { .. }
+            | Ty::Record { .. }
+            | Ty::Relation { .. }
+            | Ty::Class { .. }
+    )
 }
 
 pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
@@ -426,17 +575,12 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
     // An IR-carried guard-free Wildcard (a source `else`, or the shared
     // send grounding's raise arm) already IS the default — appending a
     // second `_` would be unreachable.
-    //
+    if let Some(rendered) = emit_regex_case(scrutinee, arms) {
+        return rendered;
+    }
     // Only literal, binding and wildcard patterns have a Rust `match`
-    // form (`try_emit_case_pattern`). A range, class or other `===`
-    // pattern, a nil/float literal, or a guarded arm has none — report
-    // instead of inventing `_` (which would let the first such arm
-    // swallow every input). Fail-closed matches Python/TS intent; the
-    // supported set keeps Bind for indexer symbol dispatch, which those
-    // emitters do not.
-    // The diagnostic points at the first such arm's guard or pattern
-    // expression; a literal pattern carries no span, so it falls back to
-    // the scrutinee.
+    // form (`try_emit_case_pattern`). Other Ruby `===` patterns and
+    // guarded arms must remain explicit unsupported gaps.
     if let Some(arm) = arms
         .iter()
         .find(|arm| arm.guard.is_some() || try_emit_case_pattern(&arm.pattern).is_none())
@@ -448,9 +592,31 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
         };
         return crate::emit::diagnostics::report_unsupported(span, "rust", "Case", "");
     }
-    let scrutinee_s = emit_expr(scrutinee);
+    let string_scrutinee = matches!(
+        scrutinee.ty.as_ref(),
+        Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)
+    ) || match &*scrutinee.node {
+        ExprNode::Ivar { name } => super::ivar_field_ty(name.as_str())
+            .is_some_and(|ty| matches!(ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)),
+        _ => false,
+    };
+    let scrutinee_s = if string_scrutinee {
+        // Ruby case/when compares string values by content. Rust string
+        // literal patterns have type `&str`, so match against a borrowed
+        // string view rather than an owned `String` scrutinee. The
+        // temporary owned conversion also covers sources emitted as
+        // borrowed literals/constants without changing the case value.
+        format!("({}).to_string().as_str()", emit_expr(scrutinee))
+    } else {
+        emit_expr(scrutinee)
+    };
     let return_ty = current_return_ty();
-    let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped));
+    let return_is_value = !arms.iter().any(|arm| {
+        matches!(&*arm.body.node, ExprNode::Assign { .. })
+    }) && return_ty
+        .as_ref()
+        .map(crate::emit::rust::ty::rust_value_shaped)
+        .unwrap_or(false);
     let arm_strs: Vec<String> = arms
         .iter()
         .map(|arm| {
@@ -460,7 +626,11 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
             // `IN_RETURN_TAIL=true` and add `.clone()` for non-Copy
             // fields. Without that, `Value::from(self.body)` below
             // would move out of `&self.body` (E0507).
-            let body_s = emit_expr_tail(&arm.body);
+            // Each match arm is its own Rust block. Keep local-declaration
+            // tracking in sync so a variable introduced in one arm is
+            // declared independently in another arm that assigns it.
+            let body_s = with_declared_vars_scope(|| emit_expr_tail(&arm.body));
+            let body_s = terminate_new_local_assignment(&arm.body, body_s);
             let body_wrapped = if return_is_value && !arm_body_already_value(&arm.body) {
                 format!("serde_json::Value::from({body_s})")
             } else {
@@ -486,6 +656,103 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
     )
 }
 
+/// Ruby `case value; when /pattern/; ...` invokes `Regexp#===` on the
+/// case value. Rust's `match` patterns cannot express that test, so
+/// compile the all-regex shape as an ordered `if` chain. This preserves
+/// the first-matching-arm behavior and handles the common Rails pattern
+/// of identifying the user-agent platform.
+fn emit_regex_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> Option<String> {
+    use crate::expr::{ExprNode, Literal, Pattern};
+
+    let regex_source = |pattern: &Pattern| match pattern {
+        Pattern::Expr { expr }
+            if matches!(
+                &*expr.node,
+                ExprNode::Lit {
+                    value: Literal::Regex { .. }
+                }
+            ) =>
+        {
+            Some(emit_expr(expr))
+        }
+        Pattern::Lit { value } if matches!(value, Literal::Regex { .. }) => {
+            Some(super::literal::emit_literal(value))
+        }
+        _ => None,
+    };
+    if arms.is_empty()
+        || !arms.iter().all(|arm| {
+            regex_source(&arm.pattern).is_some() || matches!(&arm.pattern, Pattern::Wildcard)
+        })
+    {
+        return None;
+    }
+
+    // Ruby evaluates the `case` subject once. A plain local is read in
+    // every arm as is; anything else (a call such as
+    // `request.user_agent`) is bound first so each arm tests one value.
+    let scrutinee_s = emit_expr(scrutinee);
+    let bind_scrutinee = !matches!(&*scrutinee.node, ExprNode::Var { .. });
+    let recv = if bind_scrutinee { "__case_value".to_string() } else { scrutinee_s.clone() };
+    let return_ty = current_return_ty();
+    let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped));
+    let option_return_tail = in_return_tail() && current_return_is_option();
+    let mut branches = Vec::new();
+    let mut default = None;
+    for arm in arms {
+        let body = emit_expr_tail(&arm.body);
+        let body = if return_is_value && !arm_body_already_value(&arm.body) {
+            format!("serde_json::Value::from({body})")
+        } else if option_return_tail && !tail_produces_option(&arm.body) {
+            let body = terminate_new_local_assignment(&arm.body, body);
+            let body = wrap_as_block_if_multi(&arm.body, body);
+            format!("Some({body})")
+        } else {
+            body
+        };
+        if matches!(arm.pattern, Pattern::Wildcard) {
+            if arm.guard.is_some() || default.is_some() {
+                return None;
+            }
+            default = Some(body);
+            continue;
+        }
+
+        let pattern = regex_source(&arm.pattern)?;
+        let test = format!("({pattern}).is_match(&({recv}))");
+        let test = if let Some(guard) = &arm.guard {
+            format!("{test} && ({})", emit_expr(guard))
+        } else {
+            test
+        };
+        branches.push(format!("if {test} {{ {body} }}"));
+    }
+
+    let fallback = default.unwrap_or_else(|| {
+        if return_is_value {
+            "serde_json::Value::Null".to_string()
+        } else if option_return_tail {
+            "None".to_string()
+        } else {
+            "()".to_string()
+        }
+    });
+    let Some((last, preceding)) = branches.split_last() else {
+        return Some(fallback);
+    };
+    let mut chain = preceding
+        .iter()
+        .map(|branch| format!("{branch} else "))
+        .collect::<String>();
+    chain.push_str(last);
+    if bind_scrutinee {
+        return Some(format!(
+            "{{ let __case_value = {scrutinee_s}; {chain} else {{ {fallback} }} }}"
+        ));
+    }
+    Some(format!("{chain} else {{ {fallback} }}"))
+}
+
 /// Detect a standalone Ruby guard-clause on a Var/param:
 ///   return X if name.nil?
 /// (or `raise X if name.nil?`). The body-typer narrows `name` to
@@ -496,10 +763,21 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
 /// which rebinds `name` to the unwrapped value.
 fn try_emit_param_guard_unwrap(guard: &Expr) -> Option<(String, String)> {
     use crate::ty::Ty;
-    let ExprNode::If { cond, then_branch, else_branch } = &*guard.node else {
+    let ExprNode::If {
+        cond,
+        then_branch,
+        else_branch,
+    } = &*guard.node
+    else {
         return None;
     };
-    let ExprNode::Send { recv: Some(cond_recv), method, args, .. } = &*cond.node else {
+    let ExprNode::Send {
+        recv: Some(cond_recv),
+        method,
+        args,
+        ..
+    } = &*cond.node
+    else {
         return None;
     };
     if method.as_str() != "nil?" || !args.is_empty() {
@@ -518,7 +796,9 @@ fn try_emit_param_guard_unwrap(guard: &Expr) -> Option<(String, String)> {
     let then_diverges = matches!(then_branch.ty.as_ref(), Some(Ty::Bottom));
     let else_is_nil = matches!(
         &*else_branch.node,
-        ExprNode::Lit { value: Literal::Nil }
+        ExprNode::Lit {
+            value: Literal::Nil
+        }
     );
     if !then_diverges || !else_is_nil {
         return None;
@@ -541,7 +821,10 @@ fn try_fuse_let_else(assign: &Expr, guard: &Expr) -> Option<(String, String)> {
     let ExprNode::Assign { target, value } = &*assign.node else {
         return None;
     };
-    let LValue::Var { name: assign_name, .. } = target else {
+    let LValue::Var {
+        name: assign_name, ..
+    } = target
+    else {
         return None;
     };
     let value_is_option = matches!(
@@ -551,16 +834,30 @@ fn try_fuse_let_else(assign: &Expr, guard: &Expr) -> Option<(String, String)> {
     if !value_is_option {
         return None;
     }
-    let ExprNode::If { cond, then_branch, else_branch } = &*guard.node else {
+    let ExprNode::If {
+        cond,
+        then_branch,
+        else_branch,
+    } = &*guard.node
+    else {
         return None;
     };
-    let ExprNode::Send { recv: Some(cond_recv), method, args, .. } = &*cond.node else {
+    let ExprNode::Send {
+        recv: Some(cond_recv),
+        method,
+        args,
+        ..
+    } = &*cond.node
+    else {
         return None;
     };
     if method.as_str() != "nil?" || !args.is_empty() {
         return None;
     }
-    let ExprNode::Var { name: cond_name, .. } = &*cond_recv.node else {
+    let ExprNode::Var {
+        name: cond_name, ..
+    } = &*cond_recv.node
+    else {
         return None;
     };
     if cond_name != assign_name {
@@ -569,12 +866,18 @@ fn try_fuse_let_else(assign: &Expr, guard: &Expr) -> Option<(String, String)> {
     let then_diverges = matches!(then_branch.ty.as_ref(), Some(Ty::Bottom));
     let else_is_nil = matches!(
         &*else_branch.node,
-        ExprNode::Lit { value: Literal::Nil }
+        ExprNode::Lit {
+            value: Literal::Nil
+        }
     );
     if !then_diverges || !else_is_nil {
         return None;
     }
-    let value_s = emit_expr(value);
+    let value_s = if super::send::is_array_index_read(value) {
+        super::with_option_index_read(|| emit_expr(value))
+    } else {
+        emit_expr(value)
+    };
     let diverge_s = emit_expr_tail(then_branch);
     let n = assign_name.as_str().to_string();
     Some((
@@ -609,11 +912,59 @@ fn coerce_to_value_default(default_expr: &Expr, raw: String) -> String {
     }
 }
 
-/// True when the branch's tail expression — after walking through a
-/// trailing `Seq` — is a Var read whose recorded `local_var_ty` is
-/// already `Option<T>`. Used by the `if` tail-position Some-wrap to
-/// avoid re-wrapping into `Option<Option<T>>`.
+/// True when the branch already emits an `Option<T>`. Recognize a
+/// typed nullable self-send and retain the local-variable fallback for
+/// assignment sequences whose overall type is less specific. Used by
+/// the `if` tail-position Some-wrap to avoid `Option<Option<T>>`.
 fn tail_produces_option(branch: &Expr) -> bool {
+    if let ExprNode::Seq { exprs } = &*branch.node {
+        if exprs.last().is_some_and(tail_produces_option) {
+            return true;
+        }
+    }
+    if let ExprNode::Send {
+        recv: Some(receiver),
+        method,
+        args,
+        ..
+    } = &*branch.node
+        && method.as_str() == "[]"
+        && args.len() == 1
+        && matches!(receiver.ty.as_ref().map(super::util::peel_nil), Some(crate::ty::Ty::Array { .. }))
+        && matches!(args[0].ty.as_ref(), Some(crate::ty::Ty::Int))
+        && branch.ty.as_ref().is_some_and(super::util::is_option_ty)
+    {
+        return true;
+    }
+    // `Model.find_by(…)`: the generated model shim answers `Option<Model>`
+    // (nil on a miss), whatever the surrounding analyzer type widened it
+    // to. A model that defines its own `find_by` keeps that method's
+    // resolved type instead.
+    if let ExprNode::Send {
+        recv: Some(receiver),
+        method,
+        ..
+    } = &*branch.node
+        && method.as_str() == "find_by"
+        && let ExprNode::Const { path } = &*receiver.node
+        && path
+            .last()
+            .is_some_and(|model| super::global_class_method_param_tys(model.as_str(), "find_by").is_none())
+    {
+        return true;
+    }
+    if let ExprNode::Send {
+        recv: Some(receiver),
+        ..
+    } = &*branch.node
+        && matches!(&*receiver.node, ExprNode::SelfRef)
+        && branch
+            .ty
+            .as_ref()
+            .is_some_and(|ty| crate::emit::rust::ty::rust_ty(ty).starts_with("Option<"))
+    {
+        return true;
+    }
     let (tail_name, exprs) = match &*branch.node {
         ExprNode::Seq { exprs } => match exprs.last() {
             Some(last) => match &*last.node {
@@ -632,30 +983,35 @@ fn tail_produces_option(branch: &Expr) -> bool {
     if exprs.is_empty() {
         return true;
     }
-    exprs.iter().any(|e| matches!(
-        &*e.node,
-        ExprNode::Assign {
-            target: crate::expr::LValue::Var { name: assign_name, .. },
-            value,
-        } if assign_name.as_str() == name
-            && matches!(&*value.node, ExprNode::Lit { value: Literal::Nil })
-    ))
+    exprs.iter().any(|e| {
+        matches!(
+            &*e.node,
+            ExprNode::Assign {
+                target: crate::expr::LValue::Var { name: assign_name, .. },
+                value,
+            } if assign_name.as_str() == name
+                && matches!(&*value.node, ExprNode::Lit { value: Literal::Nil })
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::emit::rust::EmitCtx;
-    use crate::emit::rust::expr::with_emit_ctx;
+    use crate::emit::rust::expr::{declare_var, with_emit_ctx};
     use crate::expr::{BoolOpKind, BoolOpSurface};
-    use crate::ident::{Symbol, VarId};
+    use crate::ident::{ClassId, Symbol, VarId};
     use crate::span::Span;
     use crate::ty::Ty;
 
     fn bool_var(name: &str) -> Expr {
         let mut e = Expr::new(
             Span::synthetic(),
-            ExprNode::Var { id: VarId(0), name: Symbol::from(name) },
+            ExprNode::Var {
+                id: VarId(0),
+                name: Symbol::from(name),
+            },
         );
         e.ty = Some(Ty::Bool);
         e
@@ -664,7 +1020,12 @@ mod tests {
     fn bool_op(op: BoolOpKind, left: Expr, right: Expr) -> Expr {
         let mut e = Expr::new(
             Span::synthetic(),
-            ExprNode::BoolOp { op, surface: BoolOpSurface::Symbol, left, right },
+            ExprNode::BoolOp {
+                op,
+                surface: BoolOpSurface::Symbol,
+                left,
+                right,
+            },
         );
         e.ty = Some(Ty::Bool);
         e
@@ -672,6 +1033,131 @@ mod tests {
 
     fn emit(e: &Expr) -> String {
         with_emit_ctx(EmitCtx::default(), || emit_expr(e))
+    }
+
+    fn string_literal(value: &str) -> Expr {
+        let mut expr = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Str {
+                    value: value.to_string(),
+                },
+            },
+        );
+        expr.ty = Some(Ty::Str);
+        expr
+    }
+
+    fn local_assignment(name: &str, value: &str) -> Expr {
+        let mut expr = Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Var {
+                    id: VarId(0),
+                    name: Symbol::from(name),
+                },
+                value: string_literal(value),
+            },
+        );
+        expr.ty = Some(Ty::Str);
+        expr
+    }
+
+    fn string_case() -> (Expr, Vec<crate::expr::Arm>) {
+        let mut scrutinee = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var {
+                id: VarId(1),
+                name: Symbol::from("kind"),
+            },
+        );
+        scrutinee.ty = Some(Ty::Str);
+        let arms = ["chrome", "gecko"]
+            .into_iter()
+            .map(|kind| crate::expr::Arm {
+                pattern: crate::expr::Pattern::Lit {
+                    value: Literal::Str {
+                        value: kind.to_string(),
+                    },
+                },
+                guard: None,
+                body: local_assignment("token", kind),
+            })
+            .collect();
+        (scrutinee, arms)
+    }
+
+    #[test]
+    fn case_arms_declare_their_own_locals() {
+        let (scrutinee, arms) = string_case();
+        let emitted = with_emit_ctx(EmitCtx::default(), || emit_case(&scrutinee, &arms));
+
+        assert_eq!(emitted.matches("let token =").count(), 2, "{emitted}");
+        assert!(
+            emitted.starts_with("match (kind).to_string().as_str()"),
+            "String-valued case must compare against the `&str` literal patterns:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("let token = \"chrome\";")
+                && emitted.contains("let token = \"gecko\";"),
+            "each arm-local declaration must terminate as a Rust statement:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn string_ivar_case_matches_a_borrowed_view_of_the_field() {
+        let scrutinee = Expr::new(
+            Span::synthetic(),
+            ExprNode::Ivar {
+                name: Symbol::from("kind"),
+            },
+        );
+        let arms = vec![crate::expr::Arm {
+            pattern: crate::expr::Pattern::Lit {
+                value: Literal::Str {
+                    value: "edge".to_string(),
+                },
+            },
+            guard: None,
+            body: string_literal("Edge"),
+        }];
+        let ctx = EmitCtx::default();
+        ctx.ivar_types
+            .borrow_mut()
+            .insert("kind".to_string(), Ty::Str);
+        let emitted = with_emit_ctx(ctx, || emit_case(&scrutinee, &arms));
+
+        assert!(
+            emitted.starts_with("match (self.kind).to_string().as_str()"),
+            "String ivar case must use string literal-compatible matching:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn case_arm_assignment_keeps_an_outer_local_binding() {
+        let (scrutinee, arms) = string_case();
+        let emitted = with_emit_ctx(EmitCtx::default(), || {
+            declare_var("token".to_string());
+            emit_case(&scrutinee, &arms)
+        });
+
+        assert_eq!(emitted.matches("token =").count(), 2, "{emitted}");
+        assert!(!emitted.contains("let token ="), "{emitted}");
+    }
+
+    #[test]
+    fn if_branches_terminate_new_local_declarations() {
+        let emitted = with_emit_ctx(EmitCtx::default(), || {
+            emit_if(
+                &bool_var("flag"),
+                &local_assignment("left", "yes"),
+                &local_assignment("right", "no"),
+            )
+        });
+
+        assert!(emitted.contains("let left = "), "{emitted}");
+        assert!(emitted.contains("let right = "), "{emitted}");
+        assert!(emitted.contains("; } else {"), "branch statements must end with semicolons:\n{emitted}");
     }
 
     #[test]
@@ -683,6 +1169,23 @@ mod tests {
         let inner_or = bool_op(BoolOpKind::Or, bool_var("c"), bool_var("d"));
         let root = bool_op(BoolOpKind::And, inner_and, inner_or);
         assert_eq!(emit(&root), "a && b && (c || d)");
+    }
+
+    #[test]
+    fn or_keeps_its_right_side_unless_the_left_is_always_truthy() {
+        // `true | false` may be false, so `a || b` must still evaluate b.
+        let mut maybe_false = bool_var("a");
+        maybe_false.ty = Some(Ty::Union {
+            variants: vec![Ty::Bool, Ty::Str],
+        });
+        let kept = bool_op(BoolOpKind::Or, maybe_false, bool_var("b"));
+        assert_eq!(emit(&kept), "a || b");
+
+        // A String is truthy even when empty: the right side is dead.
+        let mut text = bool_var("s");
+        text.ty = Some(Ty::Str);
+        let dropped = bool_op(BoolOpKind::Or, text, bool_var("b"));
+        assert_eq!(emit(&dropped), "s");
     }
 
     #[test]
@@ -709,5 +1212,251 @@ mod tests {
             bool_var("c"),
         );
         assert_eq!(emit(&and_in_and), "a && b && c");
+    }
+
+    #[test]
+    fn nil_guard_keeps_the_option_return_tail_shape() {
+        let mut guarded = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("current_user"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: true,
+            },
+        );
+        guarded.ty = Some(Ty::Union {
+            variants: vec![
+                Ty::Class {
+                    id: crate::ident::ClassId(Symbol::from("User")),
+                    args: Vec::new(),
+                },
+                Ty::Nil,
+            ],
+        });
+        let mut cond = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(guarded.clone()),
+                method: Symbol::from("nil?"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: true,
+            },
+        );
+        cond.ty = Some(Ty::Bool);
+        let mut body = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(guarded.clone()),
+                method: Symbol::from("id"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: true,
+            },
+        );
+        body.ty = Some(Ty::Int);
+        let nil = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Nil,
+            },
+        );
+        let return_ty = Ty::Union {
+            variants: vec![Ty::Int, Ty::Nil],
+        };
+
+        let out = with_emit_ctx(EmitCtx::default(), || {
+            super::super::with_current_return_ty(Some(return_ty), || {
+                super::super::with_return_tail(true, || emit_if(&cond, &nil, &body))
+            })
+        });
+
+        assert!(out.contains("Some("), "{out}");
+        assert!(out.contains("else { None }"), "{out}");
+        assert_eq!(out.matches("current_user()").count(), 2, "{out}");
+    }
+
+    #[test]
+    fn nullable_send_branch_is_not_wrapped_in_another_some() {
+        let cond = bool_var("present");
+        let nil = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Nil,
+            },
+        );
+        let mut branch = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                method: Symbol::from("user"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let user_ty = Ty::Class {
+            id: ClassId(Symbol::from("User")),
+            args: Vec::new(),
+        };
+        branch.ty = Some(Ty::Union {
+            variants: vec![user_ty.clone(), Ty::Nil],
+        });
+        let return_ty = Ty::Union {
+            variants: vec![user_ty, Ty::Nil],
+        };
+
+        let emitted = with_emit_ctx(EmitCtx::default(), || {
+            super::super::with_current_return_ty(Some(return_ty), || {
+                super::super::with_return_tail(true, || emit_if(&cond, &nil, &branch))
+            })
+        });
+
+        assert_eq!(emitted, "if !(present) { self.user() } else { None }");
+    }
+
+    #[test]
+    fn regex_case_uses_ordered_match_predicates() {
+        use crate::expr::{Arm, Literal, Pattern};
+
+        let mut scrutinee = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var {
+                id: VarId(0),
+                name: Symbol::from("platform"),
+            },
+        );
+        scrutinee.ty = Some(Ty::Str);
+        let regex_arm = Arm {
+            pattern: Pattern::Lit {
+                value: Literal::Regex {
+                    pattern: "Android".to_string(),
+                    flags: String::new(),
+                },
+            },
+            guard: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit {
+                    value: Literal::Str {
+                        value: "Android".to_string(),
+                    },
+                },
+            ),
+        };
+        let fallback = Arm {
+            pattern: Pattern::Wildcard,
+            guard: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit {
+                    value: Literal::Str {
+                        value: "Other".to_string(),
+                    },
+                },
+            ),
+        };
+        let emitted = with_emit_ctx(EmitCtx::default(), || {
+            emit_case(&scrutinee, &[regex_arm, fallback])
+        });
+        assert!(emitted.contains(".is_match(&(platform))"), "{emitted}");
+        assert!(emitted.contains("else { \"Other\" }"), "{emitted}");
+        assert!(!emitted.contains("match platform"), "{emitted}");
+    }
+
+    #[test]
+    fn regex_case_evaluates_a_call_subject_once() {
+        use crate::expr::{Arm, Pattern};
+        let mut recv = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from("request") },
+        );
+        recv.ty = Some(Ty::Str);
+        let mut scrutinee = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from("user_agent"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        scrutinee.ty = Some(Ty::Str);
+        let arm = |pattern: &str| Arm {
+            pattern: Pattern::Lit {
+                value: Literal::Regex { pattern: pattern.to_string(), flags: String::new() },
+            },
+            guard: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Str { value: pattern.to_string() } },
+            ),
+        };
+        let emitted = with_emit_ctx(EmitCtx::default(), || {
+            emit_case(&scrutinee, &[arm("Android"), arm("iPhone")])
+        });
+        assert!(emitted.starts_with("{ let __case_value = "), "{emitted}");
+        assert_eq!(emitted.matches("user_agent").count(), 1, "{emitted}");
+        assert_eq!(emitted.matches(".is_match(&(__case_value))").count(), 2, "{emitted}");
+    }
+
+    #[test]
+    fn regex_case_uses_option_branches_only_in_an_option_return_tail() {
+        use crate::expr::{Arm, Pattern};
+
+        let mut scrutinee = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from("platform") },
+        );
+        scrutinee.ty = Some(Ty::Str);
+        let string_arm = || Arm {
+            pattern: Pattern::Lit {
+                value: Literal::Regex { pattern: "Android".to_string(), flags: String::new() },
+            },
+            guard: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Str { value: "Android".to_string() } },
+            ),
+        };
+        let option_return = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        let emitted_option = with_emit_ctx(EmitCtx::default(), || {
+            super::super::with_current_return_ty(Some(option_return.clone()), || {
+                super::super::with_return_tail(true, || {
+                    emit_regex_case(&scrutinee, &[string_arm()]).expect("regex case")
+                })
+            })
+        });
+        assert!(emitted_option.contains("Some(\"Android\")"), "{emitted_option}");
+        assert!(emitted_option.ends_with("else { None }"), "{emitted_option}");
+
+        let statement_arm = Arm {
+            pattern: Pattern::Lit {
+                value: Literal::Regex { pattern: "Android".to_string(), flags: String::new() },
+            },
+            guard: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Var { id: VarId(1), name: Symbol::from("matched") },
+                    value: Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Bool { value: true } },
+                    ),
+                },
+            ),
+        };
+        let emitted_statement = with_emit_ctx(EmitCtx::default(), || {
+            super::super::with_current_return_ty(Some(option_return), || {
+                super::super::with_return_tail(false, || {
+                    emit_regex_case(&scrutinee, &[statement_arm]).expect("regex case")
+                })
+            })
+        });
+        assert!(emitted_statement.ends_with("else { () }"), "{emitted_statement}");
+        assert!(!emitted_statement.contains("Some("), "{emitted_statement}");
     }
 }

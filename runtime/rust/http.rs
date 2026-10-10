@@ -149,6 +149,9 @@ pub struct ControllerResponse {
     /// Set when `redirect_to` fires; the wrapper emits a 3xx with
     /// this as the `Location` header instead of an HTML body.
     pub location: Option<String>,
+    /// Extra response headers the action set through
+    /// `response.headers[...] = …`, applied after the body headers.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Default for ControllerResponse {
@@ -158,6 +161,7 @@ impl Default for ControllerResponse {
             body: String::new(),
             content_type: "text/html; charset=utf-8".to_string(),
             location: None,
+            headers: Vec::new(),
         }
     }
 }
@@ -186,6 +190,378 @@ thread_local! {
 /// and threaded into the thread-local before the controller body runs.
 #[derive(Clone, Debug)]
 pub struct RequestFormatExt(pub String);
+
+/// Owned transport metadata visible during controller, helper, view,
+/// and layout execution for one request. This is intentionally a
+/// snapshot rather than an Axum request borrow: layout wrapping awaits
+/// the handler and consumes the response body before rendering the
+/// layout.
+#[derive(Clone, Debug)]
+pub struct RequestContext {
+    pub method: axum::http::Method,
+    pub uri: axum::http::Uri,
+    pub headers: axum::http::HeaderMap,
+    pub remote_addr: Option<std::net::SocketAddr>,
+    cookies: std::sync::Arc<std::sync::Mutex<CookieTransport>>,
+}
+
+#[derive(Debug, Default)]
+struct CookieTransport {
+    incoming: HashMap<String, String>,
+    pending: Vec<axum::http::HeaderValue>,
+}
+
+impl RequestContext {
+    pub fn from_request(req: &axum::extract::Request) -> Self {
+        let mut incoming = HashMap::new();
+        for header in req.headers().get_all(axum::http::header::COOKIE) {
+            if let Ok(value) = header.to_str() {
+                for pair in value.split(';') {
+                    if let Some((name, value)) = pair.trim().split_once('=') {
+                        incoming
+                            .entry(name.trim().to_string())
+                            .or_insert_with(|| value.trim().to_string());
+                    }
+                }
+            }
+        }
+        Self {
+            method: req.method().clone(),
+            uri: req.uri().clone(),
+            headers: req.headers().clone(),
+            remote_addr: req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|info| info.0),
+            cookies: std::sync::Arc::new(std::sync::Mutex::new(CookieTransport {
+                incoming,
+                pending: Vec::new(),
+            })),
+        }
+    }
+
+    /// Read an incoming cookie value without applying Rails' jar semantics.
+    /// The CookieJar runtime owns decoding, signing, and missing-value rules.
+    pub fn request_cookie(&self, name: &str) -> Option<String> {
+        self.cookies
+            .lock()
+            .expect("request cookie transport mutex poisoned")
+            .incoming
+            .get(name)
+            .cloned()
+    }
+
+    /// Queue one fully serialized Set-Cookie value. Validation happens before
+    /// it enters request state so malformed headers cannot disappear later.
+    pub fn queue_set_cookie(
+        &self,
+        value: &str,
+    ) -> Result<(), axum::http::header::InvalidHeaderValue> {
+        let value = axum::http::HeaderValue::from_str(value)?;
+        self.cookies
+            .lock()
+            .expect("request cookie transport mutex poisoned")
+            .pending
+            .push(value);
+        Ok(())
+    }
+
+    /// Append pending cookie headers to the finished response and drain the
+    /// queue. `Set-Cookie` is multi-valued and must never use `insert` here.
+    pub fn append_pending_cookies(&self, response: &mut axum::response::Response) {
+        let pending = std::mem::take(
+            &mut self
+                .cookies
+                .lock()
+                .expect("request cookie transport mutex poisoned")
+                .pending,
+        );
+        for value in pending {
+            response
+                .headers_mut()
+                .append(axum::http::header::SET_COOKIE, value);
+        }
+    }
+
+    /// Rails' Request#user_agent returns an empty string when the header
+    /// is absent in the shared typed request model.
+    pub fn user_agent(&self) -> String {
+        self.headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    pub fn get_pred(&self) -> bool {
+        self.method == axum::http::Method::GET
+    }
+
+    pub fn head_pred(&self) -> bool {
+        self.method == axum::http::Method::HEAD
+    }
+
+    /// Rails' Request#host omits a port. Prefer the request Host header,
+    /// then an absolute URI authority; do not invent a host when neither
+    /// source carried one.
+    pub fn host(&self) -> String {
+        self.headers
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+            .map(|authority| authority.host().to_owned())
+            .or_else(|| self.uri.host().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// Rails' Request#protocol: `"https://"` or `"http://"`, the same
+    /// rule as the Ruby runtime's `ssl?`. The URI scheme wins when the
+    /// request target is absolute; an origin-form target (what the axum
+    /// server sees) falls back to X-Forwarded-Proto, then plain HTTP,
+    /// which is all this server listens on.
+    pub fn protocol(&self) -> String {
+        let https = match self.uri.scheme_str() {
+            Some(scheme) => scheme.eq_ignore_ascii_case("https"),
+            None => self
+                .headers
+                .get("x-forwarded-proto")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+                .map(|value| value.trim().eq_ignore_ascii_case("https"))
+                .unwrap_or(false),
+        };
+        if https { "https://" } else { "http://" }.to_string()
+    }
+
+    pub fn remote_ip(&self) -> String {
+        self.remote_addr
+            .map(|address| address.ip().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Preserve an absolute request URI as-is. For origin-form requests,
+    /// construct an absolute URL only when both scheme and host are present;
+    /// otherwise retain the URI rather than inventing origin metadata.
+    pub fn url(&self) -> String {
+        if self.uri.scheme().is_some() && self.uri.authority().is_some() {
+            return self.uri.to_string();
+        }
+        let host = self.host();
+        if host.is_empty() {
+            return self.uri.to_string();
+        }
+        format!("{}{host}{}", self.protocol(), self.uri)
+    }
+
+    pub fn script_name(&self) -> String {
+        String::new()
+    }
+
+    pub fn referrer(&self) -> String {
+        self.headers
+            .get(axum::http::header::REFERER)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    }
+}
+
+tokio::task_local! {
+    static REQUEST_CONTEXT: RequestContext;
+}
+
+/// Run a future in this request's context. Tokio task-local scope follows
+/// the future across awaits and restores any enclosing context afterward.
+pub async fn scope_request_context<F>(context: RequestContext, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    REQUEST_CONTEXT.scope(context, future).await
+}
+
+/// Clone the active request metadata. Access outside a request scope is
+/// an invariant violation; do not fabricate an empty request.
+pub fn current_request_context() -> RequestContext {
+    REQUEST_CONTEXT
+        .try_with(Clone::clone)
+        .expect("request context accessed outside an active HTTP request")
+}
+
+/// Scope the generated router too, so direct router-based integration
+/// tests receive the same context as production server requests.
+pub async fn request_context_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let inherited = REQUEST_CONTEXT.try_with(Clone::clone).ok();
+    let context = inherited
+        .clone()
+        .unwrap_or_else(|| RequestContext::from_request(&req));
+    let mut response = scope_request_context(context.clone(), next.run(req)).await;
+    if inherited.is_none() {
+        context.append_pending_cookies(&mut response);
+    }
+    response
+}
+
+#[cfg(test)]
+mod request_context_tests {
+    use super::{RequestContext, current_request_context, scope_request_context};
+    use axum::http::{HeaderValue, Method, Request, Uri, header};
+
+    fn context(uri: &str, agent: &str) -> RequestContext {
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(header::USER_AGENT, HeaderValue::from_str(agent).unwrap())
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(
+                "203.0.113.7:4000"
+                    .parse::<std::net::SocketAddr>()
+                    .unwrap(),
+            ));
+        RequestContext::from_request(&request)
+    }
+
+    #[tokio::test]
+    async fn request_context_survives_awaits_and_nested_scopes_restore() {
+        let outer = context("/outer?x=1", "outer-agent");
+        let inner = context("/inner?y=2", "inner-agent");
+        scope_request_context(outer, async {
+            assert_eq!(current_request_context().uri, Uri::from_static("/outer?x=1"));
+            scope_request_context(inner, async {
+                tokio::task::yield_now().await;
+                let current = current_request_context();
+                assert_eq!(current.uri, Uri::from_static("/inner?y=2"));
+                assert_eq!(current.headers[header::USER_AGENT], "inner-agent");
+                assert_eq!(current.user_agent(), "inner-agent");
+                assert!(current.get_pred());
+                assert!(!current.head_pred());
+                assert_eq!(current.remote_addr.unwrap().ip().to_string(), "203.0.113.7");
+            })
+            .await;
+            tokio::task::yield_now().await;
+            let current = current_request_context();
+            assert_eq!(current.uri, Uri::from_static("/outer?x=1"));
+            assert_eq!(current.headers[header::USER_AGENT], "outer-agent");
+        })
+        .await;
+    }
+
+    #[test]
+    fn host_and_protocol_come_from_request_metadata() {
+        let mut request = Request::builder()
+            .uri("https://chat.example.test/messages")
+            .header(header::HOST, "chat.example.test:8443")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let context = RequestContext::from_request(&request);
+        assert_eq!(context.host(), "chat.example.test");
+        assert_eq!(context.protocol(), "https://");
+
+        *request.uri_mut() = Uri::from_static("/messages");
+        let context = RequestContext::from_request(&request);
+        assert_eq!(context.host(), "chat.example.test");
+        assert_eq!(context.protocol(), "http://");
+        assert_eq!(context.url(), "http://chat.example.test/messages");
+
+        request
+            .headers_mut()
+            .insert("x-forwarded-proto", "https".parse().unwrap());
+        let context = RequestContext::from_request(&request);
+        assert_eq!(context.protocol(), "https://");
+    }
+
+    fn cookie_context(session: &'static str) -> RequestContext {
+        let mut request = Request::builder()
+            .uri("/messages")
+            .header(
+                header::COOKIE,
+                format!("session={session}; session=duplicate; theme=dark; encoded=a%20b"),
+            )
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request
+            .headers_mut()
+            .append(header::COOKIE, "empty=".parse().unwrap());
+        RequestContext::from_request(&request)
+    }
+
+    async fn cookie_response(context: RequestContext, response_cookie: &'static str) -> Vec<String> {
+        scope_request_context(context.clone(), async move {
+            assert_eq!(context.request_cookie("session").as_deref(), Some(response_cookie));
+            assert_eq!(context.request_cookie("empty").as_deref(), Some(""));
+            assert_eq!(context.request_cookie("encoded").as_deref(), Some("a%20b"));
+            context
+                .queue_set_cookie(&format!("new={response_cookie}; Path=/; HttpOnly"))
+                .unwrap();
+            tokio::task::yield_now().await;
+            assert_eq!(current_request_context().request_cookie("session").as_deref(), Some(response_cookie));
+
+            let mut response = axum::response::Response::new(axum::body::Body::empty());
+            response
+                .headers_mut()
+                .append(header::SET_COOKIE, HeaderValue::from_static("flash=preserved; Path=/"));
+            context.append_pending_cookies(&mut response);
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .map(|value| value.to_str().unwrap().to_string())
+                .collect()
+        })
+        .await
+    }
+
+    async fn cookie_route() -> axum::response::Response {
+        current_request_context()
+            .queue_set_cookie("route=handled; Path=/; HttpOnly")
+            .unwrap();
+        axum::response::Response::new(axum::body::Body::empty())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cookie_transport_is_request_scoped_and_appends_without_overwriting() {
+        let first = cookie_context("first");
+        let second = cookie_context("second");
+        let (first_headers, second_headers) = tokio::join!(
+            cookie_response(first, "first"),
+            cookie_response(second, "second"),
+        );
+
+        assert_eq!(first_headers.len(), 2);
+        assert_eq!(first_headers[0], "flash=preserved; Path=/");
+        assert_eq!(first_headers[1], "new=first; Path=/; HttpOnly");
+        assert_eq!(second_headers.len(), 2);
+        assert_eq!(second_headers[0], "flash=preserved; Path=/");
+        assert_eq!(second_headers[1], "new=second; Path=/; HttpOnly");
+    }
+
+    #[tokio::test]
+    async fn request_context_middleware_flushes_cookies_after_the_handler() {
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(cookie_route))
+            .layer(axum::middleware::from_fn(super::request_context_middleware));
+        let server = axum_test::TestServer::new(app).expect("construct HTTP test server");
+        let response = server.get("/").await;
+        let values = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["route=handled; Path=/; HttpOnly"]);
+    }
+
+    #[test]
+    fn cookie_transport_rejects_invalid_response_header_values() {
+        let context = cookie_context("session");
+        assert!(context.queue_set_cookie("cookie=value\r\nInjected: yes").is_err());
+    }
+}
 
 /// Stash the inferred format on the per-task thread-local. The axum
 /// wrapper calls this synchronously immediately before the controller
@@ -429,6 +805,44 @@ pub fn response_set_head(status_name: &str, content_type: Option<String>) {
     });
 }
 
+/// Rails' `response` as a controller action sees it. The response
+/// itself lives in the `RESPONSE` thread-local; this handle is the
+/// zero-sized door to it, so `response.headers[…] = …` has somewhere
+/// to stand.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResponseHandle;
+
+impl ResponseHandle {
+    /// `response.headers[name] = value`. Header names are
+    /// case-insensitive, so a later write replaces an earlier one.
+    /// Answers the value written, as Ruby's `h[k] = v` does — the write
+    /// is often a method's last expression.
+    pub fn set_header(&self, name: &str, value: String) -> serde_json::Value {
+        let written = serde_json::Value::String(value.clone());
+        RESPONSE.with(|r| {
+            let mut resp = r.borrow_mut();
+            match resp.headers.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+                Some(slot) => slot.1 = value,
+                None => resp.headers.push((name.to_string(), value)),
+            }
+        });
+        written
+    }
+
+    /// `response.headers[name]`: the value set so far, nil (JSON null)
+    /// when unset — untyped, as the Ruby hash read is.
+    pub fn header(&self, name: &str) -> serde_json::Value {
+        RESPONSE.with(|r| {
+            r.borrow()
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| serde_json::Value::String(v.clone()))
+                .unwrap_or(serde_json::Value::Null)
+        })
+    }
+}
+
 /// Snapshot + reset — used by the per-action axum wrapper to read
 /// out the state immediately after the action returns. Returns
 /// owned value so the borrow on the thread-local is short.
@@ -448,6 +862,7 @@ pub fn response_into_axum(resp: ControllerResponse) -> axum::response::Response 
         if let Ok(hv) = axum::http::HeaderValue::from_str(&location) {
             response.headers_mut().insert(axum::http::header::LOCATION, hv);
         }
+        apply_extra_headers(&mut response, &resp.headers);
         return response;
     }
     let body = resp.body;
@@ -458,7 +873,19 @@ pub fn response_into_axum(resp: ControllerResponse) -> axum::response::Response 
             .headers_mut()
             .insert(axum::http::header::CONTENT_TYPE, hv);
     }
+    apply_extra_headers(&mut response, &resp.headers);
     response
+}
+
+fn apply_extra_headers(response: &mut axum::response::Response, headers: &[(String, String)]) {
+    for (name, value) in headers {
+        if let (Ok(n), Ok(v)) = (
+            axum::http::HeaderName::from_bytes(name.as_bytes()),
+            axum::http::HeaderValue::from_str(value),
+        ) {
+            response.headers_mut().insert(n, v);
+        }
+    }
 }
 
 /// Public alias for `status_name_to_code` — exposed for the AC::Base
@@ -506,6 +933,12 @@ impl RubyToS for String {
     }
 }
 
+impl RubyToS for () {
+    fn ruby_to_s(&self) -> String {
+        String::new()
+    }
+}
+
 impl RubyToS for serde_json::Value {
     fn ruby_to_s(&self) -> String {
         match self {
@@ -513,6 +946,12 @@ impl RubyToS for serde_json::Value {
             serde_json::Value::Null => String::new(),
             other => other.to_string(),
         }
+    }
+}
+
+impl<T: RubyToS> RubyToS for Option<T> {
+    fn ruby_to_s(&self) -> String {
+        self.as_ref().map(RubyToS::ruby_to_s).unwrap_or_default()
     }
 }
 
@@ -576,5 +1015,28 @@ fn status_name_to_code(name: &str) -> u16 {
         "unprocessable_entity" | "unprocessable_content" => 422,
         "internal_server_error" => 500,
         _ => 200,
+    }
+}
+
+#[cfg(test)]
+mod response_headers_tests {
+    use super::{ResponseHandle, response_clear, response_take};
+
+    #[test]
+    fn header_writes_land_in_the_response_and_replace_case_insensitively() {
+        response_clear();
+        ResponseHandle.set_header("X-Version", "1".to_string());
+        ResponseHandle.set_header("x-version", "2".to_string());
+        ResponseHandle.set_header("X-Rev", "abc".to_string());
+        assert_eq!(ResponseHandle.header("X-Version"), serde_json::json!("2"));
+        assert_eq!(ResponseHandle.header("X-Nope"), serde_json::Value::Null);
+        let response = response_take();
+        assert_eq!(
+            response.headers,
+            vec![
+                ("X-Version".to_string(), "2".to_string()),
+                ("X-Rev".to_string(), "abc".to_string())
+            ]
+        );
     }
 }

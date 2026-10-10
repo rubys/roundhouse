@@ -151,7 +151,8 @@ rm -rf "$TREE/test/fixtures/files"
 step "installing the campfire README + e2e suite"
 rm -rf "$TREE/e2e"
 mkdir -p "$TREE/e2e"
-cp "$REPO_ROOT"/e2e/campfire/*.spec.js "$REPO_ROOT/e2e/campfire/helpers.js" "$TREE/e2e/"
+cp "$REPO_ROOT"/e2e/campfire/*.spec.js "$REPO_ROOT/e2e/campfire/helpers.js" \
+    "$REPO_ROOT/e2e/campfire/global-setup.js" "$TREE/e2e/"
 # Keep the standalone README install on the dependency set CI prewarms.
 cp "$REPO_ROOT"/e2e/campfire/package{,-lock}.json "$TREE/e2e/"
 

@@ -32,6 +32,10 @@ Selected ignored integrations need their own SDKs and dependencies; see the
 harness you intend to run. `doctor` reports installed tools, not complete
 test readiness. Fixture generation uses Rails and can change with its release.
 
+For the tracked Campfire-to-Rust milestone, including the compiler inventory,
+parallel work boundaries, and separate compile/runtime acceptance gates, see
+the [Campfire Rust plan](campfire-rust-plan.md).
+
 ## Local loop
 
 1. Read the [compiler ownership map](compiler-changes.md) for the affected path.

@@ -158,4 +158,22 @@ class CgiIoTest < Minitest::Test
     req = CgiIo.parse_request(env, StringIO.new(body))
     assert_equal({}, req[:params])
   end
+
+  def test_parse_request_preserves_plain_text_body_for_request_body_readers
+    body = "Hello from a bot"
+    env = { "REQUEST_METHOD" => "POST", "PATH_INFO" => "/messages",
+            "CONTENT_TYPE" => "text/plain; charset=utf-8", "CONTENT_LENGTH" => body.bytesize.to_s }
+    req = CgiIo.parse_request(env, StringIO.new(body))
+    assert_equal body, req[:raw_body]
+    assert_equal({}, req[:params])
+  end
+
+  def test_parse_request_preserves_raw_body_while_parsing_form_params
+    body = "message%5Bbody%5D=hello"
+    env = { "REQUEST_METHOD" => "POST", "PATH_INFO" => "/messages",
+            "CONTENT_TYPE" => "application/x-www-form-urlencoded", "CONTENT_LENGTH" => body.bytesize.to_s }
+    req = CgiIo.parse_request(env, StringIO.new(body))
+    assert_equal body, req[:raw_body]
+    assert_equal "hello", req[:params]["message"]["body"]
+  end
 end

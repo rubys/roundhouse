@@ -23,13 +23,13 @@
 use std::net::SocketAddr;
 
 use axum::{
+    Router,
     body::Body,
     extract::Request,
-    http::{header, HeaderValue, Method, StatusCode},
+    http::{HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::Response,
     routing::get,
-    Router,
 };
 use tower_http::services::ServeDir;
 
@@ -76,12 +76,30 @@ pub async fn start(router: Router, opts: StartOptions<'_>) {
             .unwrap_or(3000)
     });
 
-    if let Some(layout) = opts.layout {
-        let _ = LAYOUT_FN.set(layout);
-    }
-
     db::open_production_db(&db_path, opts.schema_sql);
 
+    let app = production_router(router, opts.layout);
+
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("bind listener");
+    println!("Roundhouse server listening on http://localhost:{}", port);
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("axum serve");
+}
+
+/// Assemble the production router middleware stack. Kept separate from
+/// listener setup so the production cookie lifecycle can be exercised with
+/// an in-process router in the runtime regression harness.
+pub(crate) fn production_router(router: Router, layout: Option<fn() -> String>) -> Router {
+    if let Some(layout) = layout {
+        let _ = LAYOUT_FN.set(layout);
+    }
     // Static assets: serve `static/assets/<name>` for `/assets/*`
     // requests via tower-http's ServeDir. Mirrors Rails' Propshaft URL
     // shape — the importmap pins and `stylesheet_link_tag("tailwind")`
@@ -101,16 +119,9 @@ pub async fn start(router: Router, opts: StartOptions<'_>) {
     // DELETE cleanup 405s). Wrapping the whole router as the fallback of
     // an outer, route-less Router puts the override ahead of all real
     // routing, so `next.run()` re-enters routing with the corrected verb.
-    let app = Router::new()
+    Router::new()
         .fallback_service(app)
-        .layer(middleware::from_fn(method_override));
-
-    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("bind listener");
-    println!("Roundhouse server listening on http://localhost:{}", port);
-    axum::serve(listener, app).await.expect("axum serve");
+        .layer(middleware::from_fn(method_override))
 }
 
 // ── method override middleware ─────────────────────────────────
@@ -182,6 +193,19 @@ async fn method_override(req: Request, next: Next) -> Response {
 /// redirects pass through untouched, as do non-HTML responses (the
 /// WebSocket upgrade, any JSON endpoints).
 async fn layout_wrap(req: Request, next: Next) -> Response {
+    let context = crate::http::RequestContext::from_request(&req);
+    let mut response = crate::http::scope_request_context(context.clone(), async move {
+        layout_wrap_in_scope(req, next).await
+    })
+    .await;
+    context.append_pending_cookies(&mut response);
+    response
+}
+
+/// Keep request metadata scoped until after the handler response has
+/// been collected and the outer layout has rendered. Scoping only the
+/// route handler would drop the context before this post-handler work.
+async fn layout_wrap_in_scope(req: Request, next: Next) -> Response {
     // Wipe any stale yield/slot state before the handler runs.
     // Axum's multi-thread runtime means each worker thread has
     // its own thread-local; reset covers the current worker.

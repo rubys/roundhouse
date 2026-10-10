@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use roundhouse::emit::ruby;
+use roundhouse::emit::rust;
 use roundhouse::ingest::ingest_app_from_tree;
 
 fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
@@ -115,5 +116,21 @@ fn a_non_enum_integer_column_keeps_its_cast() {
     assert!(
         !line_containing(&src, "self.rank = ").contains("enum_int"),
         "rank is not an enum:\n{src}"
+    );
+}
+
+#[test]
+fn rust_enum_runtime_calls_own_string_array_literals() {
+    let mut app = app();
+    roundhouse::session::analyze_and_lower(&mut app);
+    let source = rust::emit(&app)
+        .into_iter()
+        .find(|file| file.path.to_string_lossy().ends_with("models/user.rs"))
+        .expect("Rust User model")
+        .content;
+
+    assert!(
+        source.contains("vec![(\"member\").to_string()"),
+        "enum helper Array[String] arguments must emit owned Rust strings:\n{source}"
     );
 }

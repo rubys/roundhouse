@@ -28,7 +28,7 @@ module ActionController
   class HeaderStore
     @keys: Array[String]
     @lower: Array[String]
-    @vals: Array[String]
+    @vals: Array[String?]
     def initialize: () -> void
     def []: (String key) -> String?
     def []=: (String key, String? value) -> void
@@ -63,6 +63,7 @@ module ActionController
     @has_stale_if_error: bool
     @extras: Array[String]
 
+    def self.append_extras: (Array[String] parts, Array[String] extras) -> Array[String]
     def initialize: () -> void
     def public?: () -> bool
     def public=: (bool) -> void

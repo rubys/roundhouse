@@ -49,8 +49,22 @@ pub(super) fn extract_partial_render_sites(
         ExprNode::Send { recv, method, args, block, .. } => {
             // Detect the `render` call shape (no explicit receiver, or the
             // receiver is an implicit context — Rails makes both work).
-            if recv.is_none() && method.as_str() == "render" {
-                if let Some((partial_name, locals)) = interpret_render_call(args, current_view) {
+            let render_args = if is_implicit_render_receiver(recv.as_ref()) && method.as_str() == "render" {
+                Some(args.as_slice())
+            } else if is_turbo_stream_render(recv.as_ref(), method.as_str()) {
+                // Turbo Stream actions accept the same partial/collection
+                // options as `render`, but the render is nested in the
+                // action call (`turbo_stream.replace target, partial: …`).
+                // Those options are the actual call-site evidence for the
+                // partial's local type and must seed it just like render.
+                args.iter()
+                    .find(|arg| matches!(&*arg.node, ExprNode::Hash { entries, .. } if entries.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "partial"))))
+                    .map(std::slice::from_ref)
+            } else {
+                None
+            };
+            if let Some(render_args) = render_args {
+                if let Some((partial_name, locals)) = interpret_render_call(render_args, current_view) {
                     // Record the renderer→partial edge so the caller can
                     // propagate the renderer's ivar context to the partial
                     // (partials render in their parent's view context and
@@ -58,7 +72,20 @@ pub(super) fn extract_partial_render_sites(
                     targets.push(partial_name.clone());
                     let entry = out.entry(partial_name).or_default();
                     for (k, v) in locals {
-                        entry.insert(k, v);
+                        // One partial may be rendered from both well-typed
+                        // and gradual sites. Keep useful evidence when a
+                        // later site only knows `Untyped`/an inference var;
+                        // otherwise traversal order silently erases the
+                        // concrete record type used to type the partial.
+                        match entry.get(&k) {
+                            Some(existing) if !existing.is_unknown() && v.is_unknown() => {}
+                            Some(existing) if existing.is_unknown() && !v.is_unknown() => {
+                                entry.insert(k, v);
+                            }
+                            _ => {
+                                entry.insert(k, v);
+                            }
+                        }
                     }
                 }
             }
@@ -130,6 +157,27 @@ pub(super) fn extract_partial_render_sites(
         }
         _ => {}
     }
+}
+
+/// Rails templates use both `render(...)` and `self.render(...)`. The
+/// latter is still the view-context render API; treating every receiver as
+/// an unrelated object silently drops its partial-local type evidence.
+fn is_implicit_render_receiver(recv: Option<&Expr>) -> bool {
+    match recv.map(|r| &*r.node) {
+        None | Some(ExprNode::SelfRef) => true,
+        Some(ExprNode::Var { name, .. }) => name.as_str() == "self",
+        _ => false,
+    }
+}
+
+fn is_turbo_stream_render(recv: Option<&Expr>, method: &str) -> bool {
+    matches!(method, "append" | "prepend" | "replace" | "update" | "before" | "after")
+        && (matches!(recv.map(|r| &*r.node), Some(ExprNode::Var { name, .. }) if name.as_str() == "turbo_stream")
+            || matches!(
+                recv.map(|r| &*r.node),
+                Some(ExprNode::Send { recv: None, method, args, block: None, .. })
+                    if method.as_str() == "turbo_stream" && args.is_empty()
+            ))
 }
 
 /// Collect the ivar names that views use as *dynamic* partial-render
@@ -402,5 +450,202 @@ pub(super) fn resolve_partial_path(name: &str, current_view: &Symbol) -> String 
             Some(idx) => format!("{}_{}", &current[..=idx], name),
             None => format!("_{name}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_self_render_contributes_partial_local_type_evidence() {
+        let user_ty = Ty::Class {
+            id: crate::ident::ClassId(Symbol::from("Accounts::User")),
+            args: vec![],
+        };
+        let sym = |s: &str| Expr::new(
+            Default::default(),
+            ExprNode::Lit { value: Literal::Sym { value: Symbol::from(s) } },
+        );
+        let str_lit = |s: &str| Expr::new(
+            Default::default(),
+            ExprNode::Lit { value: Literal::Str { value: s.to_string() } },
+        );
+        let mut local_value = Expr::new(
+            Default::default(),
+            ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("account_user") },
+        );
+        local_value.ty = Some(user_ty.clone());
+        let locals = Expr::new(
+            Default::default(),
+            ExprNode::Hash {
+                entries: vec![(sym("user"), local_value)],
+                kwargs: false,
+            },
+        );
+        let kwargs = Expr::new(
+            Default::default(),
+            ExprNode::Hash {
+                entries: vec![(sym("partial"), str_lit("users/user")), (sym("locals"), locals)],
+                kwargs: true,
+            },
+        );
+        // Ingest's shape for `self` (not a Var named "self").
+        let receiver = Expr::new(Default::default(), ExprNode::SelfRef);
+        let render = Expr::new(
+            Default::default(),
+            ExprNode::Send {
+                recv: Some(receiver),
+                method: Symbol::from("render"),
+                args: vec![kwargs],
+                block: None,
+                parenthesized: true,
+            },
+        );
+
+        let mut sites = HashMap::new();
+        let mut targets = Vec::new();
+        extract_partial_render_sites(
+            &render,
+            &Symbol::from("accounts/show"),
+            &mut sites,
+            &mut targets,
+        );
+        assert_eq!(targets, [Symbol::from("users/_user")]);
+        assert_eq!(sites[&Symbol::from("users/_user")][&Symbol::from("user")], user_ty);
+
+        // Carry the extracted fact through the actual view lowerer: this
+        // catches regressions where render collection works but the
+        // partial's emitted signature still falls back to an unknown type.
+        let view_name = Symbol::from("users/_user");
+        let view = crate::dialect::View {
+            name: view_name.clone(),
+            format: Symbol::from("html"),
+            locals: Default::default(),
+            body: Expr::new(Default::default(), ExprNode::Lit { value: Literal::Nil }),
+            strict_locals: Some(vec![crate::dialect::Param::positional(Symbol::from("user"))]),
+            analysis_only: false,
+            jbuilder: false,
+        };
+        let mut app = crate::App::default();
+        app.partial_local_types = sites;
+        let lowered = crate::lower::view_to_library::lower_view_to_library_class(&view, &app);
+        let signature = lowered.methods[0].signature.as_ref().expect("partial signature");
+        let Ty::Fn { params, .. } = signature else { panic!("expected function signature") };
+        assert_eq!(params[0].ty, user_ty);
+    }
+
+    #[test]
+    fn turbo_stream_collection_as_local_seeds_the_actual_partial_contract() {
+        let user_ty = Ty::Class {
+            id: crate::ident::ClassId(Symbol::from("User")),
+            args: vec![],
+        };
+        let target = Expr::new(
+            Default::default(),
+            ExprNode::Lit { value: Literal::Sym { value: Symbol::from("next_page_container") } },
+        );
+        let key = |name: &str| Expr::new(
+            Default::default(),
+            ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name) } },
+        );
+        let str_value = |value: &str| Expr::new(
+            Default::default(),
+            ExprNode::Lit { value: Literal::Str { value: value.to_string() } },
+        );
+        let mut collection = Expr::new(
+            Default::default(),
+            ExprNode::Ivar { name: Symbol::from("page") },
+        );
+        collection.ty = Some(Ty::Array { elem: Box::new(user_ty.clone()) });
+        let options = Expr::new(
+            Default::default(),
+            ExprNode::Hash {
+                entries: vec![
+                    (key("partial"), str_value("accounts/users/user")),
+                    (key("collection"), collection),
+                    (key("as"), key("user")),
+                ],
+                kwargs: true,
+            },
+        );
+        let receiver = Expr::new(
+            Default::default(),
+            ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("turbo_stream") },
+        );
+        let replace = Expr::new(
+            Default::default(),
+            ExprNode::Send {
+                recv: Some(receiver),
+                method: Symbol::from("replace"),
+                args: vec![target, options],
+                block: None,
+                parenthesized: true,
+            },
+        );
+
+        let mut sites = HashMap::new();
+        let mut targets = Vec::new();
+        extract_partial_render_sites(
+            &replace,
+            &Symbol::from("accounts/users/index"),
+            &mut sites,
+            &mut targets,
+        );
+        let partial = Symbol::from("accounts/users/_user");
+        assert_eq!(targets, [partial.clone()]);
+        assert_eq!(sites[&partial][&Symbol::from("user")], user_ty);
+
+        let ExprNode::Send { method, args, .. } = &*replace.node else {
+            panic!("expected turbo-stream action")
+        };
+        let bare_turbo_stream = Expr::new(
+            Default::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("turbo_stream"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let bare_replace = Expr::new(
+            Default::default(),
+            ExprNode::Send {
+                recv: Some(bare_turbo_stream),
+                method: method.clone(),
+                args: args.clone(),
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let mut bare_sites = HashMap::new();
+        let mut bare_targets = Vec::new();
+        extract_partial_render_sites(
+            &bare_replace,
+            &Symbol::from("accounts/users/index"),
+            &mut bare_sites,
+            &mut bare_targets,
+        );
+        assert_eq!(bare_targets, [partial.clone()]);
+        assert_eq!(bare_sites[&partial][&Symbol::from("user")], user_ty);
+
+        // This call's local cannot be inferred from the plural directory;
+        // only the collection/as: site identifies the element model.
+        let view = crate::dialect::View {
+            name: partial.clone(),
+            format: Symbol::from("html"),
+            locals: Default::default(),
+            body: Expr::new(Default::default(), ExprNode::Lit { value: Literal::Nil }),
+            strict_locals: None,
+            analysis_only: false,
+            jbuilder: false,
+        };
+        let mut app = crate::App::default();
+        app.partial_local_types = sites;
+        let lowered = crate::lower::view_to_library::lower_view_to_library_class(&view, &app);
+        let signature = lowered.methods[0].signature.as_ref().expect("partial signature");
+        let Ty::Fn { params, .. } = signature else { panic!("expected function signature") };
+        assert_eq!(params[0].ty, user_ty);
     }
 }

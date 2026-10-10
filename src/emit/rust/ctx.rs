@@ -26,7 +26,16 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
+use crate::expr::ExprNode;
 use crate::ty::{Param, Ty};
+
+#[derive(Clone, Debug)]
+pub struct GlobalHelperMethod {
+    pub path: String,
+    pub params: Vec<Ty>,
+    pub defaults: Vec<Option<String>>,
+    pub return_ty: Option<Ty>,
+}
 
 /// Emit-pipeline state. Built once per `rust::emit` call (in
 /// `collect_global_class_methods`) after every category of
@@ -50,14 +59,18 @@ pub struct EmitCtx {
     /// arm expects.
     pub global_class_methods: HashMap<String, HashMap<String, Vec<Param>>>,
 
+    /// Cross-LC return types keyed alongside `global_class_methods`.
+    /// Receiver emission consults these when the analyzer's call-site Ty
+    /// omits a nullable class-method return shape retained by Rust.
+    pub global_class_method_returns: HashMap<String, HashMap<String, Ty>>,
+
     /// Parallel registry of per-position pre-rendered kwarg defaults.
     /// `Some(rendered)` for literal-shape defaults the Const-recv
     /// dispatch can substitute when a kwarg is unsupplied; `None`
     /// for positional non-default params and complex defaults.
     /// Positions align 1:1 with `global_class_methods` by
     /// `(class, method)`.
-    pub global_class_method_defaults:
-        HashMap<String, HashMap<String, Vec<Option<String>>>>,
+    pub global_class_method_defaults: HashMap<String, HashMap<String, Vec<Option<String>>>>,
 
     /// Program-global set of method names flagged `mutates_self`
     /// (any class). Read by the `recv.each { |x| … }` → `iter_mut`
@@ -71,6 +84,10 @@ pub struct EmitCtx {
     /// over-match would at worst suppress a clone the borrow checker
     /// would then flag loudly, never miscompile silently.
     pub global_mutating_methods: HashSet<String>,
+
+    /// Unique class-method Rails helper owner for bare calls in views and
+    /// app helper bodies. Ambiguous names are omitted during collection.
+    pub global_helper_methods: HashMap<String, GlobalHelperMethod>,
 
     /// Ivar name → declared field type for the class currently being
     /// emitted. Read by `expr/mod.rs::ivar_field_ty` so `emit_assign`
@@ -94,6 +111,12 @@ pub struct EmitCtx {
     /// they compile inside `pub fn new` (no instance yet) and read
     /// as the cleaner Rust form generally.
     pub static_methods: RefCell<HashSet<String>>,
+
+    /// Instance methods and generated ivar readers available on the
+    /// current class. Bare Ruby calls to these names use implicit
+    /// receiver dispatch, so the Send emitter must not treat them as
+    /// free functions.
+    pub instance_methods: RefCell<HashSet<String>>,
 
     /// Field names of the struct being constructed by the currently-
     /// emitting `pub fn new`. Empty outside constructor scope. The
@@ -183,6 +206,11 @@ pub struct EmitCtx {
     /// tail position. Toggled by `with_return_tail`.
     pub in_return_tail: Cell<bool>,
 
+    /// Set while emitting the value of a `let Some(x) = arr[i] else`
+    /// nil guard: that one Array index read must keep Ruby's
+    /// nil-on-miss result. Consumed by the first `[]` read emitted.
+    pub option_index_read: Cell<bool>,
+
     /// True while emitting a module-singleton class (Ruby pattern
     /// `module X; class << self; attr_accessor :slot; end; end`):
     /// all methods are class methods, "ivars" are module-level state
@@ -206,6 +234,12 @@ pub struct EmitCtx {
     /// transiently by `emit_send_recv` (only at Var-shaped recvs) so
     /// the Var arm can suppress its multi-read clone.
     pub suppress_var_clone: Cell<bool>,
+
+    /// Structurally matched Option-returning expressions proven non-nil
+    /// by the active `unless expr.nil?` condition. Receiver emission
+    /// unwraps each matching read in place, preserving Ruby's repeated
+    /// evaluation rather than caching a potentially stateful call.
+    pub nil_guard_receivers: RefCell<Vec<ExprNode>>,
 }
 
 impl EmitCtx {
@@ -228,14 +262,16 @@ impl EmitCtx {
             .and_then(|methods| methods.get(method).cloned())
     }
 
+    pub fn lookup_return_ty(&self, class: &str, method: &str) -> Option<Ty> {
+        self.global_class_method_returns
+            .get(class)
+            .and_then(|methods| methods.get(method))
+            .cloned()
+    }
+
     /// Per-position kwarg-default lookup. Mirrors
     /// `global_class_method_param_default`.
-    pub fn lookup_param_default(
-        &self,
-        class: &str,
-        method: &str,
-        idx: usize,
-    ) -> Option<String> {
+    pub fn lookup_param_default(&self, class: &str, method: &str, idx: usize) -> Option<String> {
         self.global_class_method_defaults
             .get(class)
             .and_then(|methods| methods.get(method))

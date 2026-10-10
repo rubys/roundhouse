@@ -48,6 +48,7 @@ pub(crate) fn call_contracts(app: &App) -> Contracts {
         &app.views,
         &app.controllers,
         &app.library_classes,
+        &std::collections::BTreeSet::new(),
     )
 }
 

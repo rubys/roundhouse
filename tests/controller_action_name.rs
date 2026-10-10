@@ -18,7 +18,7 @@ const SCHEMA: &str = "ActiveRecord::Schema.define(version: 1) do\n  \
 
 const ROUTES: &str = "Rails.application.routes.draw do\n  \
     resources :posts, only: [ :index ]\n  \
-    resources :notes, only: [ :index ]\nend\n";
+    resources :notes, only: [ :index, :new ]\nend\n";
 
 const POSTS: &str = "class PostsController < ApplicationController\n  \
     before_action :track\n\n  \
@@ -27,7 +27,8 @@ const POSTS: &str = "class PostsController < ApplicationController\n  \
     def track\n    @tracked = action_name\n  end\nend\n";
 
 const NOTES: &str = "class NotesController < ApplicationController\n  \
-    def index\n    @notes = Note.all\n  end\nend\n";
+    def index\n    @notes = Note.all\n  end\n\n  \
+    def new\n  end\nend\n";
 
 fn app() -> roundhouse::App {
     let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
@@ -65,7 +66,7 @@ fn only_a_controller_that_reads_action_name_assigns_it() {
 }
 
 /// The emitted Rust HTTP handler for `index` in `name`'s controller.
-fn rust_index_handler(name: &str) -> String {
+fn rust_handler(name: &str, action: &str) -> String {
     let mut app = app();
     roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
     let file = roundhouse::emit::rust::emit(&app)
@@ -73,24 +74,60 @@ fn rust_index_handler(name: &str) -> String {
         .find(|f| f.path.ends_with(format!("{name}.rs")))
         .unwrap_or_else(|| panic!("{name}.rs emitted"))
         .content;
-    let start = file.find("pub async fn _axum_index").expect("index handler emitted");
+    let start = file
+        .find(&format!("pub async fn _axum_{action}"))
+        .unwrap_or_else(|| panic!("{action} handler emitted:\n{file}"));
     let end = file[start..].find("\n}\n").map_or(file.len(), |i| start + i);
     file[start..end].to_string()
 }
 
-/// The Rust HTTP handler calls the action without `process_action`, so
-/// it sets the action name itself.
+/// The HTTP handler enters the dispatcher once, which owns action-name
+/// assignment as well as the callback and action dispatch pipeline.
 #[test]
-fn the_rust_http_handler_sets_the_action_name() {
-    let posts = rust_index_handler("posts_controller");
-    let assign = posts.find("c.assign_action_name(\"index\");");
-    let call = posts.find("c.index();");
+fn the_rust_http_handler_enters_process_action_once() {
+    let posts = rust_handler("posts_controller", "index");
+    let call = posts.find("c.process_action(\"index\");");
     assert!(
-        matches!((assign, call), (Some(a), Some(c)) if a < c),
-        "the handler sets the name before the action:\n{posts}"
+        call.is_some() && !posts.contains("c.index();") && !posts.contains("assign_action_name"),
+        "the handler enters the dispatcher without bypassing it:\n{posts}"
     );
-    let notes = rust_index_handler("notes_controller");
-    assert!(!notes.contains("assign_action_name"), "{notes}");
+    assert_eq!(posts.matches("c.process_action(").count(), 1, "{posts}");
+
+    let notes = rust_handler("notes_controller", "index");
+    assert!(notes.contains("c.process_action(\"index\");"), "{notes}");
+    assert!(!notes.contains("c.index();"), "{notes}");
+}
+
+#[test]
+fn rust_http_handler_passes_the_original_new_action_name() {
+    let new_handler = rust_handler("notes_controller", "new");
+    assert!(new_handler.contains("c.process_action(\"new\");"), "{new_handler}");
+    assert!(!new_handler.contains("c.new_action();"), "{new_handler}");
+}
+
+#[test]
+fn rust_route_helper_id_params_accept_numeric_and_string_segments() {
+    let mut app = app();
+    app.routes = roundhouse::ingest::ingest_routes(
+        b"Rails.application.routes.draw do\n  resources :users, only: [:show]\nend\n",
+        "config/routes.rb",
+    )
+    .expect("routes ingest");
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let route_helpers = roundhouse::emit::rust::emit(&app)
+        .into_iter()
+        .find(|file| file.path.ends_with("route_helpers.rs"))
+        .expect("route helpers emitted")
+        .content;
+
+    assert!(
+        route_helpers.contains("pub fn user_path(id: impl std::fmt::Display)"),
+        "the route helper must accept both numeric ids and Rails path sentinels such as `me`:\n{route_helpers}"
+    );
+    assert!(
+        route_helpers.contains("pub fn user_path(id: impl std::fmt::Display) -> String { RouteHelpers::user_path(id) }"),
+        "the compatibility wrapper must preserve the same flexible path-segment type:\n{route_helpers}"
+    );
 }
 
 fn send_types<'a>(e: &'a Expr, method: &str, out: &mut Vec<Option<&'a Ty>>) {

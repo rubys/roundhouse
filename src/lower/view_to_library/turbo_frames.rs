@@ -53,6 +53,7 @@
 //! first, and the block form is the work there.
 
 use crate::expr::{Expr, ExprNode, InterpPart, Literal};
+use crate::ident::{Symbol, VarId};
 
 use super::attr_parts::{append_attr_parts, lit_str_coerce, take_opt};
 use super::{lit_str, view_helpers_call};
@@ -182,10 +183,9 @@ fn literal_id_piece(e: &Expr) -> Option<String> {
 /// rather than hypothetical.
 ///
 /// A literal decides at compile time; anything else gets the runtime
-/// test. The value is evaluated twice there (once for the test, once for
-/// the render) — every corpus site is a parameter read or a path helper,
-/// both free of side effects, and hoisting a temp is not available
-/// inside a string interpolation.
+/// test. Bind dynamic values once because the same expression is needed
+/// for both the nil check and the rendered attribute, and path helpers
+/// may consume non-Copy values.
 fn compacted_attr(key: &str, value: Expr) -> Vec<InterpPart> {
     if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
         return Vec::new();
@@ -193,13 +193,34 @@ fn compacted_attr(key: &str, value: Expr) -> Vec<InterpPart> {
     if matches!(&*value.node, ExprNode::Lit { .. } | ExprNode::StringInterp { .. }) {
         return rendered_attr(key, value);
     }
+    let name = Symbol::from(format!(
+        "__roundhouse_compacted_attr_{}_{}_{}",
+        value.span.file.0, value.span.start, value.span.end
+    ));
+    let mut bound = Expr::new(
+        value.span,
+        ExprNode::Var {
+            id: VarId(0),
+            name: name.clone(),
+        },
+    );
+    bound.ty = value.ty.clone();
+    let body = Expr::new(
+        value.span,
+        ExprNode::If {
+            cond: super::send(Some(bound.clone()), "nil?", Vec::new(), None, false),
+            then_branch: super::attr_parts::string_interp(Vec::new()),
+            else_branch: super::attr_parts::string_interp(rendered_attr(key, bound)),
+        },
+    );
     vec![InterpPart::Expr {
         expr: Expr::new(
             value.span,
-            ExprNode::If {
-                cond: super::send(Some(value.clone()), "nil?", Vec::new(), None, false),
-                then_branch: lit_str(String::new()),
-                else_branch: super::attr_parts::string_interp(rendered_attr(key, value)),
+            ExprNode::Let {
+                id: VarId(0),
+                name,
+                value,
+                body,
             },
         ),
     }]
@@ -318,5 +339,33 @@ mod tests {
     fn a_join_over_several_runtime_pieces_declines() {
         assert!(frame_open_parts(&[bare("a"), bare("b")], &|_| false).is_none());
         assert!(frame_open_parts(&[], &|_| false).is_none());
+    }
+
+    #[test]
+    fn optional_frame_attributes_use_owned_strings_in_both_branches() {
+        let parts = compacted_attr("src", bare("frame_src"));
+        let [InterpPart::Expr { expr }] = parts.as_slice() else {
+            panic!("dynamic frame attributes should be guarded as one expression");
+        };
+        let ExprNode::Let { name, value, body, .. } = &*expr.node
+        else {
+            panic!("dynamic frame attributes should bind their value once");
+        };
+        assert!(matches!(&*value.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "frame_src"));
+        let ExprNode::If { cond, then_branch, else_branch } = &*body.node else {
+            panic!("bound frame attribute should have a nil-check conditional");
+        };
+        assert!(name.as_str().starts_with("__roundhouse_compacted_attr_"));
+        assert!(matches!(&*cond.node, ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "nil?" && matches!(&*recv.node, ExprNode::Var { name: bound, .. } if bound == name)));
+        assert!(matches!(&*then_branch.node, ExprNode::StringInterp { parts } if parts.is_empty()));
+        let ExprNode::StringInterp { parts } = &*else_branch.node else {
+            panic!("rendered attribute should remain an interpolation");
+        };
+        assert!(parts.iter().any(|part| matches!(
+            part,
+            InterpPart::Expr { expr }
+                if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "html_escape")
+        )));
+        assert!(format!("{parts:?}").contains(name.as_str()), "{parts:?}");
     }
 }

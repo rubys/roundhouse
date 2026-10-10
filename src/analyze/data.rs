@@ -61,7 +61,7 @@ pub(super) fn register(
         // Rehomed constants are not emitted in their original source scope.
         let custom = app.library_classes.iter().any(|class| {
             class.name == id && matches!(class.origin,
-                Some(LibraryClassOrigin::DataFactory { declaration_span }) if declaration_span == value.span)
+                Some(LibraryClassOrigin::DataFactory { declaration_span, .. }) if declaration_span == value.span)
         });
         // The main branch also ingests Struct block classes into the same
         // registry. Preserve those generated declarations when a factory
@@ -111,7 +111,7 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
     let resolver = app.const_resolver.for_sources(&app.sources);
     let mut diagnostics = Vec::new();
     for factory in &app.library_classes {
-        let Some(LibraryClassOrigin::DataFactory { declaration_span }) = factory.origin else {
+        let Some(LibraryClassOrigin::DataFactory { declaration_span, .. }) = factory.origin else {
             continue;
         };
         let admitted = app.library_classes.iter().flat_map(|class| &class.constants)

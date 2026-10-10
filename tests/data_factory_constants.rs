@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use roundhouse::analyze::Analyzer;
+use roundhouse::dialect::LibraryClassOrigin;
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ty::Ty;
 
@@ -73,6 +74,85 @@ fn literal_data_declarations_register_exact_members_without_writers() {
 }
 
 #[test]
+fn block_data_classes_retain_ordered_members_as_nominal_origin() {
+    let source = r#"class FactoryExamples
+  ContentKey = Data.define(:digest, :source) do
+    def cache_key = digest
+  end
+end
+"#;
+    let mut app = ingest(
+        source,
+        "FactoryExamples::ContentKey.new(\"hash\", \"body\")",
+    );
+    let class = app
+        .library_classes
+        .iter()
+        .find(|class| class.name.0.as_str() == "FactoryExamples::ContentKey")
+        .expect("the Data block becomes its own library class");
+
+    assert!(matches!(
+        &class.origin,
+        Some(LibraryClassOrigin::DataFactory { members, .. })
+            if members == &[Symbol::from("digest"), Symbol::from("source")]
+    ));
+    assert!(
+        class
+            .methods
+            .iter()
+            .any(|method| method.name.as_str() == "cache_key"),
+        "source-defined Data block methods remain on the nominal class"
+    );
+    for member in ["digest", "source"] {
+        assert!(
+            class.methods.iter().any(|method| {
+                method.name.as_str() == member && method.name_span.is_synthetic()
+            }),
+            "Data declares a synthesized reader for {member}"
+        );
+        assert!(
+            !class
+                .methods
+                .iter()
+                .any(|method| method.name.as_str() == format!("{member}=")),
+            "Data member readers do not gain Struct-style writers"
+        );
+    }
+    let initialize = class
+        .methods
+        .iter()
+        .find(|method| method.name.as_str() == "initialize")
+        .expect("Data receives a synthesized initializer");
+    assert_eq!(
+        initialize
+            .params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect::<Vec<_>>(),
+        ["digest", "source"]
+    );
+    assert!(
+        initialize
+            .params
+            .iter()
+            .all(|param| param.default.is_none())
+    );
+
+    let mut analyzer = Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    let analyzed = analyzer.class_registry();
+    let info = &analyzed[&ClassId(Symbol::from("FactoryExamples::ContentKey"))];
+    assert_eq!(
+        info.instance_methods.get(&Symbol::from("digest")),
+        Some(&Ty::Str)
+    );
+    assert_eq!(
+        info.instance_methods.get(&Symbol::from("cache_key")),
+        Some(&Ty::Str)
+    );
+}
+
+#[test]
 fn custom_data_initializer_parameters_are_inferred_from_new_calls() {
     let source = r#"class FactoryExamples
   State = Data.define(:value) do
@@ -92,6 +172,128 @@ end
             &Symbol::from("initialize"),
         ),
         Some(&[Ty::Str][..]),
+    );
+}
+
+#[test]
+fn ruby_keeps_data_members_native_instead_of_emitting_synthetic_methods() {
+    use roundhouse::project::{BuildTarget, target_files};
+
+    let source = r#"class FactoryExamples
+  ContentKey = Data.define(:digest, :source) do
+    def cache_key = digest
+  end
+end
+"#;
+    let mut app = ingest(
+        source,
+        "FactoryExamples::ContentKey.new(\"hash\", \"body\")",
+    );
+    roundhouse::session::analyze_and_lower(&mut app);
+    let (result, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+        target_files(&app, roundhouse::fixtures::real_blog(), BuildTarget::Ruby)
+    });
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let files = result.expect("Ruby files emit");
+    let owner = files
+        .iter()
+        .find(|(_, content)| content.contains("def cache_key"))
+        .map(|(_, content)| content)
+        .expect("the Data block's authored method is spliced into the owner");
+
+    assert!(owner.contains("ContentKey = Data.define(:digest, :source) do"));
+    assert!(owner.contains("def cache_key"));
+    assert!(
+        !owner.contains("def initialize"),
+        "Ruby Data retains its native constructor"
+    );
+    assert!(
+        !owner.contains("def digest"),
+        "Ruby Data retains its native reader"
+    );
+    assert!(
+        !owner.contains("def source"),
+        "Ruby Data retains its native reader"
+    );
+}
+
+#[test]
+fn direct_rust_emit_preserves_data_record_storage_and_constructor_shape() {
+    use std::process::Command;
+
+    let source = r#"class FactoryExamples
+  ContentKey = Data.define(:digest, :source) do
+    def cache_key = digest
+  end
+end
+"#;
+    let mut app = ingest(
+        source,
+        "FactoryExamples::ContentKey.new(\"hash\", \"body\")",
+    );
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::rust::emit(&app);
+    let generated = files
+        .iter()
+        .find(|file| file.content.contains("pub struct ContentKey"))
+        .expect("direct emitter probe includes the nominal Data class");
+
+    assert!(generated.content.contains("#[derive(Clone)]"));
+    assert!(!generated.content.contains("#[derive(Clone, Default)]"));
+    assert!(generated.content.contains("digest: String,"));
+    assert!(generated.content.contains("source: String,"));
+    assert!(!generated.content.contains("pub digest: String"));
+    assert!(!generated.content.contains("pub source: String"));
+    assert!(
+        generated
+            .content
+            .contains("pub fn new(digest: &str, source: &str) -> Self"),
+        "{generated:?}"
+    );
+    assert!(generated.content.contains("pub fn digest(&self) -> String"));
+    assert!(generated.content.contains("self.digest()"));
+
+    let emitted = generated
+        .content
+        .lines()
+        .filter(|line| !line.starts_with("use crate::"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let harness = format!(
+        "{emitted}\nfn main() {{\n    let key = ContentKey::new(\"hash\", \"body\");\n    assert_eq!(key.digest(), \"hash\");\n    assert_eq!(key.source(), \"body\");\n    assert_eq!(key.cache_key(), \"hash\");\n}}\n"
+    );
+    let directory = std::env::temp_dir().join(format!(
+        "roundhouse-data-factory-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).expect("create temporary Rust compile directory");
+    let source_path = directory.join("data_factory.rs");
+    let binary_path = directory.join("data_factory");
+    std::fs::write(&source_path, harness).expect("write emitted record harness");
+    let compile = Command::new("rustc")
+        .arg("--edition=2024")
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .expect("run rustc on the directly emitted Data record");
+    assert!(
+        compile.status.success(),
+        "emitted record must compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&binary_path)
+        .output()
+        .expect("run emitted Data record harness");
+    std::fs::remove_dir_all(&directory).expect("remove temporary Rust compile directory");
+    assert!(
+        run.status.success(),
+        "emitted record behavior failed:\n{}",
+        String::from_utf8_lossy(&run.stderr)
     );
 }
 
@@ -777,26 +979,24 @@ fn ruby_and_spinel_emit_declared_factory_types_without_data_errors() {
         let signatures =
             roundhouse::rbs::parse_app_signatures(sidecar).expect("custom factory RBS parses");
         let methods = &signatures[&ClassId(Symbol::from("FactoryExamples::Stateful::State"))];
-        for name in [
-            "new",
-            "initialize",
-            "quantity",
-            "enabled",
-            "label",
-            "secret",
-        ] {
+        for name in ["new", "initialize", "label", "secret"] {
             assert!(
                 methods.contains_key(&Symbol::from(name)),
-                "{target:?}: {sidecar}"
+                "missing {name} for {target:?}; parsed methods: {:?}; {sidecar}",
+                methods.keys().collect::<Vec<_>>()
             );
         }
+        assert!(
+            sidecar.contains("attr_reader quantity: untyped")
+                && sidecar.contains("attr_reader enabled: untyped"),
+            "Data member readers remain declared as readers: {sidecar}"
+        );
         assert!(
             sidecar.contains("private def secret:"),
             "private factory methods retain their non-public RBS visibility: {sidecar}"
         );
         assert!(
-            sidecar.contains("def `name`: () -> untyped")
-                && sidecar.contains("def self.name:"),
+            sidecar.contains("attr_reader name: untyped") && sidecar.contains("def self.name:"),
             "a singleton method does not replace the generated instance reader: {sidecar}"
         );
         assert_eq!(

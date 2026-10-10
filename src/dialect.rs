@@ -946,9 +946,11 @@ impl LibraryClass {
 pub enum LibraryClassOrigin {
     /// Methods lifted from a constant-assigned `Data.define` block. The call span
     /// links this class to its owner's constant so emission restores the block
-    /// without changing its declaration order or lexical scope.
+    /// without changing its declaration order or lexical scope. Literal members
+    /// retain source order for the native record constructor and readers.
     DataFactory {
         declaration_span: Span,
+        members: Vec<Symbol>,
     },
     /// Validated Alba source declarations expanded to ordinary methods before
     /// inference. Analysis checks each constructor site, not a joined type

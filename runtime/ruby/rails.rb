@@ -75,7 +75,7 @@ module Rails
     # the path itself.
     def join(*parts)
       if parts.empty?
-        self
+        AppPath.new(@base + "")
       else
         AppPath.new(@base + "/" + parts.join("/"))
       end

@@ -116,7 +116,10 @@ module ActionController
   end
 
   def self.sanitize_location(path)
-    s = path.to_s
+    # Materialize an owned copy: the strict Rust emitter lowers a String
+    # parameter as `&str`, while the normalization steps below reassign
+    # their results into `s`.
+    s = "#{path}"
     if s.include?("\r") || s.include?("\n") || s.include?("\0") || s.include?("\t")
       s = s.gsub(REDIRECT_LINE_BREAK_PATTERN, REDIRECT_LINE_BREAKS)
     end
@@ -300,8 +303,8 @@ module ActionController
     def store_value(key, value)
       i = index_of(key)
       if i < 0
-        @keys << key
-        @lower << key.downcase
+        @keys.push(key.to_s)
+        @lower.push(key.downcase)
         @vals << value.to_s
       else
         @vals[i] = value.to_s
@@ -412,6 +415,16 @@ module ActionController
   class CacheControlStore
     # The fields are assigned here rather than through `clear`: a
     # Rust constructor has no `self` to call a method on yet.
+    def self.append_extras(parts, extras)
+      result = parts
+      extra_index = 0
+      while extra_index < extras.length
+        result << extras[extra_index]
+        extra_index += 1
+      end
+      result
+    end
+
     def initialize
       @public = false
       @private = false
@@ -585,7 +598,6 @@ module ActionController
       elsif @no_cache
         parts << "public" if @public
         parts << "no-cache"
-        @extras.each { |e| parts << e }
       else
         parts << "max-age=#{@max_age}" if @has_max_age
         parts << (@public ? "public" : "private")
@@ -593,8 +605,8 @@ module ActionController
         parts << "stale-while-revalidate=#{@stale_while_revalidate}" if @has_stale_while_revalidate
         parts << "stale-if-error=#{@stale_if_error}" if @has_stale_if_error
         parts << "immutable" if @immutable
-        @extras.each { |e| parts << e }
       end
+      parts = CacheControlStore.append_extras(parts, @extras) unless @no_store
       parts.join(", ")
     end
   end

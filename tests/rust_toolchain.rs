@@ -22,7 +22,7 @@ use std::process::Command;
 
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::rust;
-use roundhouse::ingest::ingest_app;
+use roundhouse::ingest::{ingest_app, ingest_app_from_tree};
 
 fn scratch_dir(fixture: &str) -> PathBuf {
     std::env::temp_dir().join(format!("roundhouse-rust-check-{fixture}"))
@@ -47,6 +47,125 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     }
 }
 
+fn generate_project_from_tree(tree: std::collections::HashMap<PathBuf, Vec<u8>>, out: &Path) {
+    if out.exists() {
+        std::fs::remove_dir_all(out).expect("clean scratch");
+    }
+    std::fs::create_dir_all(out).expect("create scratch");
+
+    let mut app = ingest_app_from_tree(tree).expect("ingest synthetic app");
+    Analyzer::new(&app).analyze(&mut app);
+    let files = rust::emit(&app);
+
+    for file in &files {
+        let path = out.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(&path, &file.content).expect("write emitted file");
+    }
+}
+
+fn generate_project_from_tree_with_shared_lowerings(
+    tree: std::collections::HashMap<PathBuf, Vec<u8>>,
+    out: &Path,
+) {
+    if out.exists() {
+        std::fs::remove_dir_all(out).expect("clean scratch");
+    }
+    std::fs::create_dir_all(out).expect("create scratch");
+
+    let mut app = ingest_app_from_tree(tree).expect("ingest synthetic app");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = rust::emit(&app);
+
+    for file in &files {
+        let path = out.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(&path, &file.content).expect("write emitted file");
+    }
+}
+
+/// Execute an optional, zero-argument String block through two forwarding
+/// methods in the generated Rust crate. This exercises the public ingest,
+/// analyze, shared post-analyze lowerings, emit, and Cargo interfaces rather
+/// than an isolated Rust prototype.
+#[test]
+#[ignore]
+fn forwarded_optional_string_block_runs_through_two_edges() {
+    let tree = [(
+        PathBuf::from("app/lib/block_forwarding_probe.rb"),
+        b"class BlockForwardingProbe\n  def block_source(&block)\n    block.nil? ? \"\" : capture(&block)\n  end\n\n  def block_middle(&block)\n    block_source(&block)\n  end\n\n  def block_outer(&block)\n    block_middle(&block)\n  end\n\n  def render_html\n    block_outer { \"from source callsite\" }\n  end\nend\n".to_vec(),
+    )]
+    .into_iter()
+    .collect();
+    let scratch = scratch_dir("optional-string-forwarded-block");
+    generate_project_from_tree_with_shared_lowerings(tree, &scratch);
+
+    let generated_test = r#"
+use app::app_classes::BlockForwardingProbe;
+
+struct NotClone(String);
+
+#[test]
+fn optional_string_block_forwards_and_runs_once() {
+    let probe = BlockForwardingProbe::default();
+    assert_eq!(probe.block_outer(None), "");
+    assert_eq!(probe.render_html(), "from source callsite");
+
+    let borrowed = String::from("borrowed");
+    let calls = std::cell::Cell::new(0);
+    let result = probe.block_outer(Some(Box::new(|| {
+        calls.set(calls.get() + 1);
+        borrowed.clone()
+    })));
+    assert_eq!(result, "borrowed");
+    assert_eq!(calls.get(), 1);
+    assert_eq!(borrowed, "borrowed");
+
+    let moved = NotClone(String::from("moved"));
+    let result = probe.block_outer(Some(Box::new(move || moved.0)));
+    assert_eq!(result, "moved");
+}
+"#;
+    std::fs::create_dir_all(scratch.join("tests")).expect("mkdir tests/");
+    std::fs::write(
+        scratch.join("tests/forwarded_optional_block.rs"),
+        generated_test,
+    )
+    .expect("write generated integration test");
+
+    let output = Command::new("cargo")
+        .args([
+            "test",
+            "--test",
+            "forwarded_optional_block",
+            "--",
+            "--exact",
+            "optional_string_block_forwards_and_runs_once",
+        ])
+        .current_dir(&scratch)
+        .output()
+        .expect("run focused test on emitted Rust project");
+
+    assert!(
+        output.status.success(),
+        "focused test failed on emitted project at {}:\n\
+         \n=== stdout ===\n{}\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("test optional_string_block_forwards_and_runs_once ... ok"),
+        "the emitted-Rust regression did not run:\n{stdout}"
+    );
+}
+
 // `tiny_blog_cargo_check_passes` retired in Phase 7.3 (2026-05-20).
 // The legacy rust emit path it exercised is gone; rust doesn't
 // yet cover tiny-blog's specific shape (Importmap LC absent,
@@ -65,8 +184,14 @@ fn real_blog_controller_identity_methods_emit_as_instance_methods() {
     generate_project(fixture, &scratch);
 
     for (path, class_name) in [
-        (scratch.join("src/action_controller_base.rs"), "ActionController::Base"),
-        (scratch.join("src/controllers/articles_controller.rs"), "ArticlesController"),
+        (
+            scratch.join("src/action_controller_base.rs"),
+            "ActionController::Base",
+        ),
+        (
+            scratch.join("src/controllers/articles_controller.rs"),
+            "ArticlesController",
+        ),
     ] {
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -78,6 +203,147 @@ fn real_blog_controller_identity_methods_emit_as_instance_methods() {
             );
         }
     }
+}
+
+#[test]
+fn inherited_before_action_calls_dispatch_on_self() {
+    let files = [
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  before_action :require_authentication\n  before_action :deny_bots\n  before_action :allow_browser\n\n  private\n\n  def require_authentication\n    set_version_headers\n    other.foreign_helper\n  end\n\n  def set_version_headers\n  end\n\n  def deny_bots\n  end\n\n  def allow_browser\n  end\n\n  def foreign_helper\n  end\n\n  def unused_parent_helper\n  end\nend\n",
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  def index\n    other.foreign_helper\n  end\n\n  private\n\n  def allow_browser\n    @child_allow_browser = \"child-allow-browser\"\n  end\nend\n",
+        ),
+    ];
+    let tree = files
+        .into_iter()
+        .map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    Analyzer::new(&app).analyze(&mut app);
+    let source = rust::emit(&app)
+        .into_iter()
+        .find(|file| file.path.ends_with("widgets_controller.rs"))
+        .expect("WidgetsController Rust output")
+        .content;
+
+    for method in ["require_authentication", "deny_bots", "set_version_headers"] {
+        let call = format!("self.{method}()");
+        assert!(
+            source.contains(&call),
+            "inherited filter must self-dispatch as `{call}`:\n{source}"
+        );
+        let definition = format!("fn {method}(");
+        assert!(
+            source.contains(&definition),
+            "reachable inherited method `{method}` must be defined on the child:\n{source}"
+        );
+    }
+    assert!(
+        source.contains("self.allow_browser()"),
+        "the inherited filter must still dispatch to the child override:\n{source}"
+    );
+    let allow_browser = source
+        .find("fn allow_browser(")
+        .map(|start| {
+            let body = &source[start..];
+            body.find("\n}").map(|end| &body[..end]).unwrap_or(body)
+        })
+        .unwrap_or("");
+    assert!(
+        allow_browser.contains("child_allow_browser")
+            && allow_browser.contains("child-allow-browser"),
+        "the child override body must be the emitted definition:\n{source}"
+    );
+    assert!(
+        !source.contains("unused_parent_helper"),
+        "unreferenced ancestor methods must not be copied:\n{source}"
+    );
+    assert!(
+        source.contains("foreign_helper") && !source.contains("fn foreign_helper("),
+        "a same-named method called only on another object must stay a call, not a copy:\n{source}"
+    );
+    assert_eq!(
+        source.matches("fn allow_browser(").count(),
+        1,
+        "child override must replace the inherited definition, not duplicate it:\n{source}"
+    );
+}
+
+#[test]
+fn router_only_references_emitted_controller_handlers() {
+    let tree = [
+        (
+            "app/controllers/reports_controller.rb",
+            "class ReportsController < ActionController::Base\n  def index\n  end\nend\n",
+        ),
+        (
+            "app/controllers/hidden_controller.rb",
+            "class HiddenController < ActionController::Base\n  private\n  def index\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/reports\", to: \"reports#index\"\n  get \"/hidden\", to: \"hidden#index\"\n  get \"/rooms/settings\", to: \"rooms/settings#show\"\n  get \"/up\", to: \"rails/health#show\"\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    Analyzer::new(&app).analyze(&mut app);
+    let files = rust::emit(&app);
+    let router = files
+        .iter()
+        .find(|file| file.path.ends_with("router.rs"))
+        .expect("Rust router output")
+        .content
+        .clone();
+
+    assert!(
+        router.contains(".route(\"/reports\""),
+        "real controller route disappeared:\n{router}"
+    );
+    assert!(
+        router.contains("reports_controller::_axum_index"),
+        "real handler missing:\n{router}"
+    );
+    for (missing, path) in [
+        ("hidden_controller", "/hidden"),
+        ("rooms::settings_controller", "/rooms/settings"),
+        ("rails::health_controller", "/up"),
+    ] {
+        assert!(
+            !router.contains(missing),
+            "router references non-emitted handler `{missing}`:\n{router}"
+        );
+        assert!(
+            router.contains(&format!(".route(\"{path}\"")),
+            "route disappeared instead of remaining explicit:\n{router}"
+        );
+    }
+    assert!(
+        router.contains("_roundhouse_unsupported_route"),
+        "missing handlers must not be treated as implemented:\n{router}"
+    );
+    assert!(
+        router.contains("StatusCode::NOT_IMPLEMENTED"),
+        "unsupported routes must fail explicitly:\n{router}"
+    );
+    assert!(
+        router.contains("request_context_middleware"),
+        "direct router users need an active request scope:\n{router}"
+    );
+    let hidden = files
+        .iter()
+        .find(|file| file.path.ends_with("hidden_controller.rs"))
+        .expect("hidden controller output");
+    assert!(
+        !hidden.content.contains("pub async fn _axum_index"),
+        "a controller with no dispatcher must not emit a route wrapper:\n{}",
+        hidden.content
+    );
 }
 
 /// Execute the generated identity methods in the native Rust toolchain lane.
@@ -155,6 +421,19 @@ fn real_blog_cargo_test_passes() {
     let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog");
     generate_project(fixture, &scratch);
+    let article_source = std::fs::read_to_string(scratch.join("src/models/article.rs"))
+        .expect("read emitted Article model");
+    let insert_row_count = article_source.matches("pub fn _insert_row(").count();
+    assert!(
+        insert_row_count == 1,
+        "the lowered Rust model must expose one callback-free fixture insertion method, got {insert_row_count}:\n{article_source}"
+    );
+    assert!(
+        article_source.contains("self.fill_timestamps(true);")
+            && article_source.contains("self.id = self._adapter_insert();")
+            && article_source.contains("self._note_hydrated();"),
+        "fixture insertion must fill timestamps and use the raw adapter path:\n{article_source}"
+    );
     // Pin the shared Inflector's new String seam on the live backend,
     // not the legacy emit_method extraction walker.
     std::fs::create_dir_all(scratch.join("tests")).unwrap();
@@ -381,6 +660,116 @@ fn filters_that_read_action_name_compile() {
 
     let scratch = scratch_dir("action-name");
     generate_project(&app_dir, &scratch);
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&scratch)
+        .output()
+        .expect("run cargo check");
+
+    assert!(
+        output.status.success(),
+        "cargo check failed on the emitted project at {}:\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// A filter sets a response header the way Campfire's `VersionHeaders`
+/// does. The bare `response` send must reach the response state, not a
+/// free function that does not exist.
+#[test]
+#[ignore]
+fn response_headers_set_in_a_filter_compile() {
+    let app_dir = scratch_dir("response-headers-app");
+    if app_dir.exists() {
+        std::fs::remove_dir_all(&app_dir).expect("clean app copy");
+    }
+    let copied = Command::new("cp")
+        .arg("-R")
+        .arg(roundhouse::fixtures::real_blog())
+        .arg(&app_dir)
+        .status()
+        .expect("copy real-blog");
+    assert!(copied.success(), "copy real-blog");
+    let controller = app_dir.join("app/controllers/articles_controller.rb");
+    let source = std::fs::read_to_string(&controller).expect("read controller");
+    let edited = source.replacen(
+        "  before_action :set_article,",
+        "  before_action { response.headers[\"X-Probe\"] = \"1\" }\n  \
+           before_action { @probe = response.headers[\"X-Probe\"] }\n  \
+           before_action :set_article,",
+        1,
+    );
+    assert_ne!(source, edited, "the filter edit applies");
+    std::fs::write(&controller, edited).expect("write controller");
+
+    let scratch = scratch_dir("response-headers");
+    generate_project(&app_dir, &scratch);
+    let emitted = std::fs::read_to_string(scratch.join("src/controllers/articles_controller.rs"))
+        .expect("read emitted controller");
+    assert!(
+        emitted.contains("crate::http::ResponseHandle.set_header(&(\"X-Probe\")"),
+        "the header write goes through the response handle:\n{emitted}"
+    );
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&scratch)
+        .output()
+        .expect("run cargo check");
+
+    assert!(
+        output.status.success(),
+        "cargo check failed on the emitted project at {}:\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// `Model.find_by(col: v)` and `Model.where(col: v)` on a model class.
+/// Rust models carry no inherited finders, so the shim must provide them,
+/// and a controller that keeps the result has to type-check against them.
+#[test]
+#[ignore]
+fn model_finders_compile() {
+    let app_dir = scratch_dir("model-finders-app");
+    if app_dir.exists() {
+        std::fs::remove_dir_all(&app_dir).expect("clean app copy");
+    }
+    let copied = Command::new("cp")
+        .arg("-R")
+        .arg(roundhouse::fixtures::real_blog())
+        .arg(&app_dir)
+        .status()
+        .expect("copy real-blog");
+    assert!(copied.success(), "copy real-blog");
+    let controller = app_dir.join("app/controllers/articles_controller.rb");
+    let source = std::fs::read_to_string(&controller).expect("read controller");
+    let edited = source.replacen(
+        "  before_action :set_article,",
+        "  before_action { @probe = Article.find_by(title: \"Probe\") }\n  \
+           before_action { @probes = Article.where(title: \"Probe\", body: \"x\") }\n  \
+           before_action :set_article,",
+        1,
+    );
+    assert_ne!(source, edited, "the filter edit applies");
+    std::fs::write(&controller, edited).expect("write controller");
+
+    let scratch = scratch_dir("model-finders");
+    generate_project(&app_dir, &scratch);
+    let model =
+        std::fs::read_to_string(scratch.join("src/models/article.rs")).expect("read emitted model");
+    assert!(
+        model.contains("pub fn find_by<"),
+        "model carries find_by:\n{model}"
+    );
+    assert!(
+        model.contains("pub fn r#where<"),
+        "model carries where:\n{model}"
+    );
     let output = Command::new("cargo")
         .arg("check")
         .arg("--quiet")

@@ -187,7 +187,17 @@ fn splice_data_block(files: &mut [EmittedFile], block: &LibraryClass, app: &App)
     let indent = "  ".repeat(depth - 1);
     let stem = crate::naming::underscore(name);
     let rb_path = PathBuf::from(format!("app/models/{stem}.rb"));
-    let rendered = emit_library_class_decl(block, app, rb_path.clone());
+    let rendered_block = if matches!(
+        &block.origin,
+        Some(crate::dialect::LibraryClassOrigin::DataFactory { .. })
+    ) {
+        let mut authored = block.clone();
+        authored.methods.retain(|method| !method.name_span.is_synthetic());
+        authored
+    } else {
+        block.clone()
+    };
+    let rendered = emit_library_class_decl(&rendered_block, app, rb_path.clone());
     let lines: Vec<&str> = rendered.content.lines().collect();
     let mut hoisted = Vec::new();
     for line in lines.iter().filter(|line| line.starts_with("require_relative ")) {
@@ -204,7 +214,7 @@ fn splice_data_block(files: &mut [EmittedFile], block: &LibraryClass, app: &App)
     let body_lines: Vec<&str> = lines.iter().copied().filter(|line| !line.starts_with("require")).collect();
     let Some(body) = unwrapped(&body_lines, depth) else {
         assert!(
-            block.methods.is_empty() && hoisted.is_empty(),
+            rendered_block.methods.is_empty() && hoisted.is_empty(),
             "Data.define methods or requires were not emitted for {name}"
         );
         return;
@@ -675,6 +685,7 @@ pub(crate) fn apply_library_partial_render_lowering(lcs: &mut [LibraryClass], ap
         &app.views,
         &app.controllers,
         &app.library_classes,
+        &std::collections::BTreeSet::new(),
     );
     if contracts.is_empty() {
         return;
@@ -6635,7 +6646,7 @@ fn emit_library_class_decl_inner(
         body_requires.extend(resolve_all(&lc.constants[i].1, true));
     }
     let factory_methods = app.library_classes.iter().filter(|class| {
-        matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span })
+        matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span, .. })
             if lc.constants.iter().any(|(_, value)| value.span == declaration_span))
     }).flat_map(|class| &class.methods);
     for m in &lc.methods {
@@ -6822,11 +6833,11 @@ fn emit_library_class_decl_inner(
             let (cname, value) = &lc.constants[i];
             let rendered = super::emit_expr(value);
             if let Some(factory) = app.library_classes.iter().find(|class| {
-                matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span })
+                matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span, .. })
                     if declaration_span == value.span)
             }) {
                 writeln!(s, "{body_pad}{} = {rendered} do", cname.as_str()).unwrap();
-                for method in &factory.methods {
+                for method in factory.methods.iter().filter(|method| !method.name_span.is_synthetic()) {
                     render_library_method(s, method, &format!("{body_pad}  "));
                 }
                 writeln!(s, "{body_pad}end").unwrap();

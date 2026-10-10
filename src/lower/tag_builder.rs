@@ -154,7 +154,220 @@ pub fn apply_tag_builder_lowering(
         let own_tag = owner.is_some_and(|c| owns_tag.contains(c));
         rewrite(body, own_tag, &models, &helpers, &sti_stems, &mut diags)
     });
+    // Propagate SafeBuffer provenance through helper wrappers before
+    // reconciling signatures. Callers such as `link_back` return another
+    // HTML-safe helper's result directly; leaving those callers typed as
+    // JSON values both breaks Rust and causes views to escape the markup.
+    let mut safe_methods = app.html_safe_methods.clone();
+    for model in &app.models {
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
+                if returns_html_safe(&method.body, &safe_methods) {
+                    safe_methods.insert(method.name.clone());
+                }
+            }
+        }
+    }
+    for class in &app.library_classes {
+        for method in &class.methods {
+            if returns_html_safe(&method.body, &safe_methods) {
+                safe_methods.insert(method.name.clone());
+            }
+        }
+    }
+    loop {
+        let mut newly_safe = Vec::new();
+        for model in &app.models {
+            for item in &model.body {
+                if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
+                    if !safe_methods.contains(&method.name)
+                        && returns_html_safe(&method.body, &safe_methods)
+                    {
+                        newly_safe.push(method.name.clone());
+                    }
+                }
+            }
+        }
+        for class in &app.library_classes {
+            for method in &class.methods {
+                if !safe_methods.contains(&method.name)
+                    && returns_html_safe(&method.body, &safe_methods)
+                {
+                    newly_safe.push(method.name.clone());
+                }
+            }
+        }
+        if newly_safe.is_empty() {
+            break;
+        }
+        safe_methods.extend(newly_safe);
+    }
+    // The set is keyed by method NAME, and a view trusts the name for any
+    // receiver. So a name inferred here is published only when EVERY
+    // definition of it in the app returns HTML-safe output: a same-named
+    // method on another class (`user.name` beside a safe helper `name`)
+    // must keep its escaping. Dropping one name can make a wrapper that
+    // relied on it unsafe too, hence the loop.
+    let inferred_from = app.html_safe_methods.clone();
+    loop {
+        let mut unsafe_names = std::collections::BTreeSet::new();
+        let mut check = |name: &Symbol, body: &Expr| {
+            if !inferred_from.contains(name)
+                && safe_methods.contains(name)
+                && !returns_html_safe(body, &safe_methods)
+            {
+                unsafe_names.insert(name.clone());
+            }
+        };
+        for model in &app.models {
+            for item in &model.body {
+                if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
+                    check(&method.name, &method.body);
+                }
+            }
+        }
+        for class in &app.library_classes {
+            for method in &class.methods {
+                check(&method.name, &method.body);
+            }
+        }
+        if unsafe_names.is_empty() {
+            break;
+        }
+        safe_methods.retain(|name| !unsafe_names.contains(name));
+    }
+    // A helper that returns a SafeBuffer-marked value has a String
+    // result, regardless of the stale declared return type inferred
+    // from the pre-lowered `tag.*` call. Keep the safety marker in the
+    // body for `html_safe` lowering; only reconcile the typed contract
+    // here so Rust's signature agrees with the rewritten expression.
+    app.html_safe_methods.extend(safe_methods.iter().cloned());
+    for model in &mut app.models {
+        for method in model.methods_mut() {
+            reconcile_html_result_signature(method, &safe_methods);
+        }
+    }
+    for class in &mut app.library_classes {
+        for method in &mut class.methods {
+            reconcile_html_result_signature(method, &safe_methods);
+        }
+    }
     diags
+}
+
+fn reconcile_html_result_signature(
+    method: &mut crate::dialect::MethodDef,
+    safe_methods: &std::collections::BTreeSet<Symbol>,
+) {
+    if !safe_methods.contains(&method.name) {
+        return;
+    }
+    let declared_result = method
+        .signature
+        .as_ref()
+        .and_then(|signature| match signature {
+            crate::ty::Ty::Fn { ret, .. } => Some(ret.as_ref()),
+            _ => None,
+        })
+        .or(method.body.ty.as_ref());
+    let result = declared_result.map_or(crate::ty::Ty::Str, safe_html_result_type);
+    set_html_result_type(&mut method.body);
+    if let Some(crate::ty::Ty::Fn { ret, .. }) = &mut method.signature {
+        **ret = result;
+    }
+}
+
+fn safe_html_result_type(ty: &crate::ty::Ty) -> crate::ty::Ty {
+    use crate::ty::Ty;
+
+    match ty {
+        Ty::Nil => Ty::Nil,
+        Ty::Union { variants } => {
+            let mut result = Vec::new();
+            for variant in variants {
+                let mapped = safe_html_result_type(variant);
+                if !result.contains(&mapped) {
+                    result.push(mapped);
+                }
+            }
+            match result.as_slice() {
+                [only] => only.clone(),
+                _ => Ty::Union { variants: result },
+            }
+        }
+        _ => Ty::Str,
+    }
+}
+
+fn set_html_result_type(expr: &mut Expr) {
+    let result = expr
+        .ty
+        .as_ref()
+        .map_or(crate::ty::Ty::Str, safe_html_result_type);
+    match &mut *expr.node {
+        ExprNode::Seq { exprs } => {
+            if let Some(tail) = exprs.last_mut() {
+                set_html_result_type(tail);
+            }
+        }
+        ExprNode::Let { body, .. } => set_html_result_type(body),
+        ExprNode::If { then_branch, else_branch, .. } => {
+            set_html_result_type(then_branch);
+            set_html_result_type(else_branch);
+        }
+        ExprNode::Case { arms, .. } => {
+            for arm in arms {
+                set_html_result_type(&mut arm.body);
+            }
+        }
+        ExprNode::Lit { value: Literal::Nil } => {}
+        _ => expr.ty = Some(crate::ty::Ty::Str),
+    }
+    expr.ty = Some(result);
+}
+
+fn returns_html_safe(body: &Expr, safe_methods: &std::collections::BTreeSet<Symbol>) -> bool {
+    match &*body.node {
+        ExprNode::Lit { value: Literal::Nil } => false,
+        ExprNode::Send { recv, method, args, block, .. } => {
+            (recv.is_some() && method.as_str() == "html_safe" && args.is_empty() && block.is_none())
+                || safe_methods.contains(method)
+        }
+        ExprNode::Seq { exprs } => exprs.last().is_some_and(|expr| returns_html_safe(expr, safe_methods)),
+        ExprNode::Let { body, .. } => returns_html_safe(body, safe_methods),
+        ExprNode::If { then_branch, else_branch, .. } => {
+            returns_html_safe_or_nil(then_branch, safe_methods)
+                && returns_html_safe_or_nil(else_branch, safe_methods)
+                && (returns_html_safe(then_branch, safe_methods)
+                    || returns_html_safe(else_branch, safe_methods))
+        }
+        ExprNode::Case { arms, .. } => {
+            arms.iter().all(|arm| returns_html_safe_or_nil(&arm.body, safe_methods))
+                && arms.iter().any(|arm| returns_html_safe(&arm.body, safe_methods))
+                && arms.iter().any(|arm| matches!(&arm.pattern, crate::expr::Pattern::Wildcard))
+        }
+        _ => false,
+    }
+}
+
+fn returns_html_safe_or_nil(body: &Expr, safe_methods: &std::collections::BTreeSet<Symbol>) -> bool {
+    returns_html_safe(body, safe_methods) || returns_nil(body)
+}
+
+fn returns_nil(body: &Expr) -> bool {
+    match &*body.node {
+        ExprNode::Lit { value: Literal::Nil } => true,
+        ExprNode::Seq { exprs } => exprs.last().is_some_and(returns_nil),
+        ExprNode::Let { body, .. } => returns_nil(body),
+        ExprNode::If { then_branch, else_branch, .. } => {
+            returns_nil(then_branch) && returns_nil(else_branch)
+        }
+        ExprNode::Case { arms, .. } => {
+            arms.iter().all(|arm| returns_nil(&arm.body))
+                && arms.iter().any(|arm| matches!(&arm.pattern, crate::expr::Pattern::Wildcard))
+        }
+        _ => false,
+    }
 }
 
 /// Classes whose bodies read a bare `tag` as their own method: APP
@@ -1029,7 +1242,9 @@ fn to_s(e: Expr) -> Expr {
 /// keeps `<%= tag.meta … %>` from being escaped, and what gets the
 /// enclosing helper into `app.html_safe_methods`.
 fn html_safe(e: Expr, span: crate::span::Span) -> Expr {
-    Expr::new(
+    let mut e = e;
+    e.ty = Some(crate::ty::Ty::Str);
+    let mut marked = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(e),
@@ -1038,7 +1253,9 @@ fn html_safe(e: Expr, span: crate::span::Span) -> Expr {
             block: None,
             parenthesized: false,
         },
-    )
+    );
+    marked.ty = Some(crate::ty::Ty::Str);
+    marked
 }
 
 /// `ActionView::ViewHelpers.content_tag(:name, content, opts)` — the

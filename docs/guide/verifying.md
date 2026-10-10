@@ -70,11 +70,31 @@ compare matrix runs:
 bin/rh compare rust          # any server target; ruby / spinel too
 ```
 
-`scripts/campfire-compare` is the Campfire half: the same walk on
-both lanes, plus the piece no page compare can carry — the Turbo
-Stream frames that arrive over `/cable` are captured on both sides and
-diffed after the same normalization. Both scripts are readable and
-short; adapting one to your app is mostly replacing the path list.
+`scripts/campfire-compare` is the Campfire half: the same walk on each
+lane, plus the piece no page compare can carry — the Turbo Stream frames
+that arrive over `/cable` are captured on both sides and diffed after the
+same normalization. Ruby and Spinel are the established lanes; Rust is
+available as an experimental compiled-app pilot and does not yet imply a
+Campfire support claim.
+
+To run the Rust pilot locally, first prepare the pinned Rails oracle from a
+Campfire checkout and make Redis available to Action Cable:
+
+```sh
+APP="$HOME/git/once-campfire"
+scripts/campfire-oracle prepare --app "$APP"
+scripts/campfire-compare --target rust "$APP"
+```
+
+The script emits Campfire for Rust, builds the generated Cargo project,
+stages the same pristine SQLite seed used by Rails, starts the native server,
+and runs the existing sign-in / two-socket message walk. It fails on a build,
+walk, or artifact comparison error. Use `--keep` to retain the generated
+project and comparison dumps for diagnosis, or `--reuse DIR` to rerun the walk
+against a previously emitted Rust project. The Rust target reads the staged
+`storage/development.sqlite3` and `PORT` from its environment. This pilot
+compares the room page and Turbo Stream frames; it does not run Campfire's
+Ruby/Minitest suite or claim parity for unexercised requests.
 
 `scripts/campfire-http-shape` compares what surrounds the page: the
 status and headers of 71 requests (pages, Turbo Streams, JSON, assets,

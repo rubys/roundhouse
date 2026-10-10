@@ -105,7 +105,6 @@ impl Server {
         }
         self.get_with_headers(path, &[("Cookie", self.cookie.as_str())])
     }
-
     /// A POST with the session's cookie and token.
     pub fn post(&self, path: &str, content_type: &str, body: &str) -> Response {
         let headers = [
@@ -120,15 +119,29 @@ impl Server {
 
     /// A GET with additional request headers.
     pub fn get_with_headers(&self, path: &str, headers: &[(&str, &str)]) -> Response {
-        let (status, _, response_headers, body) = self.send("GET", path, headers, "");
+        let mut request_headers = Vec::with_capacity(headers.len() + 1);
+        if !self.cookie.is_empty()
+            && !headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+        {
+            request_headers.push(("Cookie", self.cookie.as_str()));
+        }
+        request_headers.extend_from_slice(headers);
+        let (status, _, response_headers, body) =
+            self.send("GET", path, &request_headers, "");
         Response { status, headers: response_headers, body }
     }
 
     /// A POST with neither cookie nor token.
     pub fn post_without_session(&self, path: &str, content_type: &str, body: &str) -> Response {
         let headers = [("Content-Type", content_type), ("Accept", "application/json")];
-        let (status, _, headers, body) = self.send("POST", path, &headers, body);
-        Response { status, headers, body }
+        let (status, _, response_headers, body) = self.send("POST", path, &headers, body);
+        Response {
+            status,
+            headers: response_headers,
+            body,
+        }
     }
 
     /// One HTTP/1.1 request on its own connection: the status, every

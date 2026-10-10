@@ -45,8 +45,10 @@ use crate::dialect::{DirectHelper, LibraryFunction, Param};
 use crate::expr::{Expr, ExprNode, InterpPart, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
+use crate::ty::Ty;
 
 use super::super::routes::FlatRoute;
+use super::super::typing::fn_sig;
 
 /// One `RouteHelpers.<name>_path` per `direct` declaration.
 pub fn lower_direct_helpers(
@@ -82,6 +84,23 @@ fn build_direct_helper(
         .collect();
     let mut body = helper.body.clone();
     rewrite_route_for(&mut body, flat);
+    // These functions are consumed by typed targets as library functions,
+    // not re-analyzed source methods. Record the block's actual argument
+    // types and its URL return type explicitly; otherwise Rust's signature
+    // synthesis falls back to `()` for every untyped formal and return.
+    let signature_params = helper
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let ty = if i == last {
+                Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) }
+            } else {
+                parameter_type(&body, p).unwrap_or(Ty::Untyped)
+            };
+            (p.clone(), ty)
+        })
+        .collect();
     LibraryFunction {
         module_path: module_path.to_vec(),
         name: Symbol::from(format!("{}_path", helper.name.as_str())),
@@ -89,10 +108,31 @@ fn build_direct_helper(
         unsupported_formals: None,
         has_anonymous_block: false,
         body,
-        signature: None,
+        signature: Some(fn_sig(signature_params, Ty::Str)),
         effects: Default::default(),
         is_async: false,
     }
+}
+
+/// Find the analyzer's inferred type for a block local. `Var` nodes in a
+/// direct-helper body retain the binding type seeded from helper call sites.
+fn parameter_type(expr: &Expr, name: &Symbol) -> Option<Ty> {
+    if let ExprNode::Var { name: var_name, .. } = &*expr.node {
+        if var_name == name {
+            if let Some(ty) = &expr.ty {
+                if !matches!(ty, Ty::Untyped | Ty::Bottom) {
+                    return Some(ty.clone());
+                }
+            }
+        }
+    }
+    let mut found = None;
+    expr.node.for_each_child(&mut |child| {
+        if found.is_none() {
+            found = parameter_type(child, name);
+        }
+    });
+    found
 }
 
 fn empty_hash() -> Expr {
@@ -340,4 +380,61 @@ fn interp(parts: Vec<InterpPart>, span: Span) -> Expr {
     let mut e = Expr::new(span, ExprNode::StringInterp { parts });
     e.ty = Some(crate::ty::Ty::Str);
     e
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dialect::DirectHelper;
+    use crate::ident::ClassId;
+
+    #[test]
+    fn signature_models_block_arguments_and_string_return() {
+        let user_ty = Ty::Class { id: ClassId(Symbol::from("User")), args: vec![] };
+        let mut user = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(1), name: Symbol::from("user") },
+        );
+        user.ty = Some(user_ty.clone());
+        let helper = DirectHelper {
+            name: Symbol::from("fresh_user_avatar"),
+            params: vec![Symbol::from("user"), Symbol::from("options")],
+            body: user,
+        };
+
+        let lowered = build_direct_helper(&[Symbol::from("RouteHelpers")], &helper, &[]);
+        let Some(Ty::Fn { params, ret, .. }) = lowered.signature else {
+            panic!("direct helper must have a function signature")
+        };
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name.as_str(), "user");
+        assert_eq!(params[0].ty, user_ty);
+        assert_eq!(params[1].name.as_str(), "options");
+        assert_eq!(
+            params[1].ty,
+            Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) }
+        );
+        assert_eq!(*ret, Ty::Str);
+    }
+
+    #[test]
+    fn options_only_helper_does_not_have_a_unit_parameter_or_return() {
+        let helper = DirectHelper {
+            name: Symbol::from("fresh_account_logo"),
+            params: vec![Symbol::from("options")],
+            body: lit_str("/account/logo".to_string(), Span::synthetic()),
+        };
+
+        let lowered = build_direct_helper(&[Symbol::from("RouteHelpers")], &helper, &[]);
+        let Some(Ty::Fn { params, ret, .. }) = lowered.signature else {
+            panic!("direct helper must have a function signature")
+        };
+        assert_eq!(params.len(), 1);
+        assert_eq!(
+            params[0].ty,
+            Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) }
+        );
+        assert_eq!(*ret, Ty::Str);
+        assert!(lowered.params[0].default.is_some());
+    }
 }

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Export the routes Rails actually loads for the pinned Campfire source.
+#
+# Usage: CAMPFIRE_SHA=<pinned sha> scripts/campfire-route-inventory APP [OUTPUT]
+# OUTPUT defaults to stdout. The JSON records route order and source hashes so
+# a later coverage manifest can detect upstream route drift independently of
+# Roundhouse's emitted route table.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP="${1:-$HOME/git/once-campfire}"
+OUTPUT="${2:--}"
+EXPECTED_SHA="$(sed -n 's/^  CAMPFIRE_SHA: *//p' "$REPO_ROOT/.github/workflows/ci.yml" | head -1)"
+
+if [[ ! -f "$APP/config/application.rb" ]]; then
+    echo "campfire-route-inventory: no Rails app at $APP" >&2
+    exit 2
+fi
+
+SOURCE_SHA="${CAMPFIRE_SHA:-}"
+if [[ -e "$APP/.git" ]]; then
+    # A checkout is authoritative: an explicit CAMPFIRE_SHA must match it,
+    # or the inventory would record the pin for some other revision.
+    HEAD_SHA="$(git -C "$APP" rev-parse HEAD)"
+    if [[ -n "$SOURCE_SHA" && "$SOURCE_SHA" != "$HEAD_SHA" ]]; then
+        echo "campfire-route-inventory: CAMPFIRE_SHA $SOURCE_SHA does not match $APP HEAD $HEAD_SHA" >&2
+        exit 2
+    fi
+    SOURCE_SHA="$HEAD_SHA"
+fi
+if [[ -z "$SOURCE_SHA" ]]; then
+    echo "campfire-route-inventory: set CAMPFIRE_SHA for a source archive without .git" >&2
+    exit 2
+fi
+if [[ "$SOURCE_SHA" != "$EXPECTED_SHA" ]]; then
+    echo "campfire-route-inventory: source $SOURCE_SHA does not match CI pin $EXPECTED_SHA" >&2
+    exit 2
+fi
+
+export CAMPFIRE_SOURCE_SHA="$SOURCE_SHA"
+export SECRET_KEY_BASE="campfire-route-inventory-not-a-deployment-secret"
+export RAILS_ENV=production
+# Campfire's production logger writes to STDOUT, which is where the JSON
+# goes; boot-time warnings (a route naming a missing controller) would
+# land in front of it.
+export RAILS_LOG_LEVEL=error
+
+if [[ "$OUTPUT" == - ]]; then
+    (cd "$APP" && bundle exec rails runner "$REPO_ROOT/scripts/campfire-route-inventory.rb")
+else
+    mkdir -p "$(dirname "$OUTPUT")"
+    (cd "$APP" && bundle exec rails runner "$REPO_ROOT/scripts/campfire-route-inventory.rb") > "$OUTPUT"
+    echo "wrote $OUTPUT"
+fi

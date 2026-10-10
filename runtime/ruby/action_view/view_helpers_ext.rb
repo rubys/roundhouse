@@ -1574,39 +1574,6 @@ module ActionView
       return false if c == ""
       auto_link_word_char?(c) || c == "-"
     end
-    # Rails' CaptureHelper, for the block a helper FORWARDS rather than
-    # writes. `src/lower/capture_inline.rs` claims the LITERAL-block
-    # shape (`capture { concat(a); … }`) and inlines it into an
-    # accumulator — buffer, `concat` sites and all. What reaches here is
-    # the other shape: campfire's `ClipboardHelper
-    # .button_to_copy_to_clipboard(url, &)` forwards its caller's block
-    # into `tag.button`, and the lowered tag calls `capture(&__blk)`
-    # with a block it cannot see. There is nothing to inline, so the
-    # call has to land on a real method.
-    #
-    # It answers the block's own value when that value is a String —
-    # Rails' `buffer.presence || value`, of which this is the second
-    # half. The first half cannot arrive: an emitted block builds its
-    # markup and RETURNS it (`_cap` in a view, `a + b` in a helper), and
-    # a `concat` that would have filled a buffer instead was rewritten
-    # into an append by the pass above. A non-String value is NOT
-    # stringified — Rails answers the empty buffer there, and a helper
-    # block ending on an Integer means its markup went somewhere else.
-    #
-    # MOVED here from the CRuby overlay (`ruby_overlay/runtime/
-    # action_view_capture_helper.rb`, deleted) rather than copied: the
-    # overlay ships alongside this file on the CRuby lane, so two
-    # definitions would mean two lanes rendering different HTML with
-    # require order deciding which. The overlay's buffer STACK did not
-    # come with it — `Thread.current` is not a shape every ruby-family
-    # lane types, and a stack no `concat` can push to is state the
-    # corpus has zero call sites for (`ViewHelpers.concat` appears
-    # nowhere in campfire's or lobsters' emit).
-    def self.capture
-      value = yield
-      value.is_a?(String) ? value.to_s : ""
-    end
-
     # Rails appends to the view's output buffer; emitted views write
     # through `io <<` and have none, so there is nothing to append to.
     # Kept as the loud failure the CRuby overlay made it — a call site
