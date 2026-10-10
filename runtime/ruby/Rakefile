@@ -11,12 +11,23 @@
 
 require "rake/testtask"
 
-Rake::TestTask.new(:test) do |t|
+# Gem-backed Rails 8.1.4 inflector differential. It needs the real
+# `I18n.load_path` before the runtime shim is defined, so it cannot
+# share a process with the rest of the suite.
+INFLECTIONS = "test/active_support_inflections_test.rb"
+
+Rake::TestTask.new(:framework_test_suite) do |t|
   t.libs << "."
   t.libs << "test"
-  t.test_files = FileList["test/**/*_test.rb"]
+  t.test_files = FileList["test/**/*_test.rb"].exclude(INFLECTIONS)
   t.warning = false
   t.verbose = false
 end
 
+task :active_support_inflections do
+  # `-Itest` only: `-I.` would put the runtime I18n shim ahead of the gem.
+  ruby "-Itest", INFLECTIONS
+end
+
+task test: [:framework_test_suite, :active_support_inflections]
 task default: :test

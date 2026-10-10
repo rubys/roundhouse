@@ -1,5 +1,7 @@
-require_relative "test_helper"
+# Gem inflector first: `active_support/i18n.rb` calls `I18n.load_path`,
+# which the runtime I18n shim (loaded by test_helper) does not define.
 require "active_support/inflector"
+require_relative "test_helper"
 
 # Rails 8.1.4 default-config differential only. Custom acronym tables,
 # `classify`/`tableize`, locale mutation, constantization, transliteration,

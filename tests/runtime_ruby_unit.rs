@@ -49,19 +49,38 @@ fn framework_ruby_tests_pass() {
     // `Rake::TestTask` does the same shape when `rake test` runs;
     // we replicate it here so the cargo gate doesn't depend on
     // having `rake` installed.
+    //
+    // Exception: `active_support_inflections_test.rb` requires the
+    // real gem's `I18n.load_path`. The runtime I18n shim has none, so
+    // that file runs in its own process (issue #758).
+    run_ruby(
+        runtime_ruby,
+        &[
+            "-Itest",
+            "-e",
+            "Dir[File.join('test', '**', '*_test.rb')].sort.each { |f| \
+             next if File.basename(f) == 'active_support_inflections_test.rb'; \
+             require File.expand_path(f) }",
+        ],
+        "framework Ruby tests failed",
+    );
+    run_ruby(
+        runtime_ruby,
+        &["-Itest", "test/active_support_inflections_test.rb"],
+        "ActiveSupport inflections differential failed",
+    );
+}
+
+fn run_ruby(runtime_ruby: &Path, args: &[&str], fail_label: &str) {
     let output = Command::new("ruby")
-        .arg("-Itest")
-        .arg("-e")
-        .arg(
-            "Dir[File.join('test', '**', '*_test.rb')].sort.each { |f| require File.expand_path(f) }"
-        )
+        .args(args)
         .current_dir(runtime_ruby)
         .output()
         .expect("invoke ruby");
 
     assert!(
         output.status.success(),
-        "framework Ruby tests failed:\n\
+        "{fail_label}:\n\
          === stdout ===\n{}\n\
          === stderr ===\n{}",
         String::from_utf8_lossy(&output.stdout),
