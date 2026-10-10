@@ -233,17 +233,44 @@ module Tep
   # Cap is a COUNT so a bound does not need an LRU touch on the read
   # path. The lock is still required: a green thread can be descheduled
   # inside Hash#[]=.
+  #
+  # Before the digest, the last body served is compared with `==`, as
+  # the CRuby overlay's GzipCache does: SHA-256 runs every 64-byte block
+  # through 64 rounds, `==` is a memcmp that stops at the first byte
+  # that differs.
+  # The pair is stored on a digest hit, a body seen before; a miss does
+  # not store it, since a page with a per-request token (the CSRF meta
+  # tag) is never seen twice and copying it would be wasted. The last
+  # body is a snapshot (`dup`), so a caller that later mutates its
+  # String cannot make `==` match bytes whose gzip this is not. The
+  # pair is read under the lock and compared outside it: nothing
+  # mutates the snapshot, it is replaced.
   GZIP_CACHE_MAX = 64
   GZIP_LOCK = Mutex.new
   @gzip_bodies = Hash.new("")
+  @gzip_last_raw = ""
+  @gzip_last_gz = ""
 
   def self.gzip_cached(raw)
-    key = Digest::SHA256.hexdigest(raw)
+    last_raw = ""
     hit = ""
+    GZIP_LOCK.synchronize do
+      last_raw = @gzip_last_raw
+      hit = @gzip_last_gz
+    end
+    return hit if hit.bytesize > 0 && last_raw == raw
+    key = Digest::SHA256.hexdigest(raw)
     GZIP_LOCK.synchronize do
       hit = @gzip_bodies[key]
     end
-    return hit if hit.length > 0
+    if hit.bytesize > 0
+      last = raw.dup
+      GZIP_LOCK.synchronize do
+        @gzip_last_raw = last
+        @gzip_last_gz = hit
+      end
+      return hit
+    end
     gz = Zlib.gzip(raw)
     GZIP_LOCK.synchronize do
       if @gzip_bodies.size >= GZIP_CACHE_MAX
