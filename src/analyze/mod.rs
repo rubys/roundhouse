@@ -298,10 +298,6 @@ impl Analyzer {
             cls.class_methods.insert(Symbol::from("connection_pool"), Ty::Untyped);
             cls.class_methods.insert(Symbol::from("establish_connection"), Ty::Untyped);
             cls.class_methods.insert(Symbol::from("table_name"), Ty::Str);
-            // `Model.human_attribute_name(:col)` — the ActiveModel
-            // translation entry point every form label and table header
-            // goes through. Returns the humanized/localized String.
-            cls.class_methods.insert(Symbol::from("human_attribute_name"), Ty::Str);
             cls.class_methods.insert(Symbol::from("primary_key"), Ty::Str);
             // Arel entry points: `Model.arel_table` is an `Arel::Table`
             // (`table[:col]` → attribute → predicate node); `Model.arel`

@@ -1666,6 +1666,21 @@ impl<'a> BodyTyper<'a> {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
                     return Ty::Array { elem: Box::new(elem.unwrap_or_else(unknown)) };
                 }
+                if method.as_str() == "human_attribute_name"
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && crate::lower::human_attribute_name::literal_attribute(args).is_some()
+                    && match recv.as_ref() {
+                        Some(r) => crate::lower::human_attribute_name::receiver_model(r),
+                        None if ctx.class_side => match ctx.self_ty.as_ref() {
+                            Some(Ty::Class { id, .. }) => Some(id.clone()),
+                            _ => None,
+                        },
+                        None => None,
+                    }
+                    .is_some_and(|id| self.classes.get(&id).is_some_and(|c| c.table.is_some()))
+                {
+                    return Ty::Str;
+                }
                 if method.as_str() == "full_message"
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")

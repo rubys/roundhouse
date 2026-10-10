@@ -734,6 +734,63 @@ fn an_active_model_class_reads_the_activemodel_scope_on_spinel() {
     active_model_scope_app().run_spinel(ACTIVE_MODEL_SCOPE_ASSERTIONS).assert_passes();
 }
 
+/// `human_attribute_name` answers the locale's name, from a model method,
+/// a view and `record.class`; a dynamic attribute stays an error.
+fn human_attribute_name_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  activerecord:\n    attributes:\n      article:\n        title: \"Headline\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def self.title_label
+    human_attribute_name(:title)
+  end
+
+  def self.body_label
+    Article.human_attribute_name(\"body\")
+  end
+
+  def own_created_at_label
+    self.class.human_attribute_name(:created_at)
+  end
+",
+        )
+}
+
+const HUMAN_ATTRIBUTE_NAME_ASSERTIONS: &str = r#"raise "title: #{Article.title_label}" unless Article.title_label == "Headline"
+raise "body: #{Article.body_label}" unless Article.body_label == "Body"
+raise "created: #{Article.new.own_created_at_label}" unless Article.new.own_created_at_label == "Created at"
+puts "human_attribute_name passed"
+"#;
+
+#[test]
+fn human_attribute_name_answers_the_locale() {
+    human_attribute_name_app().run_ruby(HUMAN_ATTRIBUTE_NAME_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn human_attribute_name_answers_the_locale_on_spinel() {
+    human_attribute_name_app().run_spinel(HUMAN_ATTRIBUTE_NAME_ASSERTIONS).assert_passes();
+}
+
+#[test]
+fn human_attribute_name_on_a_dynamic_attribute_stays_an_error() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def self.label_for(field)\n    Article.human_attribute_name(field)\n  end\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("human_attribute_name")), "{errors:?}");
+}
+
 /// A field the lowering cannot humanize at compile time keeps its error.
 #[test]
 fn errors_full_message_on_a_dynamic_field_stays_an_error() {
@@ -4595,13 +4652,11 @@ puts "ok"
         .assert_passes();
 }
 
-/// #139 typed `Model.human_attribute_name` as a String, which took the
-/// call from an error to clean, but no runtime defines it, so every
-/// page rendering the form raises `undefined method
-/// 'human_attribute_name' for class Article`. It belongs once, in
-/// `runtime/ruby/active_record/base.rb`, where every target gets it.
+/// #139 typed `Model.human_attribute_name` as a String, but no runtime
+/// defined it, so every page rendering the form raised `undefined method
+/// 'human_attribute_name' for class Article` (#147). A literal attribute
+/// now folds to the locale's name at compile time.
 #[test]
-#[ignore = "check is clean but the emitted view raises NoMethodError: no runtime defines human_attribute_name (#147)"]
 fn human_attribute_name_runs() {
     emit_and_run::real_blog()
         .edit(

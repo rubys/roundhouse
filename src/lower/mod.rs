@@ -85,6 +85,7 @@ pub mod sti_is_a;
 pub mod dead_default;
 pub mod errors_add;
 pub mod errors_full_messages;
+pub mod human_attribute_name;
 pub mod assoc_attr_key;
 pub mod attachable;
 pub mod attachables_grep;
@@ -583,6 +584,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // the same body has already baked its humanized prefix — the
     // projection this pass emits reads that text.
     ("errors_index", &["errors_add"]),
+    ("human_attribute_name", &[]),
     ("create_block", &["secure_password_super"]),
     // `<params>.merge(k: v)` written a method away from the permit
     // chain → `Model.from_params(p)` + per-key setters, hoisted above
@@ -940,6 +942,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("errors_add");
     diags.extend(errors_index::apply_errors_index_lowering(app));
     ran!("errors_index");
+    human_attribute_name::apply_human_attribute_name_lowering(app);
+    ran!("human_attribute_name");
     diags.extend(create_block::apply_create_block_inline(app));
     ran!("create_block");
     diags.extend(params_merge::apply_params_merge_lowering(app));
