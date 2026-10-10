@@ -304,7 +304,7 @@ module ActionController
 
       i = index_of(key)
       if i < 0
-        @keys.push(key)
+        @keys.push(key.to_s)
         @lower.push(key.downcase)
         @vals.push(value)
       else
