@@ -182,6 +182,8 @@ look at an unfamiliar codebase.
 
 Set `ROUNDHOUSE_TIMINGS=1` before `roundhouse check`. The command prints elapsed time for ingest, analysis, diagnosis, and each inference round. It also prints the Rubydex index, resolve, and answer steps, and the time that ingest waits for Rubydex. It also prints peak RSS on macOS and Linux. The command does not print measurements by default.
 
+The same variable on an emit (`roundhouse --target ruby APP`) also prints a `post-analyze pass: <name>` line after each lowering pass that runs after analysis, with the time since the previous pass. A pass that is slow, or never ends, is the last line printed. Members of a fused group read about zero after the group's phase line.
+
 ## A clean run
 
 The Rails Guides store — the app the *Getting Started with Rails*
