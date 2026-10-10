@@ -720,6 +720,11 @@ impl Analyzer {
                 ("marked_for_destruction?", Ty::Bool),
                 ("mark_for_destruction", Ty::Bool),
                 ("record_timestamps=", Ty::Bool),
+                // `runtime/ruby/active_record/base.rb` (schema columns)
+                // and its ruby-family reopen in connection.rb (columns a
+                // `select` left out read false), as Rails does. Code guarding
+                // reads of newer columns relies on it.
+                ("has_attribute?", Ty::Bool),
                 ("attributes=", Ty::Untyped),
                 ("assign_attributes", Ty::Untyped),
                 ("update_column", Ty::Bool),
