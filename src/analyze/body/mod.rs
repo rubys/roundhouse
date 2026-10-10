@@ -575,6 +575,11 @@ impl<'a> BodyTyper<'a> {
     /// ancestor's. Such a read is a plain state read, which is what lets a
     /// guard on it (`expires_at.present? && expires_at > now`) speak for
     /// the reads that follow it the way a guard on a local does.
+    ///
+    /// The type is the reader's, not the column's: `serialize :metadata`,
+    /// an enum or a money column registers a reader that answers something
+    /// other than the storage type, and `return if metadata.nil?` must not
+    /// narrow the reads after it back to the column's `String`.
     fn self_attribute_ty(&self, name: &Symbol, ctx: &Ctx) -> Option<Ty> {
         let Some(Ty::Class { id, .. }) = &ctx.self_ty else {
             return None;
@@ -585,7 +590,7 @@ impl<'a> BodyTyper<'a> {
             let Some(cur) = cursor else { break };
             let Some(info) = self.classes.get(&cur) else { break };
             if let Some(ty) = info.attributes.fields.get(name) {
-                return Some(ty.clone());
+                return Some(info.instance_methods.get(name).unwrap_or(ty).clone());
             }
             cursor = info.parent.clone();
         }
