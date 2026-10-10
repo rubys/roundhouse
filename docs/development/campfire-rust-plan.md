@@ -365,6 +365,28 @@ one exact method/callsite resolver and carry its decision through signature,
 call, and terminal consumption; do not change generic `capture` or claim the
 other 12 methods by association.
 
+**D0 callsite-proof refinement (2026-10-10; Oracle advice checked against
+local sources):** the emitted test now runs `session::analyze_and_lower`,
+which is the same shared post-analysis lowering facade used by emit-bound
+drivers. It still uses a hand-authored guarded `capture` helper, so it does
+not yet exercise the Campfire `tag_builder` rewrite or an ERB template.
+`tag_builder::capture_call` creates the guarded terminal for a forwarded
+helper block; `capture_inline` flattens literal `capture` lambdas and may
+stringify the final block value. Therefore, a String result on that lowered
+callee is not enough to prove the original caller's block result.
+
+Require per-callsite evidence: inspect all Lambda arity fields directly
+(`Ty::Fn.params` is synthesized empty and cannot prove zero arity), require an
+exact String return rather than `Untyped`/union evidence, and reject
+unmodeled early exits such as `return`, `break`, and `next`. For template
+callbacks, require a terminal `StringBuilderResult` tied to that callback's
+own `StringBuilderInit`; a descendant-only hint is insufficient. The hints
+and `Ty::Str` prove string value shape, not SafeBuffer/HTML-safety semantics;
+preserve the existing escaping and `.html_safe` paths, and do not expand the
+support claim to Rails SafeBuffer equivalence. Missing, ambiguous, or
+conflicting callsite evidence means no specialized ABI. See the generated
+fixture and pipeline evidence in the latest ledger row.
+
 `cargo check --lib` passes without warnings after isolating the probe under
 `cfg(test)`. `rustfmt --check` passes on the new probe, while a direct check
 through `rust.rs` still reports pre-existing formatting drift across the
@@ -482,6 +504,7 @@ review artifacts; avoid committing large generated projects or sensitive data.
 | 2026-10-09 (signature-map fix inventory) | `1e5b828895dcafaa687334756ed0f8c908c27451` | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; reused generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55` and baseline Cargo target cache; fresh generated project in `/tmp/rh688-1e5b8288-survey` | Fresh `roundhouse --target rust --survey --allow-unsupported` then `cargo check --locked --lib --bin app --message-format=json` | Exit 101, 2,496 errors, 2,252 fingerprints, 555 warnings; fingerprint+count inventory exactly matches baseline (0 groups removed/added/changed). The 14 unresolved `capture` occurrences in 13 groups are unchanged. This narrow parameter-map fix is correct but does not reduce the Campfire wall; no support claim. Capture JSON/inventory in `/tmp/rh688-1e5b8288-cargo.json` and `/tmp/rh688-1e5b8288-inventory.json` | D0 adjacent signature-map defect covered; D0 ABI remains open |
 | 2026-10-09 (shared capture runtime placement, working tree based on `1e5b8288`) | Parent `1e5b828895dcafaa687334756ed0f8c908c27451` plus uncommitted changes | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; reused generated lock SHA-256 `b1ae75ef5b9f85e8166d707f9b3babcc0897f6f392c09e2ab99ccd2100d93f55`; dirty worktree | `ruby -Iruntime/ruby runtime/ruby/test/action_view/view_helpers_ext_test.rb`; `cargo test --locked --test runtime_src_integration every_runtime_method_body_is_fully_typed`; fresh survey generation and `cargo check --locked --lib --bin app --message-format=json`; generated Rust framework test with `--ignored`, before and after moving direct generic capture probes | CRuby suite passed 21 tests / 38 assertions; runtime typed-body gate passed 1/1. Fresh survey Cargo check: exit 101, 2,510 errors / 554 warnings (baseline `1e5b8288`: 2,496 / 555). Diagnostic-set comparison by code/message/source span: 14 `capture` E0425s and one clone diagnostic disappeared; 14 E0271 callable-result mismatches, 14 E0308 branch mismatches, and one relocated clone diagnostic appeared. This is not a net compiler improvement; it replaces unresolved capture names with concrete evidence that the current closure is `FnOnce() -> ()` where the runtime expects a value, while the survey output still fails. Rust framework harness failed with 24 generated-test compilation errors before probe relocation and 21 after; the three removed errors were from those new probes. Remaining failures include fixture/type-shape mismatches whose baseline status was not tested, so the Rust framework lane remains red. CRuby syntax checks and `git diff --check` passed. | Shared runtime placement locally implemented; capture ABI is now more directly localized; D0 behavior remains unproven |
 | 2026-10-10 (D0 source-callsite regression expansion; dirty worktree) | `83f6d67acd5b4e38dc4a045f4c8cac20ccee20a9` plus local test/plan/recognizer changes | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; current Roundhouse checkout `pr688-prep`; generated scratch project at `/tmp/roundhouse-rust-check-optional-string-forwarded-block` | `cargo test --lib emit::rust::block_abi::tests -- --nocapture`; `cargo check --lib`; ignored emitted-Rust test `forwarded_optional_string_block_runs_through_two_edges` with the source-authored `render_html` literal-block callsite; `git diff --check` | ABI probe unit tests passed 2/2; library check passed; `git diff --check` passed. The emitted-project test intentionally remains red (exit 101): five app compile errors, including the new source literal closure not matching the current required `Box<dyn FnOnce()>` signature, plus the pre-existing optionality, closure result, and `String`/`Value` mismatches. This reproduces the pre-fix path and expands evidence; no feature behavior is fixed and no Campfire inventory was rerun. | D0 positive source-callsite fixture added; production ABI integration and Campfire claim remain open |
+| 2026-10-10 (D0 proof-path check; dirty worktree) | `3fdeda76496c31a3b2e45d4d0fcf444ccaea5cc4` plus local test/plan edits | `32b4144b5206304fa8d4c67455a753e2d3c16635` | rustc/Cargo 1.98.1; emitted scratch project `/tmp/roundhouse-rust-check-optional-string-forwarded-block` | Re-ran the ignored D0 compile/run test after switching fixture generation to `session::analyze_and_lower`; inspected lowering order and lambda typing in `src/session.rs`, `src/lower/mod.rs`, `src/lower/tag_builder.rs`, `src/lower/capture_inline.rs`, `src/lower/view_to_library/walker.rs`, and `src/analyze/body/mod.rs` | The full emitted test still fails at Cargo with the same five app errors; shared lowerings do not change this synthetic handwritten `capture` fixture. This run proves the shared lowering path is exercised but does not exercise Campfire tag-builder rewrites, view templates, escaping, or a real Campfire compile improvement. Local source confirms `Ty::Fn.params` is empty for analyzed lambdas; lambda arity must be read from its own parameter fields. No new feature behavior is claimed. | Production-path repro harness verified; no ABI integration yet |
 
 | Date | Roundhouse SHA | Campfire SHA | Toolchain / locks | Commands and executed scope | Result / artifact links | Checklist updated |
 |---|---|---|---|---|---|---|

@@ -66,9 +66,32 @@ fn generate_project_from_tree(tree: std::collections::HashMap<PathBuf, Vec<u8>>,
     }
 }
 
+fn generate_project_from_tree_with_shared_lowerings(
+    tree: std::collections::HashMap<PathBuf, Vec<u8>>,
+    out: &Path,
+) {
+    if out.exists() {
+        std::fs::remove_dir_all(out).expect("clean scratch");
+    }
+    std::fs::create_dir_all(out).expect("create scratch");
+
+    let mut app = ingest_app_from_tree(tree).expect("ingest synthetic app");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = rust::emit(&app);
+
+    for file in &files {
+        let path = out.join(&file.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(&path, &file.content).expect("write emitted file");
+    }
+}
+
 /// Execute an optional, zero-argument String block through two forwarding
 /// methods in the generated Rust crate. This exercises the public ingest,
-/// analyze, emit, and Cargo interfaces rather than an isolated Rust prototype.
+/// analyze, shared post-analyze lowerings, emit, and Cargo interfaces rather
+/// than an isolated Rust prototype.
 #[test]
 #[ignore]
 fn forwarded_optional_string_block_runs_through_two_edges() {
@@ -79,7 +102,7 @@ fn forwarded_optional_string_block_runs_through_two_edges() {
     .into_iter()
     .collect();
     let scratch = scratch_dir("optional-string-forwarded-block");
-    generate_project_from_tree(tree, &scratch);
+    generate_project_from_tree_with_shared_lowerings(tree, &scratch);
 
     let generated_test = r#"
 use app::app_classes::BlockForwardingProbe;
