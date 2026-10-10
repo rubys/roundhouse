@@ -163,6 +163,9 @@ pub(crate) struct ConstResolver {
     /// Indexed by `FileId - 1`. `None` marks a source that Rubydex did
     /// not index, such as an ERB template.
     files: Vec<Option<FileAnswers>>,
+    /// Each source class or module that others are nested in by name,
+    /// with those nested ones (`A` to `A::B` and `A::B::C`).
+    nested_namespaces: HashMap<Box<str>, Vec<Box<str>>>,
     /// Includes paths, full text and order because answers use file IDs
     /// and byte offsets. Retain no second copy of the source snapshot.
     source_fingerprint: u64,
@@ -415,7 +418,18 @@ impl ConstResolver {
         crate::timings::phase("rubydex: resolve", || Resolver::new(&mut graph).resolve());
         let files = crate::timings::phase("rubydex: answers", || collect_answers(&graph, sources));
         drop(graph);
-        Self { files, source_fingerprint: source_fingerprint(sources) }
+        let mut declared: Vec<&str> = files.iter().flatten().flat_map(|file| file.class_definitions.iter().map(|name| name.as_ref())).collect();
+        declared.sort_unstable();
+        declared.dedup();
+        let mut nested_namespaces: HashMap<Box<str>, Vec<Box<str>>> = HashMap::default();
+        for name in &declared {
+            for (at, _) in name.match_indices("::") {
+                if declared.binary_search(&&name[..at]).is_ok() {
+                    nested_namespaces.entry(Box::from(&name[..at])).or_default().push(Box::from(*name));
+                }
+            }
+        }
+        Self { files, nested_namespaces, source_fingerprint: source_fingerprint(sources) }
     }
 
     fn file(&self, file: FileId) -> Option<&FileAnswers> {
@@ -510,6 +524,12 @@ impl ConstResolver {
     pub(crate) fn constant_class(&self, value: Span, name: &str) -> Option<ClassId> {
         let declaration = self.constant_declaration(value, name)?;
         self.file(value.file)?.constant_classes.get(&declaration).cloned()
+    }
+
+    /// The source classes and modules declared inside the source class
+    /// or module `name` (`A::B` and `A::B::C` for `A`).
+    pub(crate) fn nested_source_namespaces(&self, name: &str) -> &[Box<str>] {
+        self.nested_namespaces.get(name).map_or(&[], Vec::as_slice)
     }
 
     pub(crate) fn has_source_namespace(&self, name: &str) -> bool {

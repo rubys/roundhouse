@@ -1148,6 +1148,26 @@ impl Analyzer {
         self.fixpoint_rounds
     }
 
+    /// Whether `include <written>` in `scope` names a source module that
+    /// only nests other declarations, at least one of them modeled. Like
+    /// `body::lexical_class`, the innermost scope that has it wins.
+    fn includes_source_namespace(&self, written: &str, scope: &str) -> bool {
+        let nests_modeled = |name: &str| {
+            self.const_resolver
+                .nested_source_namespaces(name)
+                .iter()
+                .any(|nested| self.classes.contains_key(&ClassId(Symbol::from(nested.as_ref()))))
+        };
+        let mut parts: Vec<&str> = scope.split("::").filter(|s| !s.is_empty()).collect();
+        while !parts.is_empty() {
+            if nests_modeled(&format!("{}::{written}", parts.join("::"))) {
+                return true;
+            }
+            parts.pop();
+        }
+        nests_modeled(written)
+    }
+
     /// Walk the app, annotating every expression's `ty` field, then
     /// populating the owning construct's `effects` by visiting the typed tree.
     ///
@@ -1165,7 +1185,12 @@ impl Analyzer {
             for included in &class.includes {
                 let known = self.classes.contains_key(included)
                     || body::lexical_class(included, class.name.0.as_str(), &self.classes).is_some()
-                    || body::RUBY_TOP_LEVEL.contains(&included.0.as_str());
+                    || body::RUBY_TOP_LEVEL.contains(&included.0.as_str())
+                    // A source module that only nests modeled classes (an
+                    // implicit namespace: a directory of classes with no
+                    // file of its own), included so the class reads its
+                    // constants bare; emitted, its nested classes open it.
+                    || (self.source_indexed && self.includes_source_namespace(included.0.as_str(), class.name.0.as_str()));
                 if known { continue; }
                 let detail = format!("{} includes unresolved {}", class.name.0, included.0);
                 if class.unknown_calls.iter().any(|call| matches!(&call.diagnostic,
