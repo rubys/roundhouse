@@ -28,17 +28,42 @@ module ActionDispatch
     end
   end
 
+  # Route captures are exposed with String/Symbol-indifferent reads, like
+  # Rails' path_parameters. The Router supplies String keys; do not merge
+  # query parameters into this map.
+  class RequestPathParameters
+    def initialize(values)
+      @values = {}
+      values.each { |key, value| @values[key.to_s] = value }
+    end
+
+    def [](key)
+      @values[key.to_s]
+    end
+
+    def fetch(key, default = nil)
+      name = key.to_s
+      @values.key?(name) ? @values[name] : default
+    end
+
+    def key?(key)
+      @values.key?(key.to_s)
+    end
+  end
+
   class Request
     attr_reader :env
     attr_accessor :params
     # The body's params alone - see the twin in
     # runtime/ruby/action_dispatch/request.rb.
     attr_accessor :request_parameters
+    attr_reader :path_parameters
 
     def initialize(env, params = {})
       @env = env
       @params = params
       @request_parameters = {}
+      @path_parameters = RequestPathParameters.new({})
       @session_options = {}
     end
 
@@ -59,6 +84,14 @@ module ActionDispatch
 
     def [](key)
       @params[key.to_s]
+    end
+
+    def authorization
+      headers["Authorization"] || @env["X-HTTP-AUTHORIZATION"] || @env["X_HTTP_AUTHORIZATION"] || headers["X-HTTP-Authorization"]
+    end
+
+    def path_parameters=(values)
+      @path_parameters = RequestPathParameters.new(values)
     end
 
     def request_method

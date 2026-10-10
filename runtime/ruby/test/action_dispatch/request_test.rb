@@ -80,6 +80,37 @@ class ActionDispatchRequestTest < Minitest::Test
     assert_equal "http://chat.test", r.base_url
   end
 
+  def test_headers_accept_case_insensitive_http_and_rack_names
+    r = ActionDispatch::Request.for({
+      "HTTP_X_CAMPFIRE_BOT_KEY" => "bot-secret",
+      "CONTENT_TYPE" => "application/json",
+    })
+    assert_equal "bot-secret", r.headers["X-Campfire-Bot-Key"]
+    assert_equal "bot-secret", r.headers["http_x_campfire_bot_key"]
+    assert_equal "bot-secret", r.headers.fetch("HtTp_X_CaMpFiRe_BoT_KeY")
+    assert_equal "application/json", r.headers.fetch("content-type", "missing")
+    assert_equal "application/json", r.headers["content_type"]
+    assert r.headers.key?("x-campfire-bot-key")
+    assert !r.headers.key?("X-Missing")
+  end
+
+  def test_authorization_checks_rack_and_legacy_env_keys
+    assert_equal "Bearer key", ActionDispatch::Request.for(
+      { "HTTP_AUTHORIZATION" => "Bearer key" }
+    ).authorization
+    assert_equal "Bearer legacy", ActionDispatch::Request.for(
+      { "X-HTTP-AUTHORIZATION" => "Bearer legacy" }
+    ).authorization
+  end
+
+  def test_path_parameters_are_route_only_and_indifferent
+    r = ActionDispatch::Request.new
+    r.path_parameters = { "bot_key" => "route-secret" }
+    assert_equal "route-secret", r.path_parameters[:bot_key]
+    assert_equal "route-secret", r.path_parameters.fetch("bot_key", "missing")
+    assert !r.path_parameters.key?(:query_key)
+  end
+
   # A proxy chain lists one scheme per hop; the first is the client's.
   def test_optional_port_is_nil_at_the_schemes_standard_port
     assert_nil ActionDispatch::Request.for({ "HTTP_HOST" => "chat.test" }).optional_port

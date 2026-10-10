@@ -49,6 +49,9 @@ module ActionDispatch
 
       def self.env_name(key)
         name = key.to_s
+        upper = name.upcase
+        return upper if upper == "CONTENT_TYPE" || upper == "CONTENT_LENGTH"
+        return upper.tr("-", "_") if /\AHTTP_[A-Z0-9_-]+\z/.match?(upper)
         return name unless HTTP_HEADER.match?(name)
         upper = name.upcase.tr("-", "_")
         CGI_VARIABLES.include?(upper) ? upper : "HTTP_" + upper

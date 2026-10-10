@@ -88,7 +88,7 @@ module ActionController
     def self.authorization(controller)
       req = controller.request
       return "" if req.nil?
-      req.env.fetch("HTTP_AUTHORIZATION", "").to_s
+      req.authorization.to_s
     end
 
     # The `key=value` pairs after the scheme, the first one keyed
@@ -97,10 +97,10 @@ module ActionController
     def self.token_pairs(header)
       pairs = []
       rest = nil
-      if header.start_with?("Token ")
-        rest = header[6, header.length].to_s
-      elsif header.start_with?("Bearer ")
-        rest = header[7, header.length].to_s
+      parts = header.split(" ", 2)
+      scheme = parts[0].to_s.downcase
+      if scheme == "token" || scheme == "bearer"
+        rest = parts[1].to_s
       end
       return pairs if rest.nil?
       rest.tr(";\t", ",,").split(",").each do |raw|

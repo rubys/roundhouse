@@ -67,6 +67,29 @@ module ActionDispatch
     end
   end
 
+  # Rails exposes route captures through an indifferent-access hash:
+  # app code may use either :bot_key or "bot_key". Keep the stored route
+  # map String-keyed (as the router supplies it) and normalize reads.
+  class RequestPathParameters
+    def initialize(values)
+      @values = {}
+      values.each { |key, value| @values[key.to_s] = value }
+    end
+
+    def [](key)
+      @values[key.to_s]
+    end
+
+    def fetch(key, default = nil)
+      name = key.to_s
+      @values.key?(name) ? @values[name] : default
+    end
+
+    def key?(key)
+      @values.key?(key.to_s)
+    end
+  end
+
   # `ActionDispatch::TestRequest.create(env)` — the Request a test
   # builds by hand, from a Rack env rather than from a transport.
   # campfire's opengraph-embed test names the host its own links must
@@ -147,6 +170,7 @@ module ActionDispatch
       @body_io = nil
       @env = {}
       @request_parameters = {}
+      @path_parameters = RequestPathParameters.new({})
       # `@params` too, and for a reason `@env` shows: `Request.for`
       # COPIES into both (`params.each { |k, v| r.params[k] = v }`),
       # which READS the slot before anything writes it. Unset, that read
@@ -213,6 +237,20 @@ module ActionDispatch
     # Rails' `raw_post`: the body as one String, cursor untouched.
     def raw_post
       @body
+    end
+
+    # Rails checks the ordinary Rack Authorization key and both legacy
+    # X-HTTP-Authorization spellings used by some servers.
+    def authorization
+      headers["Authorization"] || @env["X-HTTP-AUTHORIZATION"] || @env["X_HTTP_AUTHORIZATION"] || headers["X-HTTP-Authorization"]
+    end
+
+    def path_parameters
+      @path_parameters
+    end
+
+    def path_parameters=(values)
+      @path_parameters = RequestPathParameters.new(values)
     end
 
     def get?

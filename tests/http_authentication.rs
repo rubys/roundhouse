@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use roundhouse::ingest::ingest_app_from_tree;
-use roundhouse::project::{target_files, BuildTarget};
+use roundhouse::project::{BuildTarget, target_files};
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
@@ -61,7 +61,10 @@ end
 
 const APP: &[(&str, &str)] = &[
     ("app/models/application_record.rb", APPLICATION_RECORD),
-    ("app/controllers/application_controller.rb", APPLICATION_CONTROLLER),
+    (
+        "app/controllers/application_controller.rb",
+        APPLICATION_CONTROLLER,
+    ),
     ("app/models/widget.rb", WIDGET),
     ("app/controllers/widgets_controller.rb", CONTROLLER),
     ("config/routes.rb", ROUTES),
@@ -90,13 +93,21 @@ fn assert_parses(files: &[(String, String)], path: &str) {
     let source = file(files, path);
     let result = ruby_prism::parse(source.as_bytes());
     let errors: Vec<String> = result.errors().map(|e| e.message().to_string()).collect();
-    assert!(errors.is_empty(), "{path} does not parse: {errors:?}\n{source}");
+    assert!(
+        errors.is_empty(),
+        "{path} does not parse: {errors:?}\n{source}"
+    );
 }
 
 #[test]
 fn the_spinel_tree_defines_the_http_auth_helpers_and_reads_the_header() {
     let files = spinel_tree();
-    for path in ["app/controllers/widgets_controller.rb", "runtime/http_authentication.rb", "boot.rb", "main.rb"] {
+    for path in [
+        "app/controllers/widgets_controller.rb",
+        "runtime/http_authentication.rb",
+        "boot.rb",
+        "main.rb",
+    ] {
         assert_parses(&files, path);
     }
     let runtime = file(&files, "runtime/http_authentication.rb");
@@ -108,18 +119,47 @@ fn the_spinel_tree_defines_the_http_auth_helpers_and_reads_the_header() {
         "def authenticate_or_request_with_http_basic",
         "def request_http_basic_authentication",
     ] {
-        assert!(runtime.contains(helper), "runtime/http_authentication.rb lacks `{helper}`");
+        assert!(
+            runtime.contains(helper),
+            "runtime/http_authentication.rb lacks `{helper}`"
+        );
     }
-    assert!(file(&files, "runtime/http_authentication.rbs").contains("def authenticate_with_http_token:"));
+    assert!(
+        file(&files, "runtime/http_authentication.rbs")
+            .contains("def authenticate_with_http_token:")
+    );
     assert!(file(&files, "boot.rb").contains("require_relative \"runtime/http_authentication\""));
     // The dispatcher maps every parsed wire header into Rails' request env;
     // this must include Authorization for the auth helpers to see credentials.
     assert!(
-        file(&files, "main.rb").contains(
-            "request_obj.env[ActionDispatch::Http::Headers.env_name(name)] = value"
-        ),
+        file(&files, "main.rb")
+            .contains("request_obj.env[ActionDispatch::Http::Headers.env_name(name)] = value"),
         "main.rb does not map parsed headers into the request env"
     );
+    assert!(file(&files, "main.rb").contains("request_obj.path_parameters = matched.path_params"));
+    let request = file(&files, "runtime/action_dispatch/request.rb");
+    for feature in [
+        "class RequestPathParameters",
+        "def authorization",
+        "def path_parameters",
+    ] {
+        assert!(
+            request.contains(feature),
+            "request runtime lacks `{feature}`"
+        );
+    }
+    let headers = file(&files, "runtime/action_dispatch/headers.rb");
+    for feature in [
+        "class Headers",
+        "def fetch(key",
+        "def key?(key",
+        "def self.env_name(key)",
+    ] {
+        assert!(
+            headers.contains(feature),
+            "shared header runtime lacks `{feature}`"
+        );
+    }
 }
 
 /// The filter can answer the 401, so the inlined filter is followed by the
@@ -164,6 +204,7 @@ token_denied = [401, 'Token realm="Application"', "HTTP Token: Access denied.\n"
 expect("/widgets", nil, token_denied)
 expect("/widgets", "Bearer wrong", token_denied)
 expect("/widgets", "Bearer secret", [200, nil, "widgets=0 bearer=ok"])
+expect("/widgets", "bearer secret", [200, nil, "widgets=0 bearer=ok"])
 expect("/widgets", 'Token token="secret", nonce="n1"', [200, nil, "widgets=0 bearer=ok"])
 expect("/peek", nil, [200, nil, "found="])
 expect("/peek", 'Token token="secret"; nonce="n1"', [200, nil, "found=ok n1"])
@@ -172,7 +213,67 @@ basic_denied = [401, 'Basic realm="Widgets"', "HTTP Basic: Access denied.\n"]
 expect("/basic", nil, basic_denied)
 expect("/basic", "Basic #{["admin:wrong"].pack("m0")}", basic_denied)
 expect("/basic", "Basic #{["admin:pw"].pack("m0")}", [200, nil, "basic ok"])
+
+request = ActionDispatch::Request.new({})
+request.path_parameters = { "bot_key" => "route-secret" }
+raise "overlay path parameters are not indifferent" unless request.path_parameters[:bot_key] == "route-secret"
 "#,
         )
         .assert_passes();
+}
+
+/// Exercise the typed Request/header/auth implementation through the emitted
+/// native Spinel binary. The source-level assertion above separately pins
+/// transport-to-Rack forwarding, which a hand-built Request cannot cover.
+#[test]
+#[ignore = "requires Spinel; run with the Spinel toolchain"]
+fn request_headers_path_parameters_and_case_insensitive_token_schemes_run_natively() {
+    let run = emit_and_run::empty_app()
+        .write("app/models/application_record.rb", APPLICATION_RECORD)
+        .write(
+            "app/controllers/application_controller.rb",
+            APPLICATION_CONTROLLER,
+        )
+        .write("app/models/widget.rb", WIDGET)
+        .write("app/controllers/widgets_controller.rb", CONTROLLER)
+        .write("config/routes.rb", ROUTES)
+        .write("db/schema.rb", SCHEMA)
+        .run_spinel(
+            r#"request = ActionDispatch::Request.new
+request.env["HTTP_X_CAMPFIRE_BOT_KEY"] = "header-secret"
+request.env["CONTENT_TYPE"] = "application/json"
+request.env["HTTP_AUTHORIZATION"] = "bEaReR bearer-secret"
+request.path_parameters = { "bot_key" => "route-secret" }
+raise "dash header lookup failed" unless request.headers["X-Campfire-Bot-Key"] == "header-secret"
+raise "Rack-key lookup failed" unless request.headers["http_x_campfire_bot_key"] == "header-secret"
+raise "case-insensitive Rack-key lookup failed" unless request.headers["http_x_campfire_bot_key".upcase] == "header-secret"
+raise "fetch failed" unless request.headers.fetch("CONTENT-TYPE", "missing") == "application/json"
+raise "key? failed" unless request.headers.key?("x-Campfire-bot-key")
+raise "missing key? failed" if request.headers.key?("X-Missing")
+raise "authorization failed" unless request.authorization == "bEaReR bearer-secret"
+raise "path parameters failed" unless request.path_parameters[:bot_key] == "route-secret"
+legacy = ActionDispatch::Request.new
+legacy.env["X-HTTP-AUTHORIZATION"] = "Basic legacy"
+raise "legacy authorization fallback failed" unless legacy.authorization == "Basic legacy"
+controller = WidgetsController.new
+controller.request = request
+found = controller.authenticate_with_http_token { |token, _options| token }
+raise "case-insensitive Bearer parsing failed: #{found.inspect}" unless found == "bearer-secret"
+request.env["HTTP_AUTHORIZATION"] = "tOkEn token-secret"
+token = controller.authenticate_with_http_token { |value, _options| value }
+raise "case-insensitive Token parsing failed: #{token.inspect}" unless token == "token-secret"
+guarded = WidgetsController.new
+guarded.request = request
+authorized = guarded.authenticate_or_request_with_http_token do |value, _options|
+  value == "token-secret" ? "ok" : nil
+end
+raise "authenticate_or_request did not accept mixed-case Token" unless authorized == "ok"
+request.env["HTTP_AUTHORIZATION"] = "bEaReR wrong"
+denied = WidgetsController.new
+denied.request = request
+denied.authenticate_or_request_with_http_token { |_value, _options| nil }
+raise "authenticate_or_request did not deny wrong credentials" unless denied.performed?
+"#,
+        );
+    run.assert_passes();
 }

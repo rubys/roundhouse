@@ -174,7 +174,13 @@ not add generic class-object/Relation support to strict targets.
 | Params | `params.expect`, `params.require(...).permit(...)`, `params[:id]`; typed by the schema they're assigned to | + nested permits, arrays, `params.merge`, indifferent access; a missing resource answers 400; JSON bodies wrapped under the model name (`wrap_parameters`, on by default since `load_defaults 7.0`) |
 | Responses | `render` (template, partial, `json:`, `status:`), `redirect_to` (record, path, `status:`), `respond_to` with `format.html`/`format.json`, `flash` and `flash.now` | + `expires_in`, `stale?`/`fresh_when` (answered as always fresh — a deliberate divergence), `cookies` and `cookies.signed`/`.permanent`, `session`, `helper_method`, `layout` |
 | Concerns | `include`d modules with `included do` filter blocks | + `class_methods`, concern-defined actions and helpers |
-| Auth | — | `Current` attributes, `authenticate_by`, signed/global ids, `has_secure_password` sessions |
+| Auth and request | — | `Current` attributes, `authenticate_by`, signed/global ids, `has_secure_password` sessions; `request.headers` (`[]`, `fetch`, `key?`, case-insensitive HTTP and Rack names), `request.authorization` (including Rack and legacy authorization env keys), route-only `request.path_parameters`, and HTTP Token/Bearer and Basic auth helpers |
+
+The Spinel dispatcher forwards incoming request headers into the request's
+Rack env (`HTTP_*`, plus unprefixed `CONTENT_TYPE` and `CONTENT_LENGTH`).
+Token and Bearer schemes are matched case-insensitively. This covers the
+request/authentication surface, not application-specific authorization
+policy or unsupported route behavior.
 
 `ActionController::Head#head` takes a positional status and optional
 options hash. Roundhouse supports registered status symbols, integer

@@ -195,6 +195,15 @@ roundhouse-check: fixtures/store — 0 parse error(s), 0 error(s), 0 warning(s),
 
 Exit status 0. Everything the analyzer saw, it typed.
 
+For the compiled Spinel request surface, supported controller APIs include
+`request.headers` (`[]`, `fetch`, and `key?`, with case-insensitive HTTP
+header and Rack env spellings), `request.authorization`, and route-only
+`request.path_parameters`. Incoming headers are mapped to Rack env names,
+including `CONTENT_TYPE` and `CONTENT_LENGTH`; HTTP Token/Bearer and Basic
+authentication helpers are available, with Token and Bearer schemes
+case-insensitive. See [Rails coverage](rails-coverage.md#action-controller)
+for the feature-level boundary.
+
 ## Reading the output of a real app
 
 A real app prints more. Every line is one of five kinds, and the
