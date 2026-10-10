@@ -1827,11 +1827,17 @@ impl Analyzer {
 
                 // Class-side `new` answers `Ty::SelfInstance` so inherited
                 // factories stay receiver-dependent in the registry. The
-                // MethodDef signature is what RBS emit reads, and emit
-                // refuses a bare SelfInstance — pin it to the owner the
-                // method is stamped on (same concrete shape
-                // `concern_class_methods` requires).
-                let owner_ty = Ty::Class { id: owner.clone(), args: Vec::new() };
+                // MethodDef signature is what RBS emit reads. On a
+                // singleton method it keeps SelfInstance: RBS spells it
+                // `instance`, which is what Ruby answers (`Child.make` is
+                // a Child), where the owner would type it as a Widget.
+                // Elsewhere emit refuses a bare SelfInstance, so it is
+                // pinned to the owner the method is stamped on (the
+                // concrete shape `concern_class_methods` requires).
+                let owner_ty = match method.receiver {
+                    crate::dialect::MethodReceiver::Class => Ty::SelfInstance,
+                    crate::dialect::MethodReceiver::Instance => Ty::Class { id: owner.clone(), args: Vec::new() },
+                };
 
                 let params: Vec<crate::ty::Param> = method
                     .params
@@ -1862,10 +1868,23 @@ impl Analyzer {
                         crate::ty::Param { name: p.name.clone(), ty, kind: p.ty_kind() }
                     })
                     .collect();
+                let mut ret = ret.unwrap_or(Ty::Untyped).subst_self(&owner_ty);
+                // A factory that answers both `new` (receiver-dependent)
+                // and the owner by name (`Probe.config` reading back the
+                // same class) names the owner twice: `instance | Owner`.
+                // The owner already covers the receiver's own instance,
+                // so the union settles on it.
+                if let Ty::Union { variants } = &ret {
+                    let owner_named = variants.iter().any(|v| matches!(v, Ty::Class { id, .. } if id == owner));
+                    if owner_named && variants.iter().any(|v| matches!(v, Ty::SelfInstance)) {
+                        let kept: Vec<Ty> = variants.iter().filter(|v| !matches!(v, Ty::SelfInstance)).cloned().collect();
+                        ret = if kept.len() == 1 { kept.into_iter().next().unwrap() } else { Ty::Union { variants: kept } };
+                    }
+                }
                 method.signature = Some(Ty::Fn {
                     params,
                     block: None,
-                    ret: Box::new(ret.unwrap_or(Ty::Untyped).subst_self(&owner_ty)),
+                    ret: Box::new(ret),
                     effects: method.effects.clone(),
                 });
             }

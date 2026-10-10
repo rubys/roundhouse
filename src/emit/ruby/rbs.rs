@@ -6,6 +6,7 @@
 //! layout, but Steep / TypeProf auto-discover `sig/` by convention —
 //! so this layout costs zero extra config for either consumer.
 
+use std::cell::Cell;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,28 @@ use crate::dialect::{
 };
 use crate::expr::{Expr, ExprNode, Literal, RESOLVED_DATA_FACTORY};
 use crate::ty::{Param, ParamKind, Ty};
+
+thread_local! {
+    /// True while rendering a class-side `def self.x` signature. See the
+    /// `Ty::SelfInstance` arm of `ty_to_rbs_in`.
+    static CLASS_SIDE_SIG: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Sets [`CLASS_SIDE_SIG`] for its scope and restores the previous value
+/// on drop, so an early return cannot leak the flag.
+struct ClassSideGuard(bool);
+
+impl ClassSideGuard {
+    fn enter(class_side: bool) -> Self {
+        ClassSideGuard(CLASS_SIDE_SIG.with(|c| c.replace(class_side)))
+    }
+}
+
+impl Drop for ClassSideGuard {
+    fn drop(&mut self) {
+        CLASS_SIDE_SIG.with(|c| c.set(self.0));
+    }
+}
 
 /// Emit an `.rbs` sidecar for a single `LibraryClass`. The output
 /// path mirrors `rb_path` under a top-level `sig/` tree with the
@@ -193,6 +216,8 @@ fn render_def(m: &MethodDef, enclosing: &[&str]) -> String {
         MethodReceiver::Instance => "",
         MethodReceiver::Class => "self.",
     };
+    let class_side = matches!(m.receiver, MethodReceiver::Class);
+    let _side = ClassSideGuard::enter(class_side);
     // A full forwarder has no named rest binding. Neither its keywords
     // nor its block can be inferred from the synthetic signature slot.
     let sig = match &m.signature {
@@ -327,6 +352,11 @@ fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
         // here is a signature that was read and never dispatched.
         // Printing `instance` back out would make that defect
         // invisible precisely because the output stays valid.
+        // The exception is a class-side signature: `def self.make; new;
+        // end` keeps `SelfInstance` on purpose so that `Child.make`
+        // answers Child at dispatch (`analyze::body`), and RBS
+        // `instance` in a singleton method means exactly that.
+        Ty::SelfInstance if CLASS_SIDE_SIG.with(Cell::get) => "instance".into(),
         Ty::SelfInstance => {
             crate::emit::diagnostics::unsupported_self_instance_ty("rbs")
         }
