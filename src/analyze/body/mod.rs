@@ -987,6 +987,15 @@ impl<'a> BodyTyper<'a> {
                 let mut elem_ty: Option<Ty> = None;
                 for e in elements.iter_mut() {
                     let et = self.analyze_expr(e, ctx);
+                    // `[*a, b]` holds `a`'s elements, not `a`.
+                    let et = if matches!(&*e.node, ExprNode::Splat { .. }) {
+                        match splat_elements(et) {
+                            Some(et) => et,
+                            None => continue,
+                        }
+                    } else {
+                        et
+                    };
                     elem_ty = Some(match elem_ty.take() {
                         Some(prev) => union_of(prev, et),
                         None => et,
@@ -2583,6 +2592,20 @@ fn written_class_id(path: &[Symbol]) -> ClassId {
     ClassId(Symbol::from(name))
 }
 
+/// What `*value` adds to an array literal's elements: an array's or a
+/// tuple's elements, a hash's pairs, nothing for `nil`. Ruby `to_a`s any
+/// other value; one with no modeled element is kept as the one element
+/// `[*object]` gives for an object that is not a collection.
+fn splat_elements(ty: Ty) -> Option<Ty> {
+    match ty {
+        Ty::Nil => None,
+        Ty::Tuple { elems } => elems.into_iter().reduce(union_of),
+        Ty::Hash { key, value } => Some(Ty::Tuple { elems: vec![*key, *value] }),
+        Ty::Union { variants } => variants.into_iter().filter_map(splat_elements).reduce(union_of),
+        other => Some(other.collection_elem().unwrap_or(other)),
+    }
+}
+
 /// Rubydex can resolve a relative path to a name with a lexical prefix:
 /// `RateCalculator` inside `module PriceSupport` is
 /// `PriceSupport::RateCalculator`. Ingest copies a concern's methods
@@ -3463,6 +3486,26 @@ mod tests {
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
         assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+    }
+
+    #[test]
+    fn an_array_literal_holds_a_splatted_arrays_elements() {
+        // [*arr, "x"] on arr: Array[Array[Str]] is Array[Array[Str] | Str],
+        // and a splatted nil adds nothing.
+        let splat = |name: &str| synth(ExprNode::Splat { value: var(name) });
+        let mut expr = synth(ExprNode::Array {
+            elements: vec![splat("arr"), splat("none"), synth(ExprNode::Lit { value: Literal::Str { value: "x".into() } })],
+            style: Default::default(),
+        });
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let mut ctx = Ctx::default();
+        let inner = Ty::Array { elem: Box::new(Ty::Str) };
+        ctx.local_bindings.insert(Symbol::from("arr"), Ty::Array { elem: Box::new(inner.clone()) });
+        ctx.local_bindings.insert(Symbol::from("none"), Ty::Nil);
+        let ty = typer.analyze_expr(&mut expr, &ctx);
+
+        assert_eq!(ty, Ty::Array { elem: Box::new(union_of(inner, Ty::Str)) });
     }
 
     #[test]
