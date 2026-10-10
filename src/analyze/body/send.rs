@@ -501,7 +501,13 @@ impl<'a> BodyTyper<'a> {
         // each arm. campfire's `Opengraph::Location.new(url).then { |l|
         // l.read_html }` is the shape: without this the block parameter
         // is unbound and every read through it goes unresolved.
+        // A class that defines its own `then` is not Kernel's: a promise's
+        // `then` yields the fulfilled value, which no signature names, so
+        // its parameters stay unbound.
         if matches!(method.as_str(), "then" | "yield_self" | "tap") {
+            if self.owns_operator(Some(recv_ty), method, false) {
+                return None;
+            }
             return Some(vec![recv_ty.clone()]);
         }
         if method.as_str() == "in_batches" {
@@ -1171,7 +1177,14 @@ impl<'a> BodyTyper<'a> {
         // which have no arm for a class the analyzer models only as a
         // name. Blockless (`then` returning an Enumerator) is not a
         // shape any corpus app writes; `Untyped` is the honest answer.
-        if matches!(method.as_str(), "then" | "yield_self") && recv_ty.is_some() {
+        // A class defining its own `then` (a promise's, which yields the
+        // fulfilled value and answers a new promise) is not Kernel's: its
+        // declaration answers, as `block_params_for` leaves the block's
+        // parameters unbound for it.
+        if matches!(method.as_str(), "then" | "yield_self")
+            && recv_ty.is_some()
+            && !self.owns_operator(recv_ty, method, false)
+        {
             return block_ret.cloned().unwrap_or(Ty::Untyped);
         }
         // `Model.transaction { … }` / `ActiveRecord::Base.transaction
