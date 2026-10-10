@@ -310,7 +310,7 @@ fn class_accessor_props(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
                 if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
                     if let Some(p) = params.first() {
                         let base = m.name.as_str().trim_end_matches('=');
-                        props.entry(camel(base)).or_insert_with(|| p.ty.clone());
+                        props.entry(camel(base)).or_insert_with(|| (*p.ty).clone());
                     }
                 }
             }
@@ -521,7 +521,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
                 if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
                     if let Some(p) = params.first() {
                         // writer name is `foo=`; strip the `=`.
-                        prop_types.entry(camel(base)).or_insert_with(|| p.ty.clone());
+                        prop_types.entry(camel(base)).or_insert_with(|| (*p.ty).clone());
                     }
                 }
             }
@@ -657,7 +657,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // passes above.)
     for m in &temporal_readers {
         let name = camel(m.name.as_str());
-        let ret = m_sig_ret(m).unwrap_or(Ty::Union { variants: vec![Ty::Time, Ty::Nil] });
+        let ret = m_sig_ret(m).unwrap_or(Ty::Union { variants: vec![Ty::Time, Ty::Nil].into() });
         let ret_str = swift_ty(&ret);
         super::expr::begin_method(&m.body, true);
         let mut inner = String::new();
@@ -1060,7 +1060,7 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let ty = sig_params.and_then(|sp| sp.get(i)).map(|sp| sp.ty.clone());
+                let ty = sig_params.and_then(|sp| sp.get(i)).map(|sp| (*sp.ty).clone());
                 (camel(p.name.as_str()), ty)
             })
             .collect(),

@@ -201,8 +201,8 @@ fn push_owner_methods(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol
     let builder = Symbol::from(format!("build_markdown_{}", attr.as_str()));
     let cache = Symbol::from(format!("__markdown_{}", attr.as_str()));
     let loaded = Symbol::from(format!("__markdown_{}_loaded", attr.as_str()));
-    let record_ty = Ty::Class { id: record_class(), args: vec![] };
-    let maybe_record = Ty::Union { variants: vec![record_ty.clone(), Ty::Nil] };
+    let record_ty = Ty::Class { id: record_class(), args: vec![].into() };
+    let maybe_record = Ty::Union { variants: vec![record_ty.clone(), Ty::Nil].into() };
     let push = super::model_to_library::push_synth_instance_method;
 
     push(

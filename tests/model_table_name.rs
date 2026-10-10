@@ -91,7 +91,7 @@ end
         assert_eq!(
             model.attributes.fields[&Symbol::from("optional_label")],
             Ty::Union {
-                variants: vec![Ty::Str, Ty::Nil]
+                variants: vec![Ty::Str, Ty::Nil].into()
             },
             "the override does not erase column nullability"
         );

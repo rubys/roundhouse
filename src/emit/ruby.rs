@@ -175,7 +175,7 @@ fn relax_from_stmt_handle(lc: &mut LibraryClass) {
         if m.name.as_str() == "from_stmt" && m.receiver == MethodReceiver::Class {
             if let Some(crate::ty::Ty::Fn { params, .. }) = m.signature.as_mut() {
                 if let Some(p) = params.first_mut() {
-                    p.ty = crate::ty::Ty::Untyped;
+                    p.ty = crate::ty::Ty::Untyped.into();
                 }
             }
         }

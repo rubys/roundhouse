@@ -340,8 +340,8 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
             input.clone(),
             Symbol::from("to_h"),
             Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Untyped),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Untyped),
             },
         ));
     }
@@ -372,7 +372,7 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
         let params = if name.as_str() == "[]" {
             vec![crate::ty::Param {
                 name: Symbol::from("key"),
-                ty: Ty::Untyped,
+                ty: Ty::Untyped.into(),
                 kind: crate::ty::ParamKind::Required,
             }]
         } else {
@@ -386,9 +386,9 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
         table.insert(
             name.clone(),
             Ty::Fn {
-                params,
+                params: params.into(),
                 block: None,
-                ret: Box::new(ret),
+                ret: std::sync::Arc::new(ret),
                 effects: EffectSet::pure(),
             },
         );
@@ -757,7 +757,7 @@ fn arg_ty(a: &ArgDecl, scope: &ClassId, ctx: &Ctx<'_>, kinds: &ArgKinds) -> Ty {
                 if kinds.inputs.contains(&id) {
                     Ty::Class {
                         id,
-                        args: Vec::new(),
+                        args: Vec::new().into(),
                     }
                 } else if kinds.enums.contains(&id) {
                     Ty::Str
@@ -774,14 +774,14 @@ fn arg_ty(a: &ArgDecl, scope: &ClassId, ctx: &Ctx<'_>, kinds: &ArgKinds) -> Ty {
     }
     let base = if a.list {
         Ty::Array {
-            elem: Box::new(base),
+            elem: std::sync::Arc::new(base),
         }
     } else {
         base
     };
     if a.nullable {
         Ty::Union {
-            variants: vec![base, Ty::Nil],
+            variants: vec![base, Ty::Nil].into(),
         }
     } else {
         base

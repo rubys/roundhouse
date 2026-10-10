@@ -1058,7 +1058,7 @@ mod tests {
 
         // `def self.first(table); table.length; end` with `table: Array`.
         let mut table = vr("table");
-        table.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        table.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
         let body = seq(vec![binop_call(table, "length")]);
         let m = method("len", MethodReceiver::Class, &["table"], body);
         let class = LibraryClass {

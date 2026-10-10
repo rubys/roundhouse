@@ -245,15 +245,15 @@ fn half_variant(m: &MethodDef, half: &str, parts: Vec<InterpPart>) -> MethodDef 
     };
     let mut out = vec![crate::ty::Param {
         name: Symbol::from(ACC),
-        ty: Ty::Str,
+        ty: Ty::Str.into(),
         kind: ParamKind::Required,
     }];
     out.extend(names.into_iter().map(|name| crate::ty::Param {
         name,
-        ty: Ty::Untyped,
+        ty: Ty::Untyped.into(),
         kind: ParamKind::Required,
     }));
-    let signature = Some(Ty::Fn { params: out, block, ret: Box::new(Ty::Nil), effects });
+    let signature = Some(Ty::Fn { params: out.into(), block, ret: std::sync::Arc::new(Ty::Nil), effects });
     let mut v = m.clone();
     v.name = Symbol::from(half_name(m.name.as_str(), half).as_str());
     v.params = params;

@@ -92,7 +92,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         ExprNode::Array { elements: std::mem::take(args), style: ArrayStyle::Brackets },
     );
     if materialized.is_some() {
-        elements.ty = Some(Ty::Array { elem: Box::new(elem_ty) });
+        elements.ty = Some(Ty::Array { elem: std::sync::Arc::new(elem_ty) });
     }
     let mut to_a = Expr::new(
         span,
@@ -128,7 +128,7 @@ fn materialized_to_a(t: &Ty) -> Option<Ty> {
     match t {
         Ty::Array { .. } => Some(t.clone()),
         Ty::Relation { of } => Some(Ty::Array {
-            elem: Box::new(Ty::Class { id: of.clone(), args: vec![] }),
+            elem: std::sync::Arc::new(Ty::Class { id: of.clone(), args: vec![].into() }),
         }),
         Ty::Union { variants } => variants.iter().find_map(materialized_to_a),
         _ => None,

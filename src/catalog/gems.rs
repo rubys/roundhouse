@@ -64,7 +64,7 @@ impl GemTy {
             GemTy::Untyped => Ty::Untyped,
             GemTy::Instance(path) => Ty::Class {
                 id: ClassId(Symbol::from(path)),
-                args: vec![],
+                args: vec![].into(),
             },
         }
     }

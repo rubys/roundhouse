@@ -1059,12 +1059,12 @@ mod tests {
                 .into_iter()
                 .map(|(n, ty)| TyParam {
                     name: Symbol::from(n),
-                    ty,
+                    ty: ty.into(),
                     kind: ParamKind::Required,
                 })
                 .collect(),
             block: None,
-            ret: Box::new(ret),
+            ret: std::sync::Arc::new(ret),
             effects: EffectSet::pure(),
         }
     }

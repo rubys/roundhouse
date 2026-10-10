@@ -46,7 +46,7 @@ fn literal_data_declarations_register_exact_members_without_writers() {
         let class = &classes[&id];
         assert_eq!(
             class.class_methods.get(&Symbol::from("new")),
-            Some(&Ty::Class { id, args: vec![] })
+            Some(&Ty::Class { id, args: vec![].into() })
         );
         for member in members {
             assert_eq!(

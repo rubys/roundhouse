@@ -194,7 +194,7 @@ impl ParamsSpecs {
 /// request carried none).
 fn field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
     if spec.file_fields.contains(field) {
-        Ty::Union { variants: vec![uploaded_file_ty(), Ty::Nil] }
+        Ty::Union { variants: vec![uploaded_file_ty(), Ty::Nil].into() }
     } else {
         Ty::Str
     }
@@ -205,7 +205,7 @@ pub(crate) fn uploaded_file_class() -> ClassId {
 }
 
 fn uploaded_file_ty() -> Ty {
-    Ty::Class { id: uploaded_file_class(), args: vec![] }
+    Ty::Class { id: uploaded_file_class(), args: vec![].into() }
 }
 
 /// The two reads a field takes off a params hash — was it provided,
@@ -784,7 +784,7 @@ fn build_params_object(
 ) -> Expr {
     use crate::lower::typing::with_ty;
     let span = at.span;
-    let owner_ty = Ty::Class { id: spec.class_id.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: spec.class_id.clone(), args: vec![].into() };
     let local = Symbol::from("__params");
     let var = || {
         with_ty(
@@ -793,8 +793,8 @@ fn build_params_object(
         )
     };
     let param_value_ty =
-        Ty::Class { id: ClassId(Symbol::from("Roundhouse::ParamValue")), args: vec![] };
-    let raw_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(param_value_ty) };
+        Ty::Class { id: ClassId(Symbol::from("Roundhouse::ParamValue")), args: vec![].into() };
+    let raw_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(param_value_ty) };
     let ivar_params = || {
         with_ty(
             Expr::new(span, ExprNode::Ivar { name: Symbol::from("params") }),
@@ -1441,7 +1441,7 @@ fn synth_except(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     }
     stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
     let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts });
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -1532,13 +1532,13 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
 
     let param_value_ty = Ty::Class {
         id: ClassId(Symbol::from("Roundhouse::ParamValue")),
-        args: vec![],
+        args: vec![].into(),
     };
     let hash_ty = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(param_value_ty),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(param_value_ty),
     };
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
 
     let str_lit = |v: &str| with_ty(
         Expr::new(
@@ -1678,7 +1678,7 @@ fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     // The declared type is `initialize`'s parameter type verbatim: this
     // hash is built to be handed straight to it, and a narrower element
     // type would need a widening conversion at every call site.
-    let hash_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
     let attrs_var = || {
         with_ty(
             Expr::new(
@@ -1917,8 +1917,8 @@ fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
         })
         .collect();
     let hash_ty = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(Ty::Str),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(Ty::Str),
     };
     let hash = Expr {
         span: Span::synthetic(),
@@ -1956,12 +1956,12 @@ fn fn_sig(params: Vec<(Symbol, Ty)>, ret: Ty) -> Ty {
             .into_iter()
             .map(|(name, ty)| crate::ty::Param {
                 name,
-                ty,
+                ty: ty.into(),
                 kind: crate::ty::ParamKind::Required,
             })
             .collect(),
         block: None,
-        ret: Box::new(ret),
+        ret: std::sync::Arc::new(ret),
         effects: crate::effect::EffectSet::pure(),
     }
 }

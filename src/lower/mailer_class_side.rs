@@ -102,7 +102,7 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
             // failures.
             let (param_tys, ret_ty): (Vec<Option<Ty>>, Option<Ty>) = match &m.signature {
                 Some(Ty::Fn { params, ret, .. }) if params.len() == m.params.len() => (
-                    params.iter().map(|p| Some(p.ty.clone())).collect(),
+                    params.iter().map(|p| Some((*p.ty).clone())).collect(),
                     Some((**ret).clone()),
                 ),
                 _ => (vec![None; m.params.len()], None),
@@ -136,7 +136,7 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
                     parenthesized: false,
                 },
             );
-            new_call.ty = Some(Ty::Class { id: lc.name.clone(), args: vec![] });
+            new_call.ty = Some(Ty::Class { id: lc.name.clone(), args: vec![].into() });
             let mut body = Expr::new(
                 span,
                 ExprNode::Send {

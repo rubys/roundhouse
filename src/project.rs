@@ -8217,7 +8217,7 @@ mod tests {
             receiver(ExprNode::Var {
                 id: crate::ident::VarId(0),
                 name: Symbol::new("receiver"),
-            }, Ty::Class { id: ClassId(Symbol::new(name)), args: vec![] })
+            }, Ty::Class { id: ClassId(Symbol::new(name)), args: vec![].into() })
         };
 
         assert!(is_unported_model_instance_method(&receiver_for("Article"), "attributes_before_type_cast", &app));
@@ -8227,13 +8227,13 @@ mod tests {
         assert!(!is_unported_model_instance_method(&receiver_for("Included"), "attributes_before_type_cast", &app));
         assert!(is_unported_model_instance_method(
             &receiver(ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::new("receiver") },
-                Ty::Union { variants: vec![Ty::Class { id: ClassId(Symbol::new("Article")), args: vec![] }, Ty::Nil] }),
+                Ty::Union { variants: vec![Ty::Class { id: ClassId(Symbol::new("Article")), args: vec![].into() }, Ty::Nil].into() }),
             "attributes_before_type_cast",
             &app,
         ));
         assert!(!is_unported_model_instance_method(
             &receiver(ExprNode::Const { path: vec![Symbol::new("Article")] },
-                Ty::Class { id: ClassId(Symbol::new("Article")), args: vec![] }),
+                Ty::Class { id: ClassId(Symbol::new("Article")), args: vec![].into() }),
             "attributes_before_type_cast",
             &app,
         ));
@@ -8263,7 +8263,7 @@ mod tests {
             let mut constant = Expr::new(span, ExprNode::Const {
                 path: vec![Symbol::new("Net"), Symbol::new("HTTPOK")],
             });
-            constant.ty = Some(Ty::Class { id: ClassId(Symbol::new("Net::HTTPOK")), args: vec![] });
+            constant.ty = Some(Ty::Class { id: ClassId(Symbol::new("Net::HTTPOK")), args: vec![].into() });
             match root {
                 0 | 1 => app.fixtures.push(Fixture {
                     name: Symbol::new("probes"), path: Symbol::new("probes"), model_class: None,

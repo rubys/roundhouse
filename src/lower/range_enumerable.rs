@@ -25,6 +25,6 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         span,
         ExprNode::Send { recv: Some(range), method: Symbol::from("to_a"), args: vec![], block: None, parenthesized: false },
     );
-    to_a.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+    to_a.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
     *r = to_a;
 }

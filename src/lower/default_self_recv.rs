@@ -26,7 +26,7 @@ pub fn apply_default_self_recv(app: &mut App) -> Vec<Diagnostic> {
     for model in &mut app.models {
         let self_ty = Ty::Class {
             id: model.name.clone(),
-            args: vec![],
+            args: vec![].into(),
         };
         for item in &mut model.body {
             match item {
@@ -59,7 +59,7 @@ pub fn apply_default_self_recv(app: &mut App) -> Vec<Diagnostic> {
     {
         let self_ty = Ty::Class {
             id: lc.name.clone(),
-            args: vec![],
+            args: vec![].into(),
         };
         for method in &mut lc.methods {
             rewrite_method_defaults(method, &self_ty);

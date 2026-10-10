@@ -49,7 +49,7 @@ fn params(app: &roundhouse::App, name: &str) -> Vec<roundhouse::ty::Param> {
         .clone()
         .expect("helper signature");
     let Ty::Fn { params, .. } = sig else { panic!("not a Ty::Fn: {sig:?}") };
-    params
+    params.to_vec()
 }
 
 /// The `#` literal `append_anchor` emits, as it reads in the debug
@@ -275,7 +275,7 @@ fn an_array_valued_option_takes_an_array_parameter() {
     // `Array[Integer] | Nil` — nilable because every query key is a
     // keyword defaulting to nil, and `Integer` because `param_ty`
     // types the SINGULAR (`user_id`) it is named after.
-    let Ty::Union { variants } = &user_ids.ty else {
+    let Ty::Union { variants } = &*user_ids.ty else {
         panic!("expected a nilable union: {:?}", user_ids.ty)
     };
     assert!(
@@ -299,7 +299,7 @@ fn a_mixed_array_and_scalar_option_stays_scalar() {
         .iter()
         .find(|p| p.name.as_str() == "user_ids")
         .unwrap_or_else(|| panic!("no user_ids parameter: {ps:?}"));
-    let Ty::Union { variants } = &user_ids.ty else {
+    let Ty::Union { variants } = &*user_ids.ty else {
         panic!("expected a nilable union: {:?}", user_ids.ty)
     };
     assert!(
@@ -361,7 +361,7 @@ fn a_record_valued_non_id_query_key_is_a_string() {
         .iter()
         .find(|p| p.name.as_str() == "before")
         .unwrap_or_else(|| panic!("no before parameter: {ps:?}"));
-    let Ty::Union { variants } = &before.ty else {
+    let Ty::Union { variants } = &*before.ty else {
         panic!("expected a nilable union: {:?}", before.ty)
     };
     assert!(

@@ -136,20 +136,20 @@ pub(crate) fn push_attachment_record_methods(methods: &mut Vec<MethodDef>, model
     }
     let blob_ty = Ty::Class {
         id: ClassId(Symbol::from("ActiveStorage::Blob")),
-        args: vec![],
+        args: vec![].into(),
     };
     let maybe_blob = Ty::Union {
-        variants: vec![blob_ty.clone(), Ty::Nil],
+        variants: vec![blob_ty.clone(), Ty::Nil].into(),
     };
     let filename_ty = Ty::Class {
         id: ClassId(Symbol::from("ActiveStorage::Filename")),
-        args: vec![],
+        args: vec![].into(),
     };
     let maybe_filename = Ty::Union {
-        variants: vec![filename_ty, Ty::Nil],
+        variants: vec![filename_ty, Ty::Nil].into(),
     };
     let maybe_str = Ty::Union {
-        variants: vec![Ty::Str, Ty::Nil],
+        variants: vec![Ty::Str, Ty::Nil].into(),
     };
 
     // def blob; ActiveStorage::Blob.find(@blob_id); end

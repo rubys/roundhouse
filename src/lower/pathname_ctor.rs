@@ -50,7 +50,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     }
     let span = expr.span;
     let mut konst = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Pathname")] });
-    konst.ty = Some(Ty::Class { id: ClassId(Symbol::from("Pathname")), args: vec![] });
+    konst.ty = Some(Ty::Class { id: ClassId(Symbol::from("Pathname")), args: vec![].into() });
     *method = Symbol::from("new");
     let ExprNode::Send { recv, .. } = &mut *expr.node else { return };
     *recv = Some(konst);

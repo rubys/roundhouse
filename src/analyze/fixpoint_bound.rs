@@ -36,6 +36,8 @@
 //! `cargo check` while `check` reports no error. The emitted Ruby runs
 //! (`tests/recursive_type_bound.rs`).
 
+use std::sync::Arc;
+
 use crate::ty::{Param, Row, Ty};
 
 use super::body;
@@ -139,8 +141,8 @@ fn cut(ty: &Ty, levels: usize) -> Ty {
     }
     let inner = |t: &Ty| cut(t, levels - 1);
     match ty {
-        Ty::Array { elem } => Ty::Array { elem: Box::new(inner(elem)) },
-        Ty::Hash { key, value } => Ty::Hash { key: Box::new(inner(key)), value: Box::new(inner(value)) },
+        Ty::Array { elem } => Ty::Array { elem: Arc::new(inner(elem)) },
+        Ty::Hash { key, value } => Ty::Hash { key: Arc::new(inner(key)), value: Arc::new(inner(value)) },
         Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(inner).collect() },
         Ty::Record { row } => Ty::Record {
             row: Row {
@@ -152,10 +154,10 @@ fn cut(ty: &Ty, levels: usize) -> Ty {
         Ty::Fn { params, block, ret, effects } => Ty::Fn {
             params: params
                 .iter()
-                .map(|p| Param { name: p.name.clone(), ty: inner(&p.ty), kind: p.kind.clone() })
+                .map(|p| Param { name: p.name.clone(), ty: Arc::new(inner(&p.ty)), kind: p.kind.clone() })
                 .collect(),
-            block: block.as_ref().map(|b| Box::new(inner(b))),
-            ret: Box::new(inner(ret)),
+            block: block.as_ref().map(|b| Arc::new(inner(b))),
+            ret: Arc::new(inner(ret)),
             effects: effects.clone(),
         },
         other => other.clone(),
@@ -168,11 +170,11 @@ mod tests {
     use crate::ident::{ClassId, Symbol};
 
     fn arr(elem: Ty) -> Ty {
-        Ty::Array { elem: Box::new(elem) }
+        Ty::Array { elem: Arc::new(elem) }
     }
 
     fn str_hash(value: Ty) -> Ty {
-        Ty::Hash { key: Box::new(Ty::Str), value: Box::new(value) }
+        Ty::Hash { key: Arc::new(Ty::Str), value: Arc::new(value) }
     }
 
     fn nested_arrays(depth: usize) -> Ty {
@@ -189,7 +191,7 @@ mod tests {
 
     #[test]
     fn the_early_exit_check_agrees_with_the_full_measure() {
-        let samples = [Ty::Int, nested_arrays(5), json_like(2), json_like(6), str_hash(Ty::Tuple { elems: vec![] })];
+        let samples = [Ty::Int, nested_arrays(5), json_like(2), json_like(6), str_hash(Ty::Tuple { elems: vec![].into() })];
         for ty in &samples {
             let (depth, nodes) = measure(ty);
             for levels in 0..8 {
@@ -235,7 +237,7 @@ mod tests {
 
     #[test]
     fn a_leaf_union_wider_than_the_node_bound_is_untyped() {
-        let classes = (0..MAX_NODES).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("C{i}").as_str())), args: vec![] });
+        let classes = (0..MAX_NODES).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("C{i}").as_str())), args: vec![].into() });
         let wide = body::union_many(classes.chain([arr(Ty::Int)]).collect());
         assert!(measure(&wide).1 > MAX_NODES);
         assert_eq!(bound(wide), Ty::Untyped);
@@ -281,7 +283,7 @@ mod tests {
     /// one order cut the slot to `untyped` and another kept the deep
     /// Array (#617). The bound applies once per slot, after the walk.
     fn wide_hash(prefix: &str) -> Ty {
-        let classes = (0..300).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("{prefix}{i}").as_str())), args: vec![] });
+        let classes = (0..300).map(|i| Ty::Class { id: ClassId(Symbol::from(format!("{prefix}{i}").as_str())), args: vec![].into() });
         str_hash(body::union_many(classes.collect()))
     }
 

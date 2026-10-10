@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn array_times_int_is_array_repeat() {
-        let l = var_typed("a", Ty::Array { elem: Box::new(Ty::Int) });
+        let l = var_typed("a", Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
         let r = var_typed("b", Ty::Int);
         let MulCase::ArrayRepeat { elem } = classify_mul(&l, &r) else {
             panic!("expected ArrayRepeat");
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn array_times_str_is_array_join() {
-        let l = var_typed("a", Ty::Array { elem: Box::new(Ty::Str) });
+        let l = var_typed("a", Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         let r = var_typed("b", Ty::Str);
         let MulCase::ArrayJoin { elem } = classify_mul(&l, &r) else {
             panic!("expected ArrayJoin");
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn hash_times_hash_is_incompatible() {
-        let h = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Int) };
+        let h = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Int) };
         let l = var_typed("a", h.clone());
         let r = var_typed("b", h);
         assert!(matches!(classify_mul(&l, &r), MulCase::Incompatible));

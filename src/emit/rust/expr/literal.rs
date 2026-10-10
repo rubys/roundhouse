@@ -35,7 +35,7 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
     // tuple inference picks the first value's type and trips E0308.
     let return_hash_kv: Option<(crate::ty::Ty, crate::ty::Ty)> = if in_return_tail() {
         match current_return_ty() {
-            Some(crate::ty::Ty::Hash { key, value }) => Some((*key, *value)),
+            Some(crate::ty::Ty::Hash { key, value }) => Some((std::sync::Arc::unwrap_or_clone(key), std::sync::Arc::unwrap_or_clone(value))),
             _ => None,
         }
     } else {
@@ -153,7 +153,7 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
 pub(super) fn emit_array(elements: &[Expr]) -> String {
     let return_elem_ty: Option<crate::ty::Ty> = if in_return_tail() {
         match current_return_ty() {
-            Some(crate::ty::Ty::Array { elem }) => Some(*elem),
+            Some(crate::ty::Ty::Array { elem }) => Some(std::sync::Arc::unwrap_or_clone(elem)),
             _ => None,
         }
     } else {

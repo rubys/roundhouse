@@ -131,7 +131,7 @@ fn rewrite_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
         }
         ("key?" | "has_key?" | "include?" | "member?", [field]) => {
             let field = field.clone();
-            let mut index = send(span, accumulator, "[]", vec![field], Ty::Array { elem: Box::new(Ty::Str) });
+            let mut index = send(span, accumulator, "[]", vec![field], Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
             rewrite_index(&mut index, diags);
             Some(send(span, index, "any?", vec![], Ty::Bool))
         }
@@ -202,7 +202,7 @@ fn rewrite_index(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     // post-lowering `diagnose` walk reads stamped types without
     // re-dispatching, so an unstamped synthesis false-positives a
     // `send_dispatch_failed`.
-    expr.ty = Some(Ty::Array { elem: Box::new(Ty::Str) });
+    expr.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
     *expr.node = ExprNode::Send {
         recv: Some(Expr::new(
             span,

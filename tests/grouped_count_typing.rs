@@ -117,7 +117,7 @@ fn ivar_ty(app: &roundhouse::App, name: &str) -> Ty {
 }
 
 fn hash_of_int_keys() -> Ty {
-    Ty::Hash { key: Box::new(Ty::Int), value: Box::new(Ty::Int) }
+    Ty::Hash { key: std::sync::Arc::new(Ty::Int), value: std::sync::Arc::new(Ty::Int) }
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn select_distinct_count_is_still_an_integer() {
 #[test]
 fn keys_on_a_grouped_count_dispatches() {
     let app = analyzed_app();
-    assert_eq!(ivar_ty(&app, "feed_ids"), Ty::Array { elem: Box::new(Ty::Int) });
+    assert_eq!(ivar_ty(&app, "feed_ids"), Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
     let diags = diagnose(&app);
     let failed: Vec<_> = diags
         .iter()

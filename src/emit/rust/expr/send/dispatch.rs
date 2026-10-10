@@ -23,11 +23,11 @@ use super::super::emit_expr;
 pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Option<Vec<crate::ty::Ty>> {
     use crate::ty::Ty;
     let hash_str_untyped = || Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(Ty::Untyped),
     };
     let str_opt = || Ty::Union {
-        variants: vec![Ty::Str, Ty::Nil],
+        variants: vec![Ty::Str, Ty::Nil].into(),
     };
     match (class, method) {
         ("Db", "prepare") => Some(vec![Ty::Str]),
@@ -49,13 +49,13 @@ pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Opti
         ("Db", "column_text_opt") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "column_bool_opt") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "escape_string_opt") => {
-            Some(vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil] }])
+            Some(vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }])
         }
-        ("Db", "escape_int_opt") => Some(vec![Ty::Union { variants: vec![Ty::Int, Ty::Nil] }]),
+        ("Db", "escape_int_opt") => Some(vec![Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }]),
         ("Db", "escape_float_opt") => {
-            Some(vec![Ty::Union { variants: vec![Ty::Float, Ty::Nil] }])
+            Some(vec![Ty::Union { variants: vec![Ty::Float, Ty::Nil].into() }])
         }
-        ("Db", "escape_bool_opt") => Some(vec![Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }]),
+        ("Db", "escape_bool_opt") => Some(vec![Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() }]),
         ("Db", "last_insert_rowid") => Some(vec![]),
         ("Db", "changes") => Some(vec![]),
         // `Broadcasts::method(HashMap<String, Value>)` — the lowerer
@@ -108,8 +108,8 @@ pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Opti
 pub(super) fn controller_shim_method_param_ty(method: &str, idx: usize) -> Option<crate::ty::Ty> {
     use crate::ty::Ty;
     let hash_str_untyped = || Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(Ty::Untyped),
     };
     match (method, idx) {
         ("render_with", 1) => Some(hash_str_untyped()),

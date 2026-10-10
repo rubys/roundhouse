@@ -29,13 +29,13 @@ fn base_index_writers_keep_the_models_string_parameter_contract() {
 fn nullable_and_mixed_unions_are_not_nonnullable_strings() {
     assert!(
         !Ty::Union {
-            variants: vec![Ty::Str, Ty::Sym, Ty::Nil]
+            variants: vec![Ty::Str, Ty::Sym, Ty::Nil].into()
         }
         .is_stringish()
     );
     assert!(
         !Ty::Union {
-            variants: vec![Ty::Str, Ty::Int]
+            variants: vec![Ty::Str, Ty::Int].into()
         }
         .is_stringish()
     );

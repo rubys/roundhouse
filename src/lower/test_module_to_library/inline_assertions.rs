@@ -835,7 +835,7 @@ mod array_literal_tests {
 
     #[test]
     fn a_scalar_actual_is_left_alone() {
-        let actual = call(var("message"), "ids", Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Int) }));
+        let actual = call(var("message"), "ids", Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Int) }));
         let out = materialised_for_array_literal(&arr(vec![var("one")]), actual);
         assert_eq!(method_of(&out), "to_a", "an Array-typed call is still asked: `Array#to_a` is identity, and the analyzer's Array is sometimes a relation");
         let actual = call(var("message"), "title", Some(crate::ty::Ty::Nil));
@@ -844,7 +844,7 @@ mod array_literal_tests {
         let out = materialised_for_array_literal(&var("expected"), call(var("m"), "mentionees", None));
         assert_eq!(method_of(&out), "mentionees", "an expected side of unknown type is left alone");
         let mut typed = var("messages");
-        typed.ty = Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Untyped) });
+        typed.ty = Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Untyped) });
         let out = materialised_for_array_literal(&typed, call(var("m"), "search", None));
         assert_eq!(method_of(&out), "to_a", "a local the typer knows holds an Array counts as the literal does");
     }

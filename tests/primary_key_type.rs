@@ -101,7 +101,7 @@ fn adapter_method(app: &roundhouse::App, name: &str) -> (Ty, String) {
 
 fn param_ty(sig: &Ty, i: usize) -> Ty {
     let Ty::Fn { params, .. } = sig else { panic!("not a signature: {sig:?}") };
-    params[i].ty.clone()
+    (*params[i].ty).clone()
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn a_uuid_key_types_id_and_find_as_strings() {
     assert_eq!(registry_ty(&analyzer, "Widget", "id", false), Ty::Str, "id answers the key");
     assert_eq!(
         registry_ty(&analyzer, "Widget", "ids", true),
-        Ty::Array { elem: Box::new(Ty::Str) },
+        Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         "ids projects the key"
     );
     assert_eq!(errors(&app), Vec::<String>::new());

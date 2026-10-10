@@ -492,13 +492,13 @@ fn type_method_body_solo(method: &mut MethodDef) {
     let mut ctx = crate::analyze::Ctx::default();
     if let Some(crate::ty::Ty::Fn { params, .. }) = &method.signature {
         for (param, sig) in method.params.iter().zip(params.iter()) {
-            ctx.local_bindings.insert(param.name.clone(), sig.ty.clone());
+            ctx.local_bindings.insert(param.name.clone(), (*sig.ty).clone());
         }
     }
     if let Some(enclosing) = &method.enclosing_class {
         ctx.self_ty = Some(crate::ty::Ty::Class {
             id: ClassId(enclosing.clone()),
-            args: vec![],
+            args: vec![].into(),
         });
     }
     typer.analyze_expr(&mut method.body, &ctx);

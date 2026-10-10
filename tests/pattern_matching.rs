@@ -104,26 +104,26 @@ fn pattern_locals_survive_guard_failure_predicates_and_required_matches() {
         (
             "case 7; in n if false; in Integer; end; n",
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Nil],
+                variants: vec![Ty::Int, Ty::Nil].into(),
             },
         ),
         (
             "case 7; in n if false; in Integer; n; end",
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Nil],
+                variants: vec![Ty::Int, Ty::Nil].into(),
             },
         ),
         (
             "7 in n; n",
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Nil],
+                variants: vec![Ty::Int, Ty::Nil].into(),
             },
         ),
         ("7 => n; n", Ty::Int),
         (
             "if 7 in n; n; else; nil; end",
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Nil],
+                variants: vec![Ty::Int, Ty::Nil].into(),
             },
         ),
         (
@@ -132,13 +132,13 @@ fn pattern_locals_survive_guard_failure_predicates_and_required_matches() {
             // string order — Int before Bool. Compare unions as sets below
             // so this does not flake if the sort key changes again.
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Bool, Ty::Nil],
+                variants: vec![Ty::Int, Ty::Bool, Ty::Nil].into(),
             },
         ),
         (
             "7 => ((Integer => _n) | 1); _n",
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Nil],
+                variants: vec![Ty::Int, Ty::Nil].into(),
             },
         ),
     ] {
@@ -156,16 +156,16 @@ fn hash_pattern_rest_is_a_hash_not_the_deconstructed_subject() {
     let classes = Default::default();
     let typer = BodyTyper::new(&classes);
     let hash = Ty::Hash {
-        key: Box::new(Ty::Sym),
-        value: Box::new(Ty::Int),
+        key: std::sync::Arc::new(Ty::Sym),
+        value: std::sync::Arc::new(Ty::Int),
     };
     let object = Ty::Class {
         id: roundhouse::ClassId("PatternRecord".into()),
-        args: vec![],
+        args: vec![].into(),
     };
     let gradual_hash = Ty::Hash {
-        key: Box::new(Ty::Untyped),
-        value: Box::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::Untyped),
     };
     for (pattern, subject, expected) in [
         ("{a:, **rest}", hash.clone(), hash),

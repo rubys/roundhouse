@@ -388,9 +388,9 @@ pub fn partial_view_name(partial: &str) -> String {
 /// Types are stamped rather than inferred: this runs after analysis,
 /// and a node without a type is an error on the strict emit.
 pub(crate) fn push_attachment_delegation(methods: &mut Vec<MethodDef>, class: &ClassId) {
-    let attachment_ty = Ty::Class { id: ClassId(Symbol::from("ActionText::Attachment")), args: vec![] };
-    let slot_ty = Ty::Union { variants: vec![attachment_ty.clone(), Ty::Nil] };
-    let caption_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let attachment_ty = Ty::Class { id: ClassId(Symbol::from("ActionText::Attachment")), args: vec![].into() };
+    let slot_ty = Ty::Union { variants: vec![attachment_ty.clone(), Ty::Nil].into() };
+    let caption_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     let has_writer =
         methods.iter().any(|m| m.name.as_str() == "attachment=" && m.receiver == MethodReceiver::Instance);
     let has_caption =

@@ -85,6 +85,6 @@ fn sorbet_names_in_a_sidecar_rbs_file_read_the_same_way() {
     let flags = &sigs[&roundhouse::ident::ClassId(roundhouse::ident::Symbol::new("Cart"))]
         [&roundhouse::ident::Symbol::new("flags")];
     let roundhouse::ty::Ty::Fn { params, ret, .. } = flags else { panic!("{flags:?}") };
-    assert_eq!(params[0].ty, roundhouse::ty::Ty::Array { elem: Box::new(roundhouse::ty::Ty::Int) });
+    assert_eq!(params[0].ty, roundhouse::ty::Ty::Array { elem: std::sync::Arc::new(roundhouse::ty::Ty::Int) }.into());
     assert_eq!(**ret, roundhouse::ty::Ty::Bool);
 }

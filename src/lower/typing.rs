@@ -81,12 +81,12 @@ pub fn fn_sig_with_block(
             .into_iter()
             .map(|(name, ty)| TyParam {
                 name,
-                ty,
+                ty: ty.into(),
                 kind: ParamKind::Required,
             })
             .collect(),
-        block: block.map(Box::new),
-        ret: Box::new(ret),
+        block: block.map(std::sync::Arc::new),
+        ret: std::sync::Arc::new(ret),
         effects: crate::effect::EffectSet::pure(),
     }
 }
@@ -104,14 +104,14 @@ pub fn type_method_body(
     let mut ctx = crate::analyze::Ctx::default();
     if let Some(Ty::Fn { params, .. }) = &method.signature {
         for (param, sig) in method.params.iter().zip(params.iter()) {
-            ctx.local_bindings.insert(param.name.clone(), sig.ty.clone());
+            ctx.local_bindings.insert(param.name.clone(), (*sig.ty).clone());
         }
     }
     if let Some(enclosing) = &method.enclosing_class {
         let id = ClassId(enclosing.clone());
         ctx.self_ty = Some(Ty::Class {
             id: id.clone(),
-            args: vec![],
+            args: vec![].into(),
         });
         // Seed class constants so Value Const resolution can see
         // locally-owned bare names (test-helper splice). Without this,

@@ -873,7 +873,7 @@ fn collect_ivar_assignments(
                     if let Some(crate::ty::Ty::Hash { key: k, value: existing }) = out.get(&key) {
                         let widened = crate::ty::Ty::Hash {
                             key: k.clone(),
-                            value: Box::new(union_widen(existing, v_ty)),
+                            value: std::sync::Arc::new(union_widen(existing, v_ty)),
                         };
                         out.insert(key, widened);
                     } else if !out.contains_key(&key) {
@@ -881,8 +881,8 @@ fn collect_ivar_assignments(
                         out.insert(
                             key,
                             crate::ty::Ty::Hash {
-                                key: Box::new(crate::ty::Ty::Str),
-                                value: Box::new(v_ty.clone()),
+                                key: std::sync::Arc::new(crate::ty::Ty::Str),
+                                value: std::sync::Arc::new(v_ty.clone()),
                             },
                         );
                     }
@@ -1008,11 +1008,11 @@ fn union_widen(existing: &crate::ty::Ty, incoming: &crate::ty::Ty) -> crate::ty:
         return existing.clone();
     }
     let mut variants: Vec<Ty> = match existing {
-        Ty::Union { variants } => variants.clone(),
+        Ty::Union { variants } => variants.to_vec(),
         other => vec![other.clone()],
     };
     let incoming_variants: Vec<Ty> = match incoming {
-        Ty::Union { variants } => variants.clone(),
+        Ty::Union { variants } => variants.to_vec(),
         other => vec![other.clone()],
     };
     for v in incoming_variants {
@@ -1023,7 +1023,7 @@ fn union_widen(existing: &crate::ty::Ty, incoming: &crate::ty::Ty) -> crate::ty:
     if variants.len() == 1 {
         variants.into_iter().next().unwrap()
     } else {
-        Ty::Union { variants }
+        Ty::Union { variants: variants.into() }
     }
 }
 

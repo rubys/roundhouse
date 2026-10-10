@@ -48,7 +48,7 @@ fn is_preloader_const(expr: &Expr) -> bool {
 
 /// Drop the refusals typing left on `Preloader` and its `new`, once the call is known to lower.
 pub(crate) fn clear_refusals(new: &mut Expr) {
-    let preloader = Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Associations::Preloader")), args: vec![] };
+    let preloader = Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Associations::Preloader")), args: vec![].into() };
     new.diagnostic = None;
     new.ty = Some(preloader.clone());
     if let ExprNode::Send { recv: Some(konst), .. } = &mut *new.node {
@@ -66,14 +66,14 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     let span = expr.span;
     let mut records = call.records.clone();
     if call.relation {
-        let array = Ty::Array { elem: Box::new(Ty::Class { id: call.model.clone(), args: vec![] }) };
+        let array = Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: call.model.clone(), args: vec![].into() }) };
         records = Expr::new(span, ExprNode::Send { recv: Some(records), method: Symbol::from("to_a"), args: vec![], block: None, parenthesized: false });
         records.ty = Some(array);
     }
     let mut specs = Expr::new(span, ExprNode::Array { elements: vec![call.associations.clone()], style: Default::default() });
-    specs.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+    specs.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
     let mut model = Expr::new(span, ExprNode::Const { path: call.model.0.as_str().split("::").map(Symbol::from).collect() });
-    model.ty = Some(Ty::Class { id: call.model.clone(), args: vec![] });
+    model.ty = Some(Ty::Class { id: call.model.clone(), args: vec![].into() });
     let mut lowered = Expr::new(
         span,
         ExprNode::Send { recv: Some(model), method: Symbol::from("preload_associations"), args: vec![records, specs], block: None, parenthesized: true },

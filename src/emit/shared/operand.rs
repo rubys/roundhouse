@@ -87,13 +87,13 @@ mod tests {
         // raise on it (e.g. `Int | Nil`), so the classifier keeps
         // checking.
         let concrete = Ty::Union {
-            variants: vec![Ty::Int, Ty::Nil],
+            variants: vec![Ty::Int, Ty::Nil].into(),
         };
         assert!(!is_gradual_operand(Some(&concrete)));
 
         // One gradual arm makes the whole union gradual.
         let with_untyped = Ty::Union {
-            variants: vec![Ty::Float, Ty::Untyped],
+            variants: vec![Ty::Float, Ty::Untyped].into(),
         };
         assert!(is_gradual_operand(Some(&with_untyped)));
 
@@ -101,10 +101,10 @@ mod tests {
         let nested = Ty::Union {
             variants: vec![
                 Ty::Union {
-                    variants: vec![Ty::Untyped, Ty::Untyped],
+                    variants: vec![Ty::Untyped, Ty::Untyped].into(),
                 },
                 Ty::Int,
-            ],
+            ].into(),
         };
         assert!(is_gradual_operand(Some(&nested)));
     }

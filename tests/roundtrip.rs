@@ -63,7 +63,7 @@ fn tiny_blog_round_trips() {
         parent_span: Default::default(),
         table: TableRef(Symbol::from("posts")),
         primary_key: None,
-        attributes: Row { fields: attrs, rest: None },
+        attributes: Row { fields: attrs.into(), rest: None },
         body: vec![],
         enums: Default::default(),
         enum_defaults: Default::default(),

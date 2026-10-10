@@ -714,7 +714,7 @@ fn index(hash: &Expr, key: &Symbol, value_ty: Ty) -> Expr {
     let ty = match &value_ty {
         Ty::Var { .. } | Ty::Untyped => Ty::Untyped,
         other => Ty::Union {
-            variants: vec![other.clone(), Ty::Nil],
+            variants: vec![other.clone(), Ty::Nil].into(),
         },
     };
     let mut e = Expr::new(

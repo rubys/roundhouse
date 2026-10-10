@@ -810,8 +810,8 @@ pub(super) fn emit_send(
                     if let ExprNode::Hash { .. } = &*a.node {
                         let mut widened = a.clone();
                         widened.ty = Some(Ty::Hash {
-                            key: Box::new(Ty::Str),
-                            value: Box::new(Ty::Untyped),
+                            key: std::sync::Arc::new(Ty::Str),
+                            value: std::sync::Arc::new(Ty::Untyped),
                         });
                         return emit_expr(ctx, &widened);
                     }

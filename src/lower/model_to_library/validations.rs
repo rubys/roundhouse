@@ -370,7 +370,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
             receiver: MethodReceiver::Instance,
             params: Vec::new(),
             body: errors_read(),
-            signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) })),
+            signature: Some(fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Str) })),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
             kind: AccessorKind::Method,
@@ -1129,7 +1129,7 @@ mod tests {
 
     #[test]
     fn presence_array_typed_attr_drops_is_a_string_branch() {
-        let expr = inline_presence_check(&attr(), Some(&Ty::Array { elem: Box::new(Ty::Str) }));
+        let expr = inline_presence_check(&attr(), Some(&Ty::Array { elem: std::sync::Arc::new(Ty::Str) }));
         let dbg = format!("{:?}", expr);
         assert!(
             !dbg.contains("\"String\""),

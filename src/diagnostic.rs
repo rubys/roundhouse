@@ -290,7 +290,7 @@ mod tests {
                 method: Symbol::from("frobnicate"),
                 recv_ty: Ty::Class {
                     id: ClassId(Symbol::from("Article")),
-                    args: vec![],
+                    args: vec![].into(),
                 },
             },
             severity: Severity::Error,

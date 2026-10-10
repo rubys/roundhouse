@@ -100,7 +100,7 @@ impl super::Analyzer {
         let ctx = Ctx {
             self_ty: Some(Ty::Class {
                 id: class.clone(),
-                args: vec![],
+                args: vec![].into(),
             }),
             ..Ctx::default()
         };

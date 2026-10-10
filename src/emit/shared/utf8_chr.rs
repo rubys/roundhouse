@@ -282,7 +282,7 @@ fn main() {{
                         .entry(id)
                         .or_insert_with(crate::analyze::ClassInfo::default)
                         .instance_methods
-                        .insert(name.clone(), *ret.clone());
+                        .insert(name.clone(), std::sync::Arc::unwrap_or_clone(ret.clone()));
                 }
             }
         }

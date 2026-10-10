@@ -658,11 +658,11 @@ fn try_rewrite_compact_blank(
     let (params, out_ty) = match shape {
         Shape::Array { elem } => (
             vec![Symbol::new("__cb")],
-            Ty::Array { elem: Box::new(non_nil(&elem)) },
+            Ty::Array { elem: std::sync::Arc::new(non_nil(&elem)) },
         ),
         Shape::Hash { key, value } => (
             vec![Symbol::new("_k"), Symbol::new("__cb")],
-            Ty::Hash { key: Box::new(key), value: Box::new(non_nil(&value)) },
+            Ty::Hash { key: std::sync::Arc::new(key), value: std::sync::Arc::new(non_nil(&value)) },
         ),
     };
     let block = mk(
@@ -731,7 +731,7 @@ fn non_nil(t: &Ty) -> Ty {
             match kept.len() {
                 0 => Ty::Untyped,
                 1 => kept.remove(0),
-                _ => Ty::Union { variants: kept },
+                _ => Ty::Union { variants: kept.into() },
             }
         }
         other => other.clone(),
@@ -984,7 +984,7 @@ fn non_nil_ty(r: &Expr) -> Ty {
                 variants.iter().filter(|v| !matches!(v, Ty::Nil)).cloned().collect();
             match non_nil.len() {
                 1 => non_nil.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: non_nil },
+                _ => Ty::Union { variants: non_nil.into() },
             }
         }
         Some(t) => t.clone(),

@@ -82,7 +82,7 @@ fn emit_squish_bang(m: &MethodDef) -> String {
     assert_eq!(m.params.len(), 1, "squish! must take one String argument");
     assert_eq!(params.len(), 1, "squish! must take one String argument");
     assert!(
-        matches!(params[0].ty, Ty::Str),
+        matches!(*params[0].ty, Ty::Str),
         "squish! argument must be String"
     );
     assert!(matches!(**ret, Ty::Str), "squish! must return String");

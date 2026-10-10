@@ -366,7 +366,7 @@ fn narrow_to_named_model(
     };
     let model_ty = Ty::Class {
         id: model.clone(),
-        args: vec![],
+        args: vec![].into(),
     };
     match &ty {
         Ty::Class { id, .. } if id == model => ty,

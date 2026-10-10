@@ -112,7 +112,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // `Enum.empty?` rather than a struct-method dispatch.
             fields.push((
                 "errors".to_string(),
-                crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) },
+                crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Str) },
             ));
             let name = model.name.0.as_str();
             expr::register_field_types(name, &fields);
@@ -366,13 +366,13 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                 .map(|m| {
                     let cls = crate::ty::Ty::Class {
                         id: crate::ident::ClassId(m.clone().into()),
-                        args: vec![],
+                        args: vec![].into(),
                     };
                     (crate::naming::snake_case(m), cls)
                 })
                 .flat_map(|(singular, cls)| {
                     let plural = crate::naming::pluralize_snake(&singular);
-                    let list = crate::ty::Ty::Array { elem: Box::new(cls.clone()) };
+                    let list = crate::ty::Ty::Array { elem: std::sync::Arc::new(cls.clone()) };
                     [(singular, cls), (plural, list)]
                 })
                 .collect();
@@ -707,7 +707,7 @@ fn emit_routes_table_file(app: &App) -> EmittedFile {
 fn class_ty(class: &str) -> crate::ty::Ty {
     crate::ty::Ty::Class {
         id: crate::ident::ClassId(crate::ident::Symbol::from(class)),
-        args: Vec::new(),
+        args: Vec::new().into(),
     }
 }
 

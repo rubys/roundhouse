@@ -203,7 +203,7 @@ pub fn lower_test_modules_with_inner(
                 new_sym.clone(),
                 crate::lower::typing::fn_sig(
                     vec![],
-                    Ty::Class { id: inner.name.clone(), args: Vec::new() },
+                    Ty::Class { id: inner.name.clone(), args: Vec::new().into() },
                 ),
             );
             info.class_method_kinds
@@ -355,7 +355,7 @@ pub fn lower_test_modules_with_inner(
                 continue;
             }
             if let Some(Ty::Fn { ret, .. }) = &mut method.signature {
-                *ret = Box::new(body_ty);
+                *ret = std::sync::Arc::new(body_ty);
             }
             if let Some(sig) = &method.signature {
                 lifted.push((method.name.clone(), sig.clone()));
@@ -536,7 +536,7 @@ fn type_inner_class(
     // A parent signature may name its receiver (`-> instance`); the
     // receiver is this inner class, so substitute on adoption rather
     // than emit a self type as a declaration.
-    let self_ty = Ty::Class { id: inner.name.clone(), args: Vec::new() };
+    let self_ty = Ty::Class { id: inner.name.clone(), args: Vec::new().into() };
     let parent_methods: HashMap<Symbol, Ty> = inner
         .parent
         .as_ref()
@@ -626,12 +626,12 @@ fn type_inner_class(
         if let Some(ivar_ty) = writer_ivar {
             if let Some(Ty::Fn { params, ret, .. }) = &mut method.signature {
                 if let Some(first) = params.first_mut() {
-                    first.ty = ivar_ty.clone();
+                    first.ty = ivar_ty.clone().into();
                 }
-                *ret = Box::new(ivar_ty);
+                *ret = std::sync::Arc::new(ivar_ty);
             }
         } else if let Some(Ty::Fn { ret, .. }) = &mut method.signature {
-            *ret = Box::new(if method.name.as_str() == "initialize" {
+            *ret = std::sync::Arc::new(if method.name.as_str() == "initialize" {
                 Ty::Nil
             } else {
                 method.body.ty.clone().unwrap_or(Ty::Untyped)
@@ -680,13 +680,13 @@ fn signature_from_params(
                     }
                 }
             }
-            TyParam { name: p.name.clone(), ty, kind: p.ty_kind() }
+            TyParam { name: p.name.clone(), ty: ty.into(), kind: p.ty_kind() }
         })
         .collect();
     Ty::Fn {
-        params: ty_params,
+        params: ty_params.into(),
         block: None,
-        ret: Box::new(ret),
+        ret: std::sync::Arc::new(ret),
         effects: EffectSet::pure(),
     }
 }
@@ -841,14 +841,14 @@ fn build_library_class(
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped,
+                    ty: Ty::Untyped.into(),
                     kind: p.ty_kind(),
                 })
                 .collect();
             m.signature = Some(Ty::Fn {
-                params: ty_params,
+                params: ty_params.into(),
                 block: None,
-                ret: Box::new(Ty::Nil),
+                ret: std::sync::Arc::new(Ty::Nil),
                 effects: crate::effect::EffectSet::pure(),
             });
         }
@@ -1070,20 +1070,20 @@ fn fn_sig_two(a: Ty, b: Ty, ret: Ty) -> Ty {
 /// The SIGNED jar really is nullable — verification can fail — so it
 /// answers `Str | Nil` and grounds through the union arm instead.
 fn cookie_jar_ty() -> Ty {
-    Ty::Class { id: ClassId(Symbol::from("ActionController::CookieJar")), args: vec![] }
+    Ty::Class { id: ClassId(Symbol::from("ActionController::CookieJar")), args: vec![].into() }
 }
 
 fn permanent_cookie_jar_ty() -> Ty {
-    Ty::Class { id: ClassId(Symbol::from("ActionController::PermanentCookieJar")), args: vec![] }
+    Ty::Class { id: ClassId(Symbol::from("ActionController::PermanentCookieJar")), args: vec![].into() }
 }
 
 fn signed_cookie_jar_ty() -> Ty {
-    Ty::Class { id: ClassId(Symbol::from("ActionController::SignedCookieJar")), args: vec![] }
+    Ty::Class { id: ClassId(Symbol::from("ActionController::SignedCookieJar")), args: vec![].into() }
 }
 
 fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
     use crate::lower::typing::fn_sig;
-    let str_hash_arg = || Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    let str_hash_arg = || Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
     let str_hash = str_hash_arg();
     let key = || (Symbol::from("key"), Ty::Untyped);
     let value = || (Symbol::from("value"), Ty::Untyped);
@@ -1112,7 +1112,7 @@ fn insert_cookie_jar_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
         // cookie answers nil, which is what campfire's
         // `Session.find_signed(cookies.signed[:session_token])` is
         // written against.
-        ("[]", fn_sig(vec![key()], Ty::Union { variants: vec![Ty::Str, Ty::Nil] })),
+        ("[]", fn_sig(vec![key()], Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })),
         ("[]=", fn_sig(vec![key(), value()], Ty::Untyped)),
         ("delete", fn_sig(vec![key()], Ty::Str)),
         ("permanent", fn_sig(vec![], signed_cookie_jar_ty())),

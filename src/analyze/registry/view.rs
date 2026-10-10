@@ -24,7 +24,7 @@ pub(in crate::analyze) fn register(
     // once `form` is a FormBuilder, an unregistered `form.x` would be a
     // dispatch *error*, so the field surface is covered here.
     let form_builder_id = ClassId(Symbol::from("ActionView::Helpers::FormBuilder"));
-    let form_builder_ty = Ty::Class { id: form_builder_id.clone(), args: vec![] };
+    let form_builder_ty = Ty::Class { id: form_builder_id.clone(), args: vec![].into() };
     let mut form_builder = ClassInfo::default();
     for m in [
         "label", "submit", "button", "text_field", "text_area", "textarea",
@@ -167,7 +167,7 @@ pub(in crate::analyze) fn register(
     // renders; `tag("br")`, the call form, is the same String.
     action_view.instance_methods.insert(
         Symbol::from("tag"),
-        Ty::Class { id: ClassId(Symbol::from("ActionView::Helpers::TagHelper::TagBuilder")), args: vec![] },
+        Ty::Class { id: ClassId(Symbol::from("ActionView::Helpers::TagHelper::TagBuilder")), args: vec![].into() },
     );
     // Flash convenience accessors — Rails 7 scaffolds emit bare
     // `notice`/`alert` in views; both read `flash[:notice]`/`[:alert]`.
@@ -184,7 +184,7 @@ pub(in crate::analyze) fn register(
     // (instance) and controller (class-side) contexts get it.
     let flash_ty = Ty::Class {
         id: ClassId(Symbol::from("ActionDispatch::Flash::FlashHash")),
-        args: vec![],
+        args: vec![].into(),
     };
     action_view
         .instance_methods
@@ -197,7 +197,7 @@ pub(in crate::analyze) fn register(
     // builder mutations (`extract!`, `partial!`, …) nil.
     action_view.instance_methods.insert(
         Symbol::from("json"),
-        Ty::Class { id: ClassId(Symbol::from("Jbuilder")), args: vec![] },
+        Ty::Class { id: ClassId(Symbol::from("Jbuilder")), args: vec![].into() },
     );
     // Route URL helpers (view side).
     for name in route_helper_names {
@@ -224,13 +224,13 @@ pub(in crate::analyze) fn register(
     // values are whatever the site passed, so the read is gradual.
     action_view.instance_methods.insert(
         Symbol::from("local_assigns"),
-        Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
     );
     // `params` is exposed to templates too (same strong-params
     // surface the controller context declares).
     action_view.instance_methods.insert(
         Symbol::from("params"),
-        Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) },
     );
     // SimpleForm's form builder — same shape as `form_with` but the
     // yielded builder (`f.input`, `f.association`, …) is a SimpleForm
@@ -286,7 +286,7 @@ pub(in crate::analyze) fn register(
         let mut flash = ClassInfo::default();
         let flash_self = Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Flash::FlashHash")),
-            args: vec![],
+            args: vec![].into(),
         };
         for (m, ty) in [
             ("[]", Ty::Str),
@@ -314,10 +314,10 @@ pub(in crate::analyze) fn register(
             ("empty?", Ty::Bool),
             ("present?", Ty::Bool),
             ("blank?", Ty::Bool),
-            ("keys", Ty::Array { elem: Box::new(Ty::Sym) }),
-            ("values", Ty::Array { elem: Box::new(Ty::Str) }),
-            ("to_h", Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) }),
-            ("to_hash", Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) }),
+            ("keys", Ty::Array { elem: std::sync::Arc::new(Ty::Sym) }),
+            ("values", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+            ("to_h", Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) }),
+            ("to_hash", Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) }),
         ] {
             flash.instance_methods.insert(Symbol::from(m), ty);
         }

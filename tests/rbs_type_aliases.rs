@@ -40,11 +40,11 @@ fn an_alias_in_an_rbs_file_stands_for_the_type_it_names() {
     .expect("parse");
     let walk = &sigs[&ClassId(Symbol::new("Cart"))][&Symbol::new("walk")];
     let Ty::Fn { params, ret, .. } = walk else { panic!("{walk:?}") };
-    let ints = Ty::Array { elem: Box::new(Ty::Int) };
-    assert_eq!(params[0].ty, ints);
+    let ints = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
+    assert_eq!(params[0].ty, ints.clone().into());
     assert_eq!(
         params[1].ty,
-        Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(ints.clone()) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(ints.clone()) }.into(),
         "an alias may name another declared after it"
     );
     assert_eq!(**ret, ints);
@@ -70,7 +70,7 @@ fn root_qualified_unqualified_and_inherited_aliases_still_resolve() {
         "type path = String\nclass Cart\n  type count = Integer\n  class Nested\n    def walk: (path, ::path, count) -> void\n  end\nend\n",
     ).expect("parse");
     let Ty::Fn { params, .. } = &sigs[&ClassId(Symbol::new("Cart::Nested"))][&Symbol::new("walk")] else { panic!() };
-    assert_eq!(params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(), vec![Ty::Str, Ty::Str, Ty::Int]);
+    assert_eq!(params.iter().map(|p| (*p.ty).clone()).collect::<Vec<_>>(), vec![Ty::Str, Ty::Str, Ty::Int]);
 }
 
 const SCHEMA: (&str, &str) = ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n");
@@ -143,9 +143,9 @@ end
         let signatures = roundhouse::ingest::sorbet_sig::ingest_sorbet_signatures(source.as_bytes());
         let consume = &signatures[&ClassId(Symbol::new("Outer::Inner"))][&Symbol::new("consume")];
         let Ty::Fn { params, .. } = consume else { panic!("{consume:?}") };
-        assert_eq!(params[0].ty, Ty::Array { elem: Box::new(Ty::Str) }, "{source}");
-        assert_eq!(params[1].ty, Ty::Array { elem: Box::new(Ty::Int) }, "{source}");
-        assert_eq!(params[2].ty, Ty::Int, "{source}");
+        assert_eq!(params[0].ty, Ty::Array { elem: std::sync::Arc::new(Ty::Str) }.into(), "{source}");
+        assert_eq!(params[1].ty, Ty::Array { elem: std::sync::Arc::new(Ty::Int) }.into(), "{source}");
+        assert_eq!(params[2].ty, Ty::Int.into(), "{source}");
     }
 }
 

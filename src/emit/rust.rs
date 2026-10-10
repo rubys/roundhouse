@@ -2315,7 +2315,7 @@ fn collect_global_class_methods(
                     .iter()
                     .map(|p| Param {
                         name: Symbol::from(p.as_str()),
-                        ty: Ty::Untyped,
+                        ty: Ty::Untyped.into(),
                         kind: ParamKind::Required,
                     })
                     .collect(),

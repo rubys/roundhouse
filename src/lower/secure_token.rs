@@ -157,7 +157,7 @@ pub(crate) fn push_secure_token_methods(
             Symbol::from(format!("regenerate_{}", decl.attr.as_str())),
             Vec::<Param>::new(),
             Expr::new(span, ExprNode::Seq { exprs: body_stmts }),
-            Some(fn_sig(vec![], Ty::Class { id: model.name.clone(), args: vec![] })),
+            Some(fn_sig(vec![], Ty::Class { id: model.name.clone(), args: vec![].into() })),
             AccessorKind::Method,
             true,
         );

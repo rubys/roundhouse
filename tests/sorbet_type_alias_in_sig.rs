@@ -49,7 +49,7 @@ fn param_ty(app: &roundhouse::App, class: &str, method: &str) -> Option<Ty> {
         .and_then(|m| m.get(&Symbol::new(method)))
         .cloned()?;
     match ty {
-        Ty::Fn { params, .. } => params.first().map(|p| p.ty.clone()),
+        Ty::Fn { params, .. } => params.first().map(|p| (*p.ty).clone()),
         _ => None,
     }
 }
@@ -91,7 +91,7 @@ end
 "#,
     );
     let ty = param_ty(&app, "Reporter", "record").expect("the sig is read");
-    assert_eq!(ty, Ty::Union { variants: vec![Ty::Str, Ty::Int] }, "got {ty:?}");
+    assert_eq!(ty, Ty::Union { variants: vec![Ty::Str, Ty::Int].into() }, "got {ty:?}");
 }
 
 #[test]

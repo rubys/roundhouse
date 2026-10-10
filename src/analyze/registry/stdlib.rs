@@ -27,7 +27,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         Symbol::from("env"),
         Ty::Class {
             id: ClassId(Symbol::from("ActiveSupport::StringInquirer")),
-            args: vec![],
+            args: vec![].into(),
         },
     );
     classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
@@ -94,7 +94,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Duration arg (→ Time) from a Time arg (→ Float).
     let time_ty = || Ty::Class {
         id: ClassId(Symbol::from("Time")),
-        args: vec![],
+        args: vec![].into(),
     };
     let mut time_cls = ClassInfo::default();
     time_cls.class_methods.insert(Symbol::from("current"), time_ty());
@@ -134,7 +134,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // gradual escape) so chained calls still flow. Hardcoded like the
     // Rails/Time/Date blocks above — `register_stdlib_class` never
     // clobbers an app-defined method/class of the same name.
-    let str_arr = || Ty::Array { elem: Box::new(Ty::Str) };
+    let str_arr = || Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
     register_stdlib_class(classes, "SecureRandom", &[
         ("hex", Ty::Str), ("base64", Ty::Str), ("urlsafe_base64", Ty::Str),
         ("base58", Ty::Str), ("uuid", Ty::Str), ("alphanumeric", Ty::Str),
@@ -171,18 +171,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // forms an app writes (`fetch(key)` and `fetch(key, "default")`)
     // and a narrowing for the rarer `fetch(key, 3000)` / block forms —
     // the same trade the neighbours above make.
-    let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     register_stdlib_class(classes, "ENV", &[
         ("fetch", Ty::Str), ("[]", str_or_nil()), ("[]=", Ty::Str),
         ("key?", Ty::Bool), ("has_key?", Ty::Bool), ("include?", Ty::Bool),
         ("member?", Ty::Bool), ("key", str_or_nil()), ("delete", str_or_nil()),
         ("keys", str_arr()), ("values", str_arr()),
-        ("to_h", Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) }),
-        ("replace", Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) }),
+        ("to_h", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }),
+        ("replace", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }),
     ], &[]);
     // `Pathname` — `Rails.root.join(...)` territory. The path-returning
     // methods answer a Pathname so a chain stays typed to its `to_s`.
-    let pathname = || Ty::Class { id: ClassId(Symbol::from("Pathname")), args: vec![] };
+    let pathname = || Ty::Class { id: ClassId(Symbol::from("Pathname")), args: vec![].into() };
     register_stdlib_class(classes, "Pathname", &[
         ("new", pathname()), ("pwd", pathname()), ("getwd", pathname()),
     ], &[
@@ -192,7 +192,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("to_s", Ty::Str), ("to_path", Ty::Str), ("extname", Ty::Str),
         ("read", Ty::Str), ("write", Ty::Int),
         ("exist?", Ty::Bool), ("file?", Ty::Bool), ("directory?", Ty::Bool),
-        ("children", Ty::Array { elem: Box::new(pathname()) }),
+        ("children", Ty::Array { elem: std::sync::Arc::new(pathname()) }),
     ]);
     // `ActiveSupport::SecurityUtils.secure_compare` — the constant-time
     // comparison every hand-rolled token or basic-auth check calls.
@@ -273,7 +273,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // knowing the pair campfire's `UserAgent.parse(ua).browser` in a
     // partial read out as `no known method parse on Class {
     // UserAgent }`.
-    let user_agent_ty = Ty::Class { id: ClassId(Symbol::from("UserAgent")), args: vec![] };
+    let user_agent_ty = Ty::Class { id: ClassId(Symbol::from("UserAgent")), args: vec![].into() };
     register_stdlib_class(classes, "UserAgent", &[
         ("parse", user_agent_ty.clone()),
     ], &[
@@ -320,7 +320,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // runtime-sweep test builds a registry from it — so a façade the
     // app calls has to be named here to be known.
     register_stdlib_class(classes, "ActionText::ContentHelper", &[
-        ("allowed_attributes", Ty::Array { elem: Box::new(Ty::Str) }),
+        ("allowed_attributes", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
     ], &[]);
     // `IPAddr` — the class `runtime/ruby/ipaddr.rb` ports. Only the
     // surface that file implements is registered, so a call beyond it
@@ -339,19 +339,19 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Net::HTTP follow. `MatchData#[]` answers `String?` because a
     // group that did not participate is nil, and pretending otherwise
     // would hand a strict target a non-null it has to trust.
-    let match_data = Ty::Class { id: ClassId(Symbol::from("MatchData")), args: vec![] };
-    let str_or_nil_m = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let match_data = Ty::Class { id: ClassId(Symbol::from("MatchData")), args: vec![].into() };
+    let str_or_nil_m = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     register_stdlib_class(classes, "Regexp", &[
         // Class side: escaping is a pure String -> String function, `last_match` reads the
         // `$~` of the previous match, `union` builds a Regexp.
         ("escape", Ty::Str),
         ("quote", Ty::Str),
-        ("last_match", Ty::Union { variants: vec![match_data.clone(), Ty::Nil] }),
-        ("union", Ty::Class { id: ClassId(Symbol::from("Regexp")), args: vec![] }),
+        ("last_match", Ty::Union { variants: vec![match_data.clone(), Ty::Nil].into() }),
+        ("union", Ty::Class { id: ClassId(Symbol::from("Regexp")), args: vec![].into() }),
     ], &[
-        ("match", Ty::Union { variants: vec![match_data.clone(), Ty::Nil] }),
+        ("match", Ty::Union { variants: vec![match_data.clone(), Ty::Nil].into() }),
         ("match?", Ty::Bool),
-        ("=~", Ty::Union { variants: vec![Ty::Int, Ty::Nil] }),
+        ("=~", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
         ("===", Ty::Bool),
         ("source", Ty::Str),
     ]);
@@ -360,7 +360,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("to_s", Ty::Str),
         ("pre_match", Ty::Str),
         ("post_match", Ty::Str),
-        ("captures", Ty::Array { elem: Box::new(str_or_nil_m) }),
+        ("captures", Ty::Array { elem: std::sync::Arc::new(str_or_nil_m) }),
         ("size", Ty::Int),
         ("length", Ty::Int),
     ]);
@@ -384,13 +384,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // checkpointer opens a block-form connection, sets
     // `busy_handler_timeout=` and `execute`s a pragma. A row is an Array
     // of column values.
-    let sqlite_db = Ty::Class { id: ClassId(Symbol::from("SQLite3::Database")), args: vec![] };
+    let sqlite_db = Ty::Class { id: ClassId(Symbol::from("SQLite3::Database")), args: vec![].into() };
     register_stdlib_class(classes, "SQLite3::Database", &[
         ("new", sqlite_db.clone()),
         ("open", sqlite_db.clone()),
     ], &[
-        ("execute", Ty::Array { elem: Box::new(Ty::Array { elem: Box::new(Ty::Untyped) }) }),
-        ("get_first_row", Ty::Union { variants: vec![Ty::Array { elem: Box::new(Ty::Untyped) }, Ty::Nil] }),
+        ("execute", Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }) }),
+        ("get_first_row", Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }, Ty::Nil].into() }),
         ("get_first_value", Ty::Untyped),
         ("close", Ty::Nil),
         ("closed?", Ty::Bool),
@@ -404,7 +404,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "ActiveSupport::Cache", &[
         ("expand_cache_key", Ty::Str),
     ], &[]);
-    let memory_store = Ty::Class { id: ClassId(Symbol::from("ActiveSupport::Cache::MemoryStore")), args: vec![] };
+    let memory_store = Ty::Class { id: ClassId(Symbol::from("ActiveSupport::Cache::MemoryStore")), args: vec![].into() };
     register_stdlib_class(classes, "ActiveSupport::Cache::MemoryStore", &[
         ("new", memory_store),
     ], &[
@@ -416,7 +416,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("clear", Ty::Untyped),
         ("cleanup", Ty::Nil),
         ("prune", Ty::Nil),
-        ("read_multi", Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) }),
+        ("read_multi", Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) }),
         ("write_multi", Ty::Bool),
     ]);
 
@@ -438,17 +438,17 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // family). ONLY that surface, the IPAddr rule. A pair is
     // `[name, quality]`; the name is nil for an empty header part.
     let q_pair = Ty::Tuple {
-        elems: vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil] }, Ty::Float],
+        elems: vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }, Ty::Float].into(),
     };
     register_stdlib_class(classes, "Rack::Utils", &[
-        ("q_values", Ty::Array { elem: Box::new(q_pair) }),
-        ("select_best_encoding", Ty::Union { variants: vec![Ty::Str, Ty::Nil] }),
+        ("q_values", Ty::Array { elem: std::sync::Arc::new(q_pair) }),
+        ("select_best_encoding", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
     ], &[]);
     register_stdlib_class(classes, "IPAddr", &[], &[
         ("ipv4?", Ty::Bool), ("ipv6?", Ty::Bool), ("ipv4_mapped?", Ty::Bool),
         ("loopback?", Ty::Bool), ("private?", Ty::Bool), ("link_local?", Ty::Bool),
         ("to_s", Ty::Str),
-        ("octets", Ty::Array { elem: Box::new(Ty::Int) }),
+        ("octets", Ty::Array { elem: std::sync::Arc::new(Ty::Int) }),
     ]);
     // `Surfguard` — basecamp/surfguard's SSRF address policy, ported
     // into `runtime/ruby/surfguard.rb`. Class methods only: the module
@@ -458,7 +458,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // (`enforce_public_ip` and friends) stays an honest gap instead of
     // typing clean and resolving to nothing.
     register_stdlib_class(classes, "Surfguard", &[
-        ("resolve_public_ips", Ty::Array { elem: Box::new(Ty::Str) }),
+        ("resolve_public_ips", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
         ("blocked_address?", Ty::Bool),
     ], &[]);
     // `Concurrent` — concurrent-ruby's thread pools and barrier, ported
@@ -504,9 +504,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // IPAddr: a call beyond the implemented surface stays a gap.
     let http_response = Ty::Class {
         id: ClassId(Symbol::from("Net::HTTPResponse")),
-        args: vec![],
+        args: vec![].into(),
     };
-    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     register_stdlib_class(classes, "Net::HTTP", &[
         ("get", Ty::Str),
         ("get_response", http_response.clone()),
@@ -552,17 +552,17 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("full_message", Ty::Str),
         ("detailed_message", Ty::Str),
         ("inspect", Ty::Str),
-        ("backtrace", Ty::Array { elem: Box::new(Ty::Str) }),
-        ("backtrace_locations", Ty::Array { elem: Box::new(Ty::Untyped) }),
+        ("backtrace", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+        ("backtrace_locations", Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }),
         ("set_backtrace", Ty::Untyped),
         ("exception", Ty::Untyped),
         (
             "cause",
             Ty::Union {
                 variants: vec![
-                    Ty::Class { id: ClassId(Symbol::from("Exception")), args: vec![] },
+                    Ty::Class { id: ClassId(Symbol::from("Exception")), args: vec![].into() },
                     Ty::Nil,
-                ],
+                ].into(),
             },
         ),
     ];
@@ -620,7 +620,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("ActionController::UnknownFormat", None),
         ("ActionController::BadRequest", None),
         ("ActionController::InvalidAuthenticityToken", None),
-        ("ActionController::RoutingError", Some(("failures", Ty::Array { elem: Box::new(Ty::Str) }))),
+        ("ActionController::RoutingError", Some(("failures", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }))),
         ("AbstractController::ActionNotFound", None),
     ] {
         let mut methods = exception_surface.to_vec();
@@ -634,14 +634,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `ActiveRecord::Type::Boolean` is a subclass with the same casting; `deserialize` casts the same way for a boolean.
     for name in ["ActiveModel::Type::Boolean", "ActiveRecord::Type::Boolean"] {
         register_stdlib_class(classes, name, &[], &[
-            ("cast", Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }),
-            ("deserialize", Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }),
+            ("cast", Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() }),
+            ("deserialize", Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() }),
         ]);
     }
     // Not a typed store: a thread-local slot holds whatever the caller put there, so `[]` answers untyped.
     // `new` / `pass` / `kill` / `join` — `runtime/ruby/timeout.rb`'s wall-clock
     // port (Spinel lane) starts a worker and kills it past the deadline.
-    let thread = Ty::Class { id: ClassId(Symbol::from("Thread")), args: vec![] };
+    let thread = Ty::Class { id: ClassId(Symbol::from("Thread")), args: vec![].into() };
     register_stdlib_class(classes, "Thread", &[
         ("current", thread.clone()),
         ("new", thread.clone()),
@@ -653,7 +653,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("join", thread.clone()),
     ]);
     // The spinel `csv` package's writer surface: `CSV.generate { |csv| csv << row }` answers the accumulated String.
-    let csv = Ty::Class { id: ClassId(Symbol::from("CSV")), args: vec![] };
+    let csv = Ty::Class { id: ClassId(Symbol::from("CSV")), args: vec![].into() };
     register_stdlib_class(classes, "CSV", &[("generate", Ty::Str), ("generate_line", Ty::Str)], &[
         ("<<", csv.clone()),
         ("add_row", csv.clone()),
@@ -687,16 +687,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // and raises for the rest, which is what makes
     // `if t = Mime::Type.lookup(ct)` a safe guard in app code. Giving it
     // a `| Nil` arm here would be a lie the type system can act on.
-    let mime_type = Ty::Class { id: ClassId(Symbol::from("Mime::Type")), args: vec![] };
+    let mime_type = Ty::Class { id: ClassId(Symbol::from("Mime::Type")), args: vec![].into() };
     register_stdlib_class(classes, "Mime::Type", &[
         ("lookup", mime_type.clone()),
         ("lookup_by_extension", Ty::Union {
-            variants: vec![mime_type.clone(), Ty::Nil],
+            variants: vec![mime_type.clone(), Ty::Nil].into(),
         }),
         ("valid?", Ty::Bool),
     ], &[
-        ("symbol", Ty::Union { variants: vec![Ty::Sym, Ty::Nil] }),
-        ("to_sym", Ty::Union { variants: vec![Ty::Sym, Ty::Nil] }),
+        ("symbol", Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() }),
+        ("to_sym", Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() }),
         ("to_s", Ty::Str), ("to_str", Ty::Str), ("inspect", Ty::Str),
         ("hash", Ty::Int), ("==", Ty::Bool), ("eql?", Ty::Bool),
     ]);
@@ -716,7 +716,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     }
     // The implementation is bundled on Ruby/Spinel. Other targets
     // report the missing runtime at project emission.
-    let string_io = Ty::Class { id: ClassId(Symbol::from("StringIO")), args: vec![] };
+    let string_io = Ty::Class { id: ClassId(Symbol::from("StringIO")), args: vec![].into() };
     register_stdlib_class(classes, "StringIO", &[], &[
         ("string", Ty::Str), ("<<", string_io),
     ]);
@@ -737,7 +737,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `winsize=` wait on carrying `require "io/console"` into the
     // emitted tree; admitting them without that load is check-quiet /
     // runtime `NoMethodError`.
-    let io = Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![] };
+    let io = Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![].into() };
     register_stdlib_class(classes, "IO", &[], &[
         ("pid", Ty::Int),
         ("read", Ty::Str),
@@ -803,23 +803,23 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(
         classes,
         "Array",
-        &[("wrap", Ty::Array { elem: Box::new(Ty::Untyped) })],
+        &[("wrap", Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) })],
         &[],
     );
     // CRuby supplies Sets here, the Spinel port supplies Arrays. Both
     // implement the collection operations the app uses; don't invent
     // one concrete representation for the two runtimes.
     register_stdlib_class(classes, "Rails::HTML5::SafeListSanitizer", &[
-        ("allowed_tags", Ty::Union { variants: vec![Ty::Array { elem: Box::new(Ty::Str) }, Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![] }] }),
-        ("allowed_attributes", Ty::Union { variants: vec![Ty::Array { elem: Box::new(Ty::Str) }, Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![] }] }),
+        ("allowed_tags", Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::Str) }, Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![].into() }].into() }),
+        ("allowed_attributes", Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::Str) }, Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![].into() }].into() }),
     ], &[]);
     // `Set` is a value type: `Set.new` yields `Class { Set }` (via the
     // universal `.new`), then these instance methods dispatch on it.
     // Mutators return the receiver (self) for chaining; element-typed
     // accessors are `Untyped` (Set isn't parameterized here).
-    let set_self = Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![] };
+    let set_self = Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![].into() };
     // Enumerable's filters and sorts answer an Array, not a Set.
-    let untyped_array = Ty::Array { elem: Box::new(Ty::Untyped) };
+    let untyped_array = Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) };
     register_stdlib_class(classes, "Set", &[("[]", set_self.clone())], &[
         ("<<", set_self.clone()), ("add", set_self.clone()),
         ("delete", set_self.clone()), ("merge", set_self.clone()),
@@ -831,14 +831,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("difference", set_self.clone()),
         ("dup", set_self.clone()), ("to_set", set_self.clone()),
         ("add?", Ty::Untyped),
-        ("delete?", Ty::Union { variants: vec![set_self.clone(), Ty::Nil] }),
+        ("delete?", Ty::Union { variants: vec![set_self.clone(), Ty::Nil].into() }),
         ("each", Ty::Untyped),
         ("map", untyped_array.clone()), ("flat_map", untyped_array.clone()),
         ("filter_map", untyped_array.clone()),
         ("select", untyped_array.clone()), ("filter", untyped_array.clone()),
         ("reject", untyped_array.clone()),
         ("sort", untyped_array.clone()), ("sort_by", untyped_array.clone()),
-        ("partition", Ty::Array { elem: Box::new(untyped_array.clone()) }),
+        ("partition", Ty::Array { elem: std::sync::Arc::new(untyped_array.clone()) }),
         ("to_a", untyped_array.clone()),
         ("find", Ty::Untyped), ("detect", Ty::Untyped),
         ("first", Ty::Untyped),
@@ -847,8 +847,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("sum", Ty::Untyped), ("inject", Ty::Untyped), ("reduce", Ty::Untyped),
         ("each_with_object", Ty::Untyped),
         ("group_by", Ty::Hash {
-            key: Box::new(Ty::Untyped),
-            value: Box::new(untyped_array.clone()),
+            key: std::sync::Arc::new(Ty::Untyped),
+            value: std::sync::Arc::new(untyped_array.clone()),
         }),
         ("include?", Ty::Bool), ("member?", Ty::Bool), ("empty?", Ty::Bool),
         ("any?", Ty::Bool), ("all?", Ty::Bool), ("none?", Ty::Bool), ("one?", Ty::Bool),

@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn array_minus_array_matching_elem_is_array_difference() {
-        let a_ty = Ty::Array { elem: Box::new(Ty::Int) };
+        let a_ty = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
         let l = var_typed("a", a_ty.clone());
         let r = var_typed("b", a_ty);
         let SubCase::ArrayDifference { elem } = classify_sub(&l, &r) else {
@@ -159,8 +159,8 @@ mod tests {
     #[test]
     fn array_minus_array_different_elem_is_a_difference() {
         // `[1] - ["a"]` is valid Ruby (nothing matches); elements are compared by `eql?`.
-        let l = var_typed("a", Ty::Array { elem: Box::new(Ty::Int) });
-        let r = var_typed("b", Ty::Array { elem: Box::new(Ty::Str) });
+        let l = var_typed("a", Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
+        let r = var_typed("b", Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         assert!(matches!(classify_sub(&l, &r), SubCase::ArrayDifference { .. }));
     }
 
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn hash_minus_hash_is_incompatible() {
-        let h = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Int) };
+        let h = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Int) };
         let l = var_typed("a", h.clone());
         let r = var_typed("b", h);
         assert!(matches!(classify_sub(&l, &r), SubCase::Incompatible));
@@ -192,7 +192,7 @@ mod tests {
         // `Time - Time → Float` (seconds) and `Time - Duration → Time`
         // are both valid Ruby; the classifier must not flag concrete
         // Time arithmetic as `Incompatible`. Falls back to native infix.
-        let time = || Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![] };
+        let time = || Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![].into() };
         let l = var_typed("a", time());
         let r = var_typed("b", time());
         assert!(matches!(classify_sub(&l, &r), SubCase::Unknown));
@@ -210,7 +210,7 @@ mod tests {
         let l = var_typed("a", Ty::Time);
         let r = var_typed("b", Ty::Time);
         assert!(matches!(classify_sub(&l, &r), SubCase::Unknown));
-        let nilable = || Ty::Union { variants: vec![Ty::Time, Ty::Nil] };
+        let nilable = || Ty::Union { variants: vec![Ty::Time, Ty::Nil].into() };
         let ln = var_typed("a", nilable());
         let rn = var_typed("b", nilable());
         assert!(matches!(classify_sub(&ln, &rn), SubCase::Unknown));
@@ -232,8 +232,8 @@ mod tests {
 
     #[test]
     fn set_lhs_is_unknown_but_array_minus_set_is_incompatible() {
-        let set = || Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![] };
-        let ints = || Ty::Array { elem: Box::new(Ty::Int) };
+        let set = || Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![].into() };
+        let ints = || Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
         let s = var_typed("s", set());
         assert!(matches!(classify_sub(&s, &var_typed("t", set())), SubCase::Unknown));
         assert!(matches!(classify_sub(&s, &var_typed("a", ints())), SubCase::Unknown));

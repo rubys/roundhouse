@@ -1202,7 +1202,7 @@ fn guard_app_methods(app: &mut App, stubbed: &BTreeMap<(String, String), BTreeSe
         // type` — an error on the strict emit, which is what the
         // archive build and the conformance ceiling run.
         let with_ty = crate::lower::typing::with_ty;
-        let stub_ty = Ty::Union { variants: vec![Ty::Class { id: ClassId(Symbol::from("MochaStub")), args: vec![] }, Ty::Nil] };
+        let stub_ty = Ty::Union { variants: vec![Ty::Class { id: ClassId(Symbol::from("MochaStub")), args: vec![].into() }, Ty::Nil].into() };
         let stub_var = || with_ty(Expr::new(sp(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("__stub") }), stub_ty.clone());
         let ivar_read = || with_ty(Expr::new(sp(), ExprNode::Ivar { name: ivar.clone() }), stub_ty.clone());
         let nil_q = |e: Expr| with_ty(call(sp(), e, "nil?", vec![]), Ty::Bool);
@@ -1270,7 +1270,7 @@ fn guard_app_methods(app: &mut App, stubbed: &BTreeMap<(String, String), BTreeSe
                 },
             ),
             signature: Some(crate::lower::typing::fn_sig(
-                vec![(value, Ty::Union { variants: vec![Ty::Class { id: ClassId(Symbol::from("MochaStub")), args: vec![] }, Ty::Nil] })],
+                vec![(value, Ty::Union { variants: vec![Ty::Class { id: ClassId(Symbol::from("MochaStub")), args: vec![].into() }, Ty::Nil].into() })],
                 Ty::Nil,
             )),
             effects: EffectSet::default(),

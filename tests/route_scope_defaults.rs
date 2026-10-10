@@ -44,7 +44,7 @@ fn helper_params(routes: &str, name: &str) -> Vec<roundhouse::ty::Param> {
     let Ty::Fn { params, .. } = f.signature.clone().expect("signature") else {
         panic!("not a Ty::Fn")
     };
-    params
+    params.to_vec()
 }
 
 /// The shape campfire has, verbatim.

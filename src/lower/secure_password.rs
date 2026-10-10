@@ -49,8 +49,8 @@ pub(crate) fn push_secure_password_methods(methods: &mut Vec<MethodDef>, model: 
     // default `password` which gets the bare `authenticate`.
     let auth_name = authenticator_name(&attr);
     let plain = Symbol::from("unencrypted_password");
-    let self_ty = Ty::Class { id: model.name.clone(), args: vec![] };
-    let plaintext_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let self_ty = Ty::Class { id: model.name.clone(), args: vec![].into() };
+    let plaintext_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
     push_synth_instance_method(
         methods,
         model,
@@ -127,7 +127,7 @@ fn push_reset_token_methods(methods: &mut Vec<MethodDef>, model: &Model, attr: &
     }
     let digest = Symbol::from(format!("{}_digest", attr.as_str()));
     let purpose = format!("{}\\n{}_reset\\n{}", model.name.0.as_str(), attr.as_str(), RESET_TOKEN_TTL);
-    let self_ty = Ty::Class { id: model.name.clone(), args: vec![] };
+    let self_ty = Ty::Class { id: model.name.clone(), args: vec![].into() };
     let token_for = || sp_expr(ExprNode::Const {
         path: vec![Symbol::from("ActiveRecord"), Symbol::from("TokenFor")],
     });
@@ -233,7 +233,7 @@ fn push_reset_token_methods(methods: &mut Vec<MethodDef>, model: &Model, attr: &
         Symbol::from(format!("find_by_{}_reset_token", attr.as_str())),
         vec![Param::positional(token.clone())],
         lenient,
-        fn_sig(vec![(token.clone(), Ty::Str)], Ty::Union { variants: vec![self_ty.clone(), Ty::Nil] }),
+        fn_sig(vec![(token.clone(), Ty::Str)], Ty::Union { variants: vec![self_ty.clone(), Ty::Nil].into() }),
     );
 
     // The bang form, Rails' `find_by_token_for!`: a token that does not
@@ -439,7 +439,7 @@ fn type_writer_body(e: &mut Expr, param: &Symbol) {
     e.node.for_each_child_mut(&mut |c| type_writer_body(c, param));
     let bcrypt = || Ty::Class {
         id: crate::ident::ClassId(Symbol::from("BCrypt::Password")),
-        args: vec![],
+        args: vec![].into(),
     };
     e.ty = match &*e.node {
         ExprNode::Var { name, .. } if name == param => Some(Ty::Str),

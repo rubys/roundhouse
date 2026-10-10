@@ -52,10 +52,10 @@ pub fn lower_importmap_to_library_functions(app: &App) -> Vec<LibraryFunction> {
         let mut fields = indexmap::IndexMap::new();
         fields.insert(Symbol::from("name"), Ty::Str);
         fields.insert(Symbol::from("path"), Ty::Str);
-        Row { fields, rest: None }
+        Row { fields: fields.into(), rest: None }
     };
     let pin_record_ty = Ty::Record { row: pin_row };
-    let pins_ty = Ty::Array { elem: Box::new(pin_record_ty.clone()) };
+    let pins_ty = Ty::Array { elem: std::sync::Arc::new(pin_record_ty.clone()) };
     let pins_body = build_pins_array(&importmap.pins, &pin_record_ty);
 
     vec![
@@ -112,6 +112,6 @@ fn build_pins_array(pins: &[crate::app::ImportmapPin], pin_ty: &Ty) -> Expr {
             Span::synthetic(),
             ExprNode::Array { elements, style: ArrayStyle::Brackets },
         ),
-        Ty::Array { elem: Box::new(pin_ty.clone()) },
+        Ty::Array { elem: std::sync::Arc::new(pin_ty.clone()) },
     )
 }

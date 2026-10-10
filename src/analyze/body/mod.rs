@@ -528,7 +528,7 @@ impl<'a> BodyTyper<'a> {
                     // need not be symbols, even though pattern keys are.
                     let rest_ty = match subject_ty {
                         Some(ty @ Ty::Hash { .. }) if constant.is_none() => ty.clone(),
-                        _ => Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) },
+                        _ => Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
                     };
                     out.push((name.clone(), rest_ty));
                 }
@@ -691,7 +691,7 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     if self.classes().contains_key(&id) {
-                        Ty::Class { id, args: vec![] }
+                        Ty::Class { id, args: vec![].into() }
                     } else {
                         unknown()
                     }
@@ -712,7 +712,7 @@ impl<'a> BodyTyper<'a> {
                         if self.classes().contains_key(&id) || *runtime {
                             expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
                             qualify_resolved_path(path, &id);
-                            Ty::Class { id, args: vec![] }
+                            Ty::Class { id, args: vec![].into() }
                         } else {
                             unknown()
                         }
@@ -756,7 +756,7 @@ impl<'a> BodyTyper<'a> {
                             // Not left unknown: ingest turned `Result = Struct.new(…)` into the class it defines.
                             None if self.classes().get(&id).is_some_and(|c| c.app_declared) => {
                                 expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
-                                Ty::Class { id, args: vec![] }
+                                Ty::Class { id, args: vec![].into() }
                             }
                             None => unknown(),
                         }
@@ -790,7 +790,7 @@ impl<'a> BodyTyper<'a> {
                         };
                         // Otherwise retain the written class path, but
                         // never guess another class by its suffix.
-                        value.unwrap_or_else(|| Ty::Class { id: written_class_id(path), args: vec![] })
+                        value.unwrap_or_else(|| Ty::Class { id: written_class_id(path), args: vec![].into() })
                     }
                 };
                 if indexed_source && matches!(ty, Ty::Var { .. }) {
@@ -878,7 +878,7 @@ impl<'a> BodyTyper<'a> {
                             name.clone(),
                             rescued.unwrap_or_else(|| Ty::Class {
                                 id: crate::ident::ClassId(Symbol::from("StandardError")),
-                                args: vec![],
+                                args: vec![].into(),
                             }),
                         );
                         self.analyze_expr(&mut rc.body, &inner);
@@ -960,8 +960,8 @@ impl<'a> BodyTyper<'a> {
                     });
                 }
                 Ty::Hash {
-                    key: Box::new(key_ty.unwrap_or_else(unknown)),
-                    value: Box::new(value_ty.unwrap_or_else(unknown)),
+                    key: std::sync::Arc::new(key_ty.unwrap_or_else(unknown)),
+                    value: std::sync::Arc::new(value_ty.unwrap_or_else(unknown)),
                 }
             }
 
@@ -983,7 +983,7 @@ impl<'a> BodyTyper<'a> {
                         None => et,
                     });
                 }
-                Ty::Array { elem: Box::new(elem_ty.unwrap_or_else(unknown)) }
+                Ty::Array { elem: std::sync::Arc::new(elem_ty.unwrap_or_else(unknown)) }
             }
 
             ExprNode::StringInterp { parts } => {
@@ -1112,7 +1112,7 @@ impl<'a> BodyTyper<'a> {
                 // parameter (`c = b`) rather than an outer local.
                 for param in extra_params.iter_mut() {
                     let ty = match (&mut param.default, param.keyword && param.rest) {
-                        (_, true) => Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+                        (_, true) => Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
                         (Some(default), false) => self.analyze_expr(default, &inner),
                         (None, false) => Ty::Untyped,
                     };
@@ -1131,9 +1131,9 @@ impl<'a> BodyTyper<'a> {
                 // Lambda node without seeing Var. Effects default to
                 // pure; full effect inference is future work.
                 Ty::Fn {
-                    params: Vec::new(),
+                    params: Vec::new().into(),
                     block: None,
-                    ret: Box::new(body_ty),
+                    ret: std::sync::Arc::new(body_ty),
                     effects: crate::effect::EffectSet::pure(),
                 }
             }
@@ -1626,9 +1626,9 @@ impl<'a> BodyTyper<'a> {
                         .get(name)
                         .is_some_and(forwarded_block_may_be_nil)
                 {
-                    let file = Ty::Class { id: ClassId(Symbol::from("File")), args: vec![] };
+                    let file = Ty::Class { id: ClassId(Symbol::from("File")), args: vec![].into() };
                     return union_of(
-                        Ty::Tuple { elems: vec![file.clone(), file, Ty::Int] },
+                        Ty::Tuple { elems: vec![file.clone(), file, Ty::Int].into() },
                         Ty::Nil,
                     );
                 }
@@ -1660,7 +1660,7 @@ impl<'a> BodyTyper<'a> {
                             && !self.app_defines(ctx.self_ty.as_ref(), method)))
                 {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
-                    return Ty::Array { elem: Box::new(elem.unwrap_or_else(unknown)) };
+                    return Ty::Array { elem: std::sync::Arc::new(elem.unwrap_or_else(unknown)) };
                 }
                 // What every object and every module answers, when the
                 // receiver's own table did not. App analyzer only.
@@ -2122,7 +2122,7 @@ impl<'a> BodyTyper<'a> {
                             // keys as strings regardless.
                             let refined = Ty::Hash {
                                 key: key.clone(),
-                                value: Box::new(new_value),
+                                value: std::sync::Arc::new(new_value),
                             };
                             bindings.insert(name.clone(), refined.clone());
                             // Retro-stamp the `{}` seed, same as the
@@ -2182,7 +2182,7 @@ impl<'a> BodyTyper<'a> {
                             } else {
                                 union_of((**cur).clone(), elem)
                             };
-                            let refined = Ty::Array { elem: Box::new(new_elem) };
+                            let refined = Ty::Array { elem: std::sync::Arc::new(new_elem) };
                             bindings.insert(name.clone(), refined.clone());
                             // Retro-stamp the seed literal so decl-site
                             // emitters agree with the refined uses: the
@@ -2436,7 +2436,7 @@ impl<'a> BodyTyper<'a> {
                     .unwrap_or(Ty::Untyped);
                 Ty::Class {
                     id: ClassId(Symbol::from("Range")),
-                    args: vec![elem],
+                    args: vec![elem].into(),
                 }
             }
             ExprNode::Cast { value, target_ty } => {
@@ -2538,7 +2538,7 @@ pub(super) fn lit_ty(lit: &Literal) -> Ty {
         // through the ordinary class walk rather than through a
         // per-literal table.
         Literal::Regex { .. } => {
-            Ty::Class { id: ClassId(Symbol::from("Regexp")), args: vec![] }
+            Ty::Class { id: ClassId(Symbol::from("Regexp")), args: vec![].into() }
         }
     }
 }
@@ -2593,7 +2593,7 @@ fn kernel_array_elem(arg: &Ty) -> Option<Ty> {
         Ty::Array { elem } => Some((**elem).clone()),
         Ty::Tuple { elems } => Some(elems.iter().cloned().reduce(union_of).unwrap_or(Ty::Bottom)),
         // `to_a` of a relation is its records; of a range, its elements.
-        Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![] }),
+        Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Ty::Class { id, args } if id.0.as_str() == "Range" => args.first().cloned(),
         Ty::Nil => Some(Ty::Bottom),
         Ty::Union { variants } => variants
@@ -2658,7 +2658,7 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         Some(Ty::Array { elem }) => Some((**elem).clone()),
         // Destructuring a relation materializes it — each scalar
         // target gets the element model, same as `Array<of>`.
-        Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![] }),
+        Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
         Some(Ty::Untyped) => Some(Ty::Untyped),
         _ => None,
@@ -2863,13 +2863,13 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
     match (&a, &b) {
         (Ty::Hash { key: k1, value: v1 }, Ty::Hash { key: k2, value: v2 }) => {
             return Ty::Hash {
-                key: Box::new(union_of((**k1).clone(), (**k2).clone())),
-                value: Box::new(union_of((**v1).clone(), (**v2).clone())),
+                key: std::sync::Arc::new(union_of((**k1).clone(), (**k2).clone())),
+                value: std::sync::Arc::new(union_of((**v1).clone(), (**v2).clone())),
             };
         }
         (Ty::Array { elem: e1 }, Ty::Array { elem: e2 }) => {
             return Ty::Array {
-                elem: Box::new(union_of((**e1).clone(), (**e2).clone())),
+                elem: std::sync::Arc::new(union_of((**e1).clone(), (**e2).clone())),
             };
         }
         _ => {}
@@ -2895,7 +2895,7 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
     match variants.len() {
         0 => Ty::Bottom,
         1 => variants.into_iter().next().unwrap(),
-        _ => Ty::Union { variants },
+        _ => Ty::Union { variants: variants.into() },
     }
 }
 
@@ -2915,8 +2915,8 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
         Ty::Hash { key, value } => {
             for existing in out.iter_mut() {
                 if let Ty::Hash { key: k0, value: v0 } = existing {
-                    *k0 = Box::new(union_of((**k0).clone(), *key));
-                    *v0 = Box::new(union_of((**v0).clone(), *value));
+                    *k0 = std::sync::Arc::new(union_of((**k0).clone(), std::sync::Arc::unwrap_or_clone(key)));
+                    *v0 = std::sync::Arc::new(union_of((**v0).clone(), std::sync::Arc::unwrap_or_clone(value)));
                     return;
                 }
             }
@@ -2925,7 +2925,7 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
         Ty::Array { elem } => {
             for existing in out.iter_mut() {
                 if let Ty::Array { elem: e0 } = existing {
-                    *e0 = Box::new(union_of((**e0).clone(), *elem));
+                    *e0 = std::sync::Arc::new(union_of((**e0).clone(), std::sync::Arc::unwrap_or_clone(elem)));
                     return;
                 }
             }
@@ -2963,10 +2963,10 @@ pub(crate) fn join_ivar_slot(a: Ty, b: Ty) -> Ty {
 pub(crate) fn drop_pending_arms(t: Ty) -> Ty {
     match t {
         Ty::Hash { key, value } => Ty::Hash {
-            key: Box::new(drop_pending_arms(*key)),
-            value: Box::new(drop_pending_arms(*value)),
+            key: std::sync::Arc::new(drop_pending_arms(std::sync::Arc::unwrap_or_clone(key))),
+            value: std::sync::Arc::new(drop_pending_arms(std::sync::Arc::unwrap_or_clone(value))),
         },
-        Ty::Array { elem } => Ty::Array { elem: Box::new(drop_pending_arms(*elem)) },
+        Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(drop_pending_arms(std::sync::Arc::unwrap_or_clone(elem))) },
         Ty::Union { variants } => {
             let mut variants: Vec<Ty> = variants.into_iter().map(drop_pending_arms).collect();
             if variants.iter().any(|v| !matches!(v, Ty::Var { .. })) {
@@ -2977,7 +2977,7 @@ pub(crate) fn drop_pending_arms(t: Ty) -> Ty {
             Ty::canonicalize_variants(&mut variants);
             match variants.len() {
                 1 => variants.pop().unwrap(),
-                _ => Ty::Union { variants },
+                _ => Ty::Union { variants: variants.into() },
             }
         }
         other => other,
@@ -3055,7 +3055,7 @@ mod tests {
             ty,
             Ty::Class {
                 id: ClassId(Symbol::from("StandardError")),
-                args: vec![],
+                args: vec![].into(),
             }
         );
         assert_ne!(
@@ -3067,7 +3067,7 @@ mod tests {
 
     fn optional_str() -> Ty {
         Ty::Union {
-            variants: vec![Ty::Str, Ty::Nil],
+            variants: vec![Ty::Str, Ty::Nil].into(),
         }
     }
 
@@ -3089,7 +3089,7 @@ mod tests {
             }
             classes.insert(child.clone(), info);
             let mut ctx = Ctx::default();
-            ctx.self_ty = Some(Ty::Class { id: child.clone(), args: vec![] });
+            ctx.self_ty = Some(Ty::Class { id: child.clone(), args: vec![].into() });
             let mut expr = send(None, "Array", vec![nil_lit()]);
             assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), ret);
         }
@@ -3097,16 +3097,16 @@ mod tests {
 
     #[test]
     fn kernel_array_keeps_the_argument_element_type() {
-        let array_of = |elem: Ty| Ty::Array { elem: Box::new(elem) };
+        let array_of = |elem: Ty| Ty::Array { elem: std::sync::Arc::new(elem) };
         for (arg, elem) in [
             (array_of(Ty::Str), Ty::Str),
-            (Ty::Tuple { elems: vec![Ty::Str, Ty::Int] }, union_of(Ty::Str, Ty::Int)),
-            (Ty::Relation { of: ClassId(Symbol::from("Story")) }, Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![] }),
-            (Ty::Class { id: ClassId(Symbol::from("Range")), args: vec![Ty::Int] }, Ty::Int),
+            (Ty::Tuple { elems: vec![Ty::Str, Ty::Int].into() }, union_of(Ty::Str, Ty::Int)),
+            (Ty::Relation { of: ClassId(Symbol::from("Story")) }, Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![].into() }),
+            (Ty::Class { id: ClassId(Symbol::from("Range")), args: vec![Ty::Int].into() }, Ty::Int),
             // Unknown elements: the class may unpack through `to_a`.
-            (Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![] }, Ty::Var { var: TyVar(0) }),
+            (Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![].into() }, Ty::Var { var: TyVar(0) }),
             (Ty::Sym, Ty::Sym),
-            (Ty::Union { variants: vec![array_of(Ty::Sym), Ty::Sym, Ty::Nil] }, Ty::Sym),
+            (Ty::Union { variants: vec![array_of(Ty::Sym), Ty::Sym, Ty::Nil].into() }, Ty::Sym),
         ] {
             let ctx = ctx_with_local("x", arg);
             let mut expr = send(None, "Array", vec![var("x")]);
@@ -3116,7 +3116,7 @@ mod tests {
 
     #[test]
     fn array_plus_onto_an_unknown_element_takes_the_argument_element() {
-        let array_of = |elem: Ty| Ty::Array { elem: Box::new(elem) };
+        let array_of = |elem: Ty| Ty::Array { elem: std::sync::Arc::new(elem) };
         let mut ctx = ctx_with_local("empty", array_of(Ty::Var { var: TyVar(0) }));
         ctx.local_bindings.insert(Symbol::from("strs"), array_of(Ty::Str));
         ctx.local_bindings.insert(Symbol::from("syms"), array_of(Ty::Sym));
@@ -3216,7 +3216,7 @@ mod tests {
         let cond = send(Some(var("x")), "is_a?", vec![class_ref]);
         let pred = extract_narrowing(&cond).expect("is_a? recognized");
         let mixed = Ty::Union {
-            variants: vec![Ty::Str, Ty::Int, Ty::Nil],
+            variants: vec![Ty::Str, Ty::Int, Ty::Nil].into(),
         };
         let ctx = ctx_with_local("x", mixed);
         let then_ctx = apply_narrowing(&ctx, &pred, true);
@@ -3225,7 +3225,7 @@ mod tests {
         assert_eq!(
             else_ctx.local_bindings[&Symbol::from("x")],
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Nil],
+                variants: vec![Ty::Int, Ty::Nil].into(),
             }
         );
     }
@@ -3241,7 +3241,7 @@ mod tests {
             "x",
             Ty::Class {
                 id: ClassId(Symbol::from("Post")),
-                args: vec![],
+                args: vec![].into(),
             },
         );
         let then_ctx = apply_narrowing(&ctx, &pred, true);
@@ -3249,7 +3249,7 @@ mod tests {
             then_ctx.local_bindings[&Symbol::from("x")],
             Ty::Class {
                 id: ClassId(Symbol::from("Post")),
-                args: vec![]
+                args: vec![].into()
             }
         );
     }
@@ -3414,7 +3414,7 @@ mod tests {
         // arr.map { |x| x.to_s } on arr: Array[Int] should produce Array[Str]
         let arr = {
             let mut e = var("arr");
-            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
             e
         };
         let block_body = send(Some(var("x")), "to_s", vec![]);
@@ -3433,11 +3433,11 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(
             Symbol::from("arr"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
     }
 
     #[test]
@@ -3445,7 +3445,7 @@ mod tests {
         // arr.select { |x| x > 0 } on arr: Array[Int] should still be Array[Int]
         let arr = {
             let mut e = var("arr");
-            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
             e
         };
         let block_body = send(Some(var("x")), ">", vec![synth(ExprNode::Lit {
@@ -3466,11 +3466,11 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(
             Symbol::from("arr"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
     }
 
     #[test]
@@ -3478,7 +3478,7 @@ mod tests {
         // arr.flat_map { |x| [x.to_s] } on arr: Array[Int] should be Array[Str]
         let arr = {
             let mut e = var("arr");
-            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
             e
         };
         let inner_arr = synth(ExprNode::Array {
@@ -3500,11 +3500,11 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(
             Symbol::from("arr"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
     }
 
     #[test]
@@ -3528,7 +3528,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         let ctx = Ctx::default();
         let ty = typer.analyze_expr(&mut seq, &ctx);
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
     }
 
     #[test]
@@ -3554,7 +3554,7 @@ mod tests {
         let ctx = Ctx::default();
         typer.analyze_expr(&mut seq, &ctx);
 
-        let expected = Ty::Array { elem: Box::new(Ty::Int) };
+        let expected = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
         let ExprNode::Seq { exprs } = &*seq.node else { panic!("seq") };
         assert_eq!(exprs[0].ty.as_ref(), Some(&expected));
         let ExprNode::Assign { value, .. } = &*exprs[0].node else { panic!("assign") };
@@ -3642,8 +3642,8 @@ mod tests {
         let ctx = ctx_with_local(
             "opts",
             Ty::Hash {
-                key: Box::new(Ty::Str),
-                value: Box::new(Ty::Untyped),
+                key: std::sync::Arc::new(Ty::Str),
+                value: std::sync::Arc::new(Ty::Untyped),
             },
         );
         typer.analyze_expr(&mut seq, &ctx);
@@ -3703,8 +3703,8 @@ mod tests {
         let h = {
             let mut e = var("h");
             e.ty = Some(Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             });
             e
         };
@@ -3725,13 +3725,13 @@ mod tests {
         ctx.local_bindings.insert(
             Symbol::from("h"),
             Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
     }
 
     #[test]
@@ -3740,8 +3740,8 @@ mod tests {
         let h = {
             let mut e = var("h");
             e.ty = Some(Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             });
             e
         };
@@ -3762,8 +3762,8 @@ mod tests {
         ctx.local_bindings.insert(
             Symbol::from("h"),
             Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
@@ -3771,8 +3771,8 @@ mod tests {
         assert_eq!(
             ty,
             Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Str),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Str),
             }
         );
     }
@@ -3783,7 +3783,7 @@ mod tests {
         // should still produce a sensible Array[elem] type.
         let arr = {
             let mut e = var("arr");
-            e.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+            e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
             e
         };
         let call = synth(ExprNode::Send {
@@ -3800,11 +3800,11 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(
             Symbol::from("arr"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
-        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
+        assert_eq!(ty, Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
     }
 
     // ── diagnostic annotation ─────────────────────────────────────
@@ -3964,8 +3964,8 @@ mod tests {
                 kwargs: false,
             });
             e.ty = Some(Ty::Hash {
-                key: Box::new(Ty::Sym),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Sym),
+                value: std::sync::Arc::new(Ty::Int),
             });
             e
         };
@@ -4051,12 +4051,12 @@ mod tests {
     fn law_universe() -> Vec<Ty> {
         let class = |name: &str| Ty::Class {
             id: ClassId(Symbol::from(name)),
-            args: vec![],
+            args: vec![].into(),
         };
-        let arr = |elem: Ty| Ty::Array { elem: Box::new(elem) };
+        let arr = |elem: Ty| Ty::Array { elem: std::sync::Arc::new(elem) };
         let hash = |k: Ty, v: Ty| Ty::Hash {
-            key: Box::new(k),
-            value: Box::new(v),
+            key: std::sync::Arc::new(k),
+            value: std::sync::Arc::new(v),
         };
         vec![
             Ty::Int,
@@ -4079,10 +4079,10 @@ mod tests {
                 Ty::Var { var: TyVar(1) },
                 Ty::Var { var: TyVar(2) },
             ),
-            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
-            Ty::Union { variants: vec![Ty::Int, Ty::Str] },
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::Int, Ty::Str].into() },
             Ty::Union {
-                variants: vec![hash(Ty::Str, Ty::Int), Ty::Nil],
+                variants: vec![hash(Ty::Str, Ty::Int), Ty::Nil].into(),
             },
         ]
     }
@@ -4122,7 +4122,7 @@ mod tests {
         assert_eq!(
             got,
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Bool, Ty::Nil]
+                variants: vec![Ty::Int, Ty::Bool, Ty::Nil].into()
             }
         );
     }
@@ -4191,12 +4191,12 @@ mod tests {
         // out per variant — union_of's own doc names that shape as the
         // harmful one.
         let h1 = Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(Ty::Int),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Int),
         };
         let h2 = Ty::Hash {
-            key: Box::new(Ty::Sym),
-            value: Box::new(Ty::Str),
+            key: std::sync::Arc::new(Ty::Sym),
+            value: std::sync::Arc::new(Ty::Str),
         };
         let via_nil_first = union_of(union_of(h1.clone(), Ty::Nil), h2.clone());
         let via_hashes_first = union_of(union_of(h1.clone(), h2.clone()), Ty::Nil);
@@ -4297,16 +4297,16 @@ mod tests {
         let mut raw = law_universe();
         raw.extend([
             Ty::Var { var: TyVar(2) },
-            Ty::Union { variants: vec![Ty::Str, Ty::Untyped] },
-            Ty::Union { variants: vec![Ty::Int, Ty::Var { var: TyVar(4) }] },
-            Ty::Union { variants: vec![Ty::Untyped, Ty::Nil] },
-            Ty::Union { variants: vec![Ty::Var { var: TyVar(5) }, Ty::Nil] },
-            Ty::Union { variants: vec![Ty::Var { var: TyVar(6) }, Ty::Untyped, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Str, Ty::Untyped].into() },
+            Ty::Union { variants: vec![Ty::Int, Ty::Var { var: TyVar(4) }].into() },
+            Ty::Union { variants: vec![Ty::Untyped, Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::Var { var: TyVar(5) }, Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::Var { var: TyVar(6) }, Ty::Untyped, Ty::Nil].into() },
             Ty::Union {
                 variants: vec![
-                    Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+                    Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) },
                     Ty::Nil,
-                ],
+                ].into(),
             },
         ]);
         let mut out: Vec<Ty> = Vec::new();
@@ -4359,7 +4359,7 @@ mod tests {
     #[test]
     fn param_slot_join_classifies_untyped_arms_inside_unions() {
         let join = crate::analyze::unify_param_ty;
-        let str_or_untyped = Ty::Union { variants: vec![Ty::Str, Ty::Untyped] };
+        let str_or_untyped = Ty::Union { variants: vec![Ty::Str, Ty::Untyped].into() };
         assert_eq!(
             join(Ty::Int, str_or_untyped),
             join(join(Ty::Int, Ty::Str), Ty::Untyped),
@@ -4372,10 +4372,10 @@ mod tests {
     #[test]
     fn param_slot_join_keeps_untyped_beside_nil_alone() {
         let join = crate::analyze::unify_param_ty;
-        let nil_or_untyped = Ty::Union { variants: vec![Ty::Untyped, Ty::Nil] };
+        let nil_or_untyped = Ty::Union { variants: vec![Ty::Untyped, Ty::Nil].into() };
         assert_eq!(join(Ty::Nil, Ty::Untyped), nil_or_untyped);
         assert_eq!(join(Ty::Untyped, Ty::Nil), nil_or_untyped);
-        let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        let str_or_nil = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
         assert_eq!(join(nil_or_untyped.clone(), Ty::Str), str_or_nil);
         assert_eq!(join(Ty::Str, nil_or_untyped), str_or_nil);
     }
@@ -4384,7 +4384,7 @@ mod tests {
     /// Hash at another is that Hash, as for an ivar.
     #[test]
     fn param_slot_join_drops_pending_inside_hash_spines() {
-        let filled = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Int) };
+        let filled = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Int) };
         assert_eq!(crate::analyze::unify_param_ty(empty_hash(), filled.clone()), filled);
     }
 
@@ -4423,7 +4423,7 @@ mod tests {
     }
 
     fn empty_hash() -> Ty {
-        Ty::Hash { key: Box::new(Ty::Var { var: TyVar(0) }), value: Box::new(Ty::Var { var: TyVar(0) }) }
+        Ty::Hash { key: std::sync::Arc::new(Ty::Var { var: TyVar(0) }), value: std::sync::Arc::new(Ty::Var { var: TyVar(0) }) }
     }
 
     /// `@h = {}` and `@h[k] = v` give one type whichever is harvested
@@ -4441,8 +4441,8 @@ mod tests {
             ivar_write("h", empty_hash()),
         ]);
         let want = Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(Ty::Union { variants: vec![Ty::Int, Ty::Str] }),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, Ty::Str].into() }),
         };
         assert_eq!(seed_first, want);
         assert_eq!(writes_first, want);
@@ -4458,11 +4458,11 @@ mod tests {
         let want = Ty::Union {
             variants: vec![
                 Ty::Hash {
-                    key: Box::new(Ty::Str),
-                    value: Box::new(Ty::Union { variants: vec![Ty::Int, Ty::Str] }),
+                    key: std::sync::Arc::new(Ty::Str),
+                    value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, Ty::Str].into() }),
                 },
                 Ty::Nil,
-            ],
+            ].into(),
         };
         let seeded = harvested_ivar("data", vec![
             ivar_write("data", Ty::Nil),
@@ -4484,8 +4484,8 @@ mod tests {
     /// a nullable one) alone: that class's own `[]=` runs, not Hash's.
     #[test]
     fn index_writes_leave_a_class_instance_ivar_alone() {
-        let foo = Ty::Class { id: ClassId(Symbol::from("Foo")), args: vec![] };
-        let nullable_foo = Ty::Union { variants: vec![foo, Ty::Nil] };
+        let foo = Ty::Class { id: ClassId(Symbol::from("Foo")), args: vec![].into() };
+        let nullable_foo = Ty::Union { variants: vec![foo, Ty::Nil].into() };
         let got = harvested_ivar("x", vec![
             ivar_write("x", nullable_foo.clone()),
             ivar_index_write("x", Ty::Int),
@@ -4518,11 +4518,11 @@ mod tests {
         let want_nullable = Ty::Union {
             variants: vec![
                 Ty::Hash {
-                    key: Box::new(Ty::Str),
-                    value: Box::new(Ty::Union { variants: vec![Ty::Int, Ty::Str] }),
+                    key: std::sync::Arc::new(Ty::Str),
+                    value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, Ty::Str].into() }),
                 },
                 Ty::Nil,
-            ],
+            ].into(),
         };
         let stmts = vec![
             ivar_write("data", Ty::Nil),
@@ -4533,7 +4533,7 @@ mod tests {
         for order in permutations(stmts) {
             assert_eq!(harvested_ivar("data", order.clone()), want_nullable, "order {order:?}");
         }
-        let want = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Int) };
+        let want = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Int) };
         let stmts = vec![
             ivar_write("data", Ty::Var { var: TyVar(3) }),
             ivar_write("data", empty_hash()),
@@ -4548,8 +4548,8 @@ mod tests {
     /// instance is assigned.
     #[test]
     fn index_writes_leave_a_class_instance_ivar_alone_in_any_order() {
-        let foo = Ty::Class { id: ClassId(Symbol::from("Foo")), args: vec![] };
-        let nullable_foo = Ty::Union { variants: vec![foo, Ty::Nil] };
+        let foo = Ty::Class { id: ClassId(Symbol::from("Foo")), args: vec![].into() };
+        let nullable_foo = Ty::Union { variants: vec![foo, Ty::Nil].into() };
         for order in permutations(vec![ivar_write("x", nullable_foo.clone()), ivar_index_write("x", Ty::Int)]) {
             assert_eq!(harvested_ivar("x", order), nullable_foo);
         }
@@ -4559,10 +4559,10 @@ mod tests {
     fn concrete_value_shapes_are_truthy_for_boolean_operators() {
         let values = [
             Ty::Date,
-            Ty::Tuple { elems: vec![Ty::Int] },
+            Ty::Tuple { elems: vec![Ty::Int].into() },
             Ty::Record { row: Row::default() },
             Ty::Fn {
-                params: Vec::new(), block: None, ret: Box::new(Ty::Str),
+                params: Vec::new().into(), block: None, ret: std::sync::Arc::new(Ty::Str),
                 effects: crate::effect::EffectSet::pure(),
             },
         ];
@@ -4576,14 +4576,14 @@ mod tests {
     fn nil_arms_of_concrete_value_unions_remain_falsy() {
         for truthy in [
             Ty::Date,
-            Ty::Tuple { elems: vec![Ty::Int] },
+            Ty::Tuple { elems: vec![Ty::Int].into() },
             Ty::Record { row: Row::default() },
             Ty::Fn {
-                params: Vec::new(), block: None, ret: Box::new(Ty::Str),
+                params: Vec::new().into(), block: None, ret: std::sync::Arc::new(Ty::Str),
                 effects: crate::effect::EffectSet::pure(),
             },
         ] {
-            let left = Ty::Union { variants: vec![truthy, Ty::Nil] };
+            let left = Ty::Union { variants: vec![truthy, Ty::Nil].into() };
             assert!(!never_falsy(&left), "{left:?} must not always short-circuit `||`");
             assert_eq!(falsy_part(&left), Some(Ty::Nil), "{left:?} must retain nil for `&&`");
         }
@@ -4601,7 +4601,7 @@ mod tests {
         // `h` is statically `Hash[Sym, Str]`; the value-omission bind
         // `data:` should type as the hash's uniform value type (`Str`),
         // and so should the arm body that reads it back.
-        let h_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) };
+        let h_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) };
         let pattern = MatchPattern::Hash {
             constant: None,
             pairs: vec![
@@ -4690,7 +4690,7 @@ fn falsy_part(ty: &Ty) -> Option<Ty> {
             match kept.len() {
                 0 => None,
                 1 => kept.into_iter().next(),
-                _ => Some(Ty::Union { variants: kept }),
+                _ => Some(Ty::Union { variants: kept.into() }),
             }
         }
         t if never_falsy(t) => None,
@@ -4742,7 +4742,7 @@ fn time_parse_ty(recv: &Expr, method: &Symbol, args: &[Expr]) -> Option<Ty> {
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
             if method.as_str() == "zone" && args.is_empty() && is_time_const(r) =>
         {
-            Some(Ty::Union { variants: vec![Ty::Time, Ty::Nil] })
+            Some(Ty::Union { variants: vec![Ty::Time, Ty::Nil].into() })
         }
         _ => None,
     }
@@ -4781,7 +4781,7 @@ fn expect_hash_arg_ty(recv_ty: Option<&Ty>, method: &str, args: &[crate::expr::E
     let (key, value) = match recv_ty {
         Some(Ty::Hash { key, value }) => (key.clone(), value.clone()),
         Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionController::Parameters" => {
-            (Box::new(Ty::Str), Box::new(Ty::Untyped))
+            (std::sync::Arc::new(Ty::Str), std::sync::Arc::new(Ty::Untyped))
         }
         _ => return None,
     };
@@ -4950,7 +4950,7 @@ fn literal_extremum_ty(recv: Option<&Expr>, recv_ty: &Ty, method: &Symbol, args:
             match kept.len() {
                 0 => return None,
                 1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept },
+                _ => Ty::Union { variants: kept.into() },
             }
         }
         other => other.clone(),

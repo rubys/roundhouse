@@ -166,7 +166,7 @@ fn rewrite_value(
         // of disagreement a strict target reads as the element type.
         if all_int {
             value.ty = Some(crate::ty::Ty::Array {
-                elem: Box::new(crate::ty::Ty::Int),
+                elem: std::sync::Arc::new(crate::ty::Ty::Int),
             });
         }
         return;

@@ -12,7 +12,7 @@ use crate::ty::Ty;
 /// connection the runtime implements (`runtime/ruby/active_record/
 /// connection.rb`).
 pub(in crate::analyze) fn connection_ty() -> Ty {
-    Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Connection")), args: vec![] }
+    Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Connection")), args: vec![].into() }
 }
 
 /// `ActiveRecord::Connection` and `ActiveRecord::Result`, read from the
@@ -42,8 +42,8 @@ fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
     // result types, and the adapter objects it hands out (the transaction
     // manager, the pool, the current transaction) stay untyped.
     let str = Ty::Str;
-    let untyped_rows = Ty::Array { elem: Box::new(Ty::Array { elem: Box::new(Ty::Untyped) }) };
-    let untyped_list = Ty::Array { elem: Box::new(Ty::Untyped) };
+    let untyped_rows = Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }) };
+    let untyped_list = Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) };
     let cls = classes.entry(ClassId(Symbol::from("ActiveRecord::Connection"))).or_default();
     for (name, ty) in [
         ("quote_column_name", str.clone()),
@@ -62,7 +62,7 @@ fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("select_values", untyped_list.clone()),
         ("select_one", Ty::Untyped),
         ("select_value", Ty::Untyped),
-        ("tables", Ty::Array { elem: Box::new(Ty::Str) }),
+        ("tables", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
         ("columns", untyped_list.clone()),
         ("indexes", untyped_list),
         ("insert", Ty::Untyped),
@@ -115,13 +115,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             .entry(Symbol::from("connection_db_config"))
             .or_insert(Ty::Class {
                 id: ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig")),
-                args: vec![],
+                args: vec![].into(),
             });
         base.class_methods
             .entry(Symbol::from("connection_pool"))
             .or_insert(Ty::Class {
                 id: ClassId(Symbol::from("ActiveRecord::ConnectionAdapters::DbPool")),
-                args: vec![],
+                args: vec![].into(),
             });
         base.class_methods
             .entry(Symbol::from("connection"))
@@ -140,7 +140,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
                 id: ClassId(Symbol::from(
                     "ActiveRecord::Reflection::AssociationReflection",
                 )),
-                args: vec![],
+                args: vec![].into(),
             });
         base.class_methods
             .entry(Symbol::from("strict_loading_by_default"))
@@ -179,7 +179,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     let mut cp_cls = ClassInfo::default();
     cp_cls.class_methods.insert(
         Symbol::from("new"),
-        Ty::Class { id: cp_class.clone(), args: vec![] },
+        Ty::Class { id: cp_class.clone(), args: vec![].into() },
     );
     cp_cls.instance_methods.insert(Symbol::from("size"), Ty::Int);
     cp_cls.instance_methods.insert(Symbol::from("length"), Ty::Int);
@@ -207,14 +207,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // dispatch against; the RBS sidecar then references it as
     // `() -> AdapterInterface`.
     let hash_str_untyped = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(Ty::Untyped),
     };
     let row_ty = hash_str_untyped.clone();
     let nilable_row = Ty::Union {
-        variants: vec![row_ty.clone(), Ty::Nil],
+        variants: vec![row_ty.clone(), Ty::Nil].into(),
     };
-    let array_of_rows = Ty::Array { elem: Box::new(row_ty.clone()) };
+    let array_of_rows = Ty::Array { elem: std::sync::Arc::new(row_ty.clone()) };
     let mut adapter_iface = ClassInfo::default();
     adapter_iface
         .instance_methods
@@ -283,8 +283,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let variant_id = ClassId(Symbol::from("ActiveStorage::VariantWithRecord"));
         let service_id = ClassId(Symbol::from("ActiveStorage::Service"));
         let analyzer_id = ClassId(Symbol::from("ActiveStorage::ImageAnalyzer"));
-        let class_ty = |id: &ClassId| Ty::Class { id: id.clone(), args: vec![] };
-        let nilable = |ty: Ty| Ty::Union { variants: vec![ty, Ty::Nil] };
+        let class_ty = |id: &ClassId| Ty::Class { id: id.clone(), args: vec![].into() };
+        let nilable = |ty: Ty| Ty::Union { variants: vec![ty, Ty::Nil].into() };
         let nilable_str = nilable(Ty::Str);
 
         let mut attached = ClassInfo::default();
@@ -318,7 +318,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         }
         attached.instance_methods.insert(
             Symbol::from("variations"),
-            Ty::Array { elem: Box::new(class_ty(&ClassId(Symbol::from("ActiveStorage::Variation")))) },
+            Ty::Array { elem: std::sync::Arc::new(class_ty(&ClassId(Symbol::from("ActiveStorage::Variation")))) },
         );
         classes.insert(attached_id.clone(), attached);
 
@@ -333,19 +333,19 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             many_row.instance_methods.insert(
                 Symbol::from("blob"),
                 Ty::Union {
-                    variants: vec![class_ty(&blob_id), Ty::Nil],
+                    variants: vec![class_ty(&blob_id), Ty::Nil].into(),
                 },
             );
             many_row.instance_methods.insert(
                 Symbol::from("filename"),
                 Ty::Union {
-                    variants: vec![class_ty(&filename_id), Ty::Nil],
+                    variants: vec![class_ty(&filename_id), Ty::Nil].into(),
                 },
             );
             many_row.instance_methods.insert(
                 Symbol::from("content_type"),
                 Ty::Union {
-                    variants: vec![Ty::Str, Ty::Nil],
+                    variants: vec![Ty::Str, Ty::Nil].into(),
                 },
             );
             many_row.instance_methods.insert(Symbol::from("url"), Ty::Str);
@@ -357,7 +357,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             many.instance_methods.insert(
                 Symbol::from("attachments"),
                 Ty::Array {
-                    elem: Box::new(class_ty(&many_row_id)),
+                    elem: std::sync::Arc::new(class_ty(&many_row_id)),
                 },
             );
             // `delegate_missing_to :attachments` — `each` is the
@@ -366,7 +366,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
                 Symbol::from("each"),
                 super::block_fn(
                     &class_ty(&many_row_id),
-                    Ty::Array { elem: Box::new(class_ty(&many_row_id)) },
+                    Ty::Array { elem: std::sync::Arc::new(class_ty(&many_row_id)) },
                 ),
             );
             many.instance_methods.insert(Symbol::from("attach_blob"), Ty::Nil);
@@ -496,7 +496,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let mut analyzer = ClassInfo::default();
         analyzer.class_methods.insert(
             Symbol::from("dimensions"),
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         classes.insert(analyzer_id, analyzer);
 
@@ -548,7 +548,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
 
         let mut storage = ClassInfo::default();
         for m in ["default_variable_content_types", "variable_content_types"] {
-            storage.class_methods.insert(Symbol::from(m), Ty::Array { elem: Box::new(Ty::Str) });
+            storage.class_methods.insert(Symbol::from(m), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         }
         storage.class_methods.insert(Symbol::from("variable_content_type?"), Ty::Bool);
         storage.class_methods.insert(Symbol::from("content_type_for_format"), Ty::Str);
@@ -565,11 +565,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // first `arel_table`/`arel`/`Arel.sql` hop. Precision is coarse —
     // every predicate/combinator returns the same `Arel::Node`; the
     // win is that the chain resolves rather than which node it is.
-    let arel_node = Ty::Class { id: ClassId(Symbol::from("Arel::Node")), args: vec![] };
+    let arel_node = Ty::Class { id: ClassId(Symbol::from("Arel::Node")), args: vec![].into() };
     let arel_attribute_ty =
-        Ty::Class { id: ClassId(Symbol::from("Arel::Attribute")), args: vec![] };
+        Ty::Class { id: ClassId(Symbol::from("Arel::Attribute")), args: vec![].into() };
     let arel_select_mgr =
-        Ty::Class { id: ClassId(Symbol::from("Arel::SelectManager")), args: vec![] };
+        Ty::Class { id: ClassId(Symbol::from("Arel::SelectManager")), args: vec![].into() };
 
     // `Arel.sql(...)` / `Arel.star` — module-level node constructors.
     let mut arel_mod = ClassInfo::default();
@@ -654,26 +654,26 @@ pub(in crate::analyze) fn register_action_cable(classes: &mut HashMap<ClassId, C
     let mut remotes = ClassInfo::default();
     remotes
         .instance_methods
-        .insert(Symbol::from("where"), Ty::Class { id: remote_id, args: vec![] });
+        .insert(Symbol::from("where"), Ty::Class { id: remote_id, args: vec![].into() });
     classes.insert(remotes_id.clone(), remotes);
 
     let mut server = ClassInfo::default();
     server.instance_methods.insert(Symbol::from("broadcast"), Ty::Nil);
     server
         .instance_methods
-        .insert(Symbol::from("remote_connections"), Ty::Class { id: remotes_id, args: vec![] });
+        .insert(Symbol::from("remote_connections"), Ty::Class { id: remotes_id, args: vec![].into() });
     classes.insert(server_id.clone(), server);
 
     let mut cable = ClassInfo::default();
     cable
         .class_methods
-        .insert(Symbol::from("server"), Ty::Class { id: server_id, args: vec![] });
+        .insert(Symbol::from("server"), Ty::Class { id: server_id, args: vec![].into() });
     classes.insert(ClassId(Symbol::from("ActionCable")), cable);
 }
 
 pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, ClassInfo>) {
     let attachment_id = ClassId(Symbol::from("ActionText::Attachment"));
-    let attachment_ty = Ty::Class { id: attachment_id.clone(), args: vec![] };
+    let attachment_ty = Ty::Class { id: attachment_id.clone(), args: vec![].into() };
 
     let mut attachment = ClassInfo::default();
     for m in ["sgid", "content_type", "url", "to_plain_text", "to_html", "to_s", "[]"] {
@@ -683,19 +683,19 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     // delegates it; the runtime wraps the node's text the same way).
     attachment.instance_methods.insert(
         Symbol::from("filename"),
-        Ty::Class { id: ClassId(Symbol::from("ActiveStorage::Filename")), args: vec![] },
+        Ty::Class { id: ClassId(Symbol::from("ActiveStorage::Filename")), args: vec![].into() },
     );
     // `node_attributes["caption"].presence` — the caption typed in the
     // editor, stored on the `<action-text-attachment>` node; nil when
     // there is none.
     attachment.instance_methods.insert(
         Symbol::from("caption"),
-        Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+        Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
     );
     for m in ["node_attributes", "full_attributes"] {
         attachment.instance_methods.insert(
             Symbol::from(m),
-            Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
+            Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) },
         );
     }
     // `delegate_missing_to :attachable`: an attachment wrapping a blob
@@ -706,7 +706,7 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     attachment.parent = Some(ClassId(Symbol::from("ActiveStorage::Blob")));
     attachment.instance_methods.insert(
         Symbol::from("attributes"),
-        Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) },
     );
     // Read as a constant by content filters (`Attachment.tag_name`),
     // which is why it is a class method and not a bare literal.
@@ -725,9 +725,9 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     // content filter (and a test) reads markup through: the selector
     // scans answer nodes, a node answers its attributes and its html.
     let fragment_id = ClassId(Symbol::from("ActionText::Fragment"));
-    let fragment_ty = Ty::Class { id: fragment_id.clone(), args: vec![] };
+    let fragment_ty = Ty::Class { id: fragment_id.clone(), args: vec![].into() };
     let node_id = ClassId(Symbol::from("ActionText::Node"));
-    let node_ty = Ty::Class { id: node_id.clone(), args: vec![] };
+    let node_ty = Ty::Class { id: node_id.clone(), args: vec![].into() };
     let mut fragment = ClassInfo::default();
     fragment.class_methods.insert(Symbol::from("wrap"), fragment_ty.clone());
     for m in ["to_s", "to_html", "source", "to_plain_text"] {
@@ -736,11 +736,11 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     for m in ["find_all", "css"] {
         fragment
             .instance_methods
-            .insert(Symbol::from(m), Ty::Array { elem: Box::new(node_ty.clone()) });
+            .insert(Symbol::from(m), Ty::Array { elem: std::sync::Arc::new(node_ty.clone()) });
     }
     fragment.instance_methods.insert(
         Symbol::from("at_css"),
-        Ty::Union { variants: vec![node_ty.clone(), Ty::Nil] },
+        Ty::Union { variants: vec![node_ty.clone(), Ty::Nil].into() },
     );
     for m in ["replace", "update"] {
         fragment.instance_methods.insert(Symbol::from(m), fragment_ty.clone());
@@ -751,10 +751,10 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
         node.instance_methods.insert(Symbol::from(m), Ty::Str);
     }
     node.instance_methods
-        .insert(Symbol::from("[]"), Ty::Union { variants: vec![Ty::Str, Ty::Nil] });
+        .insert(Symbol::from("[]"), Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
     node.instance_methods.insert(
         Symbol::from("attributes"),
-        Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) },
     );
     classes.insert(node_id, node);
 
@@ -770,10 +770,10 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     content.instance_methods.insert(Symbol::from("fragment"), fragment_ty.clone());
     content
         .instance_methods
-        .insert(Symbol::from("links"), Ty::Array { elem: Box::new(Ty::Str) });
+        .insert(Symbol::from("links"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
     content
         .instance_methods
-        .insert(Symbol::from("attachments"), Ty::Array { elem: Box::new(attachment_ty) });
+        .insert(Symbol::from("attachments"), Ty::Array { elem: std::sync::Arc::new(attachment_ty) });
     // DIVERGENCE, and typed as such: Rails resolves each attachment's
     // signed GlobalID back to the record it points at, so this is
     // `Array[ActionText::Attachable]` there. Nothing dereferences an
@@ -782,6 +782,6 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     // comes back.
     content
         .instance_methods
-        .insert(Symbol::from("attachables"), Ty::Array { elem: Box::new(Ty::Untyped) });
+        .insert(Symbol::from("attachables"), Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
     classes.insert(ClassId(Symbol::from("ActionText::Content")), content);
 }

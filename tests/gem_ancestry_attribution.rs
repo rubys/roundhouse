@@ -42,7 +42,7 @@ fn app_with_consumer(resources: &str, lock: Option<&str>, consumer: &str) -> App
 fn class(name: &str) -> Ty {
     Ty::Class {
         id: ClassId(Symbol::from(name)),
-        args: vec![],
+        args: vec![].into(),
     }
 }
 
@@ -413,7 +413,7 @@ fn union_arms_must_agree_and_cycles_do_not_hide_reachable_evidence() {
     ] {
         let mut diags = vec![failed_call(
             Ty::Union {
-                variants: arms.clone(),
+                variants: arms.clone().into(),
             },
             "encode_record",
         )];

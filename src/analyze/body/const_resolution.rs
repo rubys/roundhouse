@@ -84,7 +84,7 @@ const CORE_VALUE_CLASSES: &[(&str, &str)] = &[
 ];
 
 fn encoding_ty() -> Ty {
-    Ty::Class { id: ClassId(Symbol::from("Encoding")), args: vec![] }
+    Ty::Class { id: ClassId(Symbol::from("Encoding")), args: vec![].into() }
 }
 
 fn rbs_type_name(ty: &Ty) -> &'static str {

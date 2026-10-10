@@ -161,7 +161,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr, names: &HashMap<ClassId, Vec<String>
                 style: crate::expr::ArrayStyle::Brackets,
             },
         );
-        set.ty = Some(Ty::Array { elem: Box::new(Ty::Str) });
+        set.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         ExprNode::Send {
             recv: Some(set),
             method: Symbol::from("include?"),

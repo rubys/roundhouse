@@ -100,7 +100,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
                 Some(Ty::Hash { key, value }) if **key == Ty::Sym => {
                     let value = value.clone();
                     let mut call = active_support_call(expr.span, "stringify_keys", r.clone());
-                    call.ty = Some(Ty::Hash { key: Box::new(Ty::Str), value });
+                    call.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value });
                     Some(call)
                 }
                 _ => None,
@@ -154,7 +154,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
                                 parenthesized: true,
                             },
                         );
-                        call.ty = Some(Ty::Hash { key: Box::new(Ty::Sym), value });
+                        call.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value });
                         Some(call)
                     }
                 }

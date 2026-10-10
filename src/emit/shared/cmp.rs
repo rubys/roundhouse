@@ -174,7 +174,7 @@ mod tests {
         // string; Go doesn't support `<` on slices). Classify as
         // Incompatible so users get a loud diagnostic rather than
         // silently-wrong emission.
-        let arr = Ty::Array { elem: Box::new(Ty::Int) };
+        let arr = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
         let l = var_typed("a", arr.clone());
         let r = var_typed("b", arr);
         assert!(matches!(classify_cmp(&l, &r), CmpCase::Incompatible));
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn time_vs_time_is_not_incompatible() {
         use crate::ident::ClassId;
-        let legacy = Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![] };
+        let legacy = Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![].into() };
         for (l, r) in [
             (Ty::Time, Ty::Time),
             (Ty::Time, legacy.clone()),
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn date_vs_date_is_not_incompatible() {
         use crate::ident::ClassId;
-        let legacy = Ty::Class { id: ClassId(Symbol::from("Date")), args: vec![] };
+        let legacy = Ty::Class { id: ClassId(Symbol::from("Date")), args: vec![].into() };
         for (l, r) in [
             (Ty::Date, Ty::Date),
             (Ty::Date, legacy.clone()),
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn nullable_time_vs_time_is_incompatible() {
-        let l = var_typed("a", Ty::Union { variants: vec![Ty::Time, Ty::Nil] });
+        let l = var_typed("a", Ty::Union { variants: vec![Ty::Time, Ty::Nil].into() });
         let r = var_typed("b", Ty::Time);
         assert!(matches!(classify_cmp(&l, &r), CmpCase::Incompatible));
     }
@@ -251,11 +251,11 @@ mod tests {
         use crate::ident::ClassId;
         let mut lhs = var_typed(
             "L",
-            Ty::Class { id: ClassId(Symbol::from("RecordNotFound")), args: vec![] },
+            Ty::Class { id: ClassId(Symbol::from("RecordNotFound")), args: vec![].into() },
         );
         let mut rhs = var_typed(
             "R",
-            Ty::Class { id: ClassId(Symbol::from("StandardError")), args: vec![] },
+            Ty::Class { id: ClassId(Symbol::from("StandardError")), args: vec![].into() },
         );
         assert!(matches!(classify_cmp(&lhs, &rhs), CmpCase::Incompatible));
         lhs.decisions |= crate::expr::CLASS_OBJECT_VALUE;

@@ -275,7 +275,7 @@ pub(crate) fn rewrite_node(
     }
     let flat = Symbol::from(flat_name(assoc));
     let reload_ty = reload.then(|| Ty::Array {
-        elem: Box::new(inner.ty.as_ref().and_then(|t| match t {
+        elem: std::sync::Arc::new(inner.ty.as_ref().and_then(|t| match t {
             Ty::Array { elem } => Some((**elem).clone()),
             _ => None,
         }).unwrap_or(Ty::Untyped)),
@@ -288,7 +288,7 @@ pub(crate) fn rewrite_node(
             let mut s = Expr::new(inner.span, ExprNode::SelfRef);
             s.ty = Some(Ty::Class {
                 id: owner_model,
-                args: vec![],
+                args: vec![].into(),
             });
             Some(s)
         }
@@ -344,7 +344,7 @@ fn rewrite_association_loaded(
     let new_recv = match owner {
         None => {
             let mut s = Expr::new(inner.span, ExprNode::SelfRef);
-            s.ty = Some(Ty::Class { id: owner_model, args: vec![] });
+            s.ty = Some(Ty::Class { id: owner_model, args: vec![].into() });
             Some(s)
         }
         Some(base) => Some(base.clone()),
@@ -417,7 +417,7 @@ fn rewrite_association_target(
             let mut s = Expr::new(inner.span, ExprNode::SelfRef);
             s.ty = Some(Ty::Class {
                 id: owner_model,
-                args: vec![],
+                args: vec![].into(),
             });
             Some(s)
         }

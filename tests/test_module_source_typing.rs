@@ -132,7 +132,7 @@ end
     assert_eq!(
         receivers[0],
         Some(Ty::Array {
-            elem: Box::new(Ty::Int)
+            elem: std::sync::Arc::new(Ty::Int)
         })
     );
     assert!(
@@ -199,7 +199,7 @@ end
     let class_ty = |name: &str| {
         Some(Ty::Class {
             id: roundhouse::ident::ClassId(name.into()),
-            args: vec![],
+            args: vec![].into(),
         })
     };
     assert_eq!(exprs[0].ty, class_ty("Push::Subscription"));
@@ -259,11 +259,11 @@ end
     child.helpers[0].signature = Some(Ty::Fn {
         params: vec![roundhouse::ty::Param {
             name: "value".into(),
-            ty: Ty::Int,
+            ty: Ty::Int.into(),
             kind: roundhouse::ty::ParamKind::Required,
-        }],
+        }].into(),
         block: None,
-        ret: Box::new(Ty::Int),
+        ret: std::sync::Arc::new(Ty::Int),
         effects: roundhouse::effect::EffectSet::pure(),
     });
     roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
@@ -277,7 +277,7 @@ end
     assert_eq!(
         receivers,
         vec![Some(Ty::Array {
-            elem: Box::new(Ty::Int)
+            elem: std::sync::Arc::new(Ty::Int)
         })]
     );
     assert_eq!(child.helpers[0].body.ty, Some(Ty::Int));
@@ -305,7 +305,7 @@ end
     let helper = &app.test_modules[0].helpers[0];
     assert_eq!(helper.params[1].default.as_ref().unwrap().ty, Some(Ty::Str));
     let strings = Ty::Array {
-        elem: Box::new(Ty::Str),
+        elem: std::sync::Arc::new(Ty::Str),
     };
     assert_eq!(
         helper.params[2].default.as_ref().unwrap().ty,
@@ -344,12 +344,12 @@ end
     };
     assert_eq!(
         params[0].ty,
-        Ty::Int,
+        Ty::Int.into(),
         "real positional sites survive forwarding"
     );
     assert_eq!(
         params[1].ty,
-        Ty::Str,
+        Ty::Str.into(),
         "keyword hash is not the keyword value"
     );
 }
@@ -374,14 +374,14 @@ end
     roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
     let helper = &app.test_modules[0].helpers[1];
     let hash = Ty::Hash {
-        key: Box::new(Ty::Sym),
-        value: Box::new(Ty::Str),
+        key: std::sync::Arc::new(Ty::Sym),
+        value: std::sync::Arc::new(Ty::Str),
     };
     assert_eq!(helper.body.ty, Some(hash.clone()));
     let Some(Ty::Fn { params, .. }) = &helper.signature else {
         panic!("positional Hash helper signature: {:?}", helper.signature);
     };
-    assert_eq!(params[0].ty, hash);
+    assert_eq!(params[0].ty, hash.into());
 }
 
 #[test]
@@ -409,8 +409,8 @@ end
     assert_eq!(
         helper.body.ty,
         Some(Ty::Hash {
-            key: Box::new(Ty::Sym),
-            value: Box::new(Ty::Str),
+            key: std::sync::Arc::new(Ty::Sym),
+            value: std::sync::Arc::new(Ty::Str),
         }),
         "keyword-rest is a real Hash binding, not an individual named keyword"
     );
@@ -441,7 +441,7 @@ end
     assert_eq!(
         base.helpers[0].body.ty,
         Some(Ty::Array {
-            elem: Box::new(Ty::Str)
+            elem: std::sync::Arc::new(Ty::Str)
         })
     );
     let key = (base.name.clone(), "values".into());
@@ -519,7 +519,7 @@ end
             assert_eq!(
                 app.inferred_method_params.get(&key),
                 Some(&vec![Ty::Array {
-                    elem: Box::new(Ty::Str)
+                    elem: std::sync::Arc::new(Ty::Str)
                 }])
             );
         }
@@ -577,7 +577,7 @@ end
     assert_eq!(
         receivers,
         vec![Some(Ty::Array {
-            elem: Box::new(Ty::Str)
+            elem: std::sync::Arc::new(Ty::Str)
         })],
         "fixture must not hide a real inherited source method"
     );
@@ -621,7 +621,7 @@ end
                 .find(|module| module.name.0.as_str() == name)
                 .unwrap();
             let expected = Ty::Array {
-                elem: Box::new(element),
+                elem: std::sync::Arc::new(element),
             };
             assert_eq!(module.helpers[0].body.ty, Some(expected.clone()), "{name}");
             assert!(matches!(&module.helpers[0].signature,
@@ -633,7 +633,7 @@ end
                 expected_receivers
                     .into_iter()
                     .map(|elem| Some(Ty::Array {
-                        elem: Box::new(elem)
+                        elem: std::sync::Arc::new(elem)
                     }))
                     .collect::<Vec<_>>()
             );
@@ -676,7 +676,7 @@ end
         module.helpers[0].body.ty,
         Some(Ty::Class {
             id: roundhouse::ident::ClassId("LocalStandIn".into()),
-            args: vec![],
+            args: vec![].into(),
         })
     );
     let mut receivers = Vec::new();
@@ -684,7 +684,7 @@ end
     assert_eq!(
         receivers,
         vec![Some(Ty::Array {
-            elem: Box::new(Ty::Int)
+            elem: std::sync::Arc::new(Ty::Int)
         })]
     );
 }
@@ -715,7 +715,7 @@ fn test_constants_do_not_replace_or_poison_production_view_fallbacks() {
     assert_eq!(
         receivers,
         vec![Some(Ty::Array {
-            elem: Box::new(Ty::Int)
+            elem: std::sync::Arc::new(Ty::Int)
         })]
     );
     receivers.clear();
@@ -731,7 +731,7 @@ fn test_constants_do_not_replace_or_poison_production_view_fallbacks() {
         receivers,
         vec![Some(Ty::Class {
             id: roundhouse::ident::ClassId("TEST_ONLY".into()),
-            args: vec![],
+            args: vec![].into(),
         })]
     );
 }

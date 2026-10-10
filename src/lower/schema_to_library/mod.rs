@@ -45,7 +45,7 @@ pub fn lower_schema_to_library_functions(schema: &Schema) -> Vec<LibraryFunction
             Span::synthetic(),
             ExprNode::Array { elements, style: ArrayStyle::Brackets },
         ),
-        Ty::Array { elem: Box::new(Ty::Str) },
+        Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
     );
     vec![LibraryFunction {
         module_path,
@@ -54,7 +54,7 @@ pub fn lower_schema_to_library_functions(schema: &Schema) -> Vec<LibraryFunction
         unsupported_formals: None,
         has_anonymous_block: false,
         body,
-        signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) })),
+        signature: Some(fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Str) })),
         effects: EffectSet::default(),
         is_async: false,
     }]

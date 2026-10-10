@@ -149,7 +149,7 @@ fn measure(ty: &Ty) -> (usize, usize) {
         Ty::Union { variants } => (variants.iter().collect(), false),
         Ty::Class { args, .. } => (args.iter().collect(), !args.is_empty()),
         Ty::Fn { params, block, ret, .. } => (
-            params.iter().map(|p| &p.ty).chain(block.as_deref()).chain(std::iter::once(&**ret)).collect(),
+            params.iter().map(|p| &*p.ty).chain(block.as_deref()).chain(std::iter::once(&**ret)).collect(),
             true,
         ),
         _ => (Vec::new(), false),

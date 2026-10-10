@@ -1302,7 +1302,7 @@ fn concern_class_attribute_macros_are_fully_typed() {
     };
     assert_eq!(
         params[0].ty,
-        roundhouse::ty::Ty::Array { elem: Box::new(roundhouse::ty::Ty::Str) },
+        roundhouse::ty::Ty::Array { elem: std::sync::Arc::new(roundhouse::ty::Ty::Str) }.into(),
         "codes"
     );
     // `only: nil` is nil when absent, which the signature has to say.
@@ -1312,7 +1312,7 @@ fn concern_class_attribute_macros_are_fully_typed() {
     };
     let only = params.iter().find(|p| p.name.as_str() == "only").expect("only");
     assert!(
-        matches!(&only.ty, roundhouse::ty::Ty::Union { variants } if variants.contains(&roundhouse::ty::Ty::Nil)),
+        matches!(&*only.ty, roundhouse::ty::Ty::Union { variants } if variants.contains(&roundhouse::ty::Ty::Nil)),
         "only: {:?}",
         only.ty
     );
@@ -8052,7 +8052,7 @@ puts "Data factory identity, aliases, constructors, values and immutability pass
         let Ty::Fn { ret, .. } = &owner_methods[&Symbol::from("build")] else {
             panic!("build has no function signature: {sidecar}");
         };
-        assert_eq!(ret.as_ref(), &Ty::Class { id, args: vec![] }, "{sidecar}");
+        assert_eq!(ret.as_ref(), &Ty::Class { id, args: vec![].into() }, "{sidecar}");
     }
 }
 

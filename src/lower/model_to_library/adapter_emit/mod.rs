@@ -94,9 +94,9 @@ pub(super) fn synth_find_primary_key_input(owner: &ClassId, table: &Table) -> Me
         "_adapter_find_by_id",
         Ty::Union {
             variants: vec![
-                Ty::Class { id: owner.clone(), args: vec![] },
+                Ty::Class { id: owner.clone(), args: vec![].into() },
                 Ty::Nil,
-            ],
+            ].into(),
         },
         super::nil_lit(),
     )
@@ -183,8 +183,8 @@ fn synth_primary_key_input(
 fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
     let id = Symbol::from("id");
     let key_ty = key_ty(table);
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    let nilable_owner = Ty::Union { variants: vec![owner_ty, Ty::Nil] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+    let nilable_owner = Ty::Union { variants: vec![owner_ty, Ty::Nil].into() };
 
     let op = ArelOp::Select(Select {
         single_record: true, // _adapter_find_by_id — one record or nil
@@ -217,7 +217,7 @@ fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> 
 }
 
 fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
 
     let op = ArelOp::Select(Select {
         single_record: false, // _adapter_all — a collection
@@ -239,7 +239,7 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
         receiver: MethodReceiver::Class,
         params: vec![],
         body: SqliteVisitor.visit(&op, schema, owner),
-        signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(owner_ty) })),
+        signature: Some(fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(owner_ty) })),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -256,8 +256,8 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
 /// as `_adapter_find_by_id`, so it works for every app (the raw
 /// `ActiveRecord.adapter` is not wired under the Level-3 architecture).
 fn synth_adapter_last(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    let nilable_owner = Ty::Union { variants: vec![owner_ty, Ty::Nil] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+    let nilable_owner = Ty::Union { variants: vec![owner_ty, Ty::Nil].into() };
 
     let op = ArelOp::Select(Select {
         single_record: true, // _adapter_last — one record or nil
@@ -883,7 +883,7 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
 
     let stmt = Symbol::from("stmt");
     let db = ClassId(Symbol::from("Db"));
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
 
     // SQL: "SELECT <cols> FROM <table> WHERE id = " + Db.escape_int(@id) + " LIMIT 1"
     let cols_csv: String = table
@@ -1099,8 +1099,8 @@ fn synth_hydrate_all(owner: &ClassId) -> MethodDef {
     let stmt = Symbol::from("stmt");
     let results = Symbol::from("results");
     let db = ClassId(Symbol::from("Db"));
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    let owner_array_ty = Ty::Array { elem: Box::new(owner_ty) };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+    let owner_array_ty = Ty::Array { elem: std::sync::Arc::new(owner_ty) };
 
     let stmt_assign = arel_assign(&stmt, arel_db_call(&db, "prepare", vec![var_ref(&sql)]));
     // Typed empty literal — same reason as the visitor's multi hydrate

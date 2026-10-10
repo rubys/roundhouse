@@ -81,7 +81,7 @@ fn permitted_chain(e: &Expr) -> Option<Expr> {
 
 /// What `Params.permitted` answers: the Symbol-keyed scalars.
 fn permitted_ty() -> Ty {
-    Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) }
+    Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) }
 }
 
 fn sym_name(e: &Expr) -> Option<String> {

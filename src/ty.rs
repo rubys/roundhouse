@@ -12,6 +12,8 @@
 //! absorbed by unions so a raising branch doesn't widen the type.
 
 use indexmap::IndexMap;
+use crate::shared::Shared;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::effect::EffectSet;
@@ -73,11 +75,11 @@ pub enum Ty {
     /// association reads).
     Relation { of: ClassId },
 
-    Array { elem: Box<Ty> },
-    Hash { key: Box<Ty>, value: Box<Ty> },
-    Tuple { elems: Vec<Ty> },
+    Array { elem: Arc<Ty> },
+    Hash { key: Arc<Ty>, value: Arc<Ty> },
+    Tuple { elems: Shared<Vec<Ty>> },
     Record { row: Row },
-    Union { variants: Vec<Ty> },
+    Union { variants: Shared<Vec<Ty>> },
 
     /// An instance of the class that RECEIVED the call — RBS
     /// `instance` (and `self` on an instance-side member), sorbet
@@ -99,12 +101,12 @@ pub enum Ty {
     /// silent fallback would hide it.
     SelfInstance,
 
-    Class { id: ClassId, args: Vec<Ty> },
+    Class { id: ClassId, args: Shared<Vec<Ty>> },
 
     Fn {
-        params: Vec<Param>,
-        block: Option<Box<Ty>>,
-        ret: Box<Ty>,
+        params: Shared<Vec<Param>>,
+        block: Option<Arc<Ty>>,
+        ret: Arc<Ty>,
         effects: EffectSet,
     },
 
@@ -161,10 +163,10 @@ impl Ty {
     pub fn subst_self(&self, with: &Ty) -> Ty {
         match self {
             Ty::SelfInstance => with.clone(),
-            Ty::Array { elem } => Ty::Array { elem: Box::new(elem.subst_self(with)) },
+            Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(elem.subst_self(with)) },
             Ty::Hash { key, value } => Ty::Hash {
-                key: Box::new(key.subst_self(with)),
-                value: Box::new(value.subst_self(with)),
+                key: std::sync::Arc::new(key.subst_self(with)),
+                value: std::sync::Arc::new(value.subst_self(with)),
             },
             Ty::Tuple { elems } => {
                 Ty::Tuple { elems: elems.iter().map(|t| t.subst_self(with)).collect() }
@@ -191,12 +193,12 @@ impl Ty {
                     .iter()
                     .map(|p| Param {
                         name: p.name.clone(),
-                        ty: p.ty.subst_self(with),
+                        ty: p.ty.subst_self(with).into(),
                         kind: p.kind.clone(),
                     })
                     .collect(),
-                block: block.as_ref().map(|b| Box::new(b.subst_self(with))),
-                ret: Box::new(ret.subst_self(with)),
+                block: block.as_ref().map(|b| std::sync::Arc::new(b.subst_self(with))),
+                ret: std::sync::Arc::new(ret.subst_self(with)),
                 effects: effects.clone(),
             },
             // Leaves, and `Relation { of }` whose `of` is a ClassId
@@ -214,17 +216,17 @@ impl Ty {
                 args: args.iter().map(go).collect(),
             },
             Ty::Relation { of } if of == from => Ty::Relation { of: to.clone() },
-            Ty::Array { elem } => Ty::Array { elem: Box::new(go(elem)) },
-            Ty::Hash { key, value } => Ty::Hash { key: Box::new(go(key)), value: Box::new(go(value)) },
+            Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(go(elem)) },
+            Ty::Hash { key, value } => Ty::Hash { key: std::sync::Arc::new(go(key)), value: std::sync::Arc::new(go(value)) },
             Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(go).collect() },
             Ty::Union { variants } => Ty::Union { variants: variants.iter().map(go).collect() },
             Ty::Fn { params, block, ret, effects } => Ty::Fn {
                 params: params
                     .iter()
-                    .map(|p| Param { name: p.name.clone(), ty: go(&p.ty), kind: p.kind.clone() })
+                    .map(|p| Param { name: p.name.clone(), ty: go(&p.ty).into(), kind: p.kind.clone() })
                     .collect(),
-                block: block.as_ref().map(|b| Box::new(go(b))),
-                ret: Box::new(go(ret)),
+                block: block.as_ref().map(|b| std::sync::Arc::new(go(b))),
+                ret: std::sync::Arc::new(go(ret)),
                 effects: effects.clone(),
             },
             other => other.clone(),
@@ -240,10 +242,10 @@ impl Ty {
                 id: f(id),
                 args: args.iter().map(|t| t.map_class_ids(f)).collect(),
             },
-            Ty::Array { elem } => Ty::Array { elem: Box::new(elem.map_class_ids(f)) },
+            Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(elem.map_class_ids(f)) },
             Ty::Hash { key, value } => Ty::Hash {
-                key: Box::new(key.map_class_ids(f)),
-                value: Box::new(value.map_class_ids(f)),
+                key: std::sync::Arc::new(key.map_class_ids(f)),
+                value: std::sync::Arc::new(value.map_class_ids(f)),
             },
             Ty::Tuple { elems } => {
                 Ty::Tuple { elems: elems.iter().map(|t| t.map_class_ids(f)).collect() }
@@ -254,10 +256,10 @@ impl Ty {
             Ty::Fn { params, block, ret, effects } => Ty::Fn {
                 params: params
                     .iter()
-                    .map(|p| Param { name: p.name.clone(), ty: p.ty.map_class_ids(f), kind: p.kind.clone() })
+                    .map(|p| Param { name: p.name.clone(), ty: p.ty.map_class_ids(f).into(), kind: p.kind.clone() })
                     .collect(),
-                block: block.as_ref().map(|b| Box::new(b.map_class_ids(f))),
-                ret: Box::new(ret.map_class_ids(f)),
+                block: block.as_ref().map(|b| std::sync::Arc::new(b.map_class_ids(f))),
+                ret: std::sync::Arc::new(ret.map_class_ids(f)),
                 effects: effects.clone(),
             },
             other => other.clone(),
@@ -321,7 +323,7 @@ impl Ty {
     pub fn collection_elem(&self) -> Option<Ty> {
         match self {
             Ty::Array { elem } => Some((**elem).clone()),
-            Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![] }),
+            Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
             Ty::Union { variants } => {
                 let mut non_nil = variants.iter().filter(|v| !matches!(v, Ty::Nil));
                 let first = non_nil.next()?;
@@ -424,7 +426,7 @@ impl Ty {
         match kept.len() {
             0 => Ty::Nil,
             1 => kept.into_iter().next().unwrap(),
-            _ => Ty::Union { variants: kept },
+            _ => Ty::Union { variants: kept.into() },
         }
     }
 
@@ -451,7 +453,7 @@ impl Ty {
                 match kept.len() {
                     0 => Ty::Untyped,
                     1 => kept.into_iter().next().unwrap(),
-                    _ => Ty::Union { variants: kept },
+                    _ => Ty::Union { variants: kept.into() },
                 }
             }
             Ty::Var { .. } => Ty::Untyped,
@@ -640,20 +642,20 @@ fn param_kind_tag(kind: &ParamKind) -> u8 {
 /// `fields` are known; `rest` is the open-extension variable if this is a partial view.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Row {
-    pub fields: IndexMap<Symbol, Ty>,
+    pub fields: Shared<IndexMap<Symbol, Ty>>,
     pub rest: Option<TyVar>,
 }
 
 impl Row {
     pub fn closed() -> Self {
-        Row { fields: IndexMap::new(), rest: None }
+        Row { fields: IndexMap::new().into(), rest: None }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Param {
     pub name: Symbol,
-    pub ty: Ty,
+    pub ty: std::sync::Arc<Ty>,
     pub kind: ParamKind,
 }
 
@@ -666,4 +668,10 @@ pub enum ParamKind {
     Keyword { required: bool },
     KeywordRest,
     Block,
+}
+
+impl From<std::sync::Arc<Ty>> for Ty {
+    fn from(value: std::sync::Arc<Ty>) -> Self {
+        std::sync::Arc::unwrap_or_clone(value)
+    }
 }

@@ -77,7 +77,7 @@ pub(super) fn register(
         }
         let instance = Ty::Class {
             id: id.clone(),
-            args: vec![],
+            args: vec![].into(),
         };
         let mut info = classes.remove(&id).unwrap_or_default();
         info.class_methods

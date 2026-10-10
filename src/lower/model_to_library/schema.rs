@@ -36,7 +36,7 @@ fn push_schema_symbol_list(
                 style: ArrayStyle::Brackets,
             },
         ),
-        Ty::Array { elem: Box::new(Ty::Sym) },
+        Ty::Array { elem: std::sync::Arc::new(Ty::Sym) },
     );
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -47,7 +47,7 @@ fn push_schema_symbol_list(
         receiver: MethodReceiver::Class,
         params: Vec::new(),
         body,
-        signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Sym) })),
+        signature: Some(fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Sym) })),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -562,7 +562,7 @@ fn synth_attributes_before_type_cast(owner: &ClassId, table: &Table) -> MethodDe
             (key, value)
         })
         .collect();
-    let ret = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
+    let ret = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
     let body = with_ty(Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: false }), ret.clone());
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -999,7 +999,7 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
     // native seam; the target boundary rejects unsupported Date seams
     // before an emitter can silently substitute a timestamp carrier.
     let (body, ret_ty) = if let Some(label) = enum_label_read(model, col) {
-        (label, Ty::Union { variants: vec![Ty::Str, Ty::Nil] })
+        (label, Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })
     } else if is_temporal_col(col) {
         // Nilable: a stored value can be absent (NULL / unset), so the
         // parse short-circuits to nil. Date?/Time? is the honest static type
@@ -1007,7 +1007,7 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
         // storage ivar.
         (
             temporal_reader_body(col),
-            Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil] },
+            Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil].into() },
         )
     } else if is_generic_json_col(col, model) {
         (json_reader_body(col), Ty::Untyped)
@@ -1143,7 +1143,7 @@ fn temporal_reader_body(col: &Column) -> Expr {
                 parenthesized: true,
             },
         ),
-        Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil] },
+        Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil].into() },
     )
 }
 
@@ -1220,8 +1220,8 @@ fn synth_temporal_writer(owner: &ClassId, col: &Column) -> MethodDef {
     let value_param = Symbol::from("value");
     let (value_ty, text_ty) = if col.nullable {
         (
-            Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil] },
-            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil].into() },
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
         )
     } else {
         (temporal_seam(col).0, Ty::Str)
@@ -1520,12 +1520,12 @@ fn synth_instantiate(owner: &ClassId, fire_after_initialize: bool) -> MethodDef 
     stmts.push(var_ref(instance));
     let body = seq(stmts);
 
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
     // Adapter rows are String-keyed across all targets (Crystal/TS can't
     // dynamically create Symbols at runtime; Spinel adapters skip the
     // historical `to_sym` step). Matches `synth_row_from_raw`. Internal
     // narrowing happens in the body.
-    let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
+    let row_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -1631,8 +1631,8 @@ pub(super) fn push_from_params_method(
 
     stmts.push(var_ref(instance));
 
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![].into() };
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -1701,7 +1701,7 @@ pub(super) fn push_create_from_params_method(
 ) {
     let p = Symbol::from("p");
     let instance = Symbol::from("instance");
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
 
     let from_params_call = Expr::new(
         Span::synthetic(),
@@ -1734,7 +1734,7 @@ pub(super) fn push_create_from_params_method(
         var_ref(instance),
     ];
 
-    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
+    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![].into() };
     methods.push(MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -1887,8 +1887,8 @@ fn synth_from_row(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     // not fire it on the empty shell.
     stmts.push(var_ref(instance));
 
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    let row_ty = Ty::Class { id: row_class, args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+    let row_ty = Ty::Class { id: row_class, args: vec![].into() };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -2014,7 +2014,7 @@ fn synth_from_stmt(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     }
     stmts.push(var_ref(instance));
 
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -2751,7 +2751,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                 Span::synthetic(),
                 ExprNode::Cast {
                     value: lookup.clone(),
-                    target_ty: Ty::Class { id: target.clone(), args: vec![] },
+                    target_ty: Ty::Class { id: target.clone(), args: vec![].into() },
                 },
             );
             let id_read = with_ty(
@@ -2975,13 +2975,13 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                     },
                 ));
             }
-            let elem = Ty::Class { id: target.clone(), args: vec![] };
+            let elem = Ty::Class { id: target.clone(), args: vec![].into() };
             let empty = with_ty(
                 Expr::new(
                     Span::synthetic(),
                     ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
                 ),
-                Ty::Array { elem: Box::new(elem) },
+                Ty::Array { elem: std::sync::Arc::new(elem) },
             );
             stmts.push(Expr::new(
                 Span::synthetic(),
@@ -3049,13 +3049,13 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         Span::synthetic(),
         ExprNode::Hash { entries: Vec::new(), kwargs: false },
     );
-    let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let attrs_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
     let signature = Ty::Fn {
         params: vec![crate::ty::Param {
-            name: attrs.clone(), ty: attrs_ty, kind: crate::ty::ParamKind::Optional,
-        }],
+            name: attrs.clone(), ty: attrs_ty.into(), kind: crate::ty::ParamKind::Optional,
+        }].into(),
         block: None,
-        ret: Box::new(Ty::Nil),
+        ret: std::sync::Arc::new(Ty::Nil),
         effects: EffectSet::default(),
     };
     MethodDef {
@@ -3114,7 +3114,7 @@ fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     // Hash<Str, ?> — value type is a union of column types; collapsing to
     // Untyped is the conservative approximation. Refining to a Record
     // (row-polymorphic) is a follow-up if downstream wants per-key types.
-    let hash_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
     let body = with_ty(
         Expr::new(
             Span::synthetic(),
@@ -3309,9 +3309,9 @@ fn enum_label_read(model: &Model, col: &Column) -> Option<Expr> {
                 parenthesized: true,
             },
         ),
-        Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+        Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
     );
-    Some(with_ty(nil_guarded(col, stored, call), Ty::Union { variants: vec![Ty::Str, Ty::Nil] }))
+    Some(with_ty(nil_guarded(col, stored, call), Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }))
 }
 
 /// The mapping as two parallel literal Arrays, and the stored values' type — `None` for a mapping that mixes kinds.
@@ -3338,7 +3338,7 @@ fn enum_arrays(model: &Model, col: &Column) -> Option<(Expr, Expr, Ty)> {
     let array = |elems: Vec<Expr>, of: Ty| {
         with_ty(
             Expr::new(Span::synthetic(), ExprNode::Array { elements: elems, style: Default::default() }),
-            Ty::Array { elem: Box::new(of) },
+            Ty::Array { elem: std::sync::Arc::new(of) },
         )
     };
     Some((array(labels, Ty::Str), array(values, value_ty.clone()), value_ty))
@@ -3369,11 +3369,11 @@ fn enum_int_call(model: &Model, col: &Column, text: Expr) -> Option<Expr> {
             .collect::<Option<Vec<_>>>()?;
         args.push(with_ty(
             Expr::new(Span::synthetic(), ExprNode::Array { elements: texts, style: Default::default() }),
-            Ty::Array { elem: Box::new(Ty::Str) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         ));
     }
     args.push(attr);
-    let ret = if nullable { Ty::Union { variants: vec![value_ty, Ty::Nil] } } else { value_ty };
+    let ret = if nullable { Ty::Union { variants: vec![value_ty, Ty::Nil].into() } } else { value_ty };
     Some(with_ty(
         Expr::new(
             Span::synthetic(),
@@ -3494,7 +3494,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
             Ty::Union { variants: vs }
         }
         single => Ty::Union {
-            variants: vec![single.clone(), Ty::Nil],
+            variants: vec![single.clone(), Ty::Nil].into(),
         },
     };
 
@@ -3674,7 +3674,7 @@ fn column_union_ty(table: &Table) -> Ty {
     if variants.len() == 1 {
         variants.into_iter().next().unwrap()
     } else {
-        Ty::Union { variants }
+        Ty::Union { variants: variants.into() }
     }
 }
 
@@ -3780,8 +3780,8 @@ fn synth_update_typed(
         stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
     }
 
-    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
-    let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![] } } else { Ty::Bool };
+    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![].into() };
+    let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![].into() } } else { Ty::Bool };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -4100,8 +4100,8 @@ fn synth_update_hash(
         stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
     }
 
-    let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
-    let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![] } } else { Ty::Bool };
+    let attrs_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![].into() } } else { Ty::Bool };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,

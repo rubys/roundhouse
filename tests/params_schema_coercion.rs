@@ -102,7 +102,7 @@ fn schema_scalar_conversions_are_in_shared_lowered_ir() {
             (
                 "ratio",
                 Ty::Union {
-                    variants: vec![Ty::Float, Ty::Nil],
+                    variants: vec![Ty::Float, Ty::Nil].into(),
                 },
             ),
             ("enabled", Ty::Bool),

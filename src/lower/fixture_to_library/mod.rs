@@ -176,7 +176,7 @@ fn build_fixture_class(
 ) -> LibraryClass {
     let owner_name = format!("{}Fixtures", camelize(f.name.as_str()));
     let owner_id = ClassId(Symbol::from(owner_name.clone()));
-    let class_ty = Ty::Class { id: f.class.clone(), args: vec![] };
+    let class_ty = Ty::Class { id: f.class.clone(), args: vec![].into() };
 
     // Each label method (`one`, `two`, …) returns the persisted record
     // looked up by id. The actual insert happens in `_fixtures_load!`,
@@ -364,7 +364,7 @@ fn build_find_call(cls: &ClassId, id: i64) -> Expr {
             Span::synthetic(),
             ExprNode::Const { path: vec![cls.0.clone()] },
         ),
-        Ty::Class { id: cls.clone(), args: vec![] },
+        Ty::Class { id: cls.clone(), args: vec![].into() },
     );
     with_ty(
         Expr::new(
@@ -377,7 +377,7 @@ fn build_find_call(cls: &ClassId, id: i64) -> Expr {
                 parenthesized: true,
             },
         ),
-        Ty::Class { id: cls.clone(), args: vec![] },
+        Ty::Class { id: cls.clone(), args: vec![].into() },
     )
 }
 
@@ -403,7 +403,7 @@ fn build_load_method_body(
     all: &LoweredFixtureSet,
     defaults: &[&Column],
 ) -> Expr {
-    let class_ty = Ty::Class { id: cls.clone(), args: vec![] };
+    let class_ty = Ty::Class { id: cls.clone(), args: vec![].into() };
     let instance_sym = Symbol::from("instance");
 
     let mut exprs: Vec<Expr> = Vec::new();
@@ -582,7 +582,7 @@ fn load_file_blob(id: i64, blob: &crate::dialect::FixtureFileBlob) -> Expr {
             Span::synthetic(),
             ExprNode::Const { path: vec![Symbol::from("ActiveStorage"), Symbol::from("FixtureSet")] },
         ),
-        Ty::Class { id: ClassId(Symbol::from("ActiveStorage::FixtureSet")), args: vec![] },
+        Ty::Class { id: ClassId(Symbol::from("ActiveStorage::FixtureSet")), args: vec![].into() },
     );
     with_ty(
         Expr::new(
@@ -701,7 +701,7 @@ pub fn rewrite_fixture_calls(body: &Expr, fixture_names: &[Symbol]) -> Expr {
                     e.span,
                     ExprNode::Const { path: vec![Symbol::from(owner.as_str())] },
                 ),
-                Ty::Class { id: owner_id.clone(), args: vec![] },
+                Ty::Class { id: owner_id.clone(), args: vec![].into() },
             )
         };
         // One argument → one record.

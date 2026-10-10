@@ -98,7 +98,7 @@ impl Analyzer {
             let mut ctx = Ctx {
                 self_ty: Some(Ty::Class {
                     id: module.name.clone(),
-                    args: vec![],
+                    args: vec![].into(),
                 }),
                 constants: constants.clone(),
                 ..Ctx::default()

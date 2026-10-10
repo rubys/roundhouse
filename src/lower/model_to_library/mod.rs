@@ -354,11 +354,11 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                 vec![(
                     Symbol::from("params"),
                     Ty::Hash {
-                        key: Box::new(Ty::Sym),
-                        value: Box::new(Ty::Untyped),
+                        key: std::sync::Arc::new(Ty::Sym),
+                        value: std::sync::Arc::new(Ty::Untyped),
                     },
                 )],
-                Ty::Class { id: class_id.clone(), args: vec![] },
+                Ty::Class { id: class_id.clone(), args: vec![].into() },
             ),
         );
         info.class_method_kinds
@@ -1559,21 +1559,21 @@ pub(crate) fn push_scope_variants(
                     name: rel.clone(),
                     ty: Ty::Class {
                         id: ClassId(Symbol::from("ActiveRecord::Relation")),
-                        args: vec![],
-                    },
+                        args: vec![].into(),
+                    }.into(),
                     kind: crate::ty::ParamKind::Required,
                 }];
                 for p in &shape.positionals[..k] {
                     sig_params.push(crate::ty::Param {
                         name: p.name.clone(),
-                        ty: Ty::Untyped,
+                        ty: Ty::Untyped.into(),
                         kind: crate::ty::ParamKind::Required,
                     });
                 }
                 for p in &subset {
                     sig_params.push(crate::ty::Param {
                         name: p.name.clone(),
-                        ty: Ty::Untyped,
+                        ty: Ty::Untyped.into(),
                         kind: crate::ty::ParamKind::Keyword { required: true },
                     });
                 }
@@ -1587,9 +1587,9 @@ pub(crate) fn push_scope_variants(
                     params,
                     body,
                     signature: Some(Ty::Fn {
-                        params: sig_params,
+                        params: sig_params.into(),
                         block: None,
-                        ret: Box::new(Ty::Untyped),
+                        ret: std::sync::Arc::new(Ty::Untyped),
                         effects: crate::effect::EffectSet::default(),
                     }),
                     effects: crate::effect::EffectSet::default(),
@@ -1775,12 +1775,12 @@ fn build_class_info_with_finder_inputs(
                 // Unsigned methods retain default types, not call-site seeds.
                 params: m.params.iter().map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: p.default.as_ref().and_then(|d| d.ty.clone()).unwrap_or(Ty::Untyped),
+                    ty: p.default.as_ref().and_then(|d| d.ty.clone()).unwrap_or(Ty::Untyped).into(),
                     kind: p.ty_kind(),
                 }).collect(),
                 block: (m.block_param.is_some() || m.has_anonymous_block)
-                    .then(|| Box::new(Ty::Untyped)),
-                ret: Box::new(inferred.clone()),
+                    .then(|| std::sync::Arc::new(Ty::Untyped)),
+                ret: std::sync::Arc::new(inferred.clone()),
                 effects: m.effects.clone(),
             });
         kind_map.entry(m.name.clone()).or_insert(m.kind);
@@ -1790,12 +1790,12 @@ fn build_class_info_with_finder_inputs(
     // public API that synthesized model bodies actually call). Only insert
     // when not already overridden by the lowerer.
     let class_id = &model.name;
-    let owner_ty = Ty::Class { id: class_id.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: class_id.clone(), args: vec![].into() };
     let owner_or_nil = Ty::Union {
-        variants: vec![owner_ty.clone(), Ty::Nil],
+        variants: vec![owner_ty.clone(), Ty::Nil].into(),
     };
-    let array_owner = Ty::Array { elem: Box::new(owner_ty.clone()) };
-    let any_hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let array_owner = Ty::Array { elem: std::sync::Arc::new(owner_ty.clone()) };
+    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
 
     // ApplicationRecord declares `id` and `id=` (the schema synthesizers
     // skip the id column because it's inherited from the base class).
@@ -1841,7 +1841,7 @@ fn build_class_info_with_finder_inputs(
     insert_default(
         &mut info.instance_methods,
         "errors",
-        fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) }),
+        fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
     );
     insert_default(&mut info.instance_methods, "valid?", fn_sig(vec![], Ty::Bool));
     insert_default(
@@ -1972,17 +1972,17 @@ fn build_class_info_with_finder_inputs(
     insert_default(
         &mut info.class_methods,
         "first",
-        fn_sig(vec![], Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil] }),
+        fn_sig(vec![], Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil].into() }),
     );
     insert_default(
         &mut info.class_methods,
         "last",
-        fn_sig(vec![], Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil] }),
+        fn_sig(vec![], Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil].into() }),
     );
     insert_default(
         &mut info.class_methods,
         "take",
-        fn_sig(vec![], Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil] }),
+        fn_sig(vec![], Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil].into() }),
     );
     insert_default(
         &mut info.class_methods,
@@ -2016,13 +2016,13 @@ fn build_class_info_with_finder_inputs(
         "_adapter_find_by_id",
         fn_sig(
             vec![(Symbol::from("id"), key_ty.clone())],
-            Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil] },
+            Ty::Union { variants: vec![owner_ty.clone(), Ty::Nil].into() },
         ),
     );
     insert_default(
         &mut info.class_methods,
         "_adapter_all",
-        fn_sig(vec![], Ty::Array { elem: Box::new(owner_ty.clone()) }),
+        fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(owner_ty.clone()) }),
     );
     insert_default(
         &mut info.class_methods,
@@ -2080,7 +2080,7 @@ fn build_class_info_with_finder_inputs(
         "_hydrate_all",
         fn_sig(
             vec![(Symbol::from("sql"), Ty::Str)],
-            Ty::Array { elem: Box::new(owner_ty.clone()) },
+            Ty::Array { elem: std::sync::Arc::new(owner_ty.clone()) },
         ),
     );
 
@@ -2094,7 +2094,7 @@ fn build_class_info_with_finder_inputs(
         &mut info.class_methods,
         "from_row",
         fn_sig(
-            vec![(Symbol::from("row"), Ty::Class { id: row_class_id, args: vec![] })],
+            vec![(Symbol::from("row"), Ty::Class { id: row_class_id, args: vec![].into() })],
             owner_ty.clone(),
         ),
     );
@@ -2174,15 +2174,15 @@ fn broadcasts_class_info() -> crate::analyze::ClassInfo {
     // site, which every target dispatches correctly: Ruby kwargs →
     // Hash, Crystal NamedTuple → named params, TS object literal).
     use crate::dialect::AccessorKind;
-    let opts_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let opts_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
     let sig = Ty::Fn {
         params: vec![crate::ty::Param {
             name: Symbol::from("opts"),
-            ty: opts_ty,
+            ty: opts_ty.into(),
             kind: crate::ty::ParamKind::KeywordRest,
-        }],
+        }].into(),
         block: None,
-        ret: Box::new(Ty::Nil),
+        ret: std::sync::Arc::new(Ty::Nil),
         effects: crate::effect::EffectSet::pure(),
     };
     for name in ["prepend", "replace", "remove", "append"] {
@@ -2196,7 +2196,7 @@ fn broadcasts_class_info() -> crate::analyze::ClassInfo {
 /// existing input contracts rather than assigning them integer casting rules.
 pub(super) fn finder_input_ty(key: &Ty) -> Ty {
     if matches!(key, Ty::Int | Ty::Str) {
-        Ty::Union { variants: vec![Ty::Int, Ty::Float, Ty::Str, Ty::Nil] }
+        Ty::Union { variants: vec![Ty::Int, Ty::Float, Ty::Str, Ty::Nil].into() }
     } else {
         key.clone()
     }
@@ -2207,9 +2207,9 @@ pub(super) fn finder_input_ty(key: &Ty) -> Ty {
 fn insert_integer_key_cast_info(classes: &mut HashMap<ClassId, crate::analyze::ClassInfo>) {
     let id = ClassId(Symbol::from("ActiveRecord::IntegerKeyCast"));
     let mut info = crate::analyze::ClassInfo::default();
-    let input = Ty::Union { variants: vec![Ty::Int, Ty::Float, Ty::Str, Ty::Nil] };
+    let input = Ty::Union { variants: vec![Ty::Int, Ty::Float, Ty::Str, Ty::Nil].into() };
     info.class_methods.insert(Symbol::from("parse"), fn_sig(
-        vec![(Symbol::from("id"), input.clone())], Ty::Class { id: id.clone(), args: vec![] },
+        vec![(Symbol::from("id"), input.clone())], Ty::Class { id: id.clone(), args: vec![].into() },
     ));
     info.class_methods.insert(Symbol::from("input_text"), fn_sig(
         vec![(Symbol::from("id"), input)], Ty::Str,
@@ -2229,13 +2229,13 @@ fn type_method_body(
     let mut ctx = crate::analyze::Ctx::default();
     if let Some(Ty::Fn { params, .. }) = &method.signature {
         for (param, sig) in method.params.iter().zip(params.iter()) {
-            ctx.local_bindings.insert(param.name.clone(), sig.ty.clone());
+            ctx.local_bindings.insert(param.name.clone(), (*sig.ty).clone());
         }
     }
     if let Some(enclosing) = &method.enclosing_class {
         ctx.self_ty = Some(Ty::Class {
             id: ClassId(enclosing.clone()),
-            args: vec![],
+            args: vec![].into(),
         });
     }
     // Seed ivar_bindings from schema columns so bare `@title` reads
@@ -2333,14 +2333,14 @@ fn backfill_scalar_signature(method: &mut MethodDef, body_ty: Ty) {
         .iter()
         .map(|p| crate::ty::Param {
             name: p.name.clone(),
-            ty: Ty::Untyped,
+            ty: Ty::Untyped.into(),
             kind: p.ty_kind(),
         })
         .collect();
     method.signature = Some(Ty::Fn {
         params,
         block: None,
-        ret: Box::new(body_ty),
+        ret: std::sync::Arc::new(body_ty),
         effects: crate::effect::EffectSet::default(),
     });
 }
@@ -2457,7 +2457,7 @@ pub fn ty_of_column(t: &ColumnType) -> Ty {
 pub fn ty_of_column_slot(col: &Column) -> Ty {
     let base = ty_of_column(&col.col_type);
     if (col.nullable || col.generated.is_some()) && !col.primary_key {
-        Ty::Union { variants: vec![base, Ty::Nil] }
+        Ty::Union { variants: vec![base, Ty::Nil].into() }
     } else {
         base
     }
@@ -2471,12 +2471,12 @@ pub(crate) fn fn_sig(params: Vec<(Symbol, Ty)>, ret: Ty) -> Ty {
             .into_iter()
             .map(|(name, ty)| crate::ty::Param {
                 name,
-                ty,
+                ty: ty.into(),
                 kind: crate::ty::ParamKind::Required,
             })
             .collect(),
         block: None,
-        ret: Box::new(ret),
+        ret: std::sync::Arc::new(ret),
         effects: crate::effect::EffectSet::pure(),
     }
 }
@@ -2581,7 +2581,7 @@ mod tests {
             .body
             .ty = Some(Ty::Class {
             id: ClassId(Symbol::from("Book")),
-            args: vec![],
+            args: vec![].into(),
         });
         let info = article_info(&app, &methods);
         assert_eq!(
@@ -2589,7 +2589,7 @@ mod tests {
                 .get(&Symbol::from("positioning_parent")),
             Some(&fn_sig(vec![], Ty::Class {
                 id: ClassId(Symbol::from("Book")),
-                args: vec![]
+                args: vec![].into()
             }))
         );
     }
@@ -2601,11 +2601,11 @@ mod tests {
                 "  belongs_to :book\n  def parent_for({formal})\n    book\n  end\n  def probe\n    parent_for(title: 'asymmetric')\n  end"
             ));
             let mut methods = article_methods(&app);
-            let record = Ty::Class { id: ClassId(Symbol::from("Book")), args: vec![] };
+            let record = Ty::Class { id: ClassId(Symbol::from("Book")), args: vec![].into() };
             let parent = methods.iter_mut().find(|m| m.name.as_str() == "parent_for").unwrap();
             parent.body.ty = Some(record.clone());
             parent.params[0].default.as_mut().unwrap().ty = Some(Ty::Hash {
-                key: Box::new(Ty::Sym), value: Box::new(Ty::Str),
+                key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str),
             });
             let classes = HashMap::from([
                 (ClassId(Symbol::from("Article")), article_info(&app, &methods)),
@@ -2629,7 +2629,7 @@ mod tests {
             .find(|m| m.name.as_str() == "recent")
             .unwrap();
         recent.signature = None;
-        recent.body.ty = Some(Ty::Class { id: ClassId(Symbol::from("Book")), args: vec![] });
+        recent.body.ty = Some(Ty::Class { id: ClassId(Symbol::from("Book")), args: vec![].into() });
         let info = article_info(&app, &methods);
         assert_eq!(
             info.class_methods.get(&Symbol::from("recent")),
@@ -2643,7 +2643,7 @@ mod tests {
     fn raw_container_and_fn_body_types_are_excluded() {
         let app = app("  def callable\n    1\n  end");
         let mut methods = article_methods(&app);
-        for ty in [fn_sig(vec![], Ty::Int), Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Int) }, Ty::Untyped] {
+        for ty in [fn_sig(vec![], Ty::Int), Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Int) }, Ty::Untyped] {
             let callable = methods.iter_mut().find(|m| m.name.as_str() == "callable").unwrap();
             callable.signature = None;
             callable.body.ty = Some(ty);
@@ -2659,8 +2659,8 @@ mod tests {
     fn scalar_array_body_type_is_registered_but_not_an_untyped_one() {
         let app = app("  def self.evens\n    [1, 2].map { |x| x * 2 }\n  end");
         let mut methods = article_methods(&app);
-        let ints = Ty::Array { elem: Box::new(Ty::Int) };
-        for (ty, kept) in [(ints.clone(), true), (Ty::Array { elem: Box::new(Ty::Untyped) }, false)] {
+        let ints = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
+        for (ty, kept) in [(ints.clone(), true), (Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }, false)] {
             let evens = methods.iter_mut().find(|m| m.name.as_str() == "evens").unwrap();
             evens.signature = None;
             evens.body.ty = Some(ty);
@@ -2683,7 +2683,7 @@ mod tests {
             .unwrap();
         let explicit = fn_sig(vec![], Ty::Int);
         answer.signature = Some(explicit.clone());
-        answer.body.ty = Some(Ty::Class { id: ClassId(Symbol::from("Book")), args: vec![] });
+        answer.body.ty = Some(Ty::Class { id: ClassId(Symbol::from("Book")), args: vec![].into() });
         assert_eq!(
             article_info(&app, &methods)
                 .instance_methods

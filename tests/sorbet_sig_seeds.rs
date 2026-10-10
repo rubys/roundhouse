@@ -106,7 +106,7 @@ fn a_sig_declares_the_method_the_analyzer_could_not_infer() {
     let Ty::Fn { params, .. } = &ty else { panic!("expected a function type, got {ty:?}") };
     assert_eq!(params.len(), 1);
     assert_eq!(params[0].name, Symbol::new("name"));
-    assert_eq!(params[0].ty, Ty::Str);
+    assert_eq!(params[0].ty, Ty::Str.into());
 }
 
 #[test]
@@ -160,20 +160,20 @@ end
     assert_eq!(ret("a"), Some(Ty::Nil), "void is Nil");
     assert_eq!(
         ret("b"),
-        Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil] }),
+        Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
         "T.nilable is a union with Nil"
     );
     assert_eq!(
         ret("c"),
-        Some(Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Int) })
+        Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Int) })
     );
     assert_eq!(ret("d"), Some(Ty::Sym), "modifier forms carry no type of their own");
-    assert_eq!(ret("e"), Some(Ty::Union { variants: vec![Ty::Str, Ty::Int] }));
+    assert_eq!(ret("e"), Some(Ty::Union { variants: vec![Ty::Str, Ty::Int].into() }));
     let Some(Ty::Fn { params, .. }) = signature(&app, "ReportsController", "c") else {
         panic!("c has a signature")
     };
-    assert_eq!(params[0].ty, Ty::Array { elem: Box::new(Ty::Str) });
-    assert_eq!(params[1].ty, Ty::Bool, "T::Boolean");
+    assert_eq!(params[0].ty, Ty::Array { elem: std::sync::Arc::new(Ty::Str) }.into());
+    assert_eq!(params[1].ty, Ty::Bool.into(), "T::Boolean");
 }
 
 #[test]
@@ -248,11 +248,11 @@ end
     assert_eq!(returns_of(&row("count").expect("count")), Some(Ty::Int));
     assert_eq!(
         returns_of(&row("note").expect("note")),
-        Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil] })
+        Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })
     );
     assert_eq!(
         returns_of(&row("tags").expect("a `default:` rides along and says nothing about the type")),
-        Some(Ty::Array { elem: Box::new(Ty::Str) })
+        Some(Ty::Array { elem: std::sync::Arc::new(Ty::Str) })
     );
     // `prop` is writable, `const` is not.
     assert!(row("note=").is_some(), "a prop declares its writer");

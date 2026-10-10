@@ -237,7 +237,7 @@ fn generated_visibility_changes_are_refused_before_dispatch_grounding() {
         let mut body = roundhouse::ingest::ingest_expr(&statement, "probe.rb").unwrap();
         let ExprNode::Send { recv: Some(recv), .. } = &mut *body.node else { panic!("dispatch call") };
         recv.ty = Some(roundhouse::ty::Ty::Class {
-            id: roundhouse::ident::ClassId(roundhouse::Symbol::from("Article")), args: vec![],
+            id: roundhouse::ident::ClassId(roundhouse::Symbol::from("Article")), args: vec![].into(),
         });
         roundhouse::lower::scope_chain::ground_literal_model_dispatch(&mut body, &app, &assocs);
         assert_eq!(ruby::emit_expr(&body), "self.comments", "{dispatcher}");
@@ -308,7 +308,7 @@ fn reopened_and_initializer_dispatchers_preserve_reflection() {
         };
         recv.ty = Some(roundhouse::ty::Ty::Class {
             id: roundhouse::ident::ClassId(roundhouse::Symbol::from(owner)),
-            args: vec![],
+            args: vec![].into(),
         });
         roundhouse::lower::scope_chain::ground_literal_model_dispatch(&mut body, &app, &assocs);
         let source = ruby::emit_expr(&body);

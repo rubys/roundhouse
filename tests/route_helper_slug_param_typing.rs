@@ -48,7 +48,7 @@ fn nested_param_under_slug_parent_types_str() {
         let Ty::Fn { params, .. } = sig else {
             panic!("helper signature is not Ty::Fn: {sig:?}")
         };
-        params
+        params.to_vec()
     };
 
     // Nested collection helper: its `story_id` param must be Str (the
@@ -56,7 +56,7 @@ fn nested_param_under_slug_parent_types_str() {
     let params = sig_params("story_suggestions_path");
     assert_eq!(params[0].name.as_str(), "story_id");
     assert!(
-        matches!(params[0].ty, Ty::Str),
+        matches!(*params[0].ty, Ty::Str),
         "story_id under a slug parent must type Str, got {:?}",
         params[0].ty
     );
@@ -70,7 +70,7 @@ fn nested_param_under_slug_parent_types_str() {
         .map(|p| p.ty.clone())
         .expect("id param");
     assert!(
-        matches!(id_ty, Ty::Int),
+        matches!(*id_ty, Ty::Int),
         "suggestion's own id stays Int, got {id_ty:?}"
     );
 }

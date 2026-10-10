@@ -208,7 +208,7 @@ impl Reachability {
         for (cls, method) in extra_roots {
             let recv_ty = Ty::Class {
                 id: cls.clone(),
-                args: vec![],
+                args: vec![].into(),
             };
             for target in resolve_targets(Some(&recv_ty), method, &registry) {
                 record(target, &mut queue, &mut reachable, &mut reachable_names);

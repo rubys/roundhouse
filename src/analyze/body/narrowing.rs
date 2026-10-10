@@ -251,7 +251,7 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
         // `Numeric` covers Int and Float in Ruby's hierarchy. Union
         // both so subsequent dispatch resolves either via int_method
         // or as Float (universal methods cover the overlap).
-        "Numeric" => Ty::Union { variants: vec![Ty::Int, Ty::Float] },
+        "Numeric" => Ty::Union { variants: vec![Ty::Int, Ty::Float].into() },
         "Float" => Ty::Float,
         "String" => Ty::Str,
         "Symbol" => Ty::Sym,
@@ -265,10 +265,10 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
         // tells us "this is a Hash of *some* shape," and downstream
         // dispatch should propagate that gradualness rather than
         // leave block params as Var.
-        "Array" if core => Ty::Array { elem: Box::new(Ty::Untyped) },
+        "Array" if core => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
         "Hash" if core => Ty::Hash {
-            key: Box::new(Ty::Untyped),
-            value: Box::new(Ty::Untyped),
+            key: std::sync::Arc::new(Ty::Untyped),
+            value: std::sync::Arc::new(Ty::Untyped),
         },
         _ => Ty::Class {
             id: ClassId(Symbol::from(
@@ -278,7 +278,7 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
                     .collect::<Vec<_>>()
                     .join("::"),
             )),
-            args: vec![],
+            args: vec![].into(),
         },
     })
 }
@@ -373,7 +373,7 @@ pub(crate) fn remove_nil(ty: &Ty) -> Ty {
             match kept.len() {
                 0 => Ty::Nil,
                 1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept },
+                _ => Ty::Union { variants: kept.into() },
             }
         }
         // Not a union — if the type is bare Nil, the "non-nil" branch
@@ -412,10 +412,10 @@ fn intersect_with(current: &Ty, narrower: &Ty) -> Ty {
 fn intersect_variant(current: &Ty, narrower: &Ty) -> Option<Ty> {
     match (current, narrower) {
         (Ty::Class { id, .. }, Ty::Array { .. }) if id.0.as_str() == super::send::PARAM_VALUE => {
-            Some(Ty::Array { elem: Box::new(super::send::param_value_ty()) })
+            Some(Ty::Array { elem: std::sync::Arc::new(super::send::param_value_ty()) })
         }
         (Ty::Class { id, .. }, Ty::Hash { .. }) if id.0.as_str() == super::send::PARAM_VALUE => {
-            Some(Ty::Hash { key: Box::new(Ty::Str), value: Box::new(super::send::param_value_ty()) })
+            Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(super::send::param_value_ty()) })
         }
         (Ty::Untyped | Ty::Var { .. }, Ty::Array { .. } | Ty::Hash { .. }) => {
             Some(narrower.clone())
@@ -437,7 +437,7 @@ fn remove_variant(current: &Ty, ty: &Ty) -> Ty {
             match kept.len() {
                 0 => current.clone(),
                 1 => kept.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: kept },
+                _ => Ty::Union { variants: kept.into() },
             }
         }
         _ => current.clone(),

@@ -2026,16 +2026,16 @@ impl Fixture {
     pub(crate) fn accessor_signature(&self, models: &[Model]) -> Ty {
         let class = self.class_id();
         let ret = models.iter().find(|model| model.name == class)
-            .map(|model| Ty::Class { id: model.name.clone(), args: vec![] })
+            .map(|model| Ty::Class { id: model.name.clone(), args: vec![].into() })
             .unwrap_or(Ty::Untyped);
         Ty::Fn {
             params: vec![crate::ty::Param {
                 name: Symbol::from("name"),
-                ty: Ty::Sym,
+                ty: Ty::Sym.into(),
                 kind: crate::ty::ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(ret),
+            ret: std::sync::Arc::new(ret),
             effects: EffectSet::pure(),
         }
     }

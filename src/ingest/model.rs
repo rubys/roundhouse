@@ -2829,7 +2829,7 @@ pub(crate) fn row_from_table(table: &Table) -> Row {
     for col in &table.columns {
         fields.insert(col.name.clone(), ty_of_column_slot(col));
     }
-    Row { fields, rest: None }
+    Row { fields: fields.into(), rest: None }
 }
 
 /// The attributes-row type for a column: `ty_of_column` widened with
@@ -2842,7 +2842,7 @@ pub(crate) fn row_from_table(table: &Table) -> Row {
 fn ty_of_column_slot(col: &crate::schema::Column) -> Ty {
     let base = ty_of_column(&col.col_type);
     if col.nullable && !col.primary_key {
-        Ty::Union { variants: vec![base, Ty::Nil] }
+        Ty::Union { variants: vec![base, Ty::Nil].into() }
     } else {
         base
     }

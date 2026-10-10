@@ -238,10 +238,10 @@ fn prune_ty(ty: &Ty, resolve: &dyn Fn(&ClassId) -> Option<ClassId>) -> Ty {
             },
             None => Ty::Untyped,
         },
-        Ty::Array { elem } => Ty::Array { elem: Box::new(prune_ty(elem, resolve)) },
+        Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(prune_ty(elem, resolve)) },
         Ty::Hash { key, value } => Ty::Hash {
-            key: Box::new(prune_ty(key, resolve)),
-            value: Box::new(prune_ty(value, resolve)),
+            key: std::sync::Arc::new(prune_ty(key, resolve)),
+            value: std::sync::Arc::new(prune_ty(value, resolve)),
         },
         Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(|t| prune_ty(t, resolve)).collect() },
         Ty::Union { variants } => {
@@ -250,10 +250,10 @@ fn prune_ty(ty: &Ty, resolve: &dyn Fn(&ClassId) -> Option<ClassId>) -> Ty {
         Ty::Fn { params, block, ret, effects } => Ty::Fn {
             params: params
                 .iter()
-                .map(|p| crate::ty::Param { name: p.name.clone(), ty: prune_ty(&p.ty, resolve), kind: p.kind.clone() })
+                .map(|p| crate::ty::Param { name: p.name.clone(), ty: prune_ty(&p.ty, resolve).into(), kind: p.kind.clone() })
                 .collect(),
-            block: block.as_ref().map(|b| Box::new(prune_ty(b, resolve))),
-            ret: Box::new(prune_ty(ret, resolve)),
+            block: block.as_ref().map(|b| std::sync::Arc::new(prune_ty(b, resolve))),
+            ret: std::sync::Arc::new(prune_ty(ret, resolve)),
             effects: effects.clone(),
         },
         other => other.clone(),

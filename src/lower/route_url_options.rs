@@ -226,7 +226,7 @@ fn spread_options_local(arg: &Expr, index: usize, names: &[String]) -> Option<Ve
                 parenthesized: true,
             },
         );
-        e.ty = Some(crate::ty::Ty::Union { variants: vec![(**value).clone(), crate::ty::Ty::Nil] });
+        e.ty = Some(crate::ty::Ty::Union { variants: vec![(**value).clone(), crate::ty::Ty::Nil].into() });
         e
     };
     let mut out: Vec<Expr> = names[index..].iter().map(|n| read(n)).collect();

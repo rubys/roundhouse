@@ -175,7 +175,7 @@ end
     assert!(!bridge.body.span.is_synthetic());
     let Some(Ty::Fn { params, block, ret, .. }) = &bridge.signature else { panic!("typed bridge") };
     assert!(params.iter().all(|p| p.kind == ParamKind::Required));
-    assert_eq!(params[1].ty, Ty::Str);
+    assert_eq!(params[1].ty, Ty::Str.into());
     assert_eq!(bridge.body.ty.as_ref(), Some(ret.as_ref()));
     assert!(block.is_none());
     assert!(!app.helper_method_index.contains_key(&bridge.name));
@@ -193,10 +193,10 @@ end
     assert!(!bridge.effects.is_pure(), "the nested DB read is effectful");
     assert_eq!(value.effects, bridge.effects, "the call must retain nested effects");
     let roundhouse::expr::ExprNode::Send { recv: Some(recv), args, .. } = &*value.node else { panic!("bridge call") };
-    assert_eq!(recv.ty, Some(Ty::Class { id: helper.name.clone(), args: vec![] }),
+    assert_eq!(recv.ty, Some(Ty::Class { id: helper.name.clone(), args: vec![].into() }),
         "the synthesized receiver must be typed before downstream lowering");
     assert_eq!(value.ty.as_ref(), Some(ret.as_ref()));
-    assert_eq!(args.iter().map(|a| a.ty.as_ref()).collect::<Vec<_>>(), params.iter().map(|p| Some(&p.ty)).collect::<Vec<_>>());
+    assert_eq!(args.iter().map(|a| a.ty.as_ref()).collect::<Vec<_>>(), params.iter().map(|p| Some(&*p.ty)).collect::<Vec<_>>());
     let before = app.library_classes.clone();
     roundhouse::session::analyze_and_lower(&mut app);
     let after = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "ThingsHelper").unwrap();

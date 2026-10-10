@@ -55,7 +55,7 @@ fn library_ret(app: &roundhouse::App, class: &str, method: &str) -> Ty {
         .find(|m| m.name == Symbol::new(method))
         .unwrap_or_else(|| panic!("{class}#{method} exists"));
     match m.signature.clone().expect("inference wrote a signature") {
-        Ty::Fn { ret, .. } => *ret,
+        Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
         other => panic!("not a Fn: {other:?}"),
     }
 }
@@ -131,7 +131,7 @@ fn runtime_values_keep_their_owner_and_survive_a_source_roundtrip() {
 end
 "#),
     ]);
-    let expected = Ty::Array { elem: Box::new(Ty::Str) };
+    let expected = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
     assert_eq!(library_ret(&app, "RuntimeValueProbe", "direct"), expected);
     assert_eq!(library_ret(&app, "RuntimeValueProbe", "local"), Ty::Int);
     app = serde_json::from_slice(&serde_json::to_vec(&app).expect("serialize")).expect("deserialize");

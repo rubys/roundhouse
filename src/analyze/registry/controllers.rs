@@ -53,9 +53,9 @@ pub(in crate::analyze) fn register(
     // gradual; the chain methods keep the receiver's class.
     {
         let params_id = ClassId(Symbol::from("ActionController::Parameters"));
-        let params_ty = Ty::Class { id: params_id.clone(), args: vec![] };
+        let params_ty = Ty::Class { id: params_id.clone(), args: vec![].into() };
         let mut p = ClassInfo::default();
-        let hash_str_untyped = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
+        let hash_str_untyped = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
         for m in [
             // strong parameters
             "permit", "permit!", "except", "slice", "merge", "merge!", "reverse_merge",
@@ -89,7 +89,7 @@ pub(in crate::analyze) fn register(
         }
         p.instance_methods.insert(
             Symbol::from("keys"),
-            Ty::Array { elem: Box::new(Ty::Str) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         );
         for m in ["to_query", "to_param", "to_s", "inspect", "to_json"] {
             p.instance_methods.insert(Symbol::from(m), Ty::Str);
@@ -118,11 +118,11 @@ pub(in crate::analyze) fn register(
         p.class_methods.insert(Symbol::from("new"), params_ty.clone());
         p.class_methods.insert(
             Symbol::from("always_permitted_parameters"),
-            Ty::Array { elem: Box::new(Ty::Str) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         );
         p.class_methods.insert(
             Symbol::from("always_permitted_parameters="),
-            Ty::Array { elem: Box::new(Ty::Str) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         );
         p.class_methods.insert(Symbol::from("permit_all_parameters"), Ty::Bool);
         p.class_methods.insert(Symbol::from("permit_all_parameters="), Ty::Bool);
@@ -148,7 +148,7 @@ pub(in crate::analyze) fn register(
         for m in ["[]", "delete"] {
             session.instance_methods.insert(
                 Symbol::from(m),
-                Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+                Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
             );
         }
         for m in ["fetch", "dig"] {
@@ -160,20 +160,20 @@ pub(in crate::analyze) fn register(
         for m in ["key?", "has_key?", "include?", "empty?", "loaded?", "exists?"] {
             session.instance_methods.insert(Symbol::from(m), Ty::Bool);
         }
-        session.instance_methods.insert(Symbol::from("id"), Ty::Union { variants: vec![Ty::Str, Ty::Nil] });
-        session.instance_methods.insert(Symbol::from("keys"), Ty::Array { elem: Box::new(Ty::Str) });
+        session.instance_methods.insert(Symbol::from("id"), Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
+        session.instance_methods.insert(Symbol::from("keys"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         session.instance_methods.insert(
             Symbol::from("options"),
-            Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+            Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
         );
         for m in ["to_hash", "to_h"] {
             session.instance_methods.insert(
                 Symbol::from(m),
-                Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+                Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) },
             );
         }
         classes.insert(session_id.clone(), session);
-        app_ctrl.class_methods.insert(Symbol::from("session"), Ty::Class { id: session_id, args: vec![] });
+        app_ctrl.class_methods.insert(Symbol::from("session"), Ty::Class { id: session_id, args: vec![].into() });
     }
     app_ctrl.class_methods.insert(Symbol::from("render"), Ty::Nil);
     // Rails answers the rendered String and writes no response; the
@@ -241,7 +241,7 @@ pub(in crate::analyze) fn register(
         Symbol::from("flash"),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Flash::FlashHash")),
-            args: vec![],
+            args: vec![].into(),
         },
     );
     for m in ["action_name", "controller_name", "controller_path"] {
@@ -262,7 +262,7 @@ pub(in crate::analyze) fn register(
         super::block_fn(
             &Ty::Class {
                 id: ClassId(Symbol::from("ActionController::MimeResponds::Collector")),
-                args: vec![],
+                args: vec![].into(),
             },
             Ty::Nil,
         ),
@@ -276,7 +276,7 @@ pub(in crate::analyze) fn register(
     {
         let request_id = ClassId(Symbol::from("ActionDispatch::Request"));
         let mut request = ClassInfo::default();
-        let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
         for m in [
             "user_agent", "remote_ip", "ip", "url", "original_url", "fullpath", "path",
             "host", "host_with_port", "domain", "protocol", "scheme", "port_string",
@@ -311,7 +311,7 @@ pub(in crate::analyze) fn register(
         // nil at the scheme's standard port (campfire's default_url_options).
         request.instance_methods.insert(
             Symbol::from("optional_port"),
-            Ty::Union { variants: vec![Ty::Int, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         );
         // Rack env accessors and the parameter/header views Rails exposes on every
         // request. `POST`/`GET` are the raw form/query hashes; the header
@@ -319,7 +319,7 @@ pub(in crate::analyze) fn register(
         for m in ["POST", "GET", "session_options"] {
             request.instance_methods.insert(
                 Symbol::from(m),
-                Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+                Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) },
             );
         }
         for m in ["get_header", "set_header", "delete_header", "cookies"] {
@@ -338,7 +338,7 @@ pub(in crate::analyze) fn register(
             request.instance_methods.insert(Symbol::from(m), Ty::Untyped);
         }
         classes.insert(request_id.clone(), request);
-        let request_ty = Ty::Class { id: request_id, args: vec![] };
+        let request_ty = Ty::Class { id: request_id, args: vec![].into() };
         // A template reads `request` too — Rails' view context
         // delegates it, and a layout reaching for
         // `request.content_security_policy_nonce` is the shape that
@@ -361,25 +361,25 @@ pub(in crate::analyze) fn register(
     // that names one leaves the second bound to nothing and everything
     // compared against it untyped.
     let yields_two = |first: (&str, Ty), second: (&str, Ty), verdict: Ty| Ty::Fn {
-        params: Vec::new(),
-        block: Some(Box::new(Ty::Fn {
+        params: Vec::new().into(),
+        block: Some(std::sync::Arc::new(Ty::Fn {
             params: [first, second]
                 .into_iter()
                 .map(|(name, ty)| crate::ty::Param {
                     name: Symbol::from(name),
-                    ty,
+                    ty: ty.into(),
                     kind: crate::ty::ParamKind::Required,
                 })
                 .collect(),
             block: None,
-            ret: Box::new(verdict),
+            ret: std::sync::Arc::new(verdict),
             effects: crate::effect::EffectSet::default(),
         })),
         // The block's verdict, or nil once the challenge is rendered.
-        ret: Box::new(Ty::Untyped),
+        ret: std::sync::Arc::new(Ty::Untyped),
         effects: crate::effect::EffectSet::default(),
     };
-    let str_hash = || Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    let str_hash = || Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
     for m in ["authenticate_or_request_with_http_basic", "authenticate_with_http_basic"] {
         app_ctrl.class_methods.insert(
             Symbol::from(m),
@@ -410,9 +410,9 @@ pub(in crate::analyze) fn register(
     // `delete` answers the removed value.
     {
         let jar_id = ClassId(Symbol::from("ActionDispatch::Cookies::CookieJar"));
-        let jar_ty = Ty::Class { id: jar_id.clone(), args: vec![] };
+        let jar_ty = Ty::Class { id: jar_id.clone(), args: vec![].into() };
         let mut jar = ClassInfo::default();
-        let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
         for m in ["[]", "delete", "fetch"] {
             jar.instance_methods.insert(Symbol::from(m), str_or_nil());
         }
@@ -425,7 +425,7 @@ pub(in crate::analyze) fn register(
         for m in ["key?", "has_key?", "include?"] {
             jar.instance_methods.insert(Symbol::from(m), Ty::Bool);
         }
-        jar.instance_methods.insert(Symbol::from("to_h"), Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) });
+        jar.instance_methods.insert(Symbol::from("to_h"), Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) });
         jar.instance_methods.insert(Symbol::from("clear"), Ty::Nil);
         classes.insert(jar_id, jar);
         app_ctrl.class_methods.insert(Symbol::from("cookies"), jar_ty);
@@ -453,10 +453,10 @@ pub(in crate::analyze) fn register(
         let scope = crate::naming::snake_case(
             model.name.0.as_str().rsplit("::").next().unwrap_or(""),
         );
-        let model_ty = Ty::Class { id: model.name.clone(), args: vec![] };
+        let model_ty = Ty::Class { id: model.name.clone(), args: vec![].into() };
         app_ctrl.class_methods.insert(
             Symbol::from(format!("current_{scope}").as_str()),
-            Ty::Union { variants: vec![model_ty.clone(), Ty::Nil] },
+            Ty::Union { variants: vec![model_ty.clone(), Ty::Nil].into() },
         );
         app_ctrl.class_methods.insert(
             Symbol::from(format!("{scope}_signed_in?").as_str()),
@@ -484,7 +484,7 @@ pub(in crate::analyze) fn register(
         {
             view_cls.instance_methods.insert(
                 Symbol::from(format!("current_{scope}").as_str()),
-                Ty::Union { variants: vec![model_ty, Ty::Nil] },
+                Ty::Union { variants: vec![model_ty, Ty::Nil].into() },
             );
             view_cls.instance_methods.insert(
                 Symbol::from(format!("{scope}_signed_in?").as_str()),
@@ -540,12 +540,12 @@ pub(in crate::analyze) fn register(
 pub(crate) fn param_value_ty(nilable: bool) -> Ty {
     let mut variants = vec![
         Ty::Str,
-        Ty::Array { elem: Box::new(Ty::Untyped) },
-        Ty::Class { id: ClassId(Symbol::from("ActionController::Parameters")), args: vec![] },
-        Ty::Class { id: ClassId(Symbol::from("ActionDispatch::Http::UploadedFile")), args: vec![] },
+        Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
+        Ty::Class { id: ClassId(Symbol::from("ActionController::Parameters")), args: vec![].into() },
+        Ty::Class { id: ClassId(Symbol::from("ActionDispatch::Http::UploadedFile")), args: vec![].into() },
     ];
     if nilable {
         variants.push(Ty::Nil);
     }
-    Ty::Union { variants }
+    Ty::Union { variants: variants.into() }
 }

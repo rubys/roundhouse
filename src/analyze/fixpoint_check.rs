@@ -601,7 +601,7 @@ mod tests {
     use crate::ident::TyVar;
 
     fn union(variants: Vec<Ty>) -> Ty {
-        Ty::Union { variants }
+        Ty::Union { variants: variants.into() }
     }
 
     #[test]
@@ -718,20 +718,20 @@ end
 
     #[test]
     fn type_hash_tells_containers_apart() {
-        let arr = Ty::Array { elem: Box::new(Ty::Int) };
-        let hash = Ty::Hash { key: Box::new(Ty::Int), value: Box::new(Ty::Int) };
+        let arr = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
+        let hash = Ty::Hash { key: std::sync::Arc::new(Ty::Int), value: std::sync::Arc::new(Ty::Int) };
         assert_ne!(type_hash(&arr), type_hash(&hash));
-        assert_ne!(type_hash(&arr), type_hash(&Ty::Array { elem: Box::new(Ty::Str) }));
+        assert_ne!(type_hash(&arr), type_hash(&Ty::Array { elem: std::sync::Arc::new(Ty::Str) }));
     }
 
     #[test]
     fn untyped_is_found_at_any_depth() {
         let deep = Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(Ty::Array { elem: Box::new(union(vec![Ty::Int, Ty::Untyped])) }),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(union(vec![Ty::Int, Ty::Untyped])) }),
         };
         assert!(holds_untyped(&deep));
-        assert!(!holds_untyped(&Ty::Array { elem: Box::new(Ty::Int) }));
+        assert!(!holds_untyped(&Ty::Array { elem: std::sync::Arc::new(Ty::Int) }));
     }
 
     #[test]

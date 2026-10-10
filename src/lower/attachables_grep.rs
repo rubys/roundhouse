@@ -89,7 +89,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
             parenthesized: true,
         },
     );
-    ids.ty = Some(Ty::Array { elem: Box::new(Ty::Int) });
+    ids.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
     let cond = Expr::new(
         span,
         ExprNode::Hash {

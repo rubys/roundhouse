@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn array_over_array_is_incompatible() {
-        let arr = Ty::Array { elem: Box::new(Ty::Int) };
+        let arr = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
         let l = var_typed("a", arr.clone());
         let r = var_typed("b", arr);
         assert!(matches!(classify_div_pow(&l, &r), DivPowCase::Incompatible));

@@ -463,9 +463,9 @@ fn method_signature_ty(
             let (block_params, block_ret) =
                 parse_function_type_to_fn(&block_fn_type, &method_name, ctx)?;
             Some(Ty::Fn {
-                params: block_params,
+                params: block_params.into(),
                 block: None,
-                ret: Box::new(block_ret),
+                ret: std::sync::Arc::new(block_ret),
                 effects: EffectSet::pure(),
             })
         } else {
@@ -480,15 +480,15 @@ fn method_signature_ty(
     if let Some(ref bty) = block_ty {
         params.push(Param {
             name: Symbol::new("block"),
-            ty: bty.clone(),
+            ty: bty.clone().into(),
             kind: ParamKind::Block,
         });
     }
 
     Ok(Ty::Fn {
-        params,
-        block: block_ty.map(Box::new),
-        ret: Box::new(ret),
+        params: params.into(),
+        block: block_ty.map(std::sync::Arc::new),
+        ret: std::sync::Arc::new(ret),
         effects: EffectSet::pure(),
     })
 }
@@ -537,8 +537,8 @@ fn parse_function_type_to_fn(
             .map(|s| Symbol::new(s.as_str()))
             .unwrap_or_else(|| Symbol::new("rest"));
         let elem_ty = ty_from_node(&fn_param.type_(), ctx)?;
-        let ty = Ty::Array { elem: Box::new(elem_ty) };
-        params.push(Param { name, ty, kind: ParamKind::Rest });
+        let ty = Ty::Array { elem: std::sync::Arc::new(elem_ty) };
+        params.push(Param { name, ty: ty.into(), kind: ParamKind::Rest });
     }
 
     collect_function_params(
@@ -562,7 +562,7 @@ fn parse_function_type_to_fn(
         let ty = ty_from_node(&fn_param.type_(), ctx)?;
         params.push(Param {
             name,
-            ty,
+            ty: ty.into(),
             kind: ParamKind::Keyword { required: true },
         });
     }
@@ -579,7 +579,7 @@ fn parse_function_type_to_fn(
         let ty = ty_from_node(&fn_param.type_(), ctx)?;
         params.push(Param {
             name,
-            ty,
+            ty: ty.into(),
             kind: ParamKind::Keyword { required: false },
         });
     }
@@ -600,12 +600,12 @@ fn parse_function_type_to_fn(
             .unwrap_or_else(|| Symbol::new("opts"));
         let value_ty = ty_from_node(&fn_param.type_(), ctx)?;
         let ty = Ty::Hash {
-            key: Box::new(Ty::Sym),
-            value: Box::new(value_ty),
+            key: std::sync::Arc::new(Ty::Sym),
+            value: std::sync::Arc::new(value_ty),
         };
         params.push(Param {
             name,
-            ty,
+            ty: ty.into(),
             kind: ParamKind::KeywordRest,
         });
     }
@@ -646,7 +646,7 @@ fn collect_function_params<'a, I: Iterator<Item = Node<'a>>>(
             .map(|s| Symbol::new(s.as_str()))
             .unwrap_or_else(|| Symbol::new(format!("arg{idx}")));
         let ty = ty_from_node(&fn_param.type_(), ctx)?;
-        out.push(Param { name, ty, kind: kind.clone() });
+        out.push(Param { name, ty: ty.into(), kind: kind.clone() });
     }
     Ok(())
 }
@@ -810,7 +810,7 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
                 .iter()
                 .map(|n| ty_from_node(&n, ctx))
                 .collect::<Result<_, _>>()?;
-            Ok(Ty::Tuple { elems })
+            Ok(Ty::Tuple { elems: elems.into() })
         }
         // RBS record literal `{ key: T, ?optional: U }` → `Ty::Record`.
         // `Ty::Record` is what strict-typed targets (Crystal, Rust)
@@ -832,7 +832,7 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
                 let ty = ty_from_node(&field.type_(), ctx)?;
                 fields.insert(name, ty);
             }
-            Ok(Ty::Record { row: crate::ty::Row { fields, rest: None } })
+            Ok(Ty::Record { row: crate::ty::Row { fields: fields.into(), rest: None } })
         }
         // RBS proc literal `^(T) -> U` → `Ty::Fn`. Reuses the same
         // function-type parser method signatures go through — a proc
@@ -849,9 +849,9 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
             };
             let (params, ret) = parse_function_type_to_fn(&fn_type, "(proc)", ctx)?;
             Ok(Ty::Fn {
-                params,
+                params: params.into(),
                 block: None,
-                ret: Box::new(ret),
+                ret: std::sync::Arc::new(ret),
                 effects: EffectSet::default(),
             })
         }
@@ -887,7 +887,7 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
         // `singleton(String)` is the class String, not a string.
         Node::ClassSingletonType(class_type) => Ok(Ty::Class {
             id: ClassId(Symbol::new(&qualify_class_ref(&class_type.name(), ctx.scope))),
-            args: Vec::new(),
+            args: Vec::new().into(),
         }),
         // `bot` is what `raise` and `exit` return: no value at all.
         Node::BottomType(_) => Ok(Ty::Bottom),
@@ -1000,13 +1000,13 @@ pub(crate) fn resolve_aliases(members: &[Node<'_>], scope: Option<&str>, outer: 
 /// RBS reader and the `sig { … }` reader so the two spell the same
 /// type the same way.
 pub(crate) fn sorbet_generic_ty(name: &str, args: &[Ty]) -> Option<Ty> {
-    let plain = |id: &str| Ty::Class { id: ClassId(Symbol::new(id)), args: args.to_vec() };
+    let plain = |id: &str| Ty::Class { id: ClassId(Symbol::new(id)), args: args.to_vec().into() };
     Some(match (name, args) {
         ("T::Boolean", []) => Ty::Bool,
-        ("T::Array", [elem]) => Ty::Array { elem: Box::new(elem.clone()) },
+        ("T::Array", [elem]) => Ty::Array { elem: std::sync::Arc::new(elem.clone()) },
         ("T::Hash", [key, value]) => Ty::Hash {
-            key: Box::new(key.clone()),
-            value: Box::new(value.clone()),
+            key: std::sync::Arc::new(key.clone()),
+            value: std::sync::Arc::new(value.clone()),
         },
         ("T::Set", [_]) => plain("Set"),
         ("T::Range", [_]) => plain("Range"),
@@ -1037,19 +1037,19 @@ fn map_class_instance(name: &str, args: Vec<Ty>) -> Ty {
         ("TrueClass" | "FalseClass", []) => Ty::Bool,
         ("NilClass", []) => Ty::Nil,
         ("Array", [elem]) => Ty::Array {
-            elem: Box::new(elem.clone()),
+            elem: std::sync::Arc::new(elem.clone()),
         },
         ("Hash", [key, value]) => Ty::Hash {
-            key: Box::new(key.clone()),
-            value: Box::new(value.clone()),
+            key: std::sync::Arc::new(key.clone()),
+            value: std::sync::Arc::new(value.clone()),
         },
         // A bare `Hash` / `Array` is the unparameterized container, not a
         // class named Hash with nothing to call on it.
-        ("Hash", []) => Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) },
-        ("Array", []) => Ty::Array { elem: Box::new(Ty::Untyped) },
+        ("Hash", []) => Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
+        ("Array", []) => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
         _ => Ty::Class {
             id: ClassId(Symbol::new(name)),
-            args,
+            args: args.into(),
         },
     }
 }
@@ -1068,7 +1068,7 @@ fn union_or_single(variants: Vec<Ty>) -> Ty {
     if variants.len() == 1 {
         variants.into_iter().next().unwrap()
     } else {
-        Ty::Union { variants }
+        Ty::Union { variants: variants.into() }
     }
 }
 
@@ -1223,7 +1223,7 @@ pub fn print_method_signature(name: &str, fn_ty: &Ty) -> Option<String> {
     for p in params.iter().filter(|p| matches!(p.kind, ParamKind::Rest)) {
         // The stored Ty is the collected `Array[E]`; RBS declares the
         // element type (mirror of the parse direction's wrap).
-        let elem = match &p.ty {
+        let elem = match &*p.ty {
             Ty::Array { elem } => print_ty(elem),
             other => print_ty(other),
         };
@@ -1240,7 +1240,7 @@ pub fn print_method_signature(name: &str, fn_ty: &Ty) -> Option<String> {
     }
     for p in params.iter().filter(|p| matches!(p.kind, ParamKind::KeywordRest)) {
         // Stored as the collected `Hash[Symbol, V]`; RBS declares V.
-        let value = match &p.ty {
+        let value = match &*p.ty {
             Ty::Hash { value, .. } => print_ty(value),
             other => print_ty(other),
         };
@@ -1310,7 +1310,7 @@ mod tests {
 
     fn fn_parts(ty: Ty) -> (Vec<Param>, Ty) {
         if let Ty::Fn { params, ret, .. } = ty {
-            (params, *ret)
+            (params.to_vec(), std::sync::Arc::unwrap_or_clone(ret))
         } else {
             panic!("expected Ty::Fn, got {ty:?}");
         }
@@ -1389,7 +1389,7 @@ mod tests {
         // must not stop at the top level either.
         let src = "class Base\n  def self.all: () -> Array[instance]\nend\n";
         let (_, ret) = fn_parts(parse_one(src));
-        assert_eq!(ret, Ty::Array { elem: Box::new(Ty::SelfInstance) });
+        assert_eq!(ret, Ty::Array { elem: std::sync::Arc::new(Ty::SelfInstance) });
     }
 
     #[test]
@@ -1397,9 +1397,9 @@ mod tests {
         let src = "module Inflector\n  def pluralize: (Integer, String) -> String\nend\n";
         let (params, ret) = fn_parts(parse_one(src));
         assert_eq!(params.len(), 2);
-        assert_eq!(params[0].ty, Ty::Int);
+        assert_eq!(params[0].ty, Ty::Int.into());
         assert_eq!(params[0].kind, ParamKind::Required);
-        assert_eq!(params[1].ty, Ty::Str);
+        assert_eq!(params[1].ty, Ty::Str.into());
         assert_eq!(ret, Ty::Str);
     }
 
@@ -1424,7 +1424,7 @@ mod tests {
         let src = "module M\n  def f: (Integer, Float, String, Symbol, bool, nil) -> void\nend\n";
         let (params, ret) = fn_parts(parse_one(src));
         assert_eq!(
-            params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
+            params.iter().map(|p| (*p.ty).clone()).collect::<Vec<_>>(),
             vec![Ty::Int, Ty::Float, Ty::Str, Ty::Sym, Ty::Bool, Ty::Nil],
         );
         assert_eq!(ret, Ty::Nil);
@@ -1437,15 +1437,15 @@ mod tests {
         assert_eq!(
             params[0].ty,
             Ty::Array {
-                elem: Box::new(Ty::Int)
-            }
+                elem: std::sync::Arc::new(Ty::Int)
+            }.into()
         );
         assert_eq!(
             params[1].ty,
             Ty::Hash {
-                key: Box::new(Ty::Str),
-                value: Box::new(Ty::Int),
-            }
+                key: std::sync::Arc::new(Ty::Str),
+                value: std::sync::Arc::new(Ty::Int),
+            }.into()
         );
     }
 
@@ -1456,8 +1456,8 @@ mod tests {
         assert_eq!(
             params[0].ty,
             Ty::Union {
-                variants: vec![Ty::Str, Ty::Nil]
-            }
+                variants: vec![Ty::Str, Ty::Nil].into()
+            }.into()
         );
     }
 
@@ -1468,8 +1468,8 @@ mod tests {
         assert_eq!(
             params[0].ty,
             Ty::Union {
-                variants: vec![Ty::Int, Ty::Str]
-            }
+                variants: vec![Ty::Int, Ty::Str].into()
+            }.into()
         );
     }
 
@@ -1480,8 +1480,8 @@ mod tests {
         assert_eq!(
             params[0].ty,
             Ty::Tuple {
-                elems: vec![Ty::Int, Ty::Str]
-            }
+                elems: vec![Ty::Int, Ty::Str].into()
+            }.into()
         );
     }
 
@@ -1489,7 +1489,7 @@ mod tests {
     fn user_class_becomes_class_id() {
         let src = "module M\n  def f: (Article) -> void\nend\n";
         let (params, _) = fn_parts(parse_one(src));
-        let Ty::Class { id, args } = &params[0].ty else {
+        let Ty::Class { id, args } = &*params[0].ty else {
             panic!("expected Class, got {:?}", params[0].ty);
         };
         assert_eq!(id.0.as_str(), "Article");
@@ -1500,7 +1500,7 @@ mod tests {
     fn generic_user_class_keeps_args() {
         let src = "module M\n  def f: (Relation[Article]) -> void\nend\n";
         let (params, _) = fn_parts(parse_one(src));
-        let Ty::Class { id, args } = &params[0].ty else {
+        let Ty::Class { id, args } = &*params[0].ty else {
             panic!("expected Class");
         };
         assert_eq!(id.0.as_str(), "Relation");
@@ -1601,7 +1601,7 @@ end
         let out = parse_app_ivars(src).expect("parses");
         let rel = &out[&ClassId(Symbol::from("ActiveRecord::Relation"))];
         assert_eq!(rel[&Symbol::from("limit")], Ty::Union {
-            variants: vec![Ty::Int, Ty::Nil],
+            variants: vec![Ty::Int, Ty::Nil].into(),
         });
         assert!(matches!(
             &rel[&Symbol::from("records")],
@@ -1613,7 +1613,7 @@ end
         assert_eq!(
             base[&Symbol::from("errors")],
             Ty::Array {
-                elem: Box::new(Ty::Str),
+                elem: std::sync::Arc::new(Ty::Str),
             }
         );
         assert_eq!(base[&Symbol::from("persisted")], Ty::Bool);
@@ -1759,7 +1759,7 @@ end
         let methods = out.get(&ClassId(Symbol::from("ActiveRecord::Base"))).expect("Base methods");
         let ty = &methods[&Symbol::from("from_record")];
         let Ty::Fn { params, .. } = ty else { panic!("expected Ty::Fn") };
-        match &params[0].ty {
+        match &*params[0].ty {
             Ty::Class { id, .. } => assert_eq!(id.0.as_str(), "ActiveRecord::Base"),
             other => panic!("expected Class(ActiveRecord::Base), got {other:?}"),
         }
@@ -1962,24 +1962,24 @@ end
     // ── printer round-trips ──────────────────────────────────────────
 
     fn fn_ty(params: Vec<Param>, ret: Ty) -> Ty {
-        Ty::Fn { params, block: None, ret: Box::new(ret), effects: EffectSet::pure() }
+        Ty::Fn { params: params.into(), block: None, ret: std::sync::Arc::new(ret), effects: EffectSet::pure() }
     }
 
     fn req(name: &str, ty: Ty) -> Param {
-        Param { name: Symbol::from(name), ty, kind: ParamKind::Required }
+        Param { name: Symbol::from(name), ty: ty.into(), kind: ParamKind::Required }
     }
 
     #[test]
     fn print_ty_covers_the_parseable_surface() {
         assert_eq!(print_ty(&Ty::Int), "Integer");
         assert_eq!(print_ty(&Ty::Bool), "bool");
-        let account = Ty::Class { id: ClassId(Symbol::from("Account")), args: vec![] };
+        let account = Ty::Class { id: ClassId(Symbol::from("Account")), args: vec![].into() };
         assert_eq!(
-            print_ty(&Ty::Union { variants: vec![account.clone(), Ty::Nil] }),
+            print_ty(&Ty::Union { variants: vec![account.clone(), Ty::Nil].into() }),
             "Account?"
         );
         assert_eq!(
-            print_ty(&Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) }),
+            print_ty(&Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) }),
             "Hash[Symbol, String]"
         );
         // Out-of-subset shapes degrade to valid RBS, never to garbage.
@@ -1989,18 +1989,18 @@ end
 
     #[test]
     fn printed_sidecar_round_trips_through_the_parser() {
-        let account = Ty::Class { id: ClassId(Symbol::from("Account")), args: vec![] };
+        let account = Ty::Class { id: ClassId(Symbol::from("Account")), args: vec![].into() };
         let methods = vec![
             (
                 Symbol::from("find"),
                 fn_ty(
                     vec![req("id", Ty::Str)],
-                    Ty::Union { variants: vec![account.clone(), Ty::Nil] },
+                    Ty::Union { variants: vec![account.clone(), Ty::Nil].into() },
                 ),
             ),
             (
                 Symbol::from("names"),
-                fn_ty(vec![], Ty::Array { elem: Box::new(Ty::Str) }),
+                fn_ty(vec![], Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
             ),
             (
                 Symbol::from("lookup"),
@@ -2009,11 +2009,11 @@ end
                         req("key", Ty::Sym),
                         Param {
                             name: Symbol::from("strict"),
-                            ty: Ty::Bool,
+                            ty: Ty::Bool.into(),
                             kind: ParamKind::Keyword { required: false },
                         },
                     ],
-                    Ty::Union { variants: vec![Ty::Int, Ty::Str] },
+                    Ty::Union { variants: vec![Ty::Int, Ty::Str].into() },
                 ),
             ),
         ];
@@ -2031,7 +2031,7 @@ end
     fn printed_namespaced_module_sidecar_round_trips() {
         let methods = vec![(
             Symbol::from("current_scope"),
-            fn_ty(vec![], Ty::Class { id: ClassId(Symbol::from("Account")), args: vec![] }),
+            fn_ty(vec![], Ty::Class { id: ClassId(Symbol::from("Account")), args: vec![].into() }),
         )];
         let printed =
             print_sidecar("Admin::ScopeHelper", true, &methods).expect("printable");
