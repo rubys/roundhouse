@@ -1,5 +1,14 @@
+# Load the gem before test_helper prepends runtime/ruby, whose local i18n.rb
+# intentionally shadows the Rails dependency for transpiled applications.
+require "rubygems"
+require File.join(Gem::Specification.find_by_name("i18n").full_gem_path, "lib/i18n")
 require_relative "test_helper"
 require "active_support/inflector"
+require "active_support/core_ext/integer/inflections"
+
+class Integer
+  alias_method :rails_814_ordinalize, :ordinalize
+end
 
 # Rails 8.1.4 default-config differential only. Custom acronym tables,
 # `classify`/`tableize`, locale mutation, constantization, transliteration,
@@ -56,6 +65,13 @@ class ActiveSupportInflectionsTest < Minitest::Test
         ActiveSupport::Inflector.upcase_first(text), "upcase_first(#{text.inspect})"
       assert_equal ActiveSupport::Inflector.rails_814_downcase_first(text),
         ActiveSupport::Inflector.downcase_first(text), "downcase_first(#{text.inspect})"
+    end
+  end
+
+  def test_ordinalize_matches_rails_integer_rules
+    [-113, -103, -23, -13, -12, -11, -3, -2, -1, 0, 1, 2, 3, 4, 10, 11, 12, 13, 14, 20, 21, 22, 23, 101, 111, 112, 113].each do |number|
+      expected = number.rails_814_ordinalize
+      assert_equal expected, ActiveSupport::Inflector.ordinalize(number), "ordinalize(#{number})"
     end
   end
 end

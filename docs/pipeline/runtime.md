@@ -591,8 +591,13 @@ was spelled, so an untouched node is still the source bytes), and
 write-through — the two shapes campfire's mutating filters use
 (`fragment.replace("div") { |n| n.tap { |x| x.inner_html = … } }`,
 `fragment.update { |s| s.at_css("div")["class"] = … }`). `find_all`
-stays a read. Every expectation in `runtime/ruby/test/action_text_test.rb`
-for these was measured against Rails' Nokogiri-backed Fragment.
+stays a read. An update block can also scan `css("*")` and call
+`Node#remove`; that removes each disallowed element with its contents while
+leaving allowed nodes in the copied fragment. This is a removal primitive,
+not a general sanitizer: the caller supplies the allowlist, and allowed-node
+attributes are not filtered. Every expectation in
+`runtime/ruby/test/action_text_test.rb` for these was measured against Rails'
+Nokogiri-backed Fragment.
 
 **What always worked.** The PARSE: `#attachments` returns every node
 with every attribute it carried (`sgid`, `content_type`, `caption`,
@@ -2372,6 +2377,85 @@ arrived at the tail of a session that had already changed the escape
 surface twice. Do it with the golden dumps regenerated in the same
 commit, and check `compare-*` on every target rather than assuming a
 DOM comparison cannot see it.
+
+### Pooled web push connections on spinel wait on a compact-class fix — not yet
+
+campfire's `WebPush::Connections` (upstream since #351) opens pooled push
+connections as `class HTTP < Net::HTTP; include Stages; end`, where
+`Stages` overrides two private methods of CRuby's net/http to learn how
+far a request got before it failed:
+
+```ruby
+def begin_transport(...); @stage = :checking; super.tap { @stage = :sent }; end
+def connect(...);        @stage = :connecting if @stage == :checking; super;  end
+```
+
+On the ruby family this runs as written, against Ruby's own net/http
+(19 of campfire's 20 push tests pass against the TLS server its own
+test helper starts; the twentieth mixes a module into one connection
+with `extend`, the per-object mixin no compiled target has).
+
+For spinel, the forwarding and the hooks are done:
+
+- **The forwarding.** `lower::known_super_forwarding` gives a `(...)`
+  override that only reaches `super` the destination's own
+  parameters when the destination is a stdlib method of known
+  signature. For these two that is CRuby's: `begin_transport(req)` and
+  `connect()`. The strict spinel emit has no errors left.
+- **The hooks.** `runtime/spinel/net_http.rb` routes its transport
+  through `connect` and `begin_transport(req)` in CRuby's order and
+  holds `keep_alive_timeout` and `proxy?`, so an override of either
+  hook runs. It works against the net package before and after
+  matz/spinel#8361, which adds the same methods upstream.
+  `tests/emit_and_run.rs` runs the pattern natively
+  (`forwarding_into_net_http_transport_hooks_runs_on_spinel`).
+
+Three gaps remain, all on spinel's side:
+
+- **The class itself (matz/spinel#8369).** A class nested in a compact
+  `class A::B` body is undefined at run time when it is named like its
+  superclass. campfire's `class WebPush::Connections` + nested
+  `class HTTP < Net::HTTP` is exactly that, and the emit writes nested
+  modules in the compact form too. Until it is fixed, a pooled push
+  delivery on the spinel binary raises NameError where it reaches
+  `WebPush::Connections::HTTP`.
+- **The tests' TLS server.** campfire's push-service test helper serves
+  TLS itself (`OpenSSL::SSL::SSLContext#key=`, a server-side context).
+  spinel's openssl package is a client, so those tests cannot handshake
+  even with the class defined.
+- **Proxies.** One test constructs `Net::HTTP.new(host, port, proxy)`.
+  The net package refuses a proxy at construction.
+
+### Smaller shapes campfire main reaches, each narrower than Rails
+
+- **`I18n.locale` / `default_locale` answer `:en`** (`runtime/ruby/i18n_locale.rb`),
+  Rails' default when nothing sets one. Setting a locale (`I18n.locale =`,
+  `with_locale`, `config.i18n.default_locale`) and translation (`I18n.t`)
+  are not modeled.
+- **`fragment_name_with_digest(name, digest_path)` adds no template
+  digest**: templates carry none here (see
+  `runtime/spinel/action_controller_fragment_caching.rb`), so an omitted
+  `digest_path` adds nothing and an explicit one is kept in front.
+- **Token-free forms are read from one shape only**: an app helper whose
+  `token_tag` body is exactly `""` (campfire's header-only forgery
+  protection) synthesizes `token_fields_omitted`. Another `token_tag`
+  body is not read, and the forms keep their token field.
+- **`config.after_initialize` blocks do not run at boot.** campfire has
+  two: `Room::MessagesCount.ensure!` (its counter triggers, which
+  `schema.rb` cannot dump) and starting the WAL checkpointer outside
+  tests. The test suite gets the first through its `load_fixtures`
+  override, which is read; a served tree gets neither.
+- **`Rails.application.env_config` holds what is set and is consulted
+  for nothing**: a forgery failure always renders the 422 that
+  `action_dispatch.show_exceptions = :rescuable` asks for.
+- **`save` writes the whole row; only `touch` writes what changed.**
+  Rails' partial writes UPDATE the changed columns; this runtime's
+  `_adapter_update` writes every column the record loaded. A bare
+  `touch` (and so `belongs_to … touch: true`) UPDATEs `updated_at`
+  alone (`_adapter_touch`), which is what keeps campfire's
+  trigger-maintained `rooms.messages_count` correct when a message
+  touches its room. A `save`/`update` of a record loaded before a
+  trigger moved one of its columns still writes the stale value back.
 
 ## Related docs
 

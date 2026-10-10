@@ -1,0 +1,11 @@
+module ActionController
+  class Base
+    def head: ((Symbol | Integer | nil) status, ?(Hash[String | Symbol, Object?] | nil) options) -> bool
+    def head_response?: () -> bool
+    def head_status_code: (Symbol | Integer status) -> Integer
+    def head_includes_content?: (Integer status) -> bool
+    def head_format_content_type: () -> String
+    def head_option_content_type: (Object? content_type) -> String
+    def normalize_head_header_name: (String name) -> String
+  end
+end

@@ -3116,6 +3116,7 @@ fn is_modeler_member(name: &str) -> bool {
             // subclass overrides with a real SQL-emitting body.
             | "_adapter_insert"
             | "_adapter_update"
+            | "_adapter_touch"
             | "_adapter_delete"
             // Validation + callbacks — Save() drives `valid?` →
             // `self.validate`; create/update/destroy paths drive
@@ -3133,7 +3134,7 @@ fn is_known_go_method(name: &str) -> bool {
     matches!(
         name,
         "save" | "save!" | "destroy" | "destroy!" | "update" | "update!"
-            | "delete" | "touch" | "reload"
+            | "delete" | "touch" | "touch_written" | "reload"
             | "validate" | "attributes"
         // `errors` was here but is now a Base struct field
         // (`*ActiveRecordBase.Errors []string`) reached via Go method

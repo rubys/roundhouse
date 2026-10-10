@@ -212,6 +212,41 @@ fn view_helpers_test_passes_under_crystal() {
 }
 
 #[test]
+fn view_helpers_postfix_if_arg_is_parenthesized() {
+    let test_file = Path::new("runtime/ruby/test/action_view/view_helpers_test.rb");
+    let source =
+        std::fs::read(test_file).unwrap_or_else(|e| panic!("read {}: {e}", test_file.display()));
+    let test_module = ingest_test_file(&source, &test_file.display().to_string())
+        .expect("ingest framework test file")
+        .expect("framework test file should contain a test class");
+
+    let mut app = App::new();
+    app.test_modules.push(test_module);
+    load_framework_rbs(&mut app);
+    Analyzer::new(&app).analyze(&mut app);
+
+    let spec = crystal::emit(&app)
+        .into_iter()
+        .find(|file| {
+            file.path
+                .as_os_str()
+                .to_string_lossy()
+                .ends_with("view_helpers_spec.cr")
+        })
+        .expect("emitted view helpers spec");
+    assert!(
+        spec.content.contains(r#"("rtl" if false)"#),
+        "postfix if in a call argument must be parenthesized:\n{}",
+        spec.content
+    );
+    assert!(
+        !spec.content.contains(r#"haml_class("g", "rtl" if false)"#),
+        "bare postfix if in a call argument is a Crystal syntax error:\n{}",
+        spec.content
+    );
+}
+
+#[test]
 #[ignore]
 fn json_builder_test_passes_under_crystal() {
     build_and_run(

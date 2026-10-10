@@ -11,11 +11,12 @@ module ActionDispatch
       def action: () -> Symbol
       def req_format: () -> Symbol?
       def int_params: () -> String
+      def seg_constraints: () -> String
       # The pattern split on "/" once at construction, so a `Router.match`
       # table walk never re-splits it per request.
       def pattern_parts: () -> Array[String]
 
-      def initialize: (String verb, String pattern, Symbol controller, Symbol action, ?Symbol? req_format, ?String int_params) -> void
+      def initialize: (String verb, String pattern, Symbol controller, Symbol action, ?Symbol? req_format, ?String int_params, ?String seg_constraints) -> void
     end
 
     # Successful match result: the resolved controller + action symbols
@@ -74,7 +75,8 @@ module ActionDispatch
     def self.match_pattern: (
       String pattern,
       String path,
-      ?String int_params
+      ?String int_params,
+      ?String seg_constraints
     ) -> Hash[String, String]?
 
     # The same segment loop over already-split parts — what `Router.match`
@@ -87,7 +89,8 @@ module ActionDispatch
       Array[String] pattern_parts,
       Array[String] path_parts,
       ?String int_params,
-      ?String format
+      ?String format,
+      ?String seg_constraints
     ) -> Hash[String, String]?
 
     def self.decode_captures: (Hash[String, String] params) -> Hash[String, String]
@@ -111,6 +114,19 @@ module ActionDispatch
     ) -> bool
 
     def self.digits_only: (String s) -> bool
+
+    # Segment-pattern enforcement for every OTHER (non-digit-class)
+    # `constraints:` requirement — see the .rb's module-level comment
+    # on `Route#seg_constraints` and `segment_pattern.rs` for the
+    # encoding and the supported subset.
+    def self.length_prefix_content_start: (String s, Integer at) -> Integer
+    def self.length_prefix_value: (String s, Integer at, Integer content_start) -> Integer
+    def self.segment_pattern_for: (String seg_constraints, String name) -> String
+    def self.segment_pattern_char_in_class: (String c, String neg, String any, String set) -> bool
+    def self.segment_pattern_literal_match: (String quant, String text, String value, Integer start) -> Integer
+    def self.segment_pattern_class_match: (String quant, String neg, String any, String set, String value, Integer start) -> Integer
+    def self.segment_pattern_item_match: (String tag, String quant, String neg, String any, String text, String value, Integer start) -> Integer
+    def self.segment_pattern_match: (String pattern, String value) -> bool
 
     # A decoded capture path-escaped again, as Rails fills a routing
     # redirect's `%{name}`; see the .rb. Byte-oriented after UTF-8 decode.

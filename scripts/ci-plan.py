@@ -83,6 +83,8 @@ SPINEL_TESTS = [
     "postgres_json_types_spinel",
     "pessimistic_locking",
     "not_found_parity_spinel",
+    "spinel_transaction_connection",
+    "routes_segment_pattern_spinel",
 ]
 # Inputs of the PostgreSQL Db gate (tests/spinel_pg_db.rs): the shim, its
 # RBS, the contract and time parsing it compiles with, and the cases.
@@ -277,6 +279,13 @@ def native_coverage(path):
     suites = set()
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
         suites.add("framework_tests_spinel")
+    # `Model.transaction` (rollback, nesting, savepoints) lives here; its
+    # gate compiles it with the real_blog fixture.
+    if path in {
+        "runtime/ruby/active_record/connection.rb",
+        "runtime/ruby/active_record/connection.rbs",
+    }:
+        suites.add("spinel_transaction_connection")
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])

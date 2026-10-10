@@ -1734,6 +1734,17 @@ pub enum RouteSpec {
         /// (`PartsController`) still come from `name`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// Per-param regex restrictions inherited from an enclosing
+        /// `constraints(id: /.../) do … end` block (propagated at
+        /// ingest; see `merge_outer_constraints`). Applies to whichever
+        /// standard action's path carries the matching param name — in
+        /// practice `id`, so `show`/`edit`/`update`/`destroy` but not
+        /// `index`/`new`/`create`. Rails also accepts a `resources
+        /// :x, constraints: { id: /.../ }` kwarg directly; that inline
+        /// spelling is not parsed yet (a separate, pre-existing gap),
+        /// only the block form this field carries.
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        constraints: IndexMap<Symbol, String>,
     },
     /// `namespace :admin do … end` / `scope … do … end` — a routing
     /// scope wrapping nested entries. `namespace :x` is `scope` with

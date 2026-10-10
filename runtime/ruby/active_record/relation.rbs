@@ -215,6 +215,7 @@ module ActiveRecord
     private def grouped_extreme: (String column, String function) -> Hash[untyped, untyped]
     private def schema_group_column: (String group) -> Symbol?
     private def cast_schema_value: (untyped value, Symbol column) -> untyped
+    private def cast_schema_date: (untyped value) -> untyped
     def group_count: () -> Hash[untyped, Integer]
     def empty?: () -> bool
     def any?: () -> bool

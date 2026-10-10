@@ -272,6 +272,7 @@ pub struct ClassInfo {
     /// lookup (the lexical scope, then the ancestors), never by its last
     /// segment alone.
     pub app_declared: bool,
+    pub positional_struct: bool,
 }
 
 impl ClassInfo {
@@ -1407,6 +1408,39 @@ impl<'a> BodyTyper<'a> {
                     });
                     return unknown();
                 }
+                let unsupported_deep_merge = match method.as_str() {
+                    "deep_merge" if block.is_some() => Some((
+                        "Hash#deep_merge conflict block",
+                        "only the no-block Rails deep_merge form is supported",
+                    )),
+                    "deep_merge!" => Some((
+                        "Hash#deep_merge!",
+                        "the mutating deep_merge! form is unsupported",
+                    )),
+                    "deep_merge" if args.len() != 1 => Some((
+                        "Hash#deep_merge arity",
+                        "exactly one Hash argument is supported",
+                    )),
+                    "deep_merge"
+                        if !matches!(args.first().and_then(|arg| arg.ty.as_ref()), Some(Ty::Hash { .. })) =>
+                    {
+                        Some((
+                            "Hash#deep_merge argument",
+                            "the supported no-block form requires a statically typed Hash argument",
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some((construct, detail)) = unsupported_deep_merge
+                    && matches!(recv_ty, Some(Ty::Hash { .. }))
+                {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from(construct),
+                        detail: detail.into(),
+                    });
+                    return unknown();
+                }
                 // Force `parenthesized: true` when dispatch resolves
                 // to a `Method`-kind on a registered class. The TS
                 // emitter's bare-recv-Send fallback omits parens when
@@ -1557,6 +1591,18 @@ impl<'a> BodyTyper<'a> {
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
+                // Not left to the positional constructor: since Ruby 3.2 a Struct takes keywords too, which it would bind to its first member.
+                if method.as_str() == "new"
+                    && expr.diagnostic.is_none()
+                    && matches!(args.last().map(|a| &*a.node), Some(ExprNode::Hash { kwargs: true, .. }))
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if self.classes.get(id).is_some_and(|c| c.positional_struct))
+                {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("Struct keyword construction"),
+                        detail: "a `Struct.new(...)` superclass is built positionally; keyword arguments would land in its first member".to_string(),
+                    });
+                }
                 // `PTY.spawn(..., &maybe)` when `maybe` is nilable: Ruby
                 // may take the block (nil) or not (tuple). Presence was
                 // left absent above so other methods keep their no-block

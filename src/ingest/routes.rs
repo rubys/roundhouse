@@ -1127,6 +1127,20 @@ fn ingest_route_stmts<'pr>(
                         if let Some(scope) = scope {
                             retag_scope(&mut inner, scope);
                         }
+                        // `constraints(slug: %r{[^@/.]+}) do … end` — the
+                        // block's own per-param regex requirements, merged
+                        // DOWN into every route the block flattens to
+                        // (transitively, through nested scopes/resources).
+                        // A lambda/object arg (`constraints(SomeGuard.new)`)
+                        // yields no hash here, so it changes nothing — that
+                        // request-based shape stays unenforced, as before.
+                        if method == "constraints" {
+                            let block_constraints = call
+                                .arguments()
+                                .map(|args| block_constraints_hash(&args))
+                                .unwrap_or_default();
+                            merge_outer_constraints(&mut inner, &block_constraints);
+                        }
                         entries.extend(inner);
                     }
                 }
@@ -1410,6 +1424,73 @@ fn retag_scope(entries: &mut [RouteSpec], scope: ResourceScope) {
             _ => {}
         }
     }
+}
+
+/// Merge an enclosing `constraints(...) do … end` block's per-param
+/// regex requirements into every route it flattens to, transitively
+/// through nested scopes/namespaces/resources. Matches Rails 8.1's
+/// merge rule: a key the route (or a closer-nested block, already
+/// folded in by the time this runs — see below) set for itself WINS;
+/// `outer` only fills params nothing closer has already claimed.
+///
+/// Recursion order makes "innermost wins" fall out for free: a nested
+/// `constraints(...) do … end` runs this same merge for ITS OWN block
+/// before returning its entries up to the enclosing call, so by the
+/// time the outer block merges here, any param the inner block set is
+/// already present on the child's `constraints` map and `or_insert`
+/// leaves it alone.
+fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, String>) {
+    if outer.is_empty() {
+        return;
+    }
+    for entry in entries {
+        match entry {
+            RouteSpec::Explicit { constraints, .. } => {
+                for (k, v) in outer {
+                    constraints.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+            RouteSpec::Resources { constraints, nested, .. } => {
+                for (k, v) in outer {
+                    constraints.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                merge_outer_constraints(nested, outer);
+            }
+            RouteSpec::Scope { entries, .. } => {
+                merge_outer_constraints(entries, outer);
+            }
+            RouteSpec::Root { .. } => {}
+        }
+    }
+}
+
+/// The param→regex-source map from a `constraints(...)` call's own
+/// arguments — the block-level counterpart of the route-level
+/// `constraints:` kwarg hash parsed in `ingest_explicit_route`. Accepts
+/// both the bare-kwargs spelling (`constraints(slug: /.../)`, an
+/// implicit keyword hash) and an explicit Hash literal
+/// (`constraints({slug: /.../})`). A non-hash arg — the request-based
+/// `constraints(SomeGuard.new)` shape — yields an empty map, which is
+/// exactly "change nothing": that shape stays unenforced, as before.
+fn block_constraints_hash(args: &ruby_prism::ArgumentsNode<'_>) -> IndexMap<Symbol, String> {
+    let mut out = IndexMap::new();
+    for arg in args.arguments().iter() {
+        let elements: Vec<Node<'_>> = if let Some(kh) = arg.as_keyword_hash_node() {
+            kh.elements().iter().collect()
+        } else if let Some(h) = arg.as_hash_node() {
+            h.elements().iter().collect()
+        } else {
+            continue;
+        };
+        for el in elements {
+            let Some(assoc) = el.as_assoc_node() else { continue };
+            let Some(param) = symbol_value(&assoc.key()) else { continue };
+            if let Some(src) = regex_source(&assoc.value()) {
+                out.insert(Symbol::from(param.as_str()), src);
+            }
+        }
+    }
+    out
 }
 
 /// Redirect routes collected during the entry walk.
@@ -3174,6 +3255,7 @@ fn ingest_resources_route(
         controller,
         param,
         path,
+        constraints: IndexMap::new(),
     })
 }
 

@@ -1195,11 +1195,15 @@ fn push_belongs_to_touches(methods: &mut Vec<MethodDef>, model: &Model) {
                 },
             ));
         }
+        // A stamped column has to reach the row with the timestamp, so
+        // that form finishes with the whole-row `touch_written`; the bare
+        // form's `touch` writes `updated_at` alone, as Rails' does.
+        let finish = if matches!(touch, Touch::Column(_)) { "touch_written" } else { "touch" };
         guarded.push(Expr::new(
             span,
             ExprNode::Send {
                 recv: Some(read_local()),
-                method: Symbol::from("touch"),
+                method: Symbol::from(finish),
                 args: vec![],
                 block: None,
                 parenthesized: false,

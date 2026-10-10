@@ -165,7 +165,11 @@ module ActiveSupport
       end
 
       def self.copy(value, ancestors = [])
-        return value.dup if value.instance_of?(String)
+        # Any String, a SafeBuffer included: `dup` keeps the class, so the
+        # html-safe body a helper renders (campfire's text presentation,
+        # through `auto_link`) comes back html-safe, as Rails' store
+        # returns it.
+        return value.dup if value.is_a?(String)
         if value.instance_of?(Array)
           raise ArgumentError, "MemoryStore cannot safely copy a recursive value" if ancestors.any? { |ancestor| ancestor.equal?(value) }
           ancestors << value

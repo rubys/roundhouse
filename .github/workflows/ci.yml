@@ -54,7 +54,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 32b4144b5206304fa8d4c67455a753e2d3c16635
+  CAMPFIRE_SHA: edbc779f4dfc9b26c36310881711ddc976a9dfc8
   # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
   # Pinned like the apps above; bump deliberately.
@@ -1586,7 +1586,11 @@ jobs:
       #             cannot silently take the pool with it.
       - &campfire-suite-gems
         name: Install the gems the emitted suite loads
-        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent concurrent-ruby net-http-persistent web-push rails-html-sanitizer --no-document
+        # rack: the ruby-family swap of runtime/rack_utils.rb is
+        # `require "rack/utils"`. Without the gem every controller
+        # integration test aborts at load (`cannot load such file --
+        # rack/utils`). campfire-compare already installs it.
+        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent concurrent-ruby net-http-persistent web-push rails-html-sanitizer rack --no-document
       - name: Verify the suite's bcrypt test configuration
         run: ruby tests/campfire_suite_bcrypt.rb
       - name: Fetch once-campfire at the pinned SHA
@@ -1613,6 +1617,10 @@ jobs:
       #
       # Same debug binary as the suite (ROUNDHOUSE_BIN from build-roundhouse), so the
       # compiler is shared rather than paid twice (#317).
+      #
+      # It went 0 -> 2 with the edbc779 pin (WebPush::Connections::Stages'
+      # `(...)` overrides of Net::HTTP's transport hooks) and back to 0
+      # once `lower::known_super_forwarding` spelled those forwards out.
       - name: Enforce the strict-emit ceiling
         env:
           CEILING_ERRORS: 0
@@ -1627,8 +1635,9 @@ jobs:
             > /tmp/campfire-strict.log 2>&1 || status=$?
           errors=$(grep -c 'error\[' /tmp/campfire-strict.log || true)
           # An ingest abort prints no `error[` line, so a count of zero
-          # alone would pass it. A nonzero exit inside the ceiling is that.
-          if [ "$status" -ne 0 ] && [ "$errors" -le "$CEILING_ERRORS" ]; then
+          # with a nonzero exit is that. Counted errors at or below the
+          # ceiling are the pin's remaining gaps, not an abort.
+          if [ "$status" -ne 0 ] && [ "$errors" -eq 0 ]; then
             tail -5 /tmp/campfire-strict.log
             echo "::error::campfire strict emit failed (exit $status) without a counted error: ingest stopped before analysis"
             exit 1
@@ -1837,6 +1846,21 @@ jobs:
       # THIS commit and whose runner figure is not in yet — same rule
       # as last time.
       #
+      # `edbc779f` (2026-10-09) is upstream main with basecamp/once-campfire
+      # #351 (the pooled push connection is a `Net::HTTP` subclass that
+      # includes `Stages`, so no `extend` is left in app code) on top of
+      # the caching layer (#698/#720: ResponseCache, RecordCache,
+      # FragmentCache, CachedResponses, the WAL checkpointer, header-only
+      # forgery protection with token-free forms, and `rooms.messages_count`
+      # kept by SQLite triggers). Measured locally: ruby lane 552 of 579,
+      # 70 of 86 files; spinel lane 382 of 579, 50 of 86 files (16 do not
+      # link); campfire-compare green on both lanes with no forgiven
+      # divergence; strict emit 2 (see the ceiling above). The floor stays
+      # at the 32b4144 figure until this runner's notice, as before.
+      #
+      # 417/69 -> 550/69 on the notice `301da2b8`'s run emitted (550 of
+      # 578, 69 of 86 files on the runner; 552/70 on the laptop).
+      #
       # `32b4144b` (2026-10-06) is the Rails main bump (#314, rails
       # e3d5c569 with the 8.2 defaults live) and the PRs merged before it.
       # Three shapes it needed: the 8.2 default forgery strategy,
@@ -1882,7 +1906,7 @@ jobs:
       # has no per-object method table — or until upstream takes
       # basecamp/once-campfire#280, #279's twin for this file.
         env:
-          FLOOR_TESTS: 417
+          FLOOR_TESTS: 550
           FLOOR_FILES: 69
         run: |
           set -euo pipefail

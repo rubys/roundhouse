@@ -147,7 +147,8 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
     // `String` (not `Array[String]`) keeps the optional tail one type
     // across strict/AOT targets; constraint-free routes keep their
     // 4-/5-arg shape.
-    if !r.int_params.is_empty() {
+    let seg_constraints = crate::lower::segment_pattern::encode_route_constraints(&r.seg_patterns);
+    if !r.int_params.is_empty() || !seg_constraints.is_empty() {
         if r.format.is_none() {
             let mut nil = Expr::new(
                 Span::synthetic(),
@@ -157,6 +158,17 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
             args.push(nil);
         }
         args.push(lit_str(r.int_params.join(" ")));
+    }
+    // Segment-pattern requirements (anything beyond the digit class —
+    // `constraints(slug: %r{[^@/.]+})`, compiled by `segment_pattern`
+    // into a portable, backtrack-free encoding) ride the optional 7th
+    // positional as ONE combined string, the same reason `int_params`
+    // stays a scalar rather than an array: a `nil`-or-`[]` optional
+    // tail collapses to `Any?`/a bare variadic on several strict
+    // targets. Routes with no such requirement keep their existing
+    // 4-/5-/6-arg shape, so unconstrained apps emit byte-identical.
+    if !seg_constraints.is_empty() {
+        args.push(lit_str(seg_constraints));
     }
     let class_path: Vec<Symbol> = class_id
         .0

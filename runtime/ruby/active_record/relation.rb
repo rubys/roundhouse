@@ -1437,11 +1437,17 @@ module ActiveRecord
       return nil if value.nil?
       return ActiveSupport.cast_boolean(value) if @model.schema_boolean_columns.include?(column)
       return ActiveSupport.parse_db_time(value) if @model.schema_time_columns.include?(column)
-      return ActiveSupport.parse_db_date(value) if @model.schema_date_columns.include?(column)
+      return cast_schema_date(value) if @model.schema_date_columns.include?(column)
       return value.to_f if @model.schema_decimal_columns.include?(column)
       value
     end
     private :cast_schema_value
+
+    # Not `ActiveSupport.parse_db_date`: Spinel has it only with the Date package, which redefines this; a date-free app has no date column.
+    def cast_schema_date(value)
+      value
+    end
+    private :cast_schema_date
 
     # `group(:col).count` — Rails hands back a Hash of group-key =>
     # COUNT. The group_count lowering renames the grouped chain's

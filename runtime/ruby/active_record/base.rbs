@@ -208,6 +208,7 @@ module ActiveRecord
     def self._hydrate_all: (String sql) -> Array[Base]
     def _adapter_insert: () -> Integer
     def _adapter_update: () -> void
+    def _adapter_touch: () -> void
     def _adapter_delete: () -> void
     def self._adapter_count: () -> Integer
     def self._adapter_any?: () -> bool
@@ -246,6 +247,7 @@ module ActiveRecord
     def lock!: (?(bool | String)? lock) -> Base
     # `touch` is no-arg on purpose; see the note on the body.
     def touch: () -> bool
+    def touch_written: () -> bool
 
     # Lifecycle hooks — no-op defaults. Subclasses override.
     def after_initialize: () -> void

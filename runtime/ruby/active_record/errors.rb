@@ -65,6 +65,23 @@ module ActiveRecord
     end
   end
 
+  # Raised by app code (`raise ActiveRecord::RecordNotSaved.new(msg, record)`) to answer 422 as Rails does; no runtime save path raises it yet.
+  class RecordNotSaved < StandardError
+    attr_reader :record
+
+    def initialize(message = "ActiveRecord::RecordNotSaved", record = nil)
+      @record = record
+      super(message)
+    end
+  end
+
+  # Raised by app code; no runtime path marks a record read-only yet.
+  class ReadOnlyRecord < StandardError
+    def initialize(message = "ActiveRecord::ReadOnlyRecord")
+      super(message)
+    end
+  end
+
   class RecordInvalid < StandardError
     attr_reader :record
 

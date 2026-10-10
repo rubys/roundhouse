@@ -387,7 +387,13 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // Rewrite `@ivar` → bare `ivar` everywhere so the inferred arg name
     // (and any extra params we surface) read as plain locals in the
     // emitted body. Mirrors the controller-side ivar-to-local pass.
-    let rewritten = rewrite_ivars_to_locals(&view.body);
+    // `ivar_locals` names each ivar's local once for the whole view, so
+    // the params below and these reads agree (#753).
+    let closure_raw: Vec<Symbol> = view_key_of(view)
+        .and_then(|k| lx.closures.get(&k).cloned())
+        .unwrap_or_default();
+    let ivar_locals = view_ivar_locals(view, &closure_raw);
+    let rewritten = rewrite_ivars_to_locals(&view.body, &ivar_locals);
 
     // (No trim pass here: erubi's `<% %>`-on-its-own-line rule is
     // applied lexically in `src/erb.rs`, where the tag's own line is
@@ -472,16 +478,21 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // for now (their call site is main.rb, not yet threaded).
     let closures = lx.closures.clone();
     let dyn_pools = lx.dyn_pools.clone();
-    // `safe_local`: closure maps carry RAW ivar names (controller call
+    // `ivar_locals`: closure maps carry RAW ivar names (controller call
     // sites emit `@for` from them); the view-local identifiers derived
-    // here rename reserved words (`for` → `for_`), position-for-position
-    // with the raw list so caller arg order still matches.
-    let closure_ivars: Vec<String> = view_key_of(view)
-        .and_then(|k| closures.get(&k).cloned())
-        .unwrap_or_default()
-        .iter()
-        .map(|s| crate::naming::safe_local(s.as_str()))
-        .collect();
+    // here rename reserved words (`for` → `for_`, or `for__` beside a
+    // `@for_`), position-for-position with the raw list so caller arg
+    // order still matches.
+    let closure_ivars: Vec<String> =
+        closure_raw.iter().map(|s| ivar_local(&ivar_locals, s.as_str())).collect();
+    // A param's type is looked up by its ivar, not by its local name.
+    let ivar_of = |local: &str| -> String {
+        closure_raw
+            .iter()
+            .zip(&closure_ivars)
+            .find(|(_, l)| l.as_str() == local)
+            .map_or_else(|| local.to_string(), |(raw, _)| raw.as_str().to_string())
+    };
 
     // A partial's locals are its interface: every `locals:` key any call
     // site passes becomes a trailing nil-default param (sorted; see
@@ -532,7 +543,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     let mut typed: Vec<(String, crate::ty::Ty)> = Vec::new();
     if is_action_view {
         for iv in &closure_ivars {
-            typed.push((iv.clone(), closure_ivar_ty(view, iv, &known_models, lx.app)));
+            typed.push((iv.clone(), closure_ivar_ty(view, &ivar_of(iv), &known_models, lx.app)));
         }
     } else {
         // Partial/layout: record/body arg from the render/yield call site,
@@ -554,7 +565,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             if iv == &arg_name {
                 continue;
             }
-            typed.push((iv.clone(), closure_ivar_ty(view, iv, &known_models, lx.app)));
+            typed.push((iv.clone(), closure_ivar_ty(view, &ivar_of(iv), &known_models, lx.app)));
         }
         // Layouts render in the controller's view context, where `flash`
         // is live — thread it as a param when the template reads it bare
@@ -649,7 +660,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             new_params.push(Param::positional(Symbol::from(iv.clone())));
             sig_params.push(TyParam {
                 name: Symbol::from(iv.clone()),
-                ty: closure_ivar_ty(view, iv, &known_models, lx.app),
+                ty: closure_ivar_ty(view, &ivar_of(iv), &known_models, lx.app),
                 kind: ParamKind::Required,
             });
         }
@@ -737,6 +748,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         view_name: view.name.as_str().to_string(),
         ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
         str_ivars: std::rc::Rc::new(view_str_ivars(app, &view.name)),
+        ivar_locals: std::rc::Rc::new(ivar_locals),
     };
 
     // A partial that receives a form builder as a local re-derives the
@@ -2465,17 +2477,19 @@ pub(crate) fn partial_call_contracts(
             continue;
         }
         let record = singularize(last_segment(dir));
-        let rewritten = rewrite_ivars_to_locals(&view.body);
+        let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
+        let ivar_locals = view_ivar_locals(view, &closure_raw);
+        let rewritten = rewrite_ivars_to_locals(&view.body, &ivar_locals);
         let mut extras = collect_extra_params(&rewritten, &record);
-        let closure: Vec<String> = closures
-            .get(&key)
-            .map(|ivs| {
-                ivs.iter()
-                    .map(|s| crate::naming::safe_local(s.as_str()))
-                    .filter(|n| n != &record)
-                    .collect()
-            })
-            .unwrap_or_default();
+        // The def side names each closure param by `ivar_locals` and
+        // skips the one the record covers. The caller passes `@<ivar>`
+        // for the rest, so the contract keeps the RAW ivar name: the
+        // local (`class__`) is the partial's own spelling.
+        let (closure, closure_locals): (Vec<String>, Vec<String>) = closure_raw
+            .iter()
+            .map(|s| (s.as_str().to_string(), ivar_local(&ivar_locals, s.as_str())))
+            .filter(|(_, local)| local != &record)
+            .unzip();
         if let Some(keys) = keys_map.get(&key) {
             for k in keys {
                 if k != &record && !extras.contains(k) {
@@ -2483,7 +2497,7 @@ pub(crate) fn partial_call_contracts(
                 }
             }
         }
-        drop_closure_names(&mut extras, &closure);
+        drop_closure_names(&mut extras, &closure_locals);
         out.insert(key, PartialCallContract { record, closure, extras, keyword_extras: false });
     }
     out
@@ -2645,14 +2659,14 @@ pub(super) fn partial_extras_map(
         }
         let stem = base.trim_start_matches('_');
         let arg_name = infer_view_arg(stem, dir, true, &known_models);
-        let rewritten = rewrite_ivars_to_locals(&view.body);
-        let mut extras = collect_extra_params(&rewritten, &arg_name);
         let key = (camelize_path(&snake_case(dir)), stem.to_string());
+        let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
+        let ivar_locals = view_ivar_locals(view, &closure_raw);
+        let rewritten = rewrite_ivars_to_locals(&view.body, &ivar_locals);
+        let mut extras = collect_extra_params(&rewritten, &arg_name);
         // locals-key params — mirrors the def site's append exactly.
-        let closure: Vec<String> = closures
-            .get(&key)
-            .map(|ivs| ivs.iter().map(|s| crate::naming::safe_local(s.as_str())).collect())
-            .unwrap_or_default();
+        let closure: Vec<String> =
+            closure_raw.iter().map(|s| ivar_local(&ivar_locals, s.as_str())).collect();
         if let Some(keys) = keys_map.get(&key) {
             for k in keys {
                 if k != &arg_name && !extras.contains(k) {
@@ -3457,14 +3471,75 @@ fn infer_view_arg_raw(stem: &str, dir: &str, is_partial: bool, _known_models: &[
 
 // ── ivar → local rewrite ─────────────────────────────────────────
 
+/// One view's ivar name → the local that stands for it in the lowered
+/// method (`class` → `class_`). See [`ivar_local_names`].
+pub(crate) type IvarLocals = std::collections::HashMap<String, String>;
+
+/// Name a local for each of one view's ivars. An ivar keeps its own
+/// name unless it is a reserved word, which gets a trailing `_` as in
+/// `safe_local` (`@class` → `class_`), and then one more `_` while that
+/// name is another ivar of the same set: a view that reads `@class` and
+/// `@class_` takes `class__` and `class_`, not `class_` twice (#753).
+///
+/// Every site where one of the view's ivars becomes a local reads this
+/// map — the parameter list, the body rewrite, and the arguments the
+/// view passes to the partials it renders — so they agree.
+pub(crate) fn ivar_local_names<'a>(ivars: impl IntoIterator<Item = &'a str>) -> IvarLocals {
+    let mut names: Vec<&str> = Vec::new();
+    for n in ivars {
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    let mut taken: std::collections::HashSet<String> =
+        names.iter().map(|n| n.to_string()).collect();
+    let mut out = IvarLocals::new();
+    for n in &names {
+        let mut local = crate::naming::safe_local(n);
+        if local != *n {
+            while taken.contains(&local) {
+                local.push('_');
+            }
+            taken.insert(local.clone());
+        }
+        out.insert(n.to_string(), local);
+    }
+    out
+}
+
+/// The local `ivar` reads as under `locals`; an ivar the map does not
+/// name (a helper body spliced into the view) falls back to
+/// `safe_local`.
+pub(crate) fn ivar_local(locals: &IvarLocals, ivar: &str) -> String {
+    locals.get(ivar).cloned().unwrap_or_else(|| crate::naming::safe_local(ivar))
+}
+
+/// The rename map for `view`: its render-tree closure (the ivars its
+/// parameters carry) plus every ivar its own body reads or writes.
+fn view_ivar_locals(view: &View, closure: &[Symbol]) -> IvarLocals {
+    fn collect<'a>(e: &'a Expr, out: &mut Vec<&'a str>) {
+        match &*e.node {
+            ExprNode::Ivar { name }
+            | ExprNode::Assign { target: LValue::Ivar { name }, .. }
+            | ExprNode::OpAssign { target: LValue::Ivar { name }, .. } => out.push(name.as_str()),
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| collect(c, out));
+    }
+    let mut names: Vec<&str> = closure.iter().map(|s| s.as_str()).collect();
+    collect(&view.body, &mut names);
+    ivar_local_names(names)
+}
+
 /// Rewrite every `@ivar` read (and Ivar-LValue assign) under `expr`
-/// into a bare `Var` of the same name. The inferred view arg + any
+/// into a bare `Var` named by `locals`. The inferred view arg + any
 /// extra params resolve to those rewritten Vars in the emitted body.
-pub(super) fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
+pub(super) fn rewrite_ivars_to_locals(expr: &Expr, locals: &IvarLocals) -> Expr {
+    let r = |e: &Expr| rewrite_ivars_to_locals(e, locals);
     let new_node = match &*expr.node {
         ExprNode::Ivar { name } => ExprNode::Var {
             id: VarId(0),
-            name: Symbol::from(crate::naming::safe_local(name.as_str())),
+            name: Symbol::from(ivar_local(locals, name.as_str())),
         },
         // An ivar ASSIGNMENT is left as one. A template that writes
         // `@page_title` is writing the view context Rails shares with
@@ -3478,41 +3553,41 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
         // already answers the helper-side READ.
         ExprNode::Assign { target: LValue::Ivar { name }, value } => ExprNode::Assign {
             target: LValue::Ivar { name: name.clone() },
-            value: rewrite_ivars_to_locals(value),
+            value: r(value),
         },
         ExprNode::Assign { target, value } => ExprNode::Assign {
-            target: rewrite_lvalue(target),
-            value: rewrite_ivars_to_locals(value),
+            target: rewrite_lvalue(target, locals),
+            value: r(value),
         },
         ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
-            recv: recv.as_ref().map(rewrite_ivars_to_locals),
+            recv: recv.as_ref().map(r),
             method: method.clone(),
-            args: args.iter().map(rewrite_ivars_to_locals).collect(),
-            block: block.as_ref().map(rewrite_ivars_to_locals),
+            args: args.iter().map(r).collect(),
+            block: block.as_ref().map(r),
             parenthesized: *parenthesized,
         },
         ExprNode::Seq { exprs } => ExprNode::Seq {
-            exprs: exprs.iter().map(rewrite_ivars_to_locals).collect(),
+            exprs: exprs.iter().map(r).collect(),
         },
         ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
-            cond: rewrite_ivars_to_locals(cond),
-            then_branch: rewrite_ivars_to_locals(then_branch),
-            else_branch: rewrite_ivars_to_locals(else_branch),
+            cond: r(cond),
+            then_branch: r(then_branch),
+            else_branch: r(else_branch),
         },
         ExprNode::BoolOp { op, surface, left, right } => ExprNode::BoolOp {
             op: *op,
             surface: *surface,
-            left: rewrite_ivars_to_locals(left),
-            right: rewrite_ivars_to_locals(right),
+            left: r(left),
+            right: r(right),
         },
         ExprNode::Array { elements, style } => ExprNode::Array {
-            elements: elements.iter().map(rewrite_ivars_to_locals).collect(),
+            elements: elements.iter().map(r).collect(),
             style: *style,
         },
         ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
             entries: entries
                 .iter()
-                .map(|(k, v)| (rewrite_ivars_to_locals(k), rewrite_ivars_to_locals(v)))
+                .map(|(k, v)| (r(k), r(v)))
                 .collect(),
             kwargs: *kwargs,
         },
@@ -3522,13 +3597,13 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
                 .iter()
                 .map(|p| {
                     let mut p = p.clone();
-                    p.default = p.default.as_ref().map(rewrite_ivars_to_locals);
+                    p.default = p.default.as_ref().map(r);
                     p
                 })
                 .collect(),
             params: params.clone(),
             block_param: block_param.clone(),
-            body: rewrite_ivars_to_locals(body),
+            body: r(body),
             block_style: *block_style,
         },
         ExprNode::StringInterp { parts } => ExprNode::StringInterp {
@@ -3537,7 +3612,7 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
                 .map(|p| match p {
                     InterpPart::Text { value } => InterpPart::Text { value: value.clone() },
                     InterpPart::Expr { expr } => InterpPart::Expr {
-                        expr: rewrite_ivars_to_locals(expr),
+                        expr: r(expr),
                     },
                 })
                 .collect(),
@@ -3547,34 +3622,35 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
         // these arms an `@ivar` inside survives to the emitted module,
         // where no ivar exists.
         ExprNode::While { cond, body, until_form } => ExprNode::While {
-            cond: rewrite_ivars_to_locals(cond),
-            body: rewrite_ivars_to_locals(body),
+            cond: r(cond),
+            body: r(body),
             until_form: *until_form,
         },
         ExprNode::OpAssign { target, op, value } => ExprNode::OpAssign {
-            target: rewrite_lvalue(target),
+            target: rewrite_lvalue(target, locals),
             op: *op,
-            value: rewrite_ivars_to_locals(value),
+            value: r(value),
         },
         other => other.clone(),
     };
     Expr::new(expr.span, new_node)
 }
 
-fn rewrite_lvalue(lv: &LValue) -> LValue {
+fn rewrite_lvalue(lv: &LValue, locals: &IvarLocals) -> LValue {
+    let r = |e: &Expr| rewrite_ivars_to_locals(e, locals);
     match lv {
         LValue::Var { id, name } => LValue::Var { id: *id, name: name.clone() },
         LValue::Ivar { name } => LValue::Var {
             id: VarId(0),
-            name: Symbol::from(crate::naming::safe_local(name.as_str())),
+            name: Symbol::from(ivar_local(locals, name.as_str())),
         },
         LValue::Attr { recv, name } => LValue::Attr {
-            recv: rewrite_ivars_to_locals(recv),
+            recv: r(recv),
             name: name.clone(),
         },
         LValue::Index { recv, index } => LValue::Index {
-            recv: rewrite_ivars_to_locals(recv),
-            index: rewrite_ivars_to_locals(index),
+            recv: r(recv),
+            index: r(index),
         },
         LValue::Const { path } => LValue::Const { path: path.clone() },
     }
@@ -4133,6 +4209,12 @@ pub(super) struct ViewCtx {
     /// `turbo_stream.append target, @message_html` sends it as given
     /// rather than rendering a partial named after it.
     pub(super) str_ivars: std::rc::Rc<std::collections::HashSet<String>>,
+    /// THIS view's ivar → local rename (`view_ivar_locals`). A site
+    /// that turns one of the view's ivars into a local (an ivar write
+    /// in the template, the closure args of a partial render) reads it
+    /// through [`ViewCtx::ivar_local`], so it names the same local the
+    /// params and the body rewrite do.
+    pub(super) ivar_locals: std::rc::Rc<IvarLocals>,
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models
@@ -4280,6 +4362,11 @@ fn reference_target_names(app: &App) -> std::collections::HashMap<String, String
 }
 
 impl ViewCtx {
+    /// The local this view's `@ivar` reads as (see `ivar_local_names`).
+    pub(super) fn ivar_local(&self, ivar: &str) -> String {
+        ivar_local(&self.ivar_locals, ivar)
+    }
+
     pub(super) fn is_local(&self, n: &str) -> bool {
         self.locals.iter().any(|x| x == n)
     }

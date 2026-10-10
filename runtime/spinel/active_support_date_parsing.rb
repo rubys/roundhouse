@@ -151,3 +151,13 @@ module ActiveSupport
     civil_days(d.year, d.month, d.day) > civil_days(current.year, current.month, current.day)
   end
 end
+
+# Here, not in relation.rb: a date-free Spinel app cannot name `parse_db_date`.
+module ActiveRecord
+  class Relation
+    def cast_schema_date(value)
+      ActiveSupport.parse_db_date(value)
+    end
+    private :cast_schema_date
+  end
+end

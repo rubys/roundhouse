@@ -79,10 +79,14 @@ module ActionController
     i = 0
     while i < n
       byte = bytes[i]
-      return false if byte <= 32 || byte == 34 || byte == 58 || byte == 127
+      return false unless header_key_byte_ok?(byte)
       i += 1
     end
     true
+  end
+
+  def self.header_key_byte_ok?(byte)
+    byte > 32 && byte != 34 && byte != 58 && byte != 127
   end
 
   def self.header_value_ok?(v)
@@ -289,14 +293,18 @@ module ActionController
     # `()` not `Option`.
     def []=(key, value)
       if ActionController.header_key_ok?(key) && ActionController.header_value_ok?(value)
-        i = index_of(key)
-        if i < 0
-          @keys << key
-          @lower << key.downcase
-          @vals << value
-        else
-          @vals[i] = value
-        end
+        store_value(key, value)
+      end
+    end
+
+    def store_value(key, value)
+      i = index_of(key)
+      if i < 0
+        @keys << key
+        @lower << key.downcase
+        @vals << value
+      else
+        @vals[i] = value
       end
     end
 
@@ -304,15 +312,28 @@ module ActionController
     # Rack::Headers stores them that way, so `slice` hands them back so.
     def slice(*names)
       out = {}
-      names.each do |name|
-        i = index_of(name)
-        out[@lower[i].to_s] = @vals[i].to_s if i >= 0
+      name_index = 0
+      while name_index < names.length
+        name = names[name_index]
+        found = index_of(name)
+        out[@lower[found].to_s] = @vals[found].to_s if found >= 0
+        name_index += 1
       end
       out
     end
 
     def merge!(other)
-      other.each { |key, value| self[key] = value }
+      keys = other.keys
+      values = other.values
+      i = 0
+      while i < keys.length
+        key = keys[i].to_s
+        value = values[i]
+        if ActionController.header_key_ok?(key) && ActionController.header_value_ok?(value)
+          store_value(key, value)
+        end
+        i += 1
+      end
       self
     end
 
@@ -320,9 +341,16 @@ module ActionController
       i = index_of(key)
       return nil if i < 0
       value = @vals[i]
-      @keys.delete_at(i)
-      @lower.delete_at(i)
-      @vals.delete_at(i)
+      j = i
+      while j + 1 < @keys.length
+        @keys[j] = @keys[j + 1]
+        @lower[j] = @lower[j + 1]
+        @vals[j] = @vals[j + 1]
+        j += 1
+      end
+      @keys.pop()
+      @lower.pop()
+      @vals.pop()
       value
     end
 
@@ -531,6 +559,13 @@ module ActionController
       @performed
     end
 
+    # Rails' head vs redirect_to: a 3xx from `head` is not a Location
+    # redirect body. Overlay `head` sets the flag; the shared keyword
+    # form does not, so this stays false there.
+    def head_response?
+      @head_response
+    end
+
     # Discard the current session (Rails' logout idiom). The dispatch
     # layer persists whatever the session holds after the action; an
     # empty replacement means the outbound session cookie is cleared
@@ -643,94 +678,25 @@ module ActionController
       nil
     end
 
-    # Rails 8.1.4 ActionController::Head#head(status, options = nil).
-    # Options are a header hash; :location and :content_type are special,
-    # while all other entries become normalized, string-valued response
-    # headers. Content-type symbols resolve through Mime; string media
-    # types retain their MIME type with charset removed. @performed—not
-    # the initially empty @body—is Rails' double-render guard: the first
-    # head is valid, but render-then-head raises
-    # AbstractController::DoubleRenderError.
-    #
-    # Rails source returns true (the API prose does not promise a return
-    # value). Bodyless status classes omit Content-Type; other statuses
-    # carry the negotiated MIME type without a charset, matching the
-    # source's response.charset = false behavior.
-    def head(status, options = nil)
-      if status.is_a?(Hash)
-        raise ArgumentError, "#{status.inspect} is not a valid value for `status`."
-      end
-      raise AbstractController::DoubleRenderError if @performed
-
-      status = :ok if status.nil?
-      status_code = head_status_code(status)
-      content_type = +""
-      content_type = head_option_content_type(options[:content_type]) unless options.nil?
-
-      @status = status_code
-      unless options.nil?
-        location = options.delete(:location)
-        options.delete(:content_type)
-        options.each do |key, value|
-          @headers[normalize_head_header_name(key.to_s)] = value.to_s
-        end
-        unless location.nil?
-          resolved_location = ActionView::ViewHelpers.url_for(location).to_s
-          @location = ActionController.sanitize_location(resolved_location)
-        end
-      end
-
-      if head_includes_content?(@status)
-        if !@content_type_explicit || media_type.empty?
-          @content_type = content_type.empty? ? head_format_content_type : content_type
-        end
-        @content_type = media_type
-      else
-        @content_type = ""
-      end
-
+    # The strict cross-target runtimes support the bounded status and
+    # keyword form only. Rails 8.1.4's options-hash semantics live in the
+    # Ruby/Spinel overlay, where their richer runtime dependencies exist.
+    # Strict emit cannot construct the custom DoubleRenderError in every
+    # target, so reject a second response with the supported ArgumentError.
+    def head(status, content_type: nil, location: nil)
+      raise ArgumentError, "response has already been performed" if @performed
+      resolved_status = resolve_status(status)
+      @location = ActionController.sanitize_location(location) unless location.nil?
+      @status = resolved_status
       @body = +""
       @performed = true
-      @head_response = true
-      true
-    end
-
-    def head_response?
-      @head_response
-    end
-
-    def head_status_code(status)
-      return status if status.is_a?(Integer)
-      unless STATUS_CODES.key?(status)
-        raise ArgumentError, "Invalid HTTP status: #{status}"
-      end
-      resolve_status(status)
-    end
-
-    def head_includes_content?(status)
-      !(status >= 100 && status < 200) && status != 204 && status != 205 && status != 304
-    end
-
-    def head_format_content_type
-      mime_type = Mime[@request_format]
-      return mime_type.to_s unless mime_type.nil?
-      Mime[:html].to_s
-    end
-
-    def head_option_content_type(content_type)
-      if content_type.is_a?(Symbol)
-        mime_type = Mime[content_type]
-        raise ArgumentError, "Unknown MIME type #{content_type}" if mime_type.nil?
-        mime_type.to_s
+      if (@status >= 100 && @status < 200) || @status == 204 || @status == 205 || @status == 304
+        @content_type = ""
       else
-        content_type.to_s
+        @content_type = content_type unless content_type.nil?
+        @content_type = media_type
       end
-    end
-
-    def normalize_head_header_name(name)
-      name.split(/[-_]/).map do |part|
-        part.empty? ? "" : part[0].upcase + part[1..-1].to_s
-      end.join("-")
+      nil
     end
 
     # `response.headers["Expires"] = …` — Rails actions reach header

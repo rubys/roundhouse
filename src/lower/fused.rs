@@ -93,8 +93,10 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
         });
     });
     // `try_guard` also rewrites test constants and inner-class methods,
-    // which `for_each_test_body` does not reach. The other context
-    // rewrites never walked those surfaces.
+    // which `for_each_test_body` does not reach, and `webmock` the
+    // inner-class methods: an included test helper is carried in as
+    // inner classes (campfire's `PushServiceTestHelper#with_push_service`
+    // switches WebMock off around its real TLS server).
     for tm in &mut app.test_modules {
         for (_, value) in &mut tm.constants {
             walk_postorder(value, &mut |e| {
@@ -104,6 +106,7 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
         for ic in &mut tm.inner_classes {
             for m in &mut ic.methods {
                 walk_postorder(&mut m.body, &mut |e| {
+                    super::webmock::rewrite_node(e);
                     super::try_guard::rewrite_node(e, &try_definers, &try_parents);
                 });
             }

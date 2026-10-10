@@ -254,6 +254,9 @@ require_relative "config/importmap"
 # `ActionView::ViewHelpers.fragment_read/_write`, so after every file that
 # defines them.
 require_relative "runtime/action_controller_fragment_caching"
+# Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
+# feature; strict non-Ruby targets keep the bounded shared implementation.
+require_relative "runtime/action_controller_head"
 # The app/models.rb aggregator (generated — see apply_models_aggregator)
 # loads every model/support class. Model files only require their own
 # LOAD-time deps (superclass, class-body consts); method-body references

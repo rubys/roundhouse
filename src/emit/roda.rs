@@ -2054,6 +2054,7 @@ mod tests {
             param_defaults: vec![],
             int_params: vec![],
             constraints: vec![],
+            seg_patterns: vec![],
         }
     }
 

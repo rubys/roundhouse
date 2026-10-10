@@ -166,9 +166,9 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                 let lookup = |n: &str| -> Option<Expr> {
                     entry.locals.iter().find(|(k, _)| k.as_str() == n).map(|(_, v)| {
                         match &*v.node {
-                            ExprNode::Ivar { name } => var_ref(Symbol::from(
-                                crate::naming::safe_local(name.as_str()),
-                            )),
+                            ExprNode::Ivar { name } => {
+                                var_ref(Symbol::from(ctx.ivar_local(name.as_str())))
+                            }
                             _ => v.clone(),
                         }
                     })
@@ -278,9 +278,11 @@ fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
                     (is_strict || n.as_str() != record_name)
                         && !declared.contains(n.as_str())
                 })
-                // Caller bodies are post-ivar-rewrite: a reserved-word
-                // ivar (`@for`) lives there as its `safe_local` form.
-                .map(|n| var_ref(Symbol::from(crate::naming::safe_local(n.as_str()))))
+                // Caller bodies are post-ivar-rewrite: an ivar lives
+                // there as the CALLER's local for it (`@for` → `for_`,
+                // see `ivar_local_names`). The partial binds it by
+                // position, under its own name.
+                .map(|n| var_ref(Symbol::from(ctx.ivar_local(n.as_str()))))
                 .collect()
         })
         .unwrap_or_default()
@@ -680,7 +682,7 @@ fn partial_extra_named_args(
                         && !declared.contains(n.as_str())
                 })
                 .map(|n| {
-                    let safe = crate::naming::safe_local(n.as_str());
+                    let safe = ctx.ivar_local(n.as_str());
                     (safe.clone(), var_ref(Symbol::from(safe)))
                 })
                 .collect()

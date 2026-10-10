@@ -16,5 +16,7 @@ module ActiveSupport
     def self.foreign_key: (String class_name, ?bool separate_class_name_and_id_with_underscore) -> String
     def self.upcase_first: (String text) -> String
     def self.downcase_first: (String text) -> String
+    # Rails default integer ordinal suffix; no locale/configuration table.
+    def self.ordinalize: (Integer number) -> String
   end
 end

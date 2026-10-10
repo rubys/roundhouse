@@ -813,6 +813,27 @@ module Db
     !Thread.current[:db_conn].nil?
   end
 
+  # `ActiveRecord::Base.transaction`'s per-thread nesting depth
+  # (connection.rb) — see the contract note in runtime/ruby/db.rbs.
+  #
+  # #693 regression on Postgres: connection.rb's self.transaction reads
+  # Db._txn_depth unconditionally, as its very first statement, even for
+  # a flat (non-nested) transaction — not just to decide whether to
+  # join one already open. db_pg.rb never defined these two methods (#693
+  # added them only to db.rb, the SQLite shim, to box the depth counter
+  # for db.rb's own zero-residual RBS probe), so ANY Model.transaction
+  # on the PostgreSQL shim raised NoMethodError. Same per-thread storage
+  # (Thread.current[:ar_txn_depth]) as db.rb, so the two shims share the
+  # same key shape even though they never share a thread.
+  def self._txn_depth
+    d = Thread.current[:ar_txn_depth]
+    d.nil? ? 0 : d
+  end
+
+  def self._txn_depth=(value)
+    Thread.current[:ar_txn_depth] = value
+  end
+
   # Request-scoped lease. Handles left open by the block are released
   # with the lease, and the release runs even when the block raises.
   def self.with_connection
@@ -911,8 +932,23 @@ module Db
   def self.exec(sql)
     record_query(sql)
     conn = current_conn
-    conn.exec(sql)
-    Db.pin_transaction(conn)
+    # A COMMIT or ROLLBACK that itself raises — the backend's session
+    # ended (a lost connection, an idle-in-transaction timeout) rather
+    # than the statement failing cleanly — must not skip
+    # pin_transaction: without it, the pin this thread took at BEGIN
+    # leaks, and Db.current_conn stays wedged on the dead connection for
+    # the rest of the thread's life instead of falling back to a fresh
+    # one (roundhouse#693 fixed the same bug in db.rb's Db.exec). A bare
+    # begin/ensure with no rescue clause is the one shape Spinel
+    # (matz/spinel#8182) runs the ensure for even when the exception
+    # propagates uncaught; pin_transaction reads conn.status itself to
+    # decide whether to release, which is right whether the write
+    # succeeded or raised.
+    begin
+      conn.exec(sql)
+    ensure
+      Db.pin_transaction(conn)
+    end
     # A value, not nil, for the same reason as db.rb: `result = yield`
     # in with_connection cannot hold a void.
     true
@@ -921,8 +957,30 @@ module Db
   # A BEGIN outside a lease binds its connection to this thread until
   # the transaction ends, so a lease taken inside it (with_connection)
   # writes through the same session instead of committing on another.
+  #
+  # Released on PQTRANS_UNKNOWN as well as PQTRANS_IDLE: UNKNOWN is what
+  # a dead session (the backend was terminated, or the socket dropped)
+  # reports once a command on it has failed — found running self.exec's
+  # own begin/ensure fix above against a connection killed mid-BEGIN:
+  # without this, a COMMIT/ROLLBACK that raises because the SESSION
+  # ended, not because the statement failed, left `conn.status` at
+  # UNKNOWN, which the elsif branch below misread as "still open" and
+  # re-pinned — the exact leak the begin/ensure was meant to close. A
+  # dead connection has nothing left to protect, same as an idle one.
+  #
+  # UNKNOWN also drops the connection before clearing the pin. The
+  # unleased fallback (Db.current_conn -> Db.pool.first) is this SAME
+  # PgConn object, and PgConn#client only reopens a fresh session when
+  # @client is nil — left undropped, releasing just the pin here fixes
+  # the leak but leaves the connection itself dead: every LATER
+  # unleased Db.exec on this thread would still hit the same broken
+  # socket ("pg: connection lost") instead of reconnecting. Caught by
+  # CodeRabbit on #766 — case_26's own manual `.drop` after its
+  # assertions was masking exactly this gap.
   def self.pin_transaction(conn)
-    if conn.status == PG::PQTRANS_IDLE
+    status = conn.status
+    if status == PG::PQTRANS_IDLE || status == PG::PQTRANS_UNKNOWN
+      conn.drop if status == PG::PQTRANS_UNKNOWN
       Thread.current[:db_conn] = nil if Thread.current[:db_txn_pin] == true
       Thread.current[:db_txn_pin] = false
     elsif !Db.in_lease?

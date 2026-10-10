@@ -64,6 +64,8 @@ mod campfire_caches_contract;
 mod campfire_caches;
 #[path = "emit_and_run/action_text_markdown.rs"]
 mod action_text_markdown;
+#[path = "emit_and_run/ordinalize.rs"]
+mod ordinalize;
 
 /// A generated text column on the real-blog Article model exercises the
 /// schema-to-runtime path together with Rails-style symbol callbacks. The
@@ -311,6 +313,40 @@ fn extrema_run_on_a_model_and_its_has_many_reader() {
     assert!(run.stdout.contains("extrema passed"));
 }
 
+/// With a date column the Date package loads and an aggregate over it
+/// answers a Date, on Spinel as on CRuby.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn date_extrema_answer_a_date_on_spinel() {
+    let overlay = emit_and_run::real_blog()
+        .edit("db/schema.rb", "t.string \"commenter\"", "t.string \"commenter\"\n    t.date \"archived_on\"")
+        .edit(
+            "app/models/comment.rb",
+            "  belongs_to :article\n",
+            "  belongs_to :article\n\n  def self.first_archived_on\n    Comment.minimum(:archived_on)\n  end\n",
+        );
+    let script = r#"Db.configure(":memory:")
+Schema.statements.each { |sql| Db.exec(sql) }
+ActiveRecord.adapter = SqliteAdapter
+raise "empty: #{Comment.first_archived_on.inspect}" unless Comment.first_archived_on.nil?
+a = Article.create!(title: "One", body: "A sufficiently long body.")
+Comment.create!(article_id: a.id, commenter: "Ann", body: "later", archived_on: Date.iso8601("2024-03-04"))
+Comment.create!(article_id: a.id, commenter: "Bob", body: "earlier", archived_on: Date.iso8601("2024-03-02"))
+raise "first_archived_on: #{Comment.first_archived_on.iso8601}" unless Comment.first_archived_on.iso8601 == "2024-03-02"
+puts "date extrema passed"
+"#;
+    overlay.run_spinel(script).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn extrema_run_on_spinel_without_date_columns() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{EXTREMA_ASSERTIONS}"
+    );
+    extrema_app().run_spinel(&script).assert_passes();
+}
+
 /// The has_many readers `lower::scope_chain` does not seed — one off a
 /// call with arguments, or off a local holding the reader — stay
 /// unresolved: their Array has no `maximum`.
@@ -461,6 +497,78 @@ puts "savepoints passed"
         );
     run.assert_passes();
     assert!(run.stdout.contains("savepoints passed"));
+}
+
+/// `rescue URI::Error` catches `URI.parse`'s `URI::InvalidURIError`, and
+/// `SocketError` resolves where the app names it without a require (Rails
+/// has loaded socket); both lanes define the classes.
+fn uri_and_socket_errors_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/models/article.rb",
+        "  validates :title, presence: true\n",
+        "  validates :title, presence: true
+
+  def self.parsed?(url)
+    URI.parse(url)
+    true
+  rescue URI::Error
+    false
+  end
+
+  def self.socket_failure
+    raise SocketError, \"unreachable\"
+  rescue SocketError => e
+    e.message
+  end
+",
+    ).edit(
+        "app/models/comment.rb",
+        "  validates :body, presence: true\n",
+        "  validates :body, presence: true
+
+  def self.contained?
+    yield
+    false
+  rescue ArgumentError,SocketError
+    true
+  end
+",
+    )
+}
+
+const URI_AND_SOCKET_ASSERTIONS: &str = r#"raise "parsed good" unless Article.parsed?("https://example.com/a")
+raise "parsed bad" if Article.parsed?("http://bad uri")
+raise "socket: #{Article.socket_failure}" unless Article.socket_failure == "unreachable"
+raise "contained" unless Comment.contained? { raise ArgumentError, "x" }
+raise "uncontained" if Comment.contained? { 1 }
+puts "uri and socket errors passed"
+"#;
+
+#[test]
+fn uri_and_socket_errors_are_rescued() {
+    let run = uri_and_socket_errors_app().run_ruby(URI_AND_SOCKET_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("uri and socket errors passed"));
+}
+
+/// The emitted model requires what it rescues, rather than relying on
+/// another runtime file to have loaded socket first.
+#[test]
+fn rescued_socket_and_uri_errors_bring_their_requires() {
+    let (emitted, errors) = uri_and_socket_errors_app().emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let model = std::fs::read_to_string(emitted.join("app/models/article.rb")).expect("emitted model");
+    for line in ["require \"socket\"", "require \"uri\""] {
+        assert!(model.lines().any(|l| l.trim() == line), "missing {line}:\n{model}");
+    }
+    let comment = std::fs::read_to_string(emitted.join("app/models/comment.rb")).expect("emitted model");
+    assert!(comment.lines().any(|l| l.trim() == "require \"socket\""), "rescue A,SocketError:\n{comment}");
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn uri_and_socket_errors_are_rescued_on_spinel() {
+    uri_and_socket_errors_app().run_spinel(URI_AND_SOCKET_ASSERTIONS).assert_passes();
 }
 
 /// A Sidekiq worker's class-side entries run its `perform` inline, as an
@@ -1822,6 +1930,65 @@ fn walk_files(dir: &std::path::Path) -> Vec<String> {
         }
     }
     out
+}
+
+/// Rails' own exception classes the app raises answer the status
+/// Rails' rescue_responses give them, through the production
+/// dispatcher: `ActionController::BadRequest` 400,
+/// `ActiveRecord::RecordNotSaved` / `RecordInvalid` /
+/// `ActionController::InvalidAuthenticityToken` 422. A rescued
+/// `ActiveRecord::ReadOnlyRecord` carries its message.
+#[test]
+fn rails_exception_classes_answer_their_status() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/fail/:kind\", to: \"failures#show\"\n",
+        )
+        .write(
+            "app/controllers/failures_controller.rb",
+            r#"class FailuresController < ApplicationController
+  def show
+    case params[:kind]
+    when "bad" then raise ActionController::BadRequest, "nope"
+    when "not_saved" then raise ActiveRecord::RecordNotSaved.new("not saved", Article.new)
+    when "invalid" then Article.new(title: "").save!
+    when "token" then raise ActionController::InvalidAuthenticityToken
+    when "readonly"
+      begin
+        raise ActiveRecord::ReadOnlyRecord, "frozen"
+      rescue ActiveRecord::ReadOnlyRecord => e
+        render plain: e.message
+      end
+    else
+      render plain: "ok"
+    end
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r##"def call(path)
+  status, _headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+  [status, body.respond_to?(:join) ? body.join : body.to_s]
+end
+{
+  "/fail/bad" => 400,
+  "/fail/not_saved" => 422,
+  "/fail/invalid" => 422,
+  "/fail/token" => 422,
+  "/fail/none" => 200,
+  "/fail/readonly" => 200,
+}.each do |path, want|
+  got, = call(path)
+  raise "#{path} answered #{got}, want #{want}" unless got == want
+end
+_, body = call("/fail/readonly")
+raise "readonly body #{body.inspect}" unless body.include?("frozen")
+"##,
+        )
+        .assert_passes();
 }
 
 /// A job `perform_later` enqueues under the test adapter is held, not
@@ -10196,6 +10363,77 @@ raise "Lost" unless WebPush::ProbePool::Lost.ancestors.include?(StandardError)
         .assert_passes();
 }
 
+/// `def m(...)` that only forwards to `super`, where `super` is Net::HTTP's
+/// private `begin_transport(req)` / `connect` (campfire's
+/// `WebPush::Connections::Stages`): the overrides take those signatures
+/// (`lower::known_super_forwarding`), the spinel emit has no refusal left,
+/// and on both lanes the hooks run in CRuby's order around two requests
+/// over a connection the server closes after each.
+fn super_forwarding_transport_hooks_app() -> emit_and_run::Overlay {
+    // Top level, not nested in a compact parent: a class nested in
+    // `class A::B` is undefined on spinel (matz/spinel#8369), which is
+    // campfire's own spelling and not what this pins.
+    emit_and_run::real_blog().write("lib/probe_stages.rb", r##"module ProbeStages
+  attr_reader :stage
+
+  def trace
+    @trace ||= []
+  end
+
+  private
+    def begin_transport(...)
+      trace << "begin"
+      @stage = :checking
+      super.tap { @stage = :sent }
+    end
+
+    def connect(...)
+      trace << "connect"
+      @stage = :connecting if @stage == :checking
+      super
+    end
+end
+
+class ProbeHTTP < Net::HTTP
+  include ProbeStages
+end
+"##)
+}
+
+const SUPER_FORWARDING_SCRIPT: &str = r##"
+server = TCPServer.new("127.0.0.1", 0)
+port = server.addr[1]
+t = Thread.new do
+  2.times do |i|
+    c = server.accept
+    while (line = c.gets)
+      break if line.strip.empty?
+    end
+    c.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nr#{i}")
+    c.close
+  end
+end
+http = ProbeHTTP.new("127.0.0.1", port)
+http.start
+bodies = [http.get("/").body, http.get("/").body]
+http.finish
+t.join
+raise "bodies #{bodies.inspect}" unless bodies == ["r0", "r1"]
+raise "stage #{http.stage.inspect}" unless http.stage == :sent
+raise "trace #{http.trace.inspect}" unless http.trace == ["connect", "begin", "begin", "connect"]
+"##;
+
+#[test]
+fn forwarding_into_net_http_transport_hooks_runs_on_ruby() {
+    super_forwarding_transport_hooks_app().run_ruby(SUPER_FORWARDING_SCRIPT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn forwarding_into_net_http_transport_hooks_runs_on_spinel() {
+    super_forwarding_transport_hooks_app().run_spinel(SUPER_FORWARDING_SCRIPT).assert_passes();
+}
+
 /// A `test/test_helpers/` module that one test class includes itself
 /// (campfire's `include PushServiceTestHelper`), carried whole into the
 /// test's file: its nested class, its module methods, a constructor
@@ -10385,5 +10623,24 @@ class TokenFreeFormsControllerTest < ActionDispatch::IntegrationTest
 end
 "##)
         .run_test("test/controllers/token_free_forms_controller_test.rb")
+        .assert_passes();
+}
+
+/// A bounded `ActiveSupport::Cache::MemoryStore` keeps an html-safe
+/// String (a SafeBuffer) as such, as Rails' store does. campfire main
+/// caches each text message's rendered body this way (`auto_link`
+/// answers a SafeBuffer); the store refused anything but an exact
+/// String, so with caching on every message body rendered empty.
+#[test]
+fn a_memory_store_keeps_an_html_safe_string() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+store = ActiveSupport::Cache::MemoryStore.new(size: 4096)
+body = store.fetch("presentation") { "<b>hi</b>".html_safe }
+raise "fetch answered #{body.inspect}" unless body == "<b>hi</b>" && body.html_safe?
+again = store.read("presentation")
+raise "read answered #{again.inspect}" unless again == "<b>hi</b>" && again.html_safe?
+raise "the cached copy is the caller's object" if again.equal?(body)
+"##)
         .assert_passes();
 }

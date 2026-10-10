@@ -519,11 +519,16 @@ module Main
       res.status = 404
       res.body = "<h1>404 Not Found</h1>"
       return
-    rescue ActionController::ParameterMissing
+    rescue ActionController::ParameterMissing, ActionController::BadRequest
       # `params.expect` / `params.require` refused the request and the app
       # did not rescue it: Rails' rescue_responses answer :bad_request.
       res.status = 400
       res.body = "<h1>400 Bad Request</h1>"
+      return
+    rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotSaved, ActionController::InvalidAuthenticityToken
+      # Not a 500: Rails' rescue_responses answer these with 422.
+      res.status = 422
+      res.body = "<h1>422 Unprocessable Content</h1>"
       return
     end
 

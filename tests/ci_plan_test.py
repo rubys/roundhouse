@@ -785,6 +785,9 @@ class Routing(unittest.TestCase):
             "runtime/spinel/active_record_date_serialization.rbs": [
                 "date_columns_spinel"
             ],
+            "runtime/ruby/active_record/connection.rb": [
+                "framework_tests_spinel", "spinel_transaction_connection",
+            ],
             "tests/params_vectors/canon.rb": ["spinel_param_builder"],
             "tests/rails_compat_vectors.rb": ["rails_compat_vectors_spinel"],
         }

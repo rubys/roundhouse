@@ -70,18 +70,23 @@ module ActionText
     @close_tag: String
     @owner: Fragment?
     @at: Integer
+    @source_length: Integer
+    @revision: Integer
     def initialize: (String name, Hash[String, String] attributes, String open_tag, String inner, String close_tag) -> void
-    def bind: (Fragment owner, Integer at) -> void
+    def bind: (Fragment owner, Integer at, Integer source_length, Integer revision) -> void
+    def detach: () -> void
+    def refresh: (Fragment owner, Integer at, Integer source_length, Integer revision, String open_tag, String inner) -> void
     def name: () -> String
     def []: (String key) -> String?
     def []=: (String key, String value) -> void
+    def refresh_from_owner: () -> void
     def at_css: (String selector) -> Node?
     def attributes: () -> Hash[String, String]
     def inner_html: () -> String
     def inner_html=: (String markup) -> void
+    def remove: () -> Node
     def to_s: () -> String
     def to_html: () -> String
-    def write_through: (String before) -> void
   end
 
   class Selector
@@ -95,6 +100,22 @@ module ActionText
   end
 
   class Fragment
+    class Change
+      @at: Integer
+      @length: Integer
+      @delta: Integer
+      @preserves_descendants: bool
+      def initialize: (Integer at, Integer length, Integer delta, bool preserves_descendants) -> void
+      def at: () -> Integer
+      def length: () -> Integer
+      def delta: () -> Integer
+      def preserves_descendants: () -> bool
+    end
+
+    @changes: Array[Change]
+    @pending_removals: Array[Array[Integer]]
+    @last_pending_start: Integer?
+    @last_pending_finish: Integer?
     def initialize: (String html) -> void
     def self.wrap: (untyped value) -> Fragment
     def to_s: () -> String
@@ -105,7 +126,14 @@ module ActionText
     def css: (String selector) -> Array[ActionText::Node]
     def at_css: (String selector) -> ActionText::Node?
     def update: () { (Fragment source) -> untyped } -> Fragment
-    def splice: (Integer at, Integer length, String text) -> void
+    def read_inner_html: (Node node, Integer at, Integer length, Integer revision, Integer close_length) -> String
+    def write_inner_html: (Node node, Integer at, Integer length, Integer revision, Integer close_length, String markup) -> void
+    def write_attribute: (Node node, Integer at, Integer length, Integer revision, Integer close_length, String key, String value) -> void
+    def remove_node: (Node node, Integer at, Integer length, Integer revision) -> void
+    private def apply_edit: (Integer at, Integer length, String text, bool preserves_descendants) -> Integer
+    private def flush_pending_removals: () -> void
+    private def current_range: (Integer at, Integer length, Integer revision) -> Array[Integer]?
+    private def current_node_range: (String name, Integer original_at, Integer revision) -> Array[Integer]?
     def scan_elements: (String selector, bool bound) -> Array[ActionText::Node]
     def node_at: (String name, Hash[String, String] attrs, Integer open_at, Integer tag_end, Integer stop) -> ActionText::Node
     def replace: (String selector) { (ActionText::Node node) -> untyped } -> Fragment

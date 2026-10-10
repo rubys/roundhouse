@@ -151,7 +151,26 @@ fn touch_with_a_column_stamps_it_alongside_updated_at() {
         body.contains("__touch_message.last_active_at = ActiveSupport.db_now"),
         "named column stamped through the writer:\n{body}",
     );
-    assert!(body.contains("__touch_message.touch"), "and `updated_at` still stamped:\n{body}");
+    assert!(
+        body.contains("__touch_message.touch_written"),
+        "and the row written with `updated_at`, the stamped column included:\n{body}"
+    );
+}
+
+#[test]
+fn a_bare_touch_writes_only_updated_at() {
+    // Rails' `touch` UPDATEs `updated_at` alone. A whole-row write puts
+    // back every column the parent had loaded, and campfire's
+    // `rooms.messages_count` is kept by SQLite triggers behind the
+    // record: a message's touch of its room wrote the stale count over
+    // the trigger's (the db differential's rooms table, 2 vs Rails' 1).
+    let out = emit("belongs_to :message, touch: true");
+    let body = hook(&out, "class Room", "_adapter_touch");
+    assert!(body.contains("updated_at"), "stamps updated_at:\n{body}");
+    assert!(
+        !body.contains("last_active_at") && !body.contains("name"),
+        "and writes no other column:\n{body}"
+    );
 }
 
 #[test]
