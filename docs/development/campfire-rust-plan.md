@@ -392,6 +392,26 @@ fixture and pipeline evidence in the latest ledger row.
 through `rust.rs` still reports pre-existing formatting drift across the
 emitter tree; no broad formatting was applied.
 
+**D0 classifier soundness follow-up (2026-10-10):** an Oracle audit found
+four unsafe-positive paths in the initial test-only classifier: calls in
+deferred lambda bodies were skipped; a single guarded terminal could be inside
+a loop or follow an implicit `yield`/`super`; assignment could replace the
+block without adding a Var read; and a same-named inherited call could be
+silently ignored as a non-candidate target. Tightened the probe to inspect
+calls in deferred lambdas (but never treat a nested forwarded Var as proof of
+the enclosing method's block), reject loop/yield/super/rebinding flows, and
+invalidate a candidate on unresolved candidate-named targets. Added negative
+tests for deferred non-String callsites, repeated/implicit/rebound consumption,
+and unresolved inherited dispatch. Focused classifier tests pass 6/6 after
+these changes. These are test-only eligibility checks; the production emitter
+is still untouched and the D0 emitted-crate test remains a known red
+reproduction (five generated Cargo errors on the last run). One Oracle finding
+remains open before production wiring: the classifier recognizes a bare method
+named `capture` without proving that it resolves to the intended shared
+`ViewHelpers.capture` implementation. Add that target-identity proof and a
+shadowing regression before treating any candidate as eligible. No Campfire
+inventory was rerun, so there is no compiler-wall delta or support claim.
+
 For cookies, existing request/task metadata and `process_action` dispatch are
 already present. F0 must extend that request lifecycle and decide whether the
 same jar is available through outer layout rendering before deciding when
