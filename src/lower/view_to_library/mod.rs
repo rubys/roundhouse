@@ -1244,6 +1244,7 @@ pub(crate) fn insert_framework_stubs(
         "builder_text",
         "builder_attr",
         "truncate",
+        "word_wrap",
         "dom_id",
         "dom_class",
         "image_tag",
