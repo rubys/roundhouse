@@ -133,7 +133,8 @@ pub fn ingest_library_classes(
 
 /// The block of `NAME = Data.define(:a, :b) do def … end end`, when that
 /// is what `value` is: `Data` (or `::Data`) receiving `define` with
-/// Symbol members only, a parameterless block, and a body containing
+/// Symbol members only, a block with no parameter other than an unread
+/// class parameter, and a body containing
 /// only method definitions and bare visibility markers. Any other block
 /// stays with the constant's own ingest, where a `def` is not an expression.
 pub(super) fn data_define_block<'pr>(value: &Node<'pr>) -> Option<ruby_prism::BlockNode<'pr>> {
@@ -151,7 +152,7 @@ pub(super) fn data_define_block<'pr>(value: &Node<'pr>) -> Option<ruby_prism::Bl
         return None;
     }
     let block = call.block()?.as_block_node()?;
-    if block.parameters().is_some() {
+    if block.parameters().is_some() && !super::data_factory::unread_class_parameter(&block) {
         return None;
     }
     let body = block.body()?;
