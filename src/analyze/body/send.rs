@@ -1436,6 +1436,17 @@ impl<'a> BodyTyper<'a> {
                 if id.0.as_str() == "BigDecimal" {
                     return bigdecimal_method(method, call_args).unwrap_or_else(unknown);
                 }
+                // Not Rails' numeric or TZInfo lookups: only a zone NAME reaches the runtime port's `lookup`.
+                if id.0.as_str() == "ActiveSupport::TimeZone" && method.as_str() == "[]" {
+                    return match call_args {
+                        [name] if matches!(name.ty.as_ref(), Some(Ty::Str | Ty::Var { .. }))
+                            || matches!(name.ty.as_ref(), Some(Ty::Union { variants }) if variants.iter().all(|t| matches!(t, Ty::Str | Ty::Nil))) =>
+                        {
+                            Ty::Union { variants: vec![Ty::Class { id: id.clone(), args: vec![] }, Ty::Nil] }
+                        }
+                        _ => unknown(),
+                    };
+                }
                 if id.0.as_str() == "Jbuilder" {
                     return match method.as_str() {
                         "array!" => Ty::Array { elem: Box::new(Ty::Untyped) },
@@ -2094,6 +2105,10 @@ impl<'a> BodyTyper<'a> {
             // uses. Unmodeled methods fall back to `unknown()` (an
             // inference gap) rather than the parent-chain walk — `Time`
             // has no user-defined ancestors in this corpus.
+            // Not Rails' `formatted_offset(colon, alternate_utc_string)`: only the bare form lowers.
+            Some(Ty::Time) if method.as_str() == "formatted_offset" => {
+                if args.is_empty() { Ty::Str } else { unknown() }
+            }
             Some(Ty::Time) => time_method(method).unwrap_or_else(unknown),
             Some(Ty::Date) => date_method(method, args).unwrap_or_else(unknown),
             // `Integer#in_time_zone` lowers only for ≤1 arg (invariant 6).
@@ -2412,7 +2427,7 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         // Integer components / epoch seconds / spaceship.
         "to_i" | "tv_sec" | "tv_usec" | "tv_nsec" | "year" | "month" | "mon"
         | "day" | "mday" | "hour" | "min" | "sec" | "usec" | "nsec"
-        | "wday" | "yday" | "<=>" => Ty::Int,
+        | "wday" | "yday" | "<=>" | "utc_offset" | "gmt_offset" | "gmtoff" => Ty::Int,
         "to_f" => Ty::Float,
         // Predicates / comparisons that read as method calls.
         // `==`/`!=` are handled by `universal_method` (checked before

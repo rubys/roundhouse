@@ -2077,6 +2077,55 @@ raise "got #{got.inspect}" unless got == "First,Second,Second 1,2"
         .assert_passes();
 }
 
+/// `ActiveSupport::TimeZone[name]`, `.all`, and a zone's `name`,
+/// `to_s`, `utc_offset`, `formatted_offset` and `now` answer what Rails
+/// answers. Only offsets no daylight saving moves are pinned here; the
+/// runtime port reads `utc_offset` as Rails does, as the period's base
+/// offset. Expected values are ActiveSupport 8.1's.
+#[test]
+fn time_zone_lookups_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/zones\", to: \"zones#show\"\n",
+        )
+        .write(
+            "app/controllers/zones_controller.rb",
+            r#"class ZonesController < ApplicationController
+  def show
+    all = ActiveSupport::TimeZone.all
+    render plain: [
+      ActiveSupport::TimeZone[params[:tz].to_s]&.name,
+      ActiveSupport::TimeZone["Asia/Tokyo"].to_s,
+      ActiveSupport::TimeZone["Nope"].nil?,
+      ActiveSupport::TimeZone["Tokyo"].now.formatted_offset,
+      ActiveSupport::TimeZone["UTC"].utc_offset,
+      all.size,
+      all.first.to_s,
+      all.last.to_s,
+      ActiveSupport::TimeZone["Tokyo"].formatted_offset
+    ].join("|")
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/zones_controller_test.rb",
+            r#"require "test_helper"
+
+class ZonesControllerTest < ActionDispatch::IntegrationTest
+  test "time zone lookups" do
+    get "/zones", params: { tz: "Tokyo" }
+    assert_equal "Tokyo|(GMT+09:00) Asia/Tokyo|true|+09:00|0|152|(GMT-12:00) International Date Line West|(GMT+13:00) Tokelau Is.|+09:00", response.body
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/zones_controller_test.rb")
+        .assert_passes();
+}
+
 /// A job `perform_later` enqueues under the test adapter is held, not
 /// dropped, and a blockless `perform_enqueued_jobs only:` runs it
 /// (basecamp/once-campfire#296's tests). Its broadcast is JSON encoded
