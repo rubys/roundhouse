@@ -200,7 +200,11 @@ fn unsupported_targets_reject_even_the_apparently_simple_subset() {
         for &target in BuildTarget::TRANSPILE {
             if matches!(
                 target,
-                BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda
+                BuildTarget::Ruby
+                    | BuildTarget::Jruby
+                    | BuildTarget::Spinel
+                    | BuildTarget::Roda
+                    | BuildTarget::Futamura
             ) {
                 continue;
             }

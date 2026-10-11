@@ -45,7 +45,7 @@ use crate::dialect::{
     Model, ModelBodyItem, RenderTarget, ValidationRule,
 };
 use crate::expr::{Expr, ExprNode, Literal};
-use crate::lower::routes::{flatten_routes, FlatRoute};
+use crate::lower::routes::{flatten_routes_for_helpers, FlatRoute};
 use crate::naming;
 use crate::schema::{ColumnType, Table};
 
@@ -617,7 +617,9 @@ fn filter_covers(load: &FilterLoad, action: &str) -> bool {
 // ── app.rb ──────────────────────────────────────────────────────────
 
 fn emit_app_rb(app: &App) -> EmittedFile {
-    let routes = flatten_routes(app);
+    // Roda checks each `constraints:` regex natively (`constraint_guard`),
+    // so a route the regex-free router refuses is still served here.
+    let routes = flatten_routes_for_helpers(app);
     let trie = build_trie(&routes);
     let loads = collect_filter_loads(app);
 
@@ -2005,7 +2007,9 @@ fn is_model(ctx: &EmitCtx, path: &[crate::ident::Symbol]) -> bool {
 /// Views: the synthesized layout + not_found, plus the translated
 /// Rails ERB (see `views::translate_views`).
 fn emit_views(app: &App) -> Vec<EmittedFile> {
-    let routes = flatten_routes(app);
+    // Roda checks each `constraints:` regex natively (`constraint_guard`),
+    // so a route the regex-free router refuses is still served here.
+    let routes = flatten_routes_for_helpers(app);
     let mut out = vec![
         file("views/layout.erb", LAYOUT_ERB),
         file("views/not_found.erb", "<h1>404 Not Found</h1>\n"),
@@ -2055,6 +2059,7 @@ mod tests {
             int_params: vec![],
             constraints: vec![],
             seg_patterns: vec![],
+            refused: None,
         }
     }
 

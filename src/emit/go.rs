@@ -786,7 +786,7 @@ fn emit_v2_test_compat(app: &App) -> EmittedFile {
     // Route helpers — legacy emits `ArticlesPath()`, v2 emits
     // `RouteHelpers_articles_path()`. Walk the flat route list and
     // produce one shim per Rails route_helper name (`as_name`).
-    let flat = crate::lower::flatten_routes(app);
+    let flat = crate::lower::routes::flatten_routes_for_helpers(app);
     let mut seen = std::collections::HashSet::new();
     for route in &flat {
         let as_name = route.as_name.as_str();

@@ -305,6 +305,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); no Warden route guards
     ("faker", GemFate::Modeled),       // catalog/gems: Faker::*
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
+    ("htmlentities", GemFate::Modeled), // catalog/gems: HTMLEntities
     ("image_processing", GemFate::Modeled), // active_storage variants seam
     ("invisible_captcha", GemFate::Modeled), // before_action + spam? on subtitle honeypot only
     ("kaminari", GemFate::Modeled),    // Relation#page / per / paginate
@@ -521,6 +522,7 @@ pub fn namespace_of(gem: &str) -> String {
         ("combine_pdf", "CombinePDF"),
         ("fast_excel", "FastExcel"),
         ("graphql", "GraphQL"),
+        ("htmlentities", "HTMLEntities"),
         ("http", "HTTP"),
         ("i18n", "I18n"),
         ("jwt", "JWT"),

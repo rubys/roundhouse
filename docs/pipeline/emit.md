@@ -38,7 +38,10 @@ emitted under `app/v2/` + `tests/`); the per-artifact emitters and
 the `CtrlWalker` trait were deleted 2026-08-19
 (`docs/python-overlay-plan.md`). Roda sits deliberately outside the
 universal IR: it is a source-to-source Rails→Roda+Sequel converter
-consuming the INGEST-shape `App` (see `src/emit/roda.rs`).
+consuming the INGEST-shape `App` (see `src/emit/roda.rs`). Futamura sits
+outside it too: its residue runs on Rails rather than on the runtime,
+and at stage 0 it emits the source tree itself (see
+[`specialization.md`](specialization.md)).
 
 | Target | Models | Views | Controllers | Tests | Schema/Routes/Seeds | Notes |
 |--------|--------|-------|-------------|-------|---------------------|-------|
@@ -51,6 +54,7 @@ consuming the INGEST-shape `App` (see `src/emit/roda.rs`).
 | Kotlin, Swift, C#/.NET | thin | thin | thin | thin | thin | Built on the universal IR from the start |
 | Python | thin | thin | thin | thin | thin | Whole app rides the `app/v2/` overlay (models, views incl. jbuilder, controllers, dispatch, fixtures, LC-emitted unittest suite); the per-artifact emitters are deleted |
 | Roda | — | — | — | — | — | Ingest-shape source-to-source converter (issue #67); not on either path by design |
+| Futamura | — | — | — | — | — | Residue runs on Rails; stage 0 is the identity (source tree, no IR) — see [`specialization.md`](specialization.md) |
 
 "thin" = consumes the universal IR (`LibraryClass` or
 `LibraryFunction`) from a `*_to_library` lowerer. "per-target" =

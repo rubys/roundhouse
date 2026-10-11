@@ -340,8 +340,13 @@ fn run_transpile(
     // the INGEST-shape IR — lowering would rewrite the controller
     // bodies into runtime vocabulary (SQL-folded queries, Views::
     // calls), the wrong altitude to re-idiomize into Sequel/Roda from.
-    // See `emit::roda`.
+    // See `emit::roda`. Futamura needs the types but none of the
+    // lowerings: those rewrite into the runtime's vocabulary, and its
+    // specializations call Rails (docs/pipeline/specialization.md).
     let lower_diags = if target == BuildTarget::Roda {
+        Vec::new()
+    } else if target == BuildTarget::Futamura {
+        roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
         Vec::new()
     } else {
         roundhouse::session::analyze_and_lower(&mut app)
@@ -355,8 +360,13 @@ fn run_transpile(
     // they print and gate here alongside the emit-gap inventory.
     // Roda still reports recovered structural route errors. Its type
     // analysis never ran, so analyzer-only diagnostics would be noise.
-    let mut analyze_diags =
-        if target == BuildTarget::Roda { app.routes.diagnostics.clone() } else { diagnose(&app) };
+    // Futamura reports nothing: whatever it cannot specialize is
+    // residue that Rails runs, not an unsupported construct.
+    let mut analyze_diags = match target {
+        BuildTarget::Roda => app.routes.diagnostics.clone(),
+        BuildTarget::Futamura => Vec::new(),
+        _ => diagnose(&app),
+    };
     analyze_diags.extend(lower_diags);
 
     // A residue whose own text says the construct is "unsupported at
@@ -480,6 +490,9 @@ fn run_transpile(
     // They never became `EmittedFile`s (that type's content is a
     // `String`), so before this they were dropped without a word.
     let assets = project::write_binary_assets(&app.binary_assets, &files, out)?;
+    if target == BuildTarget::Futamura {
+        project::copy_exec_bits(input, &files, out)?;
+    }
     eprintln!(
         "roundhouse: emitted {} files to {} ({})",
         files.len() + assets,

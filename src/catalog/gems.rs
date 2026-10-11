@@ -216,6 +216,13 @@ pub const GEM_CATALOG: &[GemClass] = &[
         class_methods: &[("random", GemTy::Str), ("random_base32", GemTy::Str)],
         instance_methods: &[],
     },
+    // htmlentities — entity encode/decode; both directions return the
+    // converted String (lobsters' `HtmlEncoder` wraps one instance).
+    GemClass {
+        name: "HTMLEntities",
+        class_methods: &[],
+        instance_methods: &[("encode", GemTy::Str), ("decode", GemTy::Str)],
+    },
     // RQRCode — QR-code rendering; the `as_*` methods serialize to a
     // String in the requested format.
     GemClass {

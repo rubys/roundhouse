@@ -47,6 +47,12 @@ pub const DISCARDED_VALUE: u64 = 1 << 9;
 /// discarded, over one model's records. Only this one lowers.
 pub const ADMITTED_PRELOADER_CALL: u64 = 1 << 10;
 
+/// A written constant inside a body Rubydex does not index (the
+/// `class << Rails.application` settings block): the file is in the
+/// snapshot, but no reference was recorded at this span, so the absence
+/// is not evidence of an indexing defect.
+pub const UNINDEXED_SCOPE_CONST_REF: u64 = 1 << 11;
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by

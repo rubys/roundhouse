@@ -21,6 +21,19 @@ fn rewrite(expr: &mut Expr) {
 }
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {
+    // Not `TimeZone[name]`: a class-side index is an operator on the strict targets; the runtime port answers it as `lookup`.
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node {
+        if method.as_str() == "[]" && args.len() == 1 && is_time_zone_class(r) {
+            *method = Symbol::from("lookup");
+            return;
+        }
+        if method.as_str() == "formatted_offset" && args.is_empty() && matches!(r.ty, Some(Ty::Time)) {
+            let time = r.clone();
+            *expr.node = active_support_call("formatted_offset", vec![time]);
+            expr.ty = Some(Ty::Str);
+            return;
+        }
+    }
     if let ExprNode::Send { recv: Some(r), method, .. } = &mut *expr.node {
         if is_time_const(r) && method.as_str() == "use_zone" {
             *r = Expr::new(r.span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
@@ -376,6 +389,12 @@ fn date_expr(node: ExprNode) -> Expr {
 
 fn now() -> Expr {
     time_expr(active_support_call("now", vec![]))
+}
+
+fn is_time_zone_class(expr: &Expr) -> bool {
+    matches!(&*expr.node, ExprNode::Const { path }
+        if matches!(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice(),
+            ["ActiveSupport", "TimeZone"] | ["", "ActiveSupport", "TimeZone"]))
 }
 
 fn active_support_call(method: &str, args: Vec<Expr>) -> ExprNode {

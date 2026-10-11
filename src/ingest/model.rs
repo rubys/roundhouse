@@ -1424,6 +1424,22 @@ pub(super) fn expand_enum_decl(
             EnumStored::Expr(_) => None,
         })
         .collect::<Option<Vec<_>>>();
+    let writes = mapping_constant_writes(&mapping_node, file)?;
+    // The declaration's comments ride the first item, so with constant
+    // writes ahead of the generated items they move to the first write.
+    let mut doc_comments = if writes.is_empty() {
+        Vec::new()
+    } else {
+        std::mem::take(items[0].leading_comments_mut())
+    };
+    items.splice(
+        0..0,
+        writes.into_iter().map(|expr| ModelBodyItem::Unknown {
+            expr,
+            leading_comments: std::mem::take(&mut doc_comments),
+            leading_blank_line: false,
+        }),
+    );
     Ok(Some(EnumExpansion { column: Symbol::from(column.as_str()), mapping, default, items }))
 }
 
@@ -1736,13 +1752,59 @@ fn enum_label_pairs<'a>(
         let Some(assoc) = el.as_assoc_node() else { return Ok(None) };
         let Some(label) = consts.label(&assoc.key()) else { return Ok(None) };
         let value = assoc.value();
-        let stored = match consts.scalar(&value) {
-            Some(lit) => EnumStored::Lit(lit),
-            None => EnumStored::Expr(ingest_expr(&value, file)?),
+        // `pending: PENDING = "pending"` stores the written value and
+        // defines the constant, which `mapping_constant_writes` hoists
+        // into the class body. A literal value is stored as that literal;
+        // only a non-literal one makes the generated methods read the
+        // constant.
+        let stored = match value.as_constant_write_node() {
+            Some(cw) => match consts.scalar(&cw.value()) {
+                Some(lit) => EnumStored::Lit(lit),
+                None => EnumStored::Expr(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from(constant_id_str(&cw.name()))] },
+                )),
+            },
+            None => match consts.scalar(&value) {
+                Some(lit) => EnumStored::Lit(lit),
+                None => EnumStored::Expr(ingest_expr(&value, file)?),
+            },
         };
         out.push((label, stored));
     }
     Ok(Some(out))
+}
+
+/// The constants an enum's hash mapping assigns as it is built
+/// (`pending: PENDING = "pending"`), as class-body writes. Ruby runs
+/// them when the class body evaluates the `enum` call's arguments; left
+/// inside the mapping they would be copied into the generated methods,
+/// where a constant assignment does not parse.
+fn mapping_constant_writes(node: &Node<'_>, file: &str) -> IngestResult<Vec<Expr>> {
+    if let Some(call) = node.as_call_node() {
+        if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() && call.block().is_none() {
+            if let Some(recv) = call.receiver() {
+                return mapping_constant_writes(&recv, file);
+            }
+        }
+        return Ok(Vec::new());
+    }
+    let elements: Vec<Node<'_>> = if let Some(hash) = node.as_hash_node() {
+        hash.elements().iter().collect()
+    } else if let Some(kwhash) = node.as_keyword_hash_node() {
+        kwhash.elements().iter().collect()
+    } else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for el in elements {
+        let Some(assoc) = el.as_assoc_node() else { continue };
+        let value = assoc.value();
+        if value.as_constant_write_node().is_some() {
+            out.push(ingest_expr(&value, file)?);
+        }
+    }
+    Ok(out)
 }
 
 /// Rails `scopes:` / `instance_methods:` — only the unprefixed
@@ -2338,12 +2400,67 @@ fn parse_scope(
         }
     }
 
-    let body = match lambda_body {
+    let mut body = match lambda_body {
         Some(b) => ingest_expr(&b, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
+    // The body becomes a class method, where the lambda's own `next v`
+    // (its early return) is `return v`; `next` in a def does not parse.
+    // Rails runs the body as `instance_exec(*args, &body) || self`
+    // (`ActiveRecord::Relation#_exec_scope`), so a falsy `next` answers
+    // the relation: a bare `next`, `next nil` or `next false` returns
+    // `all`, and any other value `v` returns `v || all` unless it is
+    // `all` or `none` itself. A longer chain can still be falsy
+    // (`where(x).presence`, `find_by(x)`, a helper returning nil).
+    super::sql_functions::next_to_return_with(&mut body, &scope_next_value);
 
     Ok(Some(Scope { name, params, body }))
+}
+
+/// The value a scope body's `next` returns from the class method it
+/// becomes; see `parse_scope`.
+fn scope_next_value(value: Option<Expr>, span: Span) -> Expr {
+    let all = || {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("all"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+    let Some(value) = value else { return all() };
+    if matches!(
+        &*value.node,
+        ExprNode::Lit { value: crate::expr::Literal::Nil | crate::expr::Literal::Bool { value: false } }
+    ) {
+        return all();
+    }
+    if is_all_or_none(&value) {
+        return value;
+    }
+    Expr::new(
+        span,
+        ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::Or,
+            surface: crate::expr::BoolOpSurface::Symbol,
+            left: value,
+            right: all(),
+        },
+    )
+}
+
+/// A receiverless `all` or `none`: a relation, so `|| all` after it
+/// is dead.
+fn is_all_or_none(e: &Expr) -> bool {
+    matches!(
+        &*e.node,
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if args.is_empty() && matches!(method.as_str(), "all" | "none")
+    )
 }
 
 /// `(expr)` around a single statement — surface-only parens, same as

@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# scripts/futamura-suite — the `--target futamura` gate for any Rails app.
+#
+# Futamura's contract (docs/pipeline/specialization.md): whatever is not
+# specialized runs on Rails, so the app's OWN suite, run by Rails, must
+# give the same result against the emitted tree as against the source.
+# Not "passes": the same. A test that fails on the source for reasons of
+# the environment (no ffmpeg, a libvips without a loader) fails on both,
+# and that is not a finding. A test that passes on one side only is.
+#
+# The control is a COPY of the source (everything but .git), so the run
+# writes no logs, databases or caches into the app's checkout. The copy
+# keeps what the emit drops (run-time state, node_modules), which is the
+# point: if the emit dropped something the suite needs, the two sides
+# differ.
+#
+# Usage:  scripts/futamura-suite [options] APP_PATH
+#
+# Options:
+#   --mise       Run Ruby through `mise exec ruby@VERSION --`, VERSION from
+#                the app's .ruby-version (a non-interactive shell does not
+#                get mise's prompt hook, so .ruby-version alone is not
+#                enough there).
+#   --command C  Test command (default: `bin/rails test`).
+#   --keep       Keep the work directory and print its path.
+#
+# Exit status: 0 when the summaries and the sets of failing tests match;
+# 1 when they differ; 2 when the run could not be made (emit, bundle or
+# database setup failed, or neither side printed a summary).
+#
+# Requires: cargo (or ROUNDHOUSE_BIN), rsync, and the app's Ruby + bundle.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/roundhouse-bin.sh"     # ROUNDHOUSE_BIN or cargo run
+
+APP=""
+MISE=0
+COMMAND="bin/rails test"
+KEEP=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --mise)     MISE=1; shift ;;
+        --command)  COMMAND="$2"; shift 2 ;;
+        --keep)     KEEP=1; shift ;;
+        -h|--help)  sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -*)         echo "unknown flag: $1" >&2; exit 2 ;;
+        *)          APP="$1"; shift ;;
+    esac
+done
+[[ -n "$APP" && -d "$APP" ]] || { echo "usage: $0 [options] APP_PATH" >&2; exit 2; }
+APP="$(cd "$APP" && pwd)"
+
+WORK="$(mktemp -d -t futamura-suite.XXXXXX)"
+if [[ $KEEP -eq 1 ]]; then
+    echo "futamura-suite: work dir $WORK"
+else
+    trap 'rm -rf "$WORK"' EXIT
+fi
+
+RUN=()
+if [[ $MISE -eq 1 ]]; then
+    version="$(sed 's/^ruby-//' "$APP/.ruby-version" 2>/dev/null)" \
+        || { echo "futamura-suite: --mise needs $APP/.ruby-version" >&2; exit 2; }
+    RUN=(mise exec "ruby@$version" --)
+fi
+
+rsync -a --exclude=/.git "$APP/" "$WORK/src/"
+roundhouse_run --target futamura "$APP" -o "$WORK/out" >"$WORK/emit.log" 2>&1 \
+    || { cat "$WORK/emit.log" >&2; echo "futamura-suite: emit failed" >&2; exit 2; }
+
+# The suite's summary line and the names of its failing tests. Minitest
+# names a failure `Class#test_name [file:line]:` and an error
+# `Class#test_name:`, on the line after the `Failure:`/`Error:` header.
+run_side() {
+    local side="$1" dir="$WORK/$1"
+    (
+        cd "$dir"
+        # Install only what the Gemfile cannot already resolve: no network
+        # when the gems are there, and no dependence on the `bundle` command.
+        if ! "${RUN[@]}" ruby -e 'require "bundler/setup"' >/dev/null 2>&1; then
+            "${RUN[@]}" bundle install --quiet >"$WORK/$side.bundle.log" 2>&1 \
+                || { cat "$WORK/$side.bundle.log" >&2; echo "futamura-suite: bundle install failed ($side)" >&2; exit 2; }
+        fi
+        RAILS_ENV=test "${RUN[@]}" bin/rails db:prepare >"$WORK/$side.db.log" 2>&1 \
+            || { cat "$WORK/$side.db.log" >&2; echo "futamura-suite: db:prepare failed ($side)" >&2; exit 2; }
+        # A failing suite exits non-zero; that is a result to compare, not an abort.
+        "${RUN[@]}" $COMMAND >"$WORK/$side.log" 2>&1 || true
+    ) || exit 2
+    grep -E '^[0-9]+ runs, ' "$WORK/$side.log" | tail -1 >"$WORK/$side.summary" || true
+    grep -A1 -E '^(Failure|Error):' "$WORK/$side.log" \
+        | grep -E '#' | sed -E 's/ \[[^]]*\]//; s/:$//' | sort -u >"$WORK/$side.failing" || true
+}
+
+run_side src
+run_side out
+
+src_summary="$(cat "$WORK/src.summary")"
+out_summary="$(cat "$WORK/out.summary")"
+echo "source:  ${src_summary:-(no summary)}"
+echo "emitted: ${out_summary:-(no summary)}"
+if [[ -z "$src_summary" && -z "$out_summary" ]]; then
+    echo "futamura-suite: neither side printed a summary; see $WORK/{src,out}.log" >&2
+    [[ $KEEP -eq 1 ]] || trap - EXIT
+    exit 2
+fi
+
+if [[ "$src_summary" == "$out_summary" ]] && cmp -s "$WORK/src.failing" "$WORK/out.failing"; then
+    n="$(wc -l <"$WORK/src.failing" | tr -d ' ')"
+    echo "futamura-suite: SAME ($n failing on both sides)"
+    exit 0
+fi
+echo "futamura-suite: DIFFERENT — failing tests, source (<) vs emitted (>):"
+diff "$WORK/src.failing" "$WORK/out.failing" || true
+exit 1
