@@ -321,7 +321,7 @@ fn forwarding_markers_are_not_values_or_gradual_escapes() {
 }
 
 #[test]
-fn flattened_optional_keyword_callee_is_honestly_unsupported() {
+fn optional_keyword_callee_preserves_full_forwarding() {
     let source = r#"
 class Sink
   def call(first, second, factor: 2)
@@ -342,9 +342,12 @@ end
         .collect();
     assert!(
         errors
-            .iter()
-            .any(|d| d.message.contains("forwarding") && d.message.contains("flattened")),
-        "{errors:?}"
+            .is_empty(), "{errors:?}");
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", source)
+        .run_ruby("puts Probe.new.call(11, 4, factor: 3)");
+    run.assert_passes();
+    assert_eq!(run.stdout, "21\n"
     );
 }
 
@@ -449,7 +452,7 @@ fn mixed_anonymous_keyword_pairs_round_trip_as_an_ordered_group() {
 }
 
 #[test]
-fn flattened_and_unknown_contracts_remain_errors_through_lowering() {
+fn optional_keyword_forwarders_run_but_unknown_contracts_remain_errors() {
     for source in [
         "class Probe\n def call(...)\n target(...)\n end\n def target(a, b, factor: 2)\n (a-b)*factor\n end\nend",
         "class Probe\n def call(...)\n self.target(...)\n end\n def target(a, b, **kw)\n (a-b)*kw[:factor]\n end\nend",
@@ -469,10 +472,20 @@ fn flattened_and_unknown_contracts_remain_errors_through_lowering() {
             .chain(lower)
             .filter(|d| d.severity == Severity::Error)
             .collect();
+        if source.contains("absent(...)") {
         assert!(
             errors.iter().any(|d| d.message.contains("forwarding")),
             "{source}\n{errors:?}"
         );
+        } else {
+            assert!(errors.is_empty(), "{source}\n{errors:?}");
+            let receiver = if source.contains("class Child") { "Child" } else { "Probe" };
+            let run = emit_and_run::real_blog()
+                .write("app/lib/probe.rb", source)
+                .run_ruby(&format!("puts {receiver}.new.call(11, 4, factor: 3)"));
+            run.assert_passes();
+            assert_eq!(run.stdout, "21\n");
+        }
     }
 }
 
@@ -589,7 +602,6 @@ fn controller_declarations_are_kept_and_test_entry_declarations_are_rejected() {
 fn anonymous_keyword_forwarding_refuses_unverified_keyword_abis() {
     for source in [
         "class Probe; def call(__fwd_kwargs, **); missing(__fwd_kwargs, **); end; end",
-        "class Probe; def target(**options); options; end; def call(**); target(**); end; end",
         "class Probe; def target; 7; end; def call(**); target(**); end; end",
     ] {
         let mut app = analyzed(source);
@@ -707,7 +719,7 @@ fn a_forwarded_anonymous_rest_stays_unsupported() {
 }
 
 #[test]
-fn custom_new_is_not_admitted_as_the_initializer_contract() {
+fn custom_new_keeps_its_own_keyword_contract() {
     let source = "class Factory; def self.new(factor: 2); factor; end; def initialize; end; end; class Probe; def call(...); Factory.new(...); end; end";
     let native = Command::new("ruby")
         .args(["-e", &format!("{source}; puts Probe.new.call(factor: 3)")])
@@ -720,8 +732,12 @@ fn custom_new_is_not_admitted_as_the_initializer_contract() {
         .filter(|d| d.severity == Severity::Error)
         .collect();
     assert!(
-        errors.iter().any(|d| d.message.contains("flattened")),
-        "{errors:?}"
+        errors.is_empty(), "{errors:?}");
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", source)
+        .run_ruby("puts Probe.new.call(factor: 3)");
+    run.assert_passes();
+    assert_eq!(run.stdout, "3\n"
     );
 }
 
@@ -987,13 +1003,15 @@ fn anonymous_block_and_virtual_destination_losses_are_refused() {
         let run = emit_and_run::real_blog()
             .write("app/lib/probe.rb", source)
             .run_ruby(script);
+        if refusal == "anonymous block" {
         assert!(
-            run.errors.iter().any(|e| e.contains(refusal)),
-            "{refusal}: {:?}; actual={}; stderr={}",
-            run.errors,
-            run.stdout,
-            run.stderr
-        );
+            run.errors.iter().any(|e| e.contains(refusal)), "{:?}",
+            run.errors);
+        } else {
+            run.assert_passes();
+            assert_eq!(
+            run.stdout, expected);
+        }
     }
 }
 

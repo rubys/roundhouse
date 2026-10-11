@@ -7,8 +7,9 @@ use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
 use crate::lower::view::{
+    ViewHelperKind,
     classify_form_builder_method, classify_render_partial, classify_view_helper,
-    extract_sym_or_str, ViewHelperKind,
+    extract_sym_or_str,
 };
 
 use super::form_builder::{
@@ -21,11 +22,12 @@ use super::form_with::{
 };
 use super::helpers::{emit_inline_helper_block, emit_view_helper_call};
 use super::partial::{emit_render_partial, emit_yield};
-use super::turbo_drive::emit_turbo_drive_directive;
 use super::predicates::rewrite_predicates;
+use super::turbo_drive::emit_turbo_drive_directive;
 use super::{
+    ViewCtx,
     accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_sym,
-    nil_lit, seq, noop_io_append, send, todo_io_append, var_ref, view_helpers_call, ViewCtx,
+    nil_lit, noop_io_append, send, seq, todo_io_append, var_ref, view_helpers_call,
 };
 
 /// Walk a compiled-ERB body (`Seq` of `_buf = …` statements + control-
@@ -458,21 +460,51 @@ fn splice_form_wrapper(
     block: &Expr,
 ) -> Option<Expr> {
     // Fewer arguments than parameters is the NORMAL call when the
-    // wrapper's tail is an options hash: `**options` ingests as a
-    // trailing positional defaulting to `{}`, so `profile_form_with
-    // @user` supplies one argument to a two-parameter wrapper. Bind
-    // what was passed and fall back to each remaining parameter's own
-    // default; a parameter with no default and no argument is a call
-    // this pass cannot reconstruct.
-    if args.len() > w.params.len() {
+    // wrapper's tail is an options hash. A projected `**options`
+    // arrived as a trailing positional defaulting to `{}`; a preserved
+    // named keyword-rest has that empty binding stored on the helper.
+    // `profile_form_with @user` supplies one argument to a two-parameter
+    // wrapper. Bind what was passed and fall back to each remaining
+    // parameter's own default; a parameter with no default and no
+    // argument is a call this pass cannot reconstruct.
+    //
+    // A trailing keyword packet binds the named keyword-rest by name,
+    // not as another positional. An explicit positional Hash stays a
+    // positional argument — it is not rewritten into a keyword packet.
+    let (positionals, keyword_packet) = if w.keyword_rest.is_some() {
+        if args.iter().any(|a| {
+            matches!(
+                &*a.node,
+                ExprNode::KeywordSplat { .. }
+                    | ExprNode::ForwardArgs
+                    | ExprNode::ForwardKeywords
+                    | ExprNode::ForwardKeywordsWithPairs { .. }
+            )
+        }) {
+            return None;
+        }
+        match args.split_last() {
+            Some((last, rest)) if matches!(&*last.node, ExprNode::Hash { kwargs: true, .. }) => {
+                (rest, Some(last))
+            }
+            _ => (args, None),
+        }
+    } else {
+        (args, None)
+    };
+    if positionals.len() > w.params.len() {
         return None;
     }
-    if !args.iter().all(is_pure_read) {
+    if !positionals.iter().all(|a| is_pure_read(a)) || !keyword_packet.is_none_or(is_pure_read) {
         return None;
     }
+    let mut owned_packet: Option<Expr> = None;
     let mut binding: std::collections::HashMap<&Symbol, &Expr> = std::collections::HashMap::new();
     for (i, (name, default)) in w.params.iter().enumerate() {
-        match args.get(i) {
+        if w.keyword_rest == Some(i) {
+            continue;
+        }
+        match positionals.get(i) {
             Some(a) => {
                 binding.insert(name, a);
             }
@@ -483,6 +515,42 @@ fn splice_form_wrapper(
                 None => return None,
             },
         }
+    }
+    if let Some(index) = w.keyword_rest {
+        let (name, default) = &w.params[index];
+        if positionals.len() > index {
+            return None;
+        }
+        let bound = match keyword_packet {
+            Some(packet) => packet,
+            None => match default {
+                Some(d) => d,
+                None => return None,
+            },
+        };
+        // A keyword packet is `kwargs: true`. The wrapper body merges it
+        // as a Hash value; folding that merge needs a literal hash, not
+        // a call-site keyword marker. A non-literal value cannot be
+        // folded, and declining after the splice drops the form, so
+        // decline here instead.
+        let (pure, as_kwargs) = match &*bound.node {
+            ExprNode::Hash { entries, kwargs } => {
+                (entries.iter().all(|(k, v)| is_pure_read(k) && is_pure_read(v)), *kwargs)
+            }
+            _ => return None,
+        };
+        if !pure {
+            return None;
+        }
+        if as_kwargs {
+            let mut literal = bound.clone();
+            if let ExprNode::Hash { kwargs, .. } = &mut *literal.node {
+                *kwargs = false;
+            }
+            owned_packet = Some(literal);
+        }
+        let bound = owned_packet.as_ref().unwrap_or(bound);
+        binding.insert(name, bound);
     }
     let ExprNode::Send { method, args: wargs, parenthesized, .. } = &*w.call.node else {
         return None;
@@ -2225,6 +2293,7 @@ mod tests {
         // room page died on.
         let wrapper = super::super::FormWrapperHelper {
             params: vec![(Symbol::from("room"), None)],
+            keyword_rest: None,
             call: Expr::new(
                 Span::default(),
                 ExprNode::Send {
@@ -2288,6 +2357,7 @@ mod tests {
         // a site keeps its shape and stays a loud failure.
         let wrapper = super::super::FormWrapperHelper {
             params: vec![(Symbol::from("room"), None)],
+            keyword_rest: None,
             call: Expr::new(
                 Span::default(),
                 ExprNode::Send {

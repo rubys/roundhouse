@@ -2703,19 +2703,18 @@ pub(crate) fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: Method
     }
 }
 
-/// Ingest a method with the ordinary library keyword-flattening policy.
-/// Callers that need to retain the keyword contract use the explicit variant.
+/// Preserve the source keyword contract for ordinary application methods.
 pub(super) fn ingest_library_method(
     def: &ruby_prism::DefNode<'_>,
     owner: &ClassId,
     file: &str,
 ) -> IngestResult<crate::dialect::MethodDef> {
-    ingest_library_method_with_keywords(def, owner, file, false)
+    ingest_library_method_with_keywords(def, owner, file, true)
 }
 
-/// Ingest a library method, optionally retaining keyword parameters even where
-/// ordinary library ingestion would flatten them. Data initializers require this
-/// to preserve Ruby's keyword binding and forwarding through `super`.
+/// Ingest a library method with an explicit keyword-retention policy.
+/// Native declarations preserve Ruby's keyword binding and forwarding through
+/// `super`; projected runtime signatures use their existing positional ABI.
 pub(super) fn ingest_library_method_with_keywords(
     def: &ruby_prism::DefNode<'_>,
     owner: &ClassId,
@@ -3328,6 +3327,7 @@ pub fn ingest_helper_method_names(source: &[u8]) -> Vec<Symbol> {
 pub struct ConcernClassMethodSpans {
     pub owner: ClassId,
     pub methods: Vec<Span>,
+    pub templates: Vec<Span>,
     pub bridges: Vec<Span>,
     pub has_nested_carrier: bool,
     /// Literal framework identity and calls that require it to be installed.
@@ -3370,6 +3370,7 @@ pub fn ingest_concern_class_method_spans(
 
         let Some(body) = module.body() else { continue };
         let mut spans: Vec<Span> = Vec::new();
+        let mut templates = Vec::new();
         let mut bridges: Vec<Span> = Vec::new();
         let mut has_nested_carrier = false;
         let mut concern_extensions = Vec::new();
@@ -3380,6 +3381,7 @@ pub fn ingest_concern_class_method_spans(
                 if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
                     has_nested_carrier = true;
                     defs_in(m.body(), file, &mut spans);
+                    defs_in(m.body(), file, &mut templates);
                 }
                 continue;
             }
@@ -3412,6 +3414,7 @@ pub fn ingest_concern_class_method_spans(
                 {
                     if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
                         defs_in(block.body(), file, &mut spans);
+                        defs_in(block.body(), file, &mut templates);
                     }
                 }
             }
@@ -3446,6 +3449,7 @@ pub fn ingest_concern_class_method_spans(
             out.push(ConcernClassMethodSpans {
                 owner: id,
                 methods: spans,
+                templates,
                 bridges,
                 has_nested_carrier,
                 concern_extensions,

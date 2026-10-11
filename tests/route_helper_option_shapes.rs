@@ -20,7 +20,7 @@
 //! ```
 //!
 //! and a controller calls `Routes.title_path(story, anchor: a)` against
-//! the keyword `title_path` ingest flattened to `(story, anchor = nil)`.
+//! the source keyword `title_path(story, anchor: nil)`.
 //! Before: `title:` was an unknown keyword (ArgumentError on every
 //! story link), the `options` Hash became the title (`/s/x/{anchor: …}`),
 //! and the controller's `{anchor: a}` became the anchor.
@@ -97,7 +97,17 @@ fn a_local_options_hash_is_spread_into_the_slots_it_names() {
 }
 
 #[test]
-fn a_class_method_keyword_call_fills_the_flattened_slot() {
+fn a_class_method_keyword_call_keeps_the_native_keyword() {
     let out = emitted();
-    assert!(out.contains("LinkPaths.title_path(story, \"top\")"), "got:\n{out}");
+    assert!(out.contains("def self.title_path(story, anchor: nil)"),
+        "native source signature was flattened:\n{out}"
+    );
+    assert!(
+        out.contains("LinkPaths.title_path(story, anchor: \"top\")"),
+        "keyword call was rewritten positionally:\n{out}"
+    );
+    assert!(
+        !out.contains("LinkPaths.title_path(story, \"top\")"),
+        "positional rewrite of a native keyword call:\n{out}"
+    );
 }

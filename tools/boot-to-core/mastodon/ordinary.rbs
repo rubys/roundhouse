@@ -1,0 +1,9 @@
+class Addressable::URI
+  def path: () -> String
+  def query: () -> String?
+end
+
+class HttpSignatureDraft
+  def initialize: (nil, String) -> void
+  def request_target: (String, Addressable::URI) -> String
+end

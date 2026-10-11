@@ -1,0 +1,18 @@
+# Explicit API domains, never inferred from sampled runtime values.
+class RailsCoreProduct
+  def name: () -> (String | nil)
+  def name=: (String value) -> String
+  def name_describe: () -> String
+  def title_describe: () -> String
+  def attribute_describe: (String attribute) -> String
+end
+
+class CallbackProduct
+  def prime: (Integer seed, Integer weight) -> bool
+  def twist: () -> Integer
+  def review: () -> bool
+  def judge: () -> bool
+  def ledger: () -> Integer
+  def probe_weight: () -> Integer
+  def allowed?: () -> bool
+end

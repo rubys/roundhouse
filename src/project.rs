@@ -1622,15 +1622,33 @@ pub fn target_files(
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
         for (span, policy) in crate::analyze::forwarding::keyword_calls(app) {
             if policy != crate::analyze::forwarding::KeywordPolicy::Legacy {
-                let (construct, detail) = if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
-                    ("keyword splat in ordinary super",
-                     "super destination's native or lowered argument ABI cannot be verified")
-                } else {
-                    ("keyword splat into full argument forwarding",
-                     "native Ruby keyword provenance has no verified carrier on this target")
-                };
-                crate::emit::diagnostics::report_unsupported(span, target.as_str(),
-                    construct, detail);
+                let (construct, detail) =
+                    if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
+                        (
+                            "keyword splat in ordinary super",
+                            "super destination's native or lowered argument ABI cannot be verified",
+                        )
+                    } else if matches!(
+                        policy,
+                        crate::analyze::forwarding::KeywordPolicy::NativeKeywords
+                            | crate::analyze::forwarding::KeywordPolicy::RefuseKeywords
+                    ) {
+                        (
+                            "keyword splat into source keyword parameters",
+                            "native Ruby keywords have no verified argument carrier on this target",
+                        )
+                    } else {
+                        (
+                            "keyword splat into full argument forwarding",
+                            "native Ruby keyword provenance has no verified carrier on this target",
+                        )
+                    };
+                crate::emit::diagnostics::report_unsupported(
+                    span,
+                    target.as_str(),
+                    construct,
+                    detail,
+                );
             }
         }
     }
@@ -4569,6 +4587,19 @@ fn report_positional_rest_param(method: &crate::dialect::MethodDef, target: Buil
 }
 
 fn report_keyword_params(app: &App, target: &str) {
+    for (owner, method) in crate::analyze::forwarding::methods(app) {
+        for param in method.params.iter().filter(|p| p.keyword && !p.rest) {
+            crate::emit::diagnostics::report_unsupported(
+                method.name_span,
+                target,
+                "keyword parameter",
+                format!(
+                    "`{}` on `{}#{}` — this target's native keyword argument ABI is not verified",
+                    param.name, owner.0, method.name,
+                ),
+            );
+        }
+    }
     // Read from the controllers rather than from `library_classes`:
     // the lowered helper is built inside each target's emit and never
     // stored on the App, so a walk over the stored classes finds

@@ -258,6 +258,48 @@ end
     }
 }
 
+/// Explicit named keywords, general rest and forwarding stay outside
+/// this one-call specialization. The view
+/// keeps the wrapper call rather than splicing a form those formals
+/// cannot bind.
+#[test]
+fn explicit_keywords_general_rest_and_forwarding_are_not_spliced() {
+    for helper in [
+        r#"module ThingsHelper
+  def thing_form_with(model, css_class: "x", &)
+    form_with model: model, url: thing_path(model), class: css_class, &
+  end
+end
+"#,
+        r#"module ThingsHelper
+  def thing_form_with(model, *args, &)
+    form_with model: model, url: thing_path(model), &
+  end
+end
+"#,
+        r#"module ThingsHelper
+  def thing_form_with(...)
+    form_with(...)
+  end
+end
+"#,
+    ] {
+        let app = app_with_helper("", helper);
+        let files = roundhouse::emit::ruby::emit_lowered_views(&app);
+        let show = files
+            .iter()
+            .find(|f| f.path.to_string_lossy().ends_with("things/show.rb"))
+            .map(|f| f.content.clone())
+            .unwrap_or_default();
+        assert!(
+            show.contains("thing_form_with"),
+            "refused formals must not splice:\n{helper}\n{show}"
+        );
+    }
+    let src = show_view(", { class: \"positional\" }");
+    assert!(src.contains("thing_form_with"), "a positional Hash must not bind **params:\n{src}");
+}
+
 #[test]
 fn a_same_named_non_helper_wrapper_cannot_claim_a_view_call() {
     let mut app = app_with("");

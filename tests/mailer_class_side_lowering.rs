@@ -5,13 +5,15 @@
 //! follows the parent chain to ActionMailer::Base transitively, an
 //! app-defined class-side method of the same name wins, non-mailer
 //! classes are untouched, and keyword-param methods stay unwrapped
-//! with a `lower_residue` warning.
+//! with a `lower_residue` warning. Native keyword declarations are
+//! retained; the wrapper does not invent a positional ABI for them.
+
+use roundhouse::App;
 
 use roundhouse::analyze::{Analyzer, Diagnostic};
 use roundhouse::emit::ruby::emit_library;
 use roundhouse::ingest::ingest_library_classes;
 use roundhouse::lower::apply_mailer_class_side;
-use roundhouse::App;
 
 fn lower_and_emit(source: &str) -> (String, Vec<Diagnostic>) {
     let classes =
@@ -94,11 +96,10 @@ end
 }
 
 #[test]
-fn kwarg_source_shape_flattens_at_ingest_and_wraps() {
-    // Library-class ingest flattens `urgent: false` to a
-    // positional-with-default, so the wrapper forwards it
-    // value-correctly. (The pass's keyword-residue arm guards the
-    // `Param::keyword` flag, which this ingest path never sets.)
+fn native_keyword_mailer_stays_unwrapped() {
+    // The mailer pass refuses a native keyword wrapper: forwarding
+    // `urgent` positionally would mis-bind. The source signature stays
+    // `urgent: false`; no positional wrapper is invented.
     let (out, diags) = lower_and_emit(
         r#"
 class Notifier < ActionMailer::Base
@@ -108,9 +109,16 @@ class Notifier < ActionMailer::Base
 end
 "#,
     );
-    assert!(out.contains("def self.notify(user, urgent = false)"), "{out}");
-    assert!(out.contains("new.notify(user, urgent)"), "{out}");
-    assert!(diags.is_empty(), "{diags:?}");
+    assert!(out.contains("def notify(user, urgent: false)"),
+        "native keyword declaration was flattened:\n{out}");
+    assert!(!out.contains("def self.notify"), "keyword mailer gained a class-side wrapper:\n{out}");
+    assert!(
+        !out.contains("urgent = false") && !out.contains("new.notify(user, urgent)"),
+        "positional keyword wrapper was invented:\n{out}"
+    );
+    assert_eq!(diags.len(), 1, "expected one residue note: {diags:?}");
+    assert!(diags[0].message.contains("keyword"),
+        "residue should name the keyword boundary: {diags:?}");
 }
 
 #[test]

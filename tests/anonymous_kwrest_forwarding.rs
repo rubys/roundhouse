@@ -144,9 +144,8 @@ fn nonfinal_or_dynamic_mixed_anonymous_keyword_forwarding_stays_unsupported() {
 }
 
 #[test]
-fn optional_only_keyword_destination_stays_unsupported_without_keyword_rest() {
+fn optional_only_keyword_destination_retains_its_native_contract() {
     use roundhouse::analyze::diagnose;
-    use roundhouse::diagnostic::DiagnosticKind;
 
     let source = "class Probe; def self.call(**); target(**); end; def self.target(enabled: true, token: :missing); [enabled, token]; end; end";
     let mut app = ingest_app_from_tree(tree(&[("app/services/probe.rb", source)])).expect("ingest");
@@ -156,12 +155,7 @@ fn optional_only_keyword_destination_stays_unsupported_without_keyword_rest() {
         .chain(lower)
         .filter(|d| d.severity == roundhouse::diagnostic::Severity::Error)
         .collect();
-    assert!(errors.iter().any(|d| matches!(
-        &d.kind,
-        DiagnosticKind::Unsupported { construct, detail, .. }
-            if construct.as_str() == "anonymous keyword forwarding"
-                && detail.contains("flattened keyword parameters")
-    )), "{errors:?}");
+    assert!(errors.is_empty(), "{errors:?}");
 }
 
 #[test]

@@ -140,7 +140,8 @@ pub(super) fn apply_with_plans(
     for (span, policy) in plans {
         if matches!(
             policy,
-            KeywordPolicy::Refuse | KeywordPolicy::RefuseOrdinarySuper
+            KeywordPolicy::Refuse | KeywordPolicy::RefuseKeywords
+                | KeywordPolicy::RefuseOrdinarySuper
         ) {
             diagnostics.push(keyword_refusal(*span, *policy));
         }

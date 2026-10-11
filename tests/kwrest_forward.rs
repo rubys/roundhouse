@@ -8,8 +8,8 @@
 //!   local_datetime_tag message.created_at, **attributes
 //! ```
 //!
-//! Ingest flattens `style:` to a positional-with-default and
-//! `**attributes` to a trailing positional, and erases the call's `**`
+//! Ingest used to flatten `style:` to a positional-with-default and
+//! `**attributes` to a trailing positional, erasing the call's `**`
 //! into a positional too — so the bundle slid one slot left, `style`
 //! bound the whole hash and `attributes` bound `{}`. The rendered
 //! `<time>` carried `data-local-time-target="{class: …}"` and lost its
@@ -78,12 +78,11 @@ const FORWARDS: &str = "module RoomsHelper\n  \
     def labelled(room, **attributes)\n    tagged room.name, **attributes\n  end\nend\n";
 
 #[test]
-fn a_forwarded_bundle_moves_to_the_rest_slot_and_the_keyword_takes_its_default() {
+fn a_forwarded_bundle_keeps_its_packet_and_callee_default() {
     let src = emit_helpers(TAGGED_KW, FORWARDS);
     assert!(
-        src.contains("TimeHelper.tagged(room.name, :time, attributes)"),
-        "the bundle belongs in the `**rest` slot with `style`'s declared default \
-         filled in ahead of it:\n{src}"
+        src.contains("TimeHelper.tagged(room.name, **attributes)"),
+        "the native packet must leave `style:` defaulting in the callee:\n{src}"
     );
 }
 
@@ -102,12 +101,12 @@ fn the_bundle_never_binds_the_keyword_slot() {
 /// pad it a second time — which is why the order is kwrest_forward then
 /// helper_kwargs.
 #[test]
-fn a_literal_keyword_call_is_still_spliced_by_name_not_padded() {
+fn a_literal_keyword_call_keeps_its_native_name() {
     let caller = "module RoomsHelper\n  \
         def labelled(room, **attributes)\n    tagged room.name, style: :date\n  end\nend\n";
     let src = emit_helpers(TAGGED_KW, caller);
     assert!(
-        src.contains("TimeHelper.tagged(room.name, :date)"),
+        src.contains("TimeHelper.tagged(room.name, style: :date)"),
         "the named keyword binds its own slot:\n{src}"
     );
     assert!(
@@ -141,7 +140,7 @@ fn a_bundle_already_in_the_rest_slot_is_untouched() {
         def tagged(name, **attributes)\n    attributes.merge(name: name)\n  end\nend\n";
     let src = emit_helpers(callee, FORWARDS);
     assert!(
-        src.contains("TimeHelper.tagged(room.name, attributes)"),
-        "no keyword slot to skip, so no padding:\n{src}"
+        src.contains("TimeHelper.tagged(room.name, **attributes)"),
+        "a keyword-rest-only destination still needs the native packet:\n{src}"
     );
 }

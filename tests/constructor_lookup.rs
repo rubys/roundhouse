@@ -167,10 +167,10 @@ end
                 && matches!(
                     &diagnostic.kind,
                     roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
-                        if construct.as_str() == "constructor keyword arguments"
+                        if construct.as_str() == "keyword splat into source keyword parameters"
                 )
         }),
-        "a nested, lexically resolved constructor splat must reach refusal before it is projected: {lower_diagnostics:#?}"
+        "without source scope provenance, a nested constructor packet must remain refused: {lower_diagnostics:#?}"
     );
 }
 
@@ -285,7 +285,8 @@ end
                     && matches!(
                         &diagnostic.kind,
                         roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
-                            if construct.as_str() == "constructor keyword arguments"
+                            if matches!( construct.as_str(), "constructor keyword arguments"
+                                | "keyword splat into source keyword parameters")
                     )
             }),
             "constructor lookup changed by a lifecycle hook must remain fail-closed: {lower_diagnostics:#?}"

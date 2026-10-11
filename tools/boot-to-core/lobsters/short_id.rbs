@@ -1,0 +1,7 @@
+class ShortId
+  def initialize: (String) -> void
+  def klass: () -> String
+  def klass=: (String) -> String
+  def generation_attempts: () -> Integer
+  def generation_attempts=: (Integer) -> Integer
+end

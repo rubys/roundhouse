@@ -21,6 +21,7 @@ use crate::dialect::{
 use crate::expr::Expr;
 use crate::ident::{ClassId, Symbol};
 use crate::schema::Schema;
+use crate::span::Span;
 use crate::ty::Ty;
 
 /// The top-level IR: a Rails application as data. This is the serializable
@@ -365,6 +366,10 @@ pub struct App {
     /// descriptions then disagree about the parameter types.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_spliced_class_methods: HashMap<ClassId, HashMap<Symbol, ClassId>>,
+    /// ClassMethods/class_methods instance definitions flattened onto their
+    /// source module, unlike real module singletons (`class << self`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub concern_class_method_templates: HashMap<ClassId, Vec<Span>>,
     /// Model DSL declared inside a concern module's `included do`
     /// (`Account::Associations` → its `has_many :statuses` etc.),
     /// keyed by the module and classified as the same
@@ -748,6 +753,7 @@ impl App {
             graphql_signatures: Vec::new(),
             concern_spliced_actions: HashMap::new(),
             concern_spliced_class_methods: HashMap::new(),
+            concern_class_method_templates: HashMap::new(),
             concern_model_items: HashMap::new(),
             current_attribute_classes: Vec::new(),
             render_edges: HashMap::new(),

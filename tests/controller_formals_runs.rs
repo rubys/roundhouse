@@ -87,25 +87,22 @@ puts "controller formals ok"
 /// `**` into a destination whose keywords ingest flattened to positionals
 /// (`def initialize(size: 1)` becomes `size = 1`) binds the whole packet
 /// to `size`: the emitted Ruby answered `s{:size=>5}` for `s5` while
-/// `check` was clean. A controller's forwarding goes through the same
-/// destination check a model's does, and is refused there.
+/// `check` was clean. Retaining the destination keyword declaration now
+/// preserves the controller's anonymous packet without a Hash misbinding.
 #[test]
-fn controller_keyword_forwarding_into_a_flattened_destination_is_refused() {
-    let (_emitted, errors) = emit_and_run::real_blog()
+fn controller_keyword_forwarding_into_optional_keywords_runs() {
+    let run = emit_and_run::real_blog()
         .write(
             "app/models/flat.rb",
-            "class Flat\n  def initialize(size: 1)\n    @size = size\n  end\nend\n",
+            "class Flat\n  attr_reader :size\n  def initialize(size: 1)\n    @size = size\n  end\nend\n",
         )
         .edit(
             "app/controllers/articles_controller.rb",
             "class ArticlesController < ApplicationController\n",
             "class ArticlesController < ApplicationController\n  private\n\n  def flat(**)\n    Flat.new(**)\n  end\n\n  public\n\n",
         )
-        .emit(roundhouse::project::BuildTarget::Ruby);
-    assert!(
-        errors.iter().any(|e| e.contains("anonymous keyword forwarding")
-            && e.contains("flattened keyword parameters")),
-        "got {errors:?}"
+        .run_ruby("require_relative 'app/controllers/articles_controller'; controller = ArticlesController.new; raise 'keyword bound a Hash' unless controller.send(:flat, size: 5).size == 5; raise 'default changed' unless controller.send(:flat).size == 1");
+    run.assert_passes(
     );
 }
 
