@@ -501,7 +501,13 @@ impl<'a> BodyTyper<'a> {
         // each arm. campfire's `Opengraph::Location.new(url).then { |l|
         // l.read_html }` is the shape: without this the block parameter
         // is unbound and every read through it goes unresolved.
+        // A class that defines its own `then` is not Kernel's: a promise's
+        // `then` yields the fulfilled value, which no signature names, so
+        // its parameters stay unbound.
         if matches!(method.as_str(), "then" | "yield_self" | "tap") {
+            if self.owns_operator(Some(recv_ty), method, false) {
+                return None;
+            }
             return Some(vec![recv_ty.clone()]);
         }
         if method.as_str() == "in_batches" {
@@ -536,6 +542,8 @@ impl<'a> BodyTyper<'a> {
                 | "any?" | "all?" | "none?" | "one?"
                 | "to_h" => Some(vec![(**elem).clone()]),
                 "each_with_index" | "with_index" => Some(vec![(**elem).clone(), Ty::Int]),
+                "each_slice" | "each_cons" => Some(vec![recv_ty.clone()]),
+                "with_object" => Some(vec![(**elem).clone(), Ty::Untyped]),
                 "sort_by!" | "select!" | "reject!" | "keep_if" | "delete_if" => Some(vec![(**elem).clone()]),
                 _ => None,
             },
@@ -1171,7 +1179,14 @@ impl<'a> BodyTyper<'a> {
         // which have no arm for a class the analyzer models only as a
         // name. Blockless (`then` returning an Enumerator) is not a
         // shape any corpus app writes; `Untyped` is the honest answer.
-        if matches!(method.as_str(), "then" | "yield_self") && recv_ty.is_some() {
+        // A class defining its own `then` (a promise's, which yields the
+        // fulfilled value and answers a new promise) is not Kernel's: its
+        // declaration answers, as `block_params_for` leaves the block's
+        // parameters unbound for it.
+        if matches!(method.as_str(), "then" | "yield_self")
+            && recv_ty.is_some()
+            && !self.owns_operator(recv_ty, method, false)
+        {
             return block_ret.cloned().unwrap_or(Ty::Untyped);
         }
         // `Model.transaction { … }` / `ActiveRecord::Base.transaction
@@ -1618,6 +1633,17 @@ impl<'a> BodyTyper<'a> {
                     }
                     return Ty::Class { id: id.clone(), args: args.clone() };
                 }
+                // The built-in containers' own `[]` builds one from its
+                // arguments: `Array[String]` and `Hash[pairs]`.
+                if method.as_str() == "[]" {
+                    match id.0.as_str() {
+                        "Hash" => {
+                            return Ty::Hash { key: Box::new(unknown()), value: Box::new(unknown()) };
+                        }
+                        "Array" => return Ty::Array { elem: Box::new(unknown()) },
+                        _ => {}
+                    }
+                }
                 // Module/Class introspection built-ins — fall through
                 // when no user-defined method shadows them. `name` on
                 // a class returns the class's name as String;
@@ -1934,6 +1960,19 @@ impl<'a> BodyTyper<'a> {
                     {
                         return Ty::Array { elem: other.clone() };
                     }
+                }
+                // `Array#fetch(i)` answers the element or raises
+                // IndexError; a default or a block answers a miss.
+                if method.as_str() == "fetch" {
+                    return match (args, block_ret) {
+                        ([_], None) => elem.clone(),
+                        ([_, default], None) => match &default.ty {
+                            Some(default) if !default.is_open() => union_of(elem.clone(), default.clone()),
+                            _ => Ty::Untyped,
+                        },
+                        ([_], Some(missed)) if !missed.is_open() => union_of(elem.clone(), missed.clone()),
+                        _ => Ty::Untyped,
+                    };
                 }
                 array_method(method, elem, block_ret)
             }
@@ -2788,7 +2827,10 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         // `partition { … }` → `[matching, rest]`: two same-element
         // Arrays, so an Array of Array-of-elem. Rails' own
         // `users.partition(&:administrator?)` destructures it.
-        "partition" => Ty::Array {
+        // `each_slice(n)` / `each_cons(n)` yield same-element sub-arrays.
+        // Chained as an enumerator (`ids.each_slice(500).flat_map { |batch| … }`),
+        // the value is those batches.
+        "partition" | "each_slice" | "each_cons" => Ty::Array {
             elem: Box::new(Ty::Array { elem: Box::new(elem.clone()) }),
         },
         // `each`, predicates, and shape-preserving transforms keep elem.
@@ -2898,7 +2940,8 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         },
         "tally" => Ty::Hash { key: Box::new(elem.clone()), value: Box::new(Ty::Int) },
         // Fold/accumulate — result type depends on the block/seed (untracked).
-        "inject" | "reduce" | "each_with_object" => Ty::Untyped,
+        // `with_object` is the enumerator's `each_with_object` (`each_cons(2).with_object([])`).
+        "inject" | "reduce" | "each_with_object" | "with_object" => Ty::Untyped,
         "to_sentence" => Ty::Str,
         // `Array#to_h { |elem| [k, v] }` — block returns a [k, v]
         // tuple; result is Hash<k, v>. We approximate as Hash<elem, elem>

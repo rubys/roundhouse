@@ -240,3 +240,45 @@ fn a_runtime_method_try_keeps_its_type_through_the_guard() {
         "the desugared `blob.caption` must not diagnose as a failed dispatch:\n{errors:#?}"
     );
 }
+
+/// More unrelated definers than the arm bound can cover: the cover would
+/// need an `is_a?` per class, so the nil guard stays.
+#[test]
+fn a_name_with_more_unrelated_definers_than_the_arm_bound_keeps_the_nil_guard() {
+    let mut files: Vec<(String, String)> = (0..5)
+        .map(|i| (format!("app/services/pinger{i}.rb"), format!("class Pinger{i}\n  def ping\n    {i}\n  end\nend\n")))
+        .collect();
+    files.push((
+        "app/models/user.rb".to_string(),
+        "class User < ApplicationRecord\n  def show(other)\n    other.try(:ping)\n  end\nend\n".to_string(),
+    ));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    let src = emit(&refs);
+    assert!(src.contains("other && other.ping"), "five unrelated definers need five tests:\n{src}");
+    assert!(!src.contains("is_a?(Pinger"), "{src}");
+}
+
+/// A definer that is an ancestor of other definers is the test for all of
+/// them: it is on each descendant's ancestry, so each answers the name.
+#[test]
+fn a_definer_covers_its_definer_descendants_with_one_test() {
+    let mut files: Vec<(String, String)> = vec![(
+        "app/services/pinger.rb".to_string(),
+        "class Pinger\n  def ping\n    0\n  end\nend\n".to_string(),
+    )];
+    for i in 0..5 {
+        files.push((
+            format!("app/services/pinger{i}.rb"),
+            format!("class Pinger{i} < Pinger\n  def ping\n    {i}\n  end\nend\n"),
+        ));
+    }
+    files.push((
+        "app/models/user.rb".to_string(),
+        "class User < ApplicationRecord\n  def show(other)\n    other.try(:ping)\n  end\nend\n".to_string(),
+    ));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    let src = emit(&refs);
+    assert!(src.contains("is_a?(Pinger)"), "the base is the test:\n{src}");
+    assert!(!src.contains("is_a?(Pinger0)"), "{src}");
+    assert!(!src.contains("other && other.ping"), "{src}");
+}

@@ -523,6 +523,30 @@ fn namespace_aliases_cannot_expose_sorbet_objects_for_mutation() {
     }
 }
 
+/// A namespace alias is scanned once however often it is used, and only
+/// the enums beneath it are refused: a sibling namespace's enum keeps its
+/// mapping.
+#[test]
+fn repeated_namespace_alias_uses_refuse_only_the_enums_beneath_it() {
+    let catalog = format!("module Catalog\n{RATING}end\n");
+    let other = format!("module Other\n{RATING}end\n");
+    let alias = "AliasCatalog = Catalog\n\
+        AliasCatalog::Rating.define_singleton_method(:values) { [] }\n\
+        AliasCatalog::Rating.define_singleton_method(:serialize) { [] }\n\
+        AliasCatalog::Rating.class_eval { def to_s; \"wrong\"; end }\n";
+    let mapping = |ns: &str| format!(
+        "class Ticket < ApplicationRecord\n  enum :state, {ns}::Rating.values.to_h {{ |v| [v.serialize, v.serialize] }}\nend\n"
+    );
+    let constants = [
+        ("app/services/catalog.rb", catalog.as_str()),
+        ("app/services/other.rb", other.as_str()),
+        ("app/services/z_alias.rb", alias),
+    ];
+    assert_enum_gap(&mapping("Catalog"), &constants);
+    ingest_enum(&mapping("Other"), &constants)
+        .unwrap_or_else(|e| panic!("an enum outside the aliased namespace stays supported: {e}"));
+}
+
 #[test]
 fn compound_and_parenthesized_aliases_cannot_retain_sorbet_metadata() {
     let model = "class Ticket < ApplicationRecord\n  enum :state, Rating.values.to_h { |v| [v.serialize, v.serialize] }\nend\n";

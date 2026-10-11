@@ -133,7 +133,8 @@ pub fn ingest_library_classes(
 
 /// The block of `NAME = Data.define(:a, :b) do def … end end`, when that
 /// is what `value` is: `Data` (or `::Data`) receiving `define` with
-/// Symbol members only, a parameterless block, and a body containing
+/// Symbol members only, a block with no parameter other than an unread
+/// class parameter, and a body containing
 /// only method definitions and bare visibility markers. Any other block
 /// stays with the constant's own ingest, where a `def` is not an expression.
 pub(super) fn data_define_block<'pr>(value: &Node<'pr>) -> Option<ruby_prism::BlockNode<'pr>> {
@@ -151,7 +152,7 @@ pub(super) fn data_define_block<'pr>(value: &Node<'pr>) -> Option<ruby_prism::Bl
         return None;
     }
     let block = call.block()?.as_block_node()?;
-    if block.parameters().is_some() {
+    if block.parameters().is_some() && !super::data_factory::unread_class_parameter(&block) {
         return None;
     }
     let body = block.body()?;
@@ -415,6 +416,12 @@ pub(super) fn library_class_and_struct_base(
         let members = sorbet_enum_members(&owner, &constants);
         unknown_calls.retain(|call| !is_enums_declaration(call));
         let mut synthesized = synth_sorbet_enum_methods(&owner, &members);
+        route_super_to_synthesized(&mut synthesized, &mut methods).map_err(|name| IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "`super` in `{name}` with keyword, rest or forwarding parameters is not modeled for a T::Enum override"
+            ),
+        })?;
         synthesized.append(&mut methods);
         methods = synthesized;
         None
@@ -805,6 +812,62 @@ fn synth_sorbet_enum_methods(owner: &ClassId, members: &[SorbetEnumMember]) -> V
         call(Some(self_class()), "from_serialized", vec![local("value")]),
     ));
     methods
+}
+
+/// A source method that overrides a synthesized one and calls `super`
+/// (a `try_deserialize` that normalizes the value, then
+/// `super(value)`): sorbet's method lives on `T::Enum`, an ancestor, so
+/// `super` reaches it. The synthesized methods are flattened into the
+/// class itself, where the source def would replace the synthesized one
+/// and its `super` would find nothing; so the synthesized method takes
+/// an obscure name (it stays public) and the override's `super` calls it
+/// by that name. An override that takes keyword, rest or forwarding
+/// parameters cannot have its bare `super` rewritten; the `Err` carries
+/// that method's name.
+fn route_super_to_synthesized(
+    synthesized: &mut [MethodDef],
+    methods: &mut [MethodDef],
+) -> Result<(), String> {
+    fn contains_super(expr: &Expr, bare_only: bool) -> bool {
+        let mut found = matches!(&*expr.node, ExprNode::Super { args } if !bare_only || args.is_none());
+        expr.node.for_each_child(&mut |child| found |= contains_super(child, bare_only));
+        found
+    }
+    fn rewrite(expr: &mut Expr, target: &Symbol, params: &[Param]) {
+        if let ExprNode::Super { args } = &mut *expr.node {
+            // Bare `super` passes the method's own arguments on.
+            let args = args.take().unwrap_or_else(|| params.iter().map(|p| local(p.name.as_str())).collect());
+            *expr.node = ExprNode::Send {
+                recv: Some(self_class()),
+                method: target.clone(),
+                args,
+                block: None,
+                parenthesized: true,
+            };
+        }
+        expr.node.for_each_child_mut(&mut |child| rewrite(child, target, params));
+    }
+    for user in methods.iter_mut() {
+        let Some(base) = synthesized.iter_mut().find(|s| s.name == user.name && s.receiver == user.receiver) else {
+            continue;
+        };
+        if !contains_super(&user.body, false) {
+            continue;
+        }
+        // Bare `super` forwards only plain positionals here; ingest has
+        // flattened an optional keyword or keyword rest into a trailing
+        // positional (`from_keyword`, `from_kwrest`).
+        let plain = user.params.iter().all(|p| {
+            !p.keyword && !p.rest && !p.forwarding && !p.from_keyword && !p.from_kwrest
+        });
+        if !plain && contains_super(&user.body, true) {
+            return Err(user.name.as_str().to_string());
+        }
+        let target = Symbol::from(format!("__rh_sorbet_{}", base.name.as_str().trim_end_matches(['?', '!'])));
+        base.name = target.clone();
+        rewrite(&mut user.body, &target, &user.params);
+    }
+    Ok(())
 }
 
 /// `{ |name| body }` attached to a call.
@@ -1754,6 +1817,15 @@ fn walk_decl_body_with_visibility<'pr>(
     };
 
     let statements = flatten_statements(b);
+    if let Some(name) = super::util::hoisted_name_collision(&statements) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "`{name}` is declared both in this body and inside its `class << self`; \
+                 the two are different constants in Ruby and are not kept apart"
+            ),
+        });
+    }
     let has_class_methods = statements.iter().any(|stmt| stmt.as_module_node()
         .is_some_and(|m| module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])));
     for statement in statements {
@@ -3143,7 +3215,7 @@ impl ModelBases {
 pub fn has_active_record_base(source: &[u8], bases: &ModelBases) -> bool {
     let result = parse(source);
     let root = result.node();
-    let Some((scope, class)) = find_all_classes_with_scope(&root).into_iter().next() else {
+    let Some((scope, class)) = super::util::primary_class_with_scope(&root) else {
         return false;
     };
     class
@@ -3155,7 +3227,7 @@ pub fn has_active_record_base(source: &[u8], bases: &ModelBases) -> bool {
 pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKind> {
     let result = parse(source);
     let root = result.node();
-    let Some((scope, class)) = find_all_classes_with_scope(&root).into_iter().next() else {
+    let Some((scope, class)) = super::util::primary_class_with_scope(&root) else {
         // No class node. A bare top-level module under app/models/
         // (`module InactiveUser; def self.x; …; end`) is a namespace of
         // singleton methods, not a model — classify it as a library

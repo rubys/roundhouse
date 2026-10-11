@@ -251,19 +251,35 @@ fn narrowing(
         let base = highest_safe_ancestor(klass, set, parents);
         if !cover.contains(&base) {
             cover.push(base);
+            // The cover only grows, so once it is past the bound the
+            // answer is already "keep the nil guard"; stopping here keeps
+            // the climb from costing |set|^2 per site.
+            if cover.len() > MAX_ARMS {
+                return None;
+            }
         }
-    }
-    if cover.len() > MAX_ARMS {
-        return None;
     }
     // Deterministic emit: a HashSet's iteration order is not.
     cover.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     Some(cover)
 }
 
-/// The furthest ancestor of `klass` that is still SAFE to test — every
-/// class in the tree descending from it defines the name too. Falls back
-/// to `klass` itself, which is always safe.
+/// The furthest ancestor of `klass` that is still SAFE to test: every
+/// class in the tree descending from it ANSWERS the name, by defining
+/// it or by inheriting it from something that does. Falls back to
+/// `klass` itself, which is always safe.
+///
+/// RESPONDS, not DEFINES, and the distinction is the whole of STI.
+/// `to_gid_param` is synthesized on `Room` and not on `Rooms::Open`,
+/// which inherits it; asking about definition alone made
+/// `ApplicationRecord` look unsafe, nothing climbed, and a set that
+/// covers in three tests came out as fifteen.
+///
+/// An ancestor that itself DEFINES the name (is in `set`) is therefore
+/// always safe: it is on the ancestry of each of its descendants, so
+/// each one inherits the method from it. Being in `set` is the whole
+/// test. Re-checking "every descendant answers" for each such ancestor
+/// could only say yes, at |set| * |classes| * depth^2 per `try` site.
 fn highest_safe_ancestor(
     klass: &Symbol,
     set: &HashSet<Symbol>,
@@ -271,7 +287,7 @@ fn highest_safe_ancestor(
 ) -> Symbol {
     let mut best = klass.clone();
     for ancestor in ancestry(klass, parents) {
-        if set.contains(&ancestor) && descendants_all_define(&ancestor, set, parents) {
+        if set.contains(&ancestor) {
             best = ancestor;
         }
     }
@@ -294,25 +310,6 @@ fn ancestry(name: &Symbol, parents: &HashMap<Symbol, Symbol>) -> Vec<Symbol> {
         cur = p.clone();
     }
     out
-}
-
-/// Does every class under `base` ANSWER the name — by defining it or by
-/// inheriting it from something that does?
-///
-/// RESPONDS, not DEFINES, and the distinction is the whole of STI.
-/// `to_gid_param` is synthesized on `Room` and not on `Rooms::Open`,
-/// which inherits it; asking about definition alone made
-/// `ApplicationRecord` look unsafe, nothing climbed, and a set that
-/// covers in three tests came out as fifteen.
-fn descendants_all_define(
-    base: &Symbol,
-    set: &HashSet<Symbol>,
-    parents: &HashMap<Symbol, Symbol>,
-) -> bool {
-    parents
-        .keys()
-        .filter(|k| ancestry(k, parents).contains(base))
-        .all(|k| k == base || ancestry(k, parents).iter().any(|a| set.contains(a)))
 }
 
 fn is_a(span: crate::span::Span, recv: &Expr, klass: &Symbol) -> Expr {

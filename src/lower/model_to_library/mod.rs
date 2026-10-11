@@ -1172,7 +1172,7 @@ fn build_methods_with_finder_inputs(
         }
     }
 
-    push_validate_method(&mut methods, model);
+    push_validate_method(&mut methods, model, models);
     push_association_methods(&mut methods, model, models);
     push_dependent_destroy(&mut methods, model);
     push_unknown_marker_methods(&mut methods, model);

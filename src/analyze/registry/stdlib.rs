@@ -103,6 +103,25 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     time_cls.class_methods.insert(Symbol::from("at"), time_ty());
     classes.insert(ClassId(Symbol::from("Time")), time_cls);
 
+    // The seconds-based Duration value class the Ruby-family trees ship
+    // (`runtime/spinel/active_support_duration.rb` and its `.rbs`), which
+    // `lower::duration` grounds `30.minutes`
+    // to. Its surface is what that file defines, so a declared
+    // `#: ActiveSupport::Duration` names a modeled dependency. `project`
+    // refuses the value on trees that ship no such class.
+    let duration_ty = || Ty::Class { id: ClassId(Symbol::from("ActiveSupport::Duration")), args: vec![] };
+    let units = [
+        "seconds", "second", "minutes", "minute", "hours", "hour", "days", "day", "weeks", "week",
+        "fortnights", "fortnight", "months", "month", "years", "year",
+    ];
+    let class_side: Vec<(&str, Ty)> = units.iter().map(|u| (*u, duration_ty())).collect();
+    register_stdlib_class(classes, "ActiveSupport::Duration", &class_side, &[
+        ("ago", time_ty()), ("until", time_ty()), ("from_now", time_ty()), ("since", time_ty()),
+        ("to_i", Ty::Int), ("seconds", Ty::Int), ("to_f", Ty::Float), ("to_s", Ty::Str),
+        ("==", Ty::Bool), ("<", Ty::Bool), ("<=", Ty::Bool), (">", Ty::Bool), (">=", Ty::Bool),
+        ("<=>", Ty::Int),
+    ]);
+
     // Date instances are date-only values, including constructors and
     // parsers. The send dispatcher validates their argument contracts;
     // do not duplicate unvalidated return declarations here. DateTime
@@ -769,6 +788,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Process", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_MONOTONIC", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_REALTIME", &[], &[]);
+    register_stdlib_class(classes, "Process::CLOCK_PROCESS_CPUTIME_ID", &[], &[]);
+    register_stdlib_class(classes, "Process::CLOCK_THREAD_CPUTIME_ID", &[], &[]);
     // Module Const only — `timeout` return is the send special-case.
     // Exception is `Timeout::Error` above. CRuby loads via BUNDLED
     // `require "timeout"`; Spinel gets `runtime/ruby/timeout.rb`.

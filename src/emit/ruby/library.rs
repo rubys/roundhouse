@@ -3562,10 +3562,13 @@ fn rewrite_helper_calls(
     // not the modified string) are deliberately excluded.
     let bang_rewrite: Option<Symbol> =
         if let ExprNode::Send { recv: Some(r), method, block: None, .. } = &*expr.node {
-            // A reserved-word local (`class:`) is not assignable, so it
-            // keeps the bang call.
+            // A reserved-word local (`class:`) or a numbered parameter
+            // (`_1`) is not assignable, so it keeps the bang call.
             let is_lv = match &*r.node {
-                ExprNode::Var { name, .. } => !crate::naming::is_reserved_local(name.as_str()),
+                ExprNode::Var { name, .. } => {
+                    !crate::naming::is_reserved_local(name.as_str())
+                        && !crate::naming::is_numbered_param(name.as_str())
+                }
                 ExprNode::Ivar { .. } => true,
                 _ => false,
             };
@@ -6379,8 +6382,11 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     // emitter is a free function reached from a dozen callers. A reopen
     // of a core class needs its `self.` receivers kept (see the elision
     // in `expr.rs`); everything else is emitted exactly as before.
-    super::expr::with_core_class_reopen(is_core_class_name(lc.name.0.as_str()), || {
-        emit_library_class_decl_inner(lc, app, out_path, synthesized_siblings)
+    let path = out_path.clone();
+    super::expr::with_emitted_file(&path, || {
+        super::expr::with_core_class_reopen(is_core_class_name(lc.name.0.as_str()), || {
+            emit_library_class_decl_inner(lc, app, out_path, synthesized_siblings)
+        })
     })
 }
 
@@ -6459,7 +6465,8 @@ fn emit_library_class_decl_inner(
     // so emit works correctly from any output directory.
     let mut requires: Vec<String> = Vec::new();
     if let Some(parent) = lc.parent.as_ref() {
-        if let Some(anchor) = require_path_for_parent(parent, app) {
+        let parent = lexical_parent(name, parent, app);
+        if let Some(anchor) = require_path_for_parent(&parent, app) {
             if anchor != self_anchor {
                 requires.push(relpath(&out_dir, &anchor));
             }
@@ -6761,7 +6768,7 @@ fn emit_library_class_decl_inner(
         let qualified = segments[..=i].join("::");
         let parent = outer_class_parent(&qualified, app);
         match (is_app_class(&qualified, app), parent) {
-            (true, Some(p)) => format!("class {seg} < {}", p.0.as_str()),
+            (true, Some(p)) => format!("class {seg} < {}", lexically_qualified(p.0.as_str(), &segments[..i], app)),
             (true, None) => format!("class {seg}"),
             (false, _) => format!("module {seg}"),
         }
@@ -6786,7 +6793,10 @@ fn emit_library_class_decl_inner(
             let last = segments[depth - 1];
             let pad = "  ".repeat(depth - 1);
             match lc.parent.as_ref() {
-                Some(p) => writeln!(s, "{pad}class {last} < {}", p.0.as_str()).unwrap(),
+                Some(p) => {
+                    let parent = lexically_qualified(p.0.as_str(), &segments[..depth - 1], app);
+                    writeln!(s, "{pad}class {last} < {parent}").unwrap()
+                }
                 None => writeln!(s, "{pad}class {last}").unwrap(),
             }
         }
@@ -6800,10 +6810,29 @@ fn emit_library_class_decl_inner(
         writeln!(s).unwrap();
     }
 
-    for inc in &lc.includes {
-        writeln!(s, "{body_pad}include {}", inc.0.as_str()).unwrap();
+    // An include whose `self.included(base)` hook calls class methods of
+    // this class, or names its methods by symbol, runs after them, as in
+    // the source (see `hooked_include_position`); the rest open the body.
+    // An include the source has after a positioned one is written no
+    // earlier than it, so the includes keep their source order, and with
+    // it the class's ancestors. An ordered body interleaves its methods
+    // with ivar writes and keeps every include first.
+    let mut positioned: Vec<(usize, &ClassId)> = Vec::new();
+    if !ordered_body {
+        for inc in &lc.includes {
+            let floor = positioned.last().map(|(at, _)| *at);
+            if let Some(at) = hooked_include_position(lc, inc, app).max(floor) {
+                positioned.push((at, inc));
+            }
+        }
     }
-    if !lc.includes.is_empty() && !lc.methods.is_empty() {
+    for inc in &lc.includes {
+        if positioned.iter().any(|(_, p)| *p == inc) {
+            continue;
+        }
+        writeln!(s, "{body_pad}include {}", lexically_qualified(inc.0.as_str(), &segments, app)).unwrap();
+    }
+    if lc.includes.len() > positioned.len() && !lc.methods.is_empty() {
         writeln!(s).unwrap();
     }
 
@@ -6911,23 +6940,32 @@ fn emit_library_class_decl_inner(
     // class extends a base we don't model at all. See
     // `replays_foreign_class_body`. After the constants (a captured
     // call may reference one) and before the methods.
-    if replays_foreign_class_body(lc, app) {
+    //
+    // A plain class (no superclass, or a built-in one) that `extend`s an app
+    // module replays that `extend` and the calls to the module's methods
+    // after it (`app_extension_calls`); every other call stays dropped.
+    let replayed: Vec<&Expr> = if replays_foreign_class_body(lc, app) {
+        lc.unknown_calls.iter().collect()
+    } else {
+        let own = app_extension_calls(lc, app);
         for call in &lc.unknown_calls {
-            for line in super::emit_expr(call).lines() {
-                if line.is_empty() {
-                    writeln!(s).unwrap();
-                } else {
-                    writeln!(s, "{body_pad}{line}").unwrap();
-                }
+            if !own.iter().any(|c| std::ptr::eq(*c, call)) {
+                report_dropped_class_body_call(lc, call);
             }
         }
-        if !lc.unknown_calls.is_empty() && !lc.methods.is_empty() {
-            writeln!(s).unwrap();
+        own
+    };
+    for call in &replayed {
+        for line in super::emit_expr(call).lines() {
+            if line.is_empty() {
+                writeln!(s).unwrap();
+            } else {
+                writeln!(s, "{body_pad}{line}").unwrap();
+            }
         }
-    } else {
-        for call in &lc.unknown_calls {
-            report_dropped_class_body_call(lc, call);
-        }
+    }
+    if !replayed.is_empty() && !lc.methods.is_empty() {
+        writeln!(s).unwrap();
     }
 
     // Non-ordered classes keep the methods-then-initializers partition.
@@ -6935,12 +6973,20 @@ fn emit_library_class_decl_inner(
     // methods inside the interleaved body.
     if !ordered_body {
         let mut first = true;
-        for m in &lc.methods {
+        for (index, m) in lc.methods.iter().enumerate() {
             if !first {
                 writeln!(s).unwrap();
             }
             first = false;
+            for (_, inc) in positioned.iter().filter(|(at, _)| *at == index) {
+                writeln!(s, "{body_pad}include {}", lexically_qualified(inc.0.as_str(), &segments, app)).unwrap();
+                writeln!(s).unwrap();
+            }
             render_method(&mut s, m);
+        }
+        for (_, inc) in positioned.iter().filter(|(at, _)| *at >= lc.methods.len()) {
+            writeln!(s).unwrap();
+            writeln!(s, "{body_pad}include {}", lexically_qualified(inc.0.as_str(), &segments, app)).unwrap();
         }
     }
 
@@ -6980,6 +7026,89 @@ fn emit_library_class_decl_inner(
     }
 
     EmittedFile { path: out_path, content: s }
+}
+
+/// Where `include inc` must be written in `lc`'s body when the source's
+/// order is load-bearing: the index into `lc.methods` to write it before.
+///
+/// The include bucket opens the emitted body, ahead of the constants and
+/// methods. That is Ruby-equivalent for method lookup, but not for an
+/// app module's `self.included(base)` hook, which runs at the include
+/// and may call `base`'s own class methods. A class that defines `ATTRS`
+/// and `def self.attrs`, then includes a module whose hook reads
+/// `base.attrs`, raised NoMethodError at load when the include was
+/// written first. Such an include goes right after the last class method
+/// of `lc` its hook calls on `base` (the source must have had it below
+/// that def), and so also after every eagerly emitted constant.
+///
+/// A hook may also look up one of `lc`'s methods by symbol in a call on
+/// `base`: a class that defines `store`, then includes a module whose
+/// hook runs `base.send(:alias_method, :store_without_validation,
+/// :store)`. Written first, the include raised NameError (undefined
+/// method 'store') at load. Such an include goes right after the last
+/// method of `lc`, of either side, the hook names. `None` keeps it first.
+fn hooked_include_position(lc: &LibraryClass, inc: &ClassId, app: &App) -> Option<usize> {
+    let bare = |c: &ClassId| c.0.as_str().trim_start_matches("::").to_string();
+    let target = bare(inc);
+    let module = app.library_classes.iter().find(|m| m.is_module && bare(&m.name) == target)?;
+    let hook = module.methods.iter().find(|m| {
+        m.receiver == MethodReceiver::Class && m.name.as_str() == "included" && m.params.len() == 1
+    })?;
+    let base = hook.params[0].name.clone();
+    let mut called: Vec<Symbol> = Vec::new();
+    let mut named: Vec<Symbol> = Vec::new();
+    /// Methods a call on `base` looks up by name, so the method must
+    /// already exist: the symbol arguments are the names looked up
+    /// (`alias_method`'s second argument is the existing one). A call that
+    /// defines its argument (`attr_accessor :x`, `validates :x`, `delegate
+    /// :x`) names no method the class must have defined first: moving the
+    /// include after a later `def x` would let the hook's definition
+    /// clobber the class's own.
+    fn looked_up(method: &str, args: &[Expr]) -> Vec<Symbol> {
+        let syms = |args: &[Expr]| -> Vec<Symbol> {
+            args.iter()
+                .filter_map(|arg| match &*arg.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        match method {
+            "alias_method" => args.get(1).map(|a| syms(std::slice::from_ref(a))).unwrap_or_default(),
+            "instance_method" | "method_defined?" | "public_method_defined?" | "private_method_defined?"
+            | "protected_method_defined?" | "remove_method" | "undef_method" | "public" | "private"
+            | "protected" | "module_function" | "public_instance_method" => syms(args),
+            _ => Vec::new(),
+        }
+    }
+    fn walk(e: &Expr, base: &Symbol, called: &mut Vec<Symbol>, named: &mut Vec<Symbol>) {
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node {
+            if matches!(&*r.node, ExprNode::Var { name, .. } if name == base) {
+                if !called.contains(method) {
+                    called.push(method.clone());
+                }
+                // `base.send(:alias_method, :a, :b)` is `base.alias_method :a, :b`.
+                let forwarded = matches!(method.as_str(), "send" | "public_send" | "__send__");
+                let lookup = match args.first().map(|a| &*a.node) {
+                    Some(ExprNode::Lit { value: Literal::Sym { value } }) if forwarded => {
+                        looked_up(value.as_str(), &args[1..])
+                    }
+                    _ => looked_up(method.as_str(), args),
+                };
+                for name in lookup {
+                    if !named.contains(&name) {
+                        named.push(name);
+                    }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, base, called, named));
+    }
+    walk(&hook.body, &base, &mut called, &mut named);
+    lc.methods
+        .iter()
+        .rposition(|m| (m.receiver == MethodReceiver::Class && called.contains(&m.name)) || named.contains(&m.name))
+        .map(|i| i + 1)
 }
 
 /// For each of `lc`'s constants, the requires (as `resolve` spells them
@@ -7143,6 +7272,20 @@ fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>, b
         }
     }
 
+    /// The constants a value writes as it runs (`ALL = [LOW = new(…)]`
+    /// writes LOW): they exist only once that value has run. This walks every
+    /// child, including blocks and branches the typing registry excludes.
+    /// Deferring a constant that reads one of those is harmless: a later
+    /// definition order is always valid, a missing one is not.
+    fn written_constants(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+        if let ExprNode::Assign { target: crate::expr::LValue::Const { path }, .. } = &*expr.node {
+            if let [name] = path.as_slice() {
+                out.insert(name.as_str().to_string());
+            }
+        }
+        expr.node.for_each_child(&mut |child| written_constants(child, out));
+    }
+
     let own: std::collections::HashSet<&str> =
         lc.methods.iter().map(|m| m.name.as_str()).collect();
     let mut deferred_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -7150,6 +7293,7 @@ fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>, b
     for (i, (name, value)) in lc.constants.iter().enumerate() {
         if calls_self(value, &own, &deferred_names, lc.name.0.as_str()) {
             deferred_names.insert(name.as_str().to_string());
+            written_constants(value, &mut deferred_names);
             deferred.push(i);
         } else {
             eager.push(i);
@@ -7220,6 +7364,54 @@ fn replays_foreign_class_body(lc: &LibraryClass, app: &App) -> bool {
     lc.parent.as_ref().is_some_and(|p| {
         require_path_for_parent(p, app).is_none() && !is_core_class_name(p.0.as_str())
     })
+}
+
+/// The class-body calls of a plain class (no superclass, or a built-in one)
+/// that only the app's own code defines: `extend M` of an app module and
+/// the bare calls after it to that module's methods (`extend SymbolEnum`
+/// then `symbol_enum :state, [:on, :off]`). No runtime base answers
+/// these, so the module is the receiver's and replaying the calls is what
+/// Ruby runs. They are written before the methods, like every replayed
+/// call, so a call to the class's own `def self.` (defined below it in
+/// the emitted body) is not one of them. Anything else stays dropped and
+/// reported (`replays_foreign_class_body`).
+fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App) -> Vec<&'a Expr> {
+    if lc.is_module || lc.parent.as_ref().is_some_and(|p| !is_core_class_name(p.0.as_str())) {
+        return Vec::new();
+    }
+    let app_module = |path: &[Symbol]| -> Option<&LibraryClass> {
+        let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        let nested = format!("{}::{written}", lc.name.0.as_str());
+        app.library_classes.iter().find(|c| {
+            c.is_module && c.origin.is_none() && (c.name.0.as_str() == written || c.name.0.as_str() == nested)
+        })
+    };
+    let mut extended: Vec<&LibraryClass> = Vec::new();
+    let mut out = Vec::new();
+    for call in &lc.unknown_calls {
+        let ExprNode::Send { recv: None, method, args, .. } = &*call.node else { continue };
+        if method.as_str() == "extend" {
+            let modules: Option<Vec<&LibraryClass>> = args
+                .iter()
+                .map(|a| match &*a.node {
+                    ExprNode::Const { path } => app_module(path),
+                    _ => None,
+                })
+                .collect();
+            if let Some(modules) = modules.filter(|m| !m.is_empty()) {
+                extended.extend(modules);
+                out.push(call);
+            }
+            continue;
+        }
+        let defines = |c: &LibraryClass| {
+            c.methods.iter().any(|m| m.name == *method && m.receiver == MethodReceiver::Instance)
+        };
+        if extended.iter().any(|m| defines(m)) {
+            out.push(call);
+        }
+    }
+    out
 }
 
 /// Ledger a class-body call we captured but chose not to replay. The
@@ -7293,6 +7485,46 @@ fn owns_a_file(name: &str, app: &App) -> bool {
         .any(|c| c.name.0.as_str() == name && !c.is_module)
 }
 
+/// Does the app declare the constant `path`, or a namespace enclosing a
+/// declaration (models, controllers, library classes and modules, test
+/// modules)?
+fn declares_constant_path(path: &str, app: &App) -> bool {
+    let names = app.models.iter().map(|m| m.name.0.as_str())
+        .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
+        .chain(app.library_classes.iter().map(|c| c.name.0.as_str()))
+        .chain(app.test_modules.iter().map(|t| t.name.0.as_str()));
+    names.into_iter().any(|name| {
+        let name = name.trim_start_matches("::");
+        name == path || name.strip_prefix(path).is_some_and(|rest| rest.starts_with("::"))
+    })
+}
+
+/// An app constant `written` as a class header's superclass or a body's
+/// mixin must spell it, given the lexical `scopes` (innermost last) Ruby
+/// searches first: `::Api::Base` inside `module Admin; module Api`, where
+/// a bare `Api` is `Admin::Api`. The ingest records the absolute name
+/// without its `::`, and written bare the header died with
+/// `uninitialized constant Admin::Api::Base`. A name the innermost
+/// shadowing scope does declare in full is that scope's, as Ruby binds
+/// it, and stays as written; so does a name the app does not declare.
+fn lexically_qualified(written: &str, scopes: &[&str], app: &App) -> String {
+    if written.starts_with("::") || scopes.is_empty() {
+        return written.to_string();
+    }
+    let first = written.split("::").next().unwrap_or(written);
+    let Some(scope) = (1..=scopes.len())
+        .rev()
+        .map(|i| scopes[..i].join("::"))
+        .find(|scope| declares_constant_path(&format!("{scope}::{first}"), app))
+    else {
+        return written.to_string();
+    };
+    if declares_constant_path(&format!("{scope}::{written}"), app) || !declares_constant_path(written, app) {
+        return written.to_string();
+    }
+    format!("::{written}")
+}
+
 fn is_app_class(name: &str, app: &App) -> bool {
     app.models.iter().any(|m| m.name.0.as_str() == name)
         || app.controllers.iter().any(|c| c.name.0.as_str() == name)
@@ -7315,6 +7547,41 @@ fn outer_class_parent(name: &str, app: &App) -> Option<ClassId> {
         .iter()
         .find(|c| c.name.0.as_str() == name && !c.is_module)
         .and_then(|c| c.parent.clone())
+}
+
+/// The app class a written superclass names, looked up from the child's
+/// namespace outward as Ruby does: `Base` written in
+/// `Outer::Inner::Leaf` is `Outer::Inner::Base`. A name that matches
+/// no app class at any level is returned as written (a runtime or gem
+/// class).
+///
+/// The ingested class keeps only its qualified name, so this reads the
+/// nested form (`module Outer; module Inner`) and tries every enclosing
+/// prefix. The compact form (`module Outer::Inner`) searches only the
+/// innermost one, so an outer match that natively falls through to a
+/// top-level class can add a require the program does not need; the
+/// innermost match, the case that fixes load order, is the same in both
+/// forms. This only orders `require`s; typing uses `ConstResolver`.
+fn lexical_parent(child: &str, parent: &ClassId, app: &App) -> ClassId {
+    let written = parent.0.as_str();
+    if written.starts_with("::") {
+        return parent.clone();
+    }
+    let defined = |candidate: &str| {
+        app.models.iter().any(|m| m.name.0.as_str() == candidate)
+            || app.controllers.iter().any(|c| c.name.0.as_str() == candidate)
+            || app.library_classes.iter().any(|lc| lc.name.0.as_str() == candidate)
+    };
+    let mut scope: Vec<&str> = child.split("::").collect();
+    scope.pop();
+    while !scope.is_empty() {
+        let candidate = format!("{}::{written}", scope.join("::"));
+        if defined(&candidate) {
+            return ClassId(crate::ident::Symbol::from(candidate.as_str()));
+        }
+        scope.pop();
+    }
+    parent.clone()
 }
 
 fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {

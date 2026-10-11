@@ -170,8 +170,16 @@ fn server_capabilities() -> ServerCapabilities {
 }
 
 /// Best workspace root from the initialize params: first workspace folder,
-/// else the (deprecated) root URI, else the process CWD.
+/// else the (deprecated) root URI, else the process CWD. Canonical, as
+/// `ingest::ingest_app` makes the CLI's root: the analysis names its
+/// sources under the resolved root, and a document query resolves its
+/// URI the same way (`doc_path`), so a workspace reached through a
+/// symlink answers for either spelling of a file's path.
 fn workspace_root(init: &InitializeParams) -> PathBuf {
+    canonical(&workspace_root_as_given(init))
+}
+
+fn workspace_root_as_given(init: &InitializeParams) -> PathBuf {
     if let Some(folders) = &init.workspace_folders {
         if let Some(first) = folders.first() {
             if let Some(p) = uri_to_path(&first.uri) {
@@ -401,7 +409,7 @@ impl Server {
         let analysis = self.current()?;
         let app = &analysis.app;
         let tdp = params.text_document_position_params;
-        let path = uri_to_path(&tdp.text_document.uri)?;
+        let path = doc_path(&tdp.text_document.uri)?;
         let pos = ide::Position { line: tdp.position.line, character: tdp.position.character };
         let info = ide::type_at_position(app, path.to_str()?, pos)?;
 
@@ -425,7 +433,7 @@ impl Server {
     fn inlay_hints(&self, params: InlayHintParams) -> Vec<InlayHint> {
         let Some(analysis) = self.current() else { return Vec::new() };
         let app = &analysis.app;
-        let Some(path) = uri_to_path(&params.text_document.uri) else { return Vec::new() };
+        let Some(path) = doc_path(&params.text_document.uri) else { return Vec::new() };
         let Some(path_str) = path.to_str() else { return Vec::new() };
         let Some(file) = ide::file_id(app, path_str) else { return Vec::new() };
         let Some(src) = ide::source(app, file) else { return Vec::new() };
@@ -447,7 +455,7 @@ impl Server {
         let analysis = self.current()?;
         let app = &analysis.app;
         let tdp = params.text_document_position;
-        let path = uri_to_path(&tdp.text_document.uri)?;
+        let path = doc_path(&tdp.text_document.uri)?;
         let file = ide::file_id(app, path.to_str()?)?;
         let src = ide::source(app, file)?;
         let offset = ide::position_to_offset(&src.text, lsp_to_ide(tdp.position));
@@ -469,7 +477,7 @@ impl Server {
         let analysis = self.current()?;
         let app = &analysis.app;
         let tdp = params.text_document_position_params;
-        let path = uri_to_path(&tdp.text_document.uri)?;
+        let path = doc_path(&tdp.text_document.uri)?;
         let file = ide::file_id(app, path.to_str()?)?;
         let src = ide::source(app, file)?;
         let offset = ide::position_to_offset(&src.text, lsp_to_ide(tdp.position));
@@ -484,7 +492,7 @@ impl Server {
     fn completion(&self, params: CompletionParams) -> Option<Vec<CompletionItem>> {
         let analysis = self.current()?;
         let tdp = params.text_document_position;
-        let path = uri_to_path(&tdp.text_document.uri)?;
+        let path = doc_path(&tdp.text_document.uri)?;
         let text = self.overlay.get(&canonical(&path))?.as_str();
         let path_str = path.to_str()?;
         let cursor = ide::position_to_offset(text, lsp_to_ide(tdp.position)) as usize;
@@ -506,7 +514,7 @@ impl Server {
     fn code_lenses(&self, params: CodeLensParams) -> Vec<CodeLens> {
         let Some(analysis) = self.current() else { return Vec::new() };
         let app = &analysis.app;
-        let Some(path) = uri_to_path(&params.text_document.uri) else { return Vec::new() };
+        let Some(path) = doc_path(&params.text_document.uri) else { return Vec::new() };
         let Some(path_str) = path.to_str() else { return Vec::new() };
         let Some(file) = ide::file_id(app, path_str) else { return Vec::new() };
         let Some(src) = ide::source(app, file) else { return Vec::new() };
@@ -904,6 +912,11 @@ fn extract<P: serde::de::DeserializeOwned>(req: Request) -> LspResult<(RequestId
     let id = req.id.clone();
     let params = serde_json::from_value(req.params)?;
     Ok((id, params))
+}
+
+/// A queried document's path as the analysis names it (`workspace_root`).
+fn doc_path(uri: &Uri) -> Option<PathBuf> {
+    uri_to_path(uri).map(|p| canonical(&p))
 }
 
 /// `file://` URI → filesystem path. POSIX-focused: strips the scheme and
@@ -1405,6 +1418,83 @@ mod tests {
             }))
             .unwrap();
 
+        handle.join().unwrap().expect("server loop should end cleanly");
+    }
+
+    /// A workspace opened through a symlink: the analysis names sources
+    /// under the resolved root (`workspace_root`, as `ingest_app` does),
+    /// and a hover answers for the file's path spelled either way.
+    #[cfg(unix)]
+    #[test]
+    fn hover_answers_through_a_symlinked_root() {
+        /// Removes the symlink even when an assertion panics first.
+        struct RemoveOnDrop(std::path::PathBuf);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        let target = std::env::current_dir().unwrap().join("fixtures/tiny-blog").canonicalize().unwrap();
+        let link = std::env::temp_dir().join(format!("rh_lsp_symlink_{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let _cleanup = RemoveOnDrop(link.clone());
+
+        let (ir, _) = crate::ingest::prism::scope(|| crate::ingest::ingest_app(&link));
+        let mut app = ir.expect("tiny-blog should ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut probe: Option<(String, u32, String)> = None;
+        'scan: for (i, src) in app.sources.iter().enumerate() {
+            if !src.path.ends_with(".rb") {
+                continue;
+            }
+            let file = crate::span::FileId(i as u32 + 1);
+            for off in 0..src.text.len() as u32 {
+                if ide::type_at(&app, file, off).is_some_and(|info| info.display == "String") {
+                    probe = Some((src.path.clone(), off, src.text.clone()));
+                    break 'scan;
+                }
+            }
+        }
+        let (path, offset, content) = probe.expect("tiny-blog should have a String-typed .rb position");
+        let rel = path.strip_prefix(target.to_str().unwrap()).expect("sources are named under the resolved root");
+        let pos = ide::offset_to_position(&content, offset);
+
+        let (server, client) = Connection::memory();
+        let handle = std::thread::spawn(move || run_connection(server));
+        let send = |message: Message| client.sender.send(message).unwrap();
+        send(Message::Request(Request {
+            id: RequestId::from(1),
+            method: "initialize".to_string(),
+            params: json!({ "capabilities": {}, "rootUri": format!("file://{}", link.to_str().unwrap()) }),
+        }));
+        let _ = recv_response(&client, 1);
+        send(Message::Notification(Notification { method: "initialized".to_string(), params: json!({}) }));
+        let linked = format!("file://{}{rel}", link.to_str().unwrap());
+        let resolved = format!("file://{path}");
+        send(Message::Notification(Notification {
+            method: "textDocument/didOpen".to_string(),
+            params: json!({ "textDocument": { "uri": linked, "languageId": "ruby", "version": 1, "text": content } }),
+        }));
+        for (id, uri) in [(2, &linked), (3, &resolved)] {
+            send(Message::Request(Request {
+                id: RequestId::from(id),
+                method: "textDocument/hover".to_string(),
+                params: json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": pos.line, "character": pos.character }
+                }),
+            }));
+            let value = recv_response(&client, id)
+                .result
+                .and_then(|r| r.get("contents").and_then(|c| c.get("value")).and_then(|v| v.as_str()).map(str::to_string))
+                .unwrap_or_default();
+            assert!(value.contains("String"), "hover via {uri} should report String; got {value:?}");
+        }
+        send(Message::Request(Request { id: RequestId::from(4), method: "shutdown".to_string(), params: json!(null) }));
+        let _ = recv_response(&client, 4);
+        send(Message::Notification(Notification { method: "exit".to_string(), params: json!(null) }));
         handle.join().unwrap().expect("server loop should end cleanly");
     }
 

@@ -119,3 +119,56 @@ raise "initializer not applied" unless Rating::High.serialize == "critical"
         }
     }
 }
+
+/// A class-method override of a sorbet method that calls `super`
+/// (`Channel.try_deserialize` normalizes the value first)
+/// reaches sorbet's own lookup, and the methods built on it
+/// (`from_serialized`) dispatch to the override.
+#[test]
+fn an_override_calling_super_reaches_the_sorbet_method() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/channel.rb",
+            r#"class Channel < T::Enum
+  enums do
+    Web = new("web")
+    Unknown = new("unknown")
+  end
+
+  class << self
+    def try_deserialize(value)
+      value = value&.downcase
+      value = "web" if ["legacy_web", "mobile_web"].include?(value)
+      super(value)
+    end
+
+    def has_serialized?(value)
+      super || value == "legacy"
+    end
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"raise "override lost" unless Channel.try_deserialize("MOBILE_WEB").equal?(Channel::Web)
+raise "lookup lost" unless Channel.try_deserialize("unknown").equal?(Channel::Unknown)
+raise "nil lost" unless Channel.try_deserialize("nope").nil?
+raise "from_serialized skips override" unless Channel.from_serialized("Legacy_Web").equal?(Channel::Web)
+raise "bare super lost" unless Channel.has_serialized?("web") && Channel.has_serialized?("legacy") && !Channel.has_serialized?("x")
+"#,
+        )
+        .assert_passes();
+}
+
+/// A bare `super` in an override with keyword parameters cannot be routed
+/// to the synthesized method, so ingest names it instead of emitting a
+/// `super` that finds nothing.
+#[test]
+fn an_override_with_keywords_calling_super_is_refused() {
+    let source = b"class Channel < T::Enum\n  enums do\n    Web = new(\"web\")\n  end\n\n  def self.try_deserialize(value, strict: false)\n    super\n  end\nend\n";
+    let error = roundhouse::ingest::ingest_library_classes(source, "app/services/channel.rb")
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(error.contains("`super` in `try_deserialize`"), "{error}");
+}

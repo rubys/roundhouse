@@ -7432,7 +7432,7 @@ end
 raise "constant guard changed" unless GuardProbe.constants == ["constant", "constant", nil, nil]
 raise "method guard changed" unless GuardProbe.calls == "method"
 raise "super guard changed" unless GuardChild.calls == "super"
-raise "source identity changed" unless GuardProbe.location == ["app/services/guard_probe.rb", 13]
+raise "source identity changed" unless GuardProbe.location == [File.expand_path("app/services/guard_probe.rb", Dir.pwd), 13]
 raise "predicate query was lowered or evaluated as a normal call" unless GuardProbe.predicates == [nil, "method", "method"]
 raise "static descriptors became booleans" unless GuardProbe.simple == ["self", "nil", "true", "false", "expression", nil]
 raise "nil class variable was confused with absence" unless GuardProbe.new.classvars == [nil, "class variable"]
@@ -10795,5 +10795,275 @@ again = store.read("presentation")
 raise "read answered #{again.inspect}" unless again == "<b>hi</b>" && again.html_safe?
 raise "the cached copy is the caller's object" if again.equal?(body)
 "##)
+        .assert_passes();
+}
+
+/// A model-only app (no controllers) must boot: `config/routes.rb`
+/// requires `application_controller` only when the app defines one, the
+/// same defined-only rule the per-controller requires follow.
+#[test]
+fn a_model_only_app_boots_without_an_application_controller() {
+    emit_and_run::empty_app()
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets" do |t|
+    t.integer "owner_id", null: false
+    t.boolean "enabled", default: false, null: false
+    t.string "name", null: false
+  end
+end
+"#)
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  validates :name, presence: true\nend\n")
+        .write("test/fixtures/widgets.yml", "on:\n  owner_id: 7\n  name: a\n  enabled: true\n\noff:\n  owner_id: 8\n  name: b\n  enabled: false\n")
+        .write("test/models/widget_test.rb", r#"require "test_helper"
+
+class WidgetTest < ActiveSupport::TestCase
+  test "enabled defaults to false" do
+    refute Widget.new(owner_id: 1).enabled
+  end
+
+  test "requires name" do
+    record = Widget.new(owner_id: 1, name: nil)
+    refute_predicate record, :valid?
+    assert_includes record.errors[:name], "can't be blank"
+  end
+
+  test "can query by owner_id and enabled status" do
+    record = widgets(:on)
+    assert Widget.exists?(owner_id: record.owner_id, enabled: true)
+    refute Widget.exists?(owner_id: record.owner_id, enabled: false)
+  end
+end
+"#)
+        .run_test("test/models/widget_test.rb")
+        .assert_passes();
+}
+
+/// An app with nothing in it but what the emitted test boot needs: an
+/// application controller, an empty route table and a schema.
+fn bare_test_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :things do |t|\n    t.string :name\n  end\nend\n")
+}
+
+/// A gem keeps its tests at `test/` root over a base its helper
+/// defines (`class GemCompat::TestCase < ActiveSupport::TestCase`
+/// in test/test_helper.rb). With `test_paths: [test]` the helper was
+/// read a second time as a test file, and the emitted subclass never
+/// loaded its base: NameError on `GemCompat` before any test ran.
+#[test]
+fn a_test_case_base_defined_in_the_helper_is_loaded_by_its_subclasses() {
+    bare_test_app()
+        .write("app/.keep", "")
+        .write("roundhouse.yml", "test_paths:\n  - test\n")
+        .write("lib/fragments.rb", "module Fragments\n  def self.random\n    \"RANDOM()\"\n  end\nend\n")
+        .write("test/test_helper.rb", "require \"active_support\"\n\nmodule GemCompat\n  class TestCase < ActiveSupport::TestCase\n  end\nend\n")
+        .write("test/fragments_test.rb", "require \"test_helper\"\n\nclass FragmentsTest < GemCompat::TestCase\n  test \"random\" do\n    assert_equal \"RANDOM()\", Fragments.random\n  end\nend\n")
+        .run_test("test/models/fragments_test.rb")
+        .assert_passes();
+}
+
+/// A helper that defines only a plain class with a superclass (a logger
+/// subclass the tests share) is not a test-case base: no test file, no
+/// autorun driver for zero tests.
+#[test]
+fn a_plain_class_in_the_helper_is_not_read_as_a_test_case() {
+    let (emitted, errors) = bare_test_app()
+        .write("app/.keep", "")
+        .write("roundhouse.yml", "test_paths:\n  - test\n")
+        .write("lib/fragments.rb", "module Fragments\n  def self.random\n    \"RANDOM()\"\n  end\nend\n")
+        .write("test/test_helper.rb", "require \"active_support\"\nrequire \"logger\"\n\nclass RecordingLogger < Logger\nend\n")
+        .write("test/fragments_test.rb", "require \"test_helper\"\n\nclass FragmentsTest < ActiveSupport::TestCase\n  test \"random\" do\n    assert_equal \"RANDOM()\", Fragments.random\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "got {errors:?}");
+    let emitted_tests: Vec<String> = ["test", "test/models"]
+        .iter()
+        .filter_map(|d| std::fs::read_dir(emitted.join(d)).ok())
+        .flat_map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect();
+    assert!(emitted_tests.iter().any(|f| f == "fragments_test.rb"), "got {emitted_tests:?}");
+    assert!(emitted_tests.iter().all(|f| !f.contains("recording_logger")), "got {emitted_tests:?}");
+}
+
+/// `teardown do … end` in a test class fell to the drop for unrecognized
+/// class-body statements: check stayed clean and the cleanup never ran
+/// (a common Rails idiom). ActiveSupport runs the class's
+/// `def teardown` first, then the blocks newest first, after every test;
+/// the order asserted here is what ActiveSupport 8.1.4 produces natively.
+#[test]
+fn teardown_blocks_run_after_each_test_in_rails_order() {
+    bare_test_app()
+        .write("app/.keep", "")
+        .write("test/models/teardown_order_test.rb", r#"require "test_helper"
+
+class TeardownOrderTest < ActiveSupport::TestCase
+  LOG = []
+
+  teardown do
+    LOG << "one"
+  end
+
+  def teardown
+    LOG << "def"
+  end
+
+  teardown do
+    LOG << "two"
+  end
+
+  test "a first" do
+    LOG << "a"
+  end
+
+  test "b second" do
+    assert_equal ["a", "def", "two", "one"], LOG
+  end
+end
+"#)
+        .run_test("test/models/teardown_order_test.rb")
+        .assert_passes();
+}
+
+/// One test file whose teardown prints how many times the block's
+/// effect (`Widget.hit`) ran, so a failing run shows where it stopped.
+fn destructured_block_app(name: &str, members: &str) -> emit_and_run::Overlay {
+    bare_test_app()
+        .write(
+            "app/models/widget.rb",
+            "class Widget\n  HITS = []\n\n  def self.flag\n    false\n  end\n\n  def self.hit\n    HITS << 1\n  end\n\n  def self.hits\n    HITS.size\n  end\n\n  def self.reset\n    HITS.clear\n  end\nend\n",
+        )
+        .write("test/test_helper.rb", "require \"active_support\"\n")
+        .write(
+            "test/models/widget_test.rb",
+            &format!(
+                "require \"test_helper\"\n\nclass WidgetTest < ActiveSupport::TestCase\n  setup do\n    Widget.reset\n  end\n\n  teardown do\n    puts \"CASE {name} HITS=#{{Widget.hits}}\"\n  end\n\n{members}\nend\n"
+            ),
+        )
+}
+
+/// Assertions inside the block on the right of `a, b = call do … end`
+/// are lowered where they are written, and a test class's own
+/// `assert_includes` is the one called, not Minitest's. Each case's
+/// outcome is the native Minitest run's.
+#[test]
+fn assertions_inside_a_destructured_block_run_where_they_are_written() {
+    let cases = [
+        ("plain", "  test \"t\" do\n    first, second = [1, 2].map do |x|\n      assert_equal x, x\n      Widget.hit\n      x * 10\n    end\n    assert_equal [10, 20], [first, second]\n    assert_equal 2, Widget.hits\n  end\n"),
+        ("own", "  def assert_includes(collection, item)\n    Widget.hit\n    assert collection.downcase.include?(item.downcase)\n  end\n\n  def assert_shouted(text)\n    assert_equal text.upcase, text\n  end\n\n  test \"t\" do\n    first, second = [\"HELLO\", \"LOUD\"].map do |text|\n      assert_includes text, \"hello\" if text == \"HELLO\"\n      assert_shouted text\n      text\n    end\n    assert_includes first, \"hello\"\n    assert_equal 2, Widget.hits\n  end\n"),
+        ("splat", "  test \"t\" do\n    first, *rest = [1, 2, 3].map do |x|\n      assert_equal x, x\n      Widget.hit\n      x\n    end\n    assert_equal 1, first\n    assert_equal [2, 3], rest\n    assert_equal 3, Widget.hits\n  end\n"),
+    ];
+    for (name, members) in cases {
+        let run = destructured_block_app(name, members).run_test("test/models/widget_test.rb");
+        run.assert_passes();
+        assert!(run.stdout.contains(&format!("CASE {name} HITS=")), "{name}: {}", run.stdout);
+    }
+}
+
+/// A failing assertion inside that block fails the test and stops what
+/// follows it, inside the block and after it; the effect count is the
+/// native run's.
+#[test]
+fn a_failing_assertion_inside_a_destructured_block_stops_what_follows() {
+    let cases = [
+        ("plain_fail", 1, "  test \"t\" do\n    first, second = [1, 2].map do |x|\n      assert_equal 1, x\n      Widget.hit\n      x\n    end\n    Widget.hit\n  end\n"),
+        ("own_fail", 0, "  def assert_shouted(text)\n    assert_equal text.upcase, text\n  end\n\n  test \"t\" do\n    first, second = [\"quiet\"].map do |text|\n      assert_shouted text\n      Widget.hit\n      text\n    end\n    Widget.hit\n  end\n"),
+    ];
+    for (name, hits, members) in cases {
+        let run = destructured_block_app(name, members).run_test("test/models/widget_test.rb");
+        assert!(run.errors.is_empty(), "{name}: {:?}", run.errors);
+        assert!(!run.success, "{name}: the failing assertion passed\n{}", run.stdout);
+        assert!(run.stdout.contains(&format!("CASE {name} HITS={hits}\n")), "{name}: {}", run.stdout);
+    }
+}
+
+/// An app with no tables at all, the shape of a gem's unit test:
+/// a library class and a test of it. The harness loads
+/// `Schema.statements` unconditionally, and an empty schema emitted no
+/// `Schema` module, so the test died with NameError before running.
+#[test]
+fn an_app_without_a_schema_runs_its_library_tests() {
+    emit_and_run::empty_app()
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("lib/sql_fragments.rb", "module SqlFragments\n  class Sqlite3\n    class << self\n      def random\n        \"RANDOM()\"\n      end\n\n      def excluded(column)\n        \"excluded.#{column}\"\n      end\n    end\n  end\nend\n")
+        .write("test/lib/sql_fragments_test.rb", r#"require "test_helper"
+
+class SqlFragmentsTest < ActiveSupport::TestCase
+  test "random" do
+    assert_equal "RANDOM()", SqlFragments::Sqlite3.random
+  end
+
+  test "excluded" do
+    assert_equal "excluded.name", SqlFragments::Sqlite3.excluded("name")
+  end
+end
+"#)
+        .run_test("test/models/sql_fragments_test.rb")
+        .assert_passes();
+}
+
+
+/// Rails' `exists?(conditions = :none)` asks for any row when called bare
+/// and answers false for a nil/false argument (`return false if
+/// !conditions`), on the model class and on a relation alike.
+#[test]
+fn exists_without_an_argument_asks_for_any_row_and_nil_is_false() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_exists_test.rb",
+            r#"require "test_helper"
+
+class ArticleExistsTest < ActiveSupport::TestCase
+  test "bare exists? is any row; exists?(nil) is false" do
+    Article.delete_all
+    assert_not Article.exists?
+    assert_not Article.all.exists?
+    article = Article.create!(title: "Exists", body: "Body text here")
+    assert Article.exists?
+    assert Article.all.exists?
+    assert Article.exists?(article.id)
+    assert_not Article.exists?(nil)
+    assert_not Article.all.exists?(nil)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_exists_test.rb")
+        .assert_passes();
+}
+
+/// Rails' `association_primary_key` is the `belongs_to`'s `primary_key:`,
+/// else the target's primary key: the reader looks the target up by that
+/// column, the writer stores that column's value in the foreign key, and
+/// `joins` compares the foreign key with it.
+#[test]
+fn belongs_to_primary_key_option_names_the_key_the_foreign_key_holds() {
+    emit_and_run::empty_app()
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"products\", force: :cascade do |t|\n    t.string \"uuid\"\n    t.string \"name\"\n  end\n  create_table \"prices\", force: :cascade do |t|\n    t.string \"product_uuid\"\n    t.integer \"cents\"\n  end\nend\n",
+        )
+        .write("app/models/product.rb", "class Product < ApplicationRecord\nend\n")
+        .write(
+            "app/models/price.rb",
+            "class Price < ApplicationRecord\n  belongs_to :product, foreign_key: \"product_uuid\", primary_key: \"uuid\"\n\n  def self.for_product_named(name)\n    joins(:product).where(products: { name: name }).count\n  end\nend\n",
+        )
+        .run_ruby(
+            "a = Product.create!(uuid: \"u-a\", name: \"A\")\n\
+             b = Product.create!(uuid: \"u-b\", name: \"B\")\n\
+             price = Price.create!(product_uuid: \"u-a\", cents: 5)\n\
+             raise \"reader: #{price.product&.name.inspect}\" unless price.product.name == \"A\"\n\
+             price.product = b\n\
+             raise \"writer: #{price.product_uuid.inspect}\" unless price.product_uuid == \"u-b\"\n\
+             price.save!\n\
+             joined = Price.for_product_named(\"B\")\n\
+             raise \"join: #{joined}\" unless joined == 1\n\
+             puts \"belongs_to primary_key passed\"\n",
+        )
         .assert_passes();
 }

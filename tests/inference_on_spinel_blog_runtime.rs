@@ -353,7 +353,12 @@ fn untyped_subexpressions_baseline() {
     // All nine are the nested branch's new `Db.exec` SAVEPOINT / RELEASE /
     // ROLLBACK TO calls (and the `if`/`unless` arms holding them) plus the
     // `depth` read in the savepoint name, unmodeled here like the others.
-    const CEILING: usize = 578;
+    // `Model.find_or_initialize_by` / `find_or_create_by` / `find_or_create_by!`
+    // and Relation's `find_or_initialize_by` / `find_or_create_by!`:
+    // 578 -> 592, MEASURED over that commit. The new sites are the new
+    // methods' own reads, typed here without their RBS like the other
+    // finders'; the RBS-paired probe stays at zero residual.
+    const CEILING: usize = 592;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\

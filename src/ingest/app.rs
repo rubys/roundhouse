@@ -33,7 +33,7 @@ use super::model::ingest_model_with_enum_constants;
 use super::routes::{EngineRouteSource, RouteHelperSource, ingest_routes_with_engines};
 use super::schema::{ingest_migration, ingest_schema};
 use super::structure_sql::ingest_structure_sql;
-use super::test::ingest_test_files;
+use super::test::{ingest_test_bases, ingest_test_files};
 use super::view::{ViewEngine, ingest_template};
 use super::survey::{self, unwrap_or_record};
 use super::{IngestError, IngestResult};
@@ -176,6 +176,28 @@ fn names_root_constant(text: &str, name: &str) -> bool {
                 self.found |= node.name().is_some_and(|id| super::util::constant_id_str(&id) == self.name);
             }
             ruby_prism::visit_constant_path_node(self, node);
+        }
+        // A `module X` / `class X` declaration names X without reading it
+        // (`module Shops` around an app model reopens the namespace): only
+        // a namespace path it nests under (`class A::X` reads A) is a read.
+        fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+            if let Some(parent) = node.constant_path().as_constant_path_node().and_then(|p| p.parent()) {
+                self.visit(&parent);
+            }
+            if let Some(body) = node.body() {
+                self.visit(&body);
+            }
+        }
+        fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+            if let Some(parent) = node.constant_path().as_constant_path_node().and_then(|p| p.parent()) {
+                self.visit(&parent);
+            }
+            if let Some(superclass) = node.superclass() {
+                self.visit(&superclass);
+            }
+            if let Some(body) = node.body() {
+                self.visit(&body);
+            }
         }
     }
     let parsed = ruby_prism::parse(text.as_bytes());
@@ -422,6 +444,12 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // `action_text_markdowns` (not `markdowns`). Seed the framework
     // prefix so ordinary model ingest matches the gem.
     table_prefixes.insert("ActionText".to_string(), "action_text_".to_string());
+    // An app engine's own `isolate_namespace` (in its `lib/`): a prefix
+    // the module's declared `table_name_prefix` overrides.
+    let mut isolated_prefixes = super::model::TablePrefixes::default();
+    // Each class's own `self.table_name_prefix =`, for the models that
+    // inherit it from an abstract base.
+    let mut class_prefixes = super::model::TablePrefixes::default();
     // Qualified enum arrays can live in a later file (e.g. a service
     // module). Collect literal inputs before expanding any model DSL.
     let mut enum_constants = super::model::EnumConstants::default();
@@ -442,6 +470,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
             table_prefixes
                 .extend(super::model::ingest_table_name_prefixes(&source, &entry.display().to_string()));
+            class_prefixes.extend(super::model::ingest_class_table_prefixes(&source, &entry.display().to_string()));
             model_bases.record(&source, &mut base_pairs);
             enum_constants.record(&source, &entry.display().to_string());
             enum_input_files.insert(entry);
@@ -463,6 +492,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 &source,
                 &entry.display().to_string(),
             ));
+            isolated_prefixes.extend(super::model::ingest_isolated_namespace_prefixes(&source, &entry.display().to_string()));
+            class_prefixes.extend(super::model::ingest_class_table_prefixes(&source, &entry.display().to_string()));
             model_bases.record(&source, &mut base_pairs);
             if sub != "lib" || !ignored_lib_file(&entry) {
                 enum_constants.record(&source, &entry.display().to_string());
@@ -470,6 +501,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             }
         }
     }
+    for (module, prefix) in isolated_prefixes {
+        table_prefixes.entry(module).or_insert(prefix);
+    }
+    let base_prefixes = super::model::inherited_table_prefixes(&class_prefixes, &base_pairs);
     enum_constants.finish();
     model_bases.close_over(&base_pairs);
     for root in &roots {
@@ -484,7 +519,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 Some(ClassKind::Model) | None => {
                     if let Some(maybe_model) =
                         unwrap_or_record(ingest_model_with_enum_constants(
-                            &source, &path_str, &app.schema, &table_prefixes, &enum_constants,
+                            &source, &path_str, &app.schema, &table_prefixes, &base_prefixes, &enum_constants,
                             &model_bases,
                         ))?
                     {
@@ -641,7 +676,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             // directory itself is the app saying what the file is.
             if super::library_class::has_active_record_base(&source, &model_bases) {
                 match ingest_model_with_enum_constants(
-                    &source, &path_str, &app.schema, &table_prefixes, &enum_constants,
+                    &source, &path_str, &app.schema, &table_prefixes, &base_prefixes, &enum_constants,
                     &model_bases,
                 ) {
                     Ok(Some(model)) => {
@@ -1510,8 +1545,31 @@ end
             test_files.extend(read_test_rb_files(vfs, dir, &tests_dir)?);
         }
     }
+    // The helper, the shared helper modules and the fixtures are read on
+    // their own terms, above and below; a `test_paths` entry of `test`
+    // must not read them a second time as test files.
+    let helper_rb = dir.join("test/test_helper.rb");
+    let (helpers_dir, fixtures_dir) = (dir.join("test/test_helpers"), dir.join("test/fixtures"));
+    test_files.retain(|f| f != &helper_rb && !f.starts_with(&helpers_dir) && !f.starts_with(&fixtures_dir));
     test_files.sort();
     test_files.dedup();
+
+    // A test-case base the helper DEFINES (`class GemCompat::TestCase
+    // < ActiveSupport::TestCase`), which the app's tests then subclass. A
+    // reopen (`class ActiveSupport::TestCase` with no superclass) is the
+    // helper configuring Rails' own base, not a class of the app's.
+    if vfs.exists(&helper_rb) {
+        if let Some(source) = read_or_ledger(vfs, &helper_rb)? {
+            if let Some(tms) =
+                unwrap_or_record(ingest_test_bases(&source, &helper_rb.display().to_string()))?
+            {
+                for mut tm in tms.into_iter().filter(|tm| tm.parent.is_some()) {
+                    splice_test_helpers(&mut tm, &shared_test_helpers);
+                    app.test_modules.push(tm);
+                }
+            }
+        }
+    }
 
     for entry in test_files {
         let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
@@ -2045,14 +2103,11 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
                     {
                         args.iter()
                             .filter_map(|arg| match &*arg.node {
-                                ExprNode::Const { path } => {
-                                    Some(crate::ident::ClassId(crate::ident::Symbol::from(
-                                        path.iter()
-                                            .map(|s| s.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join("::"),
-                                    )))
-                                }
+                                ExprNode::Const { path } => Some(concern_named(
+                                    model.name.0.as_str(),
+                                    path,
+                                    &app.concern_model_items,
+                                )),
                                 _ => None,
                             })
                             .collect()
@@ -2078,6 +2133,33 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
             i += 1;
         }
     }
+}
+
+/// The concern an `include` arg written inside `owner` names. A rooted
+/// `::Blog::Concerns::X` (a leading empty segment) names the top-level
+/// `Blog::Concerns::X`, with no lexical lookup. A relative `Concerns::X`
+/// resolves from the owner's namespace outward (`Blog::Post::Concerns::X`,
+/// then `Blog::Concerns::X`), innermost first, falling back to the path as
+/// written. Keyed by the written path, a rooted include matched no
+/// concern and its `included do` block vanished from the includer.
+fn concern_named<V>(
+    owner: &str,
+    path: &[crate::ident::Symbol],
+    concerns: &std::collections::HashMap<crate::ident::ClassId, V>,
+) -> crate::ident::ClassId {
+    let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    if let Some(top) = written.strip_prefix("::") {
+        return crate::ident::ClassId(crate::ident::Symbol::from(top));
+    }
+    let mut scope = Some(owner);
+    while let Some(prefix) = scope {
+        let id = crate::ident::ClassId(crate::ident::Symbol::from(format!("{prefix}::{written}")));
+        if concerns.contains_key(&id) {
+            return id;
+        }
+        scope = prefix.rsplit_once("::").map(|(prefix, _)| prefix);
+    }
+    crate::ident::ClassId(crate::ident::Symbol::from(written))
 }
 
 /// An owner-derived FOREIGN KEY, recomputed for the model the
@@ -5292,14 +5374,38 @@ fn qualify_relative_includes(app: &mut App) {
     // app/controllers/concerns/authentication/session_lookup.rb.
     // Unqualified, the emitted `include SessionLookup` raises NameError
     // at load time (and nothing pulls the file into the require graph).
+    //
+    // Past the lexical scopes Ruby searches the class's ancestors before
+    // the top level: `class Child < Base::Entity` opening with
+    // `include(WithIds)` means `Base::Entity::WithIds`.
+    let parents: HashMap<String, crate::ident::ClassId> = app
+        .library_classes
+        .iter()
+        .filter_map(|lc| Some((lc.name.0.as_str().to_string(), lc.parent.clone()?)))
+        .collect();
+    let join = |path: &[crate::ident::Symbol]| path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
     for lc in &mut app.library_classes {
         let owner = lc.name.0.as_str().to_string();
         for inc in &mut lc.includes {
             let path: Vec<crate::ident::Symbol> =
                 inc.0.as_str().split("::").map(crate::ident::Symbol::from).collect();
             if let Some(qualified) = resolve(&owner, &path, &known) {
-                let joined = qualified.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-                *inc = crate::ident::ClassId(crate::ident::Symbol::from(joined));
+                *inc = crate::ident::ClassId(crate::ident::Symbol::from(join(&qualified)));
+                continue;
+            }
+            let mut class = owner.clone();
+            // A cycle guard on the superclass walk.
+            for _ in 0..32 {
+                let Some(parent) = parents.get(&class) else { break };
+                let written: Vec<crate::ident::Symbol> =
+                    parent.0.as_str().split("::").map(crate::ident::Symbol::from).collect();
+                let ancestor = resolve(&class, &written, &known).map(|p| join(&p)).unwrap_or_else(|| join(&written));
+                let candidate = crate::ident::ClassId(crate::ident::Symbol::from(format!("{ancestor}::{}", inc.0)));
+                if known.contains(&candidate) {
+                    *inc = candidate;
+                    break;
+                }
+                class = ancestor;
             }
         }
     }

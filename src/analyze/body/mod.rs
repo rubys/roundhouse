@@ -103,6 +103,11 @@ impl ConstScope {
 #[derive(Clone, Default)]
 pub struct Ctx {
     pub self_ty: Option<Ty>,
+    /// What `self_ty` was before a self binding (`T.bind(self, T)`,
+    /// `#: self as T`) replaced it for the rest of a body. Names in a
+    /// declared type still resolve in the lexical namespace, not in
+    /// the one `self` was bound to. `None` while nothing is bound.
+    pub lexical_self: Option<Ty>,
     /// Ivar bindings observed as a `Seq` walks its statements in order.
     /// `@post = Post.find(...)` in stmt 1 lets `@post.destroy` in stmt 2
     /// dispatch correctly.
@@ -570,6 +575,11 @@ impl<'a> BodyTyper<'a> {
     /// ancestor's. Such a read is a plain state read, which is what lets a
     /// guard on it (`expires_at.present? && expires_at > now`) speak for
     /// the reads that follow it the way a guard on a local does.
+    ///
+    /// The type is the reader's, not the column's: `serialize :metadata`,
+    /// an enum or a money column registers a reader that answers something
+    /// other than the storage type, and `return if metadata.nil?` must not
+    /// narrow the reads after it back to the column's `String`.
     fn self_attribute_ty(&self, name: &Symbol, ctx: &Ctx) -> Option<Ty> {
         let Some(Ty::Class { id, .. }) = &ctx.self_ty else {
             return None;
@@ -580,7 +590,7 @@ impl<'a> BodyTyper<'a> {
             let Some(cur) = cursor else { break };
             let Some(info) = self.classes.get(&cur) else { break };
             if let Some(ty) = info.attributes.fields.get(name) {
-                return Some(ty.clone());
+                return Some(info.instance_methods.get(name).unwrap_or(ty).clone());
             }
             cursor = info.parent.clone();
         }
@@ -618,6 +628,30 @@ impl<'a> BodyTyper<'a> {
                         Some(Ty::Class { id: ty_id, .. }) if *ty_id == id
                     )
             }
+            // Kernel#singleton_class answers the receiver's own singleton
+            // class, one class object unique to that receiver: no subclass
+            // can stand in, unlike `x.class` on a nominal type. Only for a
+            // proven class/module object or an instance of a known
+            // non-immediate class (`1.singleton_class` raises TypeError),
+            // and not where an app method overrides it.
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                if method.as_str() == "singleton_class" && args.is_empty() =>
+            {
+                let class_object = self.is_class_object(r, ctx);
+                let instance = matches!(r.ty.as_ref(), Some(Ty::Class { id, .. })
+                    if self.classes().contains_key(id)
+                        && !matches!(id.0.as_str(), "Integer" | "Float" | "Symbol" | "Rational" | "Complex" | "NilClass" | "TrueClass" | "FalseClass"));
+                (class_object || instance) && !self.owns_operator(r.ty.as_ref(), method, class_object)
+            }
+            // `Module.new` / `Class.new(Parent)` answer a fresh module or
+            // class, unless the app overrides `new` on them.
+            ExprNode::Send { recv: Some(r), method, .. }
+                if method.as_str() == "new"
+                    && matches!(&*r.node, ExprNode::Const { path } if matches!(path.as_slice(), [n] if matches!(n.as_str(), "Module" | "Class")))
+                    && self.is_class_object(r, ctx) =>
+            {
+                !self.owns_operator(r.ty.as_ref(), method, true)
+            }
             _ => false,
         }
     }
@@ -626,6 +660,22 @@ impl<'a> BodyTyper<'a> {
     fn is_instance(&self, expr: &Expr, ctx: &Ctx) -> bool {
         !self.is_class_object(expr, ctx)
             && !matches!(&*expr.node, ExprNode::Send { method, args, .. } if method.as_str() == "class" && args.is_empty())
+    }
+
+    /// An instance method of a class that descends from `Module`
+    /// (`class Recorder < Module`) runs with a module as self: every
+    /// instance of such a class is a module, whichever subclass.
+    fn self_is_module_instance(&self, ctx: &Ctx) -> bool {
+        if ctx.class_side { return false; }
+        let Some(Ty::Class { id, .. }) = ctx.self_ty.as_ref() else { return false };
+        let mut seen = std::collections::HashSet::new();
+        let mut current = self.classes().get(id).and_then(|c| c.parent.clone());
+        while let Some(id) = current {
+            if matches!(id.0.as_str(), "Module" | "Class") { return true; }
+            if !seen.insert(id.clone()) { break; }
+            current = self.classes().get(&id).and_then(|c| c.parent.clone());
+        }
+        false
     }
 
     fn is_module_callback(&self, recv_ty: Option<&Ty>, method: &Symbol) -> bool {
@@ -982,6 +1032,15 @@ impl<'a> BodyTyper<'a> {
                 let mut elem_ty: Option<Ty> = None;
                 for e in elements.iter_mut() {
                     let et = self.analyze_expr(e, ctx);
+                    // `[*a, b]` holds `a`'s elements, not `a`.
+                    let et = if matches!(&*e.node, ExprNode::Splat { .. }) {
+                        match splat_elements(et) {
+                            Some(et) => et,
+                            None => continue,
+                        }
+                    } else {
+                        et
+                    };
                     elem_ty = Some(match elem_ty.take() {
                         Some(prev) => union_of(prev, et),
                         None => et,
@@ -1669,7 +1728,12 @@ impl<'a> BodyTyper<'a> {
                 // What every object and every module answers, when the
                 // receiver's own table did not. App analyzer only.
                 // `class_object_receiver` was resolved above for block binding
-                // so it matches the same class/instance table preference.
+                // so it matches the same class/instance table preference. A
+                // `Module` subclass's own implicit-self Module protocol is a
+                // class-object receiver too.
+                let class_object_receiver = class_object_receiver
+                    || (recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+                        && send::is_module_protocol(method) && self.self_is_module_instance(ctx));
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
                     && (recv.is_some() || (ctx.self_ty.is_some() && send::is_module_protocol(method)))
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
@@ -1678,10 +1742,13 @@ impl<'a> BodyTyper<'a> {
                     // membership. Refuse Module protocol only for true Module-only
                     // names, or for `include?` on a nominal class *instance* (where
                     // Module#include? would be the wrong answer). Untyped /
-                    // String / Array receivers fall through to membership → Bool.
+                    // String / Array receivers fall through to membership → Bool, and
+                    // so does a value typed `Class` or `Module`, which is a module
+                    // object and answers Module#include? itself.
                     let module_only = send::is_module_protocol(method)
                         && (method.as_str() != "include?"
-                            || matches!(recv_ty, Some(Ty::Class { .. })));
+                            || matches!(&recv_ty, Some(Ty::Class { id, .. })
+                                if !matches!(id.0.as_str(), "Class" | "Module")));
                     if module_only && !class_object
                         && !self.owns_operator(recv_ty.as_ref(), method, false) {
                         expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
@@ -1895,6 +1962,19 @@ impl<'a> BodyTyper<'a> {
                         forget_class_object_writes(e, &mut local_ctx);
                     }
                     last = self.analyze_expr(e, &local_ctx);
+                    // A self binding gives `self` its declared type from
+                    // the next statement to the end of this body, blocks
+                    // inside included. It changes only how `self` types:
+                    // which class a method defined below belongs to is
+                    // settled at ingest, lexically. A class-object binding
+                    // puts `self` on the class side, as in a `def self.x`.
+                    if crate::expr::is_self_binding(e) {
+                        if local_ctx.lexical_self.is_none() {
+                            local_ctx.lexical_self = local_ctx.self_ty.clone();
+                        }
+                        local_ctx.self_ty = e.ty.clone();
+                        local_ctx.class_side = e.decisions & crate::expr::SELF_BINDING_CLASS_OBJECT != 0;
+                    }
                     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
                         let proven = self.is_class_object(value, &local_ctx);
                         forget_class_object_writes(value, &mut local_ctx);
@@ -2452,9 +2532,9 @@ impl<'a> BodyTyper<'a> {
                 let _ = self.analyze_expr(value, ctx);
                 // A class named inside a namespace means the lexically
                 // nearest one (`Capabilities::Charge` in
-                // `ShopifyPayments::Capability` is
-                // `ShopifyPayments::Capabilities::Charge`).
-                let resolved = match &ctx.self_ty {
+                // `Billing::Capability` is
+                // `Billing::Capabilities::Charge`).
+                let resolved = match ctx.lexical_self.as_ref().or(ctx.self_ty.as_ref()) {
                     Some(Ty::Class { id: scope, .. }) => target_ty.map_class_ids(&|id| {
                         lexical_class(id, scope.0.as_str(), self.classes).unwrap_or_else(|| id.clone())
                     }),
@@ -2560,6 +2640,20 @@ fn written_class_id(path: &[Symbol]) -> ClassId {
         name.push_str(part.as_str());
     }
     ClassId(Symbol::from(name))
+}
+
+/// What `*value` adds to an array literal's elements: an array's or a
+/// tuple's elements, a hash's pairs, nothing for `nil`. Ruby `to_a`s any
+/// other value; one with no modeled element is kept as the one element
+/// `[*object]` gives for an object that is not a collection.
+fn splat_elements(ty: Ty) -> Option<Ty> {
+    match ty {
+        Ty::Nil => None,
+        Ty::Tuple { elems } => elems.into_iter().reduce(union_of),
+        Ty::Hash { key, value } => Some(Ty::Tuple { elems: vec![*key, *value] }),
+        Ty::Union { variants } => variants.into_iter().filter_map(splat_elements).reduce(union_of),
+        other => Some(other.collection_elem().unwrap_or(other)),
+    }
 }
 
 /// Rubydex can resolve a relative path to a name with a lexical prefix:
@@ -3442,6 +3536,26 @@ mod tests {
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
         assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+    }
+
+    #[test]
+    fn an_array_literal_holds_a_splatted_arrays_elements() {
+        // [*arr, "x"] on arr: Array[Array[Str]] is Array[Array[Str] | Str],
+        // and a splatted nil adds nothing.
+        let splat = |name: &str| synth(ExprNode::Splat { value: var(name) });
+        let mut expr = synth(ExprNode::Array {
+            elements: vec![splat("arr"), splat("none"), synth(ExprNode::Lit { value: Literal::Str { value: "x".into() } })],
+            style: Default::default(),
+        });
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let mut ctx = Ctx::default();
+        let inner = Ty::Array { elem: Box::new(Ty::Str) };
+        ctx.local_bindings.insert(Symbol::from("arr"), Ty::Array { elem: Box::new(inner.clone()) });
+        ctx.local_bindings.insert(Symbol::from("none"), Ty::Nil);
+        let ty = typer.analyze_expr(&mut expr, &ctx);
+
+        assert_eq!(ty, Ty::Array { elem: Box::new(union_of(inner, Ty::Str)) });
     }
 
     #[test]

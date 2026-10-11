@@ -21,6 +21,45 @@ thread_local! {
     /// see the comment there. Off everywhere else, so ordinary app and
     /// library bodies keep reading the way they always have.
     static IN_CORE_CLASS_REOPEN: Cell<bool> = const { Cell::new(false) };
+    /// The emitted path (relative to the output root) of the file being
+    /// rendered. A `SOURCE_FILE_PATH` literal anchors on it; `None`
+    /// outside a per-file emit, where the literal is written as is.
+    static EMITTED_FILE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` while emitting the file that lands at `out_path` (relative
+/// to the output root), restoring the previous setting after.
+pub(super) fn with_emitted_file<R>(out_path: &std::path::Path, f: impl FnOnce() -> R) -> R {
+    let prev = EMITTED_FILE.with(|c| c.replace(Some(out_path.to_path_buf())));
+    let r = f();
+    EMITTED_FILE.with(|c| *c.borrow_mut() = prev);
+    r
+}
+
+/// `__FILE__` / `__dir__` from a source file the Ruby family emits
+/// elsewhere. Ruby answers the loaded file's absolute path, so this is
+/// the source's app-relative path resolved from the emitted file's own
+/// directory: `app/models/loader.rb` carrying
+/// `lib/x/loader.rb` writes
+/// `File.expand_path("../../lib/x/loader.rb", __dir__)`.
+/// The app root maps to the output root, so walks up from `__FILE__`
+/// land on the files carried there, whatever the process's cwd.
+fn source_file_path(e: &Expr) -> Option<String> {
+    if e.decisions & crate::expr::SOURCE_FILE_PATH == 0 {
+        return None;
+    }
+    let ExprNode::Lit { value: Literal::Str { value } } = &*e.node else { return None };
+    if std::path::Path::new(value).is_absolute() {
+        return None;
+    }
+    let out = EMITTED_FILE.with(|c| c.borrow().clone())?;
+    let ups = out.parent().map_or(0, |d| d.components().count());
+    let rel = format!("{}{}", "../".repeat(ups), value);
+    Some(format!(
+        "File.expand_path({}, __dir__)",
+        emit_node(&ExprNode::Lit { value: Literal::Str { value: rel } })
+    ))
 }
 
 /// Run `f` while emitting a core-class reopen's body (or not). The
@@ -57,6 +96,9 @@ pub fn emit_expr(e: &Expr) -> String {
             // expressions retain their effects through the ordinary emitter.
             return emit_send_base(recv.as_ref(), method, args, *parenthesized);
         }
+    }
+    if let Some(path) = source_file_path(e) {
+        return path;
     }
     if is_mutable_string_literal(e) {
         return format!("+{}", emit_node(&e.node));
@@ -163,7 +205,16 @@ fn emit_node(n: &ExprNode) -> String {
             if let Some(b) = block { format!("{base} {{ {} }}", emit_expr(b)) } else { base }
         }
         ExprNode::Send { recv, method, args, block, parenthesized } => {
-            let base = emit_send_base(recv.as_ref(), method, args, *parenthesized);
+            // A brace block binds to the nearest call: after paren-less
+            // arguments it is the last argument's block (`f a, b { }` is
+            // `f(a, b { })`) or a syntax error (`f a, k: 1 { }`). The
+            // call's own `{ }` block (`field :name, :string,
+            // &:upcase`, ingested as `{ |x| x.upcase }`) takes the
+            // arguments in parentheses.
+            let brace = block.as_ref().is_some_and(|b| {
+                matches!(&*b.node, ExprNode::Lambda { block_style: crate::expr::BlockStyle::Brace, .. })
+            });
+            let base = emit_send_base(recv.as_ref(), method, args, *parenthesized || (brace && !args.is_empty()));
             match block {
                 None => base,
                 Some(b) => emit_do_block(&base, b),
@@ -241,8 +292,16 @@ fn emit_node(n: &ExprNode) -> String {
         }
         ExprNode::Seq { exprs } => {
             let mut out = String::new();
+            let last = exprs.len().saturating_sub(1);
+            let mut first = true;
             for (i, e) in exprs.iter().enumerate() {
-                if i > 0 {
+                // A self binding whose value nothing reads only informs
+                // the typer: a `#: self as T` comment never runs, and a
+                // `T.bind` keeps just its value, `self`, as `T.cast` does.
+                if i < last && crate::expr::is_self_binding(e) {
+                    continue;
+                }
+                if !first {
                     out.push('\n');
                     if e.leading_blank_line {
                         out.push('\n');
@@ -255,6 +314,7 @@ fn emit_node(n: &ExprNode) -> String {
                         out.push('\n');
                     }
                 }
+                first = false;
                 out.push_str(&emit_expr(e));
             }
             out
@@ -360,7 +420,17 @@ fn emit_node(n: &ExprNode) -> String {
         },
         ExprNode::Retry => "retry".to_string(),
         ExprNode::Redo => "redo".to_string(),
-        ExprNode::Splat { value } => format!("*{}", emit_expr(value)),
+        // `*(handles unless ready)`: bare, a modifier operand ends the
+        // element (`[*handles unless ready, x]` does not parse) or binds
+        // the whole enclosing statement; a command operand takes the
+        // following elements as its arguments.
+        ExprNode::Splat { value } => {
+            if renders_open_ended(value) {
+                format!("*({})", emit_expr(value))
+            } else {
+                format!("*{}", emit_arg(value))
+            }
+        }
         ExprNode::ForwardArgs => "...".to_string(),
         ExprNode::ForwardKeywords => "**".to_string(),
         ExprNode::ForwardKeywordsWithPairs { entries } => {
@@ -683,6 +753,11 @@ fn emit_bool_op_operand(
         ExprNode::Seq { exprs } if exprs.len() > 1 => {
             return format!("({s})");
         }
+        // `..`/`...` bind looser than `&&`/`||`: `r || a..b` is
+        // `(r || a)..b`.
+        ExprNode::Range { .. } => {
+            return format!("({s})");
+        }
         // A CONDITIONAL AS AN OPERAND, same argument one construct over.
         // The modifier form binds looser than every boolean operator, so
         // `x.m if c || fallback` re-parses as `x.m if (c || fallback)` —
@@ -855,7 +930,10 @@ fn is_simple_ident(s: &str) -> bool {
 /// and `f((g a: 1 do ... end))` parses identically everywhere.
 /// Everything else passes through unchanged.
 fn emit_arg(e: &Expr) -> String {
-    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) {
+    // A multiple assignment is a statement unless parenthesized: `if a, b
+    // = pair` does not parse, and as an argument its comma splits it.
+    let multi_assign = matches!(&*e.node, ExprNode::MultiAssign { .. });
+    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) || multi_assign {
         format!("({})", emit_expr(e))
     } else {
         emit_expr(e)
@@ -989,8 +1067,9 @@ fn recv_needs_parens(r: &Expr) -> bool {
 /// collapse `:sym` to a string and need no help. A genuinely symbol-keyed
 /// hash (`Hash[Symbol, _]`, e.g. a keyword-arg hash like
 /// `StoryRepository#@params`) has a different type and is left alone, as
-/// is any `untyped`/unknown receiver — we coerce on positive evidence
-/// only.
+/// is any `untyped`/unknown receiver. A request's params value is
+/// String-keyed at run time whatever the key's static type, so it also
+/// matches (`is_indifferent_params`) and its keys are coerced in full.
 ///
 /// This is the type-directed emit hook (the `[]` analog of the shared
 /// `classify_add`/`_sub`/`_cmp` operator dispatch) where a future
@@ -1005,14 +1084,29 @@ fn is_string_keyed_hash(recv: &Expr) -> bool {
     }
 }
 
+/// Is `recv` a request's params, the indifferent-access store? Either a
+/// params value (`ParamValue`) or the lowered controller's own `@params`,
+/// which is typed as a plain `Hash[String, untyped]` and is told apart
+/// from other hashes by being that ivar.
+fn is_indifferent_params(recv: &Expr) -> bool {
+    match &*recv.node {
+        ExprNode::Ivar { name } if name.as_str() == "params" => true,
+        _ => matches!(recv.ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == crate::analyze::PARAM_VALUE),
+    }
+}
+
 /// Coerce a key indexing a string-keyed hash: a symbol literal `:id` →
-/// `"id"`, an already-string key unchanged, and any dynamic key wrapped
-/// with `.to_s`. Safe on a `Hash[String, _]` — the key is a string, so
-/// `.to_s` is a no-op on a string and repairs a symbol.
-fn coerce_str_key(key: &Expr) -> String {
+/// `"id"`, an already-string key unchanged, and a dynamic key wrapped
+/// with `.to_s`. On params (`indifferent`) every dynamic key is wrapped:
+/// the key may hold a Symbol the static type does not show, and the store
+/// reads it by its String. On a plain `Hash[String, _]` only a key typed
+/// Symbol is, since the signature may sit over a hash that natively
+/// misses a Symbol key and an untyped key is then emitted as written.
+fn coerce_str_key(key: &Expr, indifferent: bool) -> String {
     match &*key.node {
         ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
         ExprNode::Lit { value: Literal::Str { .. } } => emit_expr(key),
+        _ if !indifferent && !matches!(key.ty, Some(Ty::Sym)) => emit_expr(key),
         _ => {
             let k = emit_expr(key);
             if recv_needs_parens(key) { format!("({k}).to_s") } else { format!("{k}.to_s") }
@@ -1039,11 +1133,12 @@ fn coerce_str_sym_key(key: &Expr) -> String {
 /// `h[x]` → `h[x.to_s]` case a literal-only pre-pass could not).
 fn emit_str_hash_access(recv: &Expr, method: &str, args: &[Expr]) -> Option<String> {
     let recv_s = emit_expr(recv);
+    let indifferent = is_indifferent_params(recv);
     match method {
-        "[]" if args.len() == 1 => Some(format!("{recv_s}[{}]", coerce_str_key(&args[0]))),
+        "[]" if args.len() == 1 => Some(format!("{recv_s}[{}]", coerce_str_key(&args[0], indifferent))),
         "[]=" if args.len() == 2 => Some(format!(
             "{recv_s}[{}] = {}",
-            coerce_str_key(&args[0]),
+            coerce_str_key(&args[0], indifferent),
             emit_arg(&args[1])
         )),
         "fetch" | "key?" | "has_key?" | "include?" | "delete" if !args.is_empty() => {
@@ -1299,6 +1394,11 @@ fn binop_of(e: &Expr) -> Option<&str> {
         // re-parses as `hrc = (HatRequest.count > 0)`, the local becoming
         // the comparison.
         ExprNode::Assign { .. } | ExprNode::OpAssign { .. } | ExprNode::MultiAssign { .. } => Some("="),
+        // A range binds looser than every infix operator and `||`/`&&`:
+        // `out << (start...limit)` written bare is `(out << start)...limit`,
+        // which pushes the Integer (and `ruby -w` flags the range as
+        // void), and `(a..b) == r` bare is `a..(b == r)`.
+        ExprNode::Range { .. } => Some(".."),
         _ => None,
     }
 }
@@ -1315,11 +1415,12 @@ fn binop_prec(op: &str) -> u8 {
         "&" => 55,
         "|" | "^" => 50,
         ">" | ">=" | "<" | "<=" => 40,
-        "==" | "!=" | "<=>" | "=~" | "===" => 30,
+        "==" | "!=" | "<=>" | "=~" | "!~" | "===" => 30,
         // Below every infix operator above; `&&` binds tighter than `||`,
         // and the `and`/`or` word forms are the loosest of all.
         "&&" => 26,
         "||" => 25,
+        ".." => 22,
         "=" => 15,
         "and" => 11,
         "or" => 10,
@@ -1498,7 +1599,8 @@ pub(crate) fn ruby_sym_literal(value: &str) -> String {
 }
 
 /// A call or `super` argument. A bare `**` is already a keyword splat;
-/// wrapping it again would print `****`.
+/// wrapping it again would print `****`. A splat the shared lowering
+/// made positional is written back as one.
 fn emit_keyword_forward_arg(arg: &Expr) -> String {
     match &*arg.node {
         ExprNode::KeywordSplat { .. } => emit_node(&arg.node),
@@ -1509,6 +1611,9 @@ fn emit_keyword_forward_arg(arg: &Expr) -> String {
             } else {
                 format!("{pairs}, **")
             }
+        }
+        _ if arg.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0 => {
+            format!("**{}", paren_multiline(emit_arg(arg)))
         }
         _ => emit_arg(arg),
     }
@@ -1554,7 +1659,7 @@ fn emit_lvalue(lv: &LValue) -> String {
             // Index-write target (`h[:x] = …`): coerce the key when writing
             // to a string-keyed hash, same as the read path above.
             let key = if is_string_keyed_hash(recv) {
-                coerce_str_key(index)
+                coerce_str_key(index, is_indifferent_params(recv))
             } else {
                 emit_expr(index)
             };

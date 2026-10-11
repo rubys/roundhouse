@@ -653,9 +653,7 @@ impl App {
                         if method.as_str() == "include" {
                             for arg in args {
                                 if let crate::expr::ExprNode::Const { path } = &*arg.node {
-                                    ids.push(crate::ident::ClassId(crate::ident::Symbol::from(
-                                        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
-                                    )));
+                                    ids.push(crate::analyze::mixin_path_id(path));
                                 }
                             }
                         }

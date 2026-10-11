@@ -60,7 +60,7 @@ fn new_errors_api_requires_runtime_support() {
 
 #[test]
 fn non_nil_assertions_require_runtime_support() {
-    refuses("T.must(1) + 1", "non-nil assertion");
+    // `T.must` lowers to sorbet's check (tests/sorbet_must_runs.rs).
     refuses("T.must_because(1) { \"present\" }", "non-nil assertion");
     refuses("1.not_nil!", "not_nil!");
 }

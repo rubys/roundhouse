@@ -755,16 +755,22 @@ pub fn apply_post_analyze_lowerings(
     // assert. `push` calls sit adjacent to each pass call below.
     #[cfg(debug_assertions)]
     let mut executed: Vec<&str> = Vec::new();
+    // With ROUNDHOUSE_TIMINGS each pass also prints its time since the
+    // previous one (a fused group's members after its phase line read ~0).
     #[cfg(debug_assertions)]
     macro_rules! ran {
-        ($name:expr) => {
-            executed.push($name)
-        };
+        ($name:expr) => {{
+            executed.push($name);
+            crate::timings::lap(format_args!("post-analyze pass: {}", $name));
+        }};
     }
     #[cfg(not(debug_assertions))]
     macro_rules! ran {
-        ($name:expr) => {};
+        ($name:expr) => {
+            crate::timings::lap(format_args!("post-analyze pass: {}", $name))
+        };
     }
+    crate::timings::lap_start();
     let mut diags = unported_rails_subclasses::apply_unported_rails_subclass_drop(app);
     ran!("unported_rails_subclasses");
     spliced_concern_bodies::apply_spliced_concern_body_prune(app);
@@ -1503,7 +1509,7 @@ pub use routes_to_library::{
     lower_routes_to_dispatch_functions, lower_routes_to_library_functions,
     url_options_helper_name,
 };
-pub use schema_to_library::lower_schema_to_library_functions;
+pub use schema_to_library::{lower_schema_module_functions, lower_schema_to_library_functions};
 pub use seeds_to_library::lower_seeds_to_library_functions;
 pub use test_module_to_library::{
     lower_test_module_to_library_class, lower_test_modules_to_library_classes,

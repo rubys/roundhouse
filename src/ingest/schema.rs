@@ -121,7 +121,8 @@ pub fn ingest_schema_with_generated_expression_dialect(
 /// Only the migration's `change` method is replayed (`up` when no
 /// `change` exists; `down` is never touched). Schema-mutating verbs we
 /// can't fold deterministically (`change_table`, `execute`, raw-SQL
-/// shapes — see `UNSUPPORTED_VERBS`) error with a pointer to
+/// shapes — see `UNSUPPORTED_VERBS`, or a verb whose table or column
+/// name is not a literal) error with a pointer to
 /// `rails db:migrate`, which materializes the schema.rb this fallback
 /// substitutes for. Receiver-less calls that aren't recognized verbs
 /// are ignored: migrations legitimately contain arbitrary Ruby (data
@@ -233,6 +234,26 @@ fn apply_migration_verb(
         .map(|a| a.arguments().iter().collect())
         .unwrap_or_default();
     let arg_name = |i: usize| args.get(i).and_then(table_name_value);
+    // A verb whose table or column name is not a literal cannot apply,
+    // and skipping it left the column typed: a
+    // `remove_column(:idx, :"col_#{n}")` in an `each` loop
+    // kept the dropped columns.
+    let named = match verb {
+        "drop_table" | "add_timestamps" => 1,
+        "rename_table" | "remove_column" | "change_column_null" | "change_column_default"
+        | "add_reference" | "add_belongs_to" | "remove_reference" | "remove_belongs_to" => 2,
+        "add_column" | "change_column" | "rename_column" => 3,
+        _ => 0,
+    };
+    if let Some(i) = (0..named).find(|&i| arg_name(i).is_none()) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "migration `{verb}` argument {} is not a literal name; the schema fold cannot apply it",
+                i + 1
+            ),
+        });
+    }
 
     match verb {
         "create_table" => {
@@ -1474,7 +1495,10 @@ fn column_with_type(
         // solid_cache's and solid_cable's schemas still write it for their
         // hash columns.
         "integer" if matches!(opts.limit, Some(5..=8)) => ColumnType::BigInt,
-        "integer" => ColumnType::Integer,
+        // `smallint` is the PostgreSQL adapter's native type name, which
+        // `t.column :island, :smallint` passes through; structure.sql's
+        // `smallint` reads alike.
+        "integer" | "smallint" => ColumnType::Integer,
         "bigint" => ColumnType::BigInt,
         "float" => ColumnType::Float,
         "decimal" | "numeric" => ColumnType::Decimal { precision: None, scale: None },
@@ -1605,6 +1629,18 @@ fn column_from_call(
             ),
         });
     }
+    // `t.column :name, :type, …` is the generic form of `t.<type> :name, …`
+    // (`TableDefinition#column`).
+    if col_type_name == "column" {
+        let Some(type_name) = args.get(1).and_then(name_value) else {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!("column dropped: {table}.{col_name} has no literal type"),
+            });
+        };
+        let opts = parse_column_opts(args.iter().skip(2));
+        return column_with_type(&type_name, col_name, &opts, table, file).map(Some);
+    }
     let opts = parse_column_opts(args.iter().skip(1));
     column_with_type(&col_type_name, col_name, &opts, table, file).map(Some)
 }
@@ -1673,6 +1709,52 @@ mod tests {
         let clips = &schema.tables[&Symbol::from("clips")];
         assert!(matches!(clips.columns[3].col_type, ColumnType::Float));
         assert!(!clips.columns[4].nullable, "timestamps are null: false");
+    }
+
+    #[test]
+    fn a_non_literal_column_name_is_a_gap_not_a_skip() {
+        let mut schema = fold(&[r#"
+            class CreateIdx < ActiveRecord::Migration[8.1]
+              def change
+                create_table :idx do |t|
+                  t.string :col_1
+                end
+              end
+            end
+        "#]);
+        let err = ingest_migration(
+            br#"
+            class DropSlots < ActiveRecord::Migration[8.1]
+              def up
+                (1..1).each { |n| remove_column(:idx, :"col_#{n}") }
+              end
+            end
+        "#,
+            "drop.rb",
+            &mut schema,
+        )
+        .expect_err("a non-literal name cannot apply");
+        assert!(err.to_string().contains("`remove_column` argument 2 is not a literal"), "{err}");
+    }
+
+    #[test]
+    fn generic_column_with_a_native_type() {
+        // `t.column(:island, :smallint, …)`.
+        let schema = fold(&[r#"
+            class CreateCounts < ActiveRecord::Migration[8.1]
+              def change
+                create_table :counts do |t|
+                  t.column(:island, :smallint, null: false)
+                  t.column "label", "string"
+                end
+              end
+            end
+        "#]);
+        assert_eq!(col_names(&schema, "counts"), ["id", "island", "label"]);
+        let counts = &schema.tables[&Symbol::from("counts")];
+        assert!(matches!(counts.columns[1].col_type, ColumnType::Integer));
+        assert!(!counts.columns[1].nullable);
+        assert!(matches!(counts.columns[2].col_type, ColumnType::String { .. }));
     }
 
     #[test]

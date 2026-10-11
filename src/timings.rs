@@ -51,6 +51,29 @@ pub fn begin(name: impl std::fmt::Display) -> Option<Guard> {
     })
 }
 
+thread_local! {
+    static LAP: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Start a run of laps: the next `lap` measures from here.
+pub fn lap_start() {
+    if *ENABLED {
+        LAP.with(|lap| lap.set(Some(Instant::now())));
+    }
+}
+
+/// Print the time since the previous `lap`/`lap_start` under `name`, so a
+/// sequence of untimed passes names the one that is slow or never ends.
+pub fn lap(name: impl std::fmt::Display) {
+    if !*ENABLED {
+        return;
+    }
+    let now = Instant::now();
+    if let Some(start) = LAP.with(|lap| lap.replace(Some(now))) {
+        drop(Guard { name: name.to_string(), start });
+    }
+}
+
 /// Prints one `roundhouse-timing:` line on drop.
 pub struct Guard {
     name: String,

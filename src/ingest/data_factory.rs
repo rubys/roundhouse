@@ -63,6 +63,41 @@ pub(super) fn head(call: &CallNode<'_>, file: &str) -> IngestResult<Expr> {
     ))
 }
 
+/// `do |klass| … end` whose one required parameter no statement of the
+/// block reads. Ruby passes the new class to a `Data.define`/`Struct.new`
+/// block; a parameter the block never reads changes nothing.
+pub(super) fn unread_class_parameter(block: &ruby_prism::BlockNode<'_>) -> bool {
+    let Some(params) = block.parameters().and_then(|p| p.as_block_parameters_node()) else { return false };
+    if params.locals().iter().next().is_some() {
+        return false;
+    }
+    let Some(list) = params.parameters() else { return false };
+    let required: Vec<_> = list.requireds().iter().collect();
+    let only_required = list.optionals().iter().next().is_none()
+        && list.rest().is_none()
+        && list.posts().iter().next().is_none()
+        && list.keywords().iter().next().is_none()
+        && list.keyword_rest().is_none()
+        && list.block().is_none();
+    let [param] = required.as_slice() else { return false };
+    let Some(param) = param.as_required_parameter_node() else { return false };
+    if !only_required {
+        return false;
+    }
+    let name = constant_id_str(&param.name()).to_string();
+    struct Reads<'a>(&'a str, bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Reads<'_> {
+        fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+            self.1 |= constant_id_str(&node.name()) == self.0;
+        }
+    }
+    let mut reads = Reads(&name, false);
+    if let Some(body) = block.body() {
+        ruby_prism::Visit::visit(&mut reads, &body);
+    }
+    !reads.1
+}
+
 /// Lift direct custom factory constants from an owner's body into library classes.
 /// Preserve instance and `self` methods, keyword formals, and instance visibility;
 /// reject block parameters and other statements instead of discarding them.
@@ -89,7 +124,7 @@ pub(super) fn collect(
             .block()
             .and_then(|node| node.as_block_node())
             .ok_or_else(unsupported)?;
-        if block.parameters().is_some() {
+        if block.parameters().is_some() && !unread_class_parameter(&block) {
             return Err(unsupported());
         }
         let Some(body) = block.body() else {

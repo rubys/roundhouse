@@ -277,7 +277,7 @@ fn collect_constant_from_stmt(
 }
 
 /// Best-effort type inference for the right-hand side of a constant
-/// assignment. Recognizes Hash and Array literals (typing element
+/// assignment. Recognizes scalar, Hash and Array literals (typing element
 /// types from the first key/value or first array element), with an
 /// optional trailing `.freeze`. Falls back to None for unsupported
 /// shapes — the body-typer's existing fallback still applies.
@@ -346,7 +346,11 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
             args: vec![],
         });
     }
-    None
+    // A scalar literal (`SALT = "active_record/signed_id"`) types as
+    // itself. Without this a runtime class's scalar constant had no table
+    // entry, so an app read of it resolved to the runtime declaration with
+    // no type and was refused as an unsupported constant.
+    type_of_literal_node(node)
 }
 
 fn type_of_literal_node(node: &Node<'_>) -> Option<Ty> {

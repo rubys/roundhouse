@@ -468,3 +468,47 @@ end
         );
     }
 }
+
+/// A receiverless `find_or_initialize_by` in an `||` operand of a class
+/// method (`find_by(…) || find_or_initialize_by(owner_id:, name:)`) is no
+/// statement the lowering inlines; the model class answers it as Rails'
+/// `all.find_or_initialize_by`: the found row, else an unsaved record
+/// carrying the conditions.
+#[test]
+fn a_receiverless_find_or_initialize_by_operand_finds_or_builds() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/comment.rb",
+            r#"
+class Comment < ApplicationRecord
+  belongs_to :article
+
+  def self.find_or_build(name, article:)
+    find_by(article_id: article.id, body: name.downcase) || find_or_initialize_by(article_id: article.id, commenter: name)
+  end
+
+  def self.find_or_save(name, article:)
+    find_by(article_id: article.id, body: name) || find_or_create_by!(article_id: article.id, commenter: name, body: "saved body")
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+article = Article.create!(title: "Owner", body: "A sufficiently long body")
+built = Comment.find_or_build("Ann", article: article)
+raise "built a saved record" if built.persisted?
+raise "conditions lost" unless built.article_id == article.id && built.commenter == "Ann"
+built.body = "ann"
+built.save!
+found = Comment.find_or_build("ANN", article: article)
+raise "did not find the row" unless found.id == built.id
+saved = Comment.find_or_save("Bea", article: article)
+raise "find_or_create_by! did not save" unless saved.persisted? && saved.commenter == "Bea"
+again = Comment.find_or_save("Bea", article: article)
+raise "find_or_create_by! duplicated" unless again.id == saved.id
+puts "PASS"
+"#,
+        )
+        .assert_passes();
+}

@@ -360,8 +360,12 @@ module ActiveRecord
     # Reject nil before a key-typed adapter can coerce it. Generated
     # models override `_exists_primary_key_input` with schema-selected
     # dispatch (same split as find) so Spinel never compiles String into
-    # an Integer adapter slot.
-    def self.exists?(id)
+    # an Integer adapter slot. No argument asks for any row (Rails'
+    # `exists?(conditions = :none)`); the optional argument is a splat
+    # so "absent" and `nil` stay distinct without an untyped default.
+    def self.exists?(*ids)
+      return all.exists? if ids.empty?
+      id = ids[0]
       return false if id.nil?
       _exists_primary_key_input(id)
     end
@@ -809,6 +813,24 @@ module ActiveRecord
     # survive); non-Hash inputs raise rather than reach Relation's SQL path.
     def self.find_by(conditions)
       ActiveRecord::Relation.new(self).find_by(conditions.to_h)
+    end
+
+    # `Model.find_or_initialize_by` / `find_or_create_by` /
+    # `find_or_create_by!`: Rails delegates them to `all`, so the
+    # default scope applies to the find and seeds the built record. The
+    # lowered call sites (`lower::first_or_create`) inline the statement
+    # forms; these answer the rest (a receiverless call inside a class
+    # method, an `||` operand).
+    def self.find_or_initialize_by(conditions)
+      ActiveRecord::Relation.new(self).find_or_initialize_by(conditions.to_h)
+    end
+
+    def self.find_or_create_by(conditions)
+      ActiveRecord::Relation.new(self).find_or_create_by(conditions.to_h)
+    end
+
+    def self.find_or_create_by!(conditions)
+      ActiveRecord::Relation.new(self).find_or_create_by!(conditions.to_h)
     end
 
     # `Model.find_sole_by(attrs)` — Rails' `where(attrs).sole`; see

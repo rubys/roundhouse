@@ -56,6 +56,21 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
 /// two suites. Non-test top-level classes are shared by every module
 /// as helpers, the way they were for the one.
 pub fn ingest_test_files(source: &[u8], file: &str) -> IngestResult<Vec<TestModule>> {
+    ingest_test_classes(source, file, true)
+}
+
+/// The test classes a support file (`test/test_helper.rb`) defines: only
+/// classes that read as test classes, with no single-class fallback, so a
+/// helper's plain `class RecordingLogger < Logger` is never mistaken for one.
+pub fn ingest_test_bases(source: &[u8], file: &str) -> IngestResult<Vec<TestModule>> {
+    ingest_test_classes(source, file, false)
+}
+
+fn ingest_test_classes(
+    source: &[u8],
+    file: &str,
+    single_class_fallback: bool,
+) -> IngestResult<Vec<TestModule>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -71,6 +86,9 @@ pub fn ingest_test_files(source: &[u8], file: &str) -> IngestResult<Vec<TestModu
     // class inside a module is not a candidate here: a support file
     // in a test directory often declares one, and it has no tests.
     if test_nodes.is_empty() {
+        if !single_class_fallback {
+            return Ok(Vec::new());
+        }
         let mut helper_nodes = helper_nodes;
         let Some(first) = helper_nodes.iter().position(|(scope, _)| scope.is_empty()) else {
             return Ok(Vec::new());
@@ -113,10 +131,15 @@ fn ingest_test_class(
     let mut helpers: Vec<MethodDef> = Vec::new();
     let mut constants: Vec<(Symbol, Expr)> = Vec::new();
     let mut includes: Vec<ClassId> = Vec::new();
+    let mut teardowns: Vec<Expr> = Vec::new();
     if let Some(class_body) = class.body() {
         for stmt in flatten_statements(class_body) {
             if let Some(test) = ingest_test_declaration(&stmt, file)? {
                 tests.push(test);
+                continue;
+            }
+            if let Some(body) = ingest_teardown_block(&stmt, file)? {
+                teardowns.push(body);
                 continue;
             }
             if let Some(body) = ingest_setup_declaration(&stmt, file)? {
@@ -211,6 +234,41 @@ fn ingest_test_class(
                 continue;
             }
         }
+    }
+
+    // ActiveSupport runs `teardown do … end` blocks after every test,
+    // passed or failed, after the class's own `def teardown` and in
+    // reverse of the order they were declared. The harness calls the
+    // test's `teardown` after each test the same way, so the blocks
+    // become that method.
+    if !teardowns.is_empty() {
+        let mut exprs: Vec<Expr> = Vec::new();
+        let own = helpers.iter().position(|m| m.name.as_str() == "teardown");
+        let name_span = match own.map(|i| helpers.remove(i)) {
+            Some(m) => {
+                exprs.push(m.body);
+                m.name_span
+            }
+            None => Span::synthetic(),
+        };
+        exprs.extend(teardowns.into_iter().rev());
+        helpers.push(MethodDef {
+            name_span,
+            name: Symbol::from("teardown"),
+            receiver: crate::dialect::MethodReceiver::Instance,
+            visibility: crate::dialect::MethodVisibility::Public,
+            params: Vec::new(),
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs }),
+            signature: None,
+            effects: crate::effect::EffectSet::default(),
+            enclosing_class: Some(name.0.clone()),
+            kind: crate::dialect::AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
     }
 
     // Top-level helper classes (e.g. `class Article < ActiveRecord::
@@ -463,6 +521,28 @@ fn ingest_setup_declaration(
         return Ok(Some(body));
     }
     Ok(None)
+}
+
+/// `teardown do … end`: the block's body. Any other `teardown` call
+/// (`teardown :close_files`, a block argument) is refused by name: it
+/// would otherwise fall to the unrecognized-statement drop below and
+/// its cleanup would silently never run.
+fn ingest_teardown_block(stmt: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> {
+    let Some(call) = stmt.as_call_node() else { return Ok(None) };
+    if call.receiver().is_some() || constant_id_str(&call.name()) != "teardown" {
+        return Ok(None);
+    }
+    let block = call.block().and_then(|b| b.as_block_node());
+    match block {
+        Some(block) if call.arguments().is_none() => Ok(Some(match block.body() {
+            Some(body_node) => ingest_expr(&body_node, file)?,
+            None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+        })),
+        _ => Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "test teardown not modeled: only `teardown do … end` runs after each test".into(),
+        }),
+    }
 }
 
 /// Recognize a single test declaration. Two shapes are supported:

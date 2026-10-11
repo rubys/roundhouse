@@ -1361,6 +1361,19 @@ pub(crate) fn scope_is_row_preserving(scope: &Expr) -> bool {
     walk(scope)
 }
 
+/// Rails' `association_primary_key` for a `belongs_to`: the declaration's
+/// `primary_key:`, else the target model's own primary key, else `id`.
+pub(crate) fn association_primary_key(
+    models: &[Model],
+    target: &ClassId,
+    declared: Option<&Symbol>,
+) -> Symbol {
+    declared
+        .cloned()
+        .or_else(|| models.iter().find(|o| &o.name == target).and_then(|o| o.primary_key.clone()))
+        .unwrap_or_else(|| Symbol::from("id"))
+}
+
 /// Build the association registry. Table names use the same
 /// `pluralize_snake` the synthesized `table_name` methods use, so the
 /// generated SQL and the runtime agree by construction.
@@ -1373,11 +1386,17 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
         let own = reg.table_for(&m.name);
         for a in m.associations() {
             match a {
-                Association::BelongsTo { name, target, foreign_key, .. } => {
+                Association::BelongsTo { name, target, foreign_key, primary_key, .. } => {
                     let t = reg.table_for(target);
+                    // Rails' `association_primary_key`: the declaration's
+                    // `primary_key:`, else the target's own primary key.
+                    // A `belongs_to :product, foreign_key:
+                    // "product_uuid", primary_key: "uuid"` joined on
+                    // `products.id` (a uuid) against a varchar fk.
+                    let pk = association_primary_key(models, target, primary_key.as_ref());
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
-                        format!("{t} ON {t}.id = {own}.{foreign_key}"),
+                        format!("{t} ON {t}.{pk} = {own}.{foreign_key}"),
                     );
                     reg.belongs_to_fk
                         .insert((m.name.clone(), name.clone()), foreign_key.clone());
@@ -1388,7 +1407,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     if name.as_str() != t {
                         reg.aliased_join_tails.insert(
                             (m.name.clone(), name.clone()),
-                            format!("{t} {name} ON {name}.id = {own}.{foreign_key}"),
+                            format!("{t} {name} ON {name}.{pk} = {own}.{foreign_key}"),
                         );
                     }
                 }
@@ -1474,7 +1493,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     let Some(thr_model) = models.iter().find(|tm| &tm.name == thr_target) else {
                         continue;
                     };
-                    let Some(Association::BelongsTo { foreign_key: src_fk, .. }) =
+                    let Some(Association::BelongsTo { foreign_key: src_fk, primary_key: src_pk, .. }) =
                         thr_model.associations().find(|a| {
                             matches!(a, Association::BelongsTo { target: t, .. } if t == target)
                         })
@@ -1483,11 +1502,12 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     };
                     let thr_table = reg.table_for(thr_target);
                     let target_table = reg.table_for(target);
+                    let src_pk = association_primary_key(models, target, src_pk.as_ref());
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
                         format!(
                             "{thr_table} ON {thr_table}.{thr_fk} = {own}.id \
-                             INNER JOIN {target_table} ON {target_table}.id = {thr_table}.{src_fk}"
+                             INNER JOIN {target_table} ON {target_table}.{src_pk} = {thr_table}.{src_fk}"
                         ),
                     );
                     reg.assoc_table
@@ -1973,16 +1993,18 @@ pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> boo
         if *found {
             return;
         }
-        if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+        if let ExprNode::Send { recv: Some(r), method, args, block, .. } = &*e.node {
             // Chain methods and `all` open a chain; so do the terminals
             // that need a seeded Relation at a Const root. Leaving the
             // latter out is a gate that closes over the very shape
             // `CLASS_ROOT_TERMINALS` exists to rewrite — a body whose
             // ONLY relation surface is `Push::Subscription.destroy_by(…)`
-            // never reached the rewriter at all.
+            // never reached the rewriter at all. Likewise the counted
+            // `Developer.first(2)` / `.last(2)`.
             if (is_relation_chain_method(method.as_str())
                 || method.as_str() == "all"
-                || CLASS_ROOT_TERMINALS.contains(&method.as_str()))
+                || CLASS_ROOT_TERMINALS.contains(&method.as_str())
+                || counted_terminal(method, args, block.as_ref()).is_some())
                 && const_model(r, models).is_some()
             {
                 *found = true;
@@ -2029,13 +2051,15 @@ pub fn mentions_bare_chain_start(expr: &Expr) -> bool {
         if *found {
             return;
         }
-        if let ExprNode::Send { recv, method, .. } = &*e.node {
+        if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
             let self_rooted = match recv {
                 None => true,
                 Some(r) => matches!(&*r.node, ExprNode::SelfRef),
             };
             if self_rooted
-                && (is_relation_chain_method(method.as_str()) || method.as_str() == "all")
+                && (is_relation_chain_method(method.as_str())
+                    || method.as_str() == "all"
+                    || (recv.is_none() && counted_terminal(method, args, block.as_ref()).is_some()))
             {
                 *found = true;
                 return;
@@ -3379,6 +3403,13 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(seed), method, args, block, parenthesized);
                     return Some(self_model);
                 }
+                // A bare `first(n)` / `last(n)` there: the same counted
+                // terminal as `Model.first(n)` below.
+                if let Some(counted) = counted_terminal(&method, &args, block.as_ref()) {
+                    let seed = relation_new(span, &self_model);
+                    *expr = put(span, Some(seed), counted, args, block, parenthesized);
+                    return None;
+                }
             }
             *expr = put(span, None, method, args, block, parenthesized);
             None
@@ -3620,6 +3651,16 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         *expr = put(span, Some(seed), method, args, block, parenthesized);
                     }
                     return Some(m);
+                }
+                // `Developer.first(2)` / `.last(2)`: the counted forms are
+                // Relation terminals (`first_n` / `last_n`). The runtime's
+                // class-side `first` takes no count, and Rails' class
+                // method delegates to `all`, so the count rides a fresh
+                // relation, as the chain methods above do. Answers an
+                // Array, not a relation: no model to thread.
+                if let Some(counted) = counted_terminal(&method, &args, block.as_ref()) {
+                    *expr = put(span, Some(relation_new(span, &m)), counted, args, block, parenthesized);
+                    return None;
                 }
                 let returns = ctx.user_returns.class.get(&(m.clone(), method.clone())).cloned();
                 *expr = put(span, Some(r), method, args, block, parenthesized);
@@ -5217,6 +5258,29 @@ mod tests {
                    INNER JOIN stories ON stories.id = taggings.story_id"
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn registry_belongs_to_join_uses_declared_primary_key() {
+        // `belongs_to :product, foreign_key: "product_uuid",
+        // primary_key: "uuid"` — Rails joins on `products.uuid`; the
+        // `products.id` join compared a PG uuid with a varchar fk.
+        let price = ingest(
+            "class Price < ApplicationRecord\n  belongs_to :product, foreign_key: \"product_uuid\", primary_key: \"uuid\"\nend\n",
+            "app/models/price.rb",
+        );
+        let product = ingest("class Product < ApplicationRecord\nend\n", "app/models/product.rb");
+        let reg = build_assoc_registry(&[price, product]);
+        let price = ClassId(Symbol::from("Price"));
+        let product = Symbol::from("product");
+        assert_eq!(
+            reg.join_tail(&price, &product),
+            Some(&"products ON products.uuid = prices.product_uuid".to_string())
+        );
+        assert_eq!(
+            reg.aliased_join_tail(&price, &product),
+            Some(&"products product ON product.uuid = prices.product_uuid".to_string())
         );
     }
 

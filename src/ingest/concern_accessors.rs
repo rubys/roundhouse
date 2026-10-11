@@ -2,12 +2,13 @@
 //! retains candidate declarations; only a concrete model inclusion
 //! commits to their ivar contract or reports a contextual refusal.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::diagnostic::DiagnosticKind;
 use crate::dialect::{MethodReceiver, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, Literal};
-use crate::ident::Symbol;
+use crate::ident::{ClassId, Symbol};
+use crate::span::Span;
 use crate::App;
 
 use super::survey::unwrap_or_record;
@@ -333,16 +334,61 @@ pub(super) fn validate(
     if candidates.is_empty() {
         return Ok(());
     }
-    let surfaces = crate::timings::phase("concern-accessor-surface", || {
-        crate::lower::model_to_library::accessor_surface::occupied_surfaces(app, &candidates)
+    // The surface probe analyzes and lowers a clone of the whole app, on
+    // a large app a second complete analysis. Only a name that passes every
+    // syntactic check reads it, so a dry pass finds those models and the
+    // probe covers just them (or does not run at all).
+    let mut probed = HashSet::new();
+    let _ = refusals(app, &spans, &mut |model, _, _| {
+        probed.insert(model.clone());
+        false
+    });
+    let surfaces = if probed.is_empty() {
+        HashMap::new()
+    } else {
+        crate::timings::phase("concern-accessor-surface", || {
+            crate::lower::model_to_library::accessor_surface::occupied_surfaces(app, &probed)
+        })
+    };
+    let refused = refusals(app, &spans, &mut |model, name, writer| {
+        surfaces[model]
+            .as_ref()
+            .is_none_or(|names| names.contains(name) || names.contains(writer))
     });
     let mut rejections = Vec::new();
+    for (model_index, refused) in refused {
+        let mut rejected = HashSet::new();
+        for (span, message) in refused {
+            let file = &app.sources[span.file.0 as usize - 1].path;
+            unwrap_or_record::<()>(Err(IngestError::Unsupported {
+                file: file.clone(),
+                message,
+            }))?;
+            rejected.insert(span);
+        }
+        rejections.push((model_index, rejected));
+    }
+    // Delay survey removals until every probe has seen original demand.
+    for (index, rejected) in rejections {
+        app.models[index].body.retain(|item| !matches!(item, ModelBodyItem::Unknown { expr, .. } if rejected.contains(&expr.span)));
+    }
+    Ok(())
+}
+
+/// Each carried model's refused declarations with their messages, in
+/// source order. `occupied(model, reader, writer)` is asked last, only
+/// for a name every syntactic check admits.
+fn refusals(
+    app: &App,
+    spans: &HashSet<Span>,
+    occupied: &mut dyn FnMut(&ClassId, &Symbol, &Symbol) -> bool,
+) -> Vec<(usize, Vec<(Span, String)>)> {
+    let mut out = Vec::new();
     for (model_index, model) in app.models.iter().enumerate() {
         let carried = |item: &ModelBodyItem| matches!(item, ModelBodyItem::Unknown { expr, .. } if spans.contains(&expr.span));
         if !model.body.iter().any(carried) {
             continue;
         };
-        let occupied = surfaces[&model.name].as_ref();
         let hook = unconsumed_included_hook(model, app);
         let mut nonpublic_methods = HashSet::new();
         for item in &model.body {
@@ -400,7 +446,7 @@ pub(super) fn validate(
                 _ => {}
             }
         }
-        let mut rejected = HashSet::new();
+        let mut refused = Vec::new();
         for (index, item) in model
             .body
             .iter()
@@ -414,24 +460,17 @@ pub(super) fn validate(
                 construct, detail, ..
             }) = &expr.diagnostic
             {
-                let file = &app.sources[expr.span.file.0 as usize - 1].path;
-                unwrap_or_record::<()>(Err(IngestError::Unsupported {
-                    file: file.clone(),
-                    message: format!("{construct} on {} {detail}", model.name.0),
-                }))?;
-                rejected.insert(expr.span);
+                refused.push((expr.span, format!("{construct} on {} {detail}", model.name.0)));
                 continue;
             }
             if let Some(hook) = &hook {
-                let file = &app.sources[expr.span.file.0 as usize - 1].path;
-                unwrap_or_record::<()>(Err(IngestError::Unsupported {
-                    file: file.clone(),
-                    message: format!(
+                refused.push((
+                    expr.span,
+                    format!(
                         "concern attr_accessor on {} cannot be carried alongside an unconsumed included hook or overridden framework API on {hook}",
                         model.name.0
                     ),
-                }))?;
-                rejected.insert(expr.span);
+                ));
                 continue;
             }
             let ExprNode::Send { args, .. } = &*expr.node else {
@@ -457,27 +496,19 @@ pub(super) fn validate(
                     || nonpublic_methods.contains(&writer)
                     || earlier
                     || uncertain
-                    || occupied
-                        .as_ref()
-                        .is_none_or(|names| names.contains(name) || names.contains(&writer))
+                    || occupied(&model.name, name, &writer)
                 {
-                    let file = &app.sources[expr.span.file.0 as usize - 1].path;
-                    unwrap_or_record::<()>(Err(IngestError::Unsupported {
-                        file: file.clone(),
-                        message: format!(
+                    refused.push((
+                        expr.span,
+                        format!(
                             "concern attr_accessor :{name} on {} requires a fresh virtual name on a concrete model with a single definition, without visibility modifiers or earlier method overrides",
                             model.name.0
                         ),
-                    }))?;
-                    rejected.insert(expr.span);
+                    ));
                 }
             }
         }
-        rejections.push((model_index, rejected));
+        out.push((model_index, refused));
     }
-    // Delay survey removals until every probe has seen original demand.
-    for (index, rejected) in rejections {
-        app.models[index].body.retain(|item| !matches!(item, ModelBodyItem::Unknown { expr, .. } if rejected.contains(&expr.span)));
-    }
-    Ok(())
+    out
 }

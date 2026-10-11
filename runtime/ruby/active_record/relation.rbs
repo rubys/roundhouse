@@ -226,7 +226,7 @@ module ActiveRecord
     def one?: () -> bool
     def many?: () -> bool
     def all?: () { (Base) -> bool } -> bool
-    def exists?: (?(Integer | String | Hash[String | Symbol, untyped] | nil) id) -> bool
+    def exists?: (*(Integer | String | Hash[String | Symbol, untyped] | nil) conditions) -> bool
     def probe_existence: (Integer n) -> Integer
     def more_than?: (Integer n) -> bool
     def length: () -> Integer
@@ -267,6 +267,8 @@ module ActiveRecord
     def find_sole_by: (Hash[Symbol, untyped] | String | nil conditions) -> Base
     def first_or_initialize: () -> Base
     def find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
+    def find_or_create_by!: (Hash[Symbol, untyped] conditions) -> Base
+    def find_or_initialize_by: (Hash[Symbol, untyped] conditions) -> Base
 
     def to_sql: () -> String
     def to_subquery_sql: () -> String

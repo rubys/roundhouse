@@ -9,9 +9,10 @@ use crate::ide::render_ty;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
-use crate::ident::Symbol;
+use crate::ident::{ClassId, Symbol};
+use std::collections::HashMap;
 
-use super::PreloadCoverage;
+use super::{ClassInfo, PreloadCoverage};
 use super::preload;
 
 
@@ -191,6 +192,56 @@ fn is_unknown_ty(ty: Option<&Ty>) -> bool {
         Some(Ty::Var { .. }) => true,
         _ => false,
     }
+}
+
+/// A send whose explicit receiver the analysis could not type.
+pub struct UnknownReceiverSend {
+    pub span: crate::span::Span,
+    pub method: Symbol,
+    /// The receiver is the gradual escape (`T.unsafe`, RBS `untyped`)
+    /// rather than an unresolved type.
+    pub gradual: bool,
+    /// The receiver's type is known, but the send resolved to nothing on
+    /// it: what `diagnose` reports as `send_dispatch_failed` in a model
+    /// or controller body, and nothing reports elsewhere.
+    pub known_receiver: bool,
+}
+
+/// Every send, in every emitted body, whose explicit receiver is
+/// unknown or gradual, or known without the send resolving, and which
+/// carries no diagnostic of its own.
+///
+/// Nothing checks such a send: no method table is consulted, so a
+/// misspelled or unimplemented method passes. `diagnose` reports the
+/// unresolved receiver only in model and controller bodies, and not at
+/// all for a gradual one, so in a library class the send is silent. A
+/// drop in errors that only moves sends here is a reclassification, not
+/// progress; `check` prints the count beside the error total.
+///
+/// A receiver whose type names a class the registry does not hold
+/// (`#: (Missing::AccessControl)`) is unknown, not known: there is no
+/// method table to check it against.
+pub fn unknown_receiver_sends(app: &App, classes: &HashMap<ClassId, ClassInfo>) -> Vec<UnknownReceiverSend> {
+    fn visit(expr: &Expr, classes: &HashMap<ClassId, ClassInfo>, out: &mut Vec<UnknownReceiverSend>) {
+        if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
+            let gradual = matches!(r.ty, Some(Ty::Untyped));
+            let unknown = is_unknown_ty(r.ty.as_ref())
+                || matches!(&r.ty, Some(Ty::Class { id, .. }) if !classes.contains_key(id));
+            let known_receiver = !gradual && !unknown && is_unknown_ty(expr.ty.as_ref());
+            if (gradual || known_receiver || unknown)
+                && expr.diagnostic.is_none()
+                && !expr.span.is_synthetic()
+            {
+                out.push(UnknownReceiverSend { span: expr.span, method: method.clone(), gradual, known_receiver });
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, classes, out));
+    }
+    let mut out = Vec::new();
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, classes, &mut out));
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|s| seen.insert((s.span.file, s.span.start, s.span.end, s.method.clone())));
+    out
 }
 
 /// Short label for what shape of expression resolved to `Untyped`.

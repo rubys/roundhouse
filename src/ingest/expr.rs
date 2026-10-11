@@ -403,6 +403,42 @@ fn ingest_multi_write(
     Ok(ExprNode::Seq { exprs })
 }
 
+/// The statements `nodes` of one statement list, ingested in order.
+/// `block_start`/`block_bytes` are the list's own source, where a blank
+/// line between two statements marks the second's `leading_blank_line`.
+/// With `reads_bindings`, a `#: self as Type` comment above a statement
+/// becomes the self binding it declares, placed before that statement
+/// (see `type_ascription::leading_self_binding`).
+fn ingest_statement_list(
+    nodes: &[Node<'_>],
+    file: &str,
+    block_start: usize,
+    block_bytes: &[u8],
+    reads_bindings: bool,
+) -> IngestResult<Vec<Expr>> {
+    let mut exprs: Vec<Expr> = Vec::with_capacity(nodes.len());
+    let mut prev_end: Option<usize> = None;
+    for child in nodes {
+        let child_start = child.location().start_offset();
+        if reads_bindings {
+            if let Some(binding) = super::type_ascription::leading_self_binding(file, child_start) {
+                exprs.push(binding);
+            }
+        }
+        let mut expr = ingest_expr(child, file)?;
+        if let Some(pe) = prev_end {
+            let from = pe - block_start;
+            let to = child_start - block_start;
+            if slice_has_blank_line(block_bytes, from, to) {
+                expr.leading_blank_line = true;
+            }
+        }
+        exprs.push(expr);
+        prev_end = Some(child.location().end_offset());
+    }
+    Ok(exprs)
+}
+
 /// The argument a sorbet-runtime assertion evaluates to, when `node`
 /// is one: `T.let(x, Type)` / `T.cast` / `T.must` / `T.must_because` /
 /// `T.unsafe` / `T.bind` / `T.assert_type!` → `x`. `T.nilable(...)` and
@@ -430,6 +466,59 @@ pub(super) fn sorbet_assertion_argument<'pr>(node: &Node<'pr>) -> Option<Node<'p
 fn sorbet_assertion_rules_out_nil(node: &Node<'_>) -> bool {
     node.as_call_node()
         .is_some_and(|c| matches!(constant_id_str(&c.name()), "must" | "must_because"))
+}
+
+/// Whether `node` is `T.bind(self, Type)`.
+fn sorbet_assertion_is_bind(node: &Node<'_>) -> bool {
+    node.as_call_node().is_some_and(|c| constant_id_str(&c.name()) == "bind")
+}
+
+/// Whether `node` is `T.must(x)` (not `T.must_because`).
+fn sorbet_assertion_is_must(node: &Node<'_>) -> bool {
+    node.as_call_node().is_some_and(|c| constant_id_str(&c.name()) == "must")
+}
+
+/// `T.must(x)` as sorbet-runtime runs it: the value when it is not nil
+/// (`false` included), else `raise TypeError.new("Passed `nil` into
+/// T.must")` (through `T::Configuration`'s inline type error handler,
+/// whose default re-raises that error). The value is
+/// evaluated once: a local read is tested directly, anything else is
+/// bound to a generated local inside the condition,
+/// `if (__must_N = x).nil? then raise ... else __must_N end`, so the
+/// else side reads it with nil narrowed away.
+fn must_check(span: Span, value: Expr, location: &ruby_prism::Location<'_>) -> Expr {
+    let (tested, read) = match &*value.node {
+        ExprNode::Var { .. } => (value.clone(), value),
+        _ => {
+            let stem = format!("__must_{}", span.start);
+            let mut name = stem.clone();
+            let mut suffix = 0;
+            while super::sources::generated_local_is_reserved(location, &name) {
+                suffix += 1;
+                name = format!("{stem}_{suffix}");
+            }
+            let name = Symbol::from(name);
+            let bind = Expr::new(
+                span,
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: name.clone() },
+                    value,
+                },
+            );
+            (bind, Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name }))
+        }
+    };
+    let send = |recv: Option<Expr>, method: &str, args: Vec<Expr>, parenthesized: bool| {
+        Expr::new(span, ExprNode::Send { recv, method: Symbol::from(method), args, block: None, parenthesized })
+    };
+    let message = Expr::new(
+        span,
+        ExprNode::Lit { value: crate::expr::Literal::Str { value: "Passed `nil` into T.must".to_string() } },
+    );
+    let type_error = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("TypeError")] });
+    let raise = send(None, "raise", vec![send(Some(type_error), "new", vec![message], true)], true);
+    let cond = send(Some(tested), "nil?", Vec::new(), false);
+    Expr::new(span, ExprNode::If { cond, then_branch: raise, else_branch: read })
 }
 
 /// The argument of a `T.absurd(x)`, which raises rather than
@@ -594,6 +683,14 @@ pub(super) fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Ex
     ))
 }
 
+/// A string literal naming this source file's own location (`__FILE__`,
+/// `__dir__`), app-root relative and flagged `SOURCE_FILE_PATH`.
+fn source_file_path_lit(span: Span, path: String) -> Expr {
+    let mut lit = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: path } });
+    lit.decisions |= crate::expr::SOURCE_FILE_PATH;
+    lit
+}
+
 fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Byte offsets into the text registered for `file` (the exact text
     // prism is parsing). FileId(0) when the entry point didn't
@@ -605,17 +702,25 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         end: loc.end_offset() as u32,
     };
     // Type ascriptions retain the value and its declared type. Nil assertions
-    // are behavior: until a shared nil-check lowerer exists, retain their
-    // explicit Unsupported annotation instead of erasing a possible raise.
+    // are behavior: `T.must` lowers to the check sorbet-runtime performs;
+    // `T.must_because` keeps its explicit Unsupported annotation instead of
+    // erasing a possible raise.
     if let Some(inner) = sorbet_assertion_argument(node) {
         let declared = super::type_ascription::sorbet_declared_type(node);
         let value = ingest_expr_strict(&inner, file)?;
-        let value = if sorbet_assertion_rules_out_nil(node) {
+        let value = if sorbet_assertion_is_must(node) {
+            must_check(span, value, &node.location())
+        } else if sorbet_assertion_rules_out_nil(node) {
             super::type_ascription::not_nil(value)
         } else {
             value
         };
-        return Ok(super::type_ascription::ascribe(value, declared));
+        let ascribed = super::type_ascription::ascribe(value, declared);
+        if sorbet_assertion_is_bind(node) {
+            let class_object = super::type_ascription::sorbet_binds_class_object(node);
+            return Ok(super::type_ascription::bind_self(ascribed, class_object));
+        }
+        return Ok(ascribed);
     }
 
     // `T.absurd(x)` is NOT an assertion that evaluates to its argument:
@@ -651,6 +756,22 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_call_node().is_some() => {
             let c = n.as_call_node().unwrap();
             let method = constant_id_str(&c.name()).to_string();
+            // `__dir__` is `File.dirname` of the loaded file's absolute
+            // path: the same static fact as `__FILE__` below, one level
+            // up. Flagged the same way so the target anchors it on the
+            // emitted file's location.
+            if method == "__dir__"
+                && c.receiver().is_none()
+                && c.arguments().is_none()
+                && c.block().is_none()
+            {
+                let rel = super::sources::relative_path(file);
+                let dir = match std::path::Path::new(&rel).parent() {
+                    Some(d) if !d.as_os_str().is_empty() => d.to_string_lossy().into_owned(),
+                    _ => ".".to_string(),
+                };
+                return Ok(source_file_path_lit(span, dir));
+            }
             let args: Vec<Expr> = if let Some(a) = c.arguments() {
                 ingest_forwardable_arguments(&a, file)?
             } else {
@@ -938,11 +1059,37 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let f = n.as_float_node().unwrap();
             ExprNode::Lit { value: Literal::Float { value: f.value() } }
         }
+        // `999999.9r` / `3r`: an exact Rational literal. Prism gives the
+        // value as numerator and denominator (`9999999` and `10`), so it
+        // becomes `Rational(9999999, 10)`, the same exact value; going
+        // through a Float would round it. `1/3r` is `1 / 3r` and needs
+        // nothing else. Kernel#Rational reduces the fraction as the
+        // literal does.
+        n if n.as_rational_node().is_some() => {
+            let r = n.as_rational_node().unwrap();
+            let int = |i: &ruby_prism::Integer<'_>| {
+                let Some(value) = super::util::integer_i64(i) else {
+                    return Err(IngestError::Unsupported {
+                        file: file.to_string(),
+                        message: "rational literal's numerator or denominator does not fit in a 64-bit integer".to_string(),
+                    });
+                };
+                Ok(Expr::new(span, ExprNode::Lit { value: Literal::Int { value } }))
+            };
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("Rational"),
+                args: vec![int(&r.numerator())?, int(&r.denominator())?],
+                block: None,
+                parenthesized: true,
+            }
+        }
         n if n.as_string_node().is_some() => {
             let s = n.as_string_node().unwrap();
             let bytes = s.unescaped();
-            ExprNode::Lit {
-                value: Literal::Str { value: String::from_utf8_lossy(bytes).into_owned() },
+            match std::str::from_utf8(bytes) {
+                Ok(text) => ExprNode::Lit { value: Literal::Str { value: text.to_string() } },
+                Err(_) => binary_string(&s, span, file)?,
             }
         }
         n if n.as_interpolated_string_node().is_some() => {
@@ -1100,8 +1247,13 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // emitted program. A read of `__FILE__` types as `Str` like any
         // other string literal, so `File.expand_path('..', __FILE__)`
         // and friends type-check through it for free.
+        //
+        // The literal carries `SOURCE_FILE_PATH`: Ruby's `__FILE__` is
+        // the loaded file's absolute path, independent of cwd, so a
+        // target that relocates the file rewrites it against its own
+        // emitted location (see the flag).
         n if n.as_source_file_node().is_some() => {
-            ExprNode::Lit { value: Literal::Str { value: super::sources::relative_path(file) } }
+            return Ok(source_file_path_lit(span, super::sources::relative_path(file)));
         }
         // `__LINE__` uses this parse's bytes, not an older registration of
         // the same filename. ERB later translates it to the template line.
@@ -1122,6 +1274,9 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let block_bytes = block_loc.as_slice();
 
             let body_nodes: Vec<Node<'_>> = stmts.body().iter().collect();
+            // A modifier's body (`stmt if cond`) begins where its statement
+            // does, so the `#: self as` above it was read one list up.
+            let reads_bindings = !super::type_ascription::is_modifier_body(file, body_nodes.len(), block_loc.end_offset());
 
             // Guard-clause rewrite: if the first child is
             // `if COND; return; end` followed by more statements,
@@ -1135,23 +1290,12 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // idempotent seed scripts).
             if body_nodes.len() >= 2 {
                 if let Some(guard_cond_node) = detect_leading_guard(&body_nodes[0]) {
+                    let binding = reads_bindings
+                        .then(|| super::type_ascription::leading_self_binding(file, body_nodes[0].location().start_offset()))
+                        .flatten();
                     let cond = ingest_expr(&guard_cond_node, file)?;
                     let rest_nodes = &body_nodes[1..];
-                    let mut rest_exprs: Vec<Expr> = Vec::with_capacity(rest_nodes.len());
-                    let mut prev_end: Option<usize> = None;
-                    for child in rest_nodes {
-                        let child_start = child.location().start_offset();
-                        let mut expr = ingest_expr(child, file)?;
-                        if let Some(pe) = prev_end {
-                            let from = pe - block_start;
-                            let to = child_start - block_start;
-                            if slice_has_blank_line(block_bytes, from, to) {
-                                expr.leading_blank_line = true;
-                            }
-                        }
-                        rest_exprs.push(expr);
-                        prev_end = Some(child.location().end_offset());
-                    }
+                    let rest_exprs = ingest_statement_list(rest_nodes, file, block_start, block_bytes, reads_bindings)?;
                     let else_branch = if rest_exprs.len() == 1 {
                         rest_exprs.into_iter().next().unwrap()
                     } else {
@@ -1161,32 +1305,22 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                         Span::synthetic(),
                         ExprNode::Lit { value: Literal::Nil },
                     );
-                    return Ok(Expr::new(
+                    let guard = Expr::new(
                         Span::synthetic(),
                         ExprNode::If {
                             cond,
                             then_branch: nil_expr,
                             else_branch,
                         },
-                    ));
+                    );
+                    return Ok(match binding {
+                        Some(binding) => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![binding, guard] }),
+                        None => guard,
+                    });
                 }
             }
 
-            let mut exprs: Vec<Expr> = Vec::with_capacity(body_nodes.len());
-            let mut prev_end: Option<usize> = None;
-            for child in &body_nodes {
-                let child_start = child.location().start_offset();
-                let mut expr = ingest_expr(child, file)?;
-                if let Some(pe) = prev_end {
-                    let from = pe - block_start;
-                    let to = child_start - block_start;
-                    if slice_has_blank_line(block_bytes, from, to) {
-                        expr.leading_blank_line = true;
-                    }
-                }
-                exprs.push(expr);
-                prev_end = Some(child.location().end_offset());
-            }
+            let exprs = ingest_statement_list(&body_nodes, file, block_start, block_bytes, reads_bindings)?;
             if exprs.len() == 1 {
                 return Ok(exprs.into_iter().next().unwrap());
             }
@@ -1356,6 +1490,20 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 value,
             }
         }
+        // `$stdout = STDOUT` — a global-variable write. Like a read
+        // (`n.as_global_variable_read_node()` below) and like `@@x`, the
+        // `$`-prefixed name rides in `LValue::Var` so the sigil
+        // round-trips on the Ruby emit, and the targets without Ruby's
+        // globals refuse it by name (`project.rs::report_native_ruby_syntax`).
+        n if n.as_global_variable_write_node().is_some() => {
+            let w = n.as_global_variable_write_node().unwrap();
+            let name = Symbol::from(constant_id_str(&w.name()));
+            let value = ingest_expr(&w.value(), file)?;
+            ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+                value,
+            }
+        }
         // `FOO = expr` — bare constant write. In a class body this is
         // a class-scoped constant; at top level it's a global constant.
         // Lowerers/emitters resolve the containing scope.
@@ -1435,6 +1583,36 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 },
                 op,
                 value,
+            }
+        }
+        // `$x ||= y`, `$x &&= y`, `$x += y` — a global, as `$x = y` above.
+        n if n.as_global_variable_or_write_node().is_some() => {
+            let w = n.as_global_variable_or_write_node().unwrap();
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: Symbol::from(constant_id_str(&w.name())) },
+                op: crate::expr::OpAssignOp::OrOr,
+                value: ingest_expr(&w.value(), file)?,
+            }
+        }
+        n if n.as_global_variable_and_write_node().is_some() => {
+            let w = n.as_global_variable_and_write_node().unwrap();
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: Symbol::from(constant_id_str(&w.name())) },
+                op: crate::expr::OpAssignOp::AndAnd,
+                value: ingest_expr(&w.value(), file)?,
+            }
+        }
+        n if n.as_global_variable_operator_write_node().is_some() => {
+            let w = n.as_global_variable_operator_write_node().unwrap();
+            let op = op_assign_op_from_binary(&constant_id_str(&w.binary_operator()))
+                .ok_or_else(|| IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!("unsupported compound-assignment operator: {}", constant_id_str(&w.binary_operator())),
+                })?;
+            ExprNode::OpAssign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: Symbol::from(constant_id_str(&w.name())) },
+                op,
+                value: ingest_expr(&w.value(), file)?,
             }
         }
         // `x &&= y` — local var, short-circuit.
@@ -2072,10 +2250,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_while_node().is_some() => {
             let w = n.as_while_node().unwrap();
             if w.is_begin_modifier() {
-                return Err(IngestError::Unsupported {
-                    file: file.into(),
-                    message: "`begin … end while` (do-while) form not yet supported".into(),
-                });
+                return Ok(Expr::new(span, do_loop(w.statements(), &w.predicate(), false, file)?));
             }
             let cond = ingest_expr(&w.predicate(), file)?;
             let body = match w.statements() {
@@ -2087,10 +2262,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_until_node().is_some() => {
             let u = n.as_until_node().unwrap();
             if u.is_begin_modifier() {
-                return Err(IngestError::Unsupported {
-                    file: file.into(),
-                    message: "`begin … end until` (do-until) form not yet supported".into(),
-                });
+                return Ok(Expr::new(span, do_loop(u.statements(), &u.predicate(), true, file)?));
             }
             let cond = ingest_expr(&u.predicate(), file)?;
             let body = match u.statements() {
@@ -2361,16 +2533,6 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             return Err(IngestError::Unsupported {
                 file: file.into(),
                 message: "unparsed fragment (Prism recovery node)".into(),
-            });
-        }
-        // `$stdout = …` — a global-variable write. Reads of the same
-        // sigil already ingest (see `n.as_global_variable_read_node()`
-        // above); writing global state isn't modeled, and the specific
-        // message says exactly what's missing instead of the generic one.
-        n if n.as_global_variable_write_node().is_some() => {
-            return Err(IngestError::Unsupported {
-                file: file.into(),
-                message: "global variable write".into(),
             });
         }
         // `class`/`module` at expression position — e.g. inside a
@@ -3177,6 +3339,91 @@ fn try_ingest_method_ref(
     )))
 }
 
+/// `begin … end while cond` / `begin … end until cond`: the body runs
+/// once before the first test (Ruby's do-while; a plain `while`
+/// modifier on a non-`begin` statement tests first). Lowered to
+///
+/// ```ruby
+/// while true
+///   body
+///   break unless cond   # `break if cond` for `until`
+/// end
+/// ```
+///
+/// which keeps the enclosing local scope (a `loop do` block would make
+/// the body's first assignments block-local) and, like the source,
+/// evaluates to nil. A `next` or `redo` aimed at the loop itself is
+/// refused: in the source `next` goes to the test, and here it would
+/// skip it.
+fn do_loop(
+    statements: Option<ruby_prism::StatementsNode<'_>>,
+    predicate: &Node<'_>,
+    until: bool,
+    file: &str,
+) -> IngestResult<ExprNode> {
+    let form = if until { "until" } else { "while" };
+    if let Some(statements) = &statements {
+        if let Some(jump) = loop_level_jump(&statements.as_node()) {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!(
+                    "`{jump}` in a `begin … end {form}` body: it would skip the loop test the source runs"
+                ),
+            });
+        }
+    }
+    let body = match statements {
+        Some(s) => ingest_expr(&s.as_node(), file)?,
+        None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+    };
+    let cond = ingest_expr(predicate, file)?;
+    let nil = || Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil });
+    let brk = Expr::new(Span::synthetic(), ExprNode::Break { value: None });
+    let test = if until {
+        ExprNode::If { cond, then_branch: brk, else_branch: nil() }
+    } else {
+        ExprNode::If { cond, then_branch: nil(), else_branch: brk }
+    };
+    let test = Expr::new(Span::synthetic(), test);
+    let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![body, test] });
+    let always = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: true } });
+    Ok(ExprNode::While { cond: always, body, until_form: false })
+}
+
+/// A `next` or `redo` in `node` that targets the loop `node` is the
+/// body of, rather than a block, lambda, method or loop inside it.
+fn loop_level_jump(node: &Node<'_>) -> Option<&'static str> {
+    use ruby_prism::Visit;
+    struct Jumps(Option<&'static str>);
+    impl<'pr> Visit<'pr> for Jumps {
+        fn visit_next_node(&mut self, _: &ruby_prism::NextNode<'pr>) {
+            self.0.get_or_insert("next");
+        }
+        fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) {
+            self.0.get_or_insert("redo");
+        }
+        fn visit_block_node(&mut self, _: &ruby_prism::BlockNode<'pr>) {}
+        fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {}
+        fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {}
+        fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'pr>) {}
+        fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'pr>) {}
+        fn visit_singleton_class_node(&mut self, _: &ruby_prism::SingletonClassNode<'pr>) {}
+        fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
+            // The predicate is outside the inner loop's body.
+            self.visit(&node.predicate());
+        }
+        fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
+            self.visit(&node.predicate());
+        }
+        fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {
+            self.visit(&node.collection());
+        }
+    }
+    let mut jumps = Jumps(None);
+    jumps.visit(node);
+    jumps.0
+}
+
 /// Classify a block's `opening_loc` bytes as `{` (brace form) or `do`.
 /// Prism always populates this location with the source-literal opener.
 fn block_style_from_opening(bytes: &[u8]) -> crate::expr::BlockStyle {
@@ -3584,4 +3831,47 @@ fn is_plain_read(e: &Expr) -> bool {
             | ExprNode::SelfRef
             | ExprNode::Lit { .. }
     )
+}
+
+/// A string literal whose bytes are not UTF-8: `"\x99*\n"` in a
+/// serialized binary blob (a generated file's `descriptor_data`). A
+/// `Literal::Str` holds UTF-8 text, and read lossily every invalid byte
+/// became U+FFFD, so the emitted blob no longer parsed. The literal is the same bytes in the
+/// same encoding instead, built from their hex digits:
+/// `["0a21…"].pack("H*").force_encoding("UTF-8")`, then `.freeze` where
+/// the file's `frozen_string_literal: true` froze the literal. Ruby gives
+/// a `\x` escape outside ASCII in a UTF-8 source the UTF-8 encoding,
+/// invalid (`"\xff".encoding == Encoding::UTF_8`), which Prism flags as
+/// forced UTF-8; Prism's forced binary (a US-ASCII source) is
+/// ASCII-8BIT, what `pack` returns. A literal in another source
+/// encoding is refused by name.
+fn binary_string(s: &ruby_prism::StringNode<'_>, span: Span, file: &str) -> IngestResult<ExprNode> {
+    let encoding = if s.is_forced_binary_encoding() {
+        None
+    } else if s.is_forced_utf8_encoding() {
+        Some("UTF-8")
+    } else {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "a non-UTF-8 string literal in a source encoding other than UTF-8 or US-ASCII is not modeled"
+                .into(),
+        });
+    };
+    let hex: String = s.unescaped().iter().map(|b| format!("{b:02x}")).collect();
+    let lit = |value: String| Expr::new(span, ExprNode::Lit { value: Literal::Str { value } });
+    let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+        Expr::new(
+            span,
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: true },
+        )
+    };
+    let array = Expr::new(span, ExprNode::Array { elements: vec![lit(hex)], style: crate::expr::ArrayStyle::Brackets });
+    let mut value = send(array, "pack", vec![lit("H*".to_string())]);
+    if let Some(encoding) = encoding {
+        value = send(value, "force_encoding", vec![lit(encoding.to_string())]);
+    }
+    if s.is_frozen() {
+        value = send(value, "freeze", Vec::new());
+    }
+    Ok(*value.node)
 }

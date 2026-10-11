@@ -12,6 +12,9 @@
 //! `parsed.to_html.split.first(words * 2)` is the shape a receiver-blind
 //! rename would corrupt.
 
+#[path = "support/emit_and_run.rs"]
+mod emit_and_run;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -63,6 +66,10 @@ end
   def self.paged?
     count > PAGE_SIZE
   end
+
+  def self.opening
+    first(2)
+  end
 end
 "#,
         ),
@@ -86,6 +93,9 @@ end
     @tail = summary.split.last(2).join(" ")
     @found = anything.search("hi").last(100)
     @shared = anything.shared.last(100)
+    @opening = Message.first(2)
+    @closing = Message.last(3)
+    @single = Message.first
   end
 
   private
@@ -327,4 +337,69 @@ fn a_scope_name_two_models_share_proves_nothing() {
         !show.contains(".shared.last_n(100)"),
         "an ambiguous scope name must not rename:\n{show}"
     );
+}
+
+/// The class-side counted forms: `Message.first(2)` is Rails'
+/// `Message.all.first(2)`, an Array of two. The runtime's class `first`
+/// takes no count, so the count rides a fresh relation's `first_n`; the
+/// bare `Message.first` keeps the class method.
+#[test]
+fn counted_terminal_on_a_model_class_seeds_a_relation() {
+    let show = emitted(
+        &ruby::emit_lowered_controllers(&app()),
+        "app/controllers/rooms_controller.rb",
+    );
+    assert!(
+        show.contains("@opening = ActiveRecord::Relation.new(Message).first_n(2)"),
+        "Message.first(2) seeds a relation:\n{show}"
+    );
+    assert!(
+        show.contains("@closing = ActiveRecord::Relation.new(Message).last_n(3)"),
+        "Message.last(3) seeds a relation:\n{show}"
+    );
+    assert!(show.contains("@single = Message.first\n"), "bare Message.first is untouched:\n{show}");
+}
+
+/// The same inside the model's own class method, where `first(2)` has
+/// an implicit self. The method takes the relation it is called on (as
+/// `paged?` does), defaulting to the whole table, so
+/// `room.messages.opening` stays scoped.
+#[test]
+fn counted_terminal_with_implicit_class_self_rides_the_relation() {
+    let message = emitted(&ruby::emit_lowered_models(&app()), "app/models/message.rb");
+    assert!(
+        message.contains("def self.opening(__rel = ActiveRecord::Relation.new(self))\n    __rel.first_n(2)\n"),
+        "a bare first(2) in a class method is a relation's first_n:\n{message}"
+    );
+}
+
+/// Run: `Widget.first(2)` / `.last(2)` from app code, and a class method's
+/// bare `first(2)`, answer Rails' Arrays (first/last two by primary key).
+/// Before the class-side rename, `Widget.first(2)` reached the runtime's
+/// zero-argument `Base.first` and raised ArgumentError.
+#[test]
+fn counted_terminal_on_a_model_class_runs() {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  def self.opening\n    first(2)\n  end\nend\n")
+        .write(
+            "app/models/widget_report.rb",
+            "class WidgetReport\n  def self.heads\n    [Widget.first(2), Widget.last(2), Widget.opening].map { |ws| ws.map { |w| w.name }.join(\",\") }.join(\"|\")\n  end\nend\n",
+        )
+        .run_ruby(
+            "%w[alpha beta gamma].each { |n| Widget.create!(name: n) }\n\
+             got = WidgetReport.heads\n\
+             raise \"counted class terminals: #{got}\" unless got == \"alpha,beta|beta,gamma|alpha,beta\"\n\
+             puts \"counted class terminals passed\"\n",
+        )
+        .assert_passes();
 }
