@@ -139,6 +139,19 @@ definition, or preserve an independently captured replacement. Copies retain ori
 provenance, not just their changed installation owner.
 Ordinary source definitions and literal accessors are recovered by source site.
 
+Round five also matches ordinary eval definitions inside argument wrappers
+against the installed ISeq's full source span, preserving aliases and final
+visibility. Blocks, singleton definitions, nested namespace bodies and ambiguous
+installations are not admitted by that rule. Runtime Symbol arguments to native
+`attr_reader`/`attr_writer`/`attr_accessor` can be captured before application
+callbacks, with saved definition identity and a refusal-only final check. This
+requires the unchanged Module backend and an observer-first `method_added`;
+custom hooks and non-Symbol coercions still execute normally but earn no native
+accessor provenance. The proof assumes **stock MRI accessor construction and
+unchanged reflection primitives**, not arbitrary C extensions manufacturing
+nonstandard accessor entries or VM-level installation causality. It proves
+ordinary live ivar storage, not a framework's constructor or complete ABI.
+
 Capture limitations become **opaque records**, not exceptions in the original
 boot. A syntactically reachable opaque definition still refuses the entire
 export before output creation, including calls on an unexecuted branch.
@@ -475,3 +488,96 @@ The existing jbuilder warning and upstream Futamura unused-mut warning remain.
 The independently pinned four-app results above were not rerun on this merged
 compiler and retain their exact earlier snapshots. Hosted CI and ignored SDK
 coverage remain separate from these local checks.
+
+## Round five: generic provenance and compiler correctness
+
+The next round integrates wrapped-definition/native-accessor provenance with
+two shared compiler corrections, without adding gem-specific generator rules:
+
+- Ordinary keyword packets preserve written pair/splat order, last-wins values
+  and once-only effects. Explicit producer `.merge` calls remain ordinary calls.
+  The asymmetric packet contract distinguished the old emitted result
+  `[:base, 11, 2, 4]` from original Ruby/Spinel's `[:base, 11, 3, 4]`.
+- Carried constructor calls retain lexical constant identity rather than trusting
+  an absent/short inferred type. Renamed/generated constants, class-valued
+  parameters and unverified helper receivers do not gain name-only admission.
+- Scoped Current writes evaluate RHS first, save/write sequentially under ensure,
+  preserve the attached block's result/control flow and restore only saved slots
+  in order. Reset keeps the instance and unrelated storage, clears declared slots
+  without custom writers or construction, and returns `{}`. Explicit defaults,
+  reset callbacks, reset `super` and source-owned/unknown `set`/`with`/`then`
+  dispatch remain honest errors. Scoped admission remains module-free:
+  include ancestry cannot be proved complete from library IR, which omits some
+  effect-only reopens across files. It refuses rather than expanding namespace
+  wrappers or trusting a harmless-looking first fragment. Existing gem
+  attribution stays unchanged.
+
+The unchanged Writebook Current subset passed 14 original/emitted checks each
+in its locked Ruby 3.4.7 YJIT children. The emitted receiver was a fresh plain
+class, not a reopened Rails Current. Real unsaved User/Session values remain an
+explicit original-Rails boundary; Account's unresolved Joinable error is retained.
+Its unchanged round-four exporter/compiler controls still have the same 287
+strict diagnostic identities/multiplicities. These are separate comparisons,
+not a claim that the new exporter now supports Current's complete lifecycle.
+
+Spinel's exact CI pin `644ed74e407e6e25b5f96ad2d1a51744b73b993c` executes the
+ordinary keyword contract. Full Current control-flow/exception compilation was
+also attempted and failed (`sp_Current_s_trace_set`: PolyArray versus RbVal).
+Current scopes therefore refuse Spinel and other unverified backends before
+rendering. On the unchanged Campfire CI pin
+`edbc779f4dfc9b26c36310881711ddc976a9dfc8`, strict Spinel emission still fails:
+the previous ten target-carrier errors disappear, sixteen ABI refusal occurrences
+at four source sites remain, and the truthful Current scope gate adds one error.
+**17 errors versus the published head's 26 is not a passing whole-app gate.**
+
+Integrated interpreter/YJIT native controls pass 82 assertions per mode
+(original = inactive = active); CLI passes 13 tests / 147 assertions, no skips.
+Original/Core/actual-emitted micro22 and Rails34 contracts remain strict-clean,
+with unchanged 10/2 parameter-signature gaps. Incremental real-blog passes 21
+original and 21 emitted tests plus 22 generator assertions; whole export remains
+blocked. Campfire's final strict diagnostic multiset is unchanged from the
+integrated candidate (17 occurrences at five identities), not just its total.
+
+On the combined tree through canonical
+[511894be](https://github.com/rubys/roundhouse/commit/511894bed1461c2fdde2651734e80d4a7ac425a5),
+the final frozen compiler passes **5,130 tests, zero failures, 252 ignored**:
+`cargo test --locked --jobs 4 --no-fail-fast -- --test-threads=1 --skip test_backtraces_retain_library_and_integration_source_locations`.
+The filtered backtrace gate separately passes with
+`CARGO_PROFILE_TEST_DEBUG=line-tables-only CARGO_PROFILE_TEST_STRIP=none`.
+The exact-pin ignored Spinel keyword execution also passes. Ignored SDK/corpus
+tests are not counted as execution, and local results are not hosted CI.
+Candidate failures/setup receipts remain private: the obsolete reset-shape
+assertion was replaced by real execution coverage, CI's existing Markly gem
+was prepared locally, and broad include-only module ingestion was rejected
+rather than relaxing attribution expectations.
+
+Reproduction uses the rebuilt native observer described above:
+
+```sh
+RUBYOPT=--yjit ruby tools/native-observer/contract.rb
+RUBYOPT=--yjit ruby tests/rh_materialize_test.rb
+RUBYOPT=--yjit ruby tools/boot-to-core/try_input.rb /tmp/core-round5-input
+RUBYOPT=--yjit ruby tools/boot-to-core/try_blog.rb /tmp/core-round5-blog
+SPINEL=/path/to/pinned/spinel cargo test --locked --test spinel_toolchain \
+  anonymous_keyword_forwarding_runs_natively -- --ignored --nocapture
+```
+
+Raw app/host logs and patch receipts remain private. No lowering is removed,
+no additional real generated family or whole-app/non-Ruby matrix is claimed.
+Bounded unchanged-source probes recover six AMS accessors, four attr_required
+accessors, Current's real generated method copies and dry-initializer's private
+wrapped initializer. Original false/nil, mutable-value identity and independent
+instances remain intact; both probe children report YJIT true and no observer
+failures. All four exports still refuse, at these actual first boundaries:
+
+| Real source cut | First remaining refusal |
+|---|---|
+| Mastodon Translation / AMS 0.10.16 | `TranslationService::Translation#raise` |
+| Rack OAuth2 grant / attr_required 1.0.2 | `AuthorizationCode#send` |
+| ActiveSupport Current 8.1.4 | `ProvenanceCurrent#class` |
+| dry-initializer 3.2.0 | `ProvenanceDry#instance_variable_defined?` |
+
+These are inherited-runtime refusals, not successful constructor exports.
+The next closure still needs genuine constructor/class-side state, exception
+primitives and explicit receiver/native boundaries; provenance alone is not
+execution support. Static check/LSP/WASM fallback remains necessary.

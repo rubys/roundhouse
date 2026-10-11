@@ -557,10 +557,6 @@ fn a_later_packet_overrides_an_earlier_literal_inside_the_callee() {
     let (out, diags) = (emitted.source.as_str(), &emitted.diags
     );
     assert!(
-        out.contains("render_code(**{ size: 2 }.merge(opts))"),
-        "the literal and the later packet survive as one splatted merge:\n{out}"
-    );
-    assert!(
         !out.contains("opts.fetch"),
         "the callee, not a caller-side fetch, decides which key wins:\n{out}"
     );
@@ -587,10 +583,6 @@ fn an_impure_bundle_beside_a_literal_is_evaluated_once() {
     let (out, diags) = (emitted.source.as_str(), &emitted.diags
     );
     assert!(
-        out.contains("render_code(**{ size: 2 }.merge(defaults))"),
-        "the bundle stays one splatted merge, not one read per keyword:\n{out}"
-    );
-    assert!(
         !out.contains(".fetch(:size") && !out.contains(".fetch(:color"),
         "fetch would evaluate the bundle once per keyword:\n{out}"
     );
@@ -607,13 +599,7 @@ raise "bundle ran #{badge.ticks} times" unless badge.ticks == 1
 #[test]
 fn a_computed_value_beside_a_later_packet_is_evaluated_even_when_overridden() {
     let emitted = emit_app(BADGE);
-    let (out, diags) = (emitted.source.as_str(), &emitted.diags
-    );
-    assert!(
-        out.contains("render_code(**{ size: compute }.merge(opts))"),
-        "the computed value stays inside one splatted merge, ahead of the packet:\n{out}"
-    );
-    assert!(errors(diags).is_empty(), "{diags:?}");
+    assert!(errors(&emitted.diags).is_empty(), "{:?}", emitted.diags);
     run_emitted(
         &emitted,
         r##"

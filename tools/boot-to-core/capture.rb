@@ -10,8 +10,13 @@ module BootToCore
   Cell = Struct.new(:binding, :name, :written)
 
   class << self
-    attr_accessor :active
+    attr_reader :active
     attr_reader :input_spec
+
+    def active=(value)
+      @active = value
+      NativeDefineMethodObserver.addition_collector = value ? ADDITION_COLLECTOR : nil
+    end
 
     def capture
       previous = active
@@ -50,6 +55,11 @@ module BootToCore
         record.definition.bind(method.receiver).unbind == definition
       end
       return captured if captured
+      if NativeDefineMethodObserver.unproven_attributes.any? do |owner, names|
+        owner == definition.owner && names.include?(definition.name)
+      end
+        raise Unsupported, "native accessor operation unwound without a matching installation snapshot"
+      end
       inherited_body = definition.owner.ancestors.drop(1).any? do |ancestor|
         next false unless own_methods(ancestor).include?(definition.name)
         inherited = ancestor.instance_method(definition.name)
@@ -62,8 +72,11 @@ module BootToCore
       raise Unsupported, "#{definition.name}: no captured or readable definition" unless path && File.file?(path)
       candidates = []
       scopes_by_node = {}
+      location = RubyVM::InstructionSequence.of(definition)&.to_a&.dig(4, :code_location)
       walk_lexical(source_tree(path)) do |node, scopes|
         if node.is_a?(Prism::DefNode) && node.receiver.nil? && node.name == definition.original_name && node.location.start_line == line
+          span = node.location
+          next if location && location != [span.start_line, span.start_column, span.end_line, span.end_column]
           candidates << node
           scopes_by_node[node] = scopes
         end
@@ -133,17 +146,40 @@ module BootToCore
       (@source_trees ||= {})[path] ||= parse(File.read(path))
     end
 
+    # Argument wrappers execute the ordinary def in the current owner. Do not
+    # descend into blocks, nested defs or namespace bodies: their installation
+    # owner/timing and lexical scope are not established by this eval event.
+    def eval_definitions(node)
+      case node
+      when Prism::DefNode
+        node.receiver.nil? ? [node] : []
+      when Prism::StatementsNode
+        node.body.flat_map { |child| eval_definitions(child) }
+      when Prism::ArgumentsNode
+        node.arguments.flat_map { |child| eval_definitions(child) }
+      when Prism::CallNode
+        node.arguments ? eval_definitions(node.arguments) : []
+      when Prism::ParenthesesNode
+        node.body ? eval_definitions(node.body) : []
+      else
+        []
+      end
+    end
+
     def record_eval(owner, source, path, first_line)
       # Admission failures describe the observed definitions; they must not
       # interrupt the original eval or unrelated Rails boot operations.
       statements = parse(source).statements.body
-      definitions = statements.select { |node| node.is_a?(Prism::DefNode) && node.receiver.nil? }
+      definitions = statements.flat_map { |node| eval_definitions(node) }
       events << { kind: "string_eval", owner_id: owner.object_id, names: definitions.map(&:name) }
       definitions.each do |node|
         (@eval_definitions ||= {})[[owner, node.name]] ||= []
-        @eval_definitions[[owner, node.name]] << [node, path, first_line + node.location.start_line - 1]
+        span = node.location
+        location = [first_line + span.start_line - 1, span.start_column,
+                    first_line + span.end_line - 1, span.end_column]
+        @eval_definitions[[owner, node.name]] << [node, path, location]
       end
-      unless definitions.length == statements.length
+      unless statements.all? { |node| node.is_a?(Prism::DefNode) && node.receiver.nil? }
         raise Unsupported, "string eval also contains non-instance-method statements (not exported)"
       end
     rescue Unsupported => error
@@ -151,12 +187,21 @@ module BootToCore
       (@opaque_evals ||= []) << [owner, path, first_line, first_line + source.lines.length, error.message]
     end
 
-    def record_added(owner, name)
-      definition = owner.instance_method(name)
+    def record_added(owner, name, definition)
+      unless definition
+        events << { kind: "removed_during_installation", owner_id: owner.object_id, name: name }
+        return
+      end
       (@additions ||= []) << [owner, name, definition]
       (@installations ||= {})[[owner, name, definition]] = true
+      # An alias can have the same saved definition but a different name. Do
+      # not replace its established provenance with an opaque eval-site guess.
+      return if recorded_definition?(definition)
       pending = (@eval_definitions || {})[[owner, name]] || []
-      matches = pending.select { |_, path, line| definition.source_location == [path, line] }
+      location = RubyVM::InstructionSequence.of(definition)&.to_a&.dig(4, :code_location)
+      matches = pending.select do |_, path, span|
+        definition.source_location == [path, span[0]] && location == span
+      end
       if matches.length == 1
         pending.delete(matches.first)
         remember(Record.new(owner, name, matches.first[0], nil, "string_eval", definition, nil, nil))
@@ -167,6 +212,42 @@ module BootToCore
         entry[0] == owner && location && location[0] == entry[1] && (entry[2]..entry[3]).cover?(location[1])
       end)
         remember(Record.new(owner, name, nil, nil, "opaque_eval", definition, opaque[4], nil))
+      end
+    end
+
+    def record_attribute(owner, name, definition, kind)
+      # On stock MRI, a saved method with no ISeq but an attr source location
+      # is IVAR/ATTRSET, not CFUNC, BMETHOD, Struct/Data or a Symbol Proc. Reject
+      # TracePoint/reentrant replacements before interpreting an accessor name.
+      # Native extensions manufacturing nonstandard accessor entries are outside
+      # this prototype's stock-construction trust boundary.
+      if !definition || RubyVM::InstructionSequence.of(definition) ||
+          !definition.source_location || definition.original_name != name ||
+          definition.arity != (kind == :attr_reader ? 0 : 1)
+        remember(Record.new(owner, name, nil, nil, "opaque_native_attribute", definition,
+          "installed definition is not a proven ordinary native ivar accessor", nil)) if definition
+        return
+      end
+      field = kind == :attr_reader ? name.to_s : name.to_s.delete_suffix("=")
+      unless field.match?(/\A[a-zA-Z_]\w*\z/)
+        remember(Record.new(owner, name, nil, nil, "opaque_native_attribute", definition,
+          "accessor name cannot be represented as an ordinary ivar def", nil))
+        return
+      end
+      body = kind == :attr_reader ? "def #{field}; @#{field}; end" : "def #{field}=(value); @#{field} = value; end"
+      node = parse(body).statements.body.first
+      remember(Record.new(owner, name, node, nil, "native_attribute", definition, nil, nil))
+    end
+
+    # This reflection can only refuse; native admission requires the earlier C
+    # method_added identity snapshot, before any application callback executes.
+    def finish_attributes(owner, names)
+      names.each do |name|
+        next unless own_methods(owner).include?(name)
+        definition = owner.instance_method(name)
+        next if recorded_definition?(definition)
+        remember(Record.new(owner, name, nil, nil, "opaque_native_attribute", definition,
+          "native accessor requires Symbol names, the original backend and an observer-first method_added hook", nil))
       end
     end
 
@@ -513,11 +594,6 @@ module BootToCore
   end
 
   module Hooks
-    def method_added(name)
-      BootToCore.record_added(self, name) if BootToCore.active
-      super
-    end
-
     def alias_method(name, original)
       source = BootToCore.source_record(instance_method(original)) if BootToCore.active
       before = BootToCore.additions.length
@@ -539,6 +615,14 @@ module BootToCore
 end
 
 Module.prepend(BootToCore::Hooks)
+BootToCore::ADDITION_COLLECTOR = ->(owner, name, definition, kind) do
+  if kind == :attribute_end
+    BootToCore.finish_attributes(owner, name)
+  else
+    BootToCore.record_added(owner, name, definition)
+    BootToCore.record_attribute(owner, name, definition, kind) if kind
+  end
+end
 NativeDefineMethodObserver.collector = ->(owner, name, callable) do
   BootToCore.record_defined(owner, name, callable) if BootToCore.active
 end

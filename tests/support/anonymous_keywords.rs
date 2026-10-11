@@ -30,6 +30,10 @@ pub const SOURCE: &str = r##"class KeywordForwarder
     request(kind: tick.next_value, kind: tick.next_value, path: tick.next_value, **)
   end
 
+  def merge_packets(tick)
+    receive(required: tick.next_value, **tick.packet(7), enabled: tick.next_value, **tick.packet(11))
+  end
+
   def receive(required:, enabled: true, token: :missing)
     [:base, required, enabled, token]
   end
@@ -75,6 +79,11 @@ class KeywordTick
   def next_value
     @count += 1
   end
+
+  def packet(value)
+    @count += 1
+    {required: value, token: @count}
+  end
 end
 "##;
 
@@ -82,6 +91,12 @@ pub const ASSERTIONS: &str = r#"
 forwarder = KeywordForwarder.new
 raise "constructor keyword bound a Hash" unless KeywordTick.new(start: 11).next_value == 12
 raise "constructor keyword splat lost its packet" unless KeywordTick.new(**{start: 19}).next_value == 20
+payload = {start: 9}
+begin
+  KeywordTick.new(payload)
+  raise "positional Hash became constructor keywords"
+rescue ArgumentError
+end
 raise "empty packet changed defaults" unless forwarder.defaults == [true, :missing]
 raise "optional keywords changed order or skipped defaults" unless forwarder.defaults(token: nil) == [true, nil]
 raise "optional false was lost" unless forwarder.defaults(enabled: false) == [false, :missing]
@@ -114,6 +129,10 @@ raise "mixed keyword values changed order, count, or override semantics" unless 
 tick = KeywordTick.new
 result = forwarder.fetch_duplicate_effects(tick)
 raise "duplicate keyword values changed order, last-wins, or count" unless result == [2, 3, :missing] && tick.count == 3
+
+tick = KeywordTick.new
+result = forwarder.merge_packets(tick)
+raise "ordinary keyword packets changed order, last-wins, or count" unless result == [:base, 11, 3, 4] && tick.count == 4
 
 overridden = OverriddenKeywordForwarder.new
 raise "keyword forwarding skipped the override" unless overridden.forward(required: 11, enabled: false, token: nil) == [:override, 11, false, nil]

@@ -371,18 +371,39 @@ fn destination<'a>(
                 None => context.map(|(owner, _)| owner),
                 Some(r) if matches!(&*r.node, ExprNode::SelfRef) => context.map(|(owner, _)| owner),
                 Some(r) => match (&*r.node, r.ty.as_ref()) {
+                    (ExprNode::Const { path }, ty)
+                        if !r.span.is_synthetic()
+                            && r.decisions & crate::expr::GENERATED_CONST_REF == 0
+                            && contracts.constants.namespace(r.span, path).is_some() =>
+                    {
+                        // A carried helper keeps the source's lexical scope, even
+                        // when inference retained only the constant's short name.
+                        // The index is position-based: validate current spelling
+                        // too, since a generated/renamed node can borrow that span.
+                        let id = contracts.constants.namespace(r.span, path)?;
+                        let absolute = path.first().is_some_and(|p| p.as_str().is_empty());
+                        let spelling = path.iter().filter(|p| !p.as_str().is_empty())
+                            .map(|p| p.as_str()).collect::<Vec<_>>().join("::");
+                        let matches_source = id.0.as_str() == spelling
+                            || (!absolute && id.0.as_str().ends_with(&format!("::{spelling}")));
+                        let matches_type = match ty {
+                            None => true,
+                            Some(Ty::Class { id: inferred, .. }) => inferred == id
+                                || inferred.0.as_str() == spelling,
+                            _ => false,
+                        };
+                        if !matches_source || !matches_type {
+                            return None;
+                        }
+                        return destination_for_class(app, contracts, id, method, receiver);
+                    }
                     (ExprNode::Const { .. }, Some(Ty::Class { id, .. })) => {
                         // Constructor monomorphization can retain the base's
                         // inferred type on a newly named subclass receiver.
                         // Do not admit the base contract for that source name.
                         constant_names_class(r, id).then_some(id)
                     }
-                    (ExprNode::Const { path }, None) => {
-                        // Carried test-helper bodies retain their original lexical
-                        // source scope even when their nominal receiver is a test.
-                        let id = contracts.constants.namespace(r.span, path)?;
-                        return destination_for_class(app, contracts, id, method, receiver);
-                    }
+                    (ExprNode::Const { .. }, None) => None,
                     (_, Some(Ty::Class { id, .. })) => Some(id),
                     _ => None,
                 },

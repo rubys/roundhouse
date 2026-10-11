@@ -27,8 +27,10 @@ if ARGV.empty?
   RUBY
   abort "collector swallowed termination: #{out}#{err}" unless status.termsig == Signal.list.fetch('TERM')
   %w[interrupt exit throw].each do |unwind|
-    out, err, status = Open3.capture3(RbConfig.ruby, __FILE__, "unwind-#{unwind}")
-    abort "#{unwind} control failed: #{out}#{err}" unless status.success?
+    %w[unwind attribute-unwind].each do |prefix|
+      out, err, status = Open3.capture3(RbConfig.ruby, __FILE__, "#{prefix}-#{unwind}")
+      abort "#{prefix}-#{unwind} control failed: #{out}#{err}" unless status.success?
+    end
   end
   puts 'PASS: collector preserves TERM, Interrupt, SystemExit and throw'
   puts "PASS: original == native-inactive == native-active"
@@ -38,34 +40,42 @@ if ARGV.empty?
 end
 
 mode = ARGV.fetch(0)
-if mode.start_with?('unwind-')
+if mode.start_with?('unwind-', 'attribute-unwind-')
   require 'native_define_method_observer'
   klass = Class.new
-  case mode
-  when 'unwind-throw'
-    NativeDefineMethodObserver.collector = ->(*) { throw :finished, -29 }
-    result = catch(:finished) { klass.define_method(:probe) { 7 }; 101 }
-    abort 'throw swallowed' unless result == -29
-  when 'unwind-interrupt', 'unwind-exit'
-    expected = mode == 'unwind-interrupt' ? Interrupt.new : SystemExit.new(23)
-    NativeDefineMethodObserver.collector = ->(*) { raise expected }
+  attribute = mode.start_with?('attribute-')
+  setter = attribute ? :addition_collector= : :collector=
+  operation = attribute ? -> { klass.attr_reader(:probe) } : -> { klass.define_method(:probe) { 7 } }
+  calls = 0
+  if mode.end_with?('-throw')
+    NativeDefineMethodObserver.public_send(setter, ->(*) { calls += 1; throw :finished, -29 - calls })
+    result = catch(:finished) { operation.call; 101 }
+    abort 'throw swallowed or payload replaced while unwinding' unless result == -30
+  else
+    expected = mode.end_with?('-interrupt') ? Interrupt.new : SystemExit.new(23)
+    NativeDefineMethodObserver.public_send(setter, ->(*) { calls += 1; raise expected })
     caught = nil
     begin
-      klass.define_method(:probe) { 7 }
+      operation.call
     rescue Exception => error
       caught = error
     end
     abort 'unwind identity lost' unless caught.equal?(expected)
   end
-  abort 'installed body changed' unless klass.new.probe == 7
+  abort 'collector called again while unwinding' unless calls == 1
+  abort 'installed body changed' unless attribute ? klass.method_defined?(:probe) : klass.new.probe == 7
   abort 'unwind deferred as ordinary failure' unless NativeDefineMethodObserver.failures.empty?
   exit
 end
 events = []
+additions = []
 if %w[inactive active].include?(mode)
   require "native_define_method_observer"
   if mode == "active"
     NativeDefineMethodObserver.collector = ->(owner, name, callable) { events << [owner, name, callable] }
+    NativeDefineMethodObserver.addition_collector = ->(owner, name, definition, kind) do
+      additions << [owner, name, definition, kind]
+    end
   end
 elsif mode == "ruby-control"
   Module.prepend(Module.new do
@@ -85,6 +95,94 @@ end
 visibility = lambda do |owner, name|
   %i[private protected public].find { |kind| owner.public_send("#{kind}_instance_methods", false).include?(name) }
 end
+
+# Exercise all native accessor APIs, not a Ruby reimplementation. Mutable values
+# and two instances distinguish a real ivar body from a frozen boot snapshot.
+attributes = Class.new
+check.call("runtime accessor return", [:value, :value=], attributes.attr_accessor(*[:value]))
+attributes.attr_reader(*[:read_only])
+attributes.attr_writer(*[:write_only])
+left, right = attributes.new, attributes.new
+check.call("native accessor initial nil", nil, left.value)
+left.value = false
+check.call("native accessor false", false, left.value)
+check.call("native accessor independent", nil, right.value)
+text = +"first"
+right.value = text
+text.replace("changed")
+check.call("native accessor mutable identity", true, right.value.equal?(text))
+check.call("native accessor mutable value", "changed", right.value)
+left.write_only = -31
+check.call("native writer ivar", -31, left.instance_variable_get(:@write_only))
+check.call("native reader nil", nil, right.read_only)
+attributes.alias_method(:old_value, :value)
+attributes.class_eval('def value; @read_only; end')
+check.call("native alias survives replacement", false, left.old_value)
+check.call("native alias not new identity", false, attributes.instance_method(:old_value) == attributes.instance_method(:value))
+check.call("native replacement has different storage", nil, left.value)
+
+callbacks = []
+attribute_callback = Module.new do
+  define_singleton_method(:method_added) do |name|
+    callbacks << [name, visibility.call(self, name)]
+    super(name)
+  end
+  private
+  attr_accessor(*[:hidden_attribute])
+end
+check.call("native private accessor callbacks", [[:hidden_attribute, :private], [:hidden_attribute=, :private]], callbacks)
+check.call("native private accessor final", :private, visibility.call(attribute_callback, :hidden_attribute))
+attribute_calls = 0
+attribute_name = Object.new
+attribute_name.define_singleton_method(:to_str) { attribute_calls += 1; "converted_attribute" }
+attributes.attr_accessor(attribute_name)
+check.call("native attribute name coerced once", 1, attribute_calls)
+left.converted_attribute = -47
+check.call("native coerced attribute", -47, left.converted_attribute)
+[
+  ["native bad attr name", TypeError, -> { attributes.attr_reader(nil) }],
+  ["native frozen attr owner", FrozenError, -> { Module.new.freeze.attr_writer(:entry) }],
+  ["native invalid attr identifier", NameError, -> { attributes.attr_accessor(:"bad?") }]
+].each do |label, type, operation|
+  caught = nil
+  begin
+    operation.call
+  rescue Exception => error
+    caught = error
+  end
+  check.call(label, type.name, caught&.class&.name)
+end
+attribute_error = RuntimeError.new("attribute callback failure")
+attribute_failing = Module.new do
+  define_singleton_method(:method_added) { |_| raise attribute_error }
+end
+begin
+  attribute_failing.attr_accessor(:partial)
+rescue RuntimeError => error
+  check.call("native attr callback error identity", true, error.equal?(attribute_error))
+end
+check.call("native attr callback partial reader", true, attribute_failing.method_defined?(:partial))
+check.call("native attr callback no writer", false, attribute_failing.method_defined?(:partial=))
+attribute_removed = Module.new do
+  define_singleton_method(:method_added) do |name|
+    remove_method(name)
+    super(name)
+  end
+end
+check.call("native callback removes before super return", [:gone], attribute_removed.attr_reader(:gone))
+check.call("native callback removal final", false, attribute_removed.method_defined?(:gone))
+attribute_no_hook = Module.new
+class << attribute_no_hook
+  undef_method :method_added
+end
+begin
+  attribute_no_hook.attr_reader(:unhooked)
+rescue NoMethodError => error
+  check.call("native absent hook exception", :method_added, error.name)
+end
+check.call("native absent hook still installs", true, attribute_no_hook.method_defined?(:unhooked))
+attributes.attr_reader(:after_unwind)
+check.call("native attr context restored", nil, left.after_unwind)
 
 %i[private protected public].each do |kind|
   callbacks = []
@@ -252,6 +350,16 @@ check.call("callback exception leaves installation", 31, Object.new.extend(faili
 check.call("failed calls not notified", true, before_errors == events.size)
 
 if mode == "active"
+  native = additions.select { |_, _, _, kind| %i[attr_reader attr_writer].include?(kind) }
+  raise "dynamic Symbols not observed before installation callback" unless native.any? { |owner, name, _, _| owner == attributes && name == :value }
+  raise "custom application hook gained native provenance" if native.any? { |owner, _, _, _| owner == attribute_callback || owner == attribute_failing }
+  raise "coerced name gained native provenance" if native.any? { |_, name, _, _| name == :converted_attribute }
+  first_reader = native.find { |owner, name, _, kind| owner == attributes && name == :value && kind == :attr_reader }[2]
+  raise "saved native identity lost through redefinition" unless first_reader == attributes.instance_method(:old_value) && first_reader != attributes.instance_method(:value)
+  raise "unwound native context contaminated next declaration" unless native.any? { |owner, name, _, kind| owner == attributes && name == :after_unwind && kind == :attr_reader }
+  GC.verify_compaction_references(double_heap: true, toward: :empty)
+  raise "native definition lost through compaction" unless first_reader.bind(left).call == false
+
   # Object identity is captured before native callbacks, not reconstructed later.
   raise "successful calls not notified exactly once" unless events.size == 18
   raise "explicit body provenance lost" unless events.find { |o, n, _| o == klass && n == :chosen }.last.equal?(explicit)

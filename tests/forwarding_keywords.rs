@@ -22,6 +22,7 @@ fn compiled_keyword_producers_preserve_identity_order_and_single_evaluation() {
 class Counter
   def initialize; @calls = 0; end
   def produce(factor); @calls += 1; {factor: factor, offset: @calls}; end
+  def merge(factor); {factor: factor+2}; end
   def calls; @calls; end
 end
 class Probe
@@ -51,12 +52,16 @@ class Probe
     kw = {factor: 3}
     Probe.call(11,4,**kw) { |r| r*2+1 }
   end
+  def self.explicit_merge
+    Probe.call(11,4,**Counter.new.merge(5))
+  end
 end
 "#;
     // Without keyword provenance run is an arity error; treating a positional
     // hash as keywords changes positional; duplication/order errors change mixed.
-    let script = "puts Probe.run; puts Probe.positional; puts Probe.mixed; puts Probe.transformed";
-    let expected = "21\npositional\n232\n43\n";
+    // A written .merge is an ordinary producer, not an ingest-created link.
+    let script = "puts Probe.run; puts Probe.positional; puts Probe.mixed; puts Probe.transformed; puts Probe.explicit_merge";
+    let expected = "21\npositional\n232\n43\n49\n";
     native_result(source, script, expected);
     let run = emit_and_run::real_blog()
         .write("app/lib/probe.rb", source)

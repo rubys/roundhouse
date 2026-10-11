@@ -56,6 +56,12 @@ pub const UNINDEXED_SCOPE_CONST_REF: u64 = 1 << 11;
 /// The `defaults.merge(hash)` ingest wrote for `hash.reverse_merge(defaults)`.
 pub const REVERSE_MERGE: u64 = 1 << 12;
 
+/// A scoped CurrentAttributes#set replacement, at the original Send span.
+/// Its attached block and ensure require verified native block semantics;
+/// target preflight must not mistake its synthetic Kernel#then for a
+/// supported ordinary method merely because analysis knows the block type.
+pub const CURRENT_SET_SCOPE: u64 = 1 << 13;
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by

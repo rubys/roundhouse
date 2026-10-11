@@ -480,6 +480,129 @@ class RhMaterializeTest < Minitest::Test
     end
   end
 
+  def test_wrapped_defs_use_final_source_columns_and_visibility
+    manifest = File.join(@dir, 'wrapped.rb')
+    File.write(manifest, <<~'RUBY')
+      class WrappedProduct; end
+      BootToCore.capture do
+        WrappedProduct.module_eval('private(def helper(v); v * 11 + 101; end); private(def helper(v); v * 7 - 3; end); public(def result(v); helper(v); end)', 'wrapped-generated', 43)
+        WrappedProduct.alias_method(:saved, :result)
+        WrappedProduct.module_eval('public(def result(v); v * 3 + 19; end)', 'wrapped-generated', 43)
+      end
+      BootToCore.input(roots: { WrappedProduct => [:result, :saved] })
+    RUBY
+    contract = <<~'RUBY'
+      object = WrappedProduct.new
+      puts JSON.generate([object.result(-4), object.result(7), object.saved(-4), object.saved(7), object.respond_to?(:helper), WrappedProduct.private_instance_methods(false).include?(:helper)])
+    RUBY
+    expected = [7, 40, -31, 46, false, true]
+    original, err, status = Open3.capture3(RbConfig.ruby, '-rjson', '-r', File.join(ROOT, 'tools/boot-to-core/capture.rb'), '-r', manifest, '-e', contract)
+    assert status.success?, err
+    assert_equal expected, JSON.parse(original)
+    output = File.join(@dir, 'wrapped-core')
+    _, err, status = invoke('--trust-boot', manifest, '-o', output)
+    assert status.success?, err
+    actual, err, status = Open3.capture3(RbConfig.ruby, '-rjson', '-r', File.join(output, 'lib/core.rb'), '-e', contract)
+    assert status.success?, err
+    assert_equal expected, JSON.parse(actual)
+
+    File.write(manifest, <<~'RUBY')
+      class UnprovenScope
+        VALUE = 13
+      end
+      BootToCore.capture { UnprovenScope.module_eval('public(def result; VALUE; end)', 'wrapped-generated', 1) }
+      BootToCore.input(roots: { UnprovenScope => [:result] })
+    RUBY
+    _, err, status = invoke('--trust-boot', manifest, '-o', File.join(@dir, 'unproven'))
+    refute status.success?
+    assert_includes err, 'no proven direct lexical binding'
+  end
+
+  def test_runtime_native_attributes_preserve_live_storage_and_inherited_initialization
+    manifest = File.join(@dir, 'attributes.rb')
+    File.write(manifest, <<~'RUBY')
+      class AttributeBase
+        def initialize(value)
+          @payload = value
+        end
+      end
+      class AttributeProduct < AttributeBase; end
+      names = [:payload]
+      BootToCore.capture do
+        AttributeProduct.attr_accessor(*names)
+        AttributeProduct.alias_method(:saved_payload, :payload)
+        AttributeProduct.attr_accessor(*names)
+      end
+      BootToCore.input(roots: { AttributeProduct => [:payload, :payload=, :saved_payload] })
+    RUBY
+    output = File.join(@dir, 'attributes-core')
+    _, err, status = invoke('--trust-boot', manifest, '-o', output)
+    assert status.success?, err
+    contract = <<~'RUBY'
+      left, right = AttributeProduct.new(false), AttributeProduct.new(nil)
+      text = +'first'
+      before = [left.payload, right.payload, left.saved_payload]
+      right.payload = text
+      text.replace('changed')
+      left.payload = -31
+      puts JSON.generate(before + [left.payload, left.saved_payload, right.payload, right.payload.equal?(text)])
+    RUBY
+    expected = [false, nil, false, -31, -31, 'changed', true]
+    [File.join(output, 'lib/core.rb'), manifest].each do |source|
+      args = source == manifest ? ['-r', File.join(ROOT, 'tools/boot-to-core/capture.rb')] : []
+      actual, err, status = Open3.capture3(RbConfig.ruby, '-rjson', *args, '-r', source, '-e', contract)
+      assert status.success?, err
+      assert_equal expected, JSON.parse(actual)
+    end
+
+    File.write(manifest, <<~'RUBY')
+      class UnprovenAttribute
+        def self.method_added(name)
+          super
+        end
+      end
+      BootToCore.capture { UnprovenAttribute.attr_accessor(*[:entry]) }
+      BootToCore.input(roots: { UnprovenAttribute => [:entry] })
+    RUBY
+    _, err, status = invoke('--trust-boot', manifest, '-o', File.join(@dir, 'unproven-attribute'))
+    refute status.success?
+    assert_includes err, 'observer-first method_added'
+
+    # A TracePoint can replace a definition and unwind before the pending
+    # native backend installs anything. Context alone must never prove a body.
+    {
+      ruby: ["class UnprovenAttribute; end", "UnprovenAttribute.class_eval('def entry; -97; end')"],
+      renamed: ["class UnprovenAttribute; attr_reader :other; end", "UnprovenAttribute.define_method(:entry, UnprovenAttribute.instance_method(:other))"],
+      struct: ["StructParent = Struct.new(:entry); class UnprovenAttribute < StructParent; end", "UnprovenAttribute.define_method(:entry, StructParent.instance_method(:entry))"],
+      symbol_proc: ["class UnprovenAttribute; end", "UnprovenAttribute.define_method(:entry, :to_s.to_proc)"]
+    }.each do |kind, (declaration, replacement)|
+      File.write(manifest, <<~RUBY)
+        #{declaration}
+        trace = TracePoint.new(:c_call) do |event|
+          if event.self == UnprovenAttribute && event.defined_class == Module && event.method_id == :attr_reader
+            trace.disable
+            #{replacement}
+            raise 'application unwind'
+          end
+        end
+        BootToCore.capture do
+          trace.enable
+          begin
+            UnprovenAttribute.attr_reader(:entry)
+          rescue RuntimeError => error
+            raise unless error.message == 'application unwind'
+          ensure
+            trace.disable
+          end
+        end
+        BootToCore.input(roots: { UnprovenAttribute => [:entry] })
+      RUBY
+      _, err, status = invoke('--trust-boot', manifest, '-o', File.join(@dir, "unproven-#{kind}"))
+      refute status.success?, kind.to_s
+      assert_includes err, 'not a proven ordinary native ivar accessor'
+    end
+  end
+
   def test_real_rails_generator_and_callback_bodies_share_one_input
     output = File.join(@dir, 'app')
     _, err, status = invoke('--trust-boot', File.join(ROOT, 'tools/boot-to-core/rails_input.rb'), '-o', output)

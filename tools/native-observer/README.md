@@ -1,10 +1,10 @@
-# Bounded MRI `define_method` observer
+# Bounded MRI declaration observer
 
-Independent, host-only experiment. No exporter/compiler integration, patches to
-MRI, new VM, gems, or changes to the generic Ruby hooks are required. Verified
-on MRI 3.4.8 (Linux x86-64), with the interpreter and YJIT. The checkout uses
-canonical compiler commit `83b6b1458adde2b2db728507fcabc0c2c0557612`; the compiler
-is not executed by this proof.
+Host-only experiment, usable independently or through the opt-in boot-to-Core
+exporter. No patches to MRI, new VM or additional gems are required. Verified
+on MRI 3.4.8 (Linux x86-64), with the interpreter and actual child YJIT. The
+standalone contract does not execute the compiler. Round five additionally
+observes method additions and runtime-Symbol native accessor declarations.
 
 ## Build and prove
 
@@ -30,9 +30,9 @@ processes exercise actual TERM cancellation, Interrupt, SystemExit and throw.
 Decisive summary (each interpreter/YJIT run):
 
 ```text
-baseline: 56 native assertions; 0 notifications
-inactive: 56 native assertions; 0 notifications
-active: 56 native assertions; 18 notifications
+baseline: 82 native assertions; 0 notifications
+inactive: 82 native assertions; 0 notifications
+active: 82 native assertions; 18 notifications
 Ruby-wrapper negative control: detected private callback becoming public
 PASS: collector preserves TERM, Interrupt, SystemExit and throw
 PASS: original == native-inactive == native-active
@@ -68,8 +68,8 @@ NativeDefineMethodObserver.collector = nil
 NativeDefineMethodObserver.failures.each { |_, _, error| raise error }
 ```
 
-Only `Module#define_method` is wrapped, using a C method prepended to Module.
-With no collector it simply forwards. With a collector it retains the explicit
+`Module#define_method` is wrapped using a C method prepended to Module.
+With no define-method collector it simply forwards. With a collector it retains the explicit
 second argument (even when a block is present), or captures the one-argument
 form's block. No Ruby collector, source parsing, coercion or reflection runs
 before `rb_call_super_kw`. Original `argc`, `argv`, keyword flags and current
@@ -96,6 +96,27 @@ would be wrong. An integrating exporter needs its own before/after and
 installation snapshots, or must reject/mark opaque ambiguous mutations. This
 prototype does not solve that association or silently label the replacement.
 
+### Addition and native accessor snapshots
+
+`addition_collector` optionally receives `(owner, name, saved_unbound_method,
+kind)` from the C `method_added` hook **before** forwarding to application
+callbacks. It also receives `:attribute_end` with the operation's names; that
+post-return event can refuse unmatched definitions, not grant provenance.
+`Module#attr_reader`, `attr_writer` and `attr_accessor` forward their original
+arguments/block exactly once. Actual Symbol inputs earn an accessor kind only
+when the original backend is unchanged and the observer is the first
+`method_added` hook. Custom hooks and non-Symbol coercions execute normally but
+do not earn that kind. Unwound operations retain an `unproven_attributes`
+refusal ledger without invoking a collector during unwinding.
+
+The exporter separately checks the saved body's ISeq, source location,
+original name and arity, then final installed identity. This assumes **stock
+MRI accessor construction and unchanged reflection primitives**. It establishes
+ordinary IVAR/ATTRSET semantics, not installation causality, arbitrary-C-extension
+safety, native source-location/full-ABI transparency or framework constructors.
+TracePoint replacements and aliased/redefined methods cannot be admitted from
+context or a post-return reflection alone.
+
 ## Constraints
 
 - Trusted single-threaded boot only; the collector must be inert except for
@@ -103,10 +124,12 @@ prototype does not solve that association or silently label the replacement.
   collector effects, threads, Ractors, cancellation, or allocation failure.
 - MRI 3.4.8 is the executed boundary, not JRuby/TruffleRuby/other MRI versions.
   Prepending necessarily changes reflection on Module/ancestors/stack traces.
-- No observation of `alias_method`, ordinary `def`, `define_singleton_method`,
-  or top-level `define_method`'s separate native implementation. Aliases and
-  Method copies in the contract keep working; only define-method calls emit
-  events. No full Rails-boot/export coverage is implied.
+- No separate operation wrapper for `alias_method`, ordinary `def`,
+  `define_singleton_method`, or top-level `define_method`'s native implementation.
+  Method additions can yield saved definitions, but do not establish their
+  source/callable provenance alone. The reported 18 notifications count
+  define-method calls; addition snapshots are a separate collector channel.
+  No full Rails-boot/export coverage is implied.
 - Only ordinary collector StandardError is deferred; other unwinds are rethrown
   with `rb_jump_tag`. No exceptions from the original native call are rescued.
 - Capturing a block allocates a Proc and notifications/failures allocate Ruby

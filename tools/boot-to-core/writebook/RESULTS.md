@@ -1,6 +1,16 @@
 # Writebook boot → Core Ruby: controlled rounds
 
-**Latest: [round four](ROUND4.md) executes the real ArrangementHelper method
+**Round five:** the shared compiler's real Writebook Current subset passes 14
+original/emitted checks each in pinned Ruby 3.4.7 YJIT children. Scoped writes,
+block control flow and reset identity are corrected; defaults/callbacks and
+unproved `set`/`with`/`then` dispatch refuse. User/Session remain original Rails boundary
+values, and Account's unresolved Joinable error is retained. The unchanged
+round-four exporter/compiler controls retain their 287-entry strict diagnostic
+identity/multiplicity ledger. Zero new exported generated families and zero
+lowering removed. See the [integrated round-five report](../README.md#round-five-generic-provenance-and-compiler-correctness);
+raw delivery evidence remains private, separate from prior round receipts.
+
+**Latest exporter coverage: [round four](ROUND4.md) executes the real ArrangementHelper method
 across original/Core/emitted Ruby; QR is unchanged, Current/AR remain refused.**
 This adds an ordinary app-method positive, not a newly executable generated family.
 [Round three](ROUND3.md) retains the earlier safe Current refusal and controls.

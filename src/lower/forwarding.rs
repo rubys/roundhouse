@@ -151,6 +151,45 @@ pub(super) fn apply_with_plans(
         plans: &std::collections::HashMap<crate::span::Span, KeywordPolicy>,
         names: &ConstructorNames,
     ) {
+        fn append_packet(mut value: Expr, span: crate::span::Span, args: &mut Vec<Expr>) {
+            // Only ingest-generated links share the written keyword-list
+            // span. Keep an explicit `**hash.merge(other)` as one producer.
+            if value.span == span
+                && matches!(&*value.node, ExprNode::Send {
+                    recv: Some(_), method, args, block: None, ..
+                } if method.as_str() == "merge" && args.len() == 1)
+            {
+                let ExprNode::Send { recv: Some(recv), args: mut links, .. } = *value.node
+                    else { unreachable!() };
+                append_packet(recv, span, args);
+                append_packet(links.remove(0), span, args);
+            } else if value.span == span
+                && matches!(&*value.node, ExprNode::Hash { .. })
+            {
+                if let ExprNode::Hash { kwargs, .. } = &mut *value.node {
+                    *kwargs = true;
+                }
+                args.push(value);
+            } else {
+                args.push(Expr::new(span, ExprNode::KeywordSplat { value }));
+            }
+        }
+        if matches!(plans.get(&e.span), Some(KeywordPolicy::Native | KeywordPolicy::NativeKeywords)) {
+            let args = match &mut *e.node {
+                ExprNode::Send { args, .. } | ExprNode::Super { args: Some(args) } => Some(args),
+                _ => None,
+            };
+            if let Some(args) = args {
+                let mut native = Vec::new();
+                for arg in std::mem::take(args) {
+                    match *arg.node {
+                        ExprNode::KeywordSplat { value } => append_packet(value, arg.span, &mut native),
+                        node => native.push(Expr { node: Box::new(node), ..arg }),
+                    }
+                }
+                *args = native;
+            }
+        }
         if plans.get(&e.span) == Some(&KeywordPolicy::Legacy) {
             let (args, constructor_splat) = match &mut *e.node {
                 ExprNode::Send {

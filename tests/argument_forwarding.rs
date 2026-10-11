@@ -494,11 +494,15 @@ fn keyword_target_gates_distinguish_ordinary_super_from_full_forwarding() {
     use roundhouse::diagnostic::DiagnosticKind;
     use roundhouse::project::{BuildTarget, target_files};
 
-    for (source, expected) in [
+    for (source, expected, verified_keywords) in [
         ("class Probe < StandardError; def initialize; options={}; super(**options); end; end",
-         "keyword splat in ordinary super"),
+         "keyword splat in ordinary super", false),
         ("class Probe; def self.call(...); 11; end; def self.run; options={}; call(**options); end; end",
-         "keyword splat into full argument forwarding"),
+         "keyword splat into full argument forwarding", false),
+        ("class Probe; def self.call(value:); value; end; def self.run; options={value: 11}; call(**options); end; end",
+         "keyword splat into source keyword parameters", true),
+        ("class Probe; def call(value:); value; end; def self.run(receiver); options={value: 11}; receiver.call(**options); end; end",
+         "keyword splat into source keyword parameters", false),
     ] {
         let app = analyzed(source);
         for target in [BuildTarget::Rust, BuildTarget::Typescript, BuildTarget::Spinel, BuildTarget::Roda] {
@@ -508,9 +512,14 @@ fn keyword_target_gates_distinguish_ordinary_super_from_full_forwarding() {
             let gates: Vec<_> = diagnostics.iter().filter(|d| {
                 matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. }
                     if construct.as_str() == "keyword splat in ordinary super"
-                        || construct.as_str() == "keyword splat into full argument forwarding")
+                        || construct.as_str() == "keyword splat into full argument forwarding"
+                        || construct.as_str() == "keyword splat into source keyword parameters")
             }).collect();
-            assert_eq!(gates.len(), 1, "{target:?}: {source}: {diagnostics:?}");
+            let admitted = verified_keywords && target == BuildTarget::Spinel;
+            assert_eq!(gates.len(), usize::from(!admitted), "{target:?}: {source}: {diagnostics:?}");
+            if admitted {
+                continue;
+            }
             let gate = gates[0];
             assert_eq!(gate.severity, Severity::Error);
             assert!(!gate.span.is_synthetic());
@@ -520,6 +529,57 @@ fn keyword_target_gates_distinguish_ordinary_super_from_full_forwarding() {
                 assert!(gate.message.contains("argument ABI"), "{gate:?}");
             }
         }
+    }
+}
+
+#[test]
+fn keyword_constructor_contracts_use_lexical_identity_not_stale_constant_types() {
+    use roundhouse::expr::ExprNode;
+    use roundhouse::ident::{ClassId, Symbol};
+    use roundhouse::project::{BuildTarget, target_files};
+    use roundhouse::ty::Ty;
+
+    let source = r#"
+class Server
+  def initialize(options); @options = options; end
+end
+module Scope
+  class Server
+    def initialize(value:); @value = value; end
+  end
+  def self.run
+    options = {value: 11}
+    Server.new(**options)
+  end
+end
+"#;
+    for (path, inferred, generated, refused) in [
+        (vec!["Server"], None, false, false),
+        (vec!["Server"], Some("Server"), false, false),
+        (vec!["", "Server"], Some("Server"), false, true),
+        (vec!["Server"], Some("Server"), true, true),
+        (vec!["Sender"], Some("Scope::Server"), false, true),
+    ] {
+        fn rewrite(e: &mut roundhouse::expr::Expr, path: &[&str], inferred: Option<&str>, generated: bool, changed: &mut usize) {
+            if matches!(&*e.node, ExprNode::Const { path } if path.last().is_some_and(|p| p.as_str() == "Server")) {
+                e.node = Box::new(ExprNode::Const { path: path.iter().copied().map(Symbol::from).collect() });
+                e.ty = inferred.map(|name| Ty::Class { id: ClassId(Symbol::from(name)), args: vec![] });
+                if generated { e.decisions |= roundhouse::expr::GENERATED_CONST_REF; }
+                *changed += 1;
+            }
+            e.node.for_each_child_mut(&mut |child| rewrite(child, path, inferred, generated, changed));
+        }
+        let mut app = analyzed(source);
+        let owner = app.library_classes.iter_mut().find(|c| c.name.0.as_str() == "Scope").unwrap();
+        let method = owner.methods.iter_mut().find(|m| m.name.as_str() == "run").unwrap();
+        let mut changed = 0;
+        rewrite(&mut method.body, &path, inferred, generated, &mut changed);
+        assert_eq!(changed, 1, "the caller must contain the constant reference under test");
+        let (_, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, roundhouse::fixtures::real_blog(), BuildTarget::Spinel)
+        });
+        let gates = diagnostics.iter().filter(|d| d.message.contains("keyword splat into source keyword parameters")).count();
+        assert_eq!(gates, usize::from(refused), "{path:?}/{inferred:?}/{generated}: {diagnostics:?}");
     }
 }
 

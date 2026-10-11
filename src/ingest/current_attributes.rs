@@ -17,7 +17,7 @@
 //!
 //! ## What it becomes
 //!
-//! * one `@__instance` singleton plus `self.instance` / `self.reset`;
+//! * one thread-local singleton plus `self.instance` / `self.reset`;
 //! * a reader and writer per declared attribute, storing in an ivar;
 //! * `delegate … to: :x, prefix: true, allow_nil: true` expanded to real
 //!   methods (`request_host` → `@request.nil? ? nil : @request.host`);
@@ -32,7 +32,12 @@
 //! `super` call is REWRITTEN to the storage write it means (`@session =
 //! value`). Same reasoning as the concern splices: resolve it in the IR
 //! once, for all thirteen targets.
+//!
+//! Only the no-default/no-reset-callback subset is flattened. Explicit
+//! defaults (including nil) and callback declarations retain an error
+//! annotation and their original base; dropping them is not reset support.
 
+use crate::diagnostic::DiagnosticKind;
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
@@ -43,13 +48,35 @@ const BASE: &str = "ActiveSupport::CurrentAttributes";
 pub fn lower_current_attributes(app: &mut crate::App) {
     let mut generated: Vec<(usize, Vec<MethodDef>)> = Vec::new();
     let mut lowered: Vec<ClassId> = Vec::new();
+    let owners: std::collections::BTreeSet<ClassId> = app.library_classes.iter()
+        .filter(|lc| lc.parent.as_ref().map(|p| p.0.as_str()) == Some(BASE))
+        .map(|lc| lc.name.clone()).collect();
+    let mut unsupported_owners = std::collections::BTreeSet::new();
+    // A reopen can add lifecycle declarations or reset super after the
+    // fragment that names the base. Refuse the owner before removing it.
+    for lc in app.library_classes.iter_mut().filter(|lc| owners.contains(&lc.name)) {
+        let mut unsupported = false;
+        for call in &mut lc.unknown_calls {
+            unsupported |= refuse_lifecycle(call);
+        }
+        for method in &mut lc.methods {
+            if method.name.as_str() == "reset" {
+                unsupported |= refuse_reset_super(&mut method.body);
+            }
+        }
+        if unsupported {
+            unsupported_owners.insert(lc.name.clone());
+        }
+    }
     for (i, lc) in app.library_classes.iter_mut().enumerate() {
-        if lc.parent.as_ref().map(|p| p.0.as_str()) != Some(BASE) {
+        if lc.parent.as_ref().map(|p| p.0.as_str()) != Some(BASE)
+            || unsupported_owners.contains(&lc.name)
+        {
             continue;
         }
         let attrs = take_attribute_decls(lc);
         let delegates = take_delegate_decls(lc);
-        rewrite_super_writers(lc, &attrs);
+        rewrite_super_accessors(lc, &attrs);
         let src = synthesized_source(lc, &attrs, &delegates);
         // Isolated in its own `prism::scope` — never the outer one
         // that spans the whole app's ingest — so a bug in
@@ -86,6 +113,43 @@ pub fn lower_current_attributes(app: &mut crate::App) {
         app.library_classes[i].methods.extend(methods);
     }
     app.current_attribute_classes = lowered;
+}
+
+fn refuse_lifecycle(expr: &mut Expr) -> bool {
+    let mut refused = false;
+    expr.node.for_each_child_mut(&mut |child| refused |= refuse_lifecycle(child));
+    let ExprNode::Send { recv, method, args, .. } = &*expr.node else { return refused };
+    if recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
+        return refused;
+    }
+    let detail = match method.as_str() {
+        "attribute" if !args.iter().all(|a| matches!(&*a.node,
+            ExprNode::Lit { value: Literal::Sym { .. } })) =>
+            "only literal attributes without explicit defaults are supported; default duplication/callable defaults and reset resolution are not implemented",
+        "before_reset" | "after_reset" | "resets" | "set_callback" | "skip_callback" =>
+            "reset callbacks are not implemented; flattening would discard lifecycle effects",
+        _ => return refused,
+    };
+    expr.diagnostic = Some(DiagnosticKind::Unsupported {
+        target: None,
+        construct: Symbol::from("CurrentAttributes lifecycle"),
+        detail: detail.into(),
+    });
+    true
+}
+
+fn refuse_reset_super(expr: &mut Expr) -> bool {
+    let mut refused = false;
+    expr.node.for_each_child_mut(&mut |child| refused |= refuse_reset_super(child));
+    if matches!(&*expr.node, ExprNode::Super { .. }) {
+        expr.diagnostic = Some(DiagnosticKind::Unsupported {
+            target: None,
+            construct: Symbol::from("CurrentAttributes reset"),
+            detail: "reset super requires the inherited Rails lifecycle; flattening would remove its destination".into(),
+        });
+        return true;
+    }
+    refused
 }
 
 /// `attribute :session, :user, :request` — consumed, not replayed.
@@ -165,30 +229,38 @@ fn take_delegate_decls(lc: &mut LibraryClass) -> Vec<Delegation> {
     out
 }
 
-/// `super(value)` inside an app-written `<attr>=` is the generated
-/// storage write. Rewrite it in place so no superclass is needed.
-fn rewrite_super_writers(lc: &mut LibraryClass, attrs: &[Symbol]) {
+/// Accessor overrides reach Rails' generated module through `super`.
+/// Resolve the zero-argument reader and explicit one-argument writer.
+fn rewrite_super_accessors(lc: &mut LibraryClass, attrs: &[Symbol]) {
     for m in &mut lc.methods {
         if m.receiver != MethodReceiver::Instance {
             continue;
         }
-        let Some(attr) = m.name.as_str().strip_suffix('=') else { continue };
+        let writer = m.name.as_str().ends_with('=');
+        let attr = m.name.as_str().strip_suffix('=').unwrap_or(m.name.as_str());
         if !attrs.iter().any(|a| a.as_str() == attr) {
             continue;
         }
         let ivar = Symbol::from(attr);
-        rewrite_super(&mut m.body, &ivar);
+        rewrite_super(&mut m.body, &ivar, writer, m.params.is_empty());
     }
 }
 
-fn rewrite_super(expr: &mut Expr, ivar: &Symbol) {
-    expr.node.for_each_child_mut(&mut |c| rewrite_super(c, ivar));
+fn rewrite_super(expr: &mut Expr, ivar: &Symbol, writer: bool, parameterless: bool) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_super(c, ivar, writer, parameterless));
     let ExprNode::Super { args } = &*expr.node else { return };
+    if !writer {
+        if args.as_ref().is_some_and(|a| !a.is_empty()) || (args.is_none() && !parameterless) {
+            return;
+        }
+        *expr = Expr::new(expr.span, ExprNode::Ivar { name: ivar.clone() });
+        return;
+    }
     // `super` with no argument list (`ZSuper`) forwards the method's own
     // params; campfire writes the explicit `super(value)` form, and only
     // that is reproduced — a bare `super` keeps its shape and stays
     // visible rather than being guessed at.
-    let Some(value) = args.as_ref().and_then(|a| a.first()).cloned() else { return };
+    let Some(value) = args.as_ref().filter(|a| a.len() == 1).and_then(|a| a.first()).cloned() else { return };
     let span = expr.span;
     *expr = Expr::new(
         span,
@@ -227,18 +299,22 @@ fn synthesized_source(
     // the reader below narrows to the class and every forwarder stays
     // typed.
     //
-    // `reset` REPLACES the instance rather than nilling it. Rails'
-    // `CurrentAttributes.reset` sets every attribute back to its
-    // default, which a fresh instance is -- and a reader that ever
-    // answered a nilable made `Current.instance.user` fail to dispatch
-    // and EVERY class-level forwarder register `Untyped`. The reader
-    // narrows its slot read behind `is_a?`, not `nil?`, for the same
-    // reason: `Thread#[]` answers untyped, and a `nil?` test leaves it so.
+    // The reader narrows its slot behind `is_a?`, not `nil?`, because
+    // Thread#[] answers untyped. Reset must not replace this object or
+    // call app writers: Rails replaces its declared storage directly.
+    // With no explicit defaults/callbacks that clears each slot and
+    // returns the empty resolved-defaults Hash, preserving unrelated ivars.
     let key = format!("__current_attrs_{}", class.replace("::", "_"));
     body.push_str(&format!(
-        "  def self.instance\n    c = Thread.current[:{key}]\n    return c if c.is_a?({class})\n    c = {class}.new\n    Thread.current[:{key}] = c\n    c\n  end\n\n\
-         \x20 def self.reset\n    Thread.current[:{key}] = {class}.new\n    nil\n  end\n\n"
+        "  def self.instance\n    c = Thread.current[:{key}]\n    return c if c.is_a?({class})\n    c = {class}.new\n    Thread.current[:{key}] = c\n    c\n  end\n\n"
     ));
+    if !defines("reset") {
+        body.push_str("  def reset\n");
+        for attr in attrs {
+            body.push_str(&format!("    @{attr} = nil\n"));
+        }
+        body.push_str("    {}\n  end\n\n");
+    }
 
     for a in attrs {
         let a = a.as_str();
@@ -268,7 +344,7 @@ fn synthesized_source(
     // Class-level forwarders — the surface app code actually calls
     // (`Current.user`, `Current.account`). Rails gets these from
     // `method_missing`; a statically-resolved target needs them real.
-    let mut forwarded: Vec<String> = Vec::new();
+    let mut forwarded: Vec<String> = vec!["reset".into()];
     for a in attrs {
         forwarded.push(a.as_str().to_string());
         forwarded.push(format!("{}=", a.as_str()));
@@ -284,6 +360,9 @@ fn synthesized_source(
     forwarded.sort();
     forwarded.dedup();
     for name in forwarded {
+        if lc.methods.iter().any(|m| m.receiver == MethodReceiver::Class && m.name.as_str() == name) {
+            continue;
+        }
         if let Some(attr) = name.strip_suffix('=') {
             body.push_str(&format!(
                 "  def self.{attr}=(value)\n    {class}.instance.{attr} = value\n  end\n\n"
@@ -297,4 +376,3 @@ fn synthesized_source(
 
     format!("class {class}\n{body}end\n")
 }
-
