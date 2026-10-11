@@ -551,6 +551,14 @@ assertion was replaced by real execution coverage, CI's existing Markly gem
 was prepared locally, and broad include-only module ingestion was rejected
 rather than relaxing attribution expectations.
 
+Canonical [4294abd4](https://github.com/rubys/roundhouse/commit/4294abd41fe39d2ca0ca83a086c78296cc0dba57)
+was then merged without rewriting contributors. On that combined tree,
+**1,242 focused/library tests pass, zero fail, two are ignored**; the backtrace
+and exact-pin Spinel keyword gates separately pass again. Both binaries were
+rebuilt and original/Core/emitted input and incremental-blog controls rerun with
+the same results above. The 5,130-test full run remains the earlier snapshot,
+not a claim that the complete suite was repeated after these WASI/Futamura updates.
+
 Reproduction uses the rebuilt native observer described above:
 
 ```sh
