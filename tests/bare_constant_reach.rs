@@ -177,4 +177,6 @@ fn the_top_level_hash_with_indifferent_access_is_active_supports_and_only_new_is
     let found = diagnostics(&[], "    @a = [HashWithIndifferentAccess]");
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].contains("constant not supported (all targets): HashWithIndifferentAccess"), "{found:?}");
+    let found = diagnostics(&[], "    @a = Foo::HashWithIndifferentAccess.new");
+    assert!(found.iter().any(|d| d.contains("Foo::HashWithIndifferentAccess")), "{found:?}");
 }

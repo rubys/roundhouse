@@ -681,7 +681,7 @@ impl<'a> BodyTyper<'a> {
                 // same-named declaration: only the exact written class.
                 let exact_modeled_class = |path: &[Symbol]| {
                     let id = match path {
-                        [name] | [_, name] if name.as_str() == "HashWithIndifferentAccess" && path[0].as_str() != "ActiveSupport" => {
+                        [name] | [_, name] if name.as_str() == "HashWithIndifferentAccess" && (path.len() == 1 || path[0].as_str().is_empty()) => {
                             crate::ident::ClassId(Symbol::from(crate::analyze::indifferent::CLASS))
                         }
                         _ => written_class_id(path),
