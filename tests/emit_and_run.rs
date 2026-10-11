@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/discard.rs"]
+mod discard;
 #[path = "emit_and_run/temporal_index_assign.rs"]
 mod temporal_index_assign;
 #[path = "support/class_attribute.rs"]

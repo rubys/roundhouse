@@ -67,6 +67,8 @@ module ActiveRecord
     # it from the bare `{}` in `initialize`, which carries no element
     # type — the same trap `Base`'s `@errors` documents.
     @scope_attributes: Hash[Symbol, untyped]
+    @where_columns: Hash[String, Array[String]]
+    @hash_columns: Array[String]
     def where_scope: (Hash[Symbol, untyped] condition) -> Relation
     def scope_attributes: () -> Hash[Symbol, untyped]
     def not: (?(Hash[String | Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
@@ -139,6 +141,10 @@ module ActiveRecord
     def references: (*Symbol names) -> Relation
     def merge: (Relation other) -> Relation
     def where_clauses: () -> Array[String]
+    def where_columns: () -> Hash[String, Array[String]]
+    def unscope: (Hash[Symbol, Symbol | Array[Symbol]] spec) -> Relation
+    def unscope_targets: (Hash[Symbol, Symbol | Array[Symbol]] spec) -> Array[String]
+    def remember_where_columns: (String clause, Array[String] cols) -> nil
     def arel: () -> Arel::SelectManager
     def none: () -> Relation
     def reload: () -> Relation

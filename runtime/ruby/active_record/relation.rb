@@ -71,6 +71,8 @@ module ActiveRecord
       @skip_preloading = false
       @records = nil
       @scope_attributes = {}
+      @where_columns = {}
+      @hash_columns = []
       @from = nil
       @ctes = []
       @shared_lists = false
@@ -262,8 +264,63 @@ module ActiveRecord
         substitute_binds(condition.to_s, args)
       end
       return false if sql == ""
-      @wheres << (negate ? "NOT (#{sql})" : "(#{sql})")
+      clause = negate ? "NOT (#{sql})" : "(#{sql})"
+      @wheres << clause
+      remember_where_columns(clause, @hash_columns) if condition.is_a?(Hash)
       true
+    end
+
+    # Which columns a hash-built WHERE clause constrains, keyed by the
+    # clause text, so `unscope(where:)` can take it back out. The text
+    # is a pure function of the condition, so the table is a set of
+    # facts every clone may share. A nested `table => { col => v }`
+    # hash is recorded as `"table."`, which no bare `unscope(where: :col)`
+    # target matches.
+    def remember_where_columns(clause, cols)
+      @where_columns[clause] = cols
+      nil
+    end
+
+    # Rails' `unscope(where: :col)` / `unscope(where: [:a, :b])`: drop
+    # every hash-built condition on those columns, keep the rest. Only
+    # the `where:` form exists here, and a clause built from one hash
+    # naming several columns cannot be split, so that case raises
+    # instead of dropping the other columns' conditions. Raw-SQL
+    # clauses are never touched, as in Rails.
+    def unscope(spec)
+      own_lists
+      @records = nil
+      targets = unscope_targets(spec)
+      kept = []
+      @wheres.each do |clause|
+        cols = @where_columns[clause] || []
+        hit = false
+        cols.each { |c| hit = true if targets.include?(c) }
+        if hit && cols.length > 1
+          raise ArgumentError, "unscope(where:) cannot split the multi-column condition #{clause}"
+        end
+        kept << clause unless hit
+      end
+      @wheres = kept
+      self
+    end
+
+    def unscope_targets(spec)
+      spec.keys.each do |kind|
+        raise ArgumentError, "unscope supports only where:, got #{kind}" unless kind == :where
+      end
+      targets = []
+      names = spec[:where]
+      if names.is_a?(Symbol)
+        targets << names.to_s
+      elsif names.is_a?(Array)
+        i = 0
+        while i < names.length
+          targets << names[i].to_s
+          i += 1
+        end
+      end
+      targets
     end
 
     # `order` on a LOADED relation sorts the loaded records in memory
@@ -798,11 +855,16 @@ module ActiveRecord
       own_lists
       @records = nil
       other.where_clauses.each { |w| @wheres << w }
+      other.where_columns.each { |clause, cols| @where_columns[clause] = cols }
       self
     end
 
     def where_clauses
       @wheres
+    end
+
+    def where_columns
+      @where_columns
     end
 
     # `rel.arel` — the relation reified as its SELECT text, for the
@@ -2138,13 +2200,16 @@ module ActiveRecord
     # `IS NULL`, nested Hash -> qualified `table.col = ...`.
     def hash_conditions(hash)
       parts = []
+      @hash_columns = []
       hash.each do |key, val|
         if val.is_a?(Hash)
           val.each do |col, v|
             parts << column_predicate("#{key}.#{col}", v)
+            @hash_columns << "#{key}."
           end
         else
           parts << column_predicate(key.to_s, val)
+          @hash_columns << key.to_s
         end
       end
       parts.join(" AND ")
