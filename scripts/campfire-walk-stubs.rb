@@ -154,17 +154,11 @@ WALK_LATE_PATCHES << lambda do
   end
 end
 
-# GAP: `pluck` on a folded association (`room.memberships.pluck(:user_id)`).
-# Same family as `find_by!` above and `index_by` further up — an ActiveRecord
-# /ActiveSupport collection method the folded Array does not answer.
-class Array
-  def pluck(*names)
-    map do |record|
-      values = names.map { |name| record.public_send(name) }
-      names.one? ? values.first : values
-    end
-  end
-end
+# RETIRED: `pluck` on a folded association (`room.memberships.pluck(:user_id)`).
+# `lower::assoc_pluck` expands the site to a row projection in app bodies
+# and (as of the suite-floor reclaim) in test bodies too — campfire's
+# `RoomsControllerTest` destroy assertion. The walk-stub `Array#pluck`
+# reopen is gone; a gap closed in the compiler is an entry deleted here.
 
 # RETIRED, all six on 2026-08-23, and the diff of this file over that
 # session IS the progress report the header promises. Each was a

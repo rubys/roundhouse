@@ -89,6 +89,9 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
         walk_postorder(body, &mut |e| {
             super::time_current::rewrite_node(e, &formats);
             super::webmock::rewrite_node(e);
+            // Same Array wall as hook bodies: campfire's destroy test
+            // plucks `room.memberships` for the enqueued job's args.
+            super::assoc_pluck::rewrite_node(e, &materialized);
             super::try_guard::rewrite_node(e, &try_definers, &try_parents);
         });
     });
