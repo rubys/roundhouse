@@ -5,6 +5,10 @@
 //! method. The body's own `next` now becomes `return` with the same
 //! value; one in a nested block or a loop still ends that block's
 //! iteration (a `while` body included).
+//!
+//! Rails runs a scope body as `instance_exec(*args, &body) || self`
+//! (`ActiveRecord::Relation#_exec_scope`), so a falsy `next` (bare,
+//! `nil`, `false`, or a value that turns out nil) answers the relation.
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
@@ -35,6 +39,10 @@ const SCOPES: &str = r#"  scope :titled, ->(t) { next all if t.nil?; where(title
     where(id: all.map(&:id).first(kept.size))
   }
 
+  scope :bare_next, ->(stop) { next if stop; where(title: "one") }
+  scope :next_false, ->(stop) { next false if stop; where(title: "one") }
+  scope :next_value, ->(pick) { found = pick && where(title: pick); next found }
+
   validates :title, presence: true"#;
 
 #[test]
@@ -51,6 +59,11 @@ raise "long_or_none(false): #{Article.long_or_none(false).count}" unless Article
 raise "long_or_none(true): #{Article.long_or_none(true).count}" unless Article.long_or_none(true).count == 2
 raise "first_skipping(nil): #{Article.first_skipping(nil).count}" unless Article.first_skipping(nil).count == 0
 raise "first_skipping(2): #{Article.first_skipping(2).count}" unless Article.first_skipping(2).count == 2
+raise "bare_next(true): #{Article.bare_next(true).count}" unless Article.bare_next(true).count == 3
+raise "bare_next(false): #{Article.bare_next(false).count}" unless Article.bare_next(false).count == 1
+raise "next_false(true): #{Article.next_false(true).count}" unless Article.next_false(true).count == 3
+raise "next_value(nil): #{Article.next_value(nil).count}" unless Article.next_value(nil).count == 3
+raise "next_value(two): #{Article.next_value("two").map(&:title)}" unless Article.next_value("two").map(&:title) == ["two"]
 puts "scope next"
 "#,
         );

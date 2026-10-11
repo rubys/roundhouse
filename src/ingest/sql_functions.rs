@@ -33,6 +33,7 @@ use crate::app::{SqlFunction, SqlFunctionKind};
 use crate::dialect::{MethodDef, MethodReceiver, Param};
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
+use crate::span::Span;
 
 use super::expr::ingest_expr;
 use super::util::constant_id_str;
@@ -161,10 +162,16 @@ fn method(
 /// Not inside a nested block or a loop, where `next` still means that
 /// block's or that loop's.
 pub(crate) fn next_to_return(e: &mut Expr) {
+    next_to_return_with(e, &|value, span| {
+        value.unwrap_or_else(|| Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Nil }))
+    });
+}
+
+/// [`next_to_return`], with `returned` building each `return`'s value
+/// from the `next`'s own (`None` for a bare `next`).
+pub(crate) fn next_to_return_with(e: &mut Expr, returned: &dyn Fn(Option<Expr>, Span) -> Expr) {
     if let ExprNode::Next { value } = &mut *e.node {
-        let value = value.take().unwrap_or_else(|| {
-            Expr::new(e.span, ExprNode::Lit { value: crate::expr::Literal::Nil })
-        });
+        let value = returned(value.take(), e.span);
         *e.node = ExprNode::Return { value };
         return;
     }
@@ -175,13 +182,13 @@ pub(crate) fn next_to_return(e: &mut Expr) {
         // Recurse into receiver and args, not the block.
         if let ExprNode::Send { recv, args, .. } = &mut *e.node {
             if let Some(r) = recv {
-                next_to_return(r);
+                next_to_return_with(r, returned);
             }
             for a in args {
-                next_to_return(a);
+                next_to_return_with(a, returned);
             }
         }
         return;
     }
-    e.node.for_each_child_mut(&mut |c| next_to_return(c));
+    e.node.for_each_child_mut(&mut |c| next_to_return_with(c, returned));
 }

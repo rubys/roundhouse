@@ -2404,9 +2404,61 @@ fn parse_scope(
     };
     // The body becomes a class method, where the lambda's own `next v`
     // (its early return) is `return v`; `next` in a def does not parse.
-    super::sql_functions::next_to_return(&mut body);
+    // Rails runs the body as `instance_exec(*args, &body) || self`
+    // (`ActiveRecord::Relation#_exec_scope`), so a falsy `next` answers
+    // the relation: a bare `next`, `next nil` or `next false` returns
+    // `all`, and any other value `v` returns `v || all` unless it is a
+    // bare relation chain (`all`, `none`, `where(...)`), which is never
+    // falsy.
+    super::sql_functions::next_to_return_with(&mut body, &scope_next_value);
 
     Ok(Some(Scope { name, params, body }))
+}
+
+/// The value a scope body's `next` returns from the class method it
+/// becomes; see `parse_scope`.
+fn scope_next_value(value: Option<Expr>, span: Span) -> Expr {
+    let all = || {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("all"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+    let Some(value) = value else { return all() };
+    if matches!(
+        &*value.node,
+        ExprNode::Lit { value: crate::expr::Literal::Nil | crate::expr::Literal::Bool { value: false } }
+    ) {
+        return all();
+    }
+    if bare_chain_root(&value) {
+        return value;
+    }
+    Expr::new(
+        span,
+        ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::Or,
+            surface: crate::expr::BoolOpSurface::Symbol,
+            left: value,
+            right: all(),
+        },
+    )
+}
+
+/// `all`, `none`, `where(...).order(...)`: a chain whose root is a
+/// receiverless call, which in a scope body is a relation query method.
+fn bare_chain_root(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Send { recv: None, .. } => true,
+        ExprNode::Send { recv: Some(r), .. } => bare_chain_root(r),
+        _ => false,
+    }
 }
 
 /// `(expr)` around a single statement — surface-only parens, same as
