@@ -1754,7 +1754,9 @@ fn enum_label_pairs<'a>(
         let value = assoc.value();
         // `pending: PENDING = "pending"` stores the written value and
         // defines the constant, which `mapping_constant_writes` hoists
-        // into the class body; the generated methods read the constant.
+        // into the class body. A literal value is stored as that literal;
+        // only a non-literal one makes the generated methods read the
+        // constant.
         let stored = match value.as_constant_write_node() {
             Some(cw) => match consts.scalar(&cw.value()) {
                 Some(lit) => EnumStored::Lit(lit),
