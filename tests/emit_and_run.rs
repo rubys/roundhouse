@@ -46,6 +46,8 @@ mod helper_anonymous_rest;
 mod controller_response_body;
 #[path = "emit_and_run/render_to_string_partial_ivar.rs"]
 mod render_to_string_partial_ivar;
+#[path = "emit_and_run/active_support_extensions.rs"]
+mod active_support_extensions;
 #[path = "emit_and_run/request_optional_port.rs"]
 mod request_optional_port;
 #[path = "emit_and_run/controller_url_helpers.rs"]

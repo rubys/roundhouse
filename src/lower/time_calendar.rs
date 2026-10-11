@@ -70,7 +70,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     if is_int_value(r) && method.as_str() == "in_time_zone" && args.len() <= 1 {
         let epoch = time_expr(active_support_call("time_at_epoch", vec![r.clone()]));
         let grounded = match args.first() {
-            Some(zone) => active_support_call("in_time_zone", vec![epoch, zone.clone()]),
+            Some(zone) => active_support_call("in_time_zone", vec![epoch, zone_name_arg(zone)]),
             None => active_support_call("present", vec![epoch]),
         };
         *expr.node = grounded;
@@ -89,7 +89,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     }
     if method.as_str() == "in_time_zone" && args.len() <= 1 {
         let grounded = match args.first() {
-            Some(zone) => active_support_call("in_time_zone", vec![r.clone(), zone.clone()]),
+            Some(zone) => active_support_call("in_time_zone", vec![r.clone(), zone_name_arg(zone)]),
             None => active_support_call("present", vec![r.clone()]),
         };
         *expr.node = grounded;
@@ -178,7 +178,7 @@ fn rewrite_date_value(expr: &mut Expr, r: &Expr, method: &str, args: &[Expr]) {
     if method == "in_time_zone" && args.len() <= 1 {
         let midnight = time_expr(active_support_call("date_at_midnight", vec![r.clone()]));
         let grounded = match args.first() {
-            Some(zone) => active_support_call("in_time_zone", vec![midnight, zone.clone()]),
+            Some(zone) => active_support_call("in_time_zone", vec![midnight, zone_name_arg(zone)]),
             None => active_support_call("present", vec![midnight]),
         };
         *expr.node = grounded;
@@ -360,6 +360,24 @@ fn all_range_unit(method: &str) -> Option<&'static str> {
         "all_year" => Some("year"),
         _ => None,
     }
+}
+
+// Not a zone object passed through: `ActiveSupport.in_time_zone` keeps one parameter type, `String?`, so Spinel needs no union for it.
+fn zone_name_arg(zone: &Expr) -> Expr {
+    let is_zone = |t: &Ty| matches!(t, Ty::Class { id, .. } if id.0.as_str() == "ActiveSupport::TimeZone");
+    let zone_object = match &zone.ty {
+        Some(Ty::Union { variants }) => {
+            variants.iter().any(is_zone) && variants.iter().all(|v| is_zone(v) || matches!(v, Ty::Nil))
+        }
+        Some(t) => is_zone(t),
+        None => false,
+    };
+    if !zone_object {
+        return zone.clone();
+    }
+    let mut name = Expr::new(Span::synthetic(), active_support_call("zone_name", vec![zone.clone()]));
+    name.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil] });
+    name
 }
 
 fn time_expr(node: ExprNode) -> Expr {
