@@ -409,7 +409,7 @@ from the three-way app contracts. CLI controls are now 11 tests/119 assertions;
 Writebook retains its explicit missing-ActiveModel-fixture skip (11/113).
 No full Rails, cross-target, performance or framework-replacement claim follows.
 
-### Final shared-compiler verification
+### Round-four shared-compiler verification before upstream integration
 
 The final ten-file production diff has SHA256
 `85e2725bc2695d21141d263c7f8d12c0d0dc8db36179ed752681b6b2161abc93`.
@@ -435,7 +435,7 @@ qualified calls to an invented template singleton still refuse. The existing
 Authentication macro and carried-helper emitted tests pass without relaxed
 expectations.
 
-Final local checks on Rust 1.98.1:
+Local checks on Rust 1.98.1 before merging canonical main:
 
 - `cargo test --locked --jobs 4 --no-fail-fast -- --test-threads=1 --skip test_backtraces_retain_library_and_integration_source_locations`:
   **5,046 passed, zero failed, 245 ignored**, one separately checked backtrace gate.
@@ -453,3 +453,25 @@ Final local checks on Rust 1.98.1:
 The ignored SDK/external-corpus gates and hosted CI have not been promoted to
 passed checks. The existing jbuilder unused-assignment warning remains. These
 results do not authorize publication, merging, or deleting production lowering.
+
+### Verification after canonical upstream integration
+
+Canonical main at [636feb11](https://github.com/rubys/roundhouse/commit/636feb116c3dfb24e9821b8729f54a52c1b77a05)
+was merged without rebasing contributor commits in
+[8ee72483](https://github.com/thomasklemm/roundhouse/commit/8ee724836cd3a4512c719e2a19c855b7b0065f25).
+Fresh checks on that combined compiler tree, using the same commands above:
+
+- Default Cargo suite: **5,067 passed, zero failed, 246 ignored**, with the
+  backtrace gate filtered and separately **passed** under debug symbols.
+- Rebuilt both binaries and reran the micro **22** and Rails **34** contracts
+  in original/Core/emitted processes; strict checks remain clean. Expression
+  types have zero missing/unresolved entries; the reported parameter-signature
+  gaps remain **10/2**, identical to the pre-integration receipts, not zero.
+- Incremental real-blog again passes **21** original Rails tests, **21** emitted
+  blog tests and **22** generator assertions. Whole-app export still refuses
+  **Article#caller** and produces no Core project; forwarding still refuses.
+
+The existing jbuilder warning and upstream Futamura unused-mut warning remain.
+The independently pinned four-app results above were not rerun on this merged
+compiler and retain their exact earlier snapshots. Hosted CI and ignored SDK
+coverage remain separate from these local checks.
