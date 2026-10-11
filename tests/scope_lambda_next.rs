@@ -42,6 +42,11 @@ const SCOPES: &str = r#"  scope :titled, ->(t) { next all if t.nil?; where(title
   scope :bare_next, ->(stop) { next if stop; where(title: "one") }
   scope :next_false, ->(stop) { next false if stop; where(title: "one") }
   scope :next_value, ->(pick) { found = pick && where(title: pick); next found }
+  scope :next_helper, ->(pick) { next titled_or_nil(pick) }
+
+  def self.titled_or_nil(pick)
+    pick && where(title: pick)
+  end
 
   validates :title, presence: true"#;
 
@@ -64,6 +69,8 @@ raise "bare_next(false): #{Article.bare_next(false).count}" unless Article.bare_
 raise "next_false(true): #{Article.next_false(true).count}" unless Article.next_false(true).count == 3
 raise "next_value(nil): #{Article.next_value(nil).count}" unless Article.next_value(nil).count == 3
 raise "next_value(two): #{Article.next_value("two").map(&:title)}" unless Article.next_value("two").map(&:title) == ["two"]
+raise "next_helper(nil): #{Article.next_helper(nil).count}" unless Article.next_helper(nil).count == 3
+raise "next_helper(two): #{Article.next_helper("two").map(&:title)}" unless Article.next_helper("two").map(&:title) == ["two"]
 puts "scope next"
 "#,
         );

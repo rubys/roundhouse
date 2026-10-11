@@ -2409,9 +2409,9 @@ fn parse_scope(
     // Rails runs the body as `instance_exec(*args, &body) || self`
     // (`ActiveRecord::Relation#_exec_scope`), so a falsy `next` answers
     // the relation: a bare `next`, `next nil` or `next false` returns
-    // `all`, and any other value `v` returns `v || all` unless it is a
-    // bare relation chain (`all`, `none`, `where(...)`), which is never
-    // falsy.
+    // `all`, and any other value `v` returns `v || all` unless it is
+    // `all` or `none` itself. A longer chain can still be falsy
+    // (`where(x).presence`, `find_by(x)`, a helper returning nil).
     super::sql_functions::next_to_return_with(&mut body, &scope_next_value);
 
     Ok(Some(Scope { name, params, body }))
@@ -2439,7 +2439,7 @@ fn scope_next_value(value: Option<Expr>, span: Span) -> Expr {
     ) {
         return all();
     }
-    if bare_chain_root(&value) {
+    if is_all_or_none(&value) {
         return value;
     }
     Expr::new(
@@ -2453,14 +2453,14 @@ fn scope_next_value(value: Option<Expr>, span: Span) -> Expr {
     )
 }
 
-/// `all`, `none`, `where(...).order(...)`: a chain whose root is a
-/// receiverless call, which in a scope body is a relation query method.
-fn bare_chain_root(e: &Expr) -> bool {
-    match &*e.node {
-        ExprNode::Send { recv: None, .. } => true,
-        ExprNode::Send { recv: Some(r), .. } => bare_chain_root(r),
-        _ => false,
-    }
+/// A receiverless `all` or `none`: a relation, so `|| all` after it
+/// is dead.
+fn is_all_or_none(e: &Expr) -> bool {
+    matches!(
+        &*e.node,
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if args.is_empty() && matches!(method.as_str(), "all" | "none")
+    )
 }
 
 /// `(expr)` around a single statement — surface-only parens, same as
