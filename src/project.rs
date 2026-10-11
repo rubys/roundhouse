@@ -1546,7 +1546,23 @@ pub fn target_files(
     // yet, so none of the trimming or refusals below apply — every construct is
     // residue, and the residue runs on Rails.
     if target == BuildTarget::Futamura {
-        return Ok(ensure_readme(futamura_files(fixture)?, target));
+        let mut files = futamura_files(fixture)?;
+        let report = emit::futamura::specialize(app, &mut files)?;
+        eprintln!(
+            "roundhouse: futamura: specialized {} query site(s); {} left to Rails{}",
+            report.specialized.len(),
+            report.residue.len(),
+            if std::env::var_os("ROUNDHOUSE_FUTAMURA_LEDGER").is_some() { "" } else { " (ROUNDHOUSE_FUTAMURA_LEDGER=1 lists them)" },
+        );
+        if std::env::var_os("ROUNDHOUSE_FUTAMURA_LEDGER").is_some() {
+            for s in &report.specialized {
+                eprintln!("  specialized {s}");
+            }
+            for r in &report.residue {
+                eprintln!("  residue     {r}");
+            }
+        }
+        return Ok(ensure_readme(files, target));
     }
     let without_health;
     let app = match without_rails_health_controller(app, target) {

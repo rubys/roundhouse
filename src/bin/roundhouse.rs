@@ -340,9 +340,13 @@ fn run_transpile(
     // the INGEST-shape IR — lowering would rewrite the controller
     // bodies into runtime vocabulary (SQL-folded queries, Views::
     // calls), the wrong altitude to re-idiomize into Sequel/Roda from.
-    // See `emit::roda`. Futamura skips it too, for now: stage 0 of the
-    // specializer is the identity, and its output is the ingest source.
-    let lower_diags = if matches!(target, BuildTarget::Roda | BuildTarget::Futamura) {
+    // See `emit::roda`. Futamura needs the types but none of the
+    // lowerings: those rewrite into the runtime's vocabulary, and its
+    // specializations call Rails (docs/pipeline/specialization.md).
+    let lower_diags = if target == BuildTarget::Roda {
+        Vec::new()
+    } else if target == BuildTarget::Futamura {
+        roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
         Vec::new()
     } else {
         roundhouse::session::analyze_and_lower(&mut app)

@@ -59,9 +59,9 @@ and not the second.
   lowerings are wrong for it. Analysis alone would let its conversions
   rely on types (a receiver known to be a `Relation`) rather than on
   surface syntax.
-- `futamura` at stage 0 also skips both, because it specializes
-  nothing. From stage 1 on it needs analysis, plus lowerings of its
-  own whose output calls into Rails rather than replacing it.
+- `futamura` runs the analysis and none of the lowerings. Its own
+  specializations (`src/emit/futamura/`) read the typed IR and emit
+  Ruby that calls into Rails rather than replacing it.
 
 The emitter is shared as well. Specialized Ruby is emitted through
 `emit::ruby` (`emit_expr`), as `roda` already does. A specialization
@@ -109,20 +109,88 @@ specialization does.
 **The gate.** The app's own suite, run by Rails, must give the same
 result against the emitted tree as against the source. Integration
 tests go through the full Rack stack, so they exercise every
-specialized path in-process. `tests/futamura.rs` holds the synthetic
-identity check and the `fixtures/real-blog` suite gate. Performance
+specialized path in-process. `scripts/futamura-suite APP` runs it for
+any app (`--mise` on a box whose shells lack mise's prompt hook);
+`tests/futamura.rs` holds the synthetic checks and the
+`fixtures/real-blog` gate. Every specialized site keeps the original
+expression as a fallback block, and `FUTAMURA_VERIFY=1` runs both and
+raises on any difference, so the app's suite run under it is a
+differential test of each specialization it reaches. Performance
 claims are measured against stage 0 of the same app, which *is* the
 Rails app, on the same machine and seed.
 
-**Order of specializations.** Profile first, then specialize the
-largest share of Rails' per-request cost. The candidates follow the
-layers Rails interprets: rendering (partial lookup resolved at build
-time, collection renders unrolled into loops, helpers dispatched
-statically), dispatch (route table and filter chain become direct
-calls), and queries (`Relation` chains become prepared SQL on Active
-Record's own connection, hydrated with `instantiate`, so callers still
-receive real models). Each lands as a shared lowering, never as a
-per-app patch ([Invariant 2](../../AGENTS.md)).
+**Order of specializations.** Profiles set the order, not whether a
+specialization is built: each is built, gated, measured and published,
+small or null results included. Each lands as a shared lowering, never
+as a per-app patch ([Invariant 2](../../AGENTS.md)). The candidates
+follow the layers Rails interprets: queries, rendering (partial lookup
+resolved at build time, collection renders unrolled, helpers dispatched
+statically), and dispatch (route table and filter chain as direct
+calls). Profiles of the two benchmark apps (October 2026, CRuby + YJIT,
+in-process) disagree on what dominates:
+
+- Campfire caches aggressively. On its cached pages the controller is
+  80-90% of a request, spent on collection-cache keys and decoding,
+  Active Record, and gzip; route recognition is negligible. With the
+  cache off, rendering costs ~8 ms per message, spread across Active
+  Record, Active Support, ActionView and Action Text's sanitizer.
+- Lobsters barely caches. Active Record and Active Model are a third of
+  self time against 11% in SQLite itself.
+
+### Specialization 1: static query chains
+
+`src/emit/futamura/query.rs`. A chain whose root is a model constant or
+a plain `has_many` reader, whose links are scopes, `where(column:
+value)`, literal `order`/`preload`/`includes` and `limit`, and which
+ends in a terminal (`to_a`, `first`/`last` with or without a count,
+`take`, `find_by`) is rewritten as a Relation over bind placeholders in
+the generated initializer. Rails builds it once into an
+`ActiveRecord::StatementCache`, the mechanism behind its own
+`find_by`, so the SQL, the preload trees and the strict-loading setting
+are Rails' own. The binding-time analysis here decides which parts are
+static. A scope that only builds a relation from literals is called by
+name, so Rails evaluates it, including the Active Storage and Action
+Text scopes whose trees depend on boot-time configuration. Scopes with
+parameters, or with a terminal inside, are inlined. Values only known
+per request become binds, evaluated at the call site. `first`/`last`
+use Rails' own `ordered_relation`, so an unordered chain gets Rails'
+implicit order.
+
+Coverage (`ROUNDHOUSE_FUTAMURA_LEDGER=1` lists every site left to
+Rails, with its reason): Campfire 90b3300, 6 sites, including both
+default message-page chains; the rest are string conditions over
+records and scopes that return objects rather than relations. Lobsters,
+46 of 58 query sites, chiefly the single-record lookups
+`Model.where(column: params[:x]).first`. Campfire edbc779's
+`last_page` returns a deferred-preload `Page`, not a relation, and is
+correctly left alone.
+
+Verified: Campfire 90b3300's suite gives the same result on both trees
+with `FUTAMURA_VERIFY=1` (407 runs), its specialized sites compiled to
+statements, not the fallback, with Rails' own preload trees. Every
+Lobsters benchmark request (228) returns the same response on both
+trees in verify mode, after normalizing per-request tokens and a
+clock-dependent minutes count.
+
+Measured (October 2026, rubix3, CRuby + YJIT), a null result:
+
+| | Rails | Futamura |
+|---|--:|--:|
+| Campfire room-page chain, in-process | 4.83 ms | 4.61 ms |
+| Campfire room page, in-process | 40.97 ms | 41.07 ms |
+| Campfire room page, harness c=1 (req/s, median of 3) | 20.1 | 20.4 |
+| Campfire room page, harness c=16 | 57.2 (55.9-57.4) | 53.7 (52.9-57.3) |
+| Lobsters benchmark pass, in-process, one core | 1,353 ms | 1,358 ms |
+
+The SQL is the same and so is most of the work. What this removes,
+building the relation and compiling Arel per request, is ~0.2 ms; of
+the room page's 4.8 ms chain, ~4.1 ms is preloading, which still runs
+through Rails' Preloader. Harness rows for unspecialized routes vary by
+about 2% between the two images, and Lobsters per-route deltas scatter
+±9% around zero, so neither app shows a measurable change. That makes
+preload specialization (batched queries per association level, with
+association targets set the way the Preloader sets them) the next
+query specialization.
 
 ## Why `roda` and `futamura` stay separate targets
 

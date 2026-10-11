@@ -127,3 +127,146 @@ fn real_blog_suite_gives_the_same_result_on_source_and_emitted_tree() {
     // The fixture's suite is green, so SAME must mean zero failures.
     assert!(stdout.contains(" 0 failures, 0 errors"), "{stdout}");
 }
+
+mod query_specialization {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::emit::futamura::{INITIALIZER, specialize};
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    const SCHEMA: &str = r#"ActiveRecord::Schema.define do
+  create_table "rooms", force: :cascade do |t|
+    t.string "name", null: false
+  end
+  create_table "messages", force: :cascade do |t|
+    t.integer "room_id", null: false
+    t.integer "creator_id", null: false
+    t.boolean "pinned", default: false
+    t.datetime "created_at", null: false
+  end
+  create_table "users", force: :cascade do |t|
+    t.string "name", null: false
+  end
+end
+"#;
+
+    const MESSAGE: &str = r#"class Message < ApplicationRecord
+  PAGE_SIZE = 40
+
+  belongs_to :room
+  belongs_to :creator, class_name: "User"
+
+  scope :ordered, -> { order(:created_at) }
+  scope :with_creator, -> { preload(:creator) }
+  scope :last_page, -> { ordered.last(PAGE_SIZE) }
+  scope :before, ->(message) { where("created_at < ?", message.created_at) }
+end
+"#;
+
+    const CONTROLLER: &str = r#"class MessagesController < ApplicationController
+  def index
+    @room = Room.find(params[:room_id])
+    @messages = @room.messages.with_creator.last_page
+    @pinned = Message.where(room_id: @room.id, pinned: true).order(created_at: :desc).first(3)
+    @older = @room.messages.before(@messages.first).to_a
+  end
+end
+"#;
+
+    fn app_and_files() -> (roundhouse::App, Vec<(String, String)>) {
+        let files: Vec<(&str, &str)> = vec![
+            ("db/schema.rb", SCHEMA),
+            ("app/models/room.rb", "class Room < ApplicationRecord\n  has_many :messages\nend\n"),
+            ("app/models/user.rb", "class User < ApplicationRecord\nend\n"),
+            ("app/models/message.rb", MESSAGE),
+            ("app/controllers/messages_controller.rb", CONTROLLER),
+        ];
+        let tree: HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        (app, files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect())
+    }
+
+    fn file<'f>(files: &'f [(String, String)], path: &str) -> &'f str {
+        &files.iter().find(|(p, _)| p == path).unwrap_or_else(|| panic!("{path} not emitted")).1
+    }
+
+    #[test]
+    fn association_chain_through_scopes_becomes_a_statement_with_its_owner_bound() {
+        let (app, mut files) = app_and_files();
+        let report = specialize(&app, &mut files).unwrap();
+        let controller = file(&files, "app/controllers/messages_controller.rb");
+        let init = file(&files, INITIALIZER);
+        // The call site binds the owner's id and keeps the chain as fallback.
+        assert!(controller.contains(
+            "@messages = Futamura.records(:controllers_messages_controller_4_17, [@room.id], owner: @room, \
+             association: :messages) { @room.messages.with_creator.last_page }"
+        ), "{controller}");
+        // Static scopes stay calls for Rails to build; the terminal scope is
+        // inlined, its constant qualified so the initializer can name it,
+        // and `last(n)` follows Rails' FinderMethods: ordered_relation,
+        // limit, reverse_order, then the rows reversed.
+        assert!(init.contains(
+            "Futamura.define(:controllers_messages_controller_4_17, Message, reverse: true) \
+             { |p| Message.all.where(room_id: p.bind).with_creator.ordered.send(:ordered_relation).limit(Message::PAGE_SIZE).reverse_order }"
+        ), "{init}");
+        assert!(report.specialized.iter().any(|s| s.ends_with("messages_controller.rb:4:17")), "{:?}", report.specialized);
+    }
+
+    #[test]
+    fn constant_rooted_chain_binds_request_values_and_bakes_literals() {
+        let (app, mut files) = app_and_files();
+        specialize(&app, &mut files).unwrap();
+        let controller = file(&files, "app/controllers/messages_controller.rb");
+        let init = file(&files, INITIALIZER);
+        assert!(controller.contains("@pinned = Futamura.records(:controllers_messages_controller_5_15, [@room.id]) {"), "{controller}");
+        assert!(init.contains(
+            "Message.all.where(room_id: p.bind, pinned: true).order({ created_at: :desc }).send(:ordered_relation).limit(3) }"
+        ), "{init}");
+    }
+
+    #[test]
+    fn a_string_condition_over_a_record_is_left_to_rails_with_a_reason() {
+        let (app, mut files) = app_and_files();
+        let report = specialize(&app, &mut files).unwrap();
+        let controller = file(&files, "app/controllers/messages_controller.rb");
+        assert!(controller.contains("@older = @room.messages.before(@messages.first).to_a\n"), "{controller}");
+        assert!(report.residue.iter().any(|r| r.contains("messages_controller.rb:6:")), "{:?}", report.residue);
+    }
+}
+
+mod single_record_terminals {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::emit::futamura::{INITIALIZER, specialize};
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    #[test]
+    fn first_without_order_takes_rails_implicit_order_and_find_by_is_where_take() {
+        let schema = "ActiveRecord::Schema.define do\n  create_table \"stories\", force: :cascade do |t|\n    t.string \"short_id\", null: false\n  end\nend\n";
+        let controller = "class StoriesController < ApplicationController\n  def show\n    @story = Story.where(short_id: params[:id].to_s).first\n    @same = Story.find_by(short_id: params[:id] || params[:story_id])\n  end\nend\n";
+        let files: Vec<(&str, &str)> = vec![
+            ("db/schema.rb", schema),
+            ("app/models/story.rb", "class Story < ApplicationRecord\nend\n"),
+            ("app/controllers/stories_controller.rb", controller),
+        ];
+        let tree: HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut files: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        specialize(&app, &mut files).unwrap();
+        let get = |path: &str| files.iter().find(|(p, _)| p == path).unwrap().1.clone();
+        let init = get(INITIALIZER);
+        let out = get("app/controllers/stories_controller.rb");
+        assert!(init.contains("Story, one: true) { |p| Story.all.where(short_id: p.bind).send(:ordered_relation).limit(1) }"), "{init}");
+        assert!(init.contains("Story, one: true) { |p| Story.all.where(short_id: p.bind).limit(1) }"), "{init}");
+        assert!(out.contains("[params[:id].to_s]) { Story.where(short_id: params[:id].to_s).first }"), "{out}");
+        assert!(out.contains("[params[:id] || params[:story_id]]) {"), "{out}");
+    }
+}
