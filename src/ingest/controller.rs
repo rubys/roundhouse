@@ -135,6 +135,24 @@ pub(super) fn ingest_controller_with_nesting(
     drain_comments_before(&mut comments, class.location().start_offset());
     let mut body_items: Vec<ControllerBodyItem> = Vec::new();
     let owner = ClassId(Symbol::from(name_path.join("::")));
+    // Folded into every `around_block_filter` name on this controller so a
+    // parent and child controller each with their own block-form
+    // `around_action` don't synthesize the SAME method name: the
+    // synthesized method is an ordinary Ruby method, and the child's
+    // would otherwise override the parent's instead of coexisting
+    // alongside it through inheritance.
+    // Each `::` segment is kept as written (case included) and prefixed
+    // with its own length, so the encoding is one-to-one: neither
+    // `Admin::WidgetsController` (`5Admin_17WidgetsController`) vs a flat
+    // `AdminWidgetsController` (`22AdminWidgetsController`), nor two names
+    // that only underscore alike (`HTMLParser`, `HtmlParser`), can share it.
+    let around_block_owner_ident = owner
+        .0
+        .as_str()
+        .split("::")
+        .map(|seg| format!("{}{seg}", seg.len()))
+        .collect::<Vec<_>>()
+        .join("_");
     let mut layout = LayoutDecl::Inherit;
     // Deterministic per-controller numbering for `around_block_filter`'s
     // synthesized method names — bumped once per successfully LOWERED
@@ -206,7 +224,12 @@ pub(super) fn ingest_controller_with_nesting(
                     let loc = stmt.location();
                     let raw_text = std::str::from_utf8(&source[loc.start_offset()..loc.end_offset()])
                         .unwrap_or("");
-                    match around_block_filter(&expr, raw_text, &mut around_block_seq) {
+                    match around_block_filter(
+                        &expr,
+                        raw_text,
+                        &around_block_owner_ident,
+                        &mut around_block_seq,
+                    ) {
                         Some(Ok((filter, action))) => {
                             body_items.push(ControllerBodyItem::Filter {
                                 filter,
@@ -1214,8 +1237,8 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
 /// around filter's own method body does with a bare `yield`
 /// (`build_filter_preamble`'s doc comment: "`around_action :m` — `m` runs
 /// the action by yielding"). So the block becomes exactly that kind of
-/// method: synthesize a private `__rh_around_<n>` whose body is the
-/// block's, with the first param's reads rewritten to `self`
+/// method: synthesize a private `__rh_around_<controller>_<n>` whose
+/// body is the block's, with the first param's reads rewritten to `self`
 /// (`app::rewrite_var_to_self_ref`, the same helper the macro-expanded
 /// block filters use) and every bare `<continuation>.call` — no args, no
 /// attached block, nothing else done with the name — rewritten to `yield`.
@@ -1227,6 +1250,15 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
 /// a hand-written `around_action :method` already does
 /// (`build_filter_preamble` / `synthesize_process_action`), in declaration
 /// order among whatever other filters surround it.
+///
+/// `owner_ident` (the controller's `underscore`d name, `::` folded to
+/// `_`) is folded into the synthesized name alongside `seq`, which only
+/// counts per-controller: without it, a parent controller's
+/// `__rh_around_1` and an unrelated child controller's own
+/// `__rh_around_1` would be the SAME method name, and since the child
+/// inherits the parent's method table, one definition would silently
+/// override the other instead of the two filters coexisting as Rails
+/// runs them.
 ///
 /// Returns `None` when `expr` is not a block-form `around_action` call at
 /// all — the caller falls through to its own handling (most commonly: a
@@ -1242,6 +1274,7 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
 pub(super) fn around_block_filter(
     expr: &Expr,
     raw_text: &str,
+    owner_ident: &str,
     seq: &mut u32,
 ) -> Option<Result<(crate::dialect::Filter, Action), String>> {
     use crate::dialect::{Filter, FilterKind};
@@ -1375,7 +1408,7 @@ pub(super) fn around_block_filter(
     }
 
     *seq += 1;
-    let name = Symbol::from(format!("__rh_around_{seq}"));
+    let name = Symbol::from(format!("__rh_around_{owner_ident}_{seq}"));
     let filter = Filter {
         kind: FilterKind::Around,
         target: name.clone(),
