@@ -304,6 +304,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("bcrypt", GemFate::Modeled),      // catalog/gems: BCrypt::*; has_secure_password
     ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); no Warden route guards
     ("faker", GemFate::Modeled),       // catalog/gems: Faker::*
+    ("friendly_id", GemFate::Modeled), // lower/friendly_id + registry: friendly_id/friendly/to_param, Relation#friendly_find (slugged [+history] finder only; slug generation on save, :scoped/:finders/:simple_i18n unmodeled)
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
     ("htmlentities", GemFate::Modeled), // catalog/gems: HTMLEntities
     ("image_processing", GemFate::Modeled), // active_storage variants seam
@@ -462,7 +463,6 @@ const SURFACES: &[(&str, &[&str])] = &[
     ("discard", &["discard", "discard!", "undiscard", "undiscard!", "discarded?", "undiscarded?", "kept", "discarded", "with_discarded", "discard_all", "undiscard_all"]),
     ("doorkeeper", &["doorkeeper_authorize!", "doorkeeper_token", "current_resource_owner"]),
     ("enumerize", &["enumerize"]),
-    ("friendly_id", &["friendly_id", "friendly", "slug_candidates", "should_generate_new_friendly_id?", "normalize_friendly_id"]),
     ("geocoder", &["geocoded_by", "reverse_geocoded_by", "geocode", "reverse_geocode", "near", "distance_to", "distance_from", "bearing_to", "within_bounding_box"]),
     ("money-rails", &["monetize"]),
     ("pagy", &["pagy", "pagy_nav", "pagy_info", "pagy_array", "pagy_countless", "pagy_bootstrap_nav", "pagy_get_vars"]),
@@ -772,7 +772,7 @@ BUNDLED WITH
         assert_eq!(gem_owning_constant(&census, "Rails"), None, "framework gems don't claim");
         let lock = Lockfile::parse(LOCK);
         assert_eq!(gem_claiming_method(&lock, "policy_scope"), Some("pundit"));
-        assert_eq!(gem_claiming_method(&lock, "friendly_id"), None, "friendly_id is not in this lock");
+        assert_eq!(gem_claiming_method(&lock, "acts_as_list"), None, "acts-as-list is not in this lock");
     }
 
     #[test]

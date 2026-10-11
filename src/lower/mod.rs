@@ -68,6 +68,7 @@ mod perform_all_later;
 pub mod authenticate_by;
 pub mod group_count;
 pub mod bool_fold;
+pub mod friendly_id;
 pub mod generates_token_for;
 pub mod spliced_concern_bodies;
 pub mod unported_rails_subclasses;

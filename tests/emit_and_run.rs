@@ -10797,3 +10797,242 @@ raise "the cached copy is the caller's object" if again.equal?(body)
 "##)
         .assert_passes();
 }
+
+// ---------------------------------------------------------------------
+// friendly_id: `Article.friendly.find` (slugged + history)
+// ---------------------------------------------------------------------
+
+/// real-blog with friendly_id on Article, as the EngineeredAt models
+/// write it (`extend FriendlyId` + `friendly_id :title, use: %i[slugged
+/// history]`), a `slug` column, the gem's `friendly_id_slugs` table, and
+/// the controller's `set_article` reading through `Article.friendly`.
+fn friendly_article_overlay(use_modules: &str) -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  create_table \"articles\", force: :cascade do |t|\n    t.string \"title\"\n",
+            "  create_table \"friendly_id_slugs\", force: :cascade do |t|\n    t.string \"slug\", null: false\n    t.integer \"sluggable_id\", null: false\n    t.string \"sluggable_type\", limit: 50\n    t.string \"scope\"\n    t.datetime \"created_at\"\n    t.index [\"slug\", \"sluggable_type\"], name: \"index_friendly_id_slugs_on_slug_and_sluggable_type\"\n  end\n\n  create_table \"articles\", force: :cascade do |t|\n    t.string \"title\"\n    t.string \"slug\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            &format!("class Article < ApplicationRecord\n  extend FriendlyId\n  friendly_id :title, use: {use_modules}\n"),
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "@article = Article.find(params.expect(:id))",
+            "@article = Article.friendly.find(params[:id])",
+        )
+        .write(
+            "test/controllers/articles_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticlesControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    Article.delete_all
+    @gamma = Article.create!(title: "Gamma Post", body: "gamma body is long enough", slug: "gamma-post")
+    # A slug that is another row's id: friendly_id looks the slug up
+    # FIRST, so /articles/<gamma.id> is this article, not gamma.
+    @beta = Article.create!(title: "Beta Post", body: "beta body is long enough here", slug: @gamma.id.to_s)
+    @alpha = Article.create!(title: "Alpha Post", body: "alpha body is long enough", slug: "alpha-post")
+  end
+
+  test "a slug finds its article" do
+    get "/articles/alpha-post"
+    assert_response :success
+    assert_select "h1", "Alpha Post"
+  end
+
+  test "an id still finds its article when no slug matches" do
+    get "/articles/#{@alpha.id}"
+    assert_response :success
+    assert_select "h1", "Alpha Post"
+    get "/articles/#{@beta.id}"
+    assert_response :success
+    assert_select "h1", "Beta Post"
+  end
+
+  test "a slug that is another record's id wins over the id" do
+    get "/articles/#{@gamma.id}"
+    assert_response :success
+    assert_select "h1", "Beta Post"
+  end
+end
+"#,
+        )
+}
+
+/// friendly_id's finder over `Article.friendly.find`, in the emitted
+/// Ruby: slug first, then the id, 404 otherwise (the pairs
+/// `tools/compare` reproduces against the gem itself).
+#[test]
+fn friendly_find_resolves_a_slug_then_an_id() {
+    friendly_article_overlay("%i[slugged]")
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+/// `:history` also finds an article by a slug it no longer has, newest
+/// history row first; a current slug beats a history row.
+#[test]
+fn friendly_find_with_history_finds_a_former_slug() {
+    let overlay = friendly_article_overlay("%i[slugged history]").write(
+        "test/controllers/articles_controller_test.rb",
+        r#"require "test_helper"
+
+class ArticlesControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    Article.delete_all
+    @old = Article.create!(title: "Renamed Post", body: "renamed body is long enough", slug: "renamed-post")
+    @other = Article.create!(title: "Other Post", body: "other body is long enough", slug: "other-post")
+    conn = ActiveRecord::Base.connection
+    # history rows: the former slug "first-name" belonged to @old; the
+    # slug "contested" is in history for BOTH articles (the newest row,
+    # the higher id, is @other's); a history row for a different model
+    # type must not match.
+    conn.execute("INSERT INTO friendly_id_slugs (slug, sluggable_type, sluggable_id) VALUES ('first-name', 'Article', #{@old.id})")
+    conn.execute("INSERT INTO friendly_id_slugs (slug, sluggable_type, sluggable_id) VALUES ('contested', 'Article', #{@old.id})")
+    conn.execute("INSERT INTO friendly_id_slugs (slug, sluggable_type, sluggable_id) VALUES ('contested', 'Article', #{@other.id})")
+    conn.execute("INSERT INTO friendly_id_slugs (slug, sluggable_type, sluggable_id) VALUES ('wrong-type', 'Topic', #{@old.id})")
+    conn.execute("INSERT INTO friendly_id_slugs (slug, sluggable_type, sluggable_id) VALUES ('other-post', 'Article', #{@old.id})")
+  end
+
+  test "a former slug finds its article" do
+    get "/articles/first-name"
+    assert_response :success
+    assert_select "h1", "Renamed Post"
+  end
+
+  test "the newest history row wins" do
+    get "/articles/contested"
+    assert_response :success
+    assert_select "h1", "Other Post"
+  end
+
+  test "a current slug beats a history row for another article" do
+    get "/articles/other-post"
+    assert_response :success
+    assert_select "h1", "Other Post"
+  end
+
+end
+"#,
+    );
+    overlay.run_test("test/controllers/articles_controller_test.rb").assert_passes();
+}
+
+/// What matches nothing is `RecordNotFound` (404 through the dispatcher,
+/// as in Rails), with friendly_id's message for a String that could not
+/// be a key and Rails' own for one that could. Run through the
+/// dispatcher: the emitted test harness reports a raise as a failure.
+#[test]
+fn friendly_find_answers_404_for_what_matches_nothing() {
+    friendly_article_overlay("%i[slugged history]")
+        .run_ruby(
+            r##"
+alpha = Article.create!(title: "Alpha Post", body: "alpha body is long enough", slug: "alpha-post")
+ActiveRecord::Base.connection.execute("INSERT INTO friendly_id_slugs (slug, sluggable_type, sluggable_id) VALUES ('wrong-type', 'Topic', #{alpha.id})")
+ActiveRecord::Base.connection.execute("INSERT INTO friendly_id_slugs (slug, sluggable_type, sluggable_id) VALUES ('old-alpha', 'Article', #{alpha.id})")
+def status(path)
+  status, = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+  status
+end
+want = {
+  "/articles/alpha-post" => 200,
+  "/articles/old-alpha" => 200,
+  "/articles/#{alpha.id}" => 200,
+  "/articles/no-such-post" => 404,
+  "/articles/wrong-type" => 404,
+  "/articles/#{alpha.id + 1000}" => 404,
+  "/articles/#{alpha.id}-alpha-post" => 404,
+}
+want.each do |path, code|
+  got = status(path)
+  raise "GET #{path} answered #{got}, want #{code}" unless got == code
+end
+
+def not_found(arg)
+  Article.friendly.find(arg)
+  raise "no raise for #{arg.inspect}"
+rescue ActiveRecord::RecordNotFound => e
+  e
+end
+e = not_found("no-such-post")
+raise "message #{e.message}" unless e.message == "can't find record with friendly id: \"no-such-post\""
+raise "model/key/id #{[e.model, e.primary_key, e.id].inspect}" unless [e.model, e.primary_key, e.id] == ["Article", "slug", "no-such-post"]
+e = not_found("12abc")
+raise "prefix message #{e.message}" unless e.message == "can't find record with friendly id: \"12abc\""
+e = not_found("9999")
+raise "id message #{e.message}" unless e.message == "Couldn't find Article with 'id'=\"9999\""
+e = not_found(9999)
+raise "integer message #{e.message}" unless e.message == "Couldn't find Article with 'id'=9999"
+e = not_found(nil)
+raise "nil message #{e.message}" unless e.message == "Couldn't find Article without an ID"
+# `friendly` mid-chain keeps the relation's conditions and finds the same record.
+raise "chained" unless Article.where(title: "Alpha Post").friendly.find("old-alpha").id == alpha.id
+begin
+  Article.where(title: "Nope").friendly.find("alpha-post")
+  raise "scope ignored"
+rescue ActiveRecord::RecordNotFound
+end
+# friendly_id's to_param: the slug, else the id as a String.
+raise "to_param #{alpha.to_param.inspect}" unless alpha.to_param == "alpha-post"
+blank = Article.create!(title: "Blank Slug", body: "blank body is long enough")
+raise "blank to_param #{blank.to_param.inspect}" unless blank.to_param == blank.id.to_s
+puts "PASS friendly 404s"
+"##,
+        )
+        .assert_passes();
+}
+
+/// The finder against friendly_id 5.7.0 itself: the same seed and the
+/// same inputs ran through the real gem (ActiveRecord 8.1 + sqlite,
+/// `Article.friendly.find`, `:slugged, :history`), and each line below is
+/// what the gem printed — the record found, or the RecordNotFound message,
+/// model, key and id. Rows get ids 1..3: gamma (slug "gamma-post"), beta
+/// (slug "1", gamma's id), alpha (slug "alpha-post").
+#[test]
+fn friendly_find_matches_the_gem_on_its_oracle_inputs() {
+    friendly_article_overlay("%i[slugged history]")
+        .run_ruby(
+            r##"
+gamma = Article.create!(title: "Gamma", body: "gamma body is long enough", slug: "gamma-post")
+beta = Article.create!(title: "Beta", body: "beta body is long enough here", slug: gamma.id.to_s)
+alpha = Article.create!(title: "Alpha", body: "alpha body is long enough", slug: "alpha-post")
+raise "ids #{[gamma.id, beta.id, alpha.id]}" unless [gamma.id, beta.id, alpha.id] == [1, 2, 3]
+conn = ActiveRecord::Base.connection
+[["first-name", "Article", alpha.id], ["contested", "Article", alpha.id], ["contested", "Article", beta.id],
+ ["wrong-type", "Topic", alpha.id], ["beta-old", "Article", beta.id]].each do |s, t, i|
+  conn.execute("INSERT INTO friendly_id_slugs (slug, sluggable_type, sluggable_id) VALUES ('#{s}', '#{t}', #{i})")
+end
+oracle = [
+  ["alpha-post", "found Alpha"],
+  ["first-name", "found Alpha"],
+  ["contested", "found Beta"],
+  ["wrong-type", "NOTFOUND can't find record with friendly id: \"wrong-type\" [\"Article\",\"slug\",\"wrong-type\"]"],
+  ["1", "found Beta"],
+  ["2", "found Beta"],
+  ["3", "found Alpha"],
+  ["no-such", "NOTFOUND can't find record with friendly id: \"no-such\" [\"Article\",\"slug\",\"no-such\"]"],
+  ["3-alpha-post", "NOTFOUND can't find record with friendly id: \"3-alpha-post\" [\"Article\",\"slug\",\"3-alpha-post\"]"],
+  ["1003", "NOTFOUND Couldn't find Article with 'id'=\"1003\" [\"Article\",\"id\",\"1003\"]"],
+  ["12abc", "NOTFOUND can't find record with friendly id: \"12abc\" [\"Article\",\"slug\",\"12abc\"]"],
+  [" 3 ", "found Alpha"],
+  [3, "found Alpha"],
+  [9999, "NOTFOUND Couldn't find Article with 'id'=9999 [\"Article\",\"id\",9999]"],
+  [nil, "NOTFOUND Couldn't find Article without an ID [\"Article\",\"id\",nil]"],
+  ["beta-old", "found Beta"],
+]
+oracle.each do |arg, want|
+  got = begin
+    "found #{Article.friendly.find(arg).title}"
+  rescue ActiveRecord::RecordNotFound => e
+    "NOTFOUND #{e.message} [#{e.model.inspect},#{e.primary_key.inspect},#{e.id.inspect}]"
+  end
+  raise "#{arg.inspect}: got #{got}, gem says #{want}" unless got == want
+end
+puts "PASS friendly oracle"
+"##,
+        )
+        .assert_passes();
+}

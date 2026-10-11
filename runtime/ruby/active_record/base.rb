@@ -298,6 +298,18 @@ module ActiveRecord
       false
     end
 
+    # friendly_id (`friendly_id :col, use: [:slugged ...]`): the column
+    # `Model.friendly.find` looks a slug up in, and whether `:history`
+    # also consults `friendly_id_slugs`. lower::friendly_id overrides both
+    # on a declaring model; any other model has no `friendly`, as in Rails.
+    def self._friendly_slug_column
+      raise NotImplementedError, "#{name} does not declare friendly_id"
+    end
+
+    def self._friendly_history
+      false
+    end
+
     # The temporal subset of `schema_columns`. Unlike its siblings this
     # one does NOT raise unoverridden: a model with no temporal column
     # legitimately has none, and the lowering emits the (possibly empty)

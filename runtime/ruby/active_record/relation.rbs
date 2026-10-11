@@ -56,6 +56,7 @@ module ActiveRecord
     @from: String?
     @ctes: Array[String]
     @shared_lists: bool
+    @friendly: bool
     def with_recursive: (Hash[Symbol, Array[Relation]] ctes) -> Relation
     def from: (String source) -> Relation
     def cte_prefix: () -> String
@@ -260,6 +261,11 @@ module ActiveRecord
     def pick: (String | Symbol col) -> untyped
     def ids: () -> Array[Integer]
     def find: (Integer | Float | String | Array[Integer | Float | String] | nil id) -> untyped
+    def find_primary_key: (Integer | Float | String | nil id) -> Base
+    def friendly: () -> Relation
+    def friendly_find: (String id) -> Base
+    def friendly_first: (String id) -> Base?
+    def friendly_history_first: (String id) -> Base?
     def find_ids: (Array[Integer | Float | String] ids) -> Array[Base]
     def find_by: (Hash[Symbol, untyped] | String | nil conditions) -> Base?
     def find_by!: (Hash[Symbol, untyped] | String | nil conditions) -> Base
