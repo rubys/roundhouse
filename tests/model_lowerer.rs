@@ -181,6 +181,8 @@ fn article_lowers_with_schema_methods() {
         "delete_all",
         "_columns_sql",
         "_hydrate_all",
+        // #818: class-side name table for `reflect_on_association`.
+        "_association_names",
     ];
     for m in &lc.methods {
         let n = m.name.as_str();

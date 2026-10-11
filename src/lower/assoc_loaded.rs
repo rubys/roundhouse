@@ -308,6 +308,28 @@ pub(crate) fn rewrite_node(
     *expr = rewritten;
 }
 
+/// True when at least one model synthesizes `<name>_loaded?`.
+fn any_model_declares_name(
+    by_model: &HashMap<ClassId, HashSet<Symbol>>,
+    name: &Symbol,
+) -> bool {
+    by_model.values().any(|names| names.contains(name))
+}
+
+/// A ClassId that synthesizes `<name>_loaded?`, for stamping the
+/// rewritten send's receiver type on strict targets. When several
+/// models share the name (Message and Membership both `:room`), any
+/// declaring class is enough — the spelling is identical.
+fn a_model_declaring(
+    by_model: &HashMap<ClassId, HashSet<Symbol>>,
+    name: &Symbol,
+) -> Option<ClassId> {
+    by_model
+        .iter()
+        .find(|(_, names)| names.contains(name))
+        .map(|(id, _)| id.clone())
+}
+
 /// `association(:creator).loaded?` → `creator_loaded?` (or
 /// `self.creator_loaded?` when implicit-self), for every association
 /// with a synthesized flat predicate on the receiver's model.
@@ -333,18 +355,78 @@ fn rewrite_association_loaded(
     let Some(name) = sym_lit(&assoc_args[0]) else {
         return false;
     };
-    let Some(owner_model) =
-        resolve_owner_model(owner.as_ref(), enclosing, sole_includer, flat_loaded, &name)
-    else {
+    let flat = Symbol::from(format!("{}_loaded?", name.as_str()));
+    let in_model = enclosing.is_some_and(|id| flat_loaded.contains_key(id));
+    // Test/view explicit receivers: unique-name fails when Message and
+    // Membership both `belongs_to :room`, and `message.reload` often
+    // types as `ActiveRecord::Base` so typed resolve has no flat
+    // `room_loaded?`. Name existence on *some* model gates the widen,
+    // but a known receiver model that itself lacks the flat predicate
+    // (polymorphic `belongs_to`) keeps the dynamic path. Stamp a
+    // declaring ClassId on the kept receiver for strict targets.
+    // Model methods and implicit-self keep the stricter resolve below.
+    if let Some(base) = owner {
+        if !in_model {
+            let typed = owner_from_typed_recv(base, flat_loaded, &name);
+            let allow = match &typed {
+                // `owner_from_typed_recv` only returns Some when every
+                // class alt declares `name` — or a single Class id. A
+                // concrete model key that omits the name (poly assoc)
+                // must not rewrite.
+                Some(id) if flat_loaded.contains_key(id) => {
+                    flat_loaded.get(id).is_some_and(|n| n.contains(&name))
+                }
+                // Base / untyped / unknown: any declaring model is enough.
+                _ => any_model_declares_name(flat_loaded, &name),
+            };
+            if allow {
+                let mut recv = base.clone();
+                let stamp = typed
+                    .filter(|id| {
+                        flat_loaded.get(id).is_some_and(|n| n.contains(&name))
+                    })
+                    .or_else(|| a_model_declaring(flat_loaded, &name));
+                if let Some(id) = stamp {
+                    recv.ty = Some(Ty::Class { id, args: vec![] });
+                }
+                let mut rewritten = Expr::new(
+                    expr.span,
+                    ExprNode::Send {
+                        recv: Some(recv),
+                        method: flat,
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                rewritten.ty = Some(Ty::Bool);
+                *expr = rewritten;
+                return true;
+            }
+        }
+    }
+    let Some(owner_model) = resolve_owner_model(
+        owner.as_ref(),
+        enclosing,
+        sole_includer,
+        flat_loaded,
+        &name,
+    ) else {
         return false;
     };
-    if !flat_loaded.get(&owner_model).is_some_and(|names| names.contains(&name)) {
+    if !flat_loaded
+        .get(&owner_model)
+        .is_some_and(|names| names.contains(&name))
+    {
         return false;
     }
     let new_recv = match owner {
         None => {
             let mut s = Expr::new(inner.span, ExprNode::SelfRef);
-            s.ty = Some(Ty::Class { id: owner_model, args: vec![] });
+            s.ty = Some(Ty::Class {
+                id: owner_model,
+                args: vec![],
+            });
             Some(s)
         }
         Some(base) => Some(base.clone()),
@@ -353,7 +435,7 @@ fn rewrite_association_loaded(
         expr.span,
         ExprNode::Send {
             recv: new_recv,
-            method: Symbol::from(format!("{}_loaded?", name.as_str())),
+            method: flat,
             args: vec![],
             block: None,
             parenthesized: false,

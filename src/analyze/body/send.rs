@@ -1965,6 +1965,11 @@ impl<'a> BodyTyper<'a> {
                         return Ty::Array { elem: other.clone() };
                     }
                 }
+                if block_ret.is_none() {
+                    if let Some(t) = indexed_pluck(method, elem, args) {
+                        return t;
+                    }
+                }
                 array_method(method, elem, block_ret)
             }
             // Relation-typed receiver — a chain started from a scope
@@ -2667,6 +2672,26 @@ fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
 fn array_find(method: &Symbol, args: &[crate::expr::Expr], block_ret: Option<&Ty>) -> bool {
     method.as_str() == "find" && block_ret.is_none() && args.len() == 1
         && matches!(args[0].ty, Some(Ty::Array { .. }))
+}
+
+/// Must match `lower::enumerable_ext::ground_indexed_pluck` — typing a
+/// `pluck` the lowerer leaves alone is invariant 6 (silent NoMethodError).
+pub(crate) fn indexed_pluck(method: &Symbol, elem: &Ty, args: &[crate::expr::Expr]) -> Option<Ty> {
+    // Not any key expression: the lowerer copies the key into the `map`
+    // block, so a computed key would run once per element.
+    let [key] = args else { return None };
+    if method.as_str() != "pluck"
+        || !matches!(&*key.node, ExprNode::Lit { .. } | ExprNode::Var { .. })
+    {
+        return None;
+    }
+    let value = match elem {
+        Ty::Hash { value, .. } if **value == Ty::Untyped => Ty::Untyped,
+        Ty::Hash { value, .. } => super::union_of((**value).clone(), Ty::Nil),
+        Ty::Untyped | Ty::Var { .. } => Ty::Untyped,
+        _ => return None,
+    };
+    Some(Ty::Array { elem: Box::new(value) })
 }
 
 /// Is this array element type a model relation's element — a single

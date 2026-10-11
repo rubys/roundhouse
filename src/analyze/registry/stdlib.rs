@@ -30,7 +30,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             args: vec![],
         },
     );
+    let error_reporter = ClassId(Symbol::from("ActiveSupport::ErrorReporter"));
+    rails_cls.class_methods.insert(
+        Symbol::from("error"),
+        Ty::Class { id: error_reporter.clone(), args: vec![] },
+    );
     classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
+    register_stdlib_class(classes, error_reporter.0.as_str(), &[], &[("report", Ty::Nil)]);
 
     // GlobalID mint + Locator — unsigned `param`/`uri`/`signed` and the
     // locate / locate_signed class methods. Return types for locate*

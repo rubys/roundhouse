@@ -64,6 +64,16 @@ module ActiveRecord
   # search) — the `includes(:assoc)` distribute's run lookup; see `base.rb`.
   def self.lower_bound: (Array[Integer] sorted, Integer value) -> Integer
 
+  module Reflection
+    class AssociationReflection
+      def initialize: (Symbol name, untyped counter_cache_column) -> void
+      def name: () -> Symbol
+      def counter_cache_column: () -> untyped
+      def klass: () -> untyped
+      def macro: () -> untyped
+    end
+  end
+
   # Base class for all models. Spinel-friendly shape: zero
   # metaprogramming. Per-model subclasses define their own column
   # accessors, attributes hash, and `[]/[]=` indexers; Base supplies
@@ -113,6 +123,8 @@ module ActiveRecord
     def self.table_name: () -> String
     def self._table_sql: () -> String
     def self.primary_key: () -> String
+    def self._association_names: () -> Array[Symbol]
+    def self.reflect_on_association: (Symbol | String name) -> ActiveRecord::Reflection::AssociationReflection?
     def self._cast_primary_key: (Integer | String id) -> (Integer | String | nil)
     def self._string_primary_key: () -> bool
     def self.schema_columns: () -> Array[Symbol]

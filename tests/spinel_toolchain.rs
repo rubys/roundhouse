@@ -33,6 +33,10 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/array_excluding.rs"]
+mod array_excluding;
+#[path = "spinel_toolchain/array_excluding.rs"]
+mod array_excluding_native;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
 #[path = "support/class_configuration.rs"]

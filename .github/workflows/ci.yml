@@ -1911,8 +1911,11 @@ jobs:
       # has no per-object method table — or until upstream takes
       # basecamp/once-campfire#280, #279's twin for this file.
         env:
-          FLOOR_TESTS: 550
-          FLOOR_FILES: 69
+          # Tip Campfire suite floor — 552/71 via #818 meta
+          # (assoc_pluck test walk, view.controller, assoc_loaded,
+          # adapter_reload clear, reflect_on_association, walk-stub wipe).
+          FLOOR_TESTS: 552
+          FLOOR_FILES: 71
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)

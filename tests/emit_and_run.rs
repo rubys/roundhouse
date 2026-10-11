@@ -9,6 +9,10 @@
 mod emit_and_run;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
+#[path = "support/array_excluding.rs"]
+mod array_excluding;
+#[path = "emit_and_run/array_excluding.rs"]
+mod array_excluding_runs;
 #[path = "emit_and_run/integer_query_find_by.rs"]
 mod integer_query_find_by;
 #[path = "support/lambda_signatures.rs"]
@@ -46,6 +50,8 @@ mod helper_anonymous_rest;
 mod controller_response_body;
 #[path = "emit_and_run/render_to_string_partial_ivar.rs"]
 mod render_to_string_partial_ivar;
+#[path = "emit_and_run/active_support_extensions.rs"]
+mod active_support_extensions;
 #[path = "emit_and_run/request_optional_port.rs"]
 mod request_optional_port;
 #[path = "emit_and_run/controller_url_helpers.rs"]
@@ -10493,6 +10499,22 @@ raise "association(:article).loaded? answered #{got.inspect}" unless got == [fal
         .assert_passes();
 }
 
+/// Campfire's messages_count test: `Message.reflect_on_association(:room)`
+/// and `assert_not reflection.counter_cache_column` (trigger-backed count,
+/// not an AR `counter_cache:`).
+#[test]
+fn reflect_on_association_answers_without_counter_cache() {
+    emit_and_run::real_blog()
+        .run_ruby(r#"
+reflection = Comment.reflect_on_association(:article)
+raise "missing reflection" if reflection.nil?
+raise "expected Symbol name, got #{reflection.name.inspect}" unless reflection.name == :article
+raise "counter_cache_column should be nil, got #{reflection.counter_cache_column.inspect}" unless reflection.counter_cache_column.nil?
+raise "unknown assoc should be nil" unless Comment.reflect_on_association(:missing).nil?
+"#)
+        .assert_passes();
+}
+
 /// `owner.<has_many>.reload` reads the rows again (campfire's rooms
 /// test: `assert_empty room.memberships.reload`).
 #[test]
@@ -11520,4 +11542,183 @@ raise "nil receiver" unless Presenter.label(nil).nil?
 "#,
         );
     run.assert_passes();
+}
+
+#[test]
+fn render_inertia_answers_html_and_json_visits() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/show\", to: \"pages#show\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def show
+    render inertia: "pages/show", props: {
+      title: "Hello </script>",
+      count: -> { Article.count },
+      label: -> { "eager-lambda" }
+    }
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "a first visit renders the page object inside the layout" do
+    get "/pages/show"
+    assert_response :success
+    page = %({"component":"pages/show","props":{"title":"Hello \\u003c/script\\u003e","count":#{Article.count},"label":"eager-lambda"},) +
+      %("url":"/pages/show","version":null,"encryptHistory":false,"clearHistory":false})
+    assert_includes response.body, %(<script data-page="app" type="application/json">#{page}</script>\n<div id="app"></div>)
+    assert_includes response.body, "<title>Real Blog</title>"
+    assert_equal "X-Inertia", response.headers["vary"]
+  end
+
+  test "an Inertia visit gets the page object as JSON" do
+    get "/pages/show", headers: { "X-Inertia" => "true" }
+    assert_response :success
+    assert_equal "true", response.headers["x-inertia"]
+    assert_equal "X-Inertia", response.headers["vary"]
+    page = response.parsed_body
+    assert_equal "pages/show", page["component"]
+    assert_equal(
+      { "title" => "Hello </script>", "count" => Article.count, "label" => "eager-lambda" },
+      page["props"]
+    )
+    assert_equal "/pages/show", page["url"]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn inertia_protocol_shared_props_reloads_deferral_and_errors() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/inertia_articles\", to: \"inertia_articles#index\"\n  patch \"/inertia_articles\", to: \"inertia_articles#update\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.version = \"v1\"\n  config.encrypt_history = true\n  config.always_include_errors_hash = true\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .edit(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n",
+            "class ApplicationController < ActionController::Base\n  inertia_share articleCount: -> { Article.count },\n                appName: \"Real Blog\",\n                secret: InertiaRails.optional { \"opt\" }\n",
+        )
+        .write(
+            "app/controllers/inertia_articles_controller.rb",
+            r#"class InertiaArticlesController < ApplicationController
+  def index
+    render inertia: "inertia_articles/index", props: {
+      titles: Article.order(:id).pluck(:title),
+      inertiaVisit: request.inertia?,
+      stats: InertiaRails.defer { { total: Article.count } }
+    }
+  end
+
+  def update
+    if params[:title].to_s.empty?
+      redirect_to "/inertia_articles", inertia: { errors: { title: ["can't be blank"] } }
+    else
+      redirect_to "/inertia_articles"
+    end
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/inertia_articles_controller_test.rb",
+            r#"require "test_helper"
+
+class InertiaArticlesControllerTest < ActionDispatch::IntegrationTest
+  INERTIA = { "X-Inertia" => "true", "X-Inertia-Version" => "v1" }
+
+  test "a first visit includes shared props and lists the deferred one" do
+    get "/inertia_articles"
+    assert_response :success
+    props = %("props":{"errors":{},"articleCount":#{Article.count},"appName":"Real Blog",) +
+      %("titles":#{Article.order(:id).pluck(:title).to_json},"inertiaVisit":false},)
+    assert_includes response.body, props
+    assert_includes response.body, %("version":"v1","encryptHistory":true,"clearHistory":false,)
+    assert_includes response.body, %("sharedProps":["errors","articleCount","appName","secret"],"deferredProps":{"default":["stats"]}})
+  end
+
+  test "an Inertia visit with the current version gets JSON" do
+    get "/inertia_articles", headers: INERTIA
+    assert_response :success
+    page = response.parsed_body
+    assert_equal %w[errors articleCount appName titles inertiaVisit], page["props"].keys
+    assert_equal true, page["props"]["inertiaVisit"]
+    assert_equal({ "default" => ["stats"] }, page["deferredProps"])
+  end
+
+  test "a stale version gets 409 and the URL to reload" do
+    get "/inertia_articles", headers: { "X-Inertia" => "true", "X-Inertia-Version" => "v0" }
+    assert_response 409
+    assert_equal "http://www.example.com/inertia_articles", response.headers["x-inertia-location"]
+  end
+
+  test "a partial reload answers only the props it names" do
+    get "/inertia_articles", headers: INERTIA.merge("X-Inertia-Partial-Component" => "inertia_articles/index",
+                                                    "X-Inertia-Partial-Data" => "secret,stats")
+    page = response.parsed_body
+    assert_equal({ "errors" => {}, "secret" => "opt", "stats" => { "total" => Article.count } }, page["props"])
+    assert_nil page["deferredProps"]
+  end
+
+  test "a partial reload can leave props out" do
+    get "/inertia_articles", headers: INERTIA.merge("X-Inertia-Partial-Component" => "inertia_articles/index",
+                                                    "X-Inertia-Partial-Except" => "titles,articleCount")
+    assert_equal %w[errors appName secret inertiaVisit stats], response.parsed_body["props"].keys
+  end
+
+  test "partial headers for another component are ignored" do
+    get "/inertia_articles", headers: INERTIA.merge("X-Inertia-Partial-Component" => "other/page",
+                                                    "X-Inertia-Partial-Data" => "secret")
+    assert_equal %w[errors articleCount appName titles inertiaVisit], response.parsed_body["props"].keys
+  end
+
+  test "a failed Inertia PATCH redirects with 303 and the errors reach the next visit once" do
+    patch "/inertia_articles", params: { title: "" }, headers: INERTIA
+    assert_response 303
+    assert_redirected_to "/inertia_articles"
+    get "/inertia_articles", headers: INERTIA
+    assert_equal({ "title" => ["can't be blank"] }, response.parsed_body["props"]["errors"])
+    get "/inertia_articles", headers: INERTIA
+    assert_equal({}, response.parsed_body["props"]["errors"])
+  end
+
+  test "a stale version keeps the stored errors for the full-page reload" do
+    patch "/inertia_articles", params: { title: "" }, headers: INERTIA
+    get "/inertia_articles", headers: { "X-Inertia" => "true", "X-Inertia-Version" => "v0" }
+    assert_response 409
+    get "/inertia_articles"
+    assert_includes response.body, %("props":{"errors":{"title":["can't be blank"]},)
+  end
+
+  test "a PATCH outside Inertia keeps its 302" do
+    patch "/inertia_articles", params: { title: "ok" }
+    assert_response 302
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/inertia_articles_controller_test.rb")
+        .assert_passes();
 }

@@ -895,7 +895,7 @@ fn html_escape_call(value: &Expr) -> Expr {
 
 /// Select the bundled JSON encoder for proven primitive collections; retain
 /// Rails serialization for values requiring custom hooks or temporal conversion.
-fn json_render_encode(value: &Expr) -> Expr {
+pub(super) fn json_render_encode(value: &Expr) -> Expr {
     // JSON's bundled encoder already handles primitive collections on every
     // target. Keep values that need Rails' as_json hooks (including nested
     // models and Time) on the existing serializer path.

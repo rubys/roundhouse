@@ -309,9 +309,12 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // ledger residue for (or rewrite inside) code that cannot run.
     ("bool_fold", &[]),
     ("association_new", &["bool_fold"]),
+    // Refuses `**h` into flattened optional keywords while the splat is
+    // still a `KeywordSplat`; `forwarding_keywords` erases it to `h`.
+    ("flattened_keyword_splats", &["bool_fold"]),
     // Preserve native full destinations; ordinary keyword producers
     // rejoin the legacy projection before any argument-rewriting pass.
-    ("forwarding_keywords", &["bool_fold"]),
+    ("forwarding_keywords", &["bool_fold", "flattened_keyword_splats"]),
     // Reads the analyzer's nested request-params types before any pass rewrites the controller bodies that carry them.
     ("params_residue", &["bool_fold"]),
     // After the ledger, which reads the calls this rewrites; before the controller lowering turns `params` into `@params`.
@@ -780,6 +783,10 @@ pub fn apply_post_analyze_lowerings(
     ran!("bool_fold");
     association_new::apply_association_new_lowering(app);
     ran!("association_new");
+    // Before the first `forwarding::apply` erases `**h` into a
+    // positional `h`, after which `f(x, **h)` and `f(x, h)` are one tree.
+    diags.extend(helper_kwargs::refuse_flattened_keyword_splats(app));
+    ran!("flattened_keyword_splats");
     diags.extend(forwarding::apply(app));
     ran!("forwarding_keywords");
     diags.extend(params_residue::apply_params_residue_ledger(app));

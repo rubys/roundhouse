@@ -2266,6 +2266,50 @@ end
 }
 
 #[test]
+fn time_zone_lookup_error_report_and_array_pluck_type_without_errors() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"widgets\" do |t|\n    t.datetime \"created_at\"\n  end\nend\n",
+        ),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def local_time(zone_name) = created_at.in_time_zone(ActiveSupport::TimeZone[zone_name])
+  def report(error) = Rails.error.report(error, handled: true)
+  def self.option_labels(options) = Array(options).pluck("label")
+end
+"#,
+        ),
+    ]);
+    assert_eq!(errors_of(&app), Vec::<String>::new());
+}
+
+#[test]
+fn array_pluck_with_a_computed_key_stays_an_error() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        ("db/schema.rb", widget_schema()),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def self.labels(options) = Array(options).pluck(label_key)
+  def self.label_key = "label"
+end
+"#,
+        ),
+    ]);
+    assert_eq!(errors_of(&app), vec!["no known method `pluck` on Array[untyped]".to_string()]);
+}
+
+#[test]
 fn rails_env_is_a_string_inquirer() {
     // `Rails.env` is an ActiveSupport::StringInquirer: `development?` /
     // `production?` (any `<word>?`) resolve to Bool via method_missing,
@@ -5265,4 +5309,145 @@ end
     let counts = receiver("probe_counts");
     assert!(counts.starts_with("Hash[String") && counts.matches('[').count() == 1, "{counts}");
     assert_eq!(receiver("probe_literal_pairs"), "Hash[Integer | String, Integer | String]");
+}
+
+const INERTIA_APP: &[(&str, &str)] = &[
+    (
+        "db/schema.rb",
+        "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\", null: false\n  end\nend\n",
+    ),
+    (
+        "config/routes.rb",
+        "Rails.application.routes.draw do\n  resources :widgets, only: %i[ index ]\nend\n",
+    ),
+    ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+    ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+    (
+        "app/controllers/application_controller.rb",
+        r#"class ApplicationController < ActionController::Base
+  inertia_share widgetCount: -> { Widget.count },
+                names: InertiaRails.optional { Widget.pluck(:name) }
+end
+"#,
+    ),
+    (
+        "app/controllers/widgets_controller.rb",
+        r#"class WidgetsController < ApplicationController
+  def index
+    render inertia: "widgets/index", props: {
+      widgets: Widget.all.map { |widget| { name: widget.name } },
+      names: -> { Widget.pluck(:name) },
+      firstName: InertiaRails.optional { Widget.first&.name },
+      total: InertiaRails.defer { Widget.count },
+      inertiaVisit: request.inertia?
+    }
+  end
+end
+"#,
+    ),
+];
+
+fn inertia_check(files: &[(&str, &str)]) -> (Vec<String>, Vec<String>) {
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    roundhouse::ingest::survey::activate();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest tree");
+    let gaps = roundhouse::ingest::survey::drain().iter().map(|g| format!("{g:?}")).collect();
+    Analyzer::new(&app).analyze(&mut app);
+    let errors = diagnose(&app)
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::analyze::Severity::Error)
+        .map(|d| d.message)
+        .collect();
+    (errors, gaps)
+}
+
+#[test]
+fn inertia_share_and_render_inertia_analyze_without_errors_or_survey_gaps() {
+    let (errors, gaps) = inertia_check(INERTIA_APP);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(gaps.is_empty(), "{gaps:#?}");
+}
+
+#[test]
+fn render_inertia_with_a_computed_component_is_a_survey_gap() {
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/\" + action_name\n  end\nend\n",
+    );
+    let (_, gaps) = inertia_check(&files);
+    assert!(
+        gaps.iter().any(|g| g.contains("`render inertia:` with a component that is not a String literal")),
+        "{gaps:#?}"
+    );
+}
+
+#[test]
+fn an_inertia_share_that_is_not_lowered_is_one_survey_gap() {
+    for share in [
+        "  inertia_share do\n    { widgetCount: Widget.count }\n  end\n",
+        "  inertia_share widgetCount: -> { Widget.count }, if: :signed_in?\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        let source = format!("class ApplicationController < ActionController::Base\n{share}end\n");
+        files[4] = ("app/controllers/application_controller.rb", source.as_str());
+        let (_, gaps) = inertia_check(&files);
+        assert_eq!(gaps.len(), 1, "{share}: {gaps:#?}");
+        assert!(gaps[0].contains("`inertia_share` with a block"), "{share}: {gaps:#?}");
+    }
+}
+
+#[test]
+fn an_inertia_configure_block_with_rescue_is_a_survey_gap() {
+    let mut files = INERTIA_APP.to_vec();
+    files.push((
+        "config/initializers/inertia_rails.rb",
+        "InertiaRails.configure do |config|\n  config.version = \"v1\"\nrescue NameError\n  config.version = \"v0\"\nend\n",
+    ));
+    let (_, gaps) = inertia_check(&files);
+    assert!(
+        gaps.iter().any(|g| g.contains("InertiaRails.configure: a block with `rescue` or `ensure` is not read")),
+        "{gaps:#?}"
+    );
+}
+
+#[test]
+fn an_inertia_configure_block_without_a_named_parameter_is_a_survey_gap() {
+    for initializer in [
+        "InertiaRails.configure { it.version = \"v1\" }\n",
+        "InertiaRails.configure { _1.version = \"v1\" }\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files.push(("config/initializers/inertia_rails.rb", initializer));
+        let (_, gaps) = inertia_check(&files);
+        assert!(
+            gaps.iter().any(|g| g.contains("InertiaRails.configure: a configuration without a block that names its parameter")),
+            "{initializer}: {gaps:#?}"
+        );
+    }
+}
+
+#[test]
+fn inertia_configure_blocks_add_to_one_configuration() {
+    let mut files = INERTIA_APP.to_vec();
+    files.push((
+        "config/initializers/inertia_a.rb",
+        "InertiaRails.configure do |config|\n  config.version = \"v1\"\nend\n\nInertiaRails.configure do |config|\n  config.always_include_errors_hash = true\nend\n",
+    ));
+    files.push((
+        "config/initializers/inertia_b.rb",
+        "InertiaRails.configure do |config|\n  config.encrypt_history = true\nend\n",
+    ));
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest tree");
+    let config = app.inertia.expect("an Inertia configuration");
+    assert_eq!(config.version, "v1");
+    assert!(config.always_include_errors_hash);
+    assert!(config.encrypt_history);
 }

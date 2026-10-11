@@ -538,6 +538,10 @@ fn emitted_helpers_preserve_parent_active_scope_order_exclusion_and_privacy() {
   def sibling_ids
     other_positioned_siblings.ids
   end
+  def sibling_ids_via_local
+    siblings = all_positioned_siblings
+    siblings.excluding(self).ids
+  end
   def parent_id
     positioning_parent.id
   end
@@ -558,6 +562,7 @@ inactive = make.call(a, 5, false)
 foreign = make.call(b, 1, true)
 raise "parent capture" unless self_record.parent_id == a.id
 raise "scope/parent/order/exclusion" unless self_record.sibling_ids == [earlier.id, later.id]
+raise "local Relation exclusion" unless self_record.sibling_ids_via_local == [earlier.id, later.id]
 raise "compiled reflective wrapper" unless self_record.reflected_sibling_ids == [earlier.id, later.id]
 begin
   self_record.public_reflected_siblings

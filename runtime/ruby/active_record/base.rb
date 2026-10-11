@@ -140,6 +140,39 @@ module ActiveRecord
     lo
   end
 
+  # Thin reflection surface for `Model.reflect_on_association(:name)`.
+  # Campfire asks `counter_cache_column` (nil when the belongs_to did not
+  # declare `counter_cache:`). Deeper Rails reflection stays unmodeled.
+  module Reflection
+    class AssociationReflection
+      def initialize(name, counter_cache_column)
+        @name = name
+        @counter_cache_column = counter_cache_column
+      end
+
+      def name
+        @name
+      end
+
+      def counter_cache_column
+        @counter_cache_column
+      end
+
+      # Catalog also types `.klass` / `.macro`; presence-only callers get
+      # nil rather than a NameError until those halves are synthesized.
+      # Read-tail locals: strict targets drop a bare `nil` method body.
+      def klass
+        result = nil
+        result
+      end
+
+      def macro
+        result = nil
+        result
+      end
+    end
+  end
+
   # Base class for all models. Designed to contain *zero* metaprogramming:
   # subclasses provide their own `attributes`, `[]`, `[]=`, `update`, and
   # `initialize`-from-attrs methods (typically by writing them out per
@@ -285,6 +318,29 @@ module ActiveRecord
     # Read by the upsert builder to name its conflict target.
     def self.primary_key
       "id"
+    end
+
+    # Association names this model declares — overridden by the model
+    # lowerer (`_association_names`). Empty on Base so an unknown model
+    # answers `reflect_on_association` with nil the way Rails does.
+    def self._association_names
+      []
+    end
+
+    # Rails' `Model.reflect_on_association(:name)`. Looks the name up in
+    # `_association_names`; `counter_cache:` is unmodeled so every hit
+    # answers `counter_cache_column == nil` (honest for campfire's
+    # trigger-backed `messages_count`, which is not an AR counter cache).
+    def self.reflect_on_association(name)
+      needle = name.to_s
+      _association_names.each do |assoc|
+        if assoc.to_s == needle
+          return ActiveRecord::Reflection::AssociationReflection.new(assoc, nil)
+        end
+      end
+      # Read-tail: strict targets drop a bare `nil` method body.
+      result = nil
+      result
     end
 
     # Finder casting runs in connection.rb (Relation is ruby-family

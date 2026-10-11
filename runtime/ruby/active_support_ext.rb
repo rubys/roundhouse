@@ -298,6 +298,14 @@ module ActiveSupport
     h
   end
 
+  # Rails' `Array#excluding` (`Array#without` is its alias): Array#-
+  # preserves the receiver's order and any non-excluded duplicates.
+  # Rails flattens one level of the excluded arguments before
+  # subtracting them.
+  def self.excluding(list, *elements)
+    list - elements.flatten(1)
+  end
+
   # AS `Enumerable#many?`: the materialized no-block form is a length
   # check; the block form counts matches and stops at the second hit.
   # Another core_ext reopen the transpiled runtimes cannot host — same
@@ -948,6 +956,29 @@ module ActiveSupport
   def self.in_time_zone(t, zone)
     return present(t) if zone.nil?
     t.getlocal(find_zone!(zone).offset_at(t.to_i))
+  end
+
+  def self.zone_name(zone)
+    zone.nil? ? nil : zone.name
+  end
+
+  # Not Rails' subscriber list: nothing in the runtime subscribes, so a report goes to the log.
+  class ErrorReporter
+    def report(error, handled: true, severity: nil, context: {}, source: nil)
+      message = "#{error.class}: #{error.message}"
+      level = severity || (handled ? :warning : :error)
+      case level
+      when :info
+        Rails.logger.info(message)
+      when :warning
+        Rails.logger.warn(message)
+      when :error
+        Rails.logger.error(message)
+      else
+        raise ArgumentError, "severity must be one of :error, :warning, :info, got: #{level.inspect}"
+      end
+      nil
+    end
   end
 
   # Numeric#in_time_zone: epoch seconds before the zone remapping above.

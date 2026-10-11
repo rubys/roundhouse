@@ -28,7 +28,7 @@ mod enum_raw_input;
 mod body;
 mod class_configuration;
 mod data;
-pub(crate) use body::string_answers;
+pub(crate) use body::{indexed_pluck, string_answers};
 pub(crate) use body::ConstResolverTask;
 pub use body::PreparedConstResolver;
 pub mod async_color;

@@ -1587,6 +1587,8 @@ end
         }
     }
 
+    app.inertia = super::inertia::load_inertia_config(vfs, dir)?;
+
     // Every app source is registered by here. Rubydex resolves a
     // SNAPSHOT on another thread while the passes below run, and those
     // passes read the same snapshot. It is not the real `drain`: the
@@ -1886,6 +1888,7 @@ end
     super::rate_limit::lower_rate_limit(&mut app);
     super::invisible_captcha::lower_invisible_captcha(&mut app);
     super::impersonates::lower_impersonates(&mut app);
+    super::inertia::lower_inertia(&mut app);
     // The real drain, now that every pass re-ingesting synthesized
     // Ruby has run. A synthesized `"<label>"` re-ingest never takes a
     // slot (`sources::register` refuses a label starting with `<`), so
@@ -3016,6 +3019,10 @@ const CONSUMED_CONTROLLER_MACROS: &[&str] = &[
     // `ingest::allow_browser`'s module doc. A per-target decision, not
     // a coverage gap.
     "allow_browser",
+    // `ingest::inertia` records its own survey gap, with the reason, for
+    // an `inertia_share` it cannot lower; the generic gap would count it
+    // a second time without the reason.
+    "inertia_share",
     // Conditional GET: the runtime answers every request fresh, a
     // decision recorded in docs/pipeline/runtime.md ("Conditional GET
     // is ALWAYS FRESH"), so the importmap ETag macro has nothing to do.
@@ -7864,7 +7871,7 @@ fn layouts_link_all_stylesheets<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &[P
 /// block, flattened into one list. One level of unwrapping is enough:
 /// nesting a second config block inside the first is not a shape
 /// Rails apps write, and guessing at it would be inventing a need.
-fn initializer_statements<'a>(program: &ruby_prism::ProgramNode<'a>) -> Vec<Node<'a>> {
+pub(super) fn initializer_statements<'a>(program: &ruby_prism::ProgramNode<'a>) -> Vec<Node<'a>> {
     let mut stmts: Vec<Node> = Vec::new();
     for stmt in program.statements().body().iter() {
         let mut unwrapped = false;
@@ -7961,7 +7968,7 @@ fn extract_initializer_filters(source: &[u8], file: &str) -> Vec<crate::app::Ini
 /// (`Foo`, `Turbo::StreamsChannel`), or None for anything else. Read as
 /// TEXT rather than resolved: the receiver may name a class this tree
 /// does not define, and reporting that gap needs the app's spelling.
-fn constant_text(node: &Node, src: &str) -> Option<String> {
+pub(super) fn constant_text(node: &Node, src: &str) -> Option<String> {
     if node.as_constant_read_node().is_none() && node.as_constant_path_node().is_none() {
         return None;
     }

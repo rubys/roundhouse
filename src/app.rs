@@ -57,6 +57,8 @@ pub struct App {
     /// None when the app has no importmap.rb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub importmap: Option<Importmap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inertia: Option<InertiaConfig>,
     /// Logical stylesheet names discovered in `app/assets/stylesheets/`
     /// + `app/assets/builds/` (file stems without `.css`). When the
     /// ERB uses `stylesheet_link_tag :app, ...`, Rails with Propshaft
@@ -605,6 +607,14 @@ impl MixinKind {
 /// pin, in declaration order (Rails preserves order for
 /// modulepreload link emission).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct InertiaConfig {
+    pub version: String,
+    pub encrypt_history: bool,
+    pub always_include_errors_hash: bool,
+    pub use_script_element_for_initial_page: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct Importmap {
     pub pins: Vec<ImportmapPin>,
 }
@@ -720,6 +730,7 @@ impl App {
             fixtures: Vec::new(),
             seeds: None,
             importmap: None,
+            inertia: None,
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
             rbs_includes: HashMap::new(),
