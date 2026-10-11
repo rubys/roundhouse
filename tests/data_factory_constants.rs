@@ -698,7 +698,8 @@ fn admitted_data_factories_are_rejected_before_unverified_target_emission() {
         .collect();
     assert!(errors.is_empty(), "{errors:?}");
     for &target in BuildTarget::TRANSPILE {
-        if matches!(target, BuildTarget::Ruby | BuildTarget::Spinel) {
+        // Futamura's residue is the app itself, run by Ruby: nothing to refuse.
+        if matches!(target, BuildTarget::Ruby | BuildTarget::Spinel | BuildTarget::Futamura) {
             continue;
         }
         let (result, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
