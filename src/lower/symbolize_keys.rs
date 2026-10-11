@@ -188,6 +188,22 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
             call.ty = Some(Ty::Str);
             Some(call)
         }
+        // Every other zero-arg `to_query`: a Hash whose values may nest,
+        // or a receiver inference could not type
+        // (`request.query_parameters.deep_dup.to_query`). The walk is
+        // `ActiveSupport.to_query` (runtime/ruby/active_support_ext.rb),
+        // Rails' own grammar and ordering, so the result is the same
+        // bytes on every target. `to_query(key)` is the Object / Array /
+        // nil form and keeps refusing.
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "to_query"
+                && args.is_empty()
+                && matches!(r.ty.as_ref(), None | Some(Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. })) =>
+        {
+            let mut call = active_support_call(expr.span, "to_query", r.clone());
+            call.ty = Some(Ty::Str);
+            Some(call)
+        }
         _ => None,
     };
     if let Some(r) = replacement {

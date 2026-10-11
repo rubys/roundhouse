@@ -146,6 +146,80 @@ module ActiveSupport
     value.to_s
   end
 
+  # `Hash#to_query` (no namespace), for a receiver `lower::symbolize_keys`
+  # routes here: a Hash whose values may nest, or one inference could not
+  # type (`request.query_parameters.deep_dup.to_query`). It is ONE
+  # grammar on every target, activesupport 8.1's
+  # `core_ext/object/to_query.rb` rule for rule: `key=value`, both
+  # CGI-escaped; a nested Hash is `parent[child]=…`; an Array is
+  # `key[]=…` per element; nil is the bare escaped key; an empty Hash or
+  # Array VALUE is dropped. The `"k=v"` strings of a level are SORTED —
+  # the encoded pairs, not the keys — except under an Array namespace
+  # (a `[]` in it), where order is the array's. The result is a 301
+  # target in EngineeredAt, so it must be byte-identical to Rails'.
+  #
+  # Not `ViewHelpers.to_query`: that is the SHARED scalar rendering in
+  # insertion order, and the nesting version is a ruby-family reopen. A
+  # receiver that is not a Hash raises, as Rails' `Object#to_query`
+  # does for want of its `key` argument.
+  def self.to_query(value)
+    raise ArgumentError, "wrong number of arguments (given 0, expected 1)" unless value.is_a?(Hash)
+    query_pairs(value, "")
+  end
+
+  def self.query_pairs(hash, namespace)
+    pairs = []
+    hash.each do |key, item|
+      empty_container = (item.is_a?(Hash) && item.empty?) || (item.is_a?(Array) && item.empty?)
+      next if empty_container
+      name = namespace.empty? ? key.to_s : "#{namespace}[#{key.to_s}]"
+      pairs << query_value(name, item)
+    end
+    pairs = pairs.sort unless namespace.include?("[]")
+    pairs.join("&")
+  end
+
+  # `CGI.escape`: BYTE-wise, so a non-ASCII character becomes its UTF-8
+  # `%XX` run (`é` -> `%C3%A9`) and a control character its `%09`.
+  # Unreserved is `A-Za-z0-9 _ . - ~`; a space is `+`. The shared
+  # `ViewHelpers.url_encode` is a table over the ASCII punctuation and
+  # passes every other byte through, which is fine for a path segment
+  # a router reads back and wrong for a 301 target.
+  def self.query_escape(text)
+    hex = "0123456789ABCDEF"
+    out = +""
+    i = 0
+    n = text.bytesize
+    while i < n
+      b = text.getbyte(i)
+      if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 45 || b == 46 || b == 95 || b == 126
+        out << b.chr
+      elsif b == 32
+        out << "+"
+      else
+        out << "%" << hex[b / 16] << hex[b % 16]
+      end
+      i += 1
+    end
+    out
+  end
+
+  def self.query_value(name, item)
+    if item.is_a?(Hash)
+      query_pairs(item, name)
+    elsif item.is_a?(Array)
+      prefix = "#{name}[]"
+      return query_escape(prefix) if item.empty?
+      parts = []
+      item.each { |element| parts << query_value(prefix, element) }
+      parts.join("&")
+    elsif item.nil?
+      query_escape(name)
+    else
+      "#{query_escape(name)}=#{query_escape(item.to_s)}"
+    end
+  end
+
   def self.presence(value)
     blank?(value) ? nil : value
   end
@@ -158,7 +232,7 @@ module ActiveSupport
   # allow-list in every corpus site, which is what lets the parameter
   # be declared rather than left untyped.
   def self.presence_in(value, list)
-    list.include?(value.to_s) ? value : nil
+    value.is_a?(String) && list.include?(value) ? value : nil
   end
 
   # Rails' `ActiveModel::Errors#[]` — the messages for ONE attribute,

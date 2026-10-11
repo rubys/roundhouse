@@ -10,6 +10,10 @@ module ActiveSupport
   def self.present?: (untyped value) -> bool
   def self.to_param: (untyped value) -> String
 
+  def self.to_query: (Hash[String, Roundhouse::ParamValue] value) -> String
+  def self.query_pairs: (Hash[String, Roundhouse::ParamValue] hash, String namespace) -> String
+  def self.query_escape: (String text) -> String
+  def self.query_value: (String name, Roundhouse::ParamValue item) -> String
   def self.presence: (untyped value) -> untyped
   def self.presence_in: (untyped value, Array[String] list) -> untyped
 
