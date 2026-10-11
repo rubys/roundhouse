@@ -50,6 +50,7 @@ fn length_rule_fans_out_into_min_and_max_checks() {
         class_attr_defaults: Default::default(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        i18n: Default::default(),
         span: roundhouse::span::Span::synthetic(),
         body: vec![ModelBodyItem::Validation {
             validation: Validation {
@@ -85,6 +86,7 @@ fn multiple_rules_on_one_attribute_stay_grouped() {
         class_attr_defaults: Default::default(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        i18n: Default::default(),
         span: roundhouse::span::Span::synthetic(),
         body: vec![ModelBodyItem::Validation {
             validation: Validation {

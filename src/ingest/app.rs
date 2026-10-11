@@ -1674,6 +1674,29 @@ end
     }
     app.stylesheets = stylesheets;
 
+    // `config/locales/**/*.yml`, Rails' default I18n load path for the app.
+    let locales_dir = dir.join("config/locales");
+    let mut files = Vec::new();
+    let mut stack = if vfs.is_dir(&locales_dir) { vec![locales_dir] } else { Vec::new() };
+    while let Some(current) = stack.pop() {
+        for entry in vfs.read_dir(&current)? {
+            if vfs.is_dir(&entry) {
+                stack.push(entry);
+            } else if entry.extension().and_then(|s| s.to_str()) == Some("yml") {
+                if let Some(source) = read_to_string_or_ledger(vfs, &entry)? {
+                    let rel = entry.strip_prefix(dir).unwrap_or(&entry).display().to_string();
+                    files.push((rel, source));
+                }
+            }
+        }
+    }
+    let (catalog, problems) = crate::i18n::Catalog::load(&default_locale(vfs, dir), &mut files);
+    for (file, problem) in problems {
+        survey::record(&IngestError::Unsupported { file, message: format!("locale file not loaded: {problem}") });
+    }
+    app.i18n = catalog;
+    crate::i18n::stamp_models(&mut app);
+
     // `sig/**/*.rbs` — user-authored RBS sidecars for app code the
     // Rails conventions can't fully type on their own. Recursively
     // walk the sig dir, parse each file, merge into app.rbs_signatures
@@ -9246,5 +9269,45 @@ fn inherit_enums(models: &mut [crate::dialect::Model]) {
             }
             current = grand.clone();
         }
+    }
+}
+
+/// `config.i18n.default_locale = :xx` in `config/application.rb`, else `en`.
+fn default_locale<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> String {
+    let path = dir.join("config/application.rb");
+    let source = vfs.read_to_string(&path).unwrap_or_default();
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .find_map(|l| l.strip_prefix("config.i18n.default_locale").map(str::trim))
+        .and_then(|rest| rest.strip_prefix('='))
+        .and_then(|v| locale_literal(v.trim()))
+        .unwrap_or_else(|| "en".to_string())
+}
+
+/// `:fr`, `:"pt-BR"`, `"fr"` or `'fr'` at the start of `value`, ignoring what follows it.
+fn locale_literal(value: &str) -> Option<String> {
+    let bare = value.strip_prefix(':');
+    let value = bare.unwrap_or(value);
+    let name = match value.chars().next() {
+        Some(quote @ ('"' | '\'')) => value[1..].split(quote).next()?,
+        _ if bare.is_some() => value.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).next()?,
+        _ => return None,
+    };
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::locale_literal;
+
+    #[test]
+    fn a_default_locale_literal_drops_a_trailing_comment_but_not_a_quoted_hash() {
+        assert_eq!(locale_literal(":fr # French").as_deref(), Some("fr"));
+        assert_eq!(locale_literal(":\"pt-BR\"").as_deref(), Some("pt-BR"));
+        assert_eq!(locale_literal("\"fr#CA\" # comment").as_deref(), Some("fr#CA"));
+        assert_eq!(locale_literal("'ja'").as_deref(), Some("ja"));
+        assert_eq!(locale_literal("ENV[\"LOCALE\"]"), None);
     }
 }

@@ -127,6 +127,9 @@ pub struct App {
     /// arrays would bloat every dump for nothing.
     #[serde(skip)]
     pub binary_assets: Vec<(String, Vec<u8>)>,
+    /// `config/locales` for the default locale (see `crate::i18n`).
+    #[serde(default, skip_serializing_if = "crate::i18n::Catalog::is_empty")]
+    pub i18n: crate::i18n::Catalog,
     /// App-helper method registry: maps each method name defined in an
     /// `app/helpers/*.rb` module to the helper module (`ClassId`) that
     /// defines it. Rails mixes all helper modules into every view, so a
@@ -707,6 +710,7 @@ impl App {
             schema_version: Self::SCHEMA_VERSION,
             schema: Schema::default(),
             binary_assets: Vec::new(),
+            i18n: crate::i18n::Catalog::default(),
             models: Vec::new(),
             library_classes: Vec::new(),
             controllers: Vec::new(),
