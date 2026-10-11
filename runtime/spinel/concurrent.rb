@@ -1,4 +1,4 @@
-# concurrent-ruby's thread pools and barrier, over spinel's own threads.
+# concurrent-ruby's thread pools, barrier and Map, over spinel's own threads.
 #
 # THE RUBY FAMILY NEVER LOADS THIS FILE. `project::ruby_runtime_files`
 # swaps it for a bare `require "concurrent"`: over there the real gem
@@ -180,6 +180,40 @@ module Concurrent
   class FixedThreadPool < ThreadPoolExecutor
     def initialize(num_threads, max_queue: 0)
       super(min_threads: num_threads, max_threads: num_threads, max_queue: max_queue)
+    end
+  end
+
+  # Not the gem's lock-free table: one Mutex around a Hash makes each
+  # call atomic, and `compute_if_absent` runs its block under that lock,
+  # as the gem's MRI backend does.
+  class Map
+    def initialize
+      @hash = {}
+      @lock = Mutex.new
+    end
+
+    def [](key)
+      value = nil
+      @lock.synchronize { value = @hash[key] }
+      value
+    end
+
+    def []=(key, value)
+      @lock.synchronize { @hash[key] = value }
+      value
+    end
+
+    def compute_if_absent(key)
+      value = nil
+      @lock.synchronize do
+        value = @hash.key?(key) ? @hash[key] : (@hash[key] = yield)
+      end
+      value
+    end
+
+    def clear
+      @lock.synchronize { @hash.clear }
+      self
     end
   end
 

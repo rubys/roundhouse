@@ -461,7 +461,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("resolve_public_ips", Ty::Array { elem: Box::new(Ty::Str) }),
         ("blocked_address?", Ty::Bool),
     ], &[]);
-    // `Concurrent` — concurrent-ruby's thread pools and barrier, ported
+    // `Concurrent` — concurrent-ruby's thread pools, barrier and Map, ported
     // into `runtime/spinel/concurrent.rb` (the ruby family runs the gem).
     // ONLY the surface the port implements, the IPAddr rule: campfire's
     // `WebPush::Pool` posts, shuts down, kills and waits on its two
@@ -488,6 +488,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("wait", Ty::Bool),
         ("parties", Ty::Int),
         ("number_waiting", Ty::Int),
+    ]);
+    let concurrent_map = Ty::Class { id: ClassId(Symbol::from("Concurrent::Map")), args: vec![] };
+    register_stdlib_class(classes, "Concurrent::Map", &[], &[
+        ("[]", Ty::Untyped),
+        ("[]=", Ty::Untyped),
+        ("compute_if_absent", Ty::Untyped),
+        ("clear", concurrent_map),
     ]);
     // `Net::HTTP` — a real client on BOTH lanes: CRuby's own stdlib, and
     // spinel's `packages/net` (HTTPS included, since the openssl package
