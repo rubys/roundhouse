@@ -581,11 +581,13 @@ fn full_message_app() -> emit_and_run::Overlay {
         "  validates :title, presence: true
 
   def self.taken_title_message
-    Article.new.errors.full_message(:title, \"is taken\")
+    article = Article.new
+    article.errors.full_message(:title, \"is taken\")
   end
 
   def self.base_message(text)
-    Article.new.errors.full_message(:base, text)
+    article = Article.new
+    article.errors.full_message(:base, text)
   end
 
   def body_message(count)
@@ -818,7 +820,7 @@ fn translate_app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .write(
             "config/locales/en.yml",
-            "en:\n  hello: \"Hello world\"\n  greet: \"Hi %{name}\"\n  inbox:\n    zero: \"No messages\"\n    one: \"1 message\"\n    other: \"%{count} messages\"\n  shop:\n    title: \"Store\"\n  intro_html: \"<b>Hi</b> %{name}\"\n  articles:\n    index:\n      heading: \"All the articles\"\n",
+            "en:\n  hello: \"Hello world\"\n  greet: \"Hi %{name}\"\n  inbox:\n    zero: \"No messages\"\n    one: \"1 message\"\n    other: \"%{count} messages\"\n  shop:\n    title: \"Store\"\n  intro_html: \"<b>Hi</b> %{name}\"\n  pct: \"100%% sure %%{x} %{name}\"\n  tally_html:\n    one: \"<b>one</b>\"\n    other: \"<b>%{count}</b> items\"\n  articles:\n    index:\n      heading: \"All the articles\"\n",
         )
         .edit(
             "app/models/article.rb",
@@ -844,16 +846,24 @@ fn translate_app() -> emit_and_run::Overlay {
   def self.intro
     I18n.t(\"intro_html\", name: \"<i>\")
   end
+
+  def self.counted_inbox(calls)
+    I18n.t(\"inbox\", count: (calls << 1).size)
+  end
+
+  def self.percents
+    [I18n.t(\"pct\", name: \"N\", x: \"X\"), I18n.t(\"greet\")]
+  end
 ",
         )
         .edit(
             "app/views/articles/index.html.erb",
             "<h1",
-            "<p id=\"lazy\"><%= t(\".heading\") %></p><p id=\"inbox\"><%= t(\"inbox\", count: @articles.size) %></p><p id=\"intro\"><%= t(\"intro_html\", name: \"<i>\") %></p>\n<h1",
+            "<p id=\"lazy\"><%= t(\".heading\") %></p><p id=\"inbox\"><%= t(\"inbox\", count: @articles.size) %></p><p id=\"intro\"><%= t(\"intro_html\", name: \"<i>\") %></p><p id=\"tally\"><%= t(\"tally_html\", count: \"<s>\") %></p>\n<h1",
         )
         .write(
             "test/controllers/translations_controller_test.rb",
-            "require \"test_helper\"\n\nclass TranslationsControllerTest < ActionDispatch::IntegrationTest\n  test \"templates translate\" do\n    get articles_url\n    assert_includes response.body, \"<p id=\\\"lazy\\\">All the articles</p>\"\n    assert_includes response.body, \" messages</p>\"\n    assert_includes response.body, \"<p id=\\\"intro\\\"><b>Hi</b> &lt;i&gt;</p>\"\n  end\nend\n",
+            "require \"test_helper\"\n\nclass TranslationsControllerTest < ActionDispatch::IntegrationTest\n  test \"templates translate\" do\n    get articles_url\n    assert_includes response.body, \"<p id=\\\"lazy\\\">All the articles</p>\"\n    assert_includes response.body, \" messages</p>\"\n    assert_includes response.body, \"<p id=\\\"intro\\\"><b>Hi</b> &lt;i&gt;</p>\"\n    assert_includes response.body, \"<p id=\\\"tally\\\"><b>&lt;s&gt;</b> items</p>\"\n  end\nend\n",
         )
 }
 
@@ -864,6 +874,11 @@ raise "other: #{Article.inbox(3)}" unless Article.inbox(3) == "3 messages"
 raise "scope: #{Article.scoped_title}" unless Article.scoped_title == "Store"
 raise "fallbacks: #{Article.fallbacks.inspect}" unless Article.fallbacks == ["Hi Bo", "Plain"]
 raise "intro: #{Article.intro}" unless Article.intro == "<b>Hi</b> <i>"
+calls = []
+counted = Article.counted_inbox(calls)
+raise "counted: #{counted}" unless counted == "1 message"
+raise "count evaluated #{calls.size} times" unless calls.size == 1
+raise "percents: #{Article.percents.inspect}" unless Article.percents == ["100% sure %{x} N", "Hi %{name}"]
 puts "translate passed"
 "#;
 
@@ -883,17 +898,33 @@ fn template_t_answers_the_locale() {
     translate_app().run_test("test/controllers/translations_controller_test.rb").assert_passes();
 }
 
-/// A key the locale lacks, or one computed at run time, stays an error.
+/// A key the locale lacks, one computed at run time, or a call with a
+/// block stays an error.
 #[test]
 fn unresolvable_translations_stay_errors() {
     let (_emitted, errors) = emit_and_run::real_blog()
         .edit(
             "app/models/article.rb",
             "  validates :title, presence: true\n",
-            "  validates :title, presence: true\n\n  def self.missing\n    I18n.t(\"no.such.key\")\n  end\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n",
+            "  validates :title, presence: true\n\n  def self.missing\n    I18n.t(\"no.such.key\")\n  end\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n",
         )
         .emit(roundhouse::project::BuildTarget::Ruby);
-    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 2, "{errors:?}");
+    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 3, "{errors:?}");
+}
+
+/// `errors[:field]` cannot tell fields apart when `errors.format` puts
+/// nothing before the message, so it stays an error.
+#[test]
+fn errors_index_under_a_message_only_format_stays_an_error() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("config/locales/en.yml", "en:\n  hello: \"Hello world\"\n  errors:\n    format: \"%{message}\"\n")
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def title_errors\n    errors[:title]\n  end\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("nothing before the message")), "{errors:?}");
 }
 
 /// A field the lowering cannot humanize at compile time keeps its error.

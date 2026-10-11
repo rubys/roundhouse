@@ -73,7 +73,12 @@ fn new_errors_api_requires_runtime_support() {
 #[test]
 fn errors_full_message_on_a_literal_field_is_admitted() {
     admits("errors.full_message(:title, \"is taken\").upcase");
-    admits("Probe.new.errors.full_message(:base, title.to_s)");
+    admits("other = Probe.new; other.errors.full_message(:base, title.to_s)");
+}
+
+#[test]
+fn errors_full_message_on_a_computed_receiver_is_refused() {
+    refuses("Probe.create!(title: \"x\").errors.full_message(:title, \"is taken\")", "ActiveModel::Errors");
 }
 
 #[test]

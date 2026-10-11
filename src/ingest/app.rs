@@ -1690,7 +1690,10 @@ end
             }
         }
     }
-    let (catalog, _problems) = crate::i18n::Catalog::load(&default_locale(vfs, dir), &mut files);
+    let (catalog, problems) = crate::i18n::Catalog::load(&default_locale(vfs, dir), &mut files);
+    for (file, problem) in problems {
+        survey::record(&IngestError::Unsupported { file, message: format!("locale file not loaded: {problem}") });
+    }
     app.i18n = catalog;
     crate::i18n::stamp_models(&mut app);
 
@@ -9279,7 +9282,32 @@ fn default_locale<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> String {
         .filter(|l| !l.starts_with('#'))
         .find_map(|l| l.strip_prefix("config.i18n.default_locale").map(str::trim))
         .and_then(|rest| rest.strip_prefix('='))
-        .map(|v| v.trim().trim_start_matches(':').trim_matches(|c| c == '"' || c == '\'').to_string())
-        .filter(|v| !v.is_empty())
+        .and_then(|v| locale_literal(v.trim()))
         .unwrap_or_else(|| "en".to_string())
+}
+
+/// `:fr`, `:"pt-BR"`, `"fr"` or `'fr'` at the start of `value`, ignoring what follows it.
+fn locale_literal(value: &str) -> Option<String> {
+    let bare = value.strip_prefix(':');
+    let value = bare.unwrap_or(value);
+    let name = match value.chars().next() {
+        Some(quote @ ('"' | '\'')) => value[1..].split(quote).next()?,
+        _ if bare.is_some() => value.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).next()?,
+        _ => return None,
+    };
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::locale_literal;
+
+    #[test]
+    fn a_default_locale_literal_drops_a_trailing_comment_but_not_a_quoted_hash() {
+        assert_eq!(locale_literal(":fr # French").as_deref(), Some("fr"));
+        assert_eq!(locale_literal(":\"pt-BR\"").as_deref(), Some("pt-BR"));
+        assert_eq!(locale_literal("\"fr#CA\" # comment").as_deref(), Some("fr#CA"));
+        assert_eq!(locale_literal("'ja'").as_deref(), Some("ja"));
+        assert_eq!(locale_literal("ENV[\"LOCALE\"]"), None);
+    }
 }

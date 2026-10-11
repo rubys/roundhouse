@@ -12,9 +12,9 @@
 //! `parse` and `Catalog::resolve` accept is typed, and only that folds.
 
 use crate::app::App;
-use crate::expr::{Expr, ExprNode, InterpPart, Literal};
-use crate::i18n::{Catalog, Fallback, Translate, Translation};
-use crate::ident::Symbol;
+use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::i18n::{Catalog, Fallback, Piece, Translate, Translation};
+use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
 
@@ -32,6 +32,7 @@ pub(crate) fn parse(
     recv: Option<&Expr>,
     method: &str,
     args: &[Expr],
+    block: Option<&Expr>,
     in_view: bool,
     view: Option<&str>,
 ) -> Option<Result<Call, String>> {
@@ -42,6 +43,9 @@ pub(crate) fn parse(
         Some(ExprNode::Const { path }) if path.len() == 1 && path[0].as_str() == "I18n");
     if !(on_i18n || (recv.is_none() && in_view)) {
         return None;
+    }
+    if block.is_some() {
+        return Some(Err("a block on the call".into()));
     }
     Some(parse_args(args, view))
 }
@@ -124,11 +128,24 @@ pub fn apply_i18n_translate_lowering(app: &mut App) {
 
 fn rewrite(expr: &mut Expr, catalog: &Catalog, in_view: bool, view: Option<&str>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, catalog, in_view, view));
-    let ExprNode::Send { recv, method, args, block: None, .. } = &*expr.node else { return };
-    let Some(Ok(call)) = parse(recv.as_ref(), method.as_str(), args, in_view, view) else { return };
+    let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else { return };
+    let Some(Ok(mut call)) = parse(recv.as_ref(), method.as_str(), args, block.as_ref(), in_view, view) else { return };
     let Ok(translation) = catalog.resolve(&call.lookup) else { return };
     let span = expr.span;
     let html = in_view && crate::i18n::is_html_safe_key(&call.lookup.key);
+    // Not the count expression in each branch: Ruby evaluates a keyword argument once.
+    let bound = match (&translation, call.count.take()) {
+        (Translation::Plural { .. }, Some(count)) if !is_plain(&count) => {
+            let name = Symbol::from(format!("__i18n_count_{}", span.start));
+            let read = Expr::new(span, ExprNode::Var { id: VarId(0), name: name.clone() });
+            call.count = Some(Expr { ty: count.ty.clone(), ..read });
+            Some(Expr::new(span, ExprNode::Assign { target: LValue::Var { id: VarId(0), name }, value: count }))
+        }
+        (_, count) => {
+            call.count = count;
+            None
+        }
+    };
     let render = |template: &str| interpolate(span, template, &call, html);
     let mut folded = match (translation, &call.count) {
         (Translation::One(t), _) => render(&t),
@@ -155,6 +172,9 @@ fn rewrite(expr: &mut Expr, catalog: &Catalog, in_view: bool, view: Option<&str>
         (Translation::Plural { .. }, None) => return,
     };
     folded.ty = Some(Ty::Str);
+    if let Some(assign) = bound {
+        folded = typed(Expr::new(span, ExprNode::Seq { exprs: vec![assign, folded] }));
+    }
     if html {
         folded = typed(Expr::new(span, ExprNode::Send {
             recv: None,
@@ -192,27 +212,28 @@ fn escaped(span: Span, value: Expr) -> Expr {
     }))
 }
 
-/// `template` with each `%{name}` replaced by its value's `to_s`.
+/// A read that evaluates to the same value each time it is repeated.
+fn is_plain(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Lit { .. })
+}
+
+/// `template` with each `%{name}` replaced by its value's `to_s`, or
+/// as written when the call passes no value.
 fn interpolate(span: Span, template: &str, call: &Call, html: bool) -> Expr {
+    let pieces = match call.lookup.interpolates() {
+        true => crate::i18n::pieces(template).unwrap_or_else(|_| vec![Piece::Text(template.to_string())]),
+        false => vec![Piece::Text(template.to_string())],
+    };
     let mut parts = Vec::new();
-    let mut rest = template;
-    while let Some(i) = rest.find("%{") {
-        let Some(j) = rest[i + 2..].find('}') else { break };
-        let name = &rest[i + 2..i + 2 + j];
-        let value = if name == "count" {
-            call.count.clone()
-        } else {
-            call.values.iter().find(|(n, _)| n == name).map(|(_, v)| if html { escaped(span, v.clone()) } else { v.clone() })
-        };
-        let Some(value) = value else { break };
-        if i > 0 {
-            parts.push(InterpPart::Text { value: rest[..i].to_string() });
+    for piece in pieces {
+        match piece {
+            Piece::Text(value) => parts.push(InterpPart::Text { value }),
+            Piece::Name(name) => {
+                let value = if name == "count" { call.count.clone() } else { call.values.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone()) };
+                let value = value.expect("resolve refuses a name the call does not pass");
+                parts.push(InterpPart::Expr { expr: if html { escaped(span, value) } else { value } });
+            }
         }
-        parts.push(InterpPart::Expr { expr: value });
-        rest = &rest[i + 3 + j..];
-    }
-    if !rest.is_empty() {
-        parts.push(InterpPart::Text { value: rest.to_string() });
     }
     let mut e = match parts.as_slice() {
         [] => Expr::new(span, ExprNode::Lit { value: Literal::Str { value: String::new() } }),

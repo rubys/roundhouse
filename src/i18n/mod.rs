@@ -54,14 +54,14 @@ impl Catalog {
 
     /// Rails' English, then `files` (path, source), for `locale`. A file
     /// that does not parse is skipped and reported.
-    pub fn load(locale: &str, files: &mut Vec<(String, String)>) -> (Catalog, Vec<String>) {
+    pub fn load(locale: &str, files: &mut Vec<(String, String)>) -> (Catalog, Vec<(String, String)>) {
         files.sort_by(|a, b| a.0.cmp(&b.0));
         let mut catalog = Catalog { locale: locale.to_string(), entries: BTreeMap::new() };
         let mut problems = Vec::new();
         let rails = RAILS_EN.iter().map(|(name, src)| (name.to_string(), src.to_string()));
         for (path, source) in rails.collect::<Vec<_>>().iter().chain(files.iter()) {
             if let Err(e) = catalog.merge_source(source) {
-                problems.push(format!("{path}: {e}"));
+                problems.push((path.clone(), e));
             }
         }
         (catalog, problems)
@@ -69,9 +69,9 @@ impl Catalog {
 
     fn merge_source(&mut self, source: &str) -> Result<(), String> {
         let top = format!("{}:", self.locale);
-        let quoted = format!("\"{}\":", self.locale);
+        let quoted = [format!("\"{}\":", self.locale), format!("'{}':", self.locale)];
         // Not parsed: a file with no top-level key for this locale adds nothing to it.
-        if !source.lines().any(|l| l.trim_end().starts_with(&top) || l.starts_with(&quoted)) {
+        if !source.lines().any(|l| l.trim_end().starts_with(&top) || quoted.iter().any(|q| l.starts_with(q.as_str()))) {
             return Ok(());
         }
         let mut value: Value = serde_yaml_ng::from_str(source).map_err(|e| e.to_string())?;
@@ -201,12 +201,16 @@ impl Catalog {
             None => defaults.iter().find_map(|k| self.translate(k, count))?,
         };
         let attribute = opts.attribute.clone().unwrap_or_else(|| self.human_attribute_name(scope, keys, attr));
-        let text = template
-            .replace("%{attribute}", &attribute)
-            .replace("%{model}", &self.model_human_name(scope, keys))
-            .replace("%{count}", opts.count.as_deref().unwrap_or(""));
+        let model = self.model_human_name(scope, keys);
+        let text = interpolate_text(template, |name| match name {
+            "attribute" => Some(attribute.clone()),
+            "model" => Some(model.clone()),
+            "count" => Some(opts.count.clone().unwrap_or_default()),
+            "value" => Some(VALUE_MARK.to_string()),
+            _ => None,
+        });
         let mut parts = Vec::new();
-        for (i, piece) in text.split("%{value}").enumerate() {
+        for (i, piece) in text.split(VALUE_MARK).enumerate() {
             if i > 0 {
                 parts.push(Part::Value);
             }
@@ -236,8 +240,23 @@ impl ErrorOpts {
     }
 }
 
+/// Why `errors[:field]`, which finds a field's messages by the text
+/// `format` puts before them, cannot be answered under `format`.
+pub fn errors_index_refusal(format: &str) -> Option<&'static str> {
+    match format.strip_suffix("%{message}") {
+        None => Some("errors.format does not end in the message"),
+        Some(before) if before.contains("%{message}") => Some("errors.format names the message twice"),
+        Some("") => Some("errors.format puts nothing before the message to tell the field by"),
+        Some(_) => None,
+    }
+}
+
 pub fn format_full(format: &str, attribute: &str, message: &str) -> String {
-    format.replace("%{attribute}", attribute).replace("%{message}", message)
+    interpolate_text(format, |name| match name {
+        "attribute" => Some(attribute.to_string()),
+        "message" => Some(message.to_string()),
+        _ => None,
+    })
 }
 
 /// A `t` / `I18n.t` call reduced to what its lookup needs.
@@ -255,6 +274,14 @@ pub struct Translate {
     pub counted: bool,
     /// The other keywords, each an interpolation value.
     pub values: Vec<String>,
+}
+
+impl Translate {
+    /// I18n interpolates only when the call passes a value, so with none
+    /// `%{x}` and `%%` stay as written.
+    pub fn interpolates(&self) -> bool {
+        self.counted || !self.values.is_empty()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -304,8 +331,12 @@ impl Catalog {
             Translation::One(t) => vec![t],
             Translation::Plural { zero, one, other } => zero.iter().chain([one, other]).collect(),
         };
+        if !call.interpolates() {
+            return Ok(translation);
+        }
         for template in templates {
-            for name in placeholders(template) {
+            for piece in pieces(template)? {
+                let Piece::Name(name) = piece else { continue };
                 let given = (name == "count" && call.counted) || call.values.iter().any(|v| v == &name);
                 if !given {
                     return Err(format!("missing interpolation argument %{{{name}}}"));
@@ -333,17 +364,68 @@ pub fn is_html_safe_key(key: &str) -> bool {
     key == "html" || key.ends_with("_html") || key.ends_with(".html")
 }
 
-/// The `%{name}`s in `template`.
-pub fn placeholders(template: &str) -> Vec<String> {
+/// A template as `I18n.interpolate` reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Piece {
+    Text(String),
+    Name(String),
+}
+
+/// `%%` is a literal `%` and `%{name}` a value; a `%<name>` takes a
+/// format, which no lowering applies, so it is refused.
+pub fn pieces(template: &str) -> Result<Vec<Piece>, String> {
     let mut out = Vec::new();
+    let mut text = String::new();
     let mut rest = template;
-    while let Some(i) = rest.find("%{") {
-        let after = &rest[i + 2..];
-        let Some(j) = after.find('}') else { break };
-        out.push(after[..j].to_string());
-        rest = &after[j + 1..];
+    while let Some(i) = rest.find('%') {
+        text.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        if let Some(r) = after.strip_prefix('%') {
+            text.push('%');
+            rest = r;
+            continue;
+        }
+        let named = |open: char, close: char| {
+            let inner = after.strip_prefix(open)?;
+            let j = inner.find(close)?;
+            let name = &inner[..j];
+            (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then(|| (name, &inner[j + 1..]))
+        };
+        if let Some((name, r)) = named('{', '}') {
+            if !text.is_empty() {
+                out.push(Piece::Text(std::mem::take(&mut text)));
+            }
+            out.push(Piece::Name(name.to_string()));
+            rest = r;
+        } else if named('<', '>').is_some() {
+            return Err(format!("a formatted placeholder in {template:?}"));
+        } else {
+            text.push('%');
+            rest = after;
+        }
     }
-    out
+    text.push_str(rest);
+    if !text.is_empty() {
+        out.push(Piece::Text(text));
+    }
+    Ok(out)
+}
+
+/// Where `%{value}` sits once the other names are interpolated; not `%{value}` itself, which a `%%{value}` also leaves.
+const VALUE_MARK: char = '\u{0}';
+
+/// `template` interpolated as I18n does, a name `value` does not answer kept as written.
+fn interpolate_text(template: &str, value: impl Fn(&str) -> Option<String>) -> String {
+    match pieces(template) {
+        Ok(pieces) => pieces
+            .into_iter()
+            .map(|p| match p {
+                Piece::Text(t) => t,
+                Piece::Name(n) => value(&n).unwrap_or_else(|| format!("%{{{n}}}")),
+            })
+            .collect(),
+        Err(_) => template.to_string(),
+    }
 }
 
 /// What one model's messages need from the catalog: its i18n scope
@@ -642,10 +724,34 @@ mod tests {
             c.resolve(&Translate { counted: true, ..t("inbox") }),
             Ok(Translation::Plural { zero: None, one: "1 message".into(), other: "%{count} messages".into() })
         );
-        assert!(c.resolve(&t("greet")).is_err());
+        assert!(c.resolve(&Translate { values: vec!["other".into()], ..t("greet") }).is_err());
         assert!(c.resolve(&Translate { values: vec!["name".into()], ..t("greet") }).is_ok());
         assert!(c.resolve(&t("nope")).is_err());
         assert!(c.resolve(&t(".title")).is_err());
+    }
+
+    #[test]
+    fn interpolation_reads_escaped_percents_and_refuses_formats() {
+        assert_eq!(
+            pieces("100%% %%{x} %{name}%"),
+            Ok(vec![Piece::Text("100% %{x} ".into()), Piece::Name("name".into()), Piece::Text("%".into())])
+        );
+        assert!(pieces("%<n>05d").is_err());
+        let c = catalog(&[("config/locales/en.yml", "en:\n  greet: \"Hi %{name}\"\n  fmt: \"%<n>05d\"\n")]);
+        let t = |key: &str| Translate { key: key.into(), ..Default::default() };
+        assert_eq!(c.resolve(&t("greet")), Ok(Translation::One("Hi %{name}".into())));
+        assert!(c.resolve(&Translate { values: vec!["n".into()], ..t("fmt") }).is_err());
+        assert_eq!(format_full("%%{attribute} %{attribute}: %{message}", "Title", "is short"), "%{attribute} Title: is short");
+    }
+
+    #[test]
+    fn a_single_quoted_locale_key_is_read_and_a_broken_file_reported() {
+        let c = catalog(&[("config/locales/en.yml", "'en':\n  hello: Hi\n")]);
+        assert_eq!(c.lookup("hello"), Some("Hi"));
+        let mut files = vec![("config/locales/bad.yml".to_string(), "en:\n  a: [\n".to_string())];
+        let (_, problems) = Catalog::load("en", &mut files);
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].0, "config/locales/bad.yml");
     }
 
     #[test]

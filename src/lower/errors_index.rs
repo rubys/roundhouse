@@ -191,8 +191,8 @@ fn rewrite_index(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mu
         return;
     }
     let ExprNode::Send { recv: Some(reader), .. } = &*expr.node else { unreachable!() };
-    let Some(prefix_text) = labels.message_prefix(reader, field.as_str()) else {
-        diags.push(residue(expr, "errors.format does not end in the message"));
+    let Some(prefix_text) = labels.message_prefix(reader, field.as_str()).filter(|p| !p.is_empty()) else {
+        diags.push(residue(expr, "errors.format does not put the field before the message"));
         return;
     };
     let span = expr.span;

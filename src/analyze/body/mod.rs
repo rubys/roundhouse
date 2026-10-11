@@ -1676,7 +1676,7 @@ impl<'a> BodyTyper<'a> {
                     return Ty::Array { elem: Box::new(elem.unwrap_or_else(unknown)) };
                 }
                 if let Some(call) = crate::lower::i18n_translate::parse(
-                    recv.as_ref(), method.as_str(), args, ctx.in_view, ctx.view_name.as_ref().map(|v| v.as_str()),
+                    recv.as_ref(), method.as_str(), args, block.as_ref(), ctx.in_view, ctx.view_name.as_ref().map(|v| v.as_str()),
                 ) {
                     let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
                     let resolved = call.and_then(|c| catalog.resolve(&c.lookup).map(|_| ()));
@@ -1690,6 +1690,19 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     return Ty::Str;
+                }
+                if method.as_str() == "[]"
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                    && expr.diagnostic.is_none()
+                {
+                    let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
+                    if let Some(reason) = crate::i18n::errors_index_refusal(catalog.errors_format()) {
+                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                            target: None,
+                            construct: Symbol::from("ActiveModel::Errors"),
+                            detail: format!("`errors[:field]` cannot pick a field's messages: {reason}"),
+                        });
+                    }
                 }
                 if method.as_str() == "human_attribute_name"
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)

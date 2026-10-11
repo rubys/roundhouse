@@ -262,8 +262,13 @@ pub(crate) fn full_message_bakes(recv: Option<&Expr>, args: &[Expr], block: Opti
         && args.len() == 2
         && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } })
         && !matches!(&*args[1].node, ExprNode::Hash { .. })
-        && recv.is_some_and(|r| matches!(&*r.node, ExprNode::Send { method, args, .. }
-            if method.as_str() == "errors" && args.is_empty()))
+        && recv.is_some_and(|r| matches!(&*r.node, ExprNode::Send { recv: owner, method, args, .. }
+            if method.as_str() == "errors" && args.is_empty() && owner.as_ref().is_none_or(reads_without_effect)))
+}
+
+/// Folding drops the receiver, so only one whose evaluation does nothing.
+fn reads_without_effect(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef)
 }
 
 /// A looked-up message as a string: a literal when every part is known,
