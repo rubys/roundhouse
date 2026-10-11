@@ -186,7 +186,7 @@ fn parse_args(args: Vec<String>) -> Result<Action, String> {
                 let value = iter.next().ok_or("--archives requires a target list")?;
                 let targets = value.split(',').map(|name| {
                     BuildTarget::from_str(name)
-                        .filter(|t| BuildTarget::ALL.contains(t))
+                        .filter(|t| BuildTarget::ALL.contains(t) || BuildTarget::SITE_ONLY.contains(t))
                         .ok_or_else(|| format!("unknown archive target '{name}'"))
                 }).collect::<Result<Vec<_>, _>>()?;
                 archives = Some(targets);

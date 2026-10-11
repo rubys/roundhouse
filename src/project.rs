@@ -113,6 +113,12 @@ impl BuildTarget {
         BuildTarget::TypescriptWorker,
     ];
 
+    /// Targets the `--site` build archives beyond [`Self::ALL`]: they
+    /// get a browse archive, but sit outside the per-target test
+    /// matrices that iterate `ALL` (futamura's gate is the app's own
+    /// Rails suite, `tests/futamura.rs`).
+    pub const SITE_ONLY: &'static [BuildTarget] = &[BuildTarget::Futamura];
+
     /// Targets valid for `--target LANG` (transpile to directory).
     /// Excludes `Blog` (source-only) — `--target blog` would mean
     /// "copy the input to the output," which is a `cp -r`, not a
@@ -8180,7 +8186,9 @@ pub fn build_site(fixture: &Path, out: &Path) -> Result<(), String> {
         .map_err(|e| format!("mkdir {}: {e}", out.display()))?;
 
     // Archive generation cleans browse/, so copy its viewer assets afterwards.
-    build_archives(fixture, out, BuildTarget::ALL)?;
+    let targets: Vec<BuildTarget> =
+        BuildTarget::ALL.iter().chain(BuildTarget::SITE_ONLY).copied().collect();
+    build_archives(fixture, out, &targets)?;
     copy_site_assets(out)?;
     copy_create_blog(out)?;
     crate::guide::render_site(out)?;
@@ -8198,13 +8206,24 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
     fs::create_dir_all(&browse).map_err(|e| format!("mkdir {}: {e}", browse.display()))?;
     let mut app =
         ingest_app(fixture).map_err(|e| format!("ingest {}: {e}", fixture.display()))?;
+    // Futamura needs the types but none of the lowerings, same split as
+    // the single-target driver (`bin/roundhouse`).
+    let analyzed = targets.contains(&BuildTarget::Futamura).then(|| {
+        let mut app = app.clone();
+        crate::analyze::Analyzer::new(&app).analyze(&mut app);
+        app
+    });
     // Analyze + the same post-analyze shared lowerings as the
     // single-target driver; the site build has no diagnostic surface,
     // so the residue is dropped.
     let _ = crate::session::analyze_and_lower(&mut app);
 
     for target in targets {
-        let files = target_files(&app, fixture, *target)?;
+        let app = match (target, &analyzed) {
+            (BuildTarget::Futamura, Some(analyzed)) => analyzed,
+            _ => &app,
+        };
+        let files = target_files(app, fixture, *target)?;
         let name = target.as_str();
 
         let json_path = out.join("browse").join(format!("{name}.json"));

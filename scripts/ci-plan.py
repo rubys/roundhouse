@@ -637,7 +637,7 @@ def finish(
     smoke_extra = list(smoke_extra or [])
     compare = list(compare or [])
     archives = (
-        ["blog", "spinel", *TARGETS, "typescript-worker"]
+        ["blog", "spinel", *TARGETS, "typescript-worker", "futamura"]
         if site
         else [
             *smoke,
