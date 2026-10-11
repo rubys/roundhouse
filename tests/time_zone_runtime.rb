@@ -114,6 +114,9 @@ failures << "a zone leaked across threads: #{seen.inspect}" unless seen == [0, 3
 
 ny = AS.find_zone!("America/New_York")
 failures << "past the last transition the POSIX rule answers" unless [ny.offset_at(Time.utc(2045, 7, 1).to_i), ny.offset_at(Time.utc(2045, 12, 1).to_i)] == [-14400, -18000]
+summer = Time.utc(2021, 8, 1, 12).to_i
+london = AS.find_zone!("Europe/London")
+failures << "a base offset is the standard time even in summer" unless [ny.base_offset_at(summer), ny.offset_at(summer), london.base_offset_at(summer), london.offset_at(summer), ny.base_offset_at(Time.utc(2045, 7, 1).to_i)] == [-18000, -14400, 0, 3600, -18000]
 
 puts "cases #{want.length}"
 puts failures

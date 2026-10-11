@@ -87,13 +87,28 @@ module ActiveSupport
   ZONE_NAMES: Hash[String, String]
   class TimeZoneData
     def name: () -> String
-    def initialize: (String name, Array[Integer] transitions, Array[Integer] offsets, Integer initial_offset, Array[Integer] rule) -> void
+    def initialize: (String name, Array[Integer] transitions, Array[Integer] offsets, Integer initial_offset, Array[Integer] rule, Array[bool] dsts) -> void
     def offset_at: (Integer epoch) -> Integer
+    def base_offset_at: (Integer epoch) -> Integer
     def rule_or: (Integer epoch, Integer fallback) -> Integer
   end
   def self.rule_instant: (Integer year, Integer month, Integer week, Integer wday, Integer secs) -> Integer
   def self.be32: (Array[Integer] b, Integer i) -> Integer
   def self.find_zone!: (String? zone) -> TimeZoneData
+  def self.rails_zone_names: () -> Array[String]
+  def self.formatted_offset: (Time t) -> String
+  def self.seconds_to_utc_offset: (Integer seconds) -> String
+  class TimeZone
+    def name: () -> String
+    def initialize: (String name, TimeZoneData data) -> void
+    def self.lookup: (String? name) -> TimeZone?
+    def self.all: () -> Array[TimeZone]
+    def compare: (TimeZone other) -> Integer
+    def utc_offset: () -> Integer
+    def formatted_offset: () -> String
+    def to_s: () -> String
+    def now: () -> Time
+  end
   def self.parse_tz_rule: (String spec) -> Array[Integer]
   def self.posix_seconds: (String text) -> Integer
   def self.current_zone: () -> TimeZoneData?

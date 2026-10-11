@@ -670,12 +670,24 @@ module ActiveSupport
   class TimeZoneData
     attr_reader :name
 
-    def initialize(name, transitions, offsets, initial_offset, rule)
+    def initialize(name, transitions, offsets, initial_offset, rule, dsts)
       @name = name
       @transitions = transitions
       @offsets = offsets
       @initial_offset = initial_offset
       @rule = rule
+      @dsts = dsts
+    end
+
+    # Not `offset_at`: Rails' `TimeZone#utc_offset` is the period's BASE offset, the standard time without daylight saving.
+    def base_offset_at(epoch)
+      n = @transitions.length
+      return @rule[0] if !@rule.empty? && (n == 0 || epoch >= @transitions[n - 1])
+      return @initial_offset if n == 0 || epoch < @transitions[0]
+      i = n - 1
+      i = i - 1 while i > 0 && @transitions[i] > epoch
+      i = i - 1 while i > 0 && @dsts[i]
+      @dsts[i] ? @initial_offset : @offsets[i]
     end
 
     def offset_at(epoch)
@@ -753,9 +765,11 @@ module ActiveSupport
     idx_at = at + timecnt * width
     types_at = idx_at + timecnt
     offsets = []
+    dsts = []
     i = 0
     while i < timecnt
       offsets << be32(b, types_at + b[idx_at + i] * 6)
+      dsts << (b[types_at + b[idx_at + i] * 6 + 4] == 1)
       i = i + 1
     end
     rule = []
@@ -763,7 +777,7 @@ module ActiveSupport
       footer_at = types_at + typecnt * 6 + charcnt + leapcnt * 12 + be32(b, base + 24) + be32(b, base + 20)
       rule = parse_tz_rule(File.binread(path)[footer_at..].to_s.strip)
     end
-    TimeZoneData.new(iana, transitions, offsets, be32(b, types_at), rule)
+    TimeZoneData.new(iana, transitions, offsets, be32(b, types_at), rule, dsts)
   end
 
   # Only the `Mm.w.d` rule form: a `Jn` / `n` footer yields no rule, and the last transition's offset stands.
@@ -870,5 +884,83 @@ module ActiveSupport
     return text if significant.length <= 16
     point = int_part.length - lead + exp
     (negative ? "-" : "") + "0." + significant[0, 16].to_s + "e" + point.to_s
+  end
+
+  def self.rails_zone_names
+    ZONE_NAMES.keys
+  end
+
+  # `Time#formatted_offset`: Rails spells the offset "+09:00", "+00:00" for UTC.
+  def self.formatted_offset(t)
+    ActiveSupport.seconds_to_utc_offset(t.utc_offset)
+  end
+
+  def self.seconds_to_utc_offset(seconds)
+    sign = seconds < 0 ? "-" : "+"
+    abs = seconds.abs
+    hours = abs / 3600
+    minutes = (abs % 3600) / 60
+    sign + (hours < 10 ? "0" : "") + hours.to_s + ":" + (minutes < 10 ? "0" : "") + minutes.to_s
+  end
+
+  class TimeZone
+    attr_reader :name
+
+    def initialize(name, data)
+      @name = name
+      @data = data
+    end
+
+    # Not `[]`: a class-side index reads as an operator on the strict targets; `lower::time_calendar` spells `TimeZone[x]` this way.
+    def self.lookup(name)
+      return nil if name.nil? || name.to_s.empty?
+      begin
+        TimeZone.new(name.to_s, ActiveSupport.find_zone!(name.to_s))
+      rescue ArgumentError
+        nil
+      end
+    end
+
+    def self.all
+      zones = []
+      ActiveSupport.rails_zone_names.each do |zone_name|
+        zones << TimeZone.new(zone_name, ActiveSupport.find_zone!(zone_name))
+      end
+      # Not `sort { |a, b| … }`: a block's parameters do not type on every target, and 152 zones sort cheaply in place.
+      i = 1
+      while i < zones.length
+        current = zones[i]
+        j = i - 1
+        while j >= 0 && zones[j].compare(current) > 0
+          zones[j + 1] = zones[j]
+          j = j - 1
+        end
+        zones[j + 1] = current
+        i = i + 1
+      end
+      zones
+    end
+
+    def compare(other)
+      by_offset = utc_offset <=> other.utc_offset
+      by_offset == 0 ? (name <=> other.name) : by_offset
+    end
+
+    def utc_offset
+      @data.base_offset_at(Time.now.to_i)
+    end
+
+    def formatted_offset
+      ActiveSupport.seconds_to_utc_offset(utc_offset)
+    end
+
+    def to_s
+      "(GMT" + formatted_offset + ") " + @name
+    end
+
+    def now
+      t = Time.now
+      t.getlocal(@data.offset_at(t.to_i))
+    end
   end
 end
