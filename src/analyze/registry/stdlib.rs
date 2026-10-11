@@ -640,6 +640,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("to_s", Ty::Str), ("now", Ty::Time),
         ]);
     }
+    register_stdlib_class(classes, crate::analyze::indifferent::CLASS, &[], &[]);
     // Not answered here beyond `new`: the dispatch arm for `ActiveSupport::StringInquirer` types its predicates and String surface.
     register_stdlib_class(classes, "ActiveSupport::StringInquirer", &[("new", Ty::Str)], &[]);
     // `ActiveRecord::Type::Boolean` is a subclass with the same casting; `deserialize` casts the same way for a boolean.

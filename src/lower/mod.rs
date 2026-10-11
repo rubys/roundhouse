@@ -51,6 +51,7 @@ pub mod active_model_model;
 pub mod enumerable_ext;
 mod fused;
 pub mod time_calendar;
+pub mod indifferent_access;
 pub mod boolean_cast;
 pub mod where_range_split;
 pub mod params_merge;
@@ -313,6 +314,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("params_residue", &["bool_fold"]),
     // After the ledger, which reads the calls this rewrites; before the controller lowering turns `params` into `@params`.
     ("params_permit", &["params_residue"]),
+    // Before the fused rewrites, which key on the plain Hash type this pass leaves on an indifferent hash.
+    ("indifferent_access", &[]),
     // Independent send rewrites: one fused tree walk in
     // `fused::apply_fused_independent_rewrites`. Grouped here so the
     // executed-pass assert stays a straight list match.
@@ -779,6 +782,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("params_residue");
     params_permit::apply_params_permit_lowering(app);
     ran!("params_permit");
+    indifferent_access::apply_indifferent_access_lowering(app);
+    ran!("indifferent_access");
     crate::timings::phase("post-analyze: fused send rewrites", || {
         fused::apply_fused_independent_rewrites(app);
     });

@@ -32,6 +32,11 @@ module ActiveSupport
   def self.to_sentence: (Array[untyped] list, String words_connector, String two_words_connector, String last_word_connector) -> String
   def self.symbolize_keys: (Hash[String, untyped] hash) -> Hash[Symbol, untyped]
   def self.stringify_keys: (Hash[Symbol, untyped] hash) -> Hash[String, untyped]
+  def self.indifferent: (untyped hash) -> Hash[untyped, untyped]
+  def self.indifferent_value: (untyped value, bool in_place) -> untyped
+  def self.indifferent_key: (untyped key) -> untyped
+  def self.indifferent_keys: (Array[untyped] keys) -> Array[untyped]
+  def self.indifferent_to_hash: (untyped value) -> untyped
   def self.cast_boolean: (untyped value) -> bool?
   def self.squish: (String text) -> String
   def self.squish!: (String text) -> String

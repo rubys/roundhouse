@@ -351,6 +351,10 @@ impl<'a> BodyTyper<'a> {
             let array = Ty::Array { elem: Box::new(Ty::Int) };
             return self.block_ctx_for(outer, Some(&array), method, args, class_object_receiver, block);
         }
+        if let Some(value) = recv_ty.and_then(crate::analyze::indifferent::value_of) {
+            let hash = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(value.clone()) };
+            return self.block_ctx_for(outer, Some(&hash), method, args, class_object_receiver, block);
+        }
         let mut new_ctx = outer.clone();
         // Required parameters come first, so the extra ones (optional,
         // keyword, keyword rest) leave their positions alone; the Lambda
@@ -1435,6 +1439,21 @@ impl<'a> BodyTyper<'a> {
                 // the value Jbuilder itself returns.
                 if id.0.as_str() == "BigDecimal" {
                     return bigdecimal_method(method, call_args).unwrap_or_else(unknown);
+                }
+                if id.0.as_str() == crate::analyze::indifferent::CLASS {
+                    // Not `instance_receiver`: the bare `HashWithIndifferentAccess` alias is not marked a resolved class reference.
+                    let answer = if let Some(value) = args.first().cloned() {
+                        crate::analyze::indifferent::method_ty(&value, method.as_str(), call_args, block_ret, block_ret.is_some(), |m| {
+                            hash_method(&Symbol::from(m), &Ty::Str, &value, block_ret, call_args)
+                        })
+                    } else {
+                        match (method.as_str(), call_args) {
+                            ("new", []) => Some(crate::analyze::indifferent::of(Ty::Untyped)),
+                            ("new", [hash]) if block_ret.is_none() => hash.ty.as_ref().and_then(crate::analyze::indifferent::from),
+                            _ => None,
+                        }
+                    };
+                    return answer.unwrap_or_else(unknown);
                 }
                 // Not Rails' numeric or TZInfo lookups: only a zone NAME reaches the runtime port's `lookup`.
                 if id.0.as_str() == "ActiveSupport::TimeZone" && method.as_str() == "[]" {
@@ -3109,8 +3128,13 @@ pub(super) fn hash_method(
             key: Box::new(Ty::Sym),
             value: Box::new(value.clone()),
         },
+        "with_indifferent_access" if args.is_empty() => crate::analyze::indifferent::from(&Ty::Hash {
+            key: Box::new(key.clone()),
+            value: Box::new(value.clone()),
+        })
+        .unwrap_or_else(unknown),
         "stringify_keys" | "deep_stringify_keys" | "stringify_keys!"
-        | "deep_stringify_keys!" | "with_indifferent_access" => Ty::Hash {
+        | "deep_stringify_keys!" => Ty::Hash {
             key: Box::new(Ty::Str),
             value: Box::new(value.clone()),
         },

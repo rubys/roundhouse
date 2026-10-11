@@ -10846,3 +10846,96 @@ raise "the cached copy is the caller's object" if again.equal?(body)
 "##)
         .assert_passes();
 }
+
+/// `ActiveSupport::HashWithIndifferentAccess` reads and writes a Symbol
+/// key as its String, nested hashes included, and its conversions
+/// (`merge`, `reverse_merge`, `dup`, `to_hash`, `symbolize_keys`) answer
+/// what Rails answers.
+#[test]
+fn hash_with_indifferent_access_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/indifferent\", to: \"indifferent#show\"\n  get \"/indifferent/loose\", to: \"indifferent#loose\"\n  get \"/indifferent/copies\", to: \"indifferent#copies\"\n",
+        )
+        .write(
+            "app/controllers/indifferent_controller.rb",
+            r#"class IndifferentController < ApplicationController
+  OPTIONS = { state: :trusted }.with_indifferent_access.freeze
+
+  def show
+    h = ActiveSupport::HashWithIndifferentAccess.new(a: 1, "b" => 2)
+    h[:c] = 3
+    key = :a
+    nested = { outer: { inner: 4 } }.with_indifferent_access
+    list = HashWithIndifferentAccess.new(items: [{ id: 5 }])
+    w = ActiveSupport::HashWithIndifferentAccess.new
+    w[:name] = "x"
+    w[:rows] = [{ n: 8 }]
+    merged = h.merge(d: 6)
+    defaults = h.reverse_merge(a: 0, e: 7)
+    copy = h.dup
+    copy[:a] = 10
+    syms = h.symbolize_keys
+    render plain: [
+      h[:a], h["a"], h[key], h[:b], h.fetch(:c), h.key?(:b), h.values_at(:a, :c).join(","),
+      h.slice(:a, :c).keys.join(","), h.except(:b).keys.join(","),
+      nested[:outer][:inner], nested.dig(:outer, :inner), list[:items][0][:id], w["name"], w[:rows][0][:n],
+      merged[:d], defaults[:a], defaults[:e], copy[:a], h[:a],
+      h.to_hash.keys.join(","), syms[:a], h.is_a?(Hash), h.delete(:c), h.key?(:c), h.keys.join(","),
+      h.select { |k, v| v > 1 }.keys.join(","), h.map { |k, v| k + v.to_s }.join(",")
+    ].join("|")
+  end
+
+  def loose
+    h = ActiveSupport::HashWithIndifferentAccess.new(a: 1, "b" => 2)
+    t = h.to_h
+    t["z"] = 1
+    filled = h.with_defaults(a: 0, f: 9)
+    loose = ActiveSupport::HashWithIndifferentAccess.new
+    loose[:cfg] = { deep: { leaf: "y" } }
+    loose.fetch(:cfg)[:deep][:leaf] = "z"
+    loose.update(more: 1)
+    render plain: [
+      h.key?(:z), filled[:a], filled[:f], loose.dig(:cfg, :deep, :leaf), loose[:cfg].key?(:deep), loose[:more]
+    ].join("|")
+  end
+
+  def copies
+    src = ActiveSupport::HashWithIndifferentAccess.new(n: { k: 1 }, drop: 2)
+    cp = ActiveSupport::HashWithIndifferentAccess.new(src)
+    src[:n][:k] = 2
+    bag = ActiveSupport::HashWithIndifferentAccess.new
+    bag[:syms] = [:a]
+    keys = %i[n drop]
+    render plain: [cp[:n][:k], src.without(:drop).keys.join(","), bag[:syms].include?(:a), src.slice(*keys).keys.join(","), OPTIONS[:state], OPTIONS.frozen?, src[:n].keys.join(",")].join("|")
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/indifferent_controller_test.rb",
+            r#"require "test_helper"
+
+class IndifferentControllerTest < ActionDispatch::IntegrationTest
+  test "indifferent access" do
+    get "/indifferent"
+    assert_equal "1|1|1|2|3|true|1,3|a,c|a,c|4|4|5|x|8|6|1|7|10|1|a,b,c|1|true|3|false|a,b|b|a1,b2", response.body
+  end
+
+  test "untyped values read back indifferently" do
+    get "/indifferent/loose"
+    assert_equal "false|1|9|z|true|1", response.body
+  end
+
+  test "an indifferent source is copied shallowly" do
+    get "/indifferent/copies"
+    assert_equal "2|n|true|n,drop|trusted|true|k", response.body
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/indifferent_controller_test.rb")
+        .assert_passes();
+}

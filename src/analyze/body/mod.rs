@@ -680,7 +680,12 @@ impl<'a> BodyTyper<'a> {
                 // Never search by suffix or borrow another scope's
                 // same-named declaration: only the exact written class.
                 let exact_modeled_class = |path: &[Symbol]| {
-                    let id = written_class_id(path);
+                    let id = match path {
+                        [name] | [_, name] if name.as_str() == "HashWithIndifferentAccess" && path[0].as_str() != "ActiveSupport" => {
+                            crate::ident::ClassId(Symbol::from(crate::analyze::indifferent::CLASS))
+                        }
+                        _ => written_class_id(path),
+                    };
                     if let Some((name, owner)) = path.split_last() {
                         if !owner.is_empty() {
                             if let Some(info) = self.classes().get(&written_class_id(owner)) {
@@ -797,6 +802,14 @@ impl<'a> BodyTyper<'a> {
                         value.unwrap_or_else(|| Ty::Class { id: written_class_id(path), args: vec![] })
                     }
                 };
+                // Not a class the emitted program has: the indifferent hash is a plain Hash there, so only its `new` is supported.
+                if matches!(&ty, Ty::Class { id, args } if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS) {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("constant"),
+                        detail: written_class_id(path).0.as_str().to_string(),
+                    });
+                }
                 if indexed_source && matches!(ty, Ty::Var { .. }) {
                     expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
@@ -1278,6 +1291,13 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
+                if method.as_str() == "new"
+                    && let Some(r) = recv.as_mut()
+                    && matches!(&*r.node, ExprNode::Const { .. })
+                    && matches!(&r.ty, Some(Ty::Class { id, args }) if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS)
+                {
+                    r.diagnostic = None;
+                }
                 // Not a value: Rails' `call` answers the loaders, which `preload_associations` does not.
                 if method.as_str() == "call" && args.is_empty() && block.is_none()
                     && expr.decisions & crate::expr::DISCARDED_VALUE != 0
@@ -1600,6 +1620,12 @@ impl<'a> BodyTyper<'a> {
                     .and_then(|t| literal_extremum_ty(recv.as_ref(), t, method, args))
                 {
                     return t;
+                }
+                if expr.decisions & crate::expr::REVERSE_MERGE != 0
+                    && let (Some(defaults), [hash]) = (recv_ty.as_ref(), args.as_slice())
+                    && let Some(ty) = hash.ty.as_ref().and_then(|h| crate::analyze::indifferent::reverse_merged(defaults, h))
+                {
+                    return ty;
                 }
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
                     && recv_ty.as_ref().is_some_and(instance_shaped);

@@ -1018,7 +1018,10 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 459 on 2026-10-10 against main's 423 (445 at the Hash-surface commit + 14).
     // Rebased onto main's 428 (after the exception classes and the date-column hook):
     // MEASURED 466 on 2026-10-10, main 9249df4d (452 at the Hash-surface commit + 14).
-    const CEILING: usize = 466;
+    // MEASURED 489 on 2026-10-11: the indifferent hash's conversions
+    // (`ActiveSupport.indifferent*`, active_support_ext.rb) walk an untyped
+    // Hash/Array value the way `deep_dup` does (+23).
+    const CEILING: usize = 489;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
