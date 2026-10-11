@@ -25,6 +25,7 @@
 //! the synthesized `MethodDef`.
 
 mod broadcasts;
+mod inertia;
 mod process_action;
 pub mod params;
 pub mod params_wrapper;
@@ -3029,6 +3030,7 @@ fn lower_action_body(
     // `RouteHelpers.<x>_path(@x.id)`, matching the documented Rails
     // polymorphic location form without runtime class dispatch.
     let with_response_location = rewrite_response_location_kwarg(&with_render);
+    let with_response_location = inertia::encode_inertia_values(&with_response_location);
     let with_params = rewrite_params(&with_response_location);
     // After bare `params.expect(...)` / `params.require(:r).permit(...)`
     // canonicalize via `rewrite_params`, replace each permit chain with

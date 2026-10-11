@@ -5266,3 +5266,76 @@ end
     assert!(counts.starts_with("Hash[String") && counts.matches('[').count() == 1, "{counts}");
     assert_eq!(receiver("probe_literal_pairs"), "Hash[Integer | String, Integer | String]");
 }
+
+const INERTIA_APP: &[(&str, &str)] = &[
+    (
+        "db/schema.rb",
+        "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\", null: false\n  end\nend\n",
+    ),
+    (
+        "config/routes.rb",
+        "Rails.application.routes.draw do\n  resources :widgets, only: %i[ index ]\nend\n",
+    ),
+    ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+    ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+    (
+        "app/controllers/application_controller.rb",
+        r#"class ApplicationController < ActionController::Base
+  inertia_share widgetCount: -> { Widget.count },
+                names: InertiaRails.optional { Widget.pluck(:name) }
+end
+"#,
+    ),
+    (
+        "app/controllers/widgets_controller.rb",
+        r#"class WidgetsController < ApplicationController
+  def index
+    render inertia: "widgets/index", props: {
+      widgets: Widget.all.map { |widget| { name: widget.name } },
+      firstName: InertiaRails.optional { Widget.first&.name },
+      total: InertiaRails.defer { Widget.count },
+      inertiaVisit: request.inertia?
+    }
+  end
+end
+"#,
+    ),
+];
+
+fn inertia_check(files: &[(&str, &str)]) -> (Vec<String>, Vec<String>) {
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    roundhouse::ingest::survey::activate();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest tree");
+    let gaps = roundhouse::ingest::survey::drain().iter().map(|g| format!("{g:?}")).collect();
+    Analyzer::new(&app).analyze(&mut app);
+    let errors = diagnose(&app)
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::analyze::Severity::Error)
+        .map(|d| d.message)
+        .collect();
+    (errors, gaps)
+}
+
+#[test]
+fn inertia_share_and_render_inertia_analyze_without_errors_or_survey_gaps() {
+    let (errors, gaps) = inertia_check(INERTIA_APP);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(gaps.is_empty(), "{gaps:#?}");
+}
+
+#[test]
+fn render_inertia_with_a_computed_component_is_a_survey_gap() {
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/\" + action_name\n  end\nend\n",
+    );
+    let (_, gaps) = inertia_check(&files);
+    assert!(
+        gaps.iter().any(|g| g.contains("`render inertia:` with a component that is not a String literal")),
+        "{gaps:#?}"
+    );
+}

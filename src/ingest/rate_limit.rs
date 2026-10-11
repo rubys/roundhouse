@@ -327,7 +327,7 @@ fn seconds_source(v: &Expr) -> String {
     format!("({}).to_i", crate::emit::ruby::expr::emit_expr(v))
 }
 
-fn ruby_string_literal(s: &str) -> String {
+pub(super) fn ruby_string_literal(s: &str) -> String {
     // A double-quoted literal interpolates `#{…}`, `#@ivar`, and
     // `#$global`. The scope was a literal, so each marker stays text.
     let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");

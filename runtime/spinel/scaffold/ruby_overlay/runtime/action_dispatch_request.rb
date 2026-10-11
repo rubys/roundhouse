@@ -198,6 +198,10 @@ module ActionDispatch
       @env["HTTP_X_REQUESTED_WITH"] == "XMLHttpRequest"
     end
 
+    def inertia?
+      !@env["HTTP_X_INERTIA"].to_s.empty?
+    end
+
     # Query-string params only (Rails' GET-vs-POST split); lobsters'
     # search/time-series pages rebuild URLs from these.
     def query_parameters

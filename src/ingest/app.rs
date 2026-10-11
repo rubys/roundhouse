@@ -1587,6 +1587,20 @@ end
         }
     }
 
+    {
+        let init_dir = dir.join("config/initializers");
+        if vfs.is_dir(&init_dir) {
+            for entry in read_rb_files(vfs, &init_dir)? {
+                if let Ok(bytes) = vfs.read(&entry) {
+                    let file = entry.display().to_string();
+                    if let Some(config) = extract_inertia_config(&bytes, &file) {
+                        app.inertia = Some(config);
+                    }
+                }
+            }
+        }
+    }
+
     // Every app source is registered by here. Rubydex resolves a
     // SNAPSHOT on another thread while the passes below run, and those
     // passes read the same snapshot. It is not the real `drain`: the
@@ -1858,6 +1872,7 @@ end
     super::rate_limit::lower_rate_limit(&mut app);
     super::invisible_captcha::lower_invisible_captcha(&mut app);
     super::impersonates::lower_impersonates(&mut app);
+    super::inertia::lower_inertia(&mut app);
     // The real drain, now that every pass re-ingesting synthesized
     // Ruby has run. A synthesized `"<label>"` re-ingest never takes a
     // slot (`sources::register` refuses a label starting with `<`), so
@@ -8706,6 +8721,97 @@ fn wrap_parameters_format_includes_json(rest: &str) -> bool {
     rest.split(|c: char| matches!(c, ',' | '[' | ']' | '(' | ')' | ' ' | '\t'))
         .map(|tok| tok.trim().trim_matches(|c| c == '"' || c == '\''))
         .any(|tok| tok == ":json" || tok == "json")
+}
+
+/// A non-literal value is a survey gap rather than an evaluated guess:
+/// the emitted app would otherwise run with the gem's default and no
+/// diagnostic would say so.
+fn extract_inertia_config(source: &[u8], file: &str) -> Option<crate::app::InertiaConfig> {
+    let src = String::from_utf8_lossy(source);
+    if !src.contains("InertiaRails") {
+        return None;
+    }
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let program = root.as_program_node()?;
+    let mut found = None;
+    for stmt in initializer_statements(&program) {
+        let Some(call) = stmt.as_call_node() else { continue };
+        if super::util::constant_id_str(&call.name()) != "configure" {
+            continue;
+        }
+        let Some(recv) = call.receiver() else { continue };
+        if !matches!(constant_text(&recv, &src).as_deref(), Some("InertiaRails" | "::InertiaRails")) {
+            continue;
+        }
+        let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
+        let Some(param) = block
+            .parameters()
+            .and_then(|p| p.as_block_parameters_node())
+            .and_then(|p| p.parameters())
+            .and_then(|p| p.requireds().iter().next())
+            .and_then(|p| p.as_required_parameter_node())
+        else {
+            continue;
+        };
+        let param = super::util::constant_id_str(&param.name());
+        let mut config = crate::app::InertiaConfig::default();
+        let Some(body) = block.body().and_then(|b| b.as_statements_node()) else {
+            found = Some(config);
+            continue;
+        };
+        for inner in body.body().iter() {
+            let loc = inner.location();
+            let text = &src[loc.start_offset()..loc.end_offset()];
+            let gap = |why: &str| {
+                survey::record(&IngestError::Unsupported {
+                    file: file.to_string(),
+                    message: format!("InertiaRails.configure: {why} (`{text}`); the emitted app uses the gem's default"),
+                });
+            };
+            let Some(assign) = inner.as_call_node() else {
+                gap("not an option assignment");
+                continue;
+            };
+            let on_param = assign
+                .receiver()
+                .and_then(|r| r.as_local_variable_read_node())
+                .is_some_and(|r| super::util::constant_id_str(&r.name()) == param);
+            let name = super::util::constant_id_str(&assign.name()).to_string();
+            let args: Vec<_> = assign.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            let (true, Some(option), [value]) = (on_param, name.strip_suffix('='), args.as_slice()) else {
+                gap("not an option assignment");
+                continue;
+            };
+            let boolean = if value.as_true_node().is_some() {
+                Some(true)
+            } else if value.as_false_node().is_some() {
+                Some(false)
+            } else {
+                None
+            };
+            match (option, boolean) {
+                ("encrypt_history", Some(b)) => config.encrypt_history = b,
+                ("always_include_errors_hash", Some(b)) => config.always_include_errors_hash = b,
+                ("use_script_element_for_initial_page", Some(b)) => {
+                    config.use_script_element_for_initial_page = b
+                }
+                // Accepted rather than reported: it names the attribute of
+                // SSR head tags, and without SSR nothing on the server reads it.
+                ("use_data_inertia_head_attribute", Some(_)) => {}
+                ("version", _) => {
+                    if let Some(s) = value.as_string_node() {
+                        config.version = String::from_utf8_lossy(s.unescaped()).into_owned();
+                    } else {
+                        gap("version is not a String literal");
+                    }
+                }
+                _ => gap("option not modeled"),
+            }
+        }
+        found = Some(config);
+    }
+    found
 }
 
 fn extract_config_time_zone(source: &[u8]) -> Option<String> {

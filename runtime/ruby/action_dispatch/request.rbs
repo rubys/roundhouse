@@ -66,6 +66,7 @@ module ActionDispatch
     def post?: () -> bool
     def head?: () -> bool
     def xhr?: () -> bool
+    def inertia?: () -> bool
     def fullpath: () -> String
     def original_fullpath: () -> String
     def ssl?: () -> bool
