@@ -114,9 +114,25 @@ pub struct Model {
     /// `Rooms::Open` rows say `rooms_open`, not `room`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sti_subclass_names: Vec<ClassId>,
+
+    /// The catalog entries this model's messages can reach, its i18n
+    /// scope and lookup keys; stamped by `i18n::stamp_models`. Default
+    /// (no app locale) answers Rails' own English.
+    #[serde(default, skip_serializing_if = "crate::i18n::ModelI18n::is_default")]
+    pub i18n: crate::i18n::ModelI18n,
 }
 
 impl Model {
+    /// Rails' `human_attribute_name(attr)` for this model.
+    pub fn human_attribute_name(&self, attr: &str) -> String {
+        self.i18n.human_attribute_name(attr)
+    }
+
+    /// `errors.full_message(attr, message)` as Rails builds it for this model.
+    pub fn full_message(&self, attr: &str, message: &str) -> String {
+        self.i18n.full_message(attr, message)
+    }
+
     pub fn associations(&self) -> impl Iterator<Item = &Association> {
         self.body.iter().filter_map(|item| match item {
             ModelBodyItem::Association { assoc, .. } => Some(assoc),

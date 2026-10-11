@@ -63,12 +63,13 @@ use crate::ty::Ty;
 /// recognizable `errors[…]` sites left dynamic, with the reason.
 pub fn apply_errors_index_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
-    super::for_each_hook_body(app, &mut |body| {
-        rewrite(body, &mut diags);
+    let data = super::errors_add::LabelData::of(app);
+    super::for_each_owned_hook_body(app, &mut |owner, body| {
+        rewrite(body, &data.at(owner), &mut diags);
         ledger_messages(body, &mut diags);
     });
     super::for_each_test_body(app, &mut |body| {
-        rewrite(body, &mut diags);
+        rewrite(body, &data.at(None), &mut diags);
         ledger_messages(body, &mut diags);
     });
     diags
@@ -116,7 +117,7 @@ fn send(span: crate::span::Span, recv: Expr, method: &str, args: Vec<Expr>, ty: 
 }
 
 // Not a Hash: the accumulator is the Array of full messages, so each `messages` question is asked of it directly.
-fn rewrite_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+fn rewrite_messages(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mut Vec<Diagnostic>) {
     let span = expr.span;
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else { return };
     if !is_messages_read(r) {
@@ -132,7 +133,7 @@ fn rewrite_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
         ("key?" | "has_key?" | "include?" | "member?", [field]) => {
             let field = field.clone();
             let mut index = send(span, accumulator, "[]", vec![field], Ty::Array { elem: Box::new(Ty::Str) });
-            rewrite_index(&mut index, diags);
+            rewrite_index(&mut index, labels, diags);
             Some(send(span, index, "any?", vec![], Ty::Bool))
         }
         ("blank?" | "empty?", []) => Some(send(span, accumulator, "empty?", vec![], Ty::Bool)),
@@ -144,10 +145,10 @@ fn rewrite_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     }
 }
 
-fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
-    expr.node.for_each_child_mut(&mut |c| rewrite(c, diags));
-    rewrite_messages(expr, diags);
-    rewrite_index(expr, diags);
+fn rewrite(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mut Vec<Diagnostic>) {
+    expr.node.for_each_child_mut(&mut |c| rewrite(c, labels, diags));
+    rewrite_messages(expr, labels, diags);
+    rewrite_index(expr, labels, diags);
 }
 
 fn ledger_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
@@ -165,7 +166,7 @@ fn ledger_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     expr.node.for_each_child_mut(&mut |c| ledger_messages(c, diags));
 }
 
-fn rewrite_index(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+fn rewrite_index(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mut Vec<Diagnostic>) {
     let matches_shape = matches!(
         &*expr.node,
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
@@ -189,14 +190,18 @@ fn rewrite_index(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
         diags.push(residue(expr, ":base carries no humanized prefix"));
         return;
     }
-    let humanized = super::model_to_library::validations::humanize(field.as_str());
+    let ExprNode::Send { recv: Some(reader), .. } = &*expr.node else { unreachable!() };
+    let Some(prefix_text) = labels.message_prefix(reader, field.as_str()).filter(|p| !p.is_empty()) else {
+        diags.push(residue(expr, "errors.format does not put the field before the message"));
+        return;
+    };
     let span = expr.span;
     let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
     let ExprNode::Send { recv, .. } = node else { unreachable!() };
     let accumulator = recv.expect("checked Some above");
     let prefix = Expr::new(
         span,
-        ExprNode::Lit { value: Literal::Str { value: format!("{humanized} ") } },
+        ExprNode::Lit { value: Literal::Str { value: prefix_text } },
     );
     // Stamp the result: this pass runs *after* analyze, and the
     // post-lowering `diagnose` walk reads stamped types without

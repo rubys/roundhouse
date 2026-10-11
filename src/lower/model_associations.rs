@@ -271,6 +271,7 @@ mod tests {
             class_attr_defaults: indexmap::IndexMap::new(),
             lexical_json_shadow: false,
             sti_subclass_names: Vec::new(),
+            i18n: Default::default(),
             span: crate::span::Span::synthetic(),
         }
     }

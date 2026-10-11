@@ -8,15 +8,15 @@
 # and the strict-loading setting are all Rails' own. Rails compiles it into
 # an ActiveRecord::StatementCache, the mechanism behind `find_by`; each
 # request only executes it, then does what Relation#load would have done
-# next: mark association records the way AssociationRelation does, run the
-# same Preloaders, and reverse a `last(n)`.
+# next: mark association records the way AssociationRelation does, preload
+# (see Futamura::Preload), and reverse a `last(n)`.
 #
 # The call site keeps the original chain as a block. It runs instead
 # whenever a request-time value is one StatementCache refuses (nil, an
 # Array, a Range, a record...), or when the built Relation turns out to need
 # something a StatementCache cannot do (eager loading). With
 # FUTAMURA_VERIFY=1 it runs as well, to check that both give the same
-# records in the same order.
+# records in the same order, with the same associations loaded.
 module Futamura
   Statement = Struct.new(:model, :build, :reverse, :one, keyword_init: true)
   Compiled = Struct.new(:cache, :preload, :strict_loading, keyword_init: true)
@@ -54,14 +54,13 @@ module Futamura
       end
       records.each(&:strict_loading!) if compiled.strict_loading
 
-      scope = compiled.strict_loading ? ActiveRecord::Relation::StrictLoadingScope : nil
       compiled.preload.each do |associations|
-        ActiveRecord::Associations::Preloader.new(records: records, associations: associations, scope: scope).call
+        Preload.call(records, associations, strict: compiled.strict_loading)
       end
       records.reverse! if statement.reverse
       result = statement.one ? records.first : records
 
-      verify(key, result, fallback.call) if VERIFY
+      verify(key, result, fallback.call, compiled.preload) if VERIFY
       result
     end
 
@@ -79,10 +78,259 @@ module Futamura
       Compiled.new(cache: cache, preload: preload, strict_loading: relation.strict_loading_value)
     end
 
-    def verify(key, result, expected)
+    def verify(key, result, expected, preload)
       got = Array(result).map(&:id)
       want = Array(expected).map(&:id)
       raise "futamura #{key}: specialized #{got.inspect} != Rails #{want.inspect}" unless got == want
+      preload.each do |spec|
+        mine = Preload.signature(Array(result), spec)
+        rails = Preload.signature(Array(expected), spec)
+        raise "futamura #{key}: preloaded #{spec.inspect} differs from Rails" unless mine == rails
+      end
+    end
+  end
+
+  # One preload entry (one element of a Relation's preload_values or
+  # includes_values), loaded the way ActiveRecord::Associations::Preloader
+  # loads it, minus the work that does not depend on the request.
+  #
+  # The Preloader rebuilds, for every call, the branch tree, each
+  # association's scope (the target's scope_for_association, the
+  # polymorphic type condition, the reflection's own scope) and the loader
+  # queries that group similar associations. For a given tree and owner
+  # class none of that changes, so it is planned once here, and each call
+  # runs only what Preloader::Association does per call: key the owners,
+  # skip owners already loaded, load the missing keys with
+  # `scope.where(key => keys)` (one query per group of loaders on a level
+  # whose query is the same, as Preloader::Batch groups them), set inverses,
+  # and assign targets.
+  #
+  # An entry is planned only when every association in its tree is one
+  # whose scope can be built once: not `through:`, not a polymorphic
+  # belongs_to, no composite key, no owner-dependent scope, a target with no
+  # default_scope, and a scope that is either absent, defined by Active
+  # Storage or Action Text, or certified static by Roundhouse
+  # (`static_scopes`, from the app's own association declarations). Any
+  # other entry is handed to Rails' Preloader whole.
+  module Preload
+    Node = Struct.new(:name, :reflection, :children, :spec)
+    FRAMEWORK = %r{/(activestorage|actiontext)/}
+
+    @plans = Concurrent::Map.new
+    @scopes = Concurrent::Map.new
+    @static_scopes = Set.new
+
+    class << self
+      # "Owner#association" names whose scope lambda Roundhouse found to
+      # build a relation from literals only.
+      def static_scopes(*names)
+        @static_scopes.merge(names)
+      end
+
+      def call(records, spec, strict:)
+        return if records.empty?
+
+        root = records.first.class
+        roots = @plans.compute_if_absent([spec, root]) { plan(spec, root) || false }
+        if !roots || records.any? { |r| !r.instance_of?(root) } || scoped?(roots)
+          return rails(records, spec, strict)
+        end
+
+        level = roots.map { |node| [node, records] }
+        until level.empty?
+          loaders = []
+          level.each do |node, owners|
+            next if owners.empty?
+            if owners.all? { |o| o.class._reflect_on_association(node.name).equal?(node.reflection) }
+              loaders << Loader.new(node, owners, scope_for(node.reflection, owners.first.class, strict))
+            else
+              # An STI subclass redeclared the association: Rails' own path.
+              rails(owners, node.spec, strict)
+            end
+          end
+          loaders.group_by(&:query_key).each_value { |similar| load_batch(similar) }
+          loaders.each(&:run)
+          level = loaders.flat_map { |l| l.node.children.map { |child| [child, l.preloaded_records] } }
+        end
+      end
+
+      # Which associations a preload loaded, and to what, through the tree.
+      def signature(records, spec)
+        nodes(spec).map do |name, child|
+          records.map do |record|
+            association = record.association(name)
+            targets = Array.wrap(association.target)
+            [record.id, association.loaded?, targets.map(&:id), child ? signature(targets, child) : nil]
+          end
+        end
+      end
+
+      private
+
+      def rails(records, spec, strict)
+        scope = strict ? ActiveRecord::Relation::StrictLoadingScope : nil
+        ActiveRecord::Associations::Preloader.new(records: records, associations: spec, scope: scope).call
+      end
+
+      # The children of a preload spec, exactly as Preloader::Branch reads them.
+      def nodes(spec)
+        Array.wrap(spec).flat_map { |a| Array(a).flat_map { |parent, child| [[parent.to_sym, child]] } }
+      end
+
+      def plan(spec, klass)
+        nodes(spec).map do |name, child|
+          reflection = klass._reflect_on_association(name)
+          return nil unless plannable?(reflection)
+
+          children = child ? plan(child, reflection.klass) : []
+          return nil unless children
+
+          Node.new(name, reflection, children, child ? { name => child } : name)
+        end
+      end
+
+      def plannable?(reflection)
+        return false unless reflection
+        return false if reflection.options[:through] || reflection.polymorphic?
+        return false if reflection.scope && reflection.scope.arity != 0
+        return false if reflection.join_primary_key.is_a?(Array) || reflection.join_foreign_key.is_a?(Array)
+
+        klass = reflection.klass
+        return false if klass.abstract_class? || klass.default_scopes.any?
+
+        reflection.scope.nil? ||
+          FRAMEWORK.match?(scope_source(reflection.scope)) ||
+          @static_scopes.include?("#{reflection.active_record.name}##{reflection.name}")
+      end
+
+      # Where a scope lambda was written. Rails' association builder wraps an
+      # argument-less scope as `proc { instance_exec(&scope) }`, so look
+      # through the wrapper to the lambda it closes over.
+      def scope_source(scope)
+        location = scope.source_location&.first.to_s
+        if location.end_with?("associations/builder/association.rb") && scope.binding.local_variable_defined?(:scope)
+          location = scope.binding.local_variable_get(:scope).source_location&.first.to_s
+        end
+        location
+      end
+
+      # A `Model.scoping { }` block changes scope_for_association.
+      def scoped?(nodes)
+        nodes.any? { |n| n.reflection.klass.current_scope || scoped?(n.children) }
+      end
+
+      # Preloader::Association#build_scope, built once per association,
+      # owner class and strictness.
+      def scope_for(reflection, model, strict)
+        @scopes.compute_if_absent([reflection, model, strict]) do
+          klass = reflection.klass
+          scope = klass.scope_for_association
+          scope.where!(reflection.type => model.polymorphic_name) if reflection.type && !reflection.through_reflection?
+          reflection_scope = reflection.join_scopes(klass.arel_table, klass.predicate_builder, klass).inject(klass.unscoped, &:merge!)
+          scope.merge!(reflection_scope) unless reflection_scope.empty_scope?
+          scope = scope.strict_loading if strict
+          [scope, scope.values_for_queries]
+        end
+      end
+
+      # Preloader::Association::LoaderRecords: keys of owners not yet
+      # loaded, one query for the group, inverses set as records load.
+      def load_batch(loaders)
+        keys = Set.new
+        already = {}
+        loaders.each do |loader|
+          loader.owners_by_key.each do |key, owners|
+            if (loaded_owner = owners.find { |owner| loader.loaded?(owner) })
+              already[key] = loader.target_for(loaded_owner)
+            else
+              keys << key
+            end
+          end
+        end
+        keys.subtract(already.keys)
+        first = loaders.first
+        loaded = if keys.empty?
+          []
+        else
+          first.scope.where(first.association_key_name => keys).load { |record| loaders.each { |l| l.set_inverse(record) } }.to_a
+        end
+        raw = loaded + already.values.flatten
+        loaders.each { |loader| loader.load_records(raw) }
+      end
+    end
+
+    # Preloader::Association, for one planned association and its owners.
+    class Loader
+      attr_reader :node, :scope, :association_key_name, :query_key, :preloaded_records
+
+      def initialize(node, owners, (scope, values))
+        @node = node
+        @reflection = node.reflection
+        @klass = @reflection.klass
+        @owners = owners.uniq(&:__id__)
+        @scope = scope
+        @association_key_name = @reflection.join_primary_key(@klass)
+        @owner_key_name = @reflection.join_foreign_key
+        @query_key = [@klass, @association_key_name, values]
+        model = @owners.first.class
+        @convert = @klass.type_for_attribute(@association_key_name).type != model.type_for_attribute(@owner_key_name).type
+      end
+
+      def owners_by_key
+        @owners_by_key ||= @owners.each_with_object({}) do |owner, result|
+          key = convert(owner._read_attribute(@owner_key_name))
+          (result[key] ||= []) << owner if key
+        end
+      end
+
+      def loaded?(owner)
+        owner.association(@reflection.name).loaded?
+      end
+
+      def target_for(owner)
+        Array.wrap(owner.association(@reflection.name).target)
+      end
+
+      def set_inverse(record)
+        if (owners = owners_by_key[convert(record._read_attribute(@association_key_name))])
+          owners.first.association(@reflection.name).set_inverse_instance(record)
+        end
+      end
+
+      def load_records(raw_records)
+        @records_by_owner = {}.compare_by_identity
+        @preloaded_records = raw_records.select do |record|
+          assigned = false
+          owners_by_key[convert(record._read_attribute(@association_key_name))]&.each do |owner|
+            entries = (@records_by_owner[owner] ||= [])
+            if @reflection.collection? || entries.empty?
+              entries << record
+              assigned = true
+            end
+          end
+          assigned
+        end
+      end
+
+      def run
+        @owners.each do |owner|
+          next if loaded?(owner)
+
+          association = owner.association(@reflection.name)
+          records = @records_by_owner[owner] || []
+          if @reflection.collection?
+            association.target = records + association.target.reject(&:persisted?)
+          else
+            association.target = records.first
+          end
+        end
+      end
+
+      private
+
+      def convert(key)
+        @convert ? key.to_s : key
+      end
     end
   end
 end

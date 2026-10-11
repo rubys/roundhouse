@@ -187,10 +187,58 @@ building the relation and compiling Arel per request, is ~0.2 ms; of
 the room page's 4.8 ms chain, ~4.1 ms is preloading, which still runs
 through Rails' Preloader. Harness rows for unspecialized routes vary by
 about 2% between the two images, and Lobsters per-route deltas scatter
-±9% around zero, so neither app shows a measurable change. That makes
-preload specialization (batched queries per association level, with
-association targets set the way the Preloader sets them) the next
-query specialization.
+±9% around zero, so neither app shows a measurable change. That made preload specialization the next query specialization.
+
+### Specialization 2: preloads planned once
+
+`Futamura::Preload`, in the generated initializer's runtime. For each
+preload entry (one element of the built relation's `preload_values` or
+`includes_values`), the generic work Rails' Preloader repeats on every
+call is done once: the branch tree, each association's scope (the
+target's `scope_for_association`, the polymorphic type condition, the
+reflection's own scope) and the grouping of loaders whose queries match.
+Each call then runs only what `Preloader::Association` does per call, in
+its order: key the owners, skip owners already loaded, load the missing
+keys with `scope.where(key => keys)` (one query per group of matching
+loaders on a level, as `Preloader::Batch` groups them), set inverses as
+records load, and assign targets.
+
+An entry is planned only when every association in its tree can have
+its scope built once: not `through:`, not a polymorphic `belongs_to`, no
+composite key, no owner-dependent scope, no `default_scope` on the
+target, and a scope that is absent, written inside Active Storage or
+Action Text (read through Rails' builder wrapper), or certified static
+by Roundhouse from the app's own declarations
+(`Futamura::Preload.static_scopes`, emitted from the IR: a scope like
+`-> { where(user: Current.user) }` is not certified, so it stays
+evaluated per request). Any other entry goes to Rails' Preloader whole.
+Under `FUTAMURA_VERIFY=1` the loaded association targets are compared
+with Rails' own, through the whole tree.
+
+Verified: Campfire 90b3300's suite SAME under verify (407 runs), with
+three of the room page's four entries planned (the fourth is
+`through:`); all 228 Lobsters benchmark requests identical under verify.
+
+Measured (October 2026, rubix3, CRuby + YJIT):
+
+| | Rails | Futamura |
+|---|--:|--:|
+| Campfire room-page chain, in-process | 4.78 ms | 3.82 ms |
+| Campfire room page, in-process (6 rounds) | 40.99-41.39 ms | 39.84-40.19 ms |
+| `Session.find_by(token:)` / `Account.first`, every request | 115 / 167 us | 104 / 98 us |
+| harness c=16 req/s, median of 3: room | 54.6 | 58.7 |
+| sidebar | 137.3 | 143.8 |
+| search | 99.1 | 102.3 |
+| messages | 103.1 | 104.7 |
+| post | 76.9 | 75.7 |
+
+The first measurable gain. The sidebar and search improvements come
+from specialization 1's every-request lookups (the session and
+`Current.account`), the room page's additionally from the preloads.
+What remains of the room chain is SQLite (21%), instantiation (8%), the
+`through:` entry still on Rails' Preloader (~22%), and compiling the
+per-call `where(key => keys)` relations (10%): `through:` associations
+and cached per-arity statements are the next steps for queries.
 
 ## Why `roda` and `futamura` stay separate targets
 
