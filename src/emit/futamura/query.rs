@@ -473,6 +473,32 @@ impl<'a> Specializer<'a> {
         }
     }
 
+    /// `Owner#association` for every association whose scope lambda only
+    /// builds a relation from literals. The runtime preloader builds such a
+    /// scope once; any other scoped association it leaves to Rails, since a
+    /// scope like `-> { where(user: Current.user) }` must be evaluated per
+    /// request.
+    pub fn static_association_scopes(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for m in self.app.models.iter() {
+            for item in &m.body {
+                let ModelBodyItem::Association { assoc, .. } = item else { continue };
+                let (target, scope) = match assoc {
+                    Association::HasMany { target, scope: Some(scope), .. }
+                    | Association::HasOne { target, scope: Some(scope), .. } => (target, scope),
+                    _ => continue,
+                };
+                if let Some(t) = self.models.get(target.0.as_str())
+                    && self.static_scope(t, scope, 0)
+                {
+                    out.push(format!("{}#{}", m.name.0.as_str(), assoc.name().as_str()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     fn any_scope_named(&self, name: &Symbol) -> bool {
         self.models.values().any(|m| scope_named(m, name).is_some())
     }
