@@ -108,6 +108,7 @@ pub mod relation_ivar_materialize;
 pub mod records_to_relation_arg;
 pub mod save_without_validation;
 pub mod defined_ivar_memo;
+pub mod defined_const_fold;
 pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;
 pub mod job_test_only;
@@ -294,6 +295,11 @@ pub(crate) fn residue_diagnostic(
 /// checked by a `debug_assert!` on entry to the pipeline and by the
 /// `post_analyze_pass_order_is_sound` unit test.
 const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
+    // `defined?(Const)` → "constant" / nil when the tree, the lockfile
+    // and config/application.rb decide it, with the guard's dead branch
+    // pruned. First, so every later pass (and the spinel refusal of a
+    // runtime `defined?`) sees only the code that can run.
+    ("defined_const_fold", &[]),
     // Deletes every class extending a Rails base the runtime does not
     // port (`ApplicationMailbox < ActionMailbox::Base`) before any pass
     // ledgers residue for a body that is not going to emit.
@@ -765,6 +771,8 @@ pub fn apply_post_analyze_lowerings(
     macro_rules! ran {
         ($name:expr) => {};
     }
+    defined_const_fold::apply_defined_const_fold(app);
+    ran!("defined_const_fold");
     let mut diags = unported_rails_subclasses::apply_unported_rails_subclass_drop(app);
     ran!("unported_rails_subclasses");
     spliced_concern_bodies::apply_spliced_concern_body_prune(app);
