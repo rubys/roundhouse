@@ -169,3 +169,12 @@ fn a_top_level_class_beats_a_class_in_a_mixins_namespace() {
     let found = diagnostics(&files, "    @a = Thing.new.sibling");
     assert!(found.iter().all(|d| !d.contains("fetch_by_name")), "{found:?}");
 }
+
+#[test]
+fn the_top_level_hash_with_indifferent_access_is_active_supports_and_only_new_is_supported() {
+    let found = diagnostics(&[], "    @a = HashWithIndifferentAccess.new(a: 1)\n    @b = ActiveSupport::HashWithIndifferentAccess.new");
+    assert!(found.is_empty(), "{found:?}");
+    let found = diagnostics(&[], "    @a = [HashWithIndifferentAccess]");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("constant not supported (all targets): HashWithIndifferentAccess"), "{found:?}");
+}

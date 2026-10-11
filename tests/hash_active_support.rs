@@ -9,6 +9,10 @@ use std::path::PathBuf;
 use roundhouse::ingest::ingest_app_from_tree;
 
 fn dispatch_failures(action: &str) -> Vec<String> {
+    errors(action).into_iter().filter(|d| d.contains("send_dispatch_failed")).collect()
+}
+
+fn errors(action: &str) -> Vec<String> {
     let controller = format!(
         "class UsersController < ApplicationController\n  def index\n{action}\n  end\nend\n"
     );
@@ -28,7 +32,7 @@ fn dispatch_failures(action: &str) -> Vec<String> {
         .iter()
         .chain(roundhouse::analyze::diagnose(&app).iter())
         .map(roundhouse::diagnostic::Diagnostic::to_string)
-        .filter(|d| d.contains("send_dispatch_failed"))
+        .filter(|d| d.contains("error"))
         .collect()
 }
 
@@ -38,3 +42,15 @@ fn active_support_hash_methods_dispatch() {
     assert!(diags.is_empty(), "{diags:?}");
 }
 
+
+#[test]
+fn an_indifferent_hash_outside_its_modeled_surface_stays_an_error() {
+    for (action, reported) in [
+        ("    h = ActiveSupport::HashWithIndifferentAccess.new\n    h.is_a?(ActiveSupport::HashWithIndifferentAccess)", "HashWithIndifferentAccess"),
+        ("    h = { \"a\" => 1 }.with_indifferent_access\n    h.transform_keys(&:upcase)", "transform_keys"),
+        ("    h = { \"a\" => 1 }.with_indifferent_access\n    h.merge(\"b\" => 2) { |k, a, b| a + b }", "merge"),
+    ] {
+        let diags = errors(action);
+        assert!(diags.iter().any(|d| d.contains(reported)), "{action}: {diags:?}");
+    }
+}

@@ -2449,6 +2449,39 @@ Three gaps remain, all on spinel's side:
   touches its room. A `save`/`update` of a record loaded before a
   trigger moved one of its columns still writes the stale value back.
 
+### `HashWithIndifferentAccess` is a String-keyed Hash; a call converts its keys at the site
+
+No target can subclass `Hash`, so the class exists only in the
+analyzer, as `HashWithIndifferentAccess[V]` (`analyze::indifferent`).
+`lower::indifferent_access` rewrites each call on a value of that type
+into the String-keyed Hash call. It converts keys and values the way
+Rails does: a Symbol key becomes its String, other keys stay as they
+are, and a written Hash or Array value converts all the way down, an
+Array in place under `[]=`. The value stays a `Hash`, so `is_a?(Hash)`,
+merging it into another hash, and JSON encoding answer as in Rails. A
+method outside the modeled surface is an error, as is any use of the
+constant other than `new`.
+
+Where it differs from Rails:
+
+- **A value whose type is not known.** A Symbol key read from one
+  converts only along a chain of `[]` / `fetch` / `dig` / `first` /
+  `last` reads rooted at an indifferent hash. Once the value is held in
+  a local or passed to a method, the indifferent type is gone and
+  `x[:key]` reads the plain hash, which answers `nil` where Rails
+  answers the value.
+- **An indifferent hash inside an untyped or Array value is copied.**
+  Rails keeps such a hash as it is, shared, when it is nested into
+  another. The runtime cannot tell it from a plain Hash, so it converts
+  it into a new hash.
+- **The constructor drops a source hash's `default` / `default_proc`.**
+- **A value that may not be a Hash takes a String key where Rails raises.**
+  This covers a read on that chain, or a value typed as an indifferent
+  hash OR something else. `h[:name][:x]` on a String value is a
+  `TypeError` in Rails. The converted call asks `"…"["x"]` instead and
+  answers a substring or `nil`. `include?`, `member?` and `delete` are
+  not converted there, since an Array answers them for a Symbol too.
+
 ## Related docs
 
 - [`emit.md`](emit.md) — the universal IR contract; the consumers of

@@ -310,6 +310,52 @@ module ActiveSupport
     out
   end
 
+  # Not `stringify_keys`: Rails' indifferent hash converts only a Symbol key, and its Hash and Array values all the way down.
+  def self.indifferent(hash)
+    out = {}
+    return out if hash.nil?
+    hash.each { |key, item| out[ActiveSupport.indifferent_key(key)] = ActiveSupport.indifferent_value(item, false) }
+    out
+  end
+
+  # Not a copy for every Array: Rails converts one written by `[]=` in place, unless it is frozen.
+  def self.indifferent_value(value, in_place)
+    if value.is_a?(Hash)
+      ActiveSupport.indifferent(value)
+    elsif value.is_a?(Array)
+      items = in_place && !value.frozen? ? value : value.dup
+      # Not `map!`: spinel has no in-place map on a poly Array.
+      i = 0
+      while i < items.length
+        items[i] = ActiveSupport.indifferent_value(items[i], in_place)
+        i += 1
+      end
+      items
+    else
+      value
+    end
+  end
+
+  def self.indifferent_key(key)
+    key.is_a?(Symbol) ? key.to_s : key
+  end
+
+  def self.indifferent_keys(keys)
+    keys.map { |key| ActiveSupport.indifferent_key(key) }
+  end
+
+  def self.indifferent_to_hash(value)
+    if value.is_a?(Hash)
+      out = {}
+      value.each { |key, item| out[key] = ActiveSupport.indifferent_to_hash(item) }
+      out
+    elsif value.is_a?(Array)
+      value.map { |item| ActiveSupport.indifferent_to_hash(item) }
+    else
+      value
+    end
+  end
+
   # Not `value == false || value == 0`: ActiveModel compares its FALSE_VALUES by string too, so :off and "0" answer false.
   def self.cast_boolean(value)
     return nil if value.nil?
