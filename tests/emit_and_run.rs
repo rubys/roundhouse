@@ -859,6 +859,11 @@ fn translate_app() -> emit_and_run::Overlay {
     I18n.t(\"hello\", unused: (calls << 1).size)
   end
 
+  def self.read_before_write
+    name = \"before\"
+    I18n.t(\"greet\", name: name, unused: (name = \"after\"))
+  end
+
   def self.ordered_options(calls)
     I18n.t(\"greet\", other: (calls << \"a\").size, name: (calls << \"b\").join)
   end
@@ -889,6 +894,7 @@ raise "count evaluated #{calls.size} times" unless calls.size == 1
 raise "percents: #{Article.percents.inspect}" unless Article.percents == ["100% sure %{x} N", "Hi %{name}"]
 calls = []
 raise "unread: #{calls.inspect}" unless Article.unread_option(calls) == "Hello world" && calls == [1]
+raise "read before write: #{Article.read_before_write}" unless Article.read_before_write == "Hi before"
 calls = []
 ordered = Article.ordered_options(calls)
 raise "ordered: #{ordered} #{calls.inspect}" unless ordered == "Hi ab" && calls == ["a", "b"]

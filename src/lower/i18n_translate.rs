@@ -206,21 +206,27 @@ fn escaped(span: Span, value: Expr) -> Expr {
 }
 
 /// Ruby evaluates each keyword value once, in order, whether or not the
-/// translation reads it; folding can repeat or drop one, so an option
-/// that is not a plain read is bound to a local first. The one
-/// exception is a sole such option read exactly once by a single
+/// translation reads it; folding can repeat, drop or reorder them, so
+/// once any option is not a plain read, every option that is not a
+/// literal is bound to a local first, in source order. The one exception
+/// is a sole such option among literals, read exactly once by a single
 /// template, which already evaluates once and in order.
 fn bind_options(call: &mut Call, translation: &Translation, span: Span) -> Vec<Expr> {
-    let effectful: Vec<String> = call
+    let option = |call: &Call, name: &str| match name {
+        "count" => call.count.clone(),
+        _ => call.values.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone()),
+    };
+    let effectful: Vec<String> = call.order.iter().filter(|n| option(call, n).is_some_and(|v| !is_plain(&v))).cloned().collect();
+    let unbound: Vec<String> = call
         .order
         .iter()
-        .filter(|name| match name.as_str() {
-            "count" => call.count.as_ref(),
-            _ => call.values.iter().find(|(n, _)| n == *name).map(|(_, v)| v),
-        }.is_some_and(|v| !is_plain(v)))
+        .filter(|n| option(call, n).is_some_and(|v| !matches!(&*v.node, ExprNode::Lit { .. })))
         .cloned()
         .collect();
-    if let ([only], Translation::One(template)) = (effectful.as_slice(), translation) {
+    if effectful.is_empty() {
+        return Vec::new();
+    }
+    if let ([only], [_], Translation::One(template)) = (effectful.as_slice(), unbound.as_slice(), translation) {
         let reads = crate::i18n::pieces(template)
             .map(|p| p.iter().filter(|x| matches!(x, Piece::Name(n) if n == only)).count())
             .unwrap_or(0);
@@ -229,7 +235,7 @@ fn bind_options(call: &mut Call, translation: &Translation, span: Span) -> Vec<E
         }
     }
     let mut assigns = Vec::new();
-    for name in effectful {
+    for name in unbound {
         let local = Symbol::from(format!("__i18n_{name}_{}", span.start));
         let value = option_mut(call, &name).expect("collected above");
         let read = Expr { ty: value.ty.clone(), ..Expr::new(span, ExprNode::Var { id: VarId(0), name: local.clone() }) };
