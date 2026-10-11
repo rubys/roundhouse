@@ -1467,6 +1467,51 @@ fn report_self_bindings(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
 }
 
+/// Sends the analyzer types for every target but whose runtime only the
+/// Ruby family has: `Array#fetch`, `each_slice`, `each_cons`, an
+/// enumerator's `with_object`, `Array[...]` and `Hash[...]`, `include?` on
+/// a `Class`/`Module` value (Module's ancestry query, which the other
+/// targets' `include?` is not) and Kernel's `Rational(...)`, which a
+/// rational literal ingests as. The other emitters render them as the
+/// method name on the receiver, which nothing there defines, so they
+/// refuse each by name.
+fn report_ruby_only_sends(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        use crate::expr::ExprNode;
+        use crate::ty::Ty;
+        if let ExprNode::Send { recv, method, .. } = &*expr.node {
+            let recv_ty = recv.as_ref().and_then(|r| r.ty.as_ref());
+            let construct = match (recv, method.as_str()) {
+                (None, "Rational") => Some("Kernel#Rational"),
+                (Some(r), "[]") => match &*r.node {
+                    ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array[]"),
+                    ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash" => Some("Hash[]"),
+                    _ => None,
+                },
+                (Some(_), "fetch") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#fetch"),
+                (Some(_), "each_slice") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_slice"),
+                (Some(_), "each_cons") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_cons"),
+                (Some(_), "with_object") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Enumerator#with_object"),
+                (Some(_), "include?") if matches!(recv_ty, Some(Ty::Class { id, .. })
+                    if matches!(id.0.as_str(), "Class" | "Module")) => Some("Module#include?"),
+                _ => None,
+            };
+            if let Some(construct) = construct {
+                crate::emit::diagnostics::report_unsupported(
+                    expr.span, target.as_str(), construct,
+                    "only the Ruby targets implement it; this target would emit the call on a receiver that does not define it",
+                );
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+}
+
 /// `case/in` is not equivalent to the targets' existing `case/when`
 /// renderers, even for nil or a plain binding. Refuse before file emission
 /// rather than lose bindings, skip evaluation, or turn a test into a wildcard.
@@ -1590,6 +1635,7 @@ pub fn target_files(
     report_sqlite_index_predicates(app, target);
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
+    report_ruby_only_sends(app, target);
     // Full forwarding currently has a native Ruby contract only. A
     // declaration must be gated even when its body never forwards.
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
