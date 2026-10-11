@@ -133,6 +133,12 @@ module ActionDispatch
     # query string or the path captures. ParamsWrapper copies from these
     # (`Params.wrap`); the dispatcher fills them.
     attr_accessor :request_parameters
+    # Rails' `query_parameters`: the QUERY STRING's params alone, nested
+    # by the dispatcher's own parser (`ParamBuilder` on the spinel lane,
+    # which fills it; the CRuby overlay twin parses `query_string` on
+    # read). A reader, not a re-parse here: this file is shared with
+    # every target and names neither parser.
+    attr_accessor :query_parameters
 
     def initialize
       @remote_ip = "127.0.0.1"
@@ -147,6 +153,7 @@ module ActionDispatch
       @body_io = nil
       @env = {}
       @request_parameters = {}
+      @query_parameters = {}
       # `@params` too, and for a reason `@env` shows: `Request.for`
       # COPIES into both (`params.each { |k, v| r.params[k] = v }`),
       # which READS the slot before anything writes it. Unset, that read

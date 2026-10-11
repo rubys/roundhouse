@@ -334,19 +334,26 @@ class QcEntry
   end
 
   def cell_kind(row, i)
-    @kinds[row * @ncols + i]
+    v = @kinds[row * @ncols + i]
+    # Spinel tip (ea683750+): Array[Integer]#[] is Integer? (sp_oint).
+    # Coalesce so qc_int / column_int stay plain Integer and
+    # `_adapter_count` does not unify to sp_oint against sp_poly_count_val.
+    v.nil? ? 0 : v
   end
 
   def cell_int(row, i)
-    @ints[row * @ncols + i]
+    v = @ints[row * @ncols + i]
+    v.nil? ? 0 : v
   end
 
   def cell_float(row, i)
-    @floats[row * @ncols + i]
+    v = @floats[row * @ncols + i]
+    v.nil? ? 0.0 : v
   end
 
   def cell_text(row, i)
-    @texts[row * @ncols + i]
+    v = @texts[row * @ncols + i]
+    v.nil? ? "" : v
   end
 end
 
@@ -1359,7 +1366,15 @@ module Db
     # outside any lease pinned (`pin_transaction`), keeps the thread's
     # connection. A second lease would rebind it and, on release, unbind
     # (and roll back) the outer holder's.
-    return yield if !Thread.current[:db_conn].nil?
+    #
+    # Do not write `return yield if …`: Spinel tip (ea683750+) inlines that
+    # form at each call site and, when the block raises, emits
+    # `sp_oint_arg(({ raise…; 0; }))` — an int where sp_oint is required.
+    # Binding the yield result first keeps the early-return path well-typed.
+    unless Thread.current[:db_conn].nil?
+      result = yield
+      return result
+    end
     pool = pool_for_thread
     idx = pool.lease
     conn = pool.conn(idx)

@@ -270,3 +270,36 @@ mod single_record_terminals {
         assert!(out.contains("[params[:id] || params[:story_id]]) {"), "{out}");
     }
 }
+
+mod preload_scopes {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use roundhouse::analyze::Analyzer;
+    use roundhouse::emit::futamura::{INITIALIZER, specialize};
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    /// The runtime preloader builds an association's scope once, so only a
+    /// scope Roundhouse can see is built from literals is certified to it.
+    #[test]
+    fn literal_association_scopes_are_certified_and_request_dependent_ones_are_not() {
+        let schema = "ActiveRecord::Schema.define do\n  create_table \"users\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"posts\", force: :cascade do |t|\n    t.integer \"user_id\"\n    t.boolean \"published\"\n    t.integer \"viewer_id\"\n  end\nend\n";
+        let user = "class User < ApplicationRecord\n  has_many :posts\n  has_many :published_posts, -> { where(published: true).order(:id) }, class_name: \"Post\"\n  has_many :seen_posts, -> { where(viewer_id: Current.user.id) }, class_name: \"Post\"\nend\n";
+        let controller = "class UsersController < ApplicationController\n  def index\n    @users = User.preload(:published_posts).order(:id).first(10)\n  end\nend\n";
+        let files: Vec<(&str, &str)> = vec![
+            ("db/schema.rb", schema),
+            ("app/models/user.rb", user),
+            ("app/models/post.rb", "class Post < ApplicationRecord\n  belongs_to :user\nend\n"),
+            ("app/controllers/users_controller.rb", controller),
+        ];
+        let tree: HashMap<PathBuf, Vec<u8>> =
+            files.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        let mut files: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        specialize(&app, &mut files).unwrap();
+        let init = &files.iter().find(|(p, _)| p == INITIALIZER).expect("initializer").1;
+        assert!(init.contains("Futamura::Preload.static_scopes(\"User#published_posts\")\n"), "{init}");
+        assert!(!init.contains("User#seen_posts"), "{init}");
+    }
+}

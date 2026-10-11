@@ -807,7 +807,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 if let ExprNode::Hash { kwargs, .. } = &mut *defaults.node {
                     *kwargs = false;
                 }
-                return Ok(Expr::new(
+                let mut merge = Expr::new(
                     span,
                     ExprNode::Send {
                         recv: Some(defaults),
@@ -816,7 +816,9 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                         block: None,
                         parenthesized: true,
                     },
-                ));
+                );
+                merge.decisions |= crate::expr::REVERSE_MERGE;
+                return Ok(merge);
             }
             // ActiveRecord `Model.exists?(conditions)` / `rel.exists?(conditions)`
             // — a hash argument is Rails' conditions form, semantically

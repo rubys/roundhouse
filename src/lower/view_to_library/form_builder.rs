@@ -1509,7 +1509,7 @@ fn emit_label(
             }),
         },
         None => parts.push(InterpPart::Text {
-            value: capitalize_ascii(field_sym.as_str()),
+            value: html_escape_static(&ctx.i18n.label(&binding.model_name, field_sym.as_str())),
         }),
     }
     parts.push(InterpPart::Text { value: "</label>".to_string() });
@@ -2028,7 +2028,7 @@ fn emit_submit(
 ) -> Vec<Expr> {
     let label_expr = match positional {
         Some(lbl) => lbl.clone(),
-        None => default_submit_text(binding),
+        None => default_submit_text(binding, ctx),
     };
     emit_submit_input(label_expr, opts, ctx)
 }
@@ -2065,10 +2065,9 @@ fn emit_submit_input(label_expr: Expr, opts: &[(Expr, Expr)], ctx: &ViewCtx) -> 
 /// "Update <ModelName>" else "Create <ModelName>"`. Built as an If
 /// node referencing the captured `form_method` local so per-record
 /// new/edit distinction renders correctly at runtime.
-fn default_submit_text(binding: &FormBuilderBinding) -> Expr {
-    let capitalized_model = capitalize_ascii(&binding.model_name);
-    let update_text = lit_str(format!("Update {capitalized_model}"));
-    let create_text = lit_str(format!("Create {capitalized_model}"));
+fn default_submit_text(binding: &FormBuilderBinding, ctx: &ViewCtx) -> Expr {
+    let update_text = lit_str(ctx.i18n.submit(&binding.model_name, "update"));
+    let create_text = lit_str(ctx.i18n.submit(&binding.model_name, "create"));
     let method_var_read = Expr::new(
         Span::synthetic(),
         ExprNode::Var {
@@ -2265,21 +2264,6 @@ fn field_symbol(field: Option<&Expr>) -> Option<Symbol> {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
         ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
         _ => None,
-    }
-}
-
-/// `String#capitalize` semantics (first char uppercase, rest
-/// lowercase) for ASCII identifiers. Field symbols in real fixtures
-/// are all ASCII; unicode handling would need a per-target shim.
-fn capitalize_ascii(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(c) => {
-            let head: String = c.to_uppercase().collect();
-            let tail: String = chars.as_str().to_lowercase();
-            head + &tail
-        }
     }
 }
 

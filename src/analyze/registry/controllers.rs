@@ -329,13 +329,30 @@ pub(in crate::analyze) fn register(
         request.instance_methods.insert(Symbol::from("request_method_symbol"), Ty::Sym);
         request.instance_methods.insert(Symbol::from("route_uri_pattern"), str_or_nil());
         request.instance_methods.insert(Symbol::from("content_length"), Ty::Int);
-        for m in ["headers", "env", "cookie_jar", "session", "params", "query_parameters",
-                  "request_parameters", "path_parameters", "format", "body", "variant",
+        for m in ["headers", "env", "cookie_jar", "session", "params",
+                  "path_parameters", "format", "body", "variant",
                   "flash", "subdomains", "accepts", "mime_type", "authorization",
                   // The app's key generator, and the controller CLASS the
                   // request routed to (`Request#controller_class`).
                   "key_generator", "controller_class"] {
             request.instance_methods.insert(Symbol::from(m), Ty::Untyped);
+        }
+        // The two readers the runtime backs with a parsed, bracket-nested
+        // `Hash[String, Roundhouse::ParamValue]` (`Request#query_parameters`
+        // / `#request_parameters`, runtime/ruby/action_dispatch/request.rbs):
+        // typed as that, not `Untyped`, so `deep_dup` / `except` / `delete`
+        // / `keys` / `to_query` resolve against a Hash.
+        for m in ["query_parameters", "request_parameters"] {
+            request.instance_methods.insert(
+                Symbol::from(m),
+                Ty::Hash {
+                    key: Box::new(Ty::Str),
+                    value: Box::new(Ty::Class {
+                        id: ClassId(Symbol::from("Roundhouse::ParamValue")),
+                        args: vec![],
+                    }),
+                },
+            );
         }
         classes.insert(request_id.clone(), request);
         let request_ty = Ty::Class { id: request_id, args: vec![] };

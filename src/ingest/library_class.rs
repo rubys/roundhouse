@@ -1453,10 +1453,19 @@ impl DeclBody {
             .class_initializers
             .iter()
             .any(|expr| !expr.span.is_synthetic());
+        // Constants and `@@` initializers whose values are all literals
+        // cannot observe one another, so emitting them in a different order
+        // than the source wrote them changes nothing (lobsters' `Twitter`:
+        // `@@CONSUMER_KEY = nil` beside `MAX_TWEET_LEN = 280`).
+        let order_independent = self.constants.iter().all(|(_, value)| is_literal_value(value))
+            && self.class_initializers.iter().all(|expr| match &*expr.node {
+                ExprNode::Assign { value, .. } => is_literal_value(value),
+                _ => false,
+            });
         if has_source_ordered_init
             && (!self.unknown_calls.is_empty()
-                || !self.constants.is_empty()
-                || !self.includes.is_empty())
+                || !self.includes.is_empty()
+                || (!self.constants.is_empty() && !order_independent))
         {
             return Err(IngestError::Unsupported {
                 file: file.into(),
@@ -1464,6 +1473,17 @@ impl DeclBody {
             });
         }
         Ok(())
+    }
+}
+
+/// A literal (or an array/hash of literals): a value that reads no other
+/// constant or class variable, so its place in the class body is free.
+fn is_literal_value(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Lit { .. } => true,
+        ExprNode::Array { elements, .. } => elements.iter().all(is_literal_value),
+        ExprNode::Hash { entries, .. } => entries.iter().all(|(k, v)| is_literal_value(k) && is_literal_value(v)),
+        _ => false,
     }
 }
 

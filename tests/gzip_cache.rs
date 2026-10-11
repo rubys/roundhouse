@@ -197,6 +197,110 @@ puts "ALL OK"
 }
 
 #[test]
+fn tep_gzip_cached_repeats_the_last_body_without_a_digest() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r#"
+require "digest"
+require "zlib"
+require_relative "runtime/spinel/tep/tep_core"
+
+gzips = 0
+orig_gzip = Zlib.method(:gzip)
+Zlib.define_singleton_method(:gzip) do |raw|
+  gzips += 1
+  orig_gzip.call(raw)
+end
+digests = 0
+orig_digest = Digest::SHA256.method(:hexdigest)
+Digest::SHA256.define_singleton_method(:hexdigest) do |raw|
+  digests += 1
+  orig_digest.call(raw)
+end
+
+def same_body!(gz, raw, what)
+  raise "gzip (#{what}) does not inflate to its body" unless Zlib.gunzip(gz) == raw
+end
+
+# Nothing served yet: an empty body is not the empty last pair.
+same_body!(Tep.gzip_cached(""), "", "empty body")
+digests = 0
+gzips = 0
+
+# A miss gzips and keeps no copy of the body: a page with a per-request
+# token never comes back, and copying it would be wasted.
+a = "x" * 200
+ga = Tep.gzip_cached(a)
+same_body!(ga, a, "first")
+raise "first: digest #{digests}, gzip #{gzips}" unless digests == 1 && gzips == 1
+raise "a miss kept a copy of the body" unless Tep.instance_variable_get(:@gzip_last_raw).to_s == ""
+
+# Seen again, it is a digest hit and becomes the last body.
+raise "digest hit returned other bytes" unless Tep.gzip_cached("x" * 200) == ga
+raise "digest hit: digest #{digests}, gzip #{gzips}" unless digests == 2 && gzips == 1
+
+# A fresh String with the bytes of the last body: no digest, no gzip.
+again = "x" * 200
+raise "same object" if again.equal?(a)
+raise "last-hit returned other bytes" unless Tep.gzip_cached(again) == ga
+raise "last-hit ran the digest (#{digests})" unless digests == 2 && gzips == 1
+last = Tep.instance_variable_get(:@gzip_last_raw)
+raise "the last body is not a copy" if last != a || last.equal?(a)
+
+# Same length, one byte different: a miss, not the last gzip, and the
+# last body stays.
+b = "x" * 199 + "y"
+gb = Tep.gzip_cached(b)
+same_body!(gb, b, "same-length miss")
+raise "same-length body reused the last gzip" if gb == ga
+raise "same-length miss: digest #{digests}, gzip #{gzips}" unless digests == 3 && gzips == 2
+raise "a miss replaced the last body" unless Tep.gzip_cached("x" * 200) == ga && digests == 3
+
+# The last body is a snapshot: a caller that mutates its String misses.
+m = "m" * 200
+Tep.gzip_cached(m)
+Tep.gzip_cached(m)
+m.replace("n" * 200)
+same_body!(Tep.gzip_cached(m), "n" * 200, "mutated source")
+
+# The digest table empties at GZIP_CACHE_MAX; the last body is not in it.
+same_body!(Tep.gzip_cached("x" * 200), a, "x again")
+Tep.gzip_cached("x" * 200)
+bodies = (0..Tep::GZIP_CACHE_MAX).map { |i| "body #{i} " * 20 }
+bodies.each { |s| Tep.gzip_cached(s) }
+d = digests
+same_body!(Tep.gzip_cached("x" * 200), a, "last after wipe")
+raise "last after wipe ran the digest" unless digests == d
+same_body!(Tep.gzip_cached(bodies.first.dup), bodies.first, "first after wipe")
+
+# Threads alternating bodies of one length: every answer inflates to its own body.
+pool = ["p" * 300, "q" * 300, "p" * 299 + "q"]
+threads = 4.times.map do |t|
+  Thread.new do
+    300.times do |k|
+      s = pool[(k + t) % pool.length]
+      same_body!(Tep.gzip_cached(s.dup), s, "thread")
+    end
+  end
+end
+threads.each(&:join)
+puts "ALL OK"
+"#;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "tep gzip last-hit failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}
+
+#[test]
 fn join_body_does_not_copy_a_one_part_rack_body() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let script = r#"

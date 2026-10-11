@@ -53,6 +53,9 @@ pub const ADMITTED_PRELOADER_CALL: u64 = 1 << 10;
 /// is not evidence of an indexing defect.
 pub const UNINDEXED_SCOPE_CONST_REF: u64 = 1 << 11;
 
+/// The `defaults.merge(hash)` ingest wrote for `hash.reverse_merge(defaults)`.
+pub const REVERSE_MERGE: u64 = 1 << 12;
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by

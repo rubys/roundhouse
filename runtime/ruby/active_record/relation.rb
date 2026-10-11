@@ -1,3 +1,6 @@
+# Multi-id finder misses need the pluralizer even without app view helpers.
+require_relative "../inflector"
+
 module ActiveRecord
   # A Relation's `includes`/`preload`, deferred until a record asks.
   #

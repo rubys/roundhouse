@@ -98,6 +98,11 @@ pub fn specialize(app: &App, files: &mut Vec<(String, String)>) -> Result<Report
         defines.sort();
         let mut init = RUNTIME.to_string();
         init.push('\n');
+        let static_scopes = spec.static_association_scopes();
+        if !static_scopes.is_empty() {
+            let names = static_scopes.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ");
+            init.push_str(&format!("Futamura::Preload.static_scopes({names})\n\n"));
+        }
         init.push_str("Rails.application.config.to_prepare do\n");
         for d in &defines {
             init.push_str("  ");

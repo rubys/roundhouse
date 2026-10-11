@@ -13,7 +13,7 @@
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { execSync } from "node:child_process";
 import { relative, join } from "node:path";
-import { SOURCE_EXT, WALK_DIRS, SINGLE_FILES } from "../lib/bundle-rules.mjs";
+import { ALL_WALK_DIRS, SINGLE_FILES, wantsPath } from "../lib/bundle-rules.mjs";
 
 const args = process.argv.slice(2);
 const root = args[0];
@@ -34,14 +34,15 @@ async function walk(dir, rootDir) {
   for (const e of entries) {
     const full = join(dir, e.name);
     if (e.isDirectory()) await walk(full, rootDir);
-    else if (SOURCE_EXT.test(e.name)) {
-      src[relative(rootDir, full)] = await readFile(full, "utf8");
+    else {
+      const rel = relative(rootDir, full);
+      if (wantsPath(rel)) src[rel] = await readFile(full, "utf8");
     }
   }
 }
 // The dir walk + single-file list live in lib/bundle-rules.mjs, shared with
 // the in-browser folder loader so the two can't drift.
-for (const sub of WALK_DIRS) {
+for (const sub of ALL_WALK_DIRS) {
   await walk(join(root, sub), root);
 }
 for (const single of SINGLE_FILES) {

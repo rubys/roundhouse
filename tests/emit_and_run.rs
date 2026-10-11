@@ -571,6 +571,399 @@ fn uri_and_socket_errors_are_rescued_on_spinel() {
     uri_and_socket_errors_app().run_spinel(URI_AND_SOCKET_ASSERTIONS).assert_passes();
 }
 
+/// `errors.full_message(:field, msg)` answers Rails' text without adding
+/// to the record: the humanized field before the message, the bare message
+/// for `:base`.
+fn full_message_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/models/article.rb",
+        "  validates :title, presence: true\n",
+        "  validates :title, presence: true
+
+  def self.taken_title_message
+    article = Article.new
+    article.errors.full_message(:title, \"is taken\")
+  end
+
+  def self.base_message(text)
+    article = Article.new
+    article.errors.full_message(:base, text)
+  end
+
+  def body_message(count)
+    errors.full_message(:body, \"needs #{count} words\")
+  end
+",
+    )
+}
+
+const FULL_MESSAGE_ASSERTIONS: &str = r#"raise "taken: #{Article.taken_title_message}" unless Article.taken_title_message == "Title is taken"
+raise "base: #{Article.base_message("Whole")}" unless Article.base_message("Whole") == "Whole"
+article = Article.new(title: "x", body: "y")
+raise "body: #{article.body_message(3)}" unless article.body_message(3) == "Body needs 3 words"
+raise "added" unless article.errors.empty?
+puts "full_message passed"
+"#;
+
+#[test]
+fn errors_full_message_answers_the_humanized_text() {
+    full_message_app().run_ruby(FULL_MESSAGE_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn errors_full_message_answers_the_humanized_text_on_spinel() {
+    full_message_app().run_spinel(FULL_MESSAGE_ASSERTIONS).assert_passes();
+}
+
+/// The app's locale names attributes and formats full messages, as
+/// Rails' I18n does: `activerecord.attributes.article.title` and
+/// `errors.format` reach validation messages, `errors.add`,
+/// `full_message` and `errors[:field]` alike.
+fn localized_messages_app() -> emit_and_run::Overlay {
+    full_message_app()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  errors:\n    format: \"%{attribute}: %{message}\"\n  activerecord:\n    attributes:\n      article:\n        title: \"Headline\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  def self.taken_title_message\n",
+            "  def flag_title\n    errors.add(:title, \"is flagged\")\n  end\n\n  def listed_errors\n    errors.full_messages\n  end\n\n  def title_errors\n    errors[:title]\n  end\n\n  def self.taken_title_message\n",
+        )
+}
+
+const LOCALIZED_MESSAGES_ASSERTIONS: &str = r#"article = Article.new(title: "", body: "short")
+raise "valid" if article.valid?
+raise "full: #{article.listed_errors.inspect}" unless article.listed_errors == ["Headline: can't be blank", "Body: is too short (minimum is 10 characters)"]
+raise "taken: #{Article.taken_title_message}" unless Article.taken_title_message == "Headline: is taken"
+raise "body: #{article.body_message(3)}" unless article.body_message(3) == "Body: needs 3 words"
+raise "base: #{Article.base_message("Whole")}" unless Article.base_message("Whole") == "Whole"
+flagged = Article.new(title: "t", body: "long enough body")
+flagged.flag_title
+raise "add: #{flagged.listed_errors.inspect}" unless flagged.listed_errors == ["Headline: is flagged"]
+puts "localized messages passed"
+"#;
+
+#[test]
+fn localized_attribute_names_and_format_reach_error_messages() {
+    let index = r#"raise "index: #{Article.new(title: "", body: "long enough body").tap(&:valid?).title_errors.inspect}" unless Article.new(title: "", body: "long enough body").tap(&:valid?).title_errors == ["can't be blank"]
+"#;
+    localized_messages_app().run_ruby(&format!("{index}{LOCALIZED_MESSAGES_ASSERTIONS}")).assert_passes();
+}
+
+// Not `title_errors` here: `errors[:field]` does not compile on Spinel, with or without a locale.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn localized_attribute_names_and_format_reach_error_messages_on_spinel() {
+    localized_messages_app().run_spinel(LOCALIZED_MESSAGES_ASSERTIONS).assert_passes();
+}
+
+/// Validation and `errors.add` messages come from the locale as Rails
+/// looks them up: a model's attribute override, the plural form for the
+/// count, `%{model}` and `%{value}` interpolated.
+fn localized_error_kinds_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  activerecord:\n    models:\n      article:\n        one: \"Story\"\n        other: \"Stories\"\n    errors:\n      models:\n        article:\n          attributes:\n            title:\n              blank: \"is required for %{model}\"\n      messages:\n        too_short:\n          one: \"needs at least one character, got %{value}\"\n          other: \"needs %{count} characters, got %{value}\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def listed_errors
+    errors.full_messages
+  end
+
+  def flag
+    errors.add(:title, :blank)
+    errors.add(:body)
+  end
+",
+        )
+}
+
+const LOCALIZED_ERROR_KINDS_ASSERTIONS: &str = r#"article = Article.new(title: "", body: "short")
+raise "valid" if article.valid?
+raise "validated: #{article.listed_errors.inspect}" unless article.listed_errors == ["Title is required for Story", "Body needs 10 characters, got short"]
+flagged = Article.new(title: "t", body: "long enough body")
+flagged.flag
+raise "added: #{flagged.listed_errors.inspect}" unless flagged.listed_errors == ["Title is required for Story", "Body is invalid"]
+puts "localized error kinds passed"
+"#;
+
+#[test]
+fn localized_error_kinds_reach_validations_and_errors_add() {
+    localized_error_kinds_app().run_ruby(LOCALIZED_ERROR_KINDS_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn localized_error_kinds_reach_validations_and_errors_add_on_spinel() {
+    localized_error_kinds_app().run_spinel(LOCALIZED_ERROR_KINDS_ASSERTIONS).assert_passes();
+}
+
+/// A plain ActiveModel class reads its attribute names under
+/// `activemodel`, not `activerecord`, as Rails' i18n_scope says.
+fn active_model_scope_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  activemodel:\n    attributes:\n      search:\n        query: \"Keywords\"\n  activerecord:\n    attributes:\n      search:\n        query: \"Wrong scope\"\n",
+        )
+        .write(
+            "app/models/search.rb",
+            "class Search\n  include ActiveModel::Model\n\n  attr_accessor :query\n\n  validates :query, presence: true\nend\n",
+        )
+}
+
+const ACTIVE_MODEL_SCOPE_ASSERTIONS: &str = r#"search = Search.new(query: "")
+raise "valid" if search.valid?
+raise "messages: #{search.errors.inspect}" unless search.errors == ["Keywords can't be blank"]
+puts "active model scope passed"
+"#;
+
+#[test]
+fn an_active_model_class_reads_the_activemodel_scope() {
+    active_model_scope_app().run_ruby(ACTIVE_MODEL_SCOPE_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_active_model_class_reads_the_activemodel_scope_on_spinel() {
+    active_model_scope_app().run_spinel(ACTIVE_MODEL_SCOPE_ASSERTIONS).assert_passes();
+}
+
+/// `human_attribute_name` answers the locale's name, from a model method,
+/// a view and `record.class`; a dynamic attribute stays an error.
+fn human_attribute_name_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  activerecord:\n    attributes:\n      article:\n        title: \"Headline\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def self.title_label
+    human_attribute_name(:title)
+  end
+
+  def self.body_label
+    Article.human_attribute_name(\"body\")
+  end
+
+  def own_created_at_label
+    self.class.human_attribute_name(:created_at)
+  end
+",
+        )
+}
+
+const HUMAN_ATTRIBUTE_NAME_ASSERTIONS: &str = r#"raise "title: #{Article.title_label}" unless Article.title_label == "Headline"
+raise "body: #{Article.body_label}" unless Article.body_label == "Body"
+raise "created: #{Article.new.own_created_at_label}" unless Article.new.own_created_at_label == "Created at"
+puts "human_attribute_name passed"
+"#;
+
+#[test]
+fn human_attribute_name_answers_the_locale() {
+    human_attribute_name_app().run_ruby(HUMAN_ATTRIBUTE_NAME_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn human_attribute_name_answers_the_locale_on_spinel() {
+    human_attribute_name_app().run_spinel(HUMAN_ATTRIBUTE_NAME_ASSERTIONS).assert_passes();
+}
+
+#[test]
+fn human_attribute_name_on_a_dynamic_attribute_stays_an_error() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def self.label_for(field)\n    Article.human_attribute_name(field)\n  end\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("human_attribute_name")), "{errors:?}");
+}
+
+/// Form labels and submit text come from the locale as Action View finds
+/// them: `helpers.label`, then the model's attribute name, then the
+/// humanized method; `helpers.submit` over the model's human name.
+fn localized_form_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  helpers:\n    label:\n      article:\n        title: \"Your headline\"\n    submit:\n      create: \"Publish %{model}\"\n  activerecord:\n    attributes:\n      article:\n        body: \"Content\"\n",
+        )
+        .write(
+            "test/controllers/localized_forms_controller_test.rb",
+            "require \"test_helper\"\n\nclass LocalizedFormsControllerTest < ActionDispatch::IntegrationTest\n  test \"labels and submit read the locale\" do\n    get new_article_url\n    assert_includes response.body, \">Your headline</label>\"\n    assert_includes response.body, \">Content</label>\"\n    assert_includes response.body, \"value=\\\"Publish Article\\\"\"\n    get edit_article_url(articles(:one))\n    assert_includes response.body, \"value=\\\"Update Article\\\"\"\n  end\nend\n",
+        )
+}
+
+#[test]
+fn localized_form_labels_and_submit_text() {
+    localized_form_app().run_test("test/controllers/localized_forms_controller_test.rb").assert_passes();
+}
+
+/// `I18n.t` and a template's `t` answer the locale at compile time:
+/// interpolation, plural forms chosen by a run-time count, `scope:`,
+/// `default:` and a view's lazy `.key`.
+fn translate_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "config/locales/en.yml",
+            "en:\n  hello: \"Hello world\"\n  greet: \"Hi %{name}\"\n  inbox:\n    zero: \"No messages\"\n    one: \"1 message\"\n    other: \"%{count} messages\"\n  shop:\n    title: \"Store\"\n  intro_html: \"<b>Hi</b> %{name}\"\n  pct: \"100%% sure %%{x} %{name}\"\n  tally_html:\n    one: \"<b>one</b>\"\n    other: \"<b>%{count}</b> items\"\n  articles:\n    index:\n      heading: \"All the articles\"\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def self.greeting(name)
+    I18n.t(\"greet\", name: name)
+  end
+
+  def self.inbox(count)
+    I18n.t(\"inbox\", count: count)
+  end
+
+  def self.scoped_title
+    I18n.t(:title, scope: :shop)
+  end
+
+  def self.fallbacks
+    [I18n.t(:nope, default: :greet, name: \"Bo\"), I18n.t(:nope, default: \"Plain\")]
+  end
+
+  def self.intro
+    I18n.t(\"intro_html\", name: \"<i>\")
+  end
+
+  def self.counted_inbox(calls)
+    I18n.t(\"inbox\", count: (calls << 1).size)
+  end
+
+  def self.percents
+    [I18n.t(\"pct\", name: \"N\", x: \"X\"), I18n.t(\"greet\")]
+  end
+
+  def self.unread_option(calls)
+    I18n.t(\"hello\", unused: (calls << 1).size)
+  end
+
+  def self.read_before_write
+    name = \"before\"
+    I18n.t(\"greet\", name: name, unused: (name = \"after\"))
+  end
+
+  def self.ordered_options(calls)
+    I18n.t(\"greet\", other: (calls << \"a\").size, name: (calls << \"b\").join)
+  end
+",
+        )
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<h1",
+            "<p id=\"lazy\"><%= t(\".heading\") %></p><p id=\"inbox\"><%= t(\"inbox\", count: @articles.size) %></p><p id=\"intro\"><%= t(\"intro_html\", name: \"<i>\") %></p><p id=\"tally\"><%= t(\"tally_html\", count: \"<s>\") %></p>\n<h1",
+        )
+        .write(
+            "test/controllers/translations_controller_test.rb",
+            "require \"test_helper\"\n\nclass TranslationsControllerTest < ActionDispatch::IntegrationTest\n  test \"templates translate\" do\n    get articles_url\n    assert_includes response.body, \"<p id=\\\"lazy\\\">All the articles</p>\"\n    assert_includes response.body, \" messages</p>\"\n    assert_includes response.body, \"<p id=\\\"intro\\\"><b>Hi</b> &lt;i&gt;</p>\"\n    assert_includes response.body, \"<p id=\\\"tally\\\"><b>&lt;s&gt;</b> items</p>\"\n  end\nend\n",
+        )
+}
+
+const TRANSLATE_ASSERTIONS: &str = r#"raise "greet: #{Article.greeting("Ann")}" unless Article.greeting("Ann") == "Hi Ann"
+raise "zero: #{Article.inbox(0)}" unless Article.inbox(0) == "No messages"
+raise "one: #{Article.inbox(1)}" unless Article.inbox(1) == "1 message"
+raise "other: #{Article.inbox(3)}" unless Article.inbox(3) == "3 messages"
+raise "scope: #{Article.scoped_title}" unless Article.scoped_title == "Store"
+raise "fallbacks: #{Article.fallbacks.inspect}" unless Article.fallbacks == ["Hi Bo", "Plain"]
+raise "intro: #{Article.intro}" unless Article.intro == "<b>Hi</b> <i>"
+calls = []
+counted = Article.counted_inbox(calls)
+raise "counted: #{counted}" unless counted == "1 message"
+raise "count evaluated #{calls.size} times" unless calls.size == 1
+raise "percents: #{Article.percents.inspect}" unless Article.percents == ["100% sure %{x} N", "Hi %{name}"]
+calls = []
+raise "unread: #{calls.inspect}" unless Article.unread_option(calls) == "Hello world" && calls == [1]
+raise "read before write: #{Article.read_before_write}" unless Article.read_before_write == "Hi before"
+calls = []
+ordered = Article.ordered_options(calls)
+raise "ordered: #{ordered} #{calls.inspect}" unless ordered == "Hi ab" && calls == ["a", "b"]
+puts "translate passed"
+"#;
+
+#[test]
+fn i18n_t_answers_the_locale() {
+    translate_app().run_ruby(TRANSLATE_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn i18n_t_answers_the_locale_on_spinel() {
+    translate_app().run_spinel(TRANSLATE_ASSERTIONS).assert_passes();
+}
+
+#[test]
+fn template_t_answers_the_locale() {
+    translate_app().run_test("test/controllers/translations_controller_test.rb").assert_passes();
+}
+
+/// A key the locale lacks, one computed at run time, or a call with a
+/// block stays an error.
+#[test]
+fn unresolvable_translations_stay_errors() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def self.missing\n    I18n.t(\"no.such.key\")\n  end\n\n  def self.dynamic(key)\n    I18n.t(key)\n  end\n\n  def self.blocked\n    I18n.t(\"hello\") { |text| text }\n  end\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert_eq!(errors.iter().filter(|e| e.contains("I18n not supported")).count(), 3, "{errors:?}");
+}
+
+/// `errors[:field]` cannot tell fields apart when `errors.format` puts
+/// nothing before the message, so it stays an error.
+#[test]
+fn errors_index_under_a_message_only_format_stays_an_error() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("config/locales/en.yml", "en:\n  hello: \"Hello world\"\n  errors:\n    format: \"%{message}\"\n")
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true\n\n  def title_errors\n    errors[:title]\n  end\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("nothing before the message")), "{errors:?}");
+}
+
+/// A field the lowering cannot humanize at compile time keeps its error.
+#[test]
+fn errors_full_message_on_a_dynamic_field_stays_an_error() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :title, presence: true\n",
+            "  validates :title, presence: true
+
+  def message_for(field)
+    errors.full_message(field, \"is taken\")
+  end
+",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("full_message lacks")), "{errors:?}");
+}
+
 /// A Sidekiq worker's class-side entries run its `perform` inline, as an
 /// ActiveJob's `perform_later` does: `include Sidekiq::Job` (or `Worker`)
 /// and `sidekiq_options` leave the emitted class, `perform_in` /
@@ -2123,6 +2516,99 @@ end
 "#,
         )
         .run_test("test/controllers/zones_controller_test.rb")
+        .assert_passes();
+}
+
+/// `ActiveSupport::HashWithIndifferentAccess` reads and writes a Symbol
+/// key as its String, nested hashes included, and its conversions
+/// (`merge`, `reverse_merge`, `dup`, `to_hash`, `symbolize_keys`) answer
+/// what Rails answers.
+#[test]
+fn hash_with_indifferent_access_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/indifferent\", to: \"indifferent#show\"\n  get \"/indifferent/loose\", to: \"indifferent#loose\"\n  get \"/indifferent/copies\", to: \"indifferent#copies\"\n",
+        )
+        .write(
+            "app/controllers/indifferent_controller.rb",
+            r#"class IndifferentController < ApplicationController
+  OPTIONS = { state: :trusted }.with_indifferent_access.freeze
+
+  def show
+    h = ActiveSupport::HashWithIndifferentAccess.new(a: 1, "b" => 2)
+    h[:c] = 3
+    key = :a
+    nested = { outer: { inner: 4 } }.with_indifferent_access
+    list = HashWithIndifferentAccess.new(items: [{ id: 5 }])
+    w = ActiveSupport::HashWithIndifferentAccess.new
+    w[:name] = "x"
+    w[:rows] = [{ n: 8 }]
+    merged = h.merge(d: 6)
+    defaults = h.reverse_merge(a: 0, e: 7)
+    copy = h.dup
+    copy[:a] = 10
+    syms = h.symbolize_keys
+    render plain: [
+      h[:a], h["a"], h[key], h[:b], h.fetch(:c), h.key?(:b), h.values_at(:a, :c).join(","),
+      h.slice(:a, :c).keys.join(","), h.except(:b).keys.join(","),
+      nested[:outer][:inner], nested.dig(:outer, :inner), list[:items][0][:id], w["name"], w[:rows][0][:n],
+      merged[:d], defaults[:a], defaults[:e], copy[:a], h[:a],
+      h.to_hash.keys.join(","), syms[:a], h.is_a?(Hash), h.delete(:c), h.key?(:c), h.keys.join(","),
+      h.select { |k, v| v > 1 }.keys.join(","), h.map { |k, v| k + v.to_s }.join(",")
+    ].join("|")
+  end
+
+  def loose
+    h = ActiveSupport::HashWithIndifferentAccess.new(a: 1, "b" => 2)
+    t = h.to_h
+    t["z"] = 1
+    filled = h.with_defaults(a: 0, f: 9)
+    loose = ActiveSupport::HashWithIndifferentAccess.new
+    loose[:cfg] = { deep: { leaf: "y" } }
+    loose.fetch(:cfg)[:deep][:leaf] = "z"
+    loose.update(more: 1)
+    render plain: [
+      h.key?(:z), filled[:a], filled[:f], loose.dig(:cfg, :deep, :leaf), loose[:cfg].key?(:deep), loose[:more]
+    ].join("|")
+  end
+
+  def copies
+    src = ActiveSupport::HashWithIndifferentAccess.new(n: { k: 1 }, drop: 2)
+    cp = ActiveSupport::HashWithIndifferentAccess.new(src)
+    src[:n][:k] = 2
+    bag = ActiveSupport::HashWithIndifferentAccess.new
+    bag[:syms] = [:a]
+    keys = %i[n drop]
+    render plain: [cp[:n][:k], src.without(:drop).keys.join(","), bag[:syms].include?(:a), src.slice(*keys).keys.join(","), OPTIONS[:state], OPTIONS.frozen?, src[:n].keys.join(",")].join("|")
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/indifferent_controller_test.rb",
+            r#"require "test_helper"
+
+class IndifferentControllerTest < ActionDispatch::IntegrationTest
+  test "indifferent access" do
+    get "/indifferent"
+    assert_equal "1|1|1|2|3|true|1,3|a,c|a,c|4|4|5|x|8|6|1|7|10|1|a,b,c|1|true|3|false|a,b|b|a1,b2", response.body
+  end
+
+  test "untyped values read back indifferently" do
+    get "/indifferent/loose"
+    assert_equal "false|1|9|z|true|1", response.body
+  end
+
+  test "an indifferent source is copied shallowly" do
+    get "/indifferent/copies"
+    assert_equal "2|n|true|n,drop|trusted|true|k", response.body
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/indifferent_controller_test.rb")
         .assert_passes();
 }
 
@@ -4463,13 +4949,11 @@ puts "ok"
         .assert_passes();
 }
 
-/// #139 typed `Model.human_attribute_name` as a String, which took the
-/// call from an error to clean, but no runtime defines it, so every
-/// page rendering the form raises `undefined method
-/// 'human_attribute_name' for class Article`. It belongs once, in
-/// `runtime/ruby/active_record/base.rb`, where every target gets it.
+/// #139 typed `Model.human_attribute_name` as a String, but no runtime
+/// defined it, so every page rendering the form raised `undefined method
+/// 'human_attribute_name' for class Article` (#147). A literal attribute
+/// now folds to the locale's name at compile time.
 #[test]
-#[ignore = "check is clean but the emitted view raises NoMethodError: no runtime defines human_attribute_name (#147)"]
 fn human_attribute_name_runs() {
     emit_and_run::real_blog()
         .edit(
@@ -10852,4 +11336,109 @@ raise "read answered #{again.inspect}" unless again == "<b>hi</b>" && again.html
 raise "the cached copy is the caller's object" if again.equal?(body)
 "##)
         .assert_passes();
+}
+
+
+/// A runtime façade's scalar constants (`Markly::SMART = 0` in
+/// runtime/ruby/gem_facades.rb) used to carry no type: the constant table
+/// typed Hash/Array/`.new` values only, so after the Rubydex integration an
+/// app's `Markly::SMART` reference became a refusal stub and lobsters'
+/// `Markdowner` raised at render. On the CRuby tree Markly is the real gem.
+#[test]
+fn markly_flag_constants_resolve_and_render_through_the_real_gem() {
+    let run = emit_and_run::empty_app()
+        .write("Gemfile", "source \"https://rubygems.org\"\ngem \"rails\"\ngem \"markly\"\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "lib/markdown_renderer.rb",
+            "class MarkdownRenderer\n  def self.render(text)\n    root = Markly.parse(text, flags: Markly::SMART, extensions: [:strikethrough])\n    root.to_html(flags: Markly::DEFAULT, extensions: [:strikethrough])\n  end\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"html = MarkdownRenderer.render("**bold** ~~gone~~")
+raise "Markly render: #{html.inspect}" unless html.include?("<strong>bold</strong>") && html.include?("<del>gone</del>")
+"#,
+        );
+    run.assert_passes();
+}
+
+/// A class body that initializes `@@` variables beside constants was
+/// refused whole at ingest ("requires source ordering"), because the
+/// emitter does not keep their relative order. When every constant and
+/// every initializer is a literal neither can observe the other, so the
+/// order is free. Lobsters' `Twitter` (`@@CONSUMER_KEY = nil`,
+/// `MAX_TWEET_LEN = 280`) disappeared from the tree, and /settings raised.
+#[test]
+fn literal_class_variables_beside_literal_constants_ingest() {
+    let run = emit_and_run::empty_app()
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "lib/poster.rb",
+            "class Poster\n  cattr_accessor :CONSUMER_KEY\n\n  @@CONSUMER_KEY = nil\n\n  MAX_LEN = 280\n  SHORT_LEN = 23\n\n  def self.enabled?\n    self.CONSUMER_KEY.present?\n  end\n\n  def self.room\n    MAX_LEN - SHORT_LEN\n  end\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"raise "enabled? must start false" if Poster.enabled?
+raise "constants: #{Poster.room}" unless Poster.room == 257
+Poster.CONSUMER_KEY = "key"
+raise "enabled? must follow the class variable" unless Poster.enabled?
+"#,
+        );
+    run.assert_passes();
+}
+
+/// `recv.try(:m)` narrows to the classes that define `m`, and a model
+/// defines every column reader without spelling it as a `def`. Counting
+/// only `def`s made lobsters' `@user.try(:username)` narrow to `ModNote`
+/// (whose `delegate :username` is a method) and answer nil for every
+/// `User`: a logged-in page rendered `data-username=''`.
+#[test]
+fn try_answers_a_column_reader_beside_a_class_that_defines_the_method() {
+    let run = emit_and_run::empty_app()
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write("lib/note.rb", "class Note\n  def name\n    \"note\"\n  end\nend\n")
+        .write(
+            "lib/presenter.rb",
+            "class Presenter\n  def self.label(obj)\n    obj.try(:name)\n  end\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"w = Widget.new(name: "gizmo")
+raise "column reader: #{Presenter.label(w).inspect}" unless Presenter.label(w) == "gizmo"
+raise "defined method: #{Presenter.label(Note.new).inspect}" unless Presenter.label(Note.new) == "note"
+raise "nil receiver" unless Presenter.label(nil).nil?
+"#,
+        );
+    run.assert_passes();
 }

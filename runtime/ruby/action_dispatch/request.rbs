@@ -61,6 +61,8 @@ module ActionDispatch
     def env=: (Hash[String, untyped]) -> Hash[String, untyped]
     def request_parameters: () -> Hash[String, Roundhouse::ParamValue]
     def request_parameters=: (Hash[String, Roundhouse::ParamValue]) -> Hash[String, Roundhouse::ParamValue]
+    def query_parameters: () -> Hash[String, Roundhouse::ParamValue]
+    def query_parameters=: (Hash[String, Roundhouse::ParamValue]) -> Hash[String, Roundhouse::ParamValue]
     def initialize: () -> void
     def get?: () -> bool
     def post?: () -> bool

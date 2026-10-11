@@ -277,17 +277,32 @@ fn collect_constant_from_stmt(
 }
 
 /// Best-effort type inference for the right-hand side of a constant
-/// assignment. Recognizes Hash and Array literals (typing element
-/// types from the first key/value or first array element), with an
-/// optional trailing `.freeze`. Falls back to None for unsupported
+/// assignment. Recognizes scalar literals, integer arithmetic on integer
+/// literals (`SMART = 1 << 10`), and Hash and Array literals (typing
+/// element types from the first key/value or first array element), with
+/// an optional trailing `.freeze`. Falls back to None for unsupported
 /// shapes — the body-typer's existing fallback still applies.
 fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
+    if let Some(ty) = type_of_literal_node(node) {
+        return Some(ty);
+    }
     // Strip `.freeze` if present — it's a no-op for typing.
     if let Some(call) = node.as_call_node() {
         let name = std::str::from_utf8(call.name().as_slice()).ok()?;
         if name == "freeze" {
             let inner = call.receiver()?;
             return type_of_const_literal(&inner);
+        }
+        // `1 << 10`, `FLAG_A | FLAG_B`-free integer arithmetic: both
+        // operands integer literals (or such arithmetic) is an Integer.
+        if matches!(name, "<<" | ">>" | "|" | "&" | "^" | "+" | "-" | "*") {
+            let int = |n: &Node<'_>| matches!(type_of_const_literal(n), Some(Ty::Int));
+            let recv = call.receiver()?;
+            let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            if int(&recv) && args.len() == 1 && int(&args[0]) {
+                return Some(Ty::Int);
+            }
+            return None;
         }
         // `CONST = Klass.new(…)` — a constructed instance is as much a
         // typed constant as a literal is, and it is the shape a rule

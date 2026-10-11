@@ -384,9 +384,9 @@ if (( ${#LANES[@]} > 0 )); then
             spinel-gc|spinel-ballast|spinel-gc-ballast)
                 warn "lane $LANE retired: spinel has marked generationally by default since matz/spinel@d3b1400d, so the plain 'spinel' lane IS that configuration — folding into it"
                 LANE=spinel ;;
-            rails|rails-int|ruby|ruby-int|jruby|rails-jruby|spinel) ;;
+            rails|rails-int|ruby|ruby-int|jruby|rails-jruby|spinel|futamura) ;;
             *)
-                fail "unknown lane: $LANE (want rails rails-int ruby ruby-int jruby rails-jruby spinel)"; exit 2 ;;
+                fail "unknown lane: $LANE (want rails rails-int ruby ruby-int jruby rails-jruby spinel futamura)"; exit 2 ;;
         esac
         for K in ${KEPT_LANES[@]+"${KEPT_LANES[@]}"}; do [[ "$K" == "$LANE" ]] && continue 2; done
         KEPT_LANES+=("$LANE")
@@ -463,6 +463,41 @@ if (( ${#LANES[@]} > 0 )); then
                     if ! diff -q "$FROZEN_SEQ" "$LDIR/sequence.json" >/dev/null; then
                         fail "lane $LANE: regenerated sequence != committed frozen-sequence.json"
                     fi
+                    ok "lane $LANE done"
+                    lane_status "$LANE" ok "" ""
+                else
+                    fail "lane $LANE failed (see $LDIR/run.log)"; FAILED_LANES=$((FAILED_LANES + 1))
+                    lane_status "$LANE" failed replay "$(lane_tail "$LDIR/run.log")"
+                fi
+                ;;
+            futamura)
+                # `--target futamura`: the app as Rails runs it, with the
+                # specializations spliced in (docs/pipeline/specialization.md).
+                # Its output IS a Rails app, so it is timed the way the rails
+                # lane is — same replay, same arguments, YJIT — and its bodies
+                # go through the same content-parity check the emit lanes do.
+                if (( RAILS_OK == 0 )); then
+                    fail "lane $LANE skipped: bundle not installable in $SRC"
+                    lane_status "$LANE" skipped bundle "bundle not installable in $SRC"; continue
+                fi
+                FT_TREE="$REPO_ROOT/build/futamura-lobsters"
+                step "lane futamura: emit (--target futamura), then real Rails on the frozen sequence (YJIT)"
+                rm -rf "$FT_TREE"
+                if ! (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
+                        --target futamura "$SRC" -o "$FT_TREE" >"$LDIR/emit.log" 2>&1); then
+                    fail "lane $LANE: emit failed (see $LDIR/emit.log)"; FAILED_LANES=$((FAILED_LANES + 1))
+                    lane_status "$LANE" failed emit "$(lane_tail "$LDIR/emit.log")"; continue
+                fi
+                # The benchmark's seed is a binary file the identity tree does
+                # not carry (it is run-time state to the target); the replay
+                # loads it into memory, as for the rails lane.
+                cp "$SRC/db/production.sqlite3" "$FT_TREE/db/production.sqlite3"
+                FT_ARGS=(--src "$FT_TREE" --warmup 15 --min-iters "$TIME_ITERS" --min-time 10
+                         --seq-out "$LDIR/sequence.json" --json "$LDIR/rails.json"
+                         --dump "$LDIR/bodies" --defer "$GAPS_JSON")
+                printf '$ RUBYOPT=--yjit ruby scripts/lobsters-rails-replay %s\n\n' "${FT_ARGS[*]}" > "$LDIR/run.log"
+                if RUBYOPT=--yjit ruby "$REPO_ROOT/scripts/lobsters-rails-replay" \
+                        "${FT_ARGS[@]}" >>"$LDIR/run.log" 2>&1; then
                     ok "lane $LANE done"
                     lane_status "$LANE" ok "" ""
                 else
@@ -773,6 +808,9 @@ META = {
   "ruby-int"    => { label: "Roundhouse", kind: "emit",  runtime: "cruby", yjit: false, jit: "no JIT", src: "summary.json" },
   "jruby"       => { label: "Roundhouse", kind: "emit",  runtime: "jruby", yjit: nil,   jit: "JRuby",  src: "summary.json" },
   "spinel"      => { label: "Roundhouse", kind: "emit",  runtime: "spinel", yjit: nil,  jit: "AOT",    src: "summary.json" },
+  # Rails running the futamura emit: timed by the rails replay, so its data
+  # is rails.json, but it is compared against Rails like the emit lanes.
+  "futamura"    => { label: "Futamura",   kind: "futamura", runtime: "cruby", yjit: true, jit: "YJIT", src: "rails.json" },
 }
 # A lane that produced no timing data still gets a row. Dropping it would
 # render the page as though the lane had never been asked for, which is the
@@ -1324,6 +1362,11 @@ mkdir -p "$OUT_DIR"
 # ── emit ─────────────────────────────────────────────────────────────
 if (( SKIP_EMIT == 0 )) || [[ ! -f "$OUT_TREE/main.rb" ]]; then
     step "transpiling lobsters (--target $EMIT_TARGET --allow-unsupported)"
+    # Emit into an empty tree: writing a tree never deletes, so a file a
+    # previous emit wrote and this one no longer does (lobsters' twitter.rb,
+    # 10-11) would linger and mask the gap. Not the JRuby tree, which also
+    # holds the jars bin/fetch-jars downloads into it.
+    if [[ "$RUNTIME" == cruby ]]; then rm -rf "$OUT_TREE"; fi
     # cargo run rebuilds the compiler when sources changed, so the dev
     # loop never replays against a stale binary. Survey-mode warnings
     # are the expected torrent — keep them in emit.log, not the console.

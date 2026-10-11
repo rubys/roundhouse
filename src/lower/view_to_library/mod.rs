@@ -247,6 +247,7 @@ pub struct ViewLowerCtx<'a> {
         std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
     partial_form_bindings: std::collections::HashMap<ViewKey, PartialFormBinding>,
     route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
+    i18n: std::rc::Rc<crate::i18n::FormI18n>,
     /// Generated RouteHelpers function name -> how many REQUIRED
     /// positionals it takes. See the ViewCtx field of the same name.
     route_helper_arity: std::rc::Rc<std::collections::HashMap<String, usize>>,
@@ -327,6 +328,7 @@ impl<'a> ViewLowerCtx<'a> {
             bool_readers: std::rc::Rc::new(bool_reader_names(app)),
             store_readers: std::rc::Rc::new(store_reader_names(app)),
             partial_form_bindings: partial_form_bindings(&app.views),
+            i18n: std::rc::Rc::new(crate::i18n::FormI18n::of(app)),
             route_helper_names: std::rc::Rc::new(
                 route_helpers.iter().map(|(n, _)| n.clone()).collect(),
             ),
@@ -735,6 +737,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         bool_readers: lx.bool_readers.clone(),
         store_readers: lx.store_readers.clone(),
         route_helper_names: lx.route_helper_names.clone(),
+        i18n: lx.i18n.clone(),
         route_helper_arity: lx.route_helper_arity.clone(),
         form_wrappers: lx.form_wrappers.clone(),
         stylesheets: app.stylesheets.clone(),
@@ -4118,6 +4121,8 @@ pub(super) struct ViewCtx {
     /// Empty in single-view test harnesses → both arms (the
     /// pre-gating shape).
     pub(super) route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
+    /// The app's translations for form labels and submit text.
+    pub(super) i18n: std::rc::Rc<crate::i18n::FormI18n>,
     /// Generated RouteHelpers function name -> how many REQUIRED
     /// positionals it takes (`article_path` 1, `articles_path` 0).
     ///

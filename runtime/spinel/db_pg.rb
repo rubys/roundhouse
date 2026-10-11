@@ -839,7 +839,13 @@ module Db
   def self.with_connection
     # Re-entrant: a nested lease, or one inside a transaction a BEGIN
     # outside any lease pinned, keeps the thread's connection.
-    return yield if !Thread.current[:db_conn].nil?
+    #
+    # Do not write `return yield if …`: Spinel tip (ea683750+) mis-emits
+    # `sp_oint_arg` around a raising block's int dummy on that form.
+    unless Thread.current[:db_conn].nil?
+      result = yield
+      return result
+    end
     pool = Db.pool_for_thread
     idx = pool.lease
     conn = pool.conn(idx)
