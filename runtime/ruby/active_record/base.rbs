@@ -115,6 +115,8 @@ module ActiveRecord
     def self.primary_key: () -> String
     def self._cast_primary_key: (Integer | String id) -> (Integer | String | nil)
     def self._string_primary_key: () -> bool
+    def self._friendly_slug_column: () -> String
+    def self._friendly_history: () -> bool
     def self.schema_columns: () -> Array[Symbol]
     def self.schema_time_columns: () -> Array[Symbol]
     def self.schema_date_columns: () -> Array[Symbol]

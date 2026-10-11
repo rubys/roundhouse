@@ -1,0 +1,7 @@
+# Typing contract for friendly_id.rb beside this file.
+module ActiveRecord
+  module FriendlyIdFinder
+    def self.integer_text?: (String text) -> bool
+    def self.potential_primary_key?: (String text, bool string_key) -> bool
+  end
+end

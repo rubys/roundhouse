@@ -1935,6 +1935,18 @@ impl<'a> BodyTyper<'a> {
                         return Ty::Array { elem: other.clone() };
                     }
                 }
+                // `Model.where(..).friendly` (friendly_id): only on a
+                // model lower::friendly_id claimed, whose class side
+                // registers `friendly`. Not a catalog builder: the
+                // runtime answers it for those models alone, so any
+                // other relation keeps the dispatch failure.
+                if method.as_str() == "friendly" {
+                    if let Ty::Class { id, .. } = elem {
+                        if self.classes().get(id).is_some_and(|c| c.class_methods.contains_key(method)) {
+                            return Ty::Array { elem: Box::new(elem.clone()) };
+                        }
+                    }
+                }
                 array_method(method, elem, block_ret)
             }
             // Relation-typed receiver — a chain started from a scope

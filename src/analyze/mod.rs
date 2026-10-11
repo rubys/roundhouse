@@ -512,6 +512,13 @@ impl Analyzer {
             // `generates_token_for :purpose` — the token round-trip
             // Rails 7.1 added (the guide's unsubscribe link).
             register_generates_token_for(model, &mut cls.instance_methods, &mut cls.class_methods, &self_ty);
+            // `friendly_id` — `Model.friendly` is the model's Relation,
+            // for the configurations lower::friendly_id synthesizes.
+            if crate::lower::friendly_id::config(model).is_some() {
+                cls.class_methods
+                    .entry(Symbol::from("friendly"))
+                    .or_insert(Ty::Relation { of: model.name.clone() });
+            }
             // `has_rich_text :body` generates the reader/predicate/
             // writer and the scoped has_one behind them.
             register_has_rich_text(model, &mut cls.instance_methods);

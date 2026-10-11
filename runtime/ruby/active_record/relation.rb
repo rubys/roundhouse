@@ -74,6 +74,7 @@ module ActiveRecord
       @from = nil
       @ctes = []
       @shared_lists = false
+      @friendly = false
     end
 
     # Rails' `Relation#spawn`: a new relation that shares this one's
@@ -1793,10 +1794,89 @@ module ActiveRecord
     # the suffix could not match. An unscoped relation's message is
     # exactly Rails'.
     def find(id)
+      return find_ids(id) if id.is_a?(Array)
+      return friendly_find(id) if @friendly && id.is_a?(String)
+      find_primary_key(id)
+    end
+
+    # `Model.friendly` / `relation.friendly` (friendly_id's `all.extending(
+    # FriendlyId::FinderMethods)`): from here on `find` is friendly_id's
+    # finder. The flag rides the relation through its chain, as the
+    # extension does in Rails (`Article.friendly.includes(:x).find(s)`,
+    # `Article.with_discarded.friendly.find(s)`). Only a model that
+    # declared `friendly_id` (lower::friendly_id) has the class-side
+    # configuration `friendly_find` reads; any other raises there.
+    def friendly
+      @friendly = true
+      self
+    end
+
+    # friendly_id 5.x `FinderMethods#find` for one id, in the gem's order:
+    #
+    #   1. anything but a String (Integer, nil, Array, ...) is
+    #      `unfriendly_id?`, so `find` sends it to the plain find (this
+    #      method only ever sees a String): `find(nil)` is "without an
+    #      ID", `find(3)` is the primary key. A String is never unfriendly
+    #      ("123" answers nil, not true, to `friendly_id?`; neither
+    #      short-circuits).
+    #   2. `find_by(slug_column => id)`; with `:history`, then the newest
+    #      `friendly_id_slugs` row for (sluggable_type, slug), joined to
+    #      this relation, so its other conditions still apply.
+    #   3. no match, and the String could be a primary key
+    #      (`potential_primary_key?`): the plain find, which raises
+    #      Rails' own not-found for a missing row. A "123" slug beats the
+    #      row with id 123, as in the gem.
+    #   4. otherwise RecordNotFound with the gem's message.
+    #
+    # Not modeled: `find(id, allow_nil: true)` and `find(a, b)` (the
+    # gem's `args.count != 1` pass-through).
+    def friendly_find(id)
+      record = friendly_first(id)
+      return record unless record.nil?
+      return find_primary_key(id) if FriendlyIdFinder.potential_primary_key?(id, @model._string_primary_key)
+      column = @model._friendly_slug_column
+      raise RecordNotFound.new("can't find record with friendly id: #{id.inspect}", @model.name, column, id)
+    end
+
+    # `first_by_friendly_id`: the slug column, then (history) the slug
+    # table. `find_by` pops its predicate, so the relation is unchanged.
+    def friendly_first(id)
+      record = find_by({ @model._friendly_slug_column.to_sym => id })
+      return record unless record.nil?
+      return nil unless @model._friendly_history
+      friendly_history_first(id)
+    end
+
+    # history.rb `slug_table_record`: this relation joined to
+    # `friendly_id_slugs`, restricted to (this model's type, the slug),
+    # newest slug row first, projecting the model's columns. The join,
+    # predicate and ordering are popped again; the projection and limit
+    # restored: a terminal must not alter the relation it was asked on.
+    def friendly_history_first(id)
+      own_lists
+      prior_select = @select_sql
+      prior_limit = @limit
+      @select_sql = nil
+      @limit = 1
+      @joins << "INNER JOIN friendly_id_slugs ON friendly_id_slugs.sluggable_id = #{@table}.#{@model.primary_key}"
+      @wheres << "friendly_id_slugs.sluggable_type = #{ActiveRecord.adapter.escape_value(@model.name)} AND friendly_id_slugs.slug = #{ActiveRecord.adapter.escape_value(id)}"
+      @orders << "friendly_id_slugs.id DESC"
+      begin
+        rows = load_records
+      ensure
+        @orders.pop
+        @wheres.pop
+        @joins.pop
+        @select_sql = prior_select
+        @limit = prior_limit
+      end
+      rows.length == 0 ? nil : rows[0]
+    end
+
+    def find_primary_key(id)
       # Rails compacts the ids first, so `find(nil)` has none: the
       # "without an ID" form, with no id, as `Base.find(nil)` raises.
       raise RecordNotFound.new("Couldn't find #{@model.name} without an ID", @model.name, @model.primary_key) if id.nil?
-      return find_ids(id) if id.is_a?(Array)
       key = @model._cast_primary_key(id)
       prior_limit = @limit
       own_lists
@@ -1823,7 +1903,7 @@ module ActiveRecord
     def find_ids(ids)
       ids = ids.uniq
       return [] if ids.empty?
-      return [find(ids[0])] if ids.length == 1
+      return [find_primary_key(ids[0])] if ids.length == 1
       prior_limit = @limit
       prior_offset = @offset
       prior_select = @select_sql
