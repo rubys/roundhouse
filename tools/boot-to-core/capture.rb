@@ -137,13 +137,14 @@ module BootToCore
       # Admission failures describe the observed definitions; they must not
       # interrupt the original eval or unrelated Rails boot operations.
       statements = parse(source).statements.body
-      unless statements.all? { |node| node.is_a?(Prism::DefNode) && node.receiver.nil? }
-        raise Unsupported, "string eval contains more than ordinary instance method definitions"
-      end
-      events << { kind: "string_eval", owner_id: owner.object_id, names: statements.map(&:name) }
-      statements.each do |node|
+      definitions = statements.select { |node| node.is_a?(Prism::DefNode) && node.receiver.nil? }
+      events << { kind: "string_eval", owner_id: owner.object_id, names: definitions.map(&:name) }
+      definitions.each do |node|
         (@eval_definitions ||= {})[[owner, node.name]] ||= []
         @eval_definitions[[owner, node.name]] << [node, path, first_line + node.location.start_line - 1]
+      end
+      unless definitions.length == statements.length
+        raise Unsupported, "string eval also contains non-instance-method statements (not exported)"
       end
     rescue Unsupported => error
       events << { kind: "opaque_eval", owner_id: owner.object_id, reason: error.message }
@@ -173,11 +174,18 @@ module BootToCore
       path, line = block.source_location
       raise Unsupported, "Proc has no readable source" unless path && File.file?(path)
       candidates = []
-      walk(source_tree(path)) do |node|
-        candidates << node if node.is_a?(Prism::BlockNode) && node.location.start_line == line
+      scopes_by_node = {}
+      location = RubyVM::InstructionSequence.of(block)&.to_a&.dig(4, :code_location)
+      walk_lexical(source_tree(path)) do |node, scopes|
+        if node.is_a?(Prism::BlockNode) && node.location.start_line == line
+          span = node.location
+          next if location && location != [span.start_line, span.start_column, span.end_line, span.end_column]
+          candidates << node
+          scopes_by_node[node] = scopes
+        end
       end
       raise Unsupported, "ambiguous or missing block source at #{path}:#{line}" unless candidates.length == 1
-      remember(Record.new(owner, name.to_sym, candidates.first, block.binding, "define_method", definition, nil, nil))
+      remember(Record.new(owner, name.to_sym, candidates.first, block.binding, "define_method", definition, nil, scopes_by_node[candidates.first]))
     rescue Unsupported => error
       remember(Record.new(owner, name.to_sym, nil, nil, "opaque_proc", definition, error.message, nil))
     end
@@ -227,6 +235,32 @@ module BootToCore
       record
     end
 
+    # Reify immutable collection nodes once, preserving sharing and freezing.
+    # Mutable descendants, cycles and special Hash defaults are not snapshots.
+    def immutable_literal(value, stack = [])
+      if [NilClass, TrueClass, FalseClass, Integer, Symbol].include?(value.class) ||
+          (value.instance_of?(String) && value.frozen?)
+        return value.inspect
+      end
+      unless value.frozen? && (value.instance_of?(Array) || value.instance_of?(Hash))
+        raise Unsupported, "#{value.class} is not an immutable scalar/collection"
+      end
+      if value.instance_of?(Hash) && (value.default_proc || !value.default.nil? || value.compare_by_identity?)
+        raise Unsupported, "Hash default/identity semantics are not admitted"
+      end
+      raise Unsupported, "cyclic immutable collection" if stack.any? { |ancestor| ancestor.equal?(value) }
+      return "BootState::VALUE#{@immutable_values.fetch(value)[0]}" if @immutable_values.key?(value)
+      stack = stack + [value]
+      literal = if value.instance_of?(Array)
+        "[#{value.map { |entry| immutable_literal(entry, stack) }.join(', ')}]"
+      else
+        "{#{value.map { |key, entry| "#{immutable_literal(key, stack)} => #{immutable_literal(entry, stack)}" }.join(', ')}}"
+      end
+      index = @immutable_values.length
+      @immutable_values[value] = [index, "#{literal}.freeze"]
+      "BootState::VALUE#{index}"
+    end
+
     # Binding object identity is NOT lexical-slot identity. Probe aliases by a
     # reversible write, in this single-threaded, trusted research process only.
     def cell_for(binding, name, cells)
@@ -242,50 +276,51 @@ module BootToCore
         end
       end
       value = binding.local_variable_get(name)
-      unless [NilClass, TrueClass, FalseClass, Integer].include?(value.class) || (value.instance_of?(String) && value.frozen?)
-        raise Unsupported, "capture #{name}: #{value.class} is not an immutable scalar"
-      end
+      immutable_literal(value)
       cells << Cell.new(binding, name, false)
       cells.length - 1
     end
 
     def parameters(record)
       node = record.node.parameters
-      node = node.parameters if node.is_a?(Prism::BlockParametersNode)
-      return [] unless node
-      if node.keyword_rest.is_a?(Prism::ForwardingParameterNode) && node.requireds.empty? && node.optionals.empty? && node.rest.nil? && node.posts.empty? && node.keywords.empty? && node.block.nil?
-        return ["..."]
+      if node.is_a?(Prism::BlockParametersNode)
+        raise Unsupported, "block-local parameter declarations are not admitted" unless node.locals.empty?
+        node = node.parameters
       end
-      unless node.optionals.empty? && node.rest.nil? && node.posts.empty? && node.keywords.empty? && node.keyword_rest.nil? && node.block.nil?
-        raise Unsupported, "only required positional parameters are admitted"
+      return nil unless node
+      unless node.is_a?(Prism::ParametersNode)
+        raise Unsupported, "implicit block parameters are not admitted"
       end
-      node.requireds.map(&:name)
+      node
     end
 
-    def rewrite(node, record, cells)
+    def rewrite(node, record, cells, depth = 0)
       if node.is_a?(Prism::ConstantReadNode)
         scope = record.scopes&.find { |entry| entry.const_defined?(node.name, false) }
         raise Unsupported, "constant #{node.name}: no proven direct lexical binding" unless scope
         raise Unsupported, "constant #{node.name}: autoload is not admitted" if scope.autoload?(node.name, false)
         value = scope.const_get(node.name, false)
-        unless [NilClass, TrueClass, FalseClass, Integer].include?(value.class) || (value.instance_of?(String) && value.frozen?)
-          raise Unsupported, "constant #{node.name}: #{value.class} is not an immutable scalar"
+        begin
+          literal = immutable_literal(value)
+        rescue Unsupported => error
+          raise Unsupported, "constant #{node.name}: #{error.message}"
         end
         # Namespace paths must never have been rebound since definition creation;
         # scalar bindings must be sealed after boot. No original CREF is captured.
-        events << { kind: "scalar_constant", lexical_owner: scope.name, name: node.name, type: value.class.name }
-        return "(#{value.inspect})"
+        kind = value.instance_of?(Array) || value.instance_of?(Hash) ? "immutable_constant" : "scalar_constant"
+        events << { kind: kind, lexical_owner: scope.name, name: node.name, type: value.class.name }
+        return "(#{literal})"
       end
-      forbidden = [Prism::BlockNode, Prism::LambdaNode, Prism::DefNode, Prism::ClassNode,
-                   Prism::ModuleNode, Prism::ReturnNode, Prism::BreakNode, Prism::NextNode,
-                   Prism::YieldNode, Prism::DefinedNode, Prism::ConstantPathNode, Prism::ConstantWriteNode, Prism::ConstantPathWriteNode,
+      forbidden = [Prism::DefNode, Prism::ClassNode,
+                   Prism::ModuleNode, Prism::BreakNode, Prism::NextNode,
+                   Prism::DefinedNode, Prism::ConstantPathNode, Prism::ConstantWriteNode, Prism::ConstantPathWriteNode,
                    Prism::ClassVariableReadNode, Prism::ClassVariableWriteNode,
                    Prism::GlobalVariableReadNode, Prism::GlobalVariableWriteNode]
       raise Unsupported, "body contains #{node.class}" if forbidden.any? { |kind| node.is_a?(kind) }
       if node.is_a?(Prism::CallNode) && %i[eval class_eval module_eval define_method send require load binding const_set remove_const autoload __method__ __callee__ equal? object_id].include?(node.name)
         raise Unsupported, "late dynamic operation #{node.name}"
       end
-      if node.respond_to?(:depth) && node.respond_to?(:name) && node.depth.positive?
+      if node.respond_to?(:depth) && node.respond_to?(:name) && node.depth > depth
         raise Unsupported, "outer local without a captured binding" unless record.binding
         index = cell_for(record.binding, node.name, cells)
         cell = "BootState::CELL#{index}"
@@ -294,19 +329,20 @@ module BootToCore
           return "#{cell}.read"
         when Prism::LocalVariableWriteNode
           cells[index].written = true
-          return "#{cell}.write(#{rewrite(node.value, record, cells)})"
+          return "#{cell}.write(#{rewrite(node.value, record, cells, depth)})"
         when Prism::LocalVariableOperatorWriteNode
           cells[index].written = true
-          return "#{cell}.write(#{cell}.read #{node.binary_operator} (#{rewrite(node.value, record, cells)}))"
+          return "#{cell}.write(#{cell}.read #{node.binary_operator} (#{rewrite(node.value, record, cells, depth)}))"
         else
           raise Unsupported, "unsupported captured-local operation #{node.class}"
         end
       end
       # Prism offsets are bytes, including when text contains non-ASCII Ruby.
       text = node.location.slice.b.dup
+      depth += 1 if node.is_a?(Prism::BlockNode) || node.is_a?(Prism::LambdaNode)
       node.compact_child_nodes.sort_by { |child| -child.location.start_offset }.each do |child|
         offset = child.location.start_offset - node.location.start_offset
-        text[offset, child.location.length] = rewrite(child, record, cells).b
+        text[offset, child.location.length] = rewrite(child, record, cells, depth).b
       end
       text.force_encoding(Encoding::UTF_8)
     end
@@ -327,6 +363,7 @@ module BootToCore
         end
       end
       roots.each_key do |owner|
+        next unless owner.is_a?(Class)
         initializer = owner.instance_method(:initialize)
         chain = owner.ancestors.take_while { |ancestor| ancestor != owner.superclass }
         if chain.include?(initializer.owner)
@@ -337,19 +374,26 @@ module BootToCore
         end
       end
       visited = {}
-      until pending.empty?
+      loop do
+        if pending.empty?
+          boundary = @omitted_initializers.find { |entry| !entry.fetch(:instance_variables).empty? }
+          break unless boundary
+          @omitted_initializers.delete(boundary)
+          receiver = roots.keys.find { |owner| owner.name == boundary.fetch(:receiver) }
+          pending << [receiver, receiver.instance_method(:initialize)]
+        end
         receiver, method = pending.shift
         key = [receiver, method.owner, method.name]
         next if visited[key]
         visited[key] = true
-        chain = receiver.ancestors.take_while { |ancestor| ancestor != receiver.superclass }
-        unless chain.include?(method.owner) && (method.owner == receiver || !method.owner.is_a?(Class))
+        chain = receiver.ancestors.take_while { |ancestor| ancestor != Object }
+        unless chain.include?(method.owner)
           raise Unsupported, "#{receiver.name}##{method.name}: inherited runtime outside the declared cut"
         end
         selected[method.owner] ||= []
         selected[method.owner] |= [method.name]
         record = admitted(source_record(method))
-        walk(record.node.body) do |node|
+        walk(record.node) do |node|
           if node.class.name.start_with?("Prism::InstanceVariable") && node.respond_to?(:name)
             state.fetch(receiver) << node.name unless state.fetch(receiver).include?(node.name)
           end
@@ -361,13 +405,10 @@ module BootToCore
             end
             parent = method.super_method
             raise Unsupported, "missing super for #{receiver.name}##{method.name}" unless parent
-            pending << [receiver, parent]
+            # The projected class still inherits Object's native default init.
+            pending << [receiver, parent] unless parent.owner == BasicObject && parent.name == :initialize
           end
         end
-      end
-      @omitted_initializers.each do |boundary|
-        next if boundary.fetch(:instance_variables).empty?
-        raise Unsupported, "#{boundary.fetch(:receiver)}: inherited initializer #{boundary.fetch(:initializer_owner)}#initialize omitted; receiver state dependency #{boundary.fetch(:instance_variables).join(', ')}"
       end
       selected
     rescue NameError => error
@@ -376,11 +417,13 @@ module BootToCore
 
     def export(owners, slices: nil, roots: nil)
       cells = []
+      @immutable_values = {}.compare_by_identity
       inventory = []
       selected = {}
       owners.each do |owner|
-        unless owner.is_a?(Class) && owner.name&.match?(/\A[A-Z][A-Za-z0-9]*\z/) && (roots || owner.superclass == Object)
-          raise Unsupported, "only simple named classes (Object subclasses unless an explicit root cut) are admitted"
+        unless owner.is_a?(Module) && owner.name&.match?(/\A[A-Z]\w*(?:::[A-Z]\w*)*\z/) &&
+            (roots || (owner.is_a?(Class) && owner.superclass == Object))
+          raise Unsupported, "only named classes/modules (Object subclasses unless an explicit root cut) are admitted"
         end
         raise Unsupported, "prepend is not admitted" unless owner.ancestors.first == owner
         unless slices || roots || (owner.singleton_methods(false).empty? && owner.instance_variables.empty? && owner.constants(false).empty?)
@@ -415,10 +458,11 @@ module BootToCore
           unless owner.instance_method(name) == record.definition
             raise Unsupported, "#{labels.fetch(owner)}##{name} changed after its captured definition"
           end
-          args = parameters(record)
+          params = parameters(record)
+          args = params ? rewrite(params, record, cells) : ""
           raise Unsupported, "empty method body" unless record.node.body
           visibility = owner.private_instance_methods(false).include?(name) ? :private : owner.protected_instance_methods(false).include?(name) ? :protected : :public
-          inventory << { owner: labels.fetch(owner), original_owner: owner.name, method: name, origin: record.origin, parameters: args, visibility: visibility }
+          inventory << { owner: labels.fetch(owner), original_owner: owner.name, method: name, origin: record.origin, parameters: owner.instance_method(name).parameters, visibility: visibility }
           has_super = false
           walk(record.node.body) { |node| has_super ||= node.is_a?(Prism::SuperNode) || node.is_a?(Prism::ForwardingSuperNode) }
           if has_super && record.node.is_a?(Prism::DefNode) && record.node.name != name
@@ -429,23 +473,34 @@ module BootToCore
             next nil
           end
           body = rewrite(record.node.body, record, cells)
-          "  def #{name}(#{args.join(', ')})\n    #{body}\n  end"
+          "  def #{name}(#{args})\n    #{body}\n  end"
         end.compact
         includes = owner.ancestors.drop(1).take_while { |ancestor| ancestor != Object }.select { |ancestor| selected.key?(ancestor) }.reverse.map { |ancestor| "  include #{labels.fetch(ancestor)}" }
         visibility = %i[private protected].filter_map do |kind|
           names = selected.fetch(owner) & owner.public_send("#{kind}_instance_methods", false)
           "  #{kind} #{names.map(&:inspect).join(', ')}" unless names.empty?
         end
-        kind = owners.include?(owner) ? "class" : "module"
+        kind = owners.include?(owner) && owner.is_a?(Class) ? "class" : "module"
         "#{kind} #{labels.fetch(owner)}\n#{(includes + methods + aliases + visibility).join("\n")}\nend"
+      end
+      namespaces = {}
+      owners.each do |owner|
+        parts = owner.name.split("::")
+        namespace = Object
+        parts[0...-1].each_with_index do |name, index|
+          namespace = namespace.const_get(name, false)
+          path = parts.take(index + 1).join("::")
+          namespaces[path] ||= "#{namespace.is_a?(Class) ? 'class' : 'module'} #{path}\nend"
+        end
       end
       declarations = cells.each_with_index.map do |cell, index|
         value = cell.binding.local_variable_get(cell.name)
         writer = cell.written ? "\n  def write(value)\n    @value = value\n  end" : ""
-        "class BootCell#{index}\n  def initialize\n    @value = #{value.inspect}\n  end\n  def read\n    @value\n  end#{writer}\nend"
+        "class BootCell#{index}\n  def initialize\n    @value = #{immutable_literal(value)}\n  end\n  def read\n    @value\n  end#{writer}\nend"
       end
-      state = "class BootState\n" + cells.each_index.map { |index| "  CELL#{index} = BootCell#{index}.new\n" }.join + "end"
-      [(["# frozen_string_literal: true"] + declarations + [state] + classes).join("\n\n") + "\n", inventory, cells.length]
+      values = @immutable_values.values.map { |index, literal| "  VALUE#{index} = #{literal}\n" }.join
+      state = "class BootState\n#{values}" + cells.each_index.map { |index| "  CELL#{index} = BootCell#{index}.new\n" }.join + "end"
+      [(["# frozen_string_literal: true"] + declarations + [state] + namespaces.values + classes).join("\n\n") + "\n", inventory, cells.length]
     end
 
     def own_methods(owner)

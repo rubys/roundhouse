@@ -9760,12 +9760,12 @@ end
         .run_ruby(ASSERTIONS).assert_passes();
 }
 
-/// `recv.m(**payload, badge: b)` where nothing types `recv`: the app's
-/// one `m` takes `**rest`, so the `**` the ingest desugar erased is put
-/// back (campfire's `WebPush::Pool#deliver_later`). Passed positionally
-/// it is Ruby 3's `wrong number of arguments (given 1, expected 0)`.
+/// A selector alone cannot prove an untyped receiver's native keyword ABI.
+/// Keep the source packet (so emitted Ruby does not invent a positional Hash),
+/// but retain the unsupported boundary until receiver lookup is verified.
 #[test]
-fn a_keyword_splat_to_an_untyped_receiver_keeps_its_double_splat() {
+fn a_keyword_splat_to_an_untyped_receiver_keeps_its_packet_and_refusal() {
+    let run =
     emit_and_run::real_blog()
         // A MODEL method, as campfire's `Push::Subscription#notification`
         // is: models keep `badge:` a keyword beside `**params`.
@@ -9793,8 +9793,15 @@ article = Article.create!(title: "Splat title", body: "A sufficiently long artic
 comment = Comment.create!(article: article, commenter: "Reader", body: "Comment body")
 got = KwSplatCaller.call([comment], { title: "t" }).map { |n| [n.title, n.badge] }
 raise "keyword splat lost: #{got.inspect}" unless got == [["t", 3]]
-"#)
-        .assert_passes();
+"#);
+    assert!(
+        run.errors
+            .iter()
+            .any(|e| e.contains("keyword destination's native argument ABI cannot be verified")),
+        "an unknown receiver must not borrow a contract by selector: {:?}",
+        run.errors
+    );
+    assert!(run.success, "source packet changed despite refusal: {}", run.stderr);
 }
 
 /// Rails' `association(:name).loaded?` on a belongs_to: false until the

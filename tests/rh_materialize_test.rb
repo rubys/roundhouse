@@ -110,7 +110,7 @@ class RhMaterializeTest < Minitest::Test
       end
       BootToCore.capture do
         OpaqueProduct.define_method(:native, Kernel.instance_method(:puts))
-        OpaqueProduct.module_eval('SIDE = 19; def mixed; 41; end')
+        OpaqueProduct.module_eval('SIDE = 19; def mixed; 41; end; def from_mixed; SIDE; end')
       end
       raise 'boot did not finish' unless OpaqueProduct::SIDE == 19
       BootToCore.input(roots: { OpaqueProduct => [ENV.fetch('CUT').to_sym] })
@@ -123,7 +123,15 @@ class RhMaterializeTest < Minitest::Test
       '-e', 'puts OpaqueProduct.new.good(-4)')
     assert status.success?, err
     assert_equal '-39', out.strip
-    %w[entry mixed].each do |cut|
+    mixed = File.join(@dir, 'mixed')
+    _, err, status = Open3.capture3({ 'CUT' => 'mixed' }, RbConfig.ruby,
+      File.join(ROOT, 'bin/rh'), 'materialize', '--trust-boot', manifest, '-o', mixed)
+    assert status.success?, err
+    out, err, status = Open3.capture3(RbConfig.ruby, '-r', File.join(mixed, 'lib/core.rb'),
+      '-e', 'puts OpaqueProduct.new.mixed')
+    assert status.success?, err
+    assert_equal '41', out.strip
+    %w[entry from_mixed].each do |cut|
       refused = File.join(@dir, cut)
       _, err, status = Open3.capture3({ 'CUT' => cut }, RbConfig.ruby,
         File.join(ROOT, 'bin/rh'), 'materialize', '--trust-boot', manifest, '-o', refused)
@@ -214,7 +222,7 @@ class RhMaterializeTest < Minitest::Test
     end
   end
 
-  def test_omitted_inherited_initializer_refuses_stateful_but_not_stateless_cuts
+  def test_inherited_source_initializer_preserves_stateful_cuts
     manifest = File.join(@dir, 'constructor.rb')
     File.write(manifest, <<~RUBY)
       class StateParent
@@ -231,13 +239,15 @@ class RhMaterializeTest < Minitest::Test
       output = File.join(@dir, cut)
       _, err, status = Open3.capture3({ 'CUT' => cut }, RbConfig.ruby,
         File.join(ROOT, 'bin/rh'), 'materialize', '--trust-boot', manifest, '-o', output)
+      assert status.success?, err
       if cut == 'stateful'
-        refute status.success?
-        assert_includes err, 'inherited initializer StateParent#initialize omitted'
-        assert_includes err, '@bias'
-        refute File.exist?(output)
-      else
+        out, err, status = Open3.capture3(RbConfig.ruby, '-r', File.join(output, 'lib/core.rb'),
+          '-e', 'puts StateChild.new.stateful(-4)')
         assert status.success?, err
+        assert_equal '129', out.strip
+        report = JSON.parse(File.read(File.join(output, 'materialization.json')))
+        assert_empty report.fetch('omitted_initializers')
+      else
         out, err, status = Open3.capture3(RbConfig.ruby, '-r', File.join(output, 'lib/core.rb'),
           '-e', 'puts StateChild.new.pure(-4)')
         assert status.success?, err
@@ -246,6 +256,121 @@ class RhMaterializeTest < Minitest::Test
         assert_equal [{ 'receiver' => 'StateChild', 'initializer_owner' => 'StateParent',
           'instance_variables' => [] }], report.fetch('omitted_initializers')
       end
+    end
+  end
+
+  def test_namespaced_accessors_module_roots_and_original_parameter_forms
+    manifest = File.join(@dir, 'breadth.rb')
+    File.write(manifest, <<~RUBY)
+      # frozen_string_literal: true
+      module Products
+        module Labels
+          def label(value, prefix: 'λ')
+            "\#{prefix}:\#{value}"
+          end
+        end
+        class Parent
+          attr_accessor :value
+          def initialize(value: nil); @value = value; end
+          private
+          def weighted(values, offset)
+            result = offset
+            values.each { |entry| result += entry * 7 }
+            result
+          end
+        end
+        class Child < Parent
+          def total(offset = 13, *values, factor: 3, &block)
+            result = weighted(values, offset) * factor
+            block.call(result)
+          end
+        end
+      end
+      bias = 19
+      BootToCore.capture do
+        Products::Child.define_method(:captured) do |values, offset: bias|
+          result = offset
+          values.each { |entry| result += entry * bias }
+          result
+        end
+      end
+      bias = 11
+      BootToCore.input(roots: { Products::Child => [:value, :value=, :total, :captured],
+        Products::Labels => [:label] })
+    RUBY
+    output = File.join(@dir, 'breadth')
+    _, err, status = invoke('--trust-boot', manifest, '-o', output)
+    assert status.success?, err
+    out, err, status = Open3.capture3(RbConfig.ruby, '-r', File.join(output, 'lib/core.rb'), '-rjson', '-e', <<~RUBY)
+      left = Products::Child.new(value: 'east')
+      right = Products::Child.new
+      returned = left.public_send(:value=, 'west')
+      checks = [returned, left.value, right.value,
+        left.total(-5, 2, -4, factor: 7) { |v| v - 3 },
+        left.total { |v| v + 5 }, left.captured([2, -4]),
+        left.captured([-3, 7], offset: -13),
+        Object.new.extend(Products::Labels).label('east'),
+        Object.new.extend(Products::Labels).label('west', prefix: 'δ'),
+        left.respond_to?(:weighted)]
+      puts JSON.generate(checks)
+    RUBY
+    assert status.success?, err
+    assert_equal ['west', 'west', nil, -136, 44, -11, 31, 'λ:east', 'δ:west', false], JSON.parse(out)
+  end
+
+  def test_generated_symbol_keys_and_deep_frozen_constant_collections
+    manifest = File.join(@dir, 'policy.rb')
+    File.write(manifest, <<~RUBY)
+      # frozen_string_literal: true
+      module Policies
+        class Mask
+          FLAGS = { viewer: 2, owner: 16 }.freeze
+          SHARED = [7, -11].freeze
+          TREE = { left: SHARED, right: SHARED }.freeze
+          SHALLOW = { bad: [] }.freeze
+          DEFAULT = Hash.new(19).freeze
+          CYCLIC = []; CYCLIC << CYCLIC; CYCLIC.freeze
+          def initialize(mask); @mask = mask; end
+          def rules; FLAGS; end
+          def tree; TREE; end
+          def shallow; SHALLOW; end
+          def default; DEFAULT; end
+          def cyclic; CYCLIC; end
+          FLAGS.each_key do |key|
+            BootToCore.capture { define_method(key) { @mask.anybits?(FLAGS[key]) } }
+          end
+        end
+      end
+      BootToCore.input(roots: { Policies::Mask => ENV.fetch('CUT', 'viewer,owner,rules,tree').split(',').map(&:to_sym) })
+    RUBY
+    output = File.join(@dir, 'policy')
+    _, err, status = invoke('--trust-boot', manifest, '-o', output)
+    assert status.success?, err
+    out, err, status = Open3.capture3(RbConfig.ruby, '-r', File.join(output, 'lib/core.rb'), '-rjson', '-e', <<~RUBY)
+      observations = [0, 1, 2, 16, 18].map do |mask|
+        object = Policies::Mask.new(mask)
+        [object.viewer, object.owner]
+      end
+      object = Policies::Mask.new(0)
+      observations += [object.rules.frozen?, object.rules.equal?(object.rules),
+        object.tree.frozen?, object.tree[:left].frozen?, object.tree[:left].equal?(object.tree[:right])]
+      begin
+        object.rules[:viewer] = 7
+      rescue => error
+        observations << error.class.name
+      end
+      puts JSON.generate(observations)
+    RUBY
+    assert status.success?, err
+    assert_equal [[false, false], [false, false], [true, false], [false, true], [true, true],
+      true, true, true, true, true, 'FrozenError'], JSON.parse(out)
+    %w[shallow default cyclic].each do |cut|
+      refused = File.join(@dir, cut)
+      _, err, status = Open3.capture3({ 'CUT' => cut }, RbConfig.ruby,
+        File.join(ROOT, 'bin/rh'), 'materialize', '--trust-boot', manifest, '-o', refused)
+      refute status.success?, cut
+      assert_includes err, 'BootToCore::Unsupported'
+      refute File.exist?(refused)
     end
   end
 

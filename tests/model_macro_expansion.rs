@@ -639,7 +639,7 @@ items[3].move_to_position(0)
 raise "move to first" unless siblings.call(article).active.positioned.ids == [items[3].id, items[0].id, items[1].id, items[2].id]
 items[3].move_to_position(99)
 raise "move beyond end" unless siblings.call(article).active.positioned.ids == [items[0].id, items[1].id, items[2].id, items[3].id]
-items[0].move_to_position(1, [items[1], items[2]])
+items[0].move_to_position(1, followed_by: [items[1], items[2]])
 raise "contiguous block move" unless siblings.call(article).active.positioned.ids == [items[3].id, items[0].id, items[1].id, items[2].id]
 raise "neighbors" unless items[1].previous.id == items[0].id && items[1].next.id == items[2].id
 items[0].update!(position_score: 1e-11)

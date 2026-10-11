@@ -34,7 +34,7 @@ begin
   raise ArgumentError, "manifest must call BootToCore.input(roots:, signatures:)" unless spec
   roots = spec.fetch(:roots)
   unless roots.is_a?(Hash) && !roots.empty? && roots.values.all? { |names| names.is_a?(Array) && !names.empty? }
-    raise ArgumentError, "roots must be a nonempty { Class => [public_method_names] }"
+    raise ArgumentError, "roots must be a nonempty { Class/Module => [public_method_names] }"
   end
   core, inventory, cells = BootToCore.export(roots.keys, roots: roots)
   signatures = spec.fetch(:signatures).map do |path|
@@ -53,6 +53,7 @@ begin
     opaque_definitions: BootToCore.records.values.count { |record| record.reason },
     observer_failures: NativeDefineMethodObserver.failures.map { |_, name, error| { method: name, kind: error.class.name } },
     scalar_constants: BootToCore.events.select { |event| event[:kind] == "scalar_constant" },
+    immutable_constants: BootToCore.events.select { |event| event[:kind] == "immutable_constant" },
     signatures: signatures.map { |path, text| { path: path, sha256: Digest::SHA256.hexdigest(text) } }
   }
   # Exclusive creation also catches a competing writer after the pre-boot check.

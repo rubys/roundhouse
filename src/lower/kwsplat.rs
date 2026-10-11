@@ -110,10 +110,10 @@ use std::collections::HashMap;
 
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
+use crate::dialect::Param;
 use crate::dialect::{ControllerBodyItem, MethodReceiver, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
-use crate::dialect::Param;
 use crate::ty::Ty;
 
 /// Declared parameter lists, keyed by `(class, method)`.
@@ -424,6 +424,11 @@ fn restore_kwrest_on_typed_send(expr: &mut Expr, sigs: &Signatures) {
 /// `def attachments_for(**details)`. Restore the splat; the ruby
 /// emitter already prints `**h` for `KeywordSplat`.
 fn restore_kwrest_splat(args: &mut Vec<Expr>, params: &[Param]) {
+    // Native declarations already retain source packets. A bare Hash is a
+    // positional argument, including when Ruby would reject its arity.
+    if params.iter().any(|p| p.keyword && !p.from_keyword && !p.from_kwrest) {
+        return;
+    }
     if args
         .iter()
         .any(|a| matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. } | ExprNode::KeywordSplat { .. }))
@@ -596,6 +601,11 @@ fn erased_splat(expr: &Expr, sigs: &Signatures) -> Option<ErasedSplat> {
 
 /// The same question with the callee's parameter list already in hand.
 fn erased_splat_against(args: &[Expr], params: &[Param]) -> Option<ErasedSplat> {
+    // Excess arity is not evidence of an erased packet for native keywords:
+    // preserve the caller's positional Hash and Ruby's ArgumentError.
+    if params.iter().any(|p| p.keyword && !p.from_keyword && !p.from_kwrest) {
+        return None;
+    }
     let last = args.last()?;
     // Full packets are explicit source facts, not erased hash expressions
     // from which this pass can recover an anonymous keyword splat.

@@ -1,0 +1,18 @@
+class Search
+  def initialize: () -> void
+  def q: () -> String
+  def q=: (String) -> String
+  def order: () -> String
+  def order=: (String) -> String
+  def page: () -> Integer
+  def page=: (Integer) -> Integer
+  def per_page: () -> Integer
+  def per_page=: (Integer) -> Integer
+  def total_results: () -> Integer
+  def total_results=: (Integer) -> Integer
+  def what: () -> String
+  def what=: (String) -> String
+  def page_count: () -> Integer
+  def max_matches: () -> Integer
+  def persisted?: () -> bool
+end

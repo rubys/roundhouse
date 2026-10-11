@@ -13,6 +13,12 @@ def writebook_roots(lane)
   case lane
   when "attributes" then { Section => %i[body body= markable searchable_content] }
   when "current" then { Current => %i[user user=] }
+  when "current_lifecycle" then { Current => %i[user user= session attributes reset] }
+  when "current_registry"
+    # Actual class-method roots, not a renamed/copied class or synthetic bridge.
+    # Round three rejects this shape; generic singleton support is parent-owned.
+    { Current => %i[user user= session attributes reset set],
+      Current.singleton_class => %i[user user= session instance defaults reset set clear_all] }
   when "enum" then { Access => %i[level level= reader? editor?] }
   when "delegate" then { Section => [:title] }
   when "markdown" then { Page => %i[body body= markable] }
@@ -20,6 +26,8 @@ def writebook_roots(lane)
   when "slug" then { Leaf => [:slug] }
   when "qr" then { QrCodeLink => [:url] }
   when "embed" then { EmbedProvider => [:allows?] }
+  when "embed_accessors" then { EmbedProvider => %i[name hosts path_prefix attributes csp_sources] }
+  when "arrangement" then { ArrangementHelper => [:arrangement_actions] }
   when "lightbox" then { HtmlScrubber => [:scrub] }
   else raise "unknown lane #{lane}"
   end

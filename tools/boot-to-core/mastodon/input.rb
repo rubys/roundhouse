@@ -15,7 +15,8 @@ at_exit do
     opaque_events: BootToCore.events.select { |event| event[:kind].start_with?("opaque") },
     observer_failures: failures.map { |owner, name, error| { owner: owner.name, method: name,
       kind: error.class.name, message: error.message, stack: error.backtrace&.first(8) } },
-    scalar_constants: BootToCore.events.select { |event| event[:kind] == "scalar_constant" })
+    scalar_constants: BootToCore.events.select { |event| event[:kind] == "scalar_constant" },
+    immutable_constants: BootToCore.events.select { |event| event[:kind] == "immutable_constant" })
 end
 
 # Observe the failing exporter input without changing admission or retrying it.
@@ -42,7 +43,15 @@ targets = {
   "attribute" => ["User", "app/models/user.rb"],
   "delegate" => ["StatusEdit", "app/models/status_edit.rb"],
   "settings" => ["UserSettings", "app/models/user_settings.rb"],
-  "namespaced_attribute" => ["Fasp::Capability", "app/models/fasp/capability.rb"]
+  "namespaced_attribute" => ["Fasp::Capability", "app/models/fasp/capability.rb"],
+  "fasp_contract" => ["Fasp::Capability", "app/models/fasp/capability.rb"],
+  "safe_delegate" => ["WebPushRequest", "app/lib/web_push_request.rb"],
+  "prefixed_delegate" => ["AccountSuggestions::Suggestion", "app/models/account_suggestions/suggestion.rb"],
+  "namespace_attributes" => ["TranslationService::Translation", "app/lib/translation_service/translation.rb"],
+  "media_delegate" => ["StatusEdit::PreservedMediaAttachment", "app/models/status_edit.rb"],
+  "policy_generated" => ["InteractionPolicy::SubPolicy", "app/lib/interaction_policy.rb"],
+  "policy_plain" => ["InteractionPolicy::SubPolicy", "app/lib/interaction_policy.rb"],
+  "keyword_message" => ["Admin::SystemCheck::Message", "app/lib/admin/system_check/message.rb"]
 }
 
 if lane == "full_capture"
@@ -100,6 +109,23 @@ when "namespaced_attribute"
   { Fasp::Capability => [:enabled, :enabled=] }
 when "namespaced_root_only"
   { Fasp::Capability => [:enabled, :enabled=] }
+when "fasp_contract"
+  BootToCore.capture { Fasp::Capability.define_attribute_methods }
+  { Fasp::Capability => %i[id id= version version= enabled enabled=] }
+when "safe_delegate"
+  { WebPushRequest => %i[standard endpoint key_auth key_p256dh web_push_subscription legacy] }
+when "prefixed_delegate"
+  { AccountSuggestions::Suggestion => %i[account account= account_id sources sources=] }
+when "namespace_attributes"
+  { TranslationService::Translation => %i[text text= provider provider= detected_source_language detected_source_language=] }
+when "media_delegate"
+  { StatusEdit::PreservedMediaAttachment => %i[id local? media_attachment media_attachment= description description=] }
+when "policy_generated"
+  { InteractionPolicy::SubPolicy => %i[public? followers? following? disabled? missing?] }
+when "policy_plain"
+  { InteractionPolicy::SubPolicy => %i[missing?] }
+when "keyword_message"
+  { Admin::SystemCheck::Message => %i[key value action critical] }
 else
   raise "unknown lane #{lane}"
 end
@@ -112,4 +138,7 @@ warn "MASTODON_ROOTS=" + JSON.generate(roots.flat_map do |owner, names|
   end
 end)
 signatures = { "ordinary" => ["ordinary.rbs"], "accessor" => ["accessor.rbs"], "constant" => ["constant.rbs"] }
+%w[fasp_contract safe_delegate prefixed_delegate namespace_attributes media_delegate policy_generated policy_plain keyword_message].each do |name|
+  signatures[name] = ["generated.rbs"]
+end
 BootToCore.input(roots: roots, signatures: signatures.fetch(lane, []))

@@ -1777,7 +1777,16 @@ end
     let mut concern_class_method_spans = Vec::new();
     let mut framework_shadow_scopes = std::collections::HashSet::new();
     for source in sources.iter().filter(|source| source.path.ends_with(".rb")) {
-        let (carriers, shadows) = ingest_concern_class_method_spans(source.text.as_bytes(), &source.path);
+        let (carriers, shadows) =
+            ingest_concern_class_method_spans(source.text.as_bytes(), &source.path);
+        for carrier in &carriers {
+            if !carrier.templates.is_empty() {
+                app.concern_class_method_templates
+                    .entry(carrier.owner.clone())
+                    .or_default()
+                    .extend(carrier.templates.iter().copied());
+            }
+        }
         concern_class_method_spans.extend(carriers);
         framework_shadow_scopes.extend(shadows);
     }

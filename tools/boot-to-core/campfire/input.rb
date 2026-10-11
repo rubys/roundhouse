@@ -28,9 +28,25 @@ begin
       end
     end
   else
+    if lane == "delegate_filter"
+      # The gem's Content class includes an engine app/helper that normal Rails
+      # initialization loads. Preload that real dependency, not a substitute,
+      # before the bounded first load of Campfire's extension.
+      phase = "action_text_dependencies_outside_capture"
+      require File.join(Gem.loaded_specs.fetch("actiontext").full_gem_path,
+        "app/helpers/action_text/content_helper")
+      ActionText::Content
+      phase = "real_filter_extension_load_inside_capture"
+      BootToCore.capture { require File.join(app, "lib/rails_ext/filter") }
+    end
     phase = "initialize_outside_capture"
     Rails.application.initialize!
-    if %w[user_load enum_capture].include?(lane)
+    if %w[delegate_current delegate_presentation].include?(lane)
+      phase = "real_delegate_class_load_inside_capture"
+      BootToCore.capture do
+        lane == "delegate_current" ? Current : Messages::AttachmentPresentation
+      end
+    elsif %w[user_load enum_capture].include?(lane)
       phase = "user_model_load_inside_capture"
       BootToCore.capture do
         User
@@ -81,8 +97,16 @@ when "mention"
   { User => [:attachable_content_type] }
 when "initials"
   { User => [:initials] }
-when "platform"
+when "platform", "platform_inherited"
   { ApplicationPlatform => [:ios?, :android?, :mobile?, :desktop?] }
+when "namespace_accessor"
+  { Opengraph::Location => [:url, :url=, :parsed_url=] }
+when "delegate_current"
+  { Current => [:request, :request=, :request_host, :request_protocol] }
+when "delegate_filter"
+  { ActionText::Content::Filter => [:fragment] }
+when "delegate_presentation"
+  { Messages::AttachmentPresentation => [:link_to] }
 when "sound"
   { Sound => [:name, :asset_path, :image, :text] }
 when "attribute", "attribute_ready", "user_load"
@@ -102,4 +126,12 @@ warn "ROOT_DEFINITIONS #{JSON.generate(roots.flat_map { |owner, names| names.map
     { root: "#{owner.name}##{name}", missing: error.message }
   end
 } })}"
+if lane.start_with?("delegate_")
+  captured = BootToCore.records.values.select do |record|
+    record.node && roots.any? { |owner, names| owner.ancestors.include?(record.owner) && names.include?(record.name) }
+  end
+  warn "CAPTURED_ROOT_BODIES #{JSON.generate(captured.map { |record|
+    { owner: record.owner.name, method: record.name, origin: record.origin, body: record.node.location.slice }
+  })}"
+end
 BootToCore.input(roots: roots)

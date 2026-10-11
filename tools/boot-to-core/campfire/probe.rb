@@ -29,7 +29,7 @@ report = {
   roundhouse_commit: "83b6b1458adde2b2db728507fcabc0c2c0557612",
   campfire_commit: "66883b6fb1eda402245247592e0af5f54105c5eb",
   compiler_sha256: Digest::SHA256.file(compiler).hexdigest,
-  snapshot_sha256: "f213a414bbef19582710e82f7052d9298de478cb8b9cdbff9b3b1101cf2d3127",
+  snapshot_sha256: "cdf501542d7b6a386cabedc059975d672187bd4b2bca234c9f0b5b4e1ec35f28",
   observer_sha256: Digest::SHA256.file(File.join(observer, "native_define_method_observer.so")).hexdigest,
   ruby: RUBY_DESCRIPTION, commands: [], lanes: {},
   environment: env, source_sha256: {}, failure_source_sha256: {}
@@ -64,7 +64,9 @@ begin
   end
   required.call("bundle_check", {}, "bundle", "check")
   required.call("native_contract", {}, RbConfig.ruby, File.join(root, "tools/native-observer/contract.rb"))
-  required.call("native_contract_yjit", {}, RbConfig.ruby, "--yjit", File.join(root, "tools/native-observer/contract.rb"))
+  # The contract spawns Ruby children; a parent-only --yjit flag is not inherited.
+  required.call("native_contract_yjit", { "RUBYOPT" => "--yjit" }, RbConfig.ruby,
+    File.join(root, "tools/native-observer/contract.rb"))
   required.call("cli_contract", { "BUNDLE_PATH" => nil, "BUNDLE_WITHOUT" => nil },
     RbConfig.ruby, File.join(root, "tests/rh_materialize_test.rb"))
   report[:dsl_inventory] = JSON.parse(required.call("inventory", {}, "bundle", "exec", RbConfig.ruby,
@@ -75,9 +77,15 @@ begin
     output = required.call("#{lane}_original", {}, "bundle", "exec", RbConfig.ruby, File.join(__dir__, "contract.rb"), "original", lane)
     [lane, JSON.parse(output.lines.last)]
   end
+  candidates = %w[namespace_accessor platform_inherited delegate_current delegate_filter delegate_presentation]
+  candidates.each do |lane|
+    output = required.call("#{lane}_original", {}, "bundle", "exec", RbConfig.ruby,
+      File.join(__dir__, "next_contract.rb"), "original", lane)
+    originals[lane] = JSON.parse(output.lines.last)
+  end
   report[:original_contracts] = originals
-  # Final bounded control only; full round-one/two lanes remain in their evidence.
-  %w[leaf mention attribute_ready enum_capture].each do |lane|
+  # Full round-one/two captures remain separate; these are public bounded cuts.
+  (%w[leaf mention attribute_ready enum_capture] + candidates).each do |lane|
     core_app = File.join(out, "#{lane}-core")
     stdout, stderr, ok = run.call("#{lane}_materialize", { "CAMPFIRE_CORE_LANE" => lane }, "bundle", "exec", RbConfig.ruby,
       File.join(root, "bin/rh"), "materialize", "--trust-boot", File.join(__dir__, "input.rb"), "-o", core_app)
@@ -87,23 +95,33 @@ begin
       provenance: provenance && JSON.parse(provenance.delete_prefix("PROVENANCE ")),
       stage: stderr.include?("ROOT_EXPORT") ? "root_export" : "boot_or_generation_capture" }
     next unless ok
+    report[:lanes][lane][:inventory] = JSON.parse(File.read(File.join(core_app, "materialization.json")))
     checked_stdout, checked_stderr, checked = run.call("#{lane}_strict", {}, compiler, "check", "--strict", core_app)
     report[:lanes][lane].merge!(strict: checked, diagnostics_stdout: checked_stdout, diagnostics_stderr: checked_stderr)
-    next unless originals.key?(lane) && checked
-    core = JSON.parse(required.call("#{lane}_core", {}, RbConfig.ruby, File.join(__dir__, "contract.rb"), File.join(core_app, "lib/core.rb"), lane).lines.last)
-    raise "#{lane} Core differs from original" unless core == originals.fetch(lane)
+    next unless originals.key?(lane)
+    contract = File.join(__dir__, candidates.include?(lane) ? "next_contract.rb" : "contract.rb")
+    expected = originals.fetch(lane).reject { |key, _| key == "methods" }
+    core_stdout, core_stderr, core_ok = run.call("#{lane}_core", {}, RbConfig.ruby, contract, File.join(core_app, "lib/core.rb"), lane)
+    core = core_ok && JSON.parse(core_stdout.lines.last)
+    report[:lanes][lane].merge!(original: originals.fetch(lane), core: core,
+      core_matches_original: core_ok && core == expected, core_failure: core_ok ? nil : core_stderr)
     emitted_app = File.join(out, "#{lane}-emitted")
-    required.call("#{lane}_emit", {}, compiler, "--target", "ruby", core_app, "-o", emitted_app)
+    _, emit_stderr, emit_ok = run.call("#{lane}_emit", {}, compiler, "--target", "ruby", core_app, "-o", emitted_app)
+    report[:lanes][lane].merge!(emitted_project: emit_ok, emit_failure: emit_ok ? nil : emit_stderr)
+    next unless emit_ok
     loader = File.join(out, "#{lane}-emitted-loader.rb")
-    files = Dir[File.join(emitted_app, "app/models/*.rb")]
+    files = Dir[File.join(emitted_app, "app/models/**/*.rb")].sort
     raise "no emitted models" if files.empty?
     File.write(loader, files.map { |path| "require #{path.inspect}" }.join("\n") + "\n")
-    emitted = JSON.parse(required.call("#{lane}_emitted", {}, RbConfig.ruby, File.join(__dir__, "contract.rb"), loader, lane).lines.last)
-    raise "#{lane} emitted differs from original" unless emitted == originals.fetch(lane)
-    report[:lanes][lane].merge!(original: originals.fetch(lane), core: core, emitted: emitted,
-      inventory: JSON.parse(File.read(File.join(core_app, "materialization.json"))))
+    emitted_stdout, emitted_stderr, emitted_ok = run.call("#{lane}_emitted", {}, RbConfig.ruby, contract, loader, lane)
+    emitted = emitted_ok && JSON.parse(emitted_stdout.lines.last)
+    report[:lanes][lane].merge!(emitted: emitted, emitted_matches_original: emitted_ok && emitted == expected,
+      emitted_failure: emitted_ok ? nil : emitted_stderr,
+      verified: checked && core_ok && core == expected && emitted_ok && emitted == expected)
   end
-  raise "leaf comparison did not execute" unless report[:lanes].dig("leaf", :emitted)
+  unverified = report[:lanes].select { |_, lane| lane[:materialized] && !lane[:verified] }.keys
+  raise "materialized cuts lack strict three-way verification: #{unverified.join(', ')}" unless unverified.empty?
+  raise "leaf comparison regressed" unless report[:lanes].dig("leaf", :verified)
   raise "observer failures require investigation" if report[:lanes].values.any? { |lane| !lane.dig(:provenance, "observer_failures").to_a.empty? }
   { round1: "results", round2: "round2-final" }.each do |round, directory|
     baseline = File.join(File.dirname(out), directory, "results.json")
@@ -114,12 +132,16 @@ begin
     raise "app differs from #{round}" unless old_sources == report[:source_sha256].select { |path, _| path.start_with?("app/") }
     report[:"#{round}_comparison"] = initial.fetch("lanes").select { |lane, _| report[:lanes].key?(lane) }.to_h do |lane, old|
       [lane, { previous_stage: old.fetch("stage"), previous_refusals: old.fetch("stderr").lines.grep(/^rh materialize:/).map(&:strip),
-        round3_stage: report[:lanes].fetch(lane)[:stage], round3_refusals: report[:lanes].fetch(lane)[:refusal] }]
+        round4_stage: report[:lanes].fetch(lane)[:stage], round4_refusals: report[:lanes].fetch(lane)[:refusal] }]
     end
   end
-  report[:status] = "round3_bounded_contracts_verified"
+  report[:verified_candidates] = candidates.select { |lane| report[:lanes].dig(lane, :verified) }
+  report[:status] = "round4_cases_recorded"
   puts "PASS reference: #{reference.fetch('checks')} assertions, /up=200; leaf original/Core/emitted: 3 assertions each"
-  report[:lanes].each { |lane, result| puts "#{lane}: #{result[:materialized] ? 'materialized' : 'blocked'} (#{result[:stage]})" }
+  report[:lanes].each do |lane, result|
+    outcome = result[:verified] ? "original/Core/emitted verified" : result[:materialized] ? "materialized; not fully verified" : "blocked"
+    puts "#{lane}: #{outcome} (#{result[:stage]})"
+  end
 rescue StandardError => error
   report[:status] = "failed"
   report[:failure] = { class: error.class.name, message: error.message }
@@ -127,4 +149,4 @@ rescue StandardError => error
 ensure
   File.write(File.join(out, "results.json"), JSON.pretty_generate(report) + "\n")
 end
-exit(report[:status] == "round3_bounded_contracts_verified" ? 0 : 1)
+exit(report[:status] == "round4_cases_recorded" ? 0 : 1)

@@ -169,18 +169,33 @@ fn native_keyword_value_is_rewritten_inside_emitted_controller() {
 
 #[test]
 fn inherited_constructor_and_reopened_descendant_mixin_refuse_unsafe_contracts() {
-    for (source, reopen, script) in [
-        (
-            "class Parent; def self.build(...); new(...); end; def initialize(factor:); @factor=factor; end; def factor; @factor; end; end; class Child < Parent; def initialize(factor:2); @factor=factor; end; end",
-            "",
-            "puts Child.build(factor:3).factor",
-        ),
-        (
-            "module Mix; def target(factor:); factor; end; end; class Parent; def call(...); target(...); end; def target(factor:); factor*2; end; end; class Child < Parent; include Mix; end",
-            "module Mix; def target(factor:2); factor; end; end",
-            "puts Child.new.call(factor:3)",
-        ),
-    ] {
+    // Native keyword declarations now execute the inherited constructor.
+    // A reopened class fragment still cannot prove the forwarding contract.
+    let executing = [(
+        "class Parent; def self.build(...); new(...); end; def initialize(factor:); @factor=factor; end; def factor; @factor; end; end; class Child < Parent; def initialize(factor:2); @factor=factor; end; end",
+        "",
+        "puts Child.build(factor:3).factor",
+    )];
+    let refused = [(
+        "module Mix; def target(factor:); factor; end; end; class Parent; def call(...); target(...); end; def target(factor:); factor*2; end; end; class Child < Parent; include Mix; end",
+        "class Parent; def target(factor:2); factor; end; end",
+        "puts Child.new.call(factor:3)",
+    )];
+    for (source, reopen, script) in executing {
+        let native = Command::new("ruby")
+            .args(["-e", &format!("{source};{reopen};{script}")])
+            .output()
+            .unwrap();
+        assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+        assert_eq!(String::from_utf8_lossy(&native.stdout), "3\n");
+        let run = emit_and_run::real_blog()
+            .write("app/lib/probe.rb", source)
+            .write("app/lib/probe_reopen.rb", reopen)
+            .run_ruby(script);
+        run.assert_passes();
+        assert_eq!(run.stdout, "3\n");
+    }
+    for (source, reopen, script) in refused {
         let native = Command::new("ruby")
             .args(["-e", &format!("{source};{reopen};{script}")])
             .output()
@@ -196,7 +211,7 @@ fn inherited_constructor_and_reopened_descendant_mixin_refuse_unsafe_contracts()
             .write("app/lib/probe_reopen.rb", reopen)
             .run_ruby(script);
         assert!(
-            run.errors.iter().any(|e| e.contains("forwarding")),
+            run.errors.iter().any(|e| e.contains("forwarding") && e.contains("reopened")),
             "errors={:?}; actual={}; stderr={}",
             run.errors,
             run.stdout,
@@ -773,7 +788,8 @@ fn packet_constructor_checks_the_inherited_initializer_not_only_new() {
     // A selector-only survey would miss `initialize` behind `new(...)` and
     // admit the generated model constructor instead of the source contract.
     assert!(
-        run.errors.iter().any(|e| e.contains("model method synthesis")),
+        run.errors.iter().any(|e| e.contains("full argument forwarding")
+            && e.contains("declaration cannot be verified")),
         "{:?}; actual={}; stderr={}",
         run.errors,
         run.stdout,
@@ -824,7 +840,7 @@ fn inherited_ordinary_collisions_do_not_add_errors_without_packet_forwarding() {
 
 #[test]
 fn check_surveys_effective_model_declarations_without_lowering_or_diagnostic_leaks() {
-    use roundhouse::analyze::{diagnose, Analyzer};
+    use roundhouse::analyze::{Analyzer, diagnose};
     use roundhouse::diagnostic::{Diagnostic, Severity};
     use roundhouse::emit::diagnostics::{push, scope};
     use roundhouse::ingest::ingest_app_from_tree;

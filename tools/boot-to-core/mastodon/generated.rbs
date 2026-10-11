@@ -1,0 +1,90 @@
+# Bounded input interfaces. Account, MediaAttachment and Web::PushSubscription
+# are supplied ORIGINAL unsaved receiver objects, not materialized AR stores.
+class Account
+  def id: () -> Integer?
+end
+class MediaAttachment
+  def id: () -> Integer?
+  def local?: () -> bool
+end
+module Web
+  class PushSubscription
+    def standard: () -> bool?
+    def endpoint: () -> String?
+    def key_auth: () -> String?
+    def key_p256dh: () -> String?
+  end
+end
+class WebPushRequest
+  def initialize: (Web::PushSubscription?) -> void
+  def web_push_subscription: () -> Web::PushSubscription?
+  def standard: () -> bool?
+  def endpoint: () -> String?
+  def key_auth: () -> String?
+  def key_p256dh: () -> String?
+  def legacy: () -> bool
+end
+module Fasp
+  class Capability
+    def initialize: (?Hash[Symbol, untyped]?) -> void
+    def id: () -> String?
+    def id=: (String?) -> String?
+    def version: () -> String?
+    def version=: (String?) -> String?
+    def enabled: () -> bool?
+    def enabled=: (untyped) -> untyped
+  end
+end
+class AccountSuggestions
+  class Suggestion
+    def initialize: (?Hash[Symbol, untyped]?) -> void
+    def account: () -> Account?
+    def account=: (Account?) -> Account?
+    def account_id: () -> Integer?
+    def sources: () -> (Array[String] | bool)?
+    def sources=: ((Array[String] | bool)?) -> (Array[String] | bool)?
+  end
+end
+class TranslationService
+  class Translation
+    def initialize: (?Hash[Symbol, untyped]?) -> void
+    def text: () -> String?
+    def text=: (String?) -> String?
+    def provider: () -> (String | bool)?
+    def provider=: ((String | bool)?) -> (String | bool)?
+    def detected_source_language: () -> String?
+    def detected_source_language=: (String?) -> String?
+  end
+end
+class StatusEdit
+  class PreservedMediaAttachment
+    def initialize: (?Hash[Symbol, untyped]?) -> void
+    def media_attachment: () -> MediaAttachment?
+    def media_attachment=: (MediaAttachment?) -> MediaAttachment?
+    def id: () -> Integer?
+    def local?: () -> bool
+    def description: () -> (String | bool)?
+    def description=: ((String | bool)?) -> (String | bool)?
+  end
+end
+class InteractionPolicy
+  class SubPolicy
+    def initialize: (Integer) -> void
+    def public?: () -> bool
+    def followers?: () -> bool
+    def following?: () -> bool
+    def disabled?: () -> bool
+    def missing?: () -> bool
+  end
+end
+module Admin
+  class SystemCheck
+    class Message
+      def initialize: (Symbol, ?String?, ?String?, ?critical: bool) -> void
+      def key: () -> Symbol
+      def value: () -> String?
+      def action: () -> String?
+      def critical: () -> bool
+    end
+  end
+end

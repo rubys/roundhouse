@@ -2,7 +2,9 @@
 
 `bin/rh materialize` is a **host-only, opt-in research input**. Execute a trusted
 Ruby manifest, materialize a declared instance-method cut into ordinary Ruby,
-then use Roundhouse's existing ingest, analysis, lowering and emission unchanged.
+then use Roundhouse's existing ingest, analysis, lowering and emission pipeline.
+Round four also corrects a shared source-keyword ABI bug in that pipeline:
+ordinary Ruby keyword declarations and verified call packets stay native keywords.
 No new IR variant, alternate type checker, per-gem DSL recognizer or target
 runtime is introduced. JSON is provenance/test reporting, not an IR input.
 
@@ -47,7 +49,9 @@ ingest_app -> LibraryClass/Expr -> existing analyzer -> existing lowering -> emi
 
 `src/ingest/app.rs` already reads ordinary classes/modules under `lib/` through
 `ingest_library_classes`; `src/session.rs::analyze_and_lower` already provides
-the emit-side analysis/lowering sequence. This experiment changes neither.
+the emit-side analysis/lowering sequence. The exporter uses both existing
+stages; the shared source-keyword correction changes their argument handling,
+not this pipeline seam.
 Ruby Core is a source-level common representation, **not** the final flattened
 typed IR: the existing compiler still has to infer types and lower it.
 
@@ -143,7 +147,9 @@ admitted methods and scalar constant reads; these are not support counts.
 
 Selection starts with effective definitions and follows every direct self-call
 in every syntactic branch, including private helpers. Own/included initializers
-are retained. Reachable `super` definitions retain separate module owners and
+are retained. Stateful cuts additionally follow the actual inherited Ruby
+initializer and its reachable helpers; native or opaque dependencies still refuse
+the entire export. Reachable `super` definitions retain separate module owners and
 lookup order; shadowed bodies without a reachable `super` are not imported.
 This is a syntactic bounded closure, **not** dead-code pruning from observed
 test traces. Receiver-dependent calls on other objects are not followed by it.
@@ -151,16 +157,19 @@ test traces. Receiver-dependent calls on other objects are not followed by it.
 Closure locals become explicit shared instance cells. Shared lexical slots stay
 shared across methods and instances; different factories stay separate; later
 rebinding is preserved. Boot values are not substituted into every body.
+Symbol cells and deeply frozen Array/Hash graphs are admitted, preserving shared
+collection nodes and freezing. Mutable descendants, cycles and special Hash
+default/identity semantics refuse export. Namespace shells preserve class/module
+kind; named module roots are invoked with an extended object. Parameter syntax
+and defaults remain source-backed, including nested block-local scope depth.
 
 Root cuts intentionally omit class-side generator registries and unrelated
 framework methods. They do **not** preserve the original class's complete ABI,
 inheritance, object identity, constructor protocol or reflection surface.
-Inherited superclass initializers/runtime methods are not imported. A non-default
-omitted initializer plus any instance-variable access in the reachable cut now
-refuses export rather than producing uninitialized receiver state. Stateless
+An inherited initializer is followed when a reachable cut reads/writes instance
+variables; it is never replaced with hand-written receiver storage. Stateless
 leaves remain admissible, with the omitted initializer in provenance; this is
-not preservation of its side effects. The conservative guard may reject an API
-that could establish its own state. Default Object-based explicit setup such as
+not preservation of its side effects. Default Object-based explicit setup such as
 `prime` in the fixture remains available. State accessed through other objects
 or class registries is not proven complete by this syntactic guard.
 
@@ -208,8 +217,9 @@ accidental overwrite (including dangling symlinks); it cannot undo boot effects.
 
 Binding slot aliases are identified by a temporary sentinel write followed by
 restoration in `ensure`. This is not safe concurrent application instrumentation.
-Only nil/booleans/integers/frozen strings are snapshotted, not arbitrary mutable
-heaps. Source/eval lexical scope, mutable-string and identity semantics are not
+Only nil/booleans/integers/Symbols/frozen strings and admitted deeply frozen
+Array/Hash graphs are snapshotted, not arbitrary mutable heaps.
+Source/eval lexical scope, mutable-string and identity semantics are not
 generally solved; **this is not a sound admission checker for arbitrary Ruby**.
 It is not deterministic/reproducible full Rails boot or a Bundler dependency
 closure exporter.
@@ -235,7 +245,7 @@ receiver construction and aliased `super`. Reentrant aliases and same-site
 different-capture Procs are exercised through exported execution. Aliased super is an existing
 Ruby-emitter boundary: cloning the alias changes nameless-super lookup, so the
 new rooted lane refuses it rather than silently claiming support. Prepend,
-complex parameters, general constant/global/class-variable scopes, late dynamic
+implicit/block-local parameter declarations, general constant/global/class-variable scopes, late dynamic
 generation and general reflected dispatch are outside the bounded cut.
 
 The same real Rails generator with **default `...` forwarding** is separately
@@ -245,7 +255,14 @@ positive case does not rewrite this negative input or suppress its diagnostic.
 
 No full callback scheduler, error collection, ActiveRecord AttributeSet,
 association/DB state, native extension translation, heap snapshot, runtime
-method-missing, forwarding fix or parameter-signature fix is claimed.
+method-missing or general forwarding support is claimed. The ordinary keyword
+correction preserves Ruby's defaults, false/nil, evaluation order and
+unknown-key ArgumentError. A bare positional Hash is not promoted to keywords.
+Unverified destinations and non-Ruby native-keyword ABIs remain error boundaries.
+This is deliberately stricter than the earlier selector-only keyword-rest
+repair: an untyped receiver can no longer borrow another class's keyword ABI
+just because their method names match. Its source packet remains intact, but
+the cut is not strict-clean until receiver lookup is proved.
 
 ## Real-blog: whole-app attempt versus incremental integration
 
@@ -289,9 +306,10 @@ whole-Rails success gate.
 ## Recommended next cut
 
 Keep this an optional source materializer. The next experiment should import
-the real constructor and its reachable state-producing helpers for the failed
-Writebook Current cut, preserving separate instances, defaults and nil reset.
-Do not inject a hand-written `@attributes = {}` to get its contract green.
+the real class-attribute/default machinery reached by Writebook Current's
+inherited constructor, preserving separate instances, defaults and nil reset.
+That constructor is now followed, but its opaque defaults generator still
+refuses. Do not inject a hand-written `@attributes = {}` to get its contract green.
 Then try ordinary Ruby specialization of statically proven dispatch/class
 bindings, with overrides, visibility and once-only evaluation preserved, before
 attempting the real AR attribute representation. Those are shared Ruby/runtime
@@ -303,7 +321,7 @@ Core/emitted contract, compare against the existing synthesizer and remove only
 the responsibility proved redundant. A provenance-checked Core cache for
 non-booting editor/check consumers is a separate prerequisite for deletion.
 
-## Three real applications: controlled rounds, not full-app coverage
+## Earlier three-app rounds (one to three), not full-app coverage
 
 Three independently owned orbs used the same compiler control (canonical
 83b6b145), three exact materializer snapshots and unchanged application sources/
@@ -346,3 +364,92 @@ pass on each app's Ruby, including cancellation/unwind controls. The latest CLI
 is 9 tests/99 assertions locally, in Campfire and Mastodon; Writebook runs
 9/93 with one explicit missing ActiveModel 8.1.4 fixture skip under its unchanged
 8.2 Git bundle. No full Rails/gem, native-target or cross-target claim follows.
+
+## Round four: four real apps, original/Core/actual emitted execution
+
+Four independently owned orbs tested the exact same 22-file materializer snapshot
+(`cdf501542d7b6a386cabedc059975d672187bd4b2bca234c9f0b5b4e1ec35f28`).
+Application sources, lockfiles and original dependencies stayed unchanged.
+The initial matrix retained each orb's unchanged compiler binary; the Mastodon
+keyword failure additionally drove a separately built shared-compiler comparison.
+The reusable scripts and bounded exclusions are recorded in each app's reports.
+These are selected method contracts, not full application or HTTP conformance.
+
+| New passing cut | Assertions in each original / Core / emitted process | What became executable |
+|---|---:|---|
+| [Campfire](campfire/ROUND4.md) `Opengraph::Location` | 16 / 16 / 16 | Namespaced literal accessors with its original initializer; setter identity and nil/non-nil inputs. |
+| Campfire `ApplicationPlatform` | 25 / 25 / 25 | Original inherited constructor, private accessor and `match?`; asymmetric/mixed user agents. |
+| [Writebook](writebook/ROUND4.md) `ArrangementHelper#arrangement_actions` | 2 / 2 / 2, both capture modes | Real module receiver, full 16-event mapping and mutable returned-String isolation. An ordinary method, not a generated family. |
+| [Lobsters](lobsters/RESULTS.md) `ApplicationHelper` pagination | 7 / 7 / 7 | Public module method with boundary/asymmetric pagination inputs. |
+| Lobsters `StoriesPaginator` | 5 / 5 / 5 | Original optional-positional constructor and literal accessors. |
+| [Mastodon](mastodon/RESULTS.md) `InteractionPolicy::SubPolicy` predicates | 9 / 9 / 9 | Four actual generated methods, four Symbol closure cells and the original frozen `POLICY_FLAGS` Hash. |
+| Mastodon plain namespaced `missing?` | 3 / 3 / 3 | Ordinary namespaced method, not another generated family. |
+| Mastodon `Admin::SystemCheck::Message` | 12 / 12 / 12 with keyword candidate | Actual optional-keyword constructor; unchanged compiler instead failed `expected true, got {critical: true}` after a clean strict check. |
+
+Every passing cut is strict-clean (zero errors/warnings) and runs unchanged
+emitted Ruby in a fresh process. Prior leaf, QR, Search, scalar/accessor and
+full-captured Search controls remain. Location and SubPolicy are two app-level
+generated-family demonstrations, **not two new DSL-specific recognizers**.
+No production generator/runtime LOC is proved removable; net deleted LOC is zero.
+
+The negative ledger remains executable evidence: Current reaches the real
+inherited initializer but refuses opaque class-attribute defaults/callbacks;
+AR attributes/associations still require their actual stores; enum dispatch
+still requires `public_send`; generated delegates retain their qualified rescue
+constant/runtime refusal. Lobsters CandidateId retains the Utils/RNG/class-side
+boundary and Graph reaches `respond_to?`, rather than receiving invented state.
+Refused cuts produce no Core project. Empty-controller emitted bootstrap failure
+is separately retained, not reclassified as whole-app support.
+
+Native controls must run the **child** VM under YJIT: use
+`RUBYOPT=--yjit ruby tools/native-observer/contract.rb` and inspect `yjit: true`
+in its child records; outer `ruby --yjit` alone does not propagate through
+`RbConfig.ruby`. Interpreter/YJIT, privacy and unwind controls remain distinct
+from the three-way app contracts. CLI controls are now 11 tests/119 assertions;
+Writebook retains its explicit missing-ActiveModel-fixture skip (11/113).
+No full Rails, cross-target, performance or framework-replacement claim follows.
+
+### Final shared-compiler verification
+
+The final ten-file production diff has SHA256
+`85e2725bc2695d21141d263c7f8d12c0d0dc8db36179ed752681b6b2161abc93`.
+The independent Mastodon comparison applies that exact diff to a separate
+canonical checkout, preserving the original failing binary and all earlier
+candidates. Its six unchanged contracts pass 12/5/5/10/9/3 assertions in each
+original/Core/emitted process, with all seven strict gates clean. All 29 actual
+Ruby child records report YJIT enabled. Original app/dependencies, contracts and
+all six Core/model outputs remain unchanged across the final candidate controls.
+
+Native source keywords retain their declared ABI: `critical: false` no longer
+becomes `critical = false`. The discriminating caller uses a **local positional
+Hash**, not just an inline literal. It retains Ruby's ArgumentError; its native
+keyword sibling still returns true. The first four-file candidate failed that
+control, and its failure remains preserved separately.
+
+Broad verification additionally reproduced and fixed two ownership regressions:
+non-singleton Concern templates consumed by class-body macro expansion are not
+callable module singletons, and an untyped nested test-helper constructor needs
+the existing lexical namespace resolver, not a constant-assignment lookup.
+Actual singleton bodies and every surviving includer copy remain checked;
+qualified calls to an invented template singleton still refuse. The existing
+Authentication macro and carried-helper emitted tests pass without relaxed
+expectations.
+
+Final local checks on Rust 1.98.1:
+
+- `cargo test --locked --jobs 4 --no-fail-fast -- --test-threads=1 --skip test_backtraces_retain_library_and_integration_source_locations`:
+  **5,046 passed, zero failed, 245 ignored**, one separately checked backtrace gate.
+- `CARGO_PROFILE_TEST_DEBUG=line-tables-only CARGO_PROFILE_TEST_STRIP=none cargo test --locked --jobs 4 --test ci_policy_workflow test_backtraces_retain_library_and_integration_source_locations -- --exact --test-threads=1`:
+  **one passed** with library/integration source locations retained.
+- Rebuilt `roundhouse`/`dump_ir`, then reran `try_input.rb`: micro **22** and Rails
+  **34** assertions per original/Core/emitted process, strict-clean; the
+  unsupported forwarding control still refuses.
+- Reran `try_blog.rb`: original **21** Rails tests and emitted incremental
+  **21** blog tests plus **22** generator assertions pass. Whole-app export
+  refuses **Article#caller**, creates no Core, and is not counted as support.
+- CLI **11/119**, verifier **18/284**, and interpreter/actual-child-YJIT native
+  controls (**56** assertions per baseline/inactive/active mode) pass.
+
+The ignored SDK/external-corpus gates and hosted CI have not been promoted to
+passed checks. The existing jbuilder unused-assignment warning remains. These
+results do not authorize publication, merging, or deleting production lowering.

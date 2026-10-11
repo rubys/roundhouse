@@ -33,7 +33,8 @@ module WritebookCaptureProvenance
       opaque_reasons: opaque.map { |record| [record.origin, record.reason] }.tally.map { |identity, count| { identity: identity, count: count } },
       opaque_events: BootToCore.events.select { |event| event[:kind] == "opaque_eval" }.map { |event| event[:reason] }.tally,
       observer_failures: defined?(NativeDefineMethodObserver) ? NativeDefineMethodObserver.failures.map { |owner, name, error| { owner: owner.name, method: name, kind: error.class.name, message: error.message } } : [],
-      scalar_constants: BootToCore.events.select { |event| event[:kind] == "scalar_constant" }
+      scalar_constants: BootToCore.events.select { |event| event[:kind] == "scalar_constant" },
+      immutable_constants: BootToCore.events.select { |event| event[:kind] == "immutable_constant" }
     }
     warn "WRITEBOOK_CAPTURE_METADATA: #{JSON.generate(metadata)}"
   end
