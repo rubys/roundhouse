@@ -21,7 +21,7 @@ use crate::dialect::{HttpMethod, LibraryFunction, Param};
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode, InterpPart, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
-use crate::lower::routes::{flatten_routes, FlatRoute};
+use crate::lower::routes::{flatten_routes, flatten_routes_for_helpers, FlatRoute};
 use crate::lower::typing::{fn_sig, lit_str, lit_sym, with_ty};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -210,7 +210,7 @@ pub(crate) fn controller_symbol(class_name: &str) -> String {
 /// `LibraryFunction`s, one per named route. Empty when the app has
 /// no routes.
 pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
-    let flat = flatten_routes(app);
+    let flat = flatten_routes_for_helpers(app);
     if flat.is_empty() {
         return Vec::new();
     }
@@ -412,7 +412,7 @@ pub fn lower_url_option_helpers(app: &App) -> Vec<LibraryFunction> {
     if extra_sets.is_empty() {
         return Vec::new();
     }
-    let flat = flatten_routes(app);
+    let flat = flatten_routes_for_helpers(app);
     let module_path = vec![Symbol::from("RouteHelpers")];
     extra_sets
         .iter()
@@ -1522,7 +1522,7 @@ fn format_variant_demand(
     // against the LONGEST route name it starts with or `story_comments`
     // reads as route `story` with format `comments`.
     let mut names: Vec<String> =
-        flatten_routes(app).into_iter().filter(|r| r.named).map(|r| r.as_name).collect();
+        flatten_routes_for_helpers(app).into_iter().filter(|r| r.named).map(|r| r.as_name).collect();
     names.sort();
     names.dedup();
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));

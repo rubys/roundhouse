@@ -31,7 +31,7 @@ pub(in crate::analyze) fn route_helper_names(app: &App) -> Vec<String> {
             .collect::<Vec<_>>()
             .join("_")
     };
-    for route in crate::lower::flatten_routes(app) {
+    for route in crate::lower::routes::flatten_routes_for_helpers(app) {
         if !route.helpers_enabled {
             continue;
         }

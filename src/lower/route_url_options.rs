@@ -126,7 +126,7 @@ pub fn apply_route_url_options_lowering(app: &mut App) {
 /// the generator builds takes every slot.
 pub(crate) fn helper_path_params(app: &App) -> std::collections::HashMap<String, Vec<String>> {
     let mut out: std::collections::HashMap<String, Vec<String>> = Default::default();
-    for route in super::routes::flatten_routes(app) {
+    for route in super::routes::flatten_routes_for_helpers(app) {
         if !route.named {
             continue;
         }
