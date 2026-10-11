@@ -790,6 +790,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     app.wrap_parameters_by_default = read_wrap_parameters_by_default(vfs, dir);
     let app_config_path = dir.join("config/application.rb");
     if let Ok(source) = vfs.read(&app_config_path) {
+        app.loaded_frameworks =
+            crate::lower::defined_const_fold::loaded_frameworks(&String::from_utf8_lossy(&source));
         let file = app_config_path.display().to_string();
         // Two capture points: methods in the Application class body, and
         // the "site-wide settings" idiom — a top-level

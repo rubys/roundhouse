@@ -89,6 +89,14 @@ pub struct App {
     /// replaces Action Text's `rich_text_area`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gem_lock: Option<crate::gems::Lockfile>,
+    /// The Rails frameworks `config/application.rb` loads, as top-level
+    /// constant names (`rails/all` → every framework; individual
+    /// `require "active_storage/engine"` lines → just those). `None`
+    /// when the file is absent or unreadable, which is also what a
+    /// non-Rails tree looks like. Read by `lower::defined_const_fold`,
+    /// which answers `defined?(ActiveStorage)` from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_frameworks: Option<Vec<String>>,
     /// The classes and method headers the locked gems' Tapioca RBIs
     /// declare ([`crate::gem_boundary`]). Declarations only, read at
     /// ingest when the tree (or the real location of its lockfile) has
@@ -720,6 +728,7 @@ impl App {
             rbs_signatures: HashMap::new(),
             rbs_includes: HashMap::new(),
             gem_lock: None,
+            loaded_frameworks: None,
             gem_boundary: Default::default(),
             content_helper_allowed_attributes: Vec::new(),
             inferred_method_params: HashMap::new(),
