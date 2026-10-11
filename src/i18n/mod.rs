@@ -202,23 +202,22 @@ impl Catalog {
         };
         let attribute = opts.attribute.clone().unwrap_or_else(|| self.human_attribute_name(scope, keys, attr));
         let model = self.model_human_name(scope, keys);
-        let text = interpolate_text(template, |name| match name {
+        let value = |name: &str| match name {
             "attribute" => Some(attribute.clone()),
             "model" => Some(model.clone()),
             "count" => Some(opts.count.clone().unwrap_or_default()),
-            "value" => Some(VALUE_MARK.to_string()),
             _ => None,
-        });
-        let mut parts = Vec::new();
-        for (i, piece) in text.split(VALUE_MARK).enumerate() {
-            if i > 0 {
-                parts.push(Part::Value);
-            }
-            if !piece.is_empty() {
-                parts.push(Part::Text(piece.to_string()));
-            }
-        }
-        Some(parts)
+        };
+        let parts = pieces(template)
+            .unwrap_or_else(|_| vec![Piece::Text(template.to_string())])
+            .into_iter()
+            .map(|p| match p {
+                Piece::Name(n) if n == "value" => Part::Value,
+                Piece::Name(n) => Part::Text(value(&n).unwrap_or_else(|| format!("%{{{n}}}"))),
+                Piece::Text(t) => Part::Text(t),
+            })
+            .collect();
+        Some(merge_text(parts))
     }
 }
 
@@ -410,9 +409,6 @@ pub fn pieces(template: &str) -> Result<Vec<Piece>, String> {
     }
     Ok(out)
 }
-
-/// Where `%{value}` sits once the other names are interpolated; not `%{value}` itself, which a `%%{value}` also leaves.
-const VALUE_MARK: char = '\u{0}';
 
 /// `template` interpolated as I18n does, a name `value` does not answer kept as written.
 fn interpolate_text(template: &str, value: impl Fn(&str) -> Option<String>) -> String {

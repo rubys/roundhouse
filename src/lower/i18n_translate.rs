@@ -24,6 +24,8 @@ pub(crate) struct Call {
     pub lookup: Translate,
     count: Option<Expr>,
     values: Vec<(String, Expr)>,
+    /// `count` and the value names, in source order.
+    order: Vec<String>,
 }
 
 /// `None` when this is not a translate call; `Err` when it is one whose
@@ -69,6 +71,7 @@ fn parse_args(args: &[Expr], view: Option<&str>) -> Result<Call, String> {
         lookup: Translate { key, view: view.map(str::to_string), ..Default::default() },
         count: None,
         values: Vec::new(),
+        order: Vec::new(),
     };
     let Some(opts) = opts else { return Ok(call) };
     let ExprNode::Hash { entries, .. } = &*opts.node else {
@@ -101,6 +104,7 @@ fn parse_args(args: &[Expr], view: Option<&str>) -> Result<Call, String> {
             "count" => {
                 call.lookup.counted = true;
                 call.count = Some(v.clone());
+                call.order.push("count".into());
             }
             "locale" | "raise" | "throw" | "separator" | "exception_handler" | "fallback" => {
                 return Err(format!("the `{name}:` option"));
@@ -108,6 +112,7 @@ fn parse_args(args: &[Expr], view: Option<&str>) -> Result<Call, String> {
             _ => {
                 call.lookup.values.push(name.as_str().to_string());
                 call.values.push((name.as_str().to_string(), v.clone()));
+                call.order.push(name.as_str().to_string());
             }
         }
     }
@@ -133,19 +138,7 @@ fn rewrite(expr: &mut Expr, catalog: &Catalog, in_view: bool, view: Option<&str>
     let Ok(translation) = catalog.resolve(&call.lookup) else { return };
     let span = expr.span;
     let html = in_view && crate::i18n::is_html_safe_key(&call.lookup.key);
-    // Not the count expression in each branch: Ruby evaluates a keyword argument once.
-    let bound = match (&translation, call.count.take()) {
-        (Translation::Plural { .. }, Some(count)) if !is_plain(&count) => {
-            let name = Symbol::from(format!("__i18n_count_{}", span.start));
-            let read = Expr::new(span, ExprNode::Var { id: VarId(0), name: name.clone() });
-            call.count = Some(Expr { ty: count.ty.clone(), ..read });
-            Some(Expr::new(span, ExprNode::Assign { target: LValue::Var { id: VarId(0), name }, value: count }))
-        }
-        (_, count) => {
-            call.count = count;
-            None
-        }
-    };
+    let bound = bind_options(&mut call, &translation, span);
     let render = |template: &str| interpolate(span, template, &call, html);
     let mut folded = match (translation, &call.count) {
         (Translation::One(t), _) => render(&t),
@@ -172,8 +165,8 @@ fn rewrite(expr: &mut Expr, catalog: &Catalog, in_view: bool, view: Option<&str>
         (Translation::Plural { .. }, None) => return,
     };
     folded.ty = Some(Ty::Str);
-    if let Some(assign) = bound {
-        folded = typed(Expr::new(span, ExprNode::Seq { exprs: vec![assign, folded] }));
+    if !bound.is_empty() {
+        folded = typed(Expr::new(span, ExprNode::Seq { exprs: bound.into_iter().chain([folded]).collect() }));
     }
     if html {
         folded = typed(Expr::new(span, ExprNode::Send {
@@ -210,6 +203,47 @@ fn escaped(span: Span, value: Expr) -> Expr {
         block: None,
         parenthesized: true,
     }))
+}
+
+/// Ruby evaluates each keyword value once, in order, whether or not the
+/// translation reads it; folding can repeat or drop one, so an option
+/// that is not a plain read is bound to a local first. The one
+/// exception is a sole such option read exactly once by a single
+/// template, which already evaluates once and in order.
+fn bind_options(call: &mut Call, translation: &Translation, span: Span) -> Vec<Expr> {
+    let effectful: Vec<String> = call
+        .order
+        .iter()
+        .filter(|name| match name.as_str() {
+            "count" => call.count.as_ref(),
+            _ => call.values.iter().find(|(n, _)| n == *name).map(|(_, v)| v),
+        }.is_some_and(|v| !is_plain(v)))
+        .cloned()
+        .collect();
+    if let ([only], Translation::One(template)) = (effectful.as_slice(), translation) {
+        let reads = crate::i18n::pieces(template)
+            .map(|p| p.iter().filter(|x| matches!(x, Piece::Name(n) if n == only)).count())
+            .unwrap_or(0);
+        if reads == 1 && call.lookup.interpolates() {
+            return Vec::new();
+        }
+    }
+    let mut assigns = Vec::new();
+    for name in effectful {
+        let local = Symbol::from(format!("__i18n_{name}_{}", span.start));
+        let value = option_mut(call, &name).expect("collected above");
+        let read = Expr { ty: value.ty.clone(), ..Expr::new(span, ExprNode::Var { id: VarId(0), name: local.clone() }) };
+        let value = std::mem::replace(value, read);
+        assigns.push(Expr::new(span, ExprNode::Assign { target: LValue::Var { id: VarId(0), name: local }, value }));
+    }
+    assigns
+}
+
+fn option_mut<'a>(call: &'a mut Call, name: &str) -> Option<&'a mut Expr> {
+    match name {
+        "count" => call.count.as_mut(),
+        _ => call.values.iter_mut().find(|(n, _)| n == name).map(|(_, v)| v),
+    }
 }
 
 /// A read that evaluates to the same value each time it is repeated.
