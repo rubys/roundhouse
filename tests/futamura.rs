@@ -101,40 +101,29 @@ fn identity_carries_source_and_drops_run_time_state() {
     fs::remove_dir_all(&out).unwrap();
 }
 
-/// The behavioral gate: emit `fixtures/real-blog` and run its own suite
-/// with Rails inside the emitted tree — the commands the target's README
-/// documents. Needs the generated fixture and its bundle installed.
+/// The behavioral gate: `scripts/futamura-suite` emits `fixtures/real-blog`
+/// and runs its own suite with Rails against a copy of the source and
+/// against the emitted tree; the two must give the same result. The
+/// script is the gate's one definition, also used for apps outside the
+/// repo (campfire). Needs the generated fixture and its bundle.
 #[test]
 #[ignore = "requires fixtures/real-blog and its Rails bundle"]
-fn real_blog_suite_passes_against_the_emitted_tree() {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/real-blog");
+fn real_blog_suite_gives_the_same_result_on_source_and_emitted_tree() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture = root.join("fixtures/real-blog");
     assert!(fixture.join("Gemfile.lock").exists(), "generate fixtures/real-blog first");
-    let out = scratch("real-blog");
-    let emit = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
-        .args(["--target", "futamura", "-o"])
-        .arg(&out)
+    let run = Command::new(root.join("scripts/futamura-suite"))
         .arg(&fixture)
+        .env("ROUNDHOUSE_BIN", env!("CARGO_BIN_EXE_roundhouse"))
+        .env_remove("BUNDLE_GEMFILE")
         .output()
         .unwrap();
-    assert!(emit.status.success(), "{}", String::from_utf8_lossy(&emit.stderr));
-
-    for args in [&["db:prepare"][..], &["test"][..]] {
-        let run = Command::new(out.join("bin/rails"))
-            .args(args)
-            .current_dir(&out)
-            .env("RAILS_ENV", "test")
-            .env_remove("BUNDLE_GEMFILE")
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&run.stdout);
-        assert!(
-            run.status.success(),
-            "bin/rails {args:?} failed:\n{stdout}\n{}",
-            String::from_utf8_lossy(&run.stderr)
-        );
-        if args == ["test"] {
-            assert!(stdout.contains(" 0 failures, 0 errors"), "{stdout}");
-        }
-    }
-    fs::remove_dir_all(&out).unwrap();
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    // The fixture's suite is green, so SAME must mean zero failures.
+    assert!(stdout.contains(" 0 failures, 0 errors"), "{stdout}");
 }
