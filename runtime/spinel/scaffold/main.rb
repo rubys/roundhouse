@@ -462,6 +462,10 @@ module Main
     # The body's params alone, for ParamsWrapper (`Params.wrap`).
     body_params = Main.request_body_params(req)
     request_obj.request_parameters = body_params unless body_params.nil?
+    # The query string's params alone (`request.query_parameters`), nested
+    # by the same builder `request_params` merged them with.
+    query_params = ParamBuilder.from_query_string(req.raw_query)
+    request_obj.query_parameters = query_params unless query_params.nil?
     controller.request = request_obj
     controller.query_string = request_obj.query_string
     ActionController::Current.request = request_obj

@@ -1721,6 +1721,15 @@ impl<'a> BodyTyper<'a> {
                         // Not refused again on a receiver the constant refusal already accounts for.
                         _ if matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped))
                             && recv.as_ref().is_some_and(|r| rooted_in_refused_constant(r)) => None,
+                        // Grounded, so not a gap: `presence_in(<Array[String]>)` is
+                        // `ActiveSupport.presence_in` (lower::presence_in), and a
+                        // zero-arg `to_query` on a Hash, or on a receiver inference
+                        // could not type, is `ActiveSupport.to_query` (lower::symbolize_keys).
+                        // A list inference cannot prove is an Array[String], or a
+                        // `to_query(key)` (the Object/Array/nil form), still refuse.
+                        _ if method.as_str() == "presence_in" && args.len() == 1 && block.is_none() && is_string_array(args[0].ty.as_ref()) => None,
+                        _ if method.as_str() == "to_query" && args.is_empty() && block.is_none()
+                            && matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. })) => None,
                         _ if matches!(method.as_str(), "to_query" | "instance_values" | "acts_like?" | "presence_in" | "as_json" | "with_options" | "pretty_inspect") => Some("Object extension"),
                         _ => None,
                     };
@@ -4972,3 +4981,8 @@ pub(super) const RUBY_TOP_LEVEL: &[&str] = &[
     "Socket", "StringIO", "Struct", "Tempfile", "Thread", "Time", "Timeout", "URI", "YAML",
     "Zlib",
 ];
+
+/// `Array[String]` — what `ActiveSupport.presence_in(value, list)` declares for its list.
+fn is_string_array(ty: Option<&Ty>) -> bool {
+    matches!(ty, Some(Ty::Array { elem }) if **elem == Ty::Str)
+}
