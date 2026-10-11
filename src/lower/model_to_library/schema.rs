@@ -3427,18 +3427,61 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
                         },
                     )
                 });
-            crate::expr::Arm {
-                pattern: crate::expr::Pattern::Lit {
-                    value: Literal::Sym { value: c.name.clone() },
-                },
-                guard: None,
-                body: Expr::new(
+            // A temporal column is written through its raw setter, as the
+            // attrs-hash `update` writes it, with the value normalized to
+            // storage text. Assigning the ivar directly left the parse memo
+            // (`@__t_<col>`) of an already-read column serving the OLD
+            // value, so `update_attribute(:discarded_at, nil)` on a record
+            // that had been read came back still discarded; and a `Time`
+            // was stored as its `to_s`, not the canonical storage form.
+            let body = if is_temporal_col(c) {
+                let normalized = with_ty(
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send {
+                            recv: Some(Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+                            )),
+                            method: Symbol::from(temporal_seam(c).2),
+                            args: vec![Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Cast {
+                                    value: var_ref(value.clone()),
+                                    target_ty: temporal_seam(c).0,
+                                },
+                            )],
+                            block: None,
+                            parenthesized: true,
+                        },
+                    ),
+                    Ty::Str,
+                );
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                        method: col_storage_setter(c),
+                        args: vec![normalized],
+                        block: None,
+                        parenthesized: false,
+                    },
+                )
+            } else {
+                Expr::new(
                     Span::synthetic(),
                     ExprNode::Assign {
                         target: LValue::Ivar { name: col_storage_name(c) },
                         value: casted_value,
                     },
-                ),
+                )
+            };
+            crate::expr::Arm {
+                pattern: crate::expr::Pattern::Lit {
+                    value: Literal::Sym { value: c.name.clone() },
+                },
+                guard: None,
+                body,
             }
         })
         .collect();

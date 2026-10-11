@@ -303,6 +303,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("addressable", GemFate::Modeled), // catalog/gems: Addressable::URI
     ("bcrypt", GemFate::Modeled),      // catalog/gems: BCrypt::*; has_secure_password
     ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); no Warden route guards
+    ("discard", GemFate::Modeled),     // ingest/discard: include Discard::Model -> scopes + predicates + discard/undiscard (not discard_all/undiscard_all); Relation#unscope(where:)
     ("faker", GemFate::Modeled),       // catalog/gems: Faker::*
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
     ("htmlentities", GemFate::Modeled), // catalog/gems: HTMLEntities
@@ -459,7 +460,6 @@ const SURFACES: &[(&str, &[&str])] = &[
     ("audited", &["audited", "audits", "own_and_associated_audits", "audit_comment"]),
     ("cancancan", &["can?", "cannot?", "authorize!", "load_and_authorize_resource", "load_resource", "authorize_resource", "current_ability", "accessible_by", "check_authorization", "skip_authorization_check"]),
     ("carrierwave", &["mount_uploader", "mount_uploaders", "remove_avatar!", "store!"]),
-    ("discard", &["discard", "discard!", "undiscard", "undiscard!", "discarded?", "undiscarded?", "kept", "discarded", "with_discarded", "discard_all", "undiscard_all"]),
     ("doorkeeper", &["doorkeeper_authorize!", "doorkeeper_token", "current_resource_owner"]),
     ("enumerize", &["enumerize"]),
     ("friendly_id", &["friendly_id", "friendly", "slug_candidates", "should_generate_new_friendly_id?", "normalize_friendly_id"]),

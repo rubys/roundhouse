@@ -1872,7 +1872,7 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
                         method.as_str(),
                         "offset" | "limit" | "order" | "reorder" | "joins" | "left_outer_joins"
                             | "left_joins" | "includes" | "preload" | "eager_load" | "references" | "group"
-                            | "having" | "merge"
+                            | "having" | "merge" | "unscope"
                     ));
             if is_where
                 || is_relation_terminal(method.as_str(), args, block.as_ref())
@@ -2105,6 +2105,10 @@ fn is_relation_chain_method(name: &str) -> bool {
             // without it here that body never rooted on `__rel` and the
             // search paged every message in the table.
             | "reorder"
+            // `unscope(where: :col)` drops the conditions on a column
+            // (`Discard::Model`'s `with_discarded` is exactly that). An
+            // Array has no `unscope`, so the site can only mean Relation.
+            | "unscope"
     )
 }
 
