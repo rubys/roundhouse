@@ -22,7 +22,7 @@ the [bench page](https://rubys.github.io/roundhouse/bench/) carries measurements
 | Inspect AST, IR, or emitted output | [`docs/development/debugging.md`](docs/development/debugging.md) |
 | Change IR, lowering, runtime, or an emitter | [`docs/development/compiler-changes.md`](docs/development/compiler-changes.md) |
 | Read/request hosted checks | [`docs/ci/README.md`](docs/ci/README.md) |
-| Pipeline internals (analyze / lower / emit / runtime / verification) | [`docs/pipeline/`](docs/pipeline/) — architecture, not status |
+| Pipeline internals (analyze / lower / specialization / emit / runtime / verification) | [`docs/pipeline/`](docs/pipeline/) — architecture, not status |
 | Compiler inputs (Ruby+ERB, schema/routes/seeds, method catalog, DB adapter) | [`docs/data/`](docs/data/) |
 | Why do this at all (the argument, option value) | [`WHY.md`](WHY.md) |
 | Why this attempt is different (lineage, the three bets, risks) | [`BETS.md`](BETS.md) |
