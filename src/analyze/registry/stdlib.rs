@@ -650,7 +650,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("deserialize", Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }),
         ]);
     }
-    // Not a typed store: a thread-local slot holds whatever the caller put there, so `[]` answers untyped.
+    // Not a typed store: `[]` and thread_variable_* hold whatever the
+    // caller put there, so their results are gradual.
     // `new` / `pass` / `kill` / `join` — `runtime/ruby/timeout.rb`'s wall-clock
     // port (Spinel lane) starts a worker and kills it past the deadline.
     let thread = Ty::Class { id: ClassId(Symbol::from("Thread")), args: vec![] };
@@ -661,6 +662,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ], &[
         ("[]", Ty::Untyped),
         ("[]=", Ty::Untyped),
+        ("thread_variable_get", Ty::Untyped),
+        ("thread_variable_set", Ty::Untyped),
         ("kill", thread.clone()),
         ("join", thread.clone()),
     ]);

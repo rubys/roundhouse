@@ -555,6 +555,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         storage.class_methods.insert(Symbol::from("content_type_for_filename"), Ty::Str);
         storage.class_methods.insert(Symbol::from("url_filename"), Ty::Str);
         classes.insert(ClassId(Symbol::from("ActiveStorage")), storage);
+
+        let mut current = ClassInfo::default();
+        current.class_methods.insert(
+            Symbol::from("set"),
+            super::block_fn(&Ty::Untyped, Ty::Untyped),
+        );
+        classes.insert(ClassId(Symbol::from("ActiveStorage::Current")), current);
     }
 
     // Arel — the low-level SQL AST that advanced scopes reach for

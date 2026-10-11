@@ -70,6 +70,8 @@ mod action_text_markdown;
 mod ordinalize;
 #[path = "emit_and_run/autoload_once_paths.rs"]
 mod autoload_once_paths;
+#[path = "emit_and_run/active_storage_current.rs"]
+mod active_storage_current;
 
 /// A generated text column on the real-blog Article model exercises the
 /// schema-to-runtime path together with Rails-style symbol callbacks. The
