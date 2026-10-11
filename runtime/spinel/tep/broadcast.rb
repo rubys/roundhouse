@@ -182,12 +182,12 @@ module Tep
       i = 0
       while i < matched.length
         sub = matched[i]
-        if sub.mode == 0
+        if sub.delivery_mode == 0
           # write_bytes: write_str is strlen-terminated, and a raw
           # payload is not guaranteed NUL-free.
           Sock.sphttp_write_bytes(sub.fd, payload, payload.bytesize)
         else
-          sub.ws.write_frame(sub.mode, payload)
+          sub.ws.write_frame(sub.delivery_mode, payload)
         end
         i += 1
       end
