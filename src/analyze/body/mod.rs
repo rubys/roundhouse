@@ -2532,8 +2532,8 @@ impl<'a> BodyTyper<'a> {
                 let _ = self.analyze_expr(value, ctx);
                 // A class named inside a namespace means the lexically
                 // nearest one (`Capabilities::Charge` in
-                // `ShopifyPayments::Capability` is
-                // `ShopifyPayments::Capabilities::Charge`).
+                // `Billing::Capability` is
+                // `Billing::Capabilities::Charge`).
                 let resolved = match ctx.lexical_self.as_ref().or(ctx.self_ty.as_ref()) {
                     Some(Ty::Class { id: scope, .. }) => target_ty.map_class_ids(&|id| {
                         lexical_class(id, scope.0.as_str(), self.classes).unwrap_or_else(|| id.clone())
