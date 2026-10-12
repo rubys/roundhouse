@@ -21,6 +21,11 @@
 # the future Spinel-AOT target's tree will contain its own
 # `runtime/db.rb` (FFI-backed). Same require path, target-appropriate
 # implementation.
+# Signed stream names in the view suite are vectors. boot.rb asks
+# LocalSecret, and an unset SECRET_KEY_BASE is a fresh random key, so
+# those vectors would move every run. Pin one known key before that
+# resolve. Empty is not a pin: LocalSecret treats "" as unset.
+ENV["SECRET_KEY_BASE"] ||= "roundhouse-test-secret"
 require_relative "../runtime/base64"
 require_relative "../runtime/json_impl"
 require_relative "../runtime/db"
