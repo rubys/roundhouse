@@ -1972,8 +1972,14 @@ module ActiveRecord
 
     # `first_by_friendly_id`: the slug column, then (history) the slug
     # table. `find_by` pops its predicate, so the relation is unchanged.
+    #
+    # `.to_s` before `.to_sym`: on a model without friendly_id the base
+    # `_friendly_slug_column` only raises, and Spinel reads a raise-only
+    # class method called through a class value as nil. That model never
+    # reaches here (it has no `friendly`), but the program must still
+    # compile.
     def friendly_first(id = "")
-      record = find_by({ @model._friendly_slug_column.to_sym => id })
+      record = find_by({ @model._friendly_slug_column.to_s.to_sym => id })
       return record unless record.nil?
       return nil unless @model._friendly_history
       friendly_history_first(id)
