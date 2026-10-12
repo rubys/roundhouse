@@ -96,8 +96,11 @@ authentication) keep firing, because there is only ever one `Message`
 class. The alternatives (loading the Roundhouse runtime beside Rails,
 or splitting routes across two processes) would bypass those hooks on
 every specialized path. The runtime also defines Rails' own top-level
-constants (`ActiveRecord`, `ActionController`, …), so it cannot share
-a process with Rails as it stands.
+constants (`ActiveRecord`, `ActionController`, …), so it cannot be
+loaded into Rails' namespace. The one exception measured so far is
+[whole-route replacement](#prototype-whole-route-replacement), which
+loads the runtime into a `Ruby::Box` and lets only the session cross
+to Rails, never a model object.
 
 **Stage 0 is the identity.** Nothing is specialized, so the residue is
 the whole app and the output is the app as source control holds it:
@@ -239,6 +242,72 @@ What remains of the room chain is SQLite (21%), instantiation (8%), the
 `through:` entry still on Rails' Preloader (~22%), and compiling the
 per-call `where(key => keys)` relations (10%): `through:` associations
 and cached per-arity statements are the next steps for queries.
+
+### Where specialization inside Rails runs out
+
+With both specializations, Lobsters runs at 1.02x of Rails (rubix3,
+CRuby + YJIT, 1,149 vs 1,167 ms per benchmark pass), against 4.2x for
+`--target ruby`. The profile of that pass is flat. Relation building
+is the largest share at 12%, then SQLite 11%, dispatch 8%, Active
+Record instantiation 8% and Active Support time 7.5%. Charging time
+inclusively to model objects bounds what a faster read path inside
+Rails' own model classes could save. Rails' attribute-lookup machinery
+is ~1.3% and instantiation ~2%. The rest of attribute reading is the
+casting itself (YAML-backed stores, times, booleans), which any reader
+still pays. That is ~3-4%, the size of specializations 1 and 2.
+Keeping real Active Record and Active Support objects caps the target
+at roughly 2x. The rest of the distance to 4.2x is those objects, and
+it is removed only when a whole request avoids them.
+
+### Prototype: whole-route replacement
+
+`scripts/lobsters-rails-replay --lowered TREE` (bridge in
+`scripts/lobsters_futamura_bridge.rb`) loads the `--target ruby` emit
+of Lobsters into a `Ruby::Box` inside the Rails process. The box gives
+the runtime's `ActiveRecord`, `ActionController` and `ActiveSupport`
+their own constants, separate from Rails'. A middleware placed after
+Rails' session store hands every GET to the lowered dispatcher. Rails
+keeps everything else, including the login POST.
+
+Only the session crosses the boundary. Rails' session goes in as the
+lowered app's signed session cookie, and keys the lowered app changes
+are written back into Rails' session. CSRF tokens use Rails' format
+on both sides, so a form the lowered app renders posts to Rails and
+verifies. No model object built on one side reaches the other, so the
+coupling that makes model stand-ins hard (class identity in `is_a?`,
+policy and serializer lookup by class name) never arises on a
+replaced route.
+
+Measured (October 2026, rubix3, Ruby master 46033eff6c + YJIT, frozen
+sequence, every GET served by the lowered app):
+
+| | ms per pass |
+|---|--:|
+| Rails | 1,261-1,280 |
+| Rails under `RUBY_BOX=1` | 1,519 |
+| Rails + lowered GETs | 377-379 (min 337, max 533) |
+| `--target ruby` alone | 287 |
+
+Content: 25 of 26 routes equivalent to Rails' under
+`scripts/lobsters-content-diff`. `/rss` differs, the same gap the
+`ruby` lane has.
+
+What the prototype does not settle:
+
+- **Ruby version.** Ruby 4.0.x (4.0.5, 4.0.7) segfaults under
+  `RUBY_BOX=1` as soon as Rails loads `net/imap`, before any box is
+  created. Ruby master does not.
+- **The Box tax.** `RUBY_BOX=1` slows Rails itself by ~20%. A route
+  left to Rails pays that.
+- **Bridge cost.** ~0.8 ms per request separates the hybrid from the
+  lowered app alone. That covers Rails' middleware in front of the
+  session store, plus signing and verifying the session for each
+  request. Iteration times also vary more than either app alone.
+- **One database.** The lowered app reads its own in-memory copy,
+  seeded like Rails'. That is sound only for a GET-only benchmark.
+- **Route selection.** "Every GET, falling back to Rails on 404 or
+  >= 500" is a prototype rule. The target would choose the routes the
+  analysis lowers with no residue.
 
 ## Why `roda` and `futamura` stay separate targets
 
