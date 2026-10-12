@@ -962,25 +962,6 @@ module ActiveSupport
     zone.nil? ? nil : zone.name
   end
 
-  # Not Rails' subscriber list: nothing in the runtime subscribes, so a report goes to the log.
-  class ErrorReporter
-    def report(error, handled: true, severity: nil, context: {}, source: nil)
-      message = "#{error.class}: #{error.message}"
-      level = severity || (handled ? :warning : :error)
-      case level
-      when :info
-        Rails.logger.info(message)
-      when :warning
-        Rails.logger.warn(message)
-      when :error
-        Rails.logger.error(message)
-      else
-        raise ArgumentError, "severity must be one of :error, :warning, :info, got: #{level.inspect}"
-      end
-      nil
-    end
-  end
-
   # Numeric#in_time_zone: epoch seconds before the zone remapping above.
   def self.time_at_epoch(n)
     Time.at(n)

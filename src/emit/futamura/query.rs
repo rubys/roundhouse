@@ -17,8 +17,8 @@
 //! values are request-time binds, and what the terminal means.
 //!
 //! - Root: a model constant, or a plain `has_many` reader on a typed owner
-//!   (no `through:`, `as:`, or scope lambda; a `primary_key:` option is
-//!   not in the IR yet, so it cannot be refused).
+//!   (no `through:`, `as:`, scope lambda, or `primary_key:` — the bind is
+//!   the owner's `id`, which a keyed association does not match).
 //! - Links: `where(column: value)`, `order`/`preload`/`includes` with
 //!   literal arguments, `limit`, and scopes. A scope whose body only
 //!   builds a relation from literals (or calls other such scopes, or the
@@ -288,6 +288,9 @@ impl<'a> Specializer<'a> {
         let Association::HasMany { target, foreign_key, through, as_interface, scope, .. } = assoc else {
             return Err(format!("`{}` is not a has_many", method.as_str()));
         };
+        if crate::lower::assoc_primary_key::custom_primary_key(assoc).is_some() {
+            return Err(format!("has_many `{}` declares `primary_key:`", method.as_str()));
+        }
         if through.is_some() || as_interface.is_some() || scope.is_some() || !args.is_empty() {
             return Err(format!("has_many `{}` has options the specializer does not model", method.as_str()));
         }

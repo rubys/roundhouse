@@ -77,6 +77,7 @@ module ActiveRecord
       @from = nil
       @ctes = []
       @shared_lists = false
+      @friendly = false
     end
 
     # Rails' `Relation#spawn`: a new relation that shares this one's
@@ -159,7 +160,7 @@ module ActiveRecord
         # body typer's Array#map still returns Untyped, so the join
         # terminal would stay Ty::Var under RBS-seeded typing.
         sql_parts = []
-        parts.each { |p| sql_parts << p.to_sql }
+        parts.each { |p| sql_parts << p.bound_sql }
         @ctes << "#{name} AS (#{sql_parts.join(" UNION ALL ")})"
       end
       self
@@ -175,20 +176,21 @@ module ActiveRecord
     end
 
     # `where(hash)` / `where("raw sql")` / `where("a = ? AND b = ?", x, y)`.
+    # A hash of seedable equality predicates also feeds `scope_for_create`
+    # (Rails' `where_values_hash`), so `rel.where(account_id: 7).
+    # find_or_initialize_by(name: "A")` builds a record carrying
+    # `account_id`. Non-seedable values (arrays, ranges, nested hashes,
+    # relations, qualified keys) filter only.
     def where(condition = nil, *args)
+      merge_seedable_scope(condition) if condition.is_a?(Hash)
       add_condition(condition, args, false)
       self
     end
 
     # An association's scope: `where(fk => owner.id)` that ALSO presets
-    # what a `create` through this relation writes.
-    #
-    # Rails derives both from the same place — a relation's equality
-    # conditions filter reads (`where_values_hash`) and seed writes
-    # (`scope_for_create`), which is why `user.sessions.create!(…)`
-    # comes back with `user_id` set without anybody naming it. Only the
-    # compiler's association seed calls this, so the ordinary `where`
-    # stays a pure filter and pays nothing for the extra bookkeeping.
+    # what a `create` through this relation writes. The compiler's
+    # association seed uses this so the FK is recorded even when the
+    # ordinary `where` path would refuse it as non-seedable.
     def where_scope(condition)
       @scope_attributes = condition
       add_condition(condition, [], false)
@@ -201,8 +203,21 @@ module ActiveRecord
       @scope_attributes
     end
 
+    # Equality predicates from `where(hash)` that a new record can carry.
+    # Later keys win. Arrays / ranges / nested hashes / relations and
+    # qualified `table.col` keys are filters only.
+    def merge_seedable_scope(hash)
+      own_lists
+      hash.each do |key, val|
+        next if val.is_a?(Hash) || val.is_a?(Array) || val.is_a?(Relation) || val.is_a?(Range)
+        name = key.is_a?(Symbol) ? key.to_s : key.to_s
+        next if name.include?(".")
+        @scope_attributes = @scope_attributes.merge({ name.to_sym => val })
+      end
+    end
+
     # `where.not(...)` is lowered to `not(...)` on the relation: negate the
-    # condition back onto this relation.
+    # condition back onto this relation. Negated predicates never seed.
     def not(condition = nil, *args)
       add_condition(condition, args, true)
       self
@@ -814,7 +829,7 @@ module ActiveRecord
     # call: later chain mutations don't flow into it (matches lowered
     # usage, where `.arel` ends its chain).
     def arel
-      Arel::SelectManager.new(to_sql)
+      Arel::SelectManager.new(bound_sql)
     end
 
     def none
@@ -901,7 +916,7 @@ module ActiveRecord
       records = if @select_sql.nil?
         @model._hydrate_all(select_sql_with(@model._columns_sql))
       else
-        rows = ActiveRecord.adapter.select_rows(to_sql)
+        rows = ActiveRecord.adapter.select_rows(bound_sql)
         rows.map { |row| @model.instantiate(row) }
       end
       if @includes.length > 0 && !@skip_preloading && records.length > 0
@@ -1332,7 +1347,7 @@ module ActiveRecord
     end
 
     def count
-      rows = ActiveRecord.adapter.select_rows(count_sql)
+      rows = ActiveRecord.adapter.select_rows(bound_count_sql)
       rows.length == 0 ? 0 : rows[0]["n"].to_i
     end
 
@@ -1369,7 +1384,7 @@ module ActiveRecord
       projection = "#{@select_sql}, #{projection}" if @havings.length > 0 && !@select_sql.nil?
       scoped.select(projection)
       scoped.reorder
-      rows = ActiveRecord.adapter.select_rows(scoped.to_sql)
+      rows = ActiveRecord.adapter.select_rows(scoped.bound_sql)
       return nil if rows.length == 0
       value = rows[0]["value"]
       cast_schema_value(value, column)
@@ -1392,7 +1407,7 @@ module ActiveRecord
       selects.unshift(@select_sql) if @havings.length > 0 && !@select_sql.nil?
       scoped.select(selects.join(", "))
       scoped.reorder
-      rows = ActiveRecord.adapter.select_rows(scoped.to_sql)
+      rows = ActiveRecord.adapter.select_rows(scoped.bound_sql)
       grouped = {}
       rows.each do |row|
         key_values = []
@@ -1555,13 +1570,20 @@ module ActiveRecord
 
     # Hash conditions share where's predicate builder; scalar conditions
     # select the primary key. Unloaded: exists_sql (SELECT 1 LIMIT 1).
-    def exists?(id = nil)
+    # No argument asks for any row; `exists?(nil)` is false, as Rails'
+    # `return false if !conditions`. The argument is a splat so "absent"
+    # and `nil` stay distinct without an untyped default.
+    def exists?(*conditions)
+      raise ArgumentError, "wrong number of arguments (given #{conditions.length}, expected 0..1)" if conditions.length > 1
       return false if @limit == 0
-      if id.nil?
+      if conditions.empty?
         r = @records
         return r.length > 0 unless r.nil?
         return probe_existence(1) > 0
       end
+      id = conditions[0]
+      # Rails' `return false if !conditions` — only nil/false are falsy.
+      return false if id.nil? || id == false
       own_lists
       # Popped for the same reason `find` and `find_by` pop: a terminal
       # that answered a question must not narrow the relation it was
@@ -1569,7 +1591,7 @@ module ActiveRecord
       sql = if id.is_a?(Hash)
         hash_conditions(id)
       else
-        "#{@table}.#{@model.primary_key} = #{ActiveRecord.adapter.escape_value(id)}"
+        "#{@table}.#{@model.primary_key} = #{bind_literal(id)}"
       end
       @wheres << sql unless sql.empty?
       begin
@@ -1583,7 +1605,7 @@ module ActiveRecord
     # `one?`, and `many?` so cardinality questions never hydrate.
     def probe_existence(n)
       return 0 if @limit == 0
-      ActiveRecord.adapter.select_rows(exists_sql(n)).length
+      ActiveRecord.adapter.select_rows(bound_exists_sql(n)).length
     end
 
     # `count > n` without a COUNT(*): same FROM/JOIN/WHERE as
@@ -1744,7 +1766,7 @@ module ActiveRecord
     def pluck(col)
       prior = @select_sql
       @select_sql = "#{@table}.#{col} AS v"
-      rows = ActiveRecord.adapter.select_rows(to_sql)
+      rows = ActiveRecord.adapter.select_rows(bound_sql)
       @select_sql = prior
       rows.map { |row| row["v"] }
     end
@@ -1767,7 +1789,7 @@ module ActiveRecord
       prior = @select_sql
       key = @model.primary_key
       @select_sql = "#{@table}.#{key} AS v"
-      rows = ActiveRecord.adapter.select_rows(to_sql)
+      rows = ActiveRecord.adapter.select_rows(bound_sql)
       @select_sql = prior
       rows.map { |row| @model._cast_primary_key(row["v"]) }
     end
@@ -1796,6 +1818,85 @@ module ActiveRecord
     # the suffix could not match. An unscoped relation's message is
     # exactly Rails'.
     def find(id)
+      return friendly_find(id) if @friendly
+      find_primary_key(id)
+    end
+
+    # `Model.friendly` / `relation.friendly` (friendly_id's `all.extending(
+    # FriendlyId::FinderMethods)`): from here on `find` is friendly_id's
+    # finder. The flag rides the relation through its chain, as the
+    # extension does in Rails (`Article.friendly.includes(:x).find(s)`,
+    # `Article.with_discarded.friendly.find(s)`). Only a model that
+    # declared `friendly_id` (lower::friendly_id) has the class-side
+    # configuration `friendly_find` reads; any other raises there.
+    def friendly
+      @friendly = true
+      self
+    end
+
+    # friendly_id 5.x `FinderMethods#find` for one id, in the gem's order:
+    #
+    #   1. anything but a String (Integer, nil, Array, ...) is
+    #      `unfriendly_id?`, so the plain find: `find(nil)` is "without an
+    #      ID", `find(3)` is the primary key. A String is never unfriendly
+    #      ("123" answers nil, not true, to `friendly_id?`; neither
+    #      short-circuits).
+    #   2. `find_by(slug_column => id)`; with `:history`, then the newest
+    #      `friendly_id_slugs` row for (sluggable_type, slug), joined to
+    #      this relation, so its other conditions still apply.
+    #   3. no match, and the String could be a primary key
+    #      (`potential_primary_key?`): the plain find, which raises
+    #      Rails' own not-found for a missing row. A "123" slug beats the
+    #      row with id 123, as in the gem.
+    #   4. otherwise RecordNotFound with the gem's message.
+    #
+    # Not modeled: `find(id, allow_nil: true)` and `find(a, b)` (the
+    # gem's `args.count != 1` pass-through).
+    def friendly_find(id = "")
+      return find_primary_key(id) unless id.is_a?(String)
+      record = friendly_first(id)
+      return record unless record.nil?
+      return find_primary_key(id) if FriendlyIdFinder.potential_primary_key?(id, @model._string_primary_key)
+      column = @model._friendly_slug_column
+      raise RecordNotFound.new("can't find record with friendly id: #{id.inspect}", @model.name, column, id)
+    end
+
+    # `first_by_friendly_id`: the slug column, then (history) the slug
+    # table. `find_by` pops its predicate, so the relation is unchanged.
+    def friendly_first(id = "")
+      record = find_by({ @model._friendly_slug_column.to_sym => id })
+      return record unless record.nil?
+      return nil unless @model._friendly_history
+      friendly_history_first(id)
+    end
+
+    # history.rb `slug_table_record`: this relation joined to
+    # `friendly_id_slugs`, restricted to (this model's type, the slug),
+    # newest slug row first, projecting the model's columns. The join,
+    # predicate and ordering are popped again; the projection and limit
+    # restored: a terminal must not alter the relation it was asked on.
+    def friendly_history_first(id = "")
+      own_lists
+      prior_select = @select_sql
+      prior_limit = @limit
+      @select_sql = nil
+      @limit = 1
+      @joins << "INNER JOIN friendly_id_slugs ON friendly_id_slugs.sluggable_id = #{@table}.#{@model.primary_key}"
+      @wheres << "friendly_id_slugs.sluggable_type = #{ActiveRecord.adapter.escape_value(@model.name)} AND friendly_id_slugs.slug = #{ActiveRecord.adapter.escape_value(id)}"
+      @orders << "friendly_id_slugs.id DESC"
+      begin
+        rows = load_records
+      ensure
+        @orders.pop
+        @wheres.pop
+        @joins.pop
+        @select_sql = prior_select
+        @limit = prior_limit
+      end
+      rows.length == 0 ? nil : rows[0]
+    end
+
+    def find_primary_key(id)
       # Rails compacts the ids first, so `find(nil)` has none: the
       # "without an ID" form, with no id, as `Base.find(nil)` raises.
       raise RecordNotFound.new("Couldn't find #{@model.name} without an ID", @model.name, @model.primary_key) if id.nil?
@@ -1803,7 +1904,7 @@ module ActiveRecord
       key = @model._cast_primary_key(id)
       prior_limit = @limit
       own_lists
-      @wheres << "#{@table}.#{@model.primary_key} = #{ActiveRecord.adapter.escape_value(key)}"
+      @wheres << "#{@table}.#{@model.primary_key} = #{bind_literal(key)}"
       begin
         @limit = 1
         rows = load_records
@@ -1826,7 +1927,7 @@ module ActiveRecord
     def find_ids(ids)
       ids = ids.uniq
       return [] if ids.empty?
-      return [find(ids[0])] if ids.length == 1
+      return [find_primary_key(ids[0])] if ids.length == 1
       prior_limit = @limit
       prior_offset = @offset
       prior_select = @select_sql
@@ -2004,9 +2105,37 @@ module ActiveRecord
       created
     end
 
+    # Rails' `find_or_create_by!`: `find_by(attributes) ||
+    # create!(attributes)`. A block is the lowering's statement form
+    # (`lower::first_or_create`); the runtime method takes none.
+    def find_or_create_by!(conditions)
+      record = find_by(conditions)
+      return record if !record.nil?
+      created = @model.new(scope_attributes.merge(conditions))
+      created.save!
+      created
+    end
+
+    # Rails' `find_or_initialize_by`: `find_by(attributes) ||
+    # new(attributes)`, the new record unsaved and carrying the
+    # relation's scope attributes and the given ones.
+    def find_or_initialize_by(conditions)
+      record = find_by(conditions)
+      return record if !record.nil?
+      @model.new(scope_attributes.merge(conditions))
+    end
+
     # ---- SQL composition --------------------------------------------
 
+    # Rails' `to_sql`: the SELECT with every value written in, which is
+    # what a caller printing or splicing the SQL expects. Terminals here
+    # read `bound_sql` instead, whose hash-condition values are still
+    # marked for binding (see `bind_literal`).
     def to_sql
+      Relation.inline_sql(bound_sql)
+    end
+
+    def bound_sql
       select_sql_with("#{@table}.*")
     end
 
@@ -2056,6 +2185,10 @@ module ActiveRecord
     end
 
     def count_sql
+      Relation.inline_sql(bound_count_sql)
+    end
+
+    def bound_count_sql
       # DISTINCT / GROUP BY must count the result-set shape, not the
       # underlying rows (#343). Scalar `count` on a grouped relation
       # counts groups; the Hash form is `group_count`. LIMIT/OFFSET
@@ -2100,6 +2233,10 @@ module ActiveRecord
     # `SELECT 1 AS one … LIMIT n` for existence probes. Drops ORDER BY
     # and never hydrates. Keeps joins / WHERE / GROUP / HAVING / OFFSET.
     def exists_sql(n)
+      Relation.inline_sql(bound_exists_sql(n))
+    end
+
+    def bound_exists_sql(n)
       # DISTINCT 1 collapses every row into one — `distinct.many?` would
       # always be false. Project the primary key so each distinct row
       # still occupies a probe slot under LIMIT n.
@@ -2183,9 +2320,9 @@ module ActiveRecord
         # static `v && v.id` narrowing was dropped in favor of this
         # runtime dispatch: hash values from untyped scope params can
         # be a record OR a collection, and only the runtime knows.
-        "#{qcol} = #{ActiveRecord.adapter.escape_value(val.id)}"
+        "#{qcol} = #{bind_literal(val.id)}"
       else
-        "#{qcol} = #{ActiveRecord.adapter.escape_value(val)}"
+        "#{qcol} = #{bind_literal(val)}"
       end
     end
 
@@ -2258,6 +2395,203 @@ module ActiveRecord
       out = []
       vals.each { |v| out << ActiveRecord.adapter.escape_value(v) }
       out.join(", ")
+    end
+
+    # ---- bound values -----------------------------------------------
+    #
+    # Rails binds a hash condition's value (`where(is_deleted: false)`
+    # sends `is_deleted = ?`), and SQLite plans a bound statement
+    # differently from one with the value written in. lobsters' comments
+    # page is the case that made it matter: with `is_deleted = 0` and
+    # `is_moderated = 0` inline, SQLite built a bloom filter over every
+    # story before a LIMIT 20 scan, 61x the VM steps of Rails' bound
+    # statement for the same rows.
+    #
+    # Conditions here are SQL text that `or`, `not`, `merge` and
+    # subqueries splice together, so a value travels inside that text:
+    # its escaped literal between \x01 and \x02. The adapter lifts the
+    # marks to placeholders when it runs the read (`lift_binds`); every
+    # other exit (`to_sql`, writes) drops them (`inline_sql`), which is
+    # the SQL this class wrote before. A literal holding either control
+    # byte is left unmarked, so a mark is always ours.
+    #
+    # Only these sites mark: hash-condition scalars and primary-key
+    # lookups, the values Rails binds. String conditions
+    # (`where("a = ?", x)`) and IN lists stay inline, as Rails writes
+    # them.
+    def bind_literal(val)
+      text = ActiveRecord.adapter.escape_value(val)
+      return text if text.include?("\x01") || text.include?("\x02")
+      "\x01" + text + "\x02"
+    end
+
+    # The SQL with every mark replaced by its literal.
+    def self.inline_sql(sql)
+      return sql unless sql.include?("\x01")
+      lift_binds(sql)[1].to_s
+    end
+
+    # `[bound, inline, kind, value, kind, value, …]`: `bound` has a `?`
+    # where each liftable mark was, `inline` has the literal, and each
+    # pair says how to bind one placeholder, in order — "i" an integer,
+    # "s" a string. A mark holding any other literal (NULL, a float,
+    # an X'' blob) stays inline in both. String literals, quoted
+    # identifiers and comments, where inline user text can sit, are
+    # copied whole, so a control byte inside one is never read as a
+    # mark. The fast path below still skips quoted identifiers (a
+    # model's column list has dozens; scanning each doubled the cost of
+    # every hydrating read) — the scan path must still honor them so a
+    # `--` or `/*` inside `"…"` is not treated as a comment that
+    # swallows later marks (sql_identifiers InjectionPurchase).
+    def self.lift_binds(sql)
+      # Fast path: split at the marks, and know each mark sits outside a
+      # string literal because the text before it holds an even number
+      # of quotes (a literal opens and closes with one, and doubles any
+      # inside). Comments, an odd count or a torn mark take the scan.
+      return lift_binds_scan(sql) if sql.include?("--") || sql.include?("/*")
+      pieces = sql.split("\x01", -1)
+      out = ["", ""]
+      head = pieces[0].to_s
+      bound = [head]
+      inline = [head]
+      quotes = quote_count(head)
+      i = 1
+      while i < pieces.length
+        piece = pieces[i].to_s
+        close = piece.index("\x02")
+        return lift_binds_scan(sql) if close.nil? || quotes % 2 == 1
+        text = piece[0, close].to_s
+        rest = piece[close + 1, piece.length - close - 1].to_s
+        kind = bind_kind(text)
+        if kind == ""
+          bound << text
+        else
+          bound << "?"
+          out << kind
+          out << (kind == "s" ? text[1, text.length - 2].to_s.gsub("''", "'") : text)
+        end
+        inline << text
+        bound << rest
+        inline << rest
+        quotes += quote_count(rest)
+        i += 1
+      end
+      out[0] = bound.join
+      out[1] = inline.join
+      out
+    end
+
+    def self.quote_count(text)
+      n = 0
+      at = text.index("'")
+      until at.nil?
+        n += 1
+        at = text.index("'", at + 1)
+      end
+      n
+    end
+
+    # The general lift: a scan that copies string literals, quoted
+    # identifiers and comments whole.
+    def self.lift_binds_scan(sql)
+      out = ["", ""]
+      bound = []
+      inline = []
+      # Each token's next position is searched once and reused until the
+      # scan passes it: one pass over the text per token kind. `"` is
+      # required so `--` / `/*` inside a quoted identifier are not
+      # comments (see lift_binds); the fast path omits it on purpose.
+      toks = ["'", "\"", "\x01", "--", "/*"]
+      nexts = [-1, -1, -1, -1, -1]
+      i = 0
+      n = sql.length
+      while i < n
+        j = n
+        t = 0
+        while t < toks.length
+          at = nexts[t]
+          if at < i
+            found = sql.index(toks[t], i)
+            at = found.nil? ? n : found
+            nexts[t] = at
+          end
+          j = at if at < j
+          t += 1
+        end
+        if j > i
+          seg = sql[i, j - i].to_s
+          bound << seg
+          inline << seg
+        end
+        break if j >= n
+        ch = sql[j, 1].to_s
+        k = n
+        if ch == "\x01"
+          close = sql.index("\x02", j + 1)
+          k = close.nil? ? n : close + 1
+          text = sql[j + 1, k - j - 2].to_s
+          kind = bind_kind(text)
+          if kind == ""
+            bound << text
+          else
+            bound << "?"
+            out << kind
+            out << (kind == "s" ? text[1, text.length - 2].to_s.gsub("''", "'") : text)
+          end
+          inline << text
+        else
+          k = sql_token_end(sql, j, ch, n)
+          seg = sql[j, k - j].to_s
+          bound << seg
+          inline << seg
+        end
+        i = k
+      end
+      out[0] = bound.join
+      out[1] = inline.join
+      out
+    end
+
+    # One past the end of the string literal, quoted identifier, or
+    # comment opening at `j` (a doubled quote stays inside the token).
+    def self.sql_token_end(sql, j, ch, n)
+      if ch == "-"
+        nl = sql.index("\n", j)
+        return nl.nil? ? n : nl + 1
+      end
+      if ch == "/"
+        close = sql.index("*/", j + 2)
+        return close.nil? ? n : close + 2
+      end
+      k = j + 1
+      while k < n
+        at = sql.index(ch, k)
+        return n if at.nil?
+        return at + 1 unless sql[at + 1, 1].to_s == ch
+        k = at + 2
+      end
+      n
+    end
+
+    # "i" for an integer literal that fits 64 bits, "s" for a plain
+    # quoted string, "" for anything to leave inline.
+    def self.bind_kind(text)
+      len = text.length
+      return "" if len == 0
+      if text[0, 1].to_s == "'"
+        return "" if len < 2 || text[len - 1, 1].to_s != "'"
+        return "" if text[1, len - 2].to_s.gsub("''", "").include?("'")
+        return "s"
+      end
+      digits = text[0, 1].to_s == "-" ? text[1, len - 1].to_s : text
+      return "" if digits.length == 0 || digits.length > 18
+      k = 0
+      while k < digits.length
+        c = digits[k, 1].to_s
+        return "" if c < "0" || c > "9"
+        k += 1
+      end
+      "i"
     end
 
     # Rails' `sanitize_limit`: `Integer(n)`. An integer, or a String

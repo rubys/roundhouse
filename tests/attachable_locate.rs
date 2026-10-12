@@ -316,7 +316,7 @@ fn the_attachment_render_is_a_case_over_the_attachables_with_a_partial() {
     assert!(
         // Plus the newline ending Action Text's `_content` partial, which
         // is what the layout yields.
-        runtime.contains("Views::Layouts::ActionText::Contents.content(render_attachments + \"\\n\")"),
+        runtime.contains("Views::Layouts::ActionText::Contents.content(render_action_text_content + \"\\n\")"),
         "the layout wraps the rendered nodes:\n{runtime}"
     );
 }

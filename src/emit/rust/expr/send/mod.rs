@@ -376,19 +376,14 @@ pub(super) fn emit_send(
         out
     } else if let ExprNode::Const { path } = &*r.node {
         let class = path.last().map(|s| s.as_str()).unwrap_or("");
-        // Try the hand-written runtime sigs first (Db, Broadcasts),
-        // then a cross-LC global lookup keyed by (ClassName, method) —
-        // covers `Comment::new(...)` called from inside any other
-        // class. `current_class_method_param_tys` is the last-resort
-        // fallback: it's keyed by method name only and ignores the
-        // Const path, so a same-named method in the current class
-        // (e.g. a view module's `new` action partial) would otherwise
-        // shadow the cross-class param list and pad with the wrong
-        // defaults. Trying global first inverts the precedence so the
-        // explicit class qualifier wins when both tables list `new`.
+        // Hand-written runtime sigs first (Db, Broadcasts), then the
+        // cross-LC global registry keyed by (ClassName, method). No
+        // current-class fallback: that table ignores the Const path, so
+        // `AssociationReflection::new` inside Base would inherit
+        // Base#initialize's arity and emit `None` for a Value param
+        // (#832). Same-class Const calls resolve via the global registry.
         let param_tys = external_class_method_param_tys(class, method)
-            .or_else(|| super::global_class_method_param_tys(class, method))
-            .or_else(|| current_class_method_param_tys(method));
+            .or_else(|| super::global_class_method_param_tys(class, method));
         // Kwargs-unpack pre-pass: when the callee declares keyword
         // params and the trailing arg is a kwargs Hash literal, expand
         // the Hash entries into positional slots by name. Without this,

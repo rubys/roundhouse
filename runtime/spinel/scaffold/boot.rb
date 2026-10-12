@@ -162,6 +162,9 @@ require_relative "runtime/broadcasts"
 # which a job-less app (no `app/jobs`) does not have -- there the call
 # went unresolved and `PENDING` undefined. The file is always shipped.
 require_relative "runtime/active_job"
+# ActiveJob payload codecs: after the module and its DeserializationError,
+# and after global_id_locator, whose URI parser the record reader uses.
+require_relative "runtime/active_job_serialization"
 # Per-request state per THREAD -- reopens Current, the view slots, the
 # broadcast log, the job queue and the store memo (see the file).
 require_relative "runtime/thread_state"

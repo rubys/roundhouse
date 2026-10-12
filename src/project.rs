@@ -1441,6 +1441,64 @@ fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
     }
 }
 
+/// The date and decimal coercions `ingest::dry_struct` generates call
+/// stdlib the CRuby and JRuby trees load. Spinel's tree has its own
+/// `Date` (`runtime/spinel/date.rb`, ISO `parse` included) and
+/// `BigDecimal()`, but no `DateTime`, `Time.parse` or
+/// `BigDecimal.interpret_loosely`; the other targets have none of them.
+fn report_dry_struct_stdlib(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        use crate::expr::ExprNode;
+        let spinel = matches!(target, BuildTarget::Spinel);
+        let named = |path: &[crate::ident::Symbol]| -> Vec<String> {
+            path.iter().map(|p| p.as_str().to_string()).filter(|p| !p.is_empty()).collect()
+        };
+        let construct = match &*expr.node {
+            ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "parse" => match &*recv.node {
+                ExprNode::Const { path } if named(path) == ["Time"] => Some(("Time.parse", "Dry::Struct date coercion")),
+                _ => None,
+            },
+            ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "interpret_loosely" => match &*recv.node {
+                ExprNode::Const { path } if named(path) == ["BigDecimal"] => {
+                    Some(("BigDecimal.interpret_loosely", "Dry::Struct decimal coercion"))
+                }
+                _ => None,
+            },
+            ExprNode::Send { recv: None, method, .. } if method.as_str() == "BigDecimal" && !spinel => {
+                Some(("BigDecimal()", "Dry::Struct decimal coercion"))
+            }
+            ExprNode::Const { path } if named(path) == ["DateTime"] => Some(("DateTime", "Dry::Struct date coercion")),
+            ExprNode::Const { path } if named(path) == ["Date"] && !spinel => {
+                Some(("Date", "Dry::Struct date coercion"))
+            }
+            _ => None,
+        };
+        if let Some((what, construct)) = construct {
+            crate::emit::diagnostics::report_unsupported(
+                expr.span,
+                target.as_str(),
+                construct,
+                &format!("`{what}` has no runtime on this target"),
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    for lc in &app.library_classes {
+        if lc.origin == Some(crate::dialect::LibraryClassOrigin::DryStruct) {
+            for method in &lc.methods {
+                visit(&method.body, target);
+            }
+            // Shared defaults are class constants, evaluated at load.
+            for (_, value) in &lc.constants {
+                visit(value, target);
+            }
+        }
+    }
+}
+
 /// Report syntax whose runtime contract is currently native Ruby only.
 fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
@@ -1465,6 +1523,9 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
             ExprNode::Assign { target: LValue::Var { name, .. }, .. }
             | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
                 if name.as_str().starts_with("@@") => Some("class variable write"),
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
+                if name.as_str().starts_with('$') => Some("global variable write"),
             ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => Some("class variable read"),
             _ => None,
         };
@@ -1473,6 +1534,73 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
                 expr.span, target.as_str(), construct,
                 "native Ruby semantics have no verified implementation on this target",
             );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+}
+
+/// A self binding (`T.bind(self, T)`, `#: self as T`) retypes `self` for
+/// the rest of a body, and the analyzer types the sends after it against
+/// that type. The Ruby emitters drop the binding and leave those sends to
+/// Ruby's dynamic `self`. Every other target emits them on the method's
+/// own receiver, which the binding does not change, so it refuses it.
+fn report_self_bindings(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        if crate::expr::is_self_binding(expr) {
+            crate::emit::diagnostics::report_unsupported(
+                expr.span, target.as_str(), "self binding",
+                "the sends after it are typed against the bound type, which `self` does not take on in this target",
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+}
+
+/// Sends the analyzer types for every target but whose runtime only the
+/// Ruby family has: `Array#fetch`, `each_slice`, `each_cons`, an
+/// enumerator's `with_object`, `Array[...]` and `Hash[...]`, `include?` on
+/// a `Class`/`Module` value (Module's ancestry query, which the other
+/// targets' `include?` is not) and Kernel's `Rational(...)`, which a
+/// rational literal ingests as. The other emitters render them as the
+/// method name on the receiver, which nothing there defines, so they
+/// refuse each by name.
+fn report_ruby_only_sends(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        use crate::expr::ExprNode;
+        use crate::ty::Ty;
+        if let ExprNode::Send { recv, method, .. } = &*expr.node {
+            let recv_ty = recv.as_ref().and_then(|r| r.ty.as_ref());
+            let construct = match (recv, method.as_str()) {
+                (None, "Rational") => Some("Kernel#Rational"),
+                (Some(r), "[]") => match &*r.node {
+                    ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array[]"),
+                    ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash" => Some("Hash[]"),
+                    _ => None,
+                },
+                (Some(_), "fetch") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#fetch"),
+                (Some(_), "each_slice") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_slice"),
+                (Some(_), "each_cons") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_cons"),
+                (Some(_), "with_object") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Enumerator#with_object"),
+                (Some(_), "include?") if matches!(recv_ty, Some(Ty::Class { id, .. })
+                    if matches!(id.0.as_str(), "Class" | "Module")) => Some("Module#include?"),
+                _ => None,
+            };
+            if let Some(construct) = construct {
+                crate::emit::diagnostics::report_unsupported(
+                    expr.span, target.as_str(), construct,
+                    "only the Ruby targets implement it; this target would emit the call on a receiver that does not define it",
+                );
+            }
         }
         expr.node.for_each_child(&mut |child| visit(child, target));
     }
@@ -1623,6 +1751,9 @@ pub fn target_files(
     report_unemitted_library_classes(app, target);
     report_sqlite_index_predicates(app, target);
     report_native_ruby_syntax(app, target);
+    report_self_bindings(app, target);
+    report_ruby_only_sends(app, target);
+    report_dry_struct_stdlib(app, target);
     // Full forwarding currently has a native Ruby contract only. A
     // declaration must be gated even when its body never forwards.
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
@@ -3363,6 +3494,35 @@ fn apply_content_helper_attributes(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// `ActionText::ContentHelper.app_allowed_tags` — editor tags the app
+/// unions into ActionText's sanitizer at boot (campfire's
+/// `EDITOR_FORMATTING_TAGS`). Same generated-hook shape as attributes.
+fn apply_content_helper_tags(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "    # >>> generated: content-helper-tags\n";
+    const TAIL: &str = "    # <<< generated: content-helper-tags\n";
+    if app.content_helper_allowed_tags.is_empty() {
+        return;
+    }
+    let list = app
+        .content_helper_allowed_tags
+        .iter()
+        .map(|a| format!("{a:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = format!("{HEAD}    def self.app_allowed_tags\n      [{list}]\n    end\n{TAIL}");
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("runtime/action_text.rb") {
+            continue;
+        }
+        if let Some(start) = content.find(HEAD) {
+            if let Some(rel_end) = content[start..].find(TAIL) {
+                let end = start + rel_end + TAIL.len();
+                content.replace_range(start..end, &body);
+            }
+        }
+    }
+}
+
 fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "    # >>> generated: content-layout\n";
     const TAIL: &str = "    # <<< generated: content-layout\n";
@@ -3384,7 +3544,7 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     // emit wrote `…boxes.</div>` without it.
     let layout = format!(
         "{HEAD}    def rendered_html\n      \
-         Views::Layouts::ActionText::Contents.content(render_attachments + \"\\n\")\n    end\n{TAIL}"
+         Views::Layouts::ActionText::Contents.content(render_action_text_content + \"\\n\")\n    end\n{TAIL}"
     );
 
     // Two kinds of arm, in the order campfire's own `from_node` reopen
@@ -4161,6 +4321,36 @@ fn apply_module_mixins(files: &mut Vec<(String, String)>, app: &App, form: Mixin
     }
 }
 
+/// `app/route_helpers.rb` is generated from the app's named routes, so
+/// a tree whose source carries no `config/routes.rb` (an engine, a
+/// gem's test app) gets no file. Code that names a route helper still
+/// requires `app/route_helpers` at LOAD time, so the tree did not boot
+/// (`cannot load such file -- app/route_helpers`, from a controller).
+/// The module is emitted empty instead: the tree loads, and a call to a
+/// helper raises NoMethodError naming it, as Rails does for a route that
+/// is not declared.
+fn apply_route_helpers_demand(files: &mut Vec<(String, String)>) {
+    const PATH: &str = "app/route_helpers.rb";
+    if files.iter().any(|(p, _)| p == PATH) {
+        return;
+    }
+    let named = files
+        .iter()
+        .any(|(p, c)| p.ends_with(".rb") && !p.starts_with("runtime/") && c.contains("RouteHelpers"));
+    if !named {
+        return;
+    }
+    files.push((
+        PATH.to_string(),
+        "# The source app declares no named routes (its config/routes.rb is\n\
+         # not in this tree), so no route helper is generated. Code that\n\
+         # names one loads; calling it raises NoMethodError, naming it.\n\
+         module RouteHelpers\n\
+         end\n"
+            .to_string(),
+    ));
+}
+
 fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
     use std::fmt::Write;
 
@@ -4798,6 +4988,35 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 return;
             }
         }
+        // Only the Ruby-family trees ship the Duration value class
+        // (`runtime/spinel/active_support_duration.rb`) that `30.minutes`
+        // grounds to and a declared
+        // `#: ActiveSupport::Duration` names.
+        if !matches!(target, "jruby" | "spinel") {
+            let names_duration = |ty: &crate::ty::Ty| {
+                let found = std::cell::Cell::new(false);
+                ty.map_class_ids(&|id| {
+                    found.set(found.get() || id.0.as_str() == "ActiveSupport::Duration");
+                    id.clone()
+                });
+                found.get()
+            };
+            let duration = match &*expr.node {
+                crate::expr::ExprNode::Const { path } => {
+                    path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["ActiveSupport", "Duration"])
+                }
+                crate::expr::ExprNode::Cast { target_ty, .. } => names_duration(target_ty),
+                _ => false,
+            };
+            if duration && !app.library_classes.iter().any(|class| class.name.0.as_str() == "ActiveSupport::Duration") {
+                emit::diagnostics::report_unsupported(
+                    expr.span,
+                    target,
+                    "duration",
+                    format!("ActiveSupport::Duration is the Ruby-family runtime's value class; the {target} runtime ships none"),
+                );
+            }
+        }
         if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
             if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
                 report_unavailable_class_value(app, target, id.0.as_str(), expr.span);
@@ -5121,6 +5340,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         files.push(("sig/runtime/json_column.rbs".to_string(), rbs));
     }
 
+    // ActiveJob payload codecs. Same reason as the JSON-column sidecar:
+    // the readers take parsed JSON, which only the sidecar can type.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/active_job_serialization.rbs")
+            .map_err(|e| format!("read runtime/spinel/active_job_serialization.rbs: {e}"))?;
+        files.push(("sig/runtime/active_job_serialization.rbs".to_string(), rbs));
+    }
+
     // Duration sidecar — pins @seconds Integer so ago/from_now stay
     // Time-typed under AOT inference (an untyped @seconds widens the
     // temporal arithmetic to poly against the Time-typed C return).
@@ -5392,6 +5619,9 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         "action_view_number_helper",
         "action_view_number_helper_mixin",
         "active_support_ext",
+        // `Rails.event` / `Rails.error`: the reporters, ParameterFilter and
+        // ExecutionContext. rails.rb requires it, so it ships beside rails.
+        "active_support_reporters",
         "hash_deep_merge",
         "security_utils",
         "params",
@@ -5622,6 +5852,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_cable_channels(&mut files, app);
     apply_content_layout(&mut files, app);
     apply_content_helper_attributes(&mut files, app);
+    apply_content_helper_tags(&mut files, app);
     // The `only:`-as-finder specializations, also in the shared base:
     // `runtime/global_id_locator.rb` is ONE file that both the spinel
     // tree and the ruby overlay require, and the rewrite that names
@@ -5633,6 +5864,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_attachable_locate(&mut files, app);
     apply_views_aggregator(&mut files);
     apply_models_aggregator(&mut files);
+    apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,
@@ -7251,9 +7483,53 @@ pub fn missing_bundled_requires(files: &[(String, String)]) -> Vec<String> {
 /// stable order.
 fn write_bundled_requires(files: &mut [(String, String)]) {
     for (i, require_line) in bundled_require_gaps(files) {
-        files[i].1.insert_str(0, &format!("{require_line}\n"));
+        insert_require_line(&mut files[i].1, &require_line);
     }
     apply_bundled_gem_wiring(files);
+}
+
+/// Write `line` (a `require`) at the top of a Ruby file, after its
+/// leading magic comments: Ruby reads `# frozen_string_literal: true`
+/// (and `encoding`, `warn_indent`, `shareable_constant_value`) only
+/// before the first token, so a require written above one switches it
+/// off and warns "'frozen_string_literal' is ignored after any tokens".
+/// A shebang stays the first line.
+fn insert_require_line(content: &mut String, line: &str) {
+    // Ruby reads magic comments anywhere in the leading run of comments
+    // and blank lines, so scan that whole run (a license header may come
+    // first, a blank line may separate two magic comments) and write the
+    // require after the last magic line, or the shebang.
+    let mut at = 0;
+    let mut end = 0;
+    for (n, text) in content.split_inclusive('\n').enumerate() {
+        end += text.len();
+        let trimmed = text.trim_end();
+        if n == 0 && trimmed.starts_with("#!") {
+            at = end;
+        } else if ruby_magic_comment(trimmed) {
+            at = end;
+        } else if !(trimmed.is_empty() || trimmed.starts_with('#')) {
+            break;
+        }
+    }
+    if at > 0 && !content[..at].ends_with('\n') {
+        content.push('\n');
+        at = content.len();
+    }
+    content.insert_str(at, &format!("{line}\n"));
+}
+fn ruby_magic_comment(line: &str) -> bool {
+    let Some(body) = line.strip_prefix('#') else { return false };
+    let body = body.trim();
+    if body.starts_with("-*-") {
+        return true;
+    }
+    let Some((key, _)) = body.split_once(':') else { return false };
+    let key = key.trim().to_ascii_lowercase().replace('-', "_");
+    matches!(
+        key.as_str(),
+        "frozen_string_literal" | "encoding" | "coding" | "warn_indent" | "shareable_constant_value" | "warn_past_scope"
+    )
 }
 
 /// The emitted call every declared variant lowers to (`lower::attached
@@ -8317,6 +8593,31 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_written_require_stays_below_the_files_magic_comments() {
+        let cases = [
+            ("# frozen_string_literal: true\n\n# doc\nx = 1\n", "# frozen_string_literal: true\nrequire \"bigdecimal\"\n\n# doc\nx = 1\n"),
+            ("#!/usr/bin/env ruby\n# encoding: utf-8\n# frozen_string_literal: true\nx\n", "#!/usr/bin/env ruby\n# encoding: utf-8\n# frozen_string_literal: true\nrequire \"bigdecimal\"\nx\n"),
+            ("# -*- coding: utf-8 -*-\nx\n", "# -*- coding: utf-8 -*-\nrequire \"bigdecimal\"\nx\n"),
+            ("# A doc comment: not magic\nx\n", "require \"bigdecimal\"\n# A doc comment: not magic\nx\n"),
+            ("x = 1\n", "require \"bigdecimal\"\nx = 1\n"),
+            ("# frozen_string_literal: true", "# frozen_string_literal: true\nrequire \"bigdecimal\"\n"),
+            // A license or doc header above the magic comment.
+            ("# Copyright 2020\n# License: MIT\n\n# frozen_string_literal: true\n\nx = 1\n", "# Copyright 2020\n# License: MIT\n\n# frozen_string_literal: true\nrequire \"bigdecimal\"\n\nx = 1\n"),
+            // A blank line between two magic comments.
+            ("# encoding: utf-8\n\n# frozen_string_literal: true\nx = 1\n", "# encoding: utf-8\n\n# frozen_string_literal: true\nrequire \"bigdecimal\"\nx = 1\n"),
+            // A shebang with no magic comment.
+            ("#!/usr/bin/env ruby\n# doc\nx = 1\n", "#!/usr/bin/env ruby\nrequire \"bigdecimal\"\n# doc\nx = 1\n"),
+            // A magic-looking comment after the first token is no magic comment.
+            ("x = 1\n# frozen_string_literal: true\n", "require \"bigdecimal\"\nx = 1\n# frozen_string_literal: true\n"),
+        ];
+        for (before, after) in cases {
+            let mut content = before.to_string();
+            super::insert_require_line(&mut content, "require \"bigdecimal\"");
+            assert_eq!(content, after, "{before:?}");
+        }
+    }
 
     #[test]
     fn a_bare_exception_class_is_named_only_in_rescue_or_raise_position() {
@@ -9422,7 +9723,7 @@ mod tests {
         // the layout yields.
         assert!(
             out.contains(
-                "    def rendered_html\n      Views::Layouts::ActionText::Contents.content(render_attachments + \"\\n\")\n    end\n"
+                "    def rendered_html\n      Views::Layouts::ActionText::Contents.content(render_action_text_content + \"\\n\")\n    end\n"
             ),
             "generated dispatch not written:\n{out}"
         );

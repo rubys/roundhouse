@@ -56,6 +56,7 @@ module ActiveRecord
     @from: String?
     @ctes: Array[String]
     @shared_lists: bool
+    @friendly: bool
     def with_recursive: (Hash[Symbol, Array[Relation]] ctes) -> Relation
     def from: (String source) -> Relation
     def cte_prefix: () -> String
@@ -69,6 +70,7 @@ module ActiveRecord
     @scope_attributes: Hash[Symbol, untyped]
     def where_scope: (Hash[Symbol, untyped] condition) -> Relation
     def scope_attributes: () -> Hash[Symbol, untyped]
+    def merge_seedable_scope: (Hash[String | Symbol, untyped] hash) -> void
     def not: (?(Hash[String | Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
     def excluding: (*untyped records) -> Relation
     def without: (*untyped records) -> Relation
@@ -226,7 +228,7 @@ module ActiveRecord
     def one?: () -> bool
     def many?: () -> bool
     def all?: () { (Base) -> bool } -> bool
-    def exists?: (?(Integer | String | Hash[String | Symbol, untyped] | nil) id) -> bool
+    def exists?: (?(Integer | String | Hash[String | Symbol, untyped] | nil | false) condition) -> bool
     def probe_existence: (Integer n) -> Integer
     def more_than?: (Integer n) -> bool
     def length: () -> Integer
@@ -260,6 +262,11 @@ module ActiveRecord
     def pick: (String | Symbol col) -> untyped
     def ids: () -> Array[Integer]
     def find: (Integer | Float | String | Array[Integer | Float | String] | nil id) -> untyped
+    def find_primary_key: (Integer | Float | String | Array[Integer | Float | String] | nil id) -> (Base | Array[Base])
+    def friendly: () -> Relation
+    def friendly_find: (?(Integer | Float | String | Array[Integer | Float | String] | nil) id) -> (Base | Array[Base])
+    def friendly_first: (?String id) -> Base?
+    def friendly_history_first: (?String id) -> Base?
     def find_ids: (Array[Integer | Float | String] ids) -> Array[Base]
     def find_by: (Hash[Symbol, untyped] | String | nil conditions) -> Base?
     def find_by!: (Hash[Symbol, untyped] | String | nil conditions) -> Base
@@ -267,15 +274,20 @@ module ActiveRecord
     def find_sole_by: (Hash[Symbol, untyped] | String | nil conditions) -> Base
     def first_or_initialize: () -> Base
     def find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
+    def find_or_create_by!: (Hash[Symbol, untyped] conditions) -> Base
+    def find_or_initialize_by: (Hash[Symbol, untyped] conditions) -> Base
 
     def to_sql: () -> String
+    def bound_sql: () -> String
     def to_subquery_sql: () -> String
     def select_sql_with: (String default_cols) -> String
     def append_join_where: (String sql) -> String
     def append_group_having: (String sql) -> String
     def count_sql: () -> String
+    def bound_count_sql: () -> String
     def distinct_count_columns: () -> String
     def exists_sql: (Integer n) -> String
+    def bound_exists_sql: (Integer n) -> String
     def hash_conditions: (Hash[String | Symbol, untyped] hash) -> String
     def column_predicate: (String col, Relation | Array[untyped] | Base | String | Integer | Float | bool | nil val) -> String
     def substitute_binds: (String sql, Array[untyped] args) -> String
@@ -283,6 +295,13 @@ module ActiveRecord
     def named_bind_start?: (String ch) -> bool
     def named_bind_char?: (String ch) -> bool
     def escape_list: (Array[untyped] vals) -> String
+    def bind_literal: (untyped val) -> String
+    def self.inline_sql: (String sql) -> String
+    def self.lift_binds: (String sql) -> Array[String]
+    def self.quote_count: (String text) -> Integer
+    def self.lift_binds_scan: (String sql) -> Array[String]
+    def self.sql_token_end: (String sql, Integer j, String ch, Integer n) -> Integer
+    def self.bind_kind: (String text) -> String
     def order_term: (String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]] p) -> String
     def format_order_hash: (Hash[Symbol, untyped] h) -> String
     def sql_limit: (Integer | Float | String n) -> Integer

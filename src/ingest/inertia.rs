@@ -49,6 +49,7 @@ enum PropValue {
 pub fn load_inertia_config<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
+    vite_digest: Option<&str>,
 ) -> IngestResult<Option<InertiaConfig>> {
     let init_dir = dir.join("config/initializers");
     let mut inertia = InertiaConfig::default();
@@ -57,7 +58,7 @@ pub fn load_inertia_config<V: Vfs + ?Sized>(
         for entry in super::app::read_rb_files(vfs, &init_dir)? {
             if let Ok(bytes) = vfs.read(&entry) {
                 let file = entry.display().to_string();
-                if extract_inertia_config(&bytes, &file, &mut inertia) {
+                if extract_inertia_config(&bytes, &file, vite_digest, &mut inertia) {
                     found = true;
                 }
             }
@@ -69,7 +70,12 @@ pub fn load_inertia_config<V: Vfs + ?Sized>(
 /// A non-literal value is a survey gap rather than an evaluated guess:
 /// the emitted app would otherwise run with the gem's default and no
 /// diagnostic would say so.
-fn extract_inertia_config(source: &[u8], file: &str, config: &mut InertiaConfig) -> bool {
+pub(super) fn extract_inertia_config(
+    source: &[u8],
+    file: &str,
+    vite_digest: Option<&str>,
+    config: &mut InertiaConfig,
+) -> bool {
     let src = String::from_utf8_lossy(source);
     if !src.contains("InertiaRails") {
         return false;
@@ -169,10 +175,17 @@ fn extract_inertia_config(source: &[u8], file: &str, config: &mut InertiaConfig)
                 // SSR head tags, and without SSR nothing on the server reads it.
                 ("use_data_inertia_head_attribute", Some(_)) => {}
                 ("version", _) => {
+                    let value_loc = value.location();
+                    let value_text = &src[value_loc.start_offset()..value_loc.end_offset()];
                     if let Some(s) = value.as_string_node() {
                         config.version = String::from_utf8_lossy(s.unescaped()).into_owned();
+                    } else if matches!(value_text, "ViteRuby.digest" | "::ViteRuby.digest") {
+                        match vite_digest {
+                            Some(digest) => config.version = digest.to_string(),
+                            None => gap("`ViteRuby.digest` without a Vite build manifest"),
+                        }
                     } else {
-                        gap("version is not a String literal");
+                        gap("version is neither a String literal nor `ViteRuby.digest`");
                     }
                 }
                 _ => gap("option not modeled"),

@@ -128,6 +128,9 @@ pub struct ParamsSpec {
 #[derive(Clone, Debug, Default)]
 pub struct ParamsSpecs {
     specs: Vec<ParamsSpec>,
+    /// Names of `has_one` / `has_many` associations declared with a
+    /// `primary_key:` other than `id` (see [`Self::mark_keyed_associations`]).
+    keyed_assocs: std::collections::HashSet<Symbol>,
 }
 
 impl ParamsSpecs {
@@ -171,6 +174,27 @@ impl ParamsSpecs {
     /// `scan_create_demand` matches them — `snake_case(Model) ==
     /// resource` — so `:user` finds `User` and a list permitting
     /// `:avatar` on it types that field as a file.
+    /// Record the association names whose foreign key matches an owner
+    /// column other than `id` (`primary_key:`). The parent-ivar rewrite
+    /// (`@article.comments.build` -> `Comment.new(article_id:
+    /// @article.id)`) derives the foreign key from the ivar's name and
+    /// reads `.id`, which is wrong for these, so it declines them and
+    /// the typed association seed (which reads the declaration) handles
+    /// the call instead.
+    pub fn mark_keyed_associations(&mut self, models: &[crate::dialect::Model]) {
+        for model in models {
+            for assoc in model.associations() {
+                if crate::lower::assoc_primary_key::custom_primary_key(assoc).is_some() {
+                    self.keyed_assocs.insert(assoc.name().clone());
+                }
+            }
+        }
+    }
+
+    pub fn is_keyed_assoc(&self, name: &Symbol) -> bool {
+        self.keyed_assocs.contains(name)
+    }
+
     pub fn mark_file_fields(&mut self, models: &[crate::dialect::Model]) {
         for spec in &mut self.specs {
             let Some(model) = models
@@ -269,7 +293,7 @@ pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
         }
     }
     assign_class_ids(&mut specs);
-    let mut specs = ParamsSpecs { specs };
+    let mut specs = ParamsSpecs { specs, ..Default::default() };
     scan_create_demand(controllers, &mut specs);
     specs
 }
@@ -379,6 +403,7 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 file_fields: std::collections::BTreeSet::new(),
             })
             .collect(),
+        keyed_assocs: Default::default(),
     }
 }
 

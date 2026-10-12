@@ -8,7 +8,8 @@
 use ruby_prism::Node;
 
 use crate::dialect::{MethodDef, Test, TestModule};
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::ident::VarId;
 use crate::span::Span;
 use crate::{ClassId, Symbol};
 
@@ -56,6 +57,21 @@ pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestMo
 /// two suites. Non-test top-level classes are shared by every module
 /// as helpers, the way they were for the one.
 pub fn ingest_test_files(source: &[u8], file: &str) -> IngestResult<Vec<TestModule>> {
+    ingest_test_classes(source, file, true)
+}
+
+/// The test classes a support file (`test/test_helper.rb`) defines: only
+/// classes that read as test classes, with no single-class fallback, so a
+/// helper's plain `class RecordingLogger < Logger` is never mistaken for one.
+pub fn ingest_test_bases(source: &[u8], file: &str) -> IngestResult<Vec<TestModule>> {
+    ingest_test_classes(source, file, false)
+}
+
+fn ingest_test_classes(
+    source: &[u8],
+    file: &str,
+    single_class_fallback: bool,
+) -> IngestResult<Vec<TestModule>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -71,6 +87,9 @@ pub fn ingest_test_files(source: &[u8], file: &str) -> IngestResult<Vec<TestModu
     // class inside a module is not a candidate here: a support file
     // in a test directory often declares one, and it has no tests.
     if test_nodes.is_empty() {
+        if !single_class_fallback {
+            return Ok(Vec::new());
+        }
         let mut helper_nodes = helper_nodes;
         let Some(first) = helper_nodes.iter().position(|(scope, _)| scope.is_empty()) else {
             return Ok(Vec::new());
@@ -113,10 +132,15 @@ fn ingest_test_class(
     let mut helpers: Vec<MethodDef> = Vec::new();
     let mut constants: Vec<(Symbol, Expr)> = Vec::new();
     let mut includes: Vec<ClassId> = Vec::new();
+    let mut teardowns: Vec<Expr> = Vec::new();
     if let Some(class_body) = class.body() {
         for stmt in flatten_statements(class_body) {
             if let Some(test) = ingest_test_declaration(&stmt, file)? {
                 tests.push(test);
+                continue;
+            }
+            if let Some(body) = ingest_teardown_block(&stmt, file)? {
+                teardowns.push(body);
                 continue;
             }
             if let Some(body) = ingest_setup_declaration(&stmt, file)? {
@@ -213,6 +237,156 @@ fn ingest_test_class(
         }
     }
 
+    // ActiveSupport runs `teardown do … end` blocks after every test,
+    // passed or failed, after the class's own `def teardown` and in
+    // reverse of the order they were declared. The harness calls the
+    // test's `teardown` after each test the same way, so the blocks
+    // become that method. An early `return` in `def teardown` must not
+    // skip the blocks — wrap the method body in `ensure` so they run.
+    //
+    // Always `super` in a trailing ensure: TestBase's teardown runs
+    // `mocha_verify` / stub-slot verifies (see `patch_stub_lifecycle`).
+    // A subclass `def teardown` that omits `super` leaves Mocha expects
+    // installed, and the next test fails with "unexpected invocation"
+    // (campfire's CachedResponsesTest after this ingest landed).
+    // Method-level `ensure` (`implicit: true`) is the outer shape; the
+    // nested `begin/ensure` around the blocks is explicit so `super`
+    // still runs when a block raises.
+    //
+    // When `def teardown` already calls `super` (including conditionally),
+    // mark it at the call site and skip the ensure fallback so mocha
+    // verify runs exactly once on every path.
+    if !teardowns.is_empty() {
+        let blocks = Expr::new(
+            Span::synthetic(),
+            ExprNode::Seq {
+                exprs: teardowns.into_iter().rev().collect(),
+            },
+        );
+        let syn = Span::synthetic();
+        let super_call = || {
+            Expr::new(
+                syn,
+                ExprNode::Super { args: Some(Vec::new()) },
+            )
+        };
+        let own = helpers.iter().position(|m| m.name.as_str() == "teardown");
+        let (name_span, body) = match own.map(|i| helpers.remove(i)) {
+            Some(m) => {
+                // def teardown
+                //   __teardown_super_ran = false
+                //   begin
+                //     own  # Super sites set the flag then call super
+                //   ensure
+                //     begin
+                //       blocks
+                //     ensure
+                //       super() unless __teardown_super_ran
+                //     end
+                //   end
+                // end
+                let flag = Symbol::from("__teardown_super_ran");
+                let flag_lit = |value: bool| {
+                    Expr::new(syn, ExprNode::Lit { value: Literal::Bool { value } })
+                };
+                let flag_var = || {
+                    Expr::new(
+                        syn,
+                        ExprNode::Var {
+                            id: VarId(0),
+                            name: flag.clone(),
+                        },
+                    )
+                };
+                let assign_flag = |value: bool| {
+                    Expr::new(
+                        syn,
+                        ExprNode::Assign {
+                            target: LValue::Var {
+                                id: VarId(0),
+                                name: flag.clone(),
+                            },
+                            value: flag_lit(value),
+                        },
+                    )
+                };
+                let mut own_body = m.body;
+                mark_teardown_super_ran(&mut own_body, &flag);
+                let fallback_super = Expr::new(
+                    syn,
+                    ExprNode::If {
+                        cond: flag_var(),
+                        then_branch: Expr::new(syn, ExprNode::Lit { value: Literal::Nil }),
+                        else_branch: super_call(),
+                    },
+                );
+                let blocks_then_super = Expr::new(
+                    syn,
+                    ExprNode::BeginRescue {
+                        body: blocks,
+                        rescues: Vec::new(),
+                        else_branch: None,
+                        ensure: Some(fallback_super),
+                        implicit: false,
+                    },
+                );
+                (
+                    m.name_span,
+                    Expr::new(
+                        syn,
+                        ExprNode::BeginRescue {
+                            body: Expr::new(
+                                syn,
+                                ExprNode::Seq {
+                                    exprs: vec![assign_flag(false), own_body],
+                                },
+                            ),
+                            rescues: Vec::new(),
+                            else_branch: None,
+                            ensure: Some(blocks_then_super),
+                            implicit: true,
+                        },
+                    ),
+                )
+            }
+            None => (
+                Span::synthetic(),
+                // def teardown
+                //   blocks
+                // ensure
+                //   super()
+                // end
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::BeginRescue {
+                        body: blocks,
+                        rescues: Vec::new(),
+                        else_branch: None,
+                        ensure: Some(super_call()),
+                        implicit: true,
+                    },
+                ),
+            ),
+        };
+        helpers.push(MethodDef {
+            name_span,
+            name: Symbol::from("teardown"),
+            receiver: crate::dialect::MethodReceiver::Instance,
+            visibility: crate::dialect::MethodVisibility::Public,
+            params: Vec::new(),
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            body,
+            signature: None,
+            effects: crate::effect::EffectSet::default(),
+            enclosing_class: Some(name.0.clone()),
+            kind: crate::dialect::AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }
+
     // Top-level helper classes (e.g. `class Article < ActiveRecord::
     // Base` declared next to `ViewHelpersTest` in the same file) ingest
     // as LibraryClass and flow through the same `inner_classes` channel
@@ -305,6 +479,45 @@ pub fn ingest_test_case_setup(source: &[u8], file: &str) -> IngestResult<Option<
         return Ok(Some(Expr::new(Span::synthetic(), ExprNode::Seq { exprs })));
     }
     Ok(None)
+}
+
+/// Rewrite every `super` in a teardown body to set `__teardown_super_ran`
+/// before the call, so the ensure fallback can skip a second inherited
+/// teardown. Works for bare `super`, `super(...)`, and conditional forms
+/// (`super if x`) — only executed Super sites flip the flag.
+fn mark_teardown_super_ran(expr: &mut Expr, flag: &Symbol) {
+    if matches!(&*expr.node, ExprNode::Super { .. }) {
+        let super_expr = std::mem::replace(
+            expr,
+            Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+        );
+        *expr = Expr::new(
+            super_expr.span,
+            ExprNode::Seq {
+                exprs: vec![
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Assign {
+                            target: LValue::Var {
+                                id: VarId(0),
+                                name: flag.clone(),
+                            },
+                            value: Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Lit {
+                                    value: Literal::Bool { value: true },
+                                },
+                            ),
+                        },
+                    ),
+                    super_expr,
+                ],
+            },
+        );
+        return;
+    }
+    expr.node
+        .for_each_child_mut(&mut |child| mark_teardown_super_ran(child, flag));
 }
 
 /// `def load_fixtures(config) = (fixtures = super; …; fixtures)` on the
@@ -463,6 +676,40 @@ fn ingest_setup_declaration(
         return Ok(Some(body));
     }
     Ok(None)
+}
+
+/// `teardown do … end`: the block's body. Any other `teardown` call
+/// (`teardown :close_files`, a block argument, `self.teardown do`) is
+/// refused by name: it would otherwise fall to the unrecognized-statement
+/// drop below and its cleanup would silently never run.
+fn ingest_teardown_block(stmt: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> {
+    let Some(call) = stmt.as_call_node() else { return Ok(None) };
+    if constant_id_str(&call.name()) != "teardown" {
+        return Ok(None);
+    }
+    // Receiverless `teardown do` is the ActiveSupport form. `self.teardown
+    // do` is the same callback in some suites; refuse it rather than drop.
+    if let Some(recv) = call.receiver() {
+        let is_self = recv.as_self_node().is_some();
+        if is_self {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "test teardown not modeled: only receiverless `teardown do … end` runs after each test".into(),
+            });
+        }
+        return Ok(None);
+    }
+    let block = call.block().and_then(|b| b.as_block_node());
+    match block {
+        Some(block) if call.arguments().is_none() => Ok(Some(match block.body() {
+            Some(body_node) => ingest_expr(&body_node, file)?,
+            None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+        })),
+        _ => Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "test teardown not modeled: only `teardown do … end` runs after each test".into(),
+        }),
+    }
 }
 
 /// Recognize a single test declaration. Two shapes are supported:

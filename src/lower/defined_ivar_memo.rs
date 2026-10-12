@@ -33,7 +33,13 @@
 //! replacement is an ordinary sequence. An assignment nested inside an
 //! expression the pass cannot expand leaves the `defined?` untouched:
 //! a guard that stays `defined?` fails the way it does today, which is
-//! honest, where a flag one writer never sets would answer wrong.
+//! honest, where a flag one writer never sets would answer wrong. So
+//! does any other writer of the ivar: a compound assignment
+//! (`@x ||= {}`), a multiple assignment, `instance_variable_set` or
+//! `remove_instance_variable` naming it. A class-level
+//! `@cache ||= {}` in one method and `return unless defined?(@cache) &&
+//! @cache` in another is the shape: the guard would read a flag the
+//! compound assignment never set, and always return early.
 
 use std::collections::BTreeSet;
 
@@ -95,7 +101,7 @@ fn rewrite_class(mut bodies: Vec<&mut Expr>) {
     }
     for body in bodies.iter_mut() {
         rewrite_guards(body, &rewritable);
-        rewrite_assignments(body, &rewritable, true);
+        rewrite_assignments(body, &rewritable, true, true);
     }
 }
 
@@ -126,6 +132,18 @@ fn assignments_in_statement_position(e: &Expr, name: &Symbol, statement: bool) -
             }
             assignments_in_statement_position(value, name, false)
         }
+        ExprNode::OpAssign { target: LValue::Ivar { name: n }, .. } if n == name => false,
+        ExprNode::MultiAssign { targets, .. }
+            if targets.iter().any(|t| matches!(t, LValue::Ivar { name: n } if n == name)) =>
+        {
+            false
+        }
+        ExprNode::Send { method, args, .. }
+            if matches!(method.as_str(), "instance_variable_set" | "remove_instance_variable")
+                && args.first().is_some_and(|a| names_ivar(a, name)) =>
+        {
+            false
+        }
         ExprNode::Seq { exprs } => {
             exprs.iter().all(|x| assignments_in_statement_position(x, name, true))
         }
@@ -144,6 +162,17 @@ fn assignments_in_statement_position(e: &Expr, name: &Symbol, statement: bool) -
             ok
         }
     }
+}
+
+/// `arg` is the ivar's name as a literal (`:@x`, `"@x"`); `name` is
+/// stored without the sigil.
+fn names_ivar(arg: &Expr, name: &Symbol) -> bool {
+    let text = match &*arg.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+        ExprNode::Lit { value: Literal::Str { value } } => value.as_str(),
+        _ => return false,
+    };
+    text.strip_prefix('@') == Some(name.as_str())
 }
 
 fn rewrite_guards(e: &mut Expr, names: &[Symbol]) {
@@ -167,20 +196,25 @@ fn rewrite_guards(e: &mut Expr, names: &[Symbol]) {
     }
 }
 
-fn rewrite_assignments(e: &mut Expr, names: &[Symbol], statement: bool) {
+/// `used`: the statement's value is read (a body's or branch's last
+/// expression). Where it is not, the rewrite ends at the flag: a bare
+/// trailing `@x` in void context is a CRuby warning ("possibly useless
+/// use of a variable"), which a warnings-as-errors boot raises.
+fn rewrite_assignments(e: &mut Expr, names: &[Symbol], statement: bool, used: bool) {
     match &mut *e.node {
         ExprNode::Seq { exprs } => {
-            for x in exprs.iter_mut() {
-                rewrite_assignments(x, names, true);
+            let last = exprs.len().saturating_sub(1);
+            for (i, x) in exprs.iter_mut().enumerate() {
+                rewrite_assignments(x, names, true, used && i == last);
             }
         }
         ExprNode::If { cond, then_branch, else_branch } => {
-            rewrite_assignments(cond, names, false);
-            rewrite_assignments(then_branch, names, true);
-            rewrite_assignments(else_branch, names, true);
+            rewrite_assignments(cond, names, false, true);
+            rewrite_assignments(then_branch, names, true, used);
+            rewrite_assignments(else_branch, names, true, used);
         }
         ExprNode::Assign { target: LValue::Ivar { name }, value } if statement && names.contains(name) => {
-            rewrite_assignments(value, names, false);
+            rewrite_assignments(value, names, false, true);
             let span = e.span;
             let name = name.clone();
             let ty = e.ty.clone();
@@ -192,14 +226,18 @@ fn rewrite_assignments(e: &mut Expr, names: &[Symbol], statement: bool) {
                 ExprNode::Assign { target: LValue::Ivar { name: flag_name(&name) }, value: flag_true },
             );
             set_flag.ty = Some(Ty::Bool);
-            let mut read = Expr::new(span, ExprNode::Ivar { name });
-            read.ty = ty.clone();
-            let mut seq = Expr::new(span, ExprNode::Seq { exprs: vec![assign, set_flag, read] });
-            seq.ty = ty;
+            let mut seq = if used {
+                let mut read = Expr::new(span, ExprNode::Ivar { name });
+                read.ty = ty.clone();
+                Expr::new(span, ExprNode::Seq { exprs: vec![assign, set_flag, read] })
+            } else {
+                Expr::new(span, ExprNode::Seq { exprs: vec![assign, set_flag] })
+            };
+            seq.ty = if used { ty } else { Some(Ty::Bool) };
             *e = seq;
         }
         _ => {
-            e.node.for_each_child_mut(&mut |c| rewrite_assignments(c, names, false));
+            e.node.for_each_child_mut(&mut |c| rewrite_assignments(c, names, false, true));
         }
     }
 }

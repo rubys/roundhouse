@@ -69,6 +69,59 @@ module ActionView
       ?line_width: Integer,
       ?break_sequence: String
     ) -> String
+    def self.word_wrap_finish: (String out, String break_sequence) -> String
+    def self.word_wrap_scan: (
+      String text,
+      Integer line_width,
+      String break_sequence,
+      String out,
+      Integer i,
+      Integer n
+    ) -> String
+    def self.word_wrap_find_break: (
+      String text,
+      Integer line_width,
+      String break_sequence,
+      String out,
+      Integer i,
+      Integer n,
+      Integer j,
+      Integer max_end,
+      Integer best_j,
+      Integer best_next
+    ) -> String
+    def self.word_wrap_skip_nl: (String text, Integer r, Integer n) -> Integer
+    def self.word_wrap_skip_ws: (String text, Integer k, Integer n) -> Integer
+    def self.word_wrap_ws_next: (String text, Integer k, Integer n) -> Integer
+    def self.word_wrap_after_ws: (String text, Integer k2, Integer n) -> Integer
+    def self.word_wrap_word_end: (String text, Integer j, Integer n) -> Integer
+    def self.word_wrap_hard: (
+      String text,
+      Integer line_width,
+      String break_sequence,
+      String out,
+      Integer i,
+      Integer n
+    ) -> String
+    def self.word_wrap_hard_end: (String text, Integer i, Integer n) -> Integer
+    def self.word_wrap_hard_at: (
+      String text,
+      Integer line_width,
+      String break_sequence,
+      String out,
+      Integer i,
+      Integer n,
+      Integer j
+    ) -> String
+    def self.word_wrap_hard_cont: (
+      String text,
+      Integer line_width,
+      String break_sequence,
+      String out2,
+      Integer j,
+      Integer n,
+      String w
+    ) -> String
   
     # ── DOM helpers ─────────────────────────────────────────────────
     # Monomorphic record-shape: dom_id takes an ActiveRecord::Base
@@ -84,6 +137,7 @@ module ActionView
     # previous `record_dom_prefix(record)` helper that called
     # `record.class.name.downcase` (runtime introspection).
     def self.dom_id: (ActiveRecord::Base record, ?Symbol? suffix) -> String
+    def self.dom_class: (ActiveRecord::Base record, ?(Symbol | String)? prefix) -> String
   
     # ── HTML element helpers ────────────────────────────────────────
     # `text` is the link/button label — typed String (was untyped).

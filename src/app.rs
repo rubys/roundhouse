@@ -59,6 +59,8 @@ pub struct App {
     pub importmap: Option<Importmap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inertia: Option<InertiaConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vite_manifest: Option<ViteManifest>,
     /// Logical stylesheet names discovered in `app/assets/stylesheets/`
     /// + `app/assets/builds/` (file stems without `.css`). When the
     /// ERB uses `stylesheet_link_tag :app, ...`, Rails with Propshaft
@@ -91,6 +93,14 @@ pub struct App {
     /// replaces Action Text's `rich_text_area`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gem_lock: Option<crate::gems::Lockfile>,
+    /// The Rails frameworks `config/application.rb` loads, as top-level
+    /// constant names (`rails/all` → every framework; individual
+    /// `require "active_storage/engine"` lines → just those). `None`
+    /// when the file is absent or unreadable, which is also what a
+    /// non-Rails tree looks like. Read by `lower::defined_const_fold`,
+    /// which answers `defined?(ActiveStorage)` from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_frameworks: Option<Vec<String>>,
     /// The classes and method headers the locked gems' Tapioca RBIs
     /// declare ([`crate::gem_boundary`]). Declarations only, read at
     /// ingest when the tree (or the real location of its lockfile) has
@@ -105,6 +115,13 @@ pub struct App {
     /// the runtime's generated `ContentHelper.app_allowed_attributes`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_helper_allowed_attributes: Vec<String>,
+    /// Tags the app adds the same way — `allowed_tags=` in a
+    /// `to_prepare` / initializer (campfire's
+    /// `ContentFilters::EDITOR_FORMATTING_TAGS`). Rendered into
+    /// `ContentHelper.app_allowed_tags`. Needed once sanitize runs on
+    /// render: without it, editor markup (`s`/`u`/table) is stripped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_helper_allowed_tags: Vec<String>,
     /// Call-site-unified parameter types, written by the analyzer's
     /// fixpoint (`unify_params_from_call_sites`) as its last act and
     /// read by lowerings that build method signatures — the controller
@@ -380,6 +397,12 @@ pub struct App {
     /// item provenance) can follow when emission needs it.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_model_items: HashMap<ClassId, Vec<ModelBodyItem>>,
+    /// Instance-method names a concern's `included do` block (re)defines
+    /// (`def x`, `alias_method :x, ...`, `define_method`, `attr_*`), keyed by
+    /// module. Those statements are not carried as `concern_model_items`, so
+    /// this is the only record that an includer's reader `x` is replaced.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub concern_included_redefs: HashMap<ClassId, Vec<Symbol>>,
     /// Classes that were `ActiveSupport::CurrentAttributes` subclasses
     /// before `ingest::current_attributes` flattened them. Recorded
     /// because that pass CLEARS the parent — nothing downstream could
@@ -603,9 +626,6 @@ impl MixinKind {
     }
 }
 
-/// A Rails-style importmap: one `<name>` → `<path>` entry per
-/// pin, in declaration order (Rails preserves order for
-/// modulepreload link emission).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct InertiaConfig {
     pub version: String,
@@ -614,6 +634,23 @@ pub struct InertiaConfig {
     pub use_script_element_for_initial_page: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ViteManifest {
+    pub public_dir: String,
+    pub digest: String,
+    pub chunks: std::collections::BTreeMap<String, ViteChunk>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ViteChunk {
+    pub file: String,
+    pub css: Vec<String>,
+    pub imports: Vec<String>,
+}
+
+/// A Rails-style importmap: one `<name>` → `<path>` entry per
+/// pin, in declaration order (Rails preserves order for
+/// modulepreload link emission).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct Importmap {
     pub pins: Vec<ImportmapPin>,
@@ -666,9 +703,7 @@ impl App {
                         if method.as_str() == "include" {
                             for arg in args {
                                 if let crate::expr::ExprNode::Const { path } = &*arg.node {
-                                    ids.push(crate::ident::ClassId(crate::ident::Symbol::from(
-                                        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
-                                    )));
+                                    ids.push(crate::analyze::mixin_path_id(path));
                                 }
                             }
                         }
@@ -731,12 +766,15 @@ impl App {
             seeds: None,
             importmap: None,
             inertia: None,
+            vite_manifest: None,
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
             rbs_includes: HashMap::new(),
             gem_lock: None,
+            loaded_frameworks: None,
             gem_boundary: Default::default(),
             content_helper_allowed_attributes: Vec::new(),
+            content_helper_allowed_tags: Vec::new(),
             inferred_method_params: HashMap::new(),
             helper_method_index: HashMap::new(),
             view_visible_controller_methods: BTreeSet::new(),
@@ -760,6 +798,7 @@ impl App {
             concern_spliced_actions: HashMap::new(),
             concern_spliced_class_methods: HashMap::new(),
             concern_model_items: HashMap::new(),
+            concern_included_redefs: HashMap::new(),
             current_attribute_classes: Vec::new(),
             render_edges: HashMap::new(),
             view_feeders: HashMap::new(),

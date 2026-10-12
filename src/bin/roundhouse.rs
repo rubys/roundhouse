@@ -433,8 +433,29 @@ fn run_transpile(
     // (gradual_untyped above all) can run to hundreds on a large app,
     // so by default they collapse to a count; --allow-unsupported asks
     // for the full inventory and gets every line.
+    // The initializer ledger is a warning per unconsumed boot statement,
+    // which can run to hundreds on a large app: like the analyze warnings
+    // below it collapses to a count unless `--survey` (which prints the
+    // ledger section) or `--allow-unsupported` asks for the inventory.
+    let list_ledger = survey || allow_unsupported;
+    let is_ledger = |d: &roundhouse::diagnostic::Diagnostic| {
+        matches!(d.kind, roundhouse::diagnostic::DiagnosticKind::UnconsumedInitializer { .. })
+    };
+    let mut ledger_warnings = 0usize;
     for d in &diags {
+        if is_ledger(d) {
+            ledger_warnings += 1;
+            if !list_ledger {
+                continue;
+            }
+        }
         eprintln!("roundhouse: {}", d.render(&app.sources));
+    }
+    if ledger_warnings > 0 && !list_ledger {
+        eprintln!(
+            "roundhouse: {ledger_warnings} unconsumed initializer statement(s) (warnings) — \
+             rerun with --survey to list them"
+        );
     }
     let mut suppressed_warnings = 0usize;
     for d in &analyze_diags {
@@ -449,6 +470,15 @@ fn run_transpile(
             "roundhouse: {suppressed_warnings} analyze warning(s) not shown — \
              rerun with --allow-unsupported to list them"
         );
+    }
+
+    // The initializer ledger section, beside the punch list but NOT part of
+    // its "ingest gap(s)" count: a ledger line is a statement nothing reads,
+    // not a construct ingest failed to parse, and counting it as a gap would
+    // let `attribute_ingest_gaps` downgrade real errors in the same file.
+    if survey && ledger_warnings > 0 {
+        eprintln!();
+        eprint!("{}", roundhouse::ingest::initializer_ledger::render_summary(&diags));
     }
 
     // The punch list, before the gate: on an app that fails the gate

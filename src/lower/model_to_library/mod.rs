@@ -27,6 +27,7 @@ pub use schema::col_storage_name;
 pub use schema::shakeable_synthesized_names;
 pub(crate) mod validations;
 mod associations;
+pub(crate) use associations::polymorphic_type_switch;
 pub(crate) mod broadcasts;
 pub(crate) mod markers;
 pub mod row;
@@ -719,6 +720,30 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         {
             continue;
         }
+        // `extend FriendlyId` / `friendly_id :col, use: [...]` — claimed
+        // by lower::friendly_id on the configurations it honors. The
+        // slug-generation gap that remains is reported once, below the
+        // claim, as its own warning.
+        if (name == "friendly_id" || name == "extend")
+            && crate::lower::friendly_id::claims(model, expr.span)
+        {
+            if name == "friendly_id" {
+                if let Some((span, message)) = crate::lower::friendly_id::write_gap(model) {
+                    let kind = crate::diagnostic::DiagnosticKind::LowerResidue {
+                        pass: crate::ident::Symbol::from("friendly_id"),
+                        construct: crate::ident::Symbol::from("friendly_id"),
+                        reason: crate::ident::Symbol::from("slug generation on save"),
+                    };
+                    crate::emit::diagnostics::push(Diagnostic {
+                        span,
+                        severity: Severity::Warning,
+                        kind,
+                        message,
+                    });
+                }
+            }
+            continue;
+        }
         // `generates_token_for :purpose, expires_in: D do … end` —
         // claimed by lower::generates_token_for for the forms it
         // expands; asked by span for the same reason.
@@ -1172,7 +1197,7 @@ fn build_methods_with_finder_inputs(
         }
     }
 
-    push_validate_method(&mut methods, model);
+    push_validate_method(&mut methods, model, models);
     push_association_methods(&mut methods, model, models);
     push_dependent_destroy(&mut methods, model);
     push_unknown_marker_methods(&mut methods, model);
@@ -1214,6 +1239,10 @@ fn build_methods_with_finder_inputs(
     crate::lower::attachment_model::push_attachment_record_methods(&mut methods, model);
     crate::lower::attached::push_attached_methods(&mut methods, model);
     push_user_methods(&mut methods, model);
+    // friendly_id — `friendly`, its configuration and the slug
+    // `to_param`. After the user methods (their own wins), before the
+    // `to_param` default below.
+    crate::lower::friendly_id::push_friendly_methods(&mut methods, model);
     push_dom_prefix_method(&mut methods, model);
     // AFTER push_user_methods, unlike the macros above: its skip guard
     // reads the accumulated list, so a model's own `to_param` (already

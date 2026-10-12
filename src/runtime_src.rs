@@ -361,7 +361,11 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
             args: vec![],
         });
     }
-    None
+    // A scalar literal (`SALT = "active_record/signed_id"`) types as
+    // itself. Without this a runtime class's scalar constant had no table
+    // entry, so an app read of it resolved to the runtime declaration with
+    // no type and was refused as an unsupported constant.
+    type_of_literal_node(node)
 }
 
 fn type_of_literal_node(node: &Node<'_>) -> Option<Ty> {
@@ -949,6 +953,13 @@ pub fn parse_methods_with_rbs_in_ctx(
         if let Some(Ty::Fn { params, .. }) = &m.signature {
             for (param, p) in m.params.iter().zip(params.iter()) {
                 ctx.local_bindings.insert(param.name.clone(), p.ty.clone());
+            }
+            // `def subscribe(subscriber, &block)`: the captured block is
+            // the signature's block, which `m.params` does not carry.
+            if let Some(block_param) = &m.block_param {
+                if let Some(p) = params.iter().find(|p| matches!(p.kind, crate::ty::ParamKind::Block)) {
+                    ctx.local_bindings.insert(block_param.name.clone(), p.ty.clone());
+                }
             }
         }
         if let Some(enclosing) = &m.enclosing_class {

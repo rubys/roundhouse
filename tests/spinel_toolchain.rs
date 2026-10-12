@@ -43,6 +43,8 @@ mod class_attribute;
 mod class_configuration;
 #[path = "support/data_factory.rs"]
 mod data_factory;
+#[path = "support/dry_struct.rs"]
+mod dry_struct;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
 #[path = "support/cable_broadcast_json.rs"]
@@ -63,6 +65,8 @@ mod action_controller_head;
 mod strong_params;
 #[path = "spinel_toolchain/params_wrapper.rs"]
 mod params_wrapper;
+#[path = "spinel_toolchain/json_request_values.rs"]
+mod json_request_values;
 #[path = "support/io_process_constants.rs"]
 mod io_process_constants_contract;
 #[path = "spinel_toolchain/io_process_constants.rs"]
@@ -160,6 +164,17 @@ fn finite_concern_class_configuration_runs_natively() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// The native half of `emit_and_run::dry_struct_classes_run_lowered`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn dry_struct_classes_run_lowered_natively() {
+    let run = dry_struct::overlay()
+        .run_spinel(&format!("{}\n{}", dry_struct::ASSERTIONS, dry_struct::STAMP_ASSERTIONS));
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-struct contract passed"));
+    assert!(run.stdout.contains("dry-struct stamp contract passed"));
 }
 
 /// The native half of `emit_and_run::concern_class_attribute_macros_run_at_class_load`.

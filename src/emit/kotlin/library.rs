@@ -21,9 +21,9 @@ use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
 
 use super::expr::{
-    begin_method, emit_expr, hoisted_decls, register_method_params, set_current_class,
-    set_instance_prop_types, set_instance_props, set_param_names, set_return_label,
-    set_returns_unit,
+    begin_method, emit_expr, hoisted_decls, register_method_param_tys, register_method_params,
+    set_current_class, set_instance_prop_types, set_instance_props, set_param_names,
+    set_return_label, set_returns_unit,
 };
 use super::naming::{camel, type_name};
 use super::ty::kotlin_ty;
@@ -696,7 +696,22 @@ fn register_params_for(receiver: &str, methods: &[MethodDef]) {
             m.name.as_str(),
             m.params.iter().map(|p| camel(p.name.as_str())).collect(),
         );
+        register_method_param_tys(receiver, m.name.as_str(), positional_signature_tys(m));
     }
+}
+
+/// Positional parameter types from the RBS signature, in call order.
+/// Keyword, rest, and block params are not positional arguments.
+fn positional_signature_tys(m: &MethodDef) -> Vec<Ty> {
+    use crate::ty::ParamKind;
+    let Some(Ty::Fn { params, .. }) = m.signature.as_ref() else {
+        return Vec::new();
+    };
+    params
+        .iter()
+        .filter(|p| matches!(p.kind, ParamKind::Required | ParamKind::Optional))
+        .map(|p| p.ty.clone())
+        .collect()
 }
 
 fn indent_method(s: &str) -> String {

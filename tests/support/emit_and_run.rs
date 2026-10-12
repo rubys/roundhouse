@@ -163,20 +163,31 @@ impl Overlay {
     /// Compile the unchanged Spinel output and run its native binary.
     /// The consumer boots libraries, not the HTTP server or a database.
     pub fn run_spinel(self, script: &str) -> Run {
+        self.run_spinel_with_flags(script, &[])
+    }
+
+    /// Also enforce the emitted sidecars, as the shipped Makefile does.
+    pub fn run_spinel_with_rbs(self, script: &str) -> Run {
+        self.run_spinel_with_flags(script, &["--rbs", "."])
+    }
+
+    fn run_spinel_with_flags(self, script: &str, flags: &[&str]) -> Run {
         let (emitted, errors) = self.emit_tree(BuildTarget::Spinel);
         std::fs::write(emitted.join("contract.rb"), format!("require_relative \"boot\"\n{script}"))
             .expect("write native consumer");
         let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
-        let compiled = Command::new(&compiler).args(["contract.rb", "-o", "contract"])
+        let command = std::iter::once(compiler.as_str()).chain(flags.iter().copied())
+            .chain(["contract.rb", "-o", "contract"]).collect::<Vec<_>>().join(" ");
+        let compiled = Command::new(&compiler).args(flags).args(["contract.rb", "-o", "contract"])
             .current_dir(&emitted).output().expect("spawn spinel");
         std::fs::write(emitted.join("compile.stdout"), &compiled.stdout).expect("write compile stdout");
         std::fs::write(emitted.join("compile.stderr"), &compiled.stderr).expect("write compile stderr");
         if !compiled.status.success() {
-            return Run::new(format!("{compiler} contract.rb -o contract"), emitted, errors, compiled);
+            return Run::new(command, emitted, errors, compiled);
         }
         let output = Command::new(emitted.join("contract")).current_dir(&emitted)
             .output().expect("run native consumer");
-        Run::new(format!("{compiler} contract.rb -o contract && ./contract"), emitted, errors, output)
+        Run::new(format!("{command} && ./contract"), emitted, errors, output)
     }
 
     /// Copy the fixture, apply the edits, analyze, and write the Ruby

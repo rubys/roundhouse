@@ -1206,6 +1206,82 @@ fn is_simple_ident(s: &str) -> bool {
     true
 }
 
+fn peeled_ty(e: &Expr) -> Option<&crate::ty::Ty> {
+    e.ty.as_ref().map(|t| t.peel_nilable())
+}
+
+/// Crystal `Reference` (classes, `String`, `Array`, `Hash`). Structs
+/// (`Int64`, `Float64`, `Bool`, `Symbol`, `Time`, `Tuple`, `NamedTuple`)
+/// are not.
+fn crystal_reference(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Str | Ty::Array { .. } | Ty::Hash { .. } => true,
+        Ty::Class { id, .. } => !matches!(
+            id.0.as_str(),
+            "Integer"
+                | "Float"
+                | "Numeric"
+                | "TrueClass"
+                | "FalseClass"
+                | "NilClass"
+                | "Symbol"
+                | "Time"
+                | "Date"
+                | "Rational"
+                | "Complex"
+        ),
+        _ => false,
+    }
+}
+
+/// A Crystal struct. `same?` is not defined on these. `Nil` is included
+/// so a nil receiver does not become `nil.same?`; `Reference#same?`
+/// still accepts a nil argument, which the call site handles first.
+fn crystal_struct(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Int | Ty::Float | Ty::Bool | Ty::Sym | Ty::Nil | Ty::Time | Ty::Date
+        | Ty::Tuple { .. }
+        | Ty::Record { .. } => true,
+        Ty::Class { id, .. } => matches!(
+            id.0.as_str(),
+            "Integer"
+                | "Float"
+                | "Numeric"
+                | "TrueClass"
+                | "FalseClass"
+                | "NilClass"
+                | "Symbol"
+                | "Time"
+                | "Date"
+                | "Rational"
+                | "Complex"
+        ),
+        _ => false,
+    }
+}
+
+/// Ruby immediates, whose `equal?` is the same predicate as `==`
+/// against another value of that kind.
+fn immediate_kind(ty: &crate::ty::Ty) -> Option<&'static str> {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Int => Some("int"),
+        Ty::Bool => Some("bool"),
+        Ty::Sym => Some("sym"),
+        Ty::Nil => Some("nil"),
+        Ty::Class { id, .. } => match id.0.as_str() {
+            "Integer" => Some("int"),
+            "TrueClass" | "FalseClass" => Some("bool"),
+            "Symbol" => Some("sym"),
+            "NilClass" => Some("nil"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub(super) fn emit_send_base(
     recv: Option<&Expr>,
     method: &Symbol,
@@ -1246,6 +1322,48 @@ pub(super) fn emit_send_base(
     if method.as_str() == "!" && args.is_empty() {
         if let Some(r) = recv {
             return format!("!({})", emit_expr(r));
+        }
+    }
+    // `equal?` is object identity. Crystal's predicate is
+    // `Reference#same?(other)` (the argument may also be `Nil`).
+    // Structs such as `Int64` have no `same?`. Two immediates of the
+    // same kind use `==`, which is that identity. Anything else is
+    // unsupported: a value-type `equal?` is not `==` (a float compared
+    // with itself by value is not the same object).
+    if method.as_str() == "equal?" && args.len() == 1 {
+        if let Some(r) = recv {
+            let recv_ty = peeled_ty(r);
+            let arg_ty = peeled_ty(&args[0]);
+            let recv_s = emit_expr(r);
+            let recv_s = if needs_recv_parens(r) { format!("({recv_s})") } else { recv_s };
+            if recv_ty.is_some_and(crystal_reference)
+                && arg_ty.is_some_and(|t| crystal_reference(t) || matches!(t, crate::ty::Ty::Nil))
+            {
+                return format!("{recv_s}.same?({})", args_s[0]);
+            }
+            if let (Some(rk), Some(ak)) = (recv_ty.and_then(immediate_kind), arg_ty.and_then(immediate_kind)) {
+                if rk == ak {
+                    return format!("({recv_s} == {})", args_s[0]);
+                }
+            }
+            // `nil` is one object. `nil.equal?(x)` is `x` being nil,
+            // which Crystal's `==` already is. `nil.same?` does not exist.
+            if recv_ty.is_some_and(|t| immediate_kind(t) == Some("nil")) {
+                return format!("({recv_s} == {})", args_s[0]);
+            }
+            if recv_ty.is_some_and(crystal_struct) || arg_ty.is_some_and(crystal_struct) {
+                return crate::emit::diagnostics::report_unsupported(
+                    r.span,
+                    "crystal",
+                    "equal?",
+                    "Crystal same? is reference identity; a value-type operand has no same?",
+                );
+            }
+            // Untyped or absent. The strict targets' class and Hash
+            // identity calls (assert_same, the hydrate sentinel) land
+            // here when a local has no IR type, and Crystal types that
+            // variable as a Reference. A proven struct took the arm above.
+            return format!("{recv_s}.same?({})", args_s[0]);
         }
     }
     // Cross-target nil-safe Hash read: Ruby `h.fetch(key, nil)` returns
@@ -1843,5 +1961,66 @@ fn emit_pattern(p: &Pattern) -> String {
             }
             format!("{{ {} }}", parts.join(", "))
         }
+    }
+}
+
+#[cfg(test)]
+mod equal_identity_tests {
+    use super::*;
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+
+    use crate::ty::Ty;
+
+    fn var(name: &str, ty: Option<Ty>) -> Expr {
+        let mut e = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from(name) },
+        );
+        e.ty = ty;
+        e
+    }
+
+    fn class(name: &str) -> Ty {
+        Ty::Class { id: crate::ident::ClassId(Symbol::from(name)), args: vec![] }
+    }
+
+    fn send(recv: Expr, arg: Expr) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from("equal?"),
+                args: vec![arg],
+                block: None,
+                parenthesized: true,
+            },
+        )
+    }
+
+    #[test]
+    fn equal_on_a_class_is_same() {
+        let out = emit_expr(&send(var("store", Some(class("ActionController::HeaderStore"))), var("result", Some(class("ActionController::HeaderStore")))));
+        assert_eq!(out, "store.same?(result)");
+    }
+
+    #[test]
+    fn equal_on_integers_is_value_identity() {
+        let out = emit_expr(&send(var("a", Some(Ty::Int)), var("b", Some(Ty::Int))));
+        assert_eq!(out, "(a == b)");
+    }
+
+    #[test]
+    fn equal_without_a_type_stays_same() {
+        let out = emit_expr(&send(var("store", None), var("result", None)));
+        assert_eq!(out, "store.same?(result)");
+    }
+
+    #[test]
+    fn equal_on_a_float_is_unsupported() {
+        let out = emit_expr(&send(var("a", Some(Ty::Float)), var("b", Some(Ty::Float))));
+        assert!(!out.contains("same?"), "{out}");
+        assert!(out.contains("equal?"), "{out}");
     }
 }

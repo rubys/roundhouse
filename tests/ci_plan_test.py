@@ -743,7 +743,20 @@ class Routing(unittest.TestCase):
             "runtime/spinel/base64.rb": [
                 "spinel_web_push_crypto",
                 "rails_compat_vectors_spinel",
+                "active_job_payload",
             ],
+            # The payload gate's driver loads these beside it.
+            "runtime/ruby/active_job.rb": ["framework_tests_spinel", "active_job_payload"],
+            "runtime/spinel/active_job_serialization.rb": [
+                "framework_tests_spinel",
+                "active_job_payload",
+            ],
+            "runtime/spinel/global_id_locator.rb": [
+                "framework_tests_spinel",
+                "active_job_payload",
+            ],
+            "tests/active_job_payload/driver.rb": ["active_job_payload"],
+            "tests/active_job_payload/rails.json": ["active_job_payload"],
             "tests/spinel_db_lease.rb": ["spinel_db_lease"],
             "tests/spinel_stmt_cache_lru.rb": ["spinel_stmt_cache_lru"],
             "tests/support/db_concurrency_spinel.rb": ["db_sqlite_concurrency"],

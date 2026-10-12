@@ -79,6 +79,8 @@ module ActiveRecord
   # accessors, attributes hash, and `[]/[]=` indexers; Base supplies
   # the shared CRUD + lifecycle protocol.
   class Base
+    def self.sanitize_sql_like: (String value, ?String escape_character) -> String
+
     EMPTY_ATTRS: Hash[Symbol, untyped]
     HYDRATE_ATTRS: Hash[Symbol, untyped]
 
@@ -125,8 +127,11 @@ module ActiveRecord
     def self.primary_key: () -> String
     def self._association_names: () -> Array[Symbol]
     def self.reflect_on_association: (Symbol | String name) -> ActiveRecord::Reflection::AssociationReflection?
+    def self.reflect_on_association_at: (String needle, Integer i) -> ActiveRecord::Reflection::AssociationReflection?
     def self._cast_primary_key: (Integer | String id) -> (Integer | String | nil)
     def self._string_primary_key: () -> bool
+    def self._friendly_slug_column: () -> String
+    def self._friendly_history: () -> bool
     def self.schema_columns: () -> Array[Symbol]
     def self.schema_time_columns: () -> Array[Symbol]
     def self.schema_date_columns: () -> Array[Symbol]
@@ -249,7 +254,7 @@ module ActiveRecord
     def save!: () -> Base
     def destroy: () -> Base
     def destroy!: () -> Base
-    def reload: () -> Base
+    def reload: (?untyped options) -> Base
     # `lock!` reloads (see the note on the body); `with_lock` (connection.rbs) runs the
     # block in a transaction and answers its value, same gradual
     # `untyped` escape as `self.transaction` in connection.rbs. The

@@ -1894,7 +1894,10 @@ fn js_send_inner(
             Some(Ty::Class { id, .. }) if {
                 let name = id.0.as_str();
                 let last = name.rsplit("::").next().unwrap_or(name);
-                matches!(last, "Parameters" | "ParameterMissing" | "Router")
+                matches!(
+                    last,
+                    "Parameters" | "ParameterMissing" | "Router" | "HeaderStore"
+                )
             }
         )
     };
@@ -2109,6 +2112,11 @@ fn js_send_inner(
     // `"" == null` are all false in JS.
     if method == "nil?" && recv.is_some() && args.is_empty() {
         return Js::binary(span, "==", js_expr(recv.unwrap()), Js::synth(JsExpr::Null));
+    }
+    // `equal?` is object identity (`assert_same` lowers to it). TS has
+    // no `is_equal` on a transpiled class; `===` is that predicate.
+    if method == "equal?" && recv.is_some() && args.len() == 1 {
+        return Js::binary(span, "===", js_expr(recv.unwrap()), js_expr(&args[0]));
     }
     // `x.class` (Ruby reflection — returns the receiver's class
     // object) → `x.constructor` in TS, which exposes the same
@@ -3916,5 +3924,37 @@ mod range_slice_tests {
         let send = slice_call(var("s"), r);
         let out = emit_expr(&send);
         assert_eq!(out, "s.slice(0, 5 + 1)");
+    }
+}
+
+#[cfg(test)]
+mod equal_identity_tests {
+    use super::*;
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+
+    fn var(name: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from(name) },
+        )
+    }
+
+    #[test]
+    fn equal_is_reference_identity() {
+        let send = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var("store")),
+                method: Symbol::from("equal?"),
+                args: vec![var("result")],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let out = emit_expr(&send);
+        assert_eq!(out, "store === result");
+        assert!(!out.contains("is_equal"), "{out}");
     }
 }

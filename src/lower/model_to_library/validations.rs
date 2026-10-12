@@ -21,7 +21,7 @@ use crate::ty::Ty;
 
 use super::{fn_sig, seq};
 
-pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) {
+pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model, models: &[Model]) {
     let msgs = Messages(Some(model));
     let mut stmts: Vec<Expr> = Vec::new();
 
@@ -76,14 +76,22 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
     // record to exist before save. Emit `validates_belongs_to(:assoc,
     // @<fk>, <Target>)` per non-optional belongs_to. The runtime
     // helper short-circuits when the FK is unset (nil/0) and queries
-    // `<Target>.exists?(fk_value)` otherwise.
+    // `<Target>.exists?(fk_value)` otherwise (by the association's
+    // `primary_key:` when it names a column other than the target's key).
     for (span, assoc) in model.spanned_associations() {
         if let Association::BelongsTo {
-            name, target, foreign_key, optional: false, polymorphic, ..
+            name, target, foreign_key, optional: false, polymorphic, primary_key, ..
         } = assoc
         {
+            // The foreign key holds the association's primary key; the
+            // existence lookup goes by that column when it is not the
+            // target's own key (`primary_key: "uuid"`).
+            let assoc_pk =
+                crate::lower::scope_chain::association_primary_key(models, target, primary_key.as_ref());
+            let own_pk = crate::lower::scope_chain::association_primary_key(models, target, None);
+            let lookup_pk = (assoc_pk != own_pk).then_some(&assoc_pk);
             let mut check =
-                inline_belongs_to_check(msgs, name, foreign_key, target, *polymorphic);
+                inline_belongs_to_check(msgs, name, foreign_key, target, lookup_pk, *polymorphic);
             check.inherit_span(span);
             stmts.push(check);
         }
@@ -481,6 +489,7 @@ fn inline_belongs_to_check(
     assoc_name: &Symbol,
     foreign_key: &Symbol,
     target: &ClassId,
+    lookup_pk: Option<&Symbol>,
     polymorphic: bool,
 ) -> Expr {
     let fk_ivar = ivar(foreign_key);
@@ -504,7 +513,31 @@ fn inline_belongs_to_check(
         Span::synthetic(),
         ExprNode::Const { path: vec![target.0.clone()] },
     );
-    let exists_call = send(target_const, "exists?", vec![fk_ivar]);
+    let exists_call = match lookup_pk {
+        // `Target.exists?(uuid: @fk)`. Model_to_library synthesis runs
+        // after the post-analyze `exists_conditions` rewrite, so that
+        // pass never sees this send; arel (`build_exists_kwargs`) in
+        // `lower_models_inner` turns the kwargs form into a SELECT 1
+        // probe when the PK column is on the schema.
+        Some(pk) => {
+            let conditions = Expr::new(
+                Span::synthetic(),
+                ExprNode::Hash {
+                    entries: vec![(
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Lit { value: Literal::Sym { value: pk.clone() } },
+                        ),
+                        fk_ivar,
+                    )],
+                    kwargs: true,
+                },
+            );
+            send(target_const, "exists?", vec![conditions])
+        }
+        // `Target.exists?(@fk)`
+        None => send(target_const, "exists?", vec![fk_ivar]),
+    };
     let not_exists = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -1220,8 +1253,30 @@ mod tests {
         let assoc_name = Symbol::from("article");
         let foreign_key = Symbol::from("article_id");
         let target = ClassId(Symbol::from("Article"));
-        let expr = inline_belongs_to_check(Messages::default(), &assoc_name, &foreign_key, &target, false);
+        let expr = inline_belongs_to_check(Messages::default(), &assoc_name, &foreign_key, &target, None, false);
         assert_eq!(collect_error_messages(&expr), vec!["Article must exist"]);
+    }
+
+    #[test]
+    fn belongs_to_with_a_declared_primary_key_looks_the_target_up_by_it() {
+        // `belongs_to :product, foreign_key: "product_uuid", primary_key:
+        // "uuid"`: the foreign key holds `products.uuid`, so asking
+        // `Product.exists?(@product_uuid)` would compare it with `id`.
+        let assoc_name = Symbol::from("product");
+        let foreign_key = Symbol::from("product_uuid");
+        let target = ClassId(Symbol::from("Product"));
+        let pk = Symbol::from("uuid");
+        let expr = inline_belongs_to_check(
+            Messages::default(),
+            &assoc_name,
+            &foreign_key,
+            &target,
+            Some(&pk),
+            false,
+        );
+        let rendered = format!("{expr:?}");
+        assert!(rendered.contains("\"exists?\"") && rendered.contains("\"uuid\"") && rendered.contains("kwargs: true"), "{rendered}");
+        assert_eq!(collect_error_messages(&expr), vec!["Product must exist"]);
     }
 
     #[test]
@@ -1232,7 +1287,7 @@ mod tests {
         let assoc_name = Symbol::from("record");
         let foreign_key = Symbol::from("record_id");
         let target = ClassId(Symbol::from("Record"));
-        let expr = inline_belongs_to_check(Messages::default(), &assoc_name, &foreign_key, &target, true);
+        let expr = inline_belongs_to_check(Messages::default(), &assoc_name, &foreign_key, &target, None, true);
         assert_eq!(collect_error_messages(&expr), vec!["Record must exist"]);
         let rendered = format!("{expr:?}");
         assert!(

@@ -1,9 +1,8 @@
 # Recursive type alias for request parameters.
 #
-# Form bodies and URL params arrive as a tree of String leaves, Hashes
-# keyed by String, and Arrays. Rails' Rack parser walks
-# `comment[author][name]=x` and `tags[]=a&tags[]=b` shapes into the
-# same recursive structure; the Roundhouse runtime mirrors that.
+# Form bodies and URL params arrive as String leaves, Hashes keyed by
+# String, and Arrays. JSON bodies add Integer, Float, Bool, and Nil
+# leaves while keeping the same recursive structure.
 #
 # `Roundhouse::ParamValue` is the cross-target type contract: each
 # target's runtime defines its own recursive realization (Crystal
@@ -17,5 +16,5 @@
 # `JSON::Any` uses internally.
 
 module Roundhouse
-  alias ParamValue = String | Hash(String, ParamValue) | Array(ParamValue)
+  alias ParamValue = String | Int64 | Float64 | Bool | Nil | Hash(String, ParamValue) | Array(ParamValue)
 end

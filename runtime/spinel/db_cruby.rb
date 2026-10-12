@@ -901,6 +901,15 @@ module Db
   end
 
   def self.prepare(sql)
+    return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. After lift_binds, the
+  # bound/inline SQL may still contain \x01 inside string literals
+  # (bind_literal leaves such values unmarked); those bytes are data,
+  # not marks, and must reach SQLite intact.
+  def self.prepare_plain(sql)
     # A `?`-bearing SQL string is a placeholder query (roundhouse#12):
     # its result depends on the runtime binds set AFTER prepare, which
     # aren't in the SQL key — so it must NOT participate in the
@@ -972,6 +981,38 @@ module Db
     handle = { stmt: stmt, row: nil, cached: cached, capture: nil, open: open }
     open[stmt] = handle
     handle[:capture] = { rows: [], names: stmt.columns, eof: false, sql: sql } if !qcache.nil? && !parameterized
+    handle
+  end
+
+  # A Relation read with its hash-condition values marked for binding
+  # (`Relation#bind_literal`). `Relation.lift_binds` answers the SQL
+  # with placeholders, which shares the prepared-statement cache by
+  # shape, and the key: the same read with the values written in. The
+  # request result cache is keyed on that, so a bound read and an inline
+  # read of the same rows share an entry, and a partial replay promotes
+  # by re-running it. Kind/value pairs follow from index 2 — "i" an
+  # integer, "s" a string — one per placeholder, in order.
+  def self.prepare_marked(marked)
+    binds = ActiveRecord::Relation.lift_binds(marked)
+    sql = binds[0].to_s
+    key = binds[1].to_s
+    return prepare_plain(key) if binds.length <= 2
+    qcache = Fiber[:rh_qcache]
+    cacheable = !qcache.nil? && !key.include?("?")
+    if cacheable && (hit = qcache[key])
+      return { stmt: nil, row: nil, cached: false, replay: hit, pos: 0, sql: key }
+    end
+    handle = prepare_plain(sql)
+    i = 2
+    while i < binds.length
+      if binds[i] == "i"
+        bind_int(handle, i / 2, binds[i + 1].to_i)
+      else
+        bind_text(handle, i / 2, binds[i + 1])
+      end
+      i += 2
+    end
+    handle[:capture] = { rows: [], names: handle[:stmt].columns, eof: false, sql: key } if cacheable
     handle
   end
 
