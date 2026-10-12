@@ -11684,6 +11684,14 @@ class ProbeServerTest < ActiveSupport::TestCase
   end
 end
 "##)
+        .write("test/models/second_probe_server_test.rb", r##"require "test_helper"
+class SecondProbeServerTest < ActiveSupport::TestCase
+  include ProbeServerHelper
+  test "the same source helper is carried again" do
+    with_server(status: "202 Accepted") { |server| assert_equal "202 Accepted", server.status }
+  end
+end
+"##)
         .run_test("test/models/probe_server_test.rb")
         .assert_passes();
 }
@@ -12834,5 +12842,37 @@ puts "PASS friendly oracle"
         )
         .assert_passes();
 }
+fn cross_helper_keyword_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/helpers/stamp_helper.rb", r#"module StampHelper
+  def stamp(value, **attributes)
+    format_stamp(value, **attributes)
+  end
+end
+"#)
+        .write("app/helpers/format_helper.rb", r#"module FormatHelper
+  def format_stamp(value, style: :time, **attributes)
+    [value, style.to_s, attributes[:label].to_s, attributes[:enabled].to_s].join("|")
+  end
+end
+"#)
+}
+
+const CROSS_HELPER_KEYWORD_ASSERTIONS: &str = r#"
+raise "helper defaults" unless StampHelper.stamp("first") == "first|time||"
+raise "helper packet" unless StampHelper.stamp("second", style: :date, label: "kept", enabled: false) == "second|date|kept|false"
+"#;
+
+#[test]
+fn cross_helper_keyword_packets_reach_the_qualified_destination() {
+    cross_helper_keyword_app().run_ruby(CROSS_HELPER_KEYWORD_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn cross_helper_keyword_packets_run_natively() {
+    cross_helper_keyword_app().run_spinel(CROSS_HELPER_KEYWORD_ASSERTIONS).assert_passes();
+}
+
 #[path = "emit_and_run/acts_as_votable.rs"]
 mod acts_as_votable;

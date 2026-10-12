@@ -486,6 +486,28 @@ fn destination_for_class<'a>(
     })
 }
 
+/// Ruby emission qualifies a cross-helper bare call through this same
+/// application index. Do not borrow it for arbitrary instance dispatch.
+fn helper_keyword_destination<'a>(
+    app: &'a App,
+    contracts: &SourceContractIndex<'a>,
+    context: Option<(&ClassId, &MethodDef)>,
+    call: &Expr,
+) -> Option<ResolvedDestination<'a>> {
+    let (owner, enclosing) = context?;
+    let ExprNode::Send { recv: None, method, .. } = &*call.node else { return None };
+    if !app.helper_method_index.values().any(|helper| helper == owner)
+        || !contracts.verified_hierarchy(owner, &mut HashSet::new())
+        || contracts.declaration(owner, method, enclosing.receiver, &mut HashSet::new()).is_some()
+        || !contracts.includes(owner).is_empty()
+        || contracts.parent(owner).is_some()
+    {
+        return None;
+    }
+    let helper = app.helper_method_index.get(method)?;
+    destination_for_class(app, contracts, helper, method, MethodReceiver::Instance)
+}
+
 fn declaration_error((method, _model): (&MethodDef, bool)) -> Option<&'static str> {
     if method.unsupported_formals.is_some() {
         Some("forwarding destination has an unrepresented parameter declaration")
@@ -696,7 +718,8 @@ fn keyword_calls_with_index(
                     KeywordPolicy::Legacy
                 }
             } else {
-                let resolved = destination(app, contracts, context, e);
+                let resolved = destination(app, contracts, context, e)
+                    .or_else(|| helper_keyword_destination(app, contracts, context, e));
                 if resolved
                     .as_ref()
                     .is_some_and(|d| d.method.params.iter().any(|p| p.forwarding))
@@ -983,7 +1006,22 @@ impl<'a> SourceContractIndex<'a> {
             unretained_models: HashSet::new(),
         };
         let mut class_owners = HashSet::new();
+        let carried: HashSet<*const LibraryClass> = app.test_modules.iter()
+            .flat_map(|module| module.inner_classes.iter().map(|class| class as *const LibraryClass))
+            .collect();
+        let mut source_copies: Vec<&LibraryClass> = Vec::new();
         for class in classes(app) {
+            // Multiple tests carry the same helper declaration, not Ruby
+            // reopens. Compare the complete copied IR (including source
+            // spans); a genuinely distinct fragment still counts twice.
+            if carried.contains(&(class as *const LibraryClass))
+                && class.methods.iter().any(|m| !m.name_span.is_synthetic())
+            {
+                if source_copies.iter().any(|previous| **previous == *class) {
+                    continue;
+                }
+                source_copies.push(class);
+            }
             class_owners.insert(class.name.clone());
             if class.is_module {
                 index.modules.insert(class.name.clone());
