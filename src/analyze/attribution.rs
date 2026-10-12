@@ -628,6 +628,18 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
         if !eligible(&d.kind) || d.severity == Severity::Info {
             continue;
         }
+        // Catalogued Pay model façades exist so `is_a?(Pay::Charge)`
+        // resolves, but they are not ActiveRecord. Missing methods
+        // (`.all`, scopes, …) must stay errors — downgrading them to
+        // unknown-gem notes would quiet `check` while the empty
+        // façade still NoMethodErrors on emit (invariant 6).
+        if matches!(
+            &d.kind,
+            DiagnosticKind::SendDispatchFailed { recv_ty, .. }
+                if partial_pay_model_facade(recv_ty)
+        ) {
+            continue;
+        }
         if let Some((gem, evidence)) = gem_for(d) {
             sites.push((d.span.file, d.span.start, gem.to_string()));
             mark(d, gem, None);
@@ -692,6 +704,18 @@ fn mark(d: &mut Diagnostic, gem: &str, via_ivar: Option<&str>) {
         None => d.message.push_str(&format!(
             " — likely roundhouse coverage, not an app error (the `{gem}` gem is in the Gemfile and roundhouse does not model it)"
         )),
+    }
+}
+
+/// Empty Pay model classes registered for `is_a?` only. Sends on them
+/// are intentional refusals, not unknown-gem notes.
+fn partial_pay_model_facade(ty: &crate::ty::Ty) -> bool {
+    match ty {
+        crate::ty::Ty::Class { id, .. } => matches!(
+            id.0.as_str(),
+            "Pay::Charge" | "Pay::Subscription" | "Pay::Customer"
+        ),
+        _ => false,
     }
 }
 

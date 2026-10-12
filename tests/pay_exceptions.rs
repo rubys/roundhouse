@@ -86,17 +86,30 @@ fn pay_charge_all_stays_refused() {
     let routes = "Rails.application.routes.draw do\n  get \"/dashboard\", to: \"dashboards#show\"\nend\n";
     std::fs::write(root.join("config/routes.rb"), routes).unwrap();
 
+    // Drive the product path (analyze + unknown-gem attribution), not
+    // diagnose-only: attribution used to quiet `.all` into a note
+    // because `pay` stays Unknown while Charge is catalogued for is_a?.
     let mut app = ingest_app(&root).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
-    let diags = diagnose(&app);
+    let mut diags = diagnose(&app);
+    roundhouse::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == Severity::Error)
         .map(|d| format!("{}: {}", d.code(), d.message))
         .collect();
+    let notes: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == Severity::Info)
+        .map(|d| format!("{}: {}", d.code(), d.message))
+        .collect();
     assert!(
-        errors.iter().any(|e| e.contains("all") || e.contains("Pay::Charge")),
-        "Pay::Charge.all must remain an error (not AR yet):\n{errors:#?}"
+        errors.iter().any(|e| e.contains("`all`") && e.contains("Pay::Charge")),
+        "Pay::Charge.all must remain an error after attribution (not AR yet):\nerrors={errors:#?}\nnotes={notes:#?}"
+    );
+    assert!(
+        !notes.iter().any(|n| n.contains("`all`") && n.contains("Pay::Charge")),
+        "Pay::Charge.all must not be downgraded to an unknown-gem note:\n{notes:#?}"
     );
     std::fs::remove_dir_all(root).ok();
 }
