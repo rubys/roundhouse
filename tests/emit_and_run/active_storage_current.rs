@@ -47,3 +47,26 @@ puts "ActiveStorage::Current.set state contract passed"
         )
         .assert_passes();
 }
+
+#[test]
+fn active_storage_current_base_url_accepts_integer_port() {
+    emit_and_run::real_blog()
+        .run_ruby(
+            r#"ActiveStorage::Current.url_options = {
+  host: "example.test",
+  protocol: "https",
+  port: 3000,
+}
+url = ActiveStorage::Current.base_url
+raise "unexpected base_url: #{url.inspect}" unless url == "https://example.test:3000"
+
+ActiveStorage::Current.set(url_options: { host: "local.test", protocol: "http", port: 8080 }) do
+  nested = ActiveStorage::Current.base_url
+  raise "unexpected nested base_url: #{nested.inspect}" unless nested == "http://local.test:8080"
+end
+
+puts "ActiveStorage::Current.base_url integer port contract passed"
+"#,
+        )
+        .assert_passes();
+}

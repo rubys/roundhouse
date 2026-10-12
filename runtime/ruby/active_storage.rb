@@ -980,7 +980,9 @@ module ActiveStorage
       host = options.fetch(:host, "")
       return "" if host == ""
       protocol = options.fetch(:protocol, "http").sub("://", "")
-      port = options.fetch(:port, "")
+      # Rails hands Integer ports (`port: 3000`); coerce so concat stays
+      # a String even after RBS widened values to `untyped`.
+      port = options.fetch(:port, "").to_s
       port == "" ? protocol + "://" + host : protocol + "://" + host + ":" + port
     end
   end

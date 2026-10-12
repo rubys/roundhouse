@@ -556,11 +556,25 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         storage.class_methods.insert(Symbol::from("url_filename"), Ty::Str);
         classes.insert(ClassId(Symbol::from("ActiveStorage")), storage);
 
+        // `ActiveStorage::Current` — `runtime/ruby/active_storage.rbs`
+        // verbatim (url_options / setter / set / base_url).
+        let url_options_hash = Ty::Hash {
+            key: Box::new(Ty::Sym),
+            value: Box::new(Ty::Untyped),
+        };
+        let nilable_url_options = nilable(url_options_hash);
         let mut current = ClassInfo::default();
+        current
+            .class_methods
+            .insert(Symbol::from("url_options"), nilable_url_options.clone());
+        current
+            .class_methods
+            .insert(Symbol::from("url_options="), nilable_url_options);
         current.class_methods.insert(
             Symbol::from("set"),
             super::block_fn(&Ty::Untyped, Ty::Untyped),
         );
+        current.class_methods.insert(Symbol::from("base_url"), Ty::Str);
         classes.insert(ClassId(Symbol::from("ActiveStorage::Current")), current);
     }
 
