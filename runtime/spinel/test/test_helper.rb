@@ -24,8 +24,10 @@
 # Signed stream names in the view suite are vectors. boot.rb asks
 # LocalSecret, and an unset SECRET_KEY_BASE is a fresh random key, so
 # those vectors would move every run. Pin one known key before that
-# resolve. Empty is not a pin: LocalSecret treats "" as unset.
-ENV["SECRET_KEY_BASE"] ||= "roundhouse-test-secret"
+# resolve. Assignment, not ||=: an empty string is not a pin
+# (LocalSecret treats "" as unset) and a secret inherited from the
+# parent process would sign the vectors with a different key.
+ENV["SECRET_KEY_BASE"] = "roundhouse-test-secret"
 require_relative "../runtime/base64"
 require_relative "../runtime/json_impl"
 require_relative "../runtime/db"
