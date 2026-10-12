@@ -278,7 +278,7 @@ fn model_for(model: &Model) -> String {
                         ValidationRule::Presence => {
                             presence.push(format!(":{}", validation.attribute));
                         }
-                        ValidationRule::Length { min, max, message } => {
+                        ValidationRule::Length { min, max, message, .. } => {
                             let msg = message
                                 .as_ref()
                                 .map(|m| format!(", message: {m:?}"))

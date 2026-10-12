@@ -70,6 +70,8 @@ mod assoc_primary_key;
 mod assoc_pluck_typed;
 #[path = "emit_and_run/action_controller_head.rs"]
 mod action_controller_head;
+#[path = "emit_and_run/nil_body_length.rs"]
+mod nil_body_length;
 #[path = "emit_and_run/inline_filter_guard.rs"]
 mod inline_filter_guard;
 #[path = "emit_and_run/sti_global_id.rs"]

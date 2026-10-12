@@ -403,13 +403,14 @@ fn validation_rule_to_calls(msgs: Messages, attr: &Symbol, rule: &ValidationRule
     match rule {
         ValidationRule::Presence => vec![inline_presence_check(msgs, attr, attr_ty)],
         ValidationRule::Absence => vec![inline_absence_check(msgs, attr)],
-        ValidationRule::Length { min, max, message } => inline_length_check(
+        ValidationRule::Length { min, max, message, allow_nil } => inline_length_check(
             msgs,
             attr,
             min.map(|n| n as usize),
             max.map(|n| n as usize),
             message.as_deref(),
             attr_ty,
+            *allow_nil,
         ),
         ValidationRule::Format { pattern } => vec![inline_format_check(msgs, attr, pattern)],
         ValidationRule::Numericality { only_integer, gt, lt } => {
@@ -755,14 +756,14 @@ fn inline_format_check(msgs: Messages, attr: &Symbol, pattern: &str) -> Expr {
     if_with_nil_else(invalid, push_err)
 }
 
-/// Inline `validates :attr, length: { minimum: M, maximum: N, is: K }`.
-/// Produces a single outer `unless @attr.nil?` guard wrapping a Seq:
-///   unless @attr.nil?
-///     len = if @attr.is_a?(String) then @attr.length elsif @attr.is_a?(Array) then @attr.length else 0 end
-///     errors << "Attr is too short (minimum is M characters)" if len < M  # if min set
-///     errors << "Attr is too long (maximum is N characters)"  if len > N  # if max set
-///     errors << "attr is the wrong length (should be K)" if len != K  # if is set
-///   end
+/// Inline `validates :attr, length: { minimum: M, maximum: N }`.
+///
+/// Rails' `LengthValidator` (8.1.4) does not treat nil as "skip" for
+/// every bound. With `allow_nil` unset, a nil value fails `:minimum`
+/// (the error is added without consulting the length) and is skipped
+/// for a lone `:maximum` (`skip_nil_check?`). `allow_nil: true` skips
+/// the whole check. `allow_nil: false` fails both bounds on nil.
+///
 /// The `is` (exact length) option isn't in the current ValidationRule
 /// shape; left for when the IR adds it.
 fn inline_length_check(
@@ -772,6 +773,7 @@ fn inline_length_check(
     max: Option<usize>,
     message: Option<&str>,
     attr_ty: Option<&Ty>,
+    allow_nil: Option<bool>,
 ) -> Vec<Expr> {
     let (attr_ty, nilable) = peel_nilable(attr_ty);
     // Same narrowing as the presence check: the caller guards the
@@ -863,21 +865,58 @@ fn inline_length_check(
     }
     let body_seq = seq(inner_stmts);
 
-    // `unless @attr.nil?` → `if !@attr.nil? then body end`. Tests the
-    // RAW ivar — `attr_ivar` above may be the narrowed `Cast` read,
-    // which is exactly what this guard exists to make safe.
+    // The guard tests the RAW ivar. `attr_ivar` above may be the
+    // narrowed `Cast` read, which is what the non-nil arm exists to
+    // make safe.
     let nil_check = send(ivar(attr), "nil?", vec![]);
     let not_nil = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
-            recv: Some(nil_check),
+            recv: Some(nil_check.clone()),
             method: Symbol::from("!"),
             args: vec![],
             block: None,
             parenthesized: false,
         },
     );
-    vec![if_with_nil_else(not_nil, body_seq)]
+    let mut nil_errors: Vec<Expr> = Vec::new();
+    let fail_min = min.is_some() && allow_nil != Some(true);
+    let fail_max = max.is_some() && allow_nil == Some(false);
+    if fail_min {
+        if let Some(n) = min {
+            nil_errors.push(length_error_push(&msgs, attr, "too_short", n, message));
+        }
+    }
+    if fail_max {
+        if let Some(n) = max {
+            nil_errors.push(length_error_push(&msgs, attr, "too_long", n, message));
+        }
+    }
+    if nil_errors.is_empty() {
+        // `allow_nil: true`, or a lone maximum (Rails skips nil).
+        return vec![if_with_nil_else(not_nil, body_seq)];
+    }
+    let nil_arm = if nil_errors.len() == 1 {
+        nil_errors.pop().unwrap()
+    } else {
+        seq(nil_errors)
+    };
+    vec![Expr::new(
+        Span::synthetic(),
+        ExprNode::If { cond: nil_check, then_branch: nil_arm, else_branch: body_seq },
+    )]
+}
+
+fn length_error_push(msgs: &Messages, attr: &Symbol, kind: &str, n: usize, message: Option<&str>) -> Expr {
+    let msg = match message {
+        Some(m) => msgs.error(
+            attr.as_str(),
+            kind,
+            &ErrorOpts { message: Some(m.to_string()), ..ErrorOpts::count(n) },
+        ),
+        None => msgs.error(attr.as_str(), kind, &ErrorOpts::count(n)),
+    };
+    errors_push(msg)
 }
 
 /// Inline `validates :attr, numericality: { ... }`.
@@ -1166,30 +1205,103 @@ mod tests {
 
     #[test]
     fn length_min_only_emits_too_short() {
-        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), None, None, None);
+        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), None, None, None, None);
         assert_eq!(exprs.len(), 1, "length lowers to one outer expression");
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
-        assert_eq!(msgs, vec!["Title is too short (minimum is 5 characters)"]);
+        // Nil fails the minimum outright, and a present value fails when shorter.
+        assert_eq!(
+            msgs,
+            vec![
+                "Title is too short (minimum is 5 characters)",
+                "Title is too short (minimum is 5 characters)",
+            ],
+        );
+        let (cond, then_branch, else_branch) = root_if(&exprs);
+        assert!(is_nil_predicate(cond), "nil takes the too-short arm");
+        assert_eq!(collect_error_messages(then_branch), vec!["Title is too short (minimum is 5 characters)"]);
+        assert!(!is_nil_lit(else_branch), "the present value still measures length");
     }
 
     #[test]
-    fn length_max_only_emits_too_long() {
-        let exprs = inline_length_check(Messages::default(), &attr(), None, Some(100), None, None);
+    fn length_max_only_skips_nil() {
+        let exprs = inline_length_check(Messages::default(), &attr(), None, Some(100), None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(msgs, vec!["Title is too long (maximum is 100 characters)"]);
+        let (cond, _, else_branch) = root_if(&exprs);
+        assert!(is_not_nil(cond), "a lone maximum skips nil, as Rails does");
+        assert!(is_nil_lit(else_branch));
+    }
+
+    #[test]
+    fn length_allow_nil_skips_the_minimum() {
+        let exprs = inline_length_check(
+            Messages::default(),
+            &attr(),
+            Some(5),
+            None,
+            None,
+            None,
+            Some(true),
+        );
+        let (cond, _, else_branch) = root_if(&exprs);
+        assert!(is_not_nil(cond), "allow_nil skips the check when the value is nil");
+        assert!(is_nil_lit(else_branch));
+    }
+
+    #[test]
+    fn length_allow_nil_false_fails_a_maximum_on_nil() {
+        let exprs = inline_length_check(
+            Messages::default(),
+            &attr(),
+            None,
+            Some(100),
+            None,
+            None,
+            Some(false),
+        );
+        let (cond, then_branch, _) = root_if(&exprs);
+        assert!(is_nil_predicate(cond));
+        assert_eq!(
+            collect_error_messages(then_branch),
+            vec!["Title is too long (maximum is 100 characters)"],
+        );
     }
 
     #[test]
     fn length_min_and_max_emits_both_in_order() {
-        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), Some(100), None, None);
+        let exprs = inline_length_check(Messages::default(), &attr(), Some(5), Some(100), None, None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(
             msgs,
             vec![
                 "Title is too short (minimum is 5 characters)",
+                "Title is too short (minimum is 5 characters)",
                 "Title is too long (maximum is 100 characters)",
             ],
         );
+    }
+
+    fn root_if(exprs: &[Expr]) -> (&Expr, &Expr, &Expr) {
+        let ExprNode::If { cond, then_branch, else_branch } = exprs[0].node.as_ref() else {
+            panic!("length check is an if");
+        };
+        (cond, then_branch, else_branch)
+    }
+
+    fn is_nil_predicate(expr: &Expr) -> bool {
+        matches!(expr.node.as_ref(), ExprNode::Send { method, .. } if method.as_str() == "nil?")
+    }
+
+    fn is_not_nil(expr: &Expr) -> bool {
+        matches!(
+            expr.node.as_ref(),
+            ExprNode::Send { method, recv: Some(recv), .. }
+                if method.as_str() == "!" && is_nil_predicate(recv)
+        )
+    }
+
+    fn is_nil_lit(expr: &Expr) -> bool {
+        matches!(expr.node.as_ref(), ExprNode::Lit { value: Literal::Nil })
     }
 
     #[test]

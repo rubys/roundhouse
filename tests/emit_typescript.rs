@@ -300,7 +300,12 @@ fn length_validation_emits_with_options_object() {
         body: vec![ModelBodyItem::Validation {
             validation: Validation {
                 attribute: Symbol::from("body"),
-                rules: vec![ValidationRule::Length { min: Some(10), max: None }],
+                rules: vec![ValidationRule::Length {
+                    min: Some(10),
+                    max: None,
+                    message: None,
+                    allow_nil: None,
+                }],
             },
             leading_comments: vec![],
             leading_blank_line: false,

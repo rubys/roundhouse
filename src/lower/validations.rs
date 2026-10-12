@@ -157,7 +157,7 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
     match rule {
         ValidationRule::Presence => out.push(Check::Presence),
         ValidationRule::Absence => out.push(Check::Absence),
-        ValidationRule::Length { min, max, message } => {
+        ValidationRule::Length { min, max, message, .. } => {
             if let Some(n) = min {
                 out.push(Check::MinLength { n: *n, message: message.clone() });
             }

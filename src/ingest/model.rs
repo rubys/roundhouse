@@ -2713,6 +2713,9 @@ fn parse_validates(call: &ruby_prism::CallNode<'_>) -> Vec<crate::dialect::Valid
     let mut attrs: Vec<Symbol> = Vec::new();
     let mut rules: Vec<ValidationRule> = Vec::new();
     let mut allow_blank = false;
+    // Sibling of `length:`, as in `validates :body, length: { minimum: 10 }, allow_nil: true`.
+    // An `allow_nil` inside the length hash wins; this fills only a rule that did not say.
+    let mut allow_nil: Option<bool> = None;
 
     for arg in all_args.iter() {
         if let Some(sym) = symbol_value(&arg) {
@@ -2724,8 +2727,19 @@ fn parse_validates(call: &ruby_prism::CallNode<'_>) -> Vec<crate::dialect::Valid
                 let value = assoc.value();
                 if key.as_str() == "allow_blank" {
                     allow_blank = super::util::bool_value(&value).unwrap_or(false);
+                } else if key.as_str() == "allow_nil" {
+                    allow_nil = super::util::bool_value(&value);
                 } else if let Some(rule) = validation_rule_from_kv(&key, &value) {
                     rules.push(rule);
+                }
+            }
+        }
+    }
+    if let Some(flag) = allow_nil {
+        for rule in &mut rules {
+            if let ValidationRule::Length { allow_nil: slot, .. } = rule {
+                if slot.is_none() {
+                    *slot = Some(flag);
                 }
             }
         }
@@ -2790,9 +2804,14 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>) -> Option<crate::dialect::Val
 
     let mut min: Option<u32> = None;
     let mut max: Option<u32> = None;
+    let mut allow_nil: Option<bool> = None;
     for el in elements.iter() {
         let Some(assoc) = el.as_assoc_node() else { continue };
         let Some(key) = symbol_value(&assoc.key()) else { continue };
+        if key.as_str() == "allow_nil" {
+            allow_nil = super::util::bool_value(&assoc.value());
+            continue;
+        }
         let Some(n) = integer_value(&assoc.value()) else { continue };
         if n < 0 {
             continue;
@@ -2809,7 +2828,7 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>) -> Option<crate::dialect::Val
     if min.is_none() && max.is_none() {
         None
     } else {
-        Some(ValidationRule::Length { min, max, message: None })
+        Some(ValidationRule::Length { min, max, message: None, allow_nil })
     }
 }
 

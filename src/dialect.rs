@@ -542,6 +542,12 @@ pub enum ValidationRule {
         /// the Rails default text.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        /// `allow_nil:` on the validator. `None` is Rails' default:
+        /// a nil value fails `:minimum` and is skipped for a lone
+        /// `:maximum`. `Some(true)` skips the check when the value
+        /// is nil. `Some(false)` fails both bounds on nil.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_nil: Option<bool>,
     },
     Format { pattern: String },
     Numericality { only_integer: bool, gt: Option<f64>, lt: Option<f64> },
