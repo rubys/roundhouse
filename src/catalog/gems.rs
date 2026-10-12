@@ -166,6 +166,9 @@ pub const GEM_CATALOG: &[GemClass] = &[
             ("klass", GemTy::Untyped),
             ("name", GemTy::Sym),
             ("macro", GemTy::Sym),
+            // Nil when the association did not declare `counter_cache:`
+            // (campfire's Message→Room). Untyped until option ingest lands.
+            ("counter_cache_column", GemTy::Untyped),
         ],
     },
     // Arel — ActiveRecord's low-level SQL AST builder. `sql` wraps a

@@ -147,6 +147,17 @@ module Main
     # extension but the route pins the response format.
     request_format = matched.req_format unless matched.req_format.nil?
 
+    # `--target futamura`'s whole-route bridge serves only the actions
+    # the analysis cleared (src/emit/futamura/routes.rb); any other
+    # match is declined here, before any app code runs, and the host
+    # Rails app serves the request. Matched once, here, not again in
+    # the bridge.
+    allowed = env["roundhouse.actions"]
+    if !allowed.nil? && !allowed.include?("#{matched.controller}##{matched.action}")
+      env["roundhouse.declined"] = true
+      return [404, "", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
+    end
+
     controller = Main.instantiate_controller(matched.controller)
     merged = matched.path_params.dup
     request[:params].each { |k, v| merged[k] = v }
@@ -177,8 +188,18 @@ module Main
     session_cookie = Rails.application.session_cookie_key
     # SIGNED — see the spinel main.rb twin: `session_in` is the restored
     # session's plain encoding, and only a changed session is re-signed.
-    restored = ActionDispatch::Session.from_signed_cookie(
-      cookies[session_cookie.to_sym].to_s, session_cookie)
+    #
+    # Under the futamura bridge the host Rails app owns the session: it
+    # arrives already decoded as `roundhouse.session` and leaves as
+    # `roundhouse.session.out`, with no cookie signed or verified on
+    # this side.
+    host_session = env["roundhouse.session"]
+    restored = if host_session.nil?
+      ActionDispatch::Session.from_signed_cookie(
+        cookies[session_cookie.to_sym].to_s, session_cookie)
+    else
+      ActionDispatch::Session.new(host_session)
+    end
     session_in = restored.to_cookie
     controller.assign_http_session(restored)
     # Expose the inbound cookies to the controller as a CookieJar so
@@ -191,10 +212,15 @@ module Main
     # SIGNED — see the spinel main.rb twin: a cookie that does not verify
     # is no message (and is still cleared below, as a consumed one is).
     inbound_flash = {}
-    %w[notice alert].each do |kind|
-      name = "flash_#{kind}"
-      value = ActionDispatch::SignedCookie.verified(cookies[name.to_sym].to_s, name)
-      inbound_flash[kind] = value unless value.empty?
+    host_flash = env["roundhouse.flash"]
+    if host_flash.nil?
+      %w[notice alert].each do |kind|
+        name = "flash_#{kind}"
+        value = ActionDispatch::SignedCookie.verified(cookies[name.to_sym].to_s, name)
+        inbound_flash[kind] = value unless value.empty?
+      end
+    else
+      host_flash.each { |k, v| inbound_flash[k.to_s] = v }
     end
     controller.flash = ActionDispatch::Flash.new(inbound_flash)
 
@@ -249,12 +275,18 @@ module Main
     # a displayed notice doesn't repeat.
     out_cookies = {}
     persisted = controller.flash.to_persisted
-    if persisted.key?("notice")
+    if !host_flash.nil?
+      # The host keeps the flash in its own session; hand back what
+      # survives this request (nothing, once displayed).
+      env["roundhouse.flash.out"] = persisted
+    elsif persisted.key?("notice")
       out_cookies[:flash_notice] = ActionDispatch::SignedCookie.sign(persisted["notice"], "flash_notice")
     elsif cookies.key?(:flash_notice)
       out_cookies[:flash_notice] = nil
     end
-    if persisted.key?("alert")
+    if !host_flash.nil?
+      # Handed back above, with the notice.
+    elsif persisted.key?("alert")
       out_cookies[:flash_alert] = ActionDispatch::SignedCookie.sign(persisted["alert"], "flash_alert")
     elsif cookies.key?(:flash_alert)
       out_cookies[:flash_alert] = nil
@@ -283,7 +315,9 @@ module Main
     # `request.session_options[:skip] = true` leaves it alone — see
     # the spinel main.
     session_out = controller.session.to_cookie
-    if session_out != session_in && !controller.request.session_skip?
+    if !host_session.nil?
+      env["roundhouse.session.out"] = controller.session.to_hash if session_out != session_in && !controller.request.session_skip?
+    elsif session_out != session_in && !controller.request.session_skip?
       out_cookies[session_cookie] =
         session_out.empty? ? nil : ActionDispatch::Session.signed_cookie(session_out, session_cookie)
     end

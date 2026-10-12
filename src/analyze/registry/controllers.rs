@@ -235,6 +235,44 @@ pub(in crate::analyze) fn register(
         }
         classes.insert(ClassId(Symbol::from("ActionController::Page")), page);
     }
+
+    // The pagy gem (runtime/ruby/action_controller/pagy.rb). `pagy` is on
+    // every controller of an app whose Gemfile.lock carries the gem, as
+    // `pagy` is for geared_pagination's method; its RESULT depends on the
+    // collection argument (`[Pagy, <the scope's type>]`), so the call is
+    // typed in `analyze::body` (`pagy_call_ty`) and this entry only makes
+    // the name resolve. The `Pagy` surface below is `pagy.rbs` verbatim;
+    // a method that is not listed (`page_url`, `in`, `options`, the `_js`
+    // helpers, ...) is "no known method on Pagy" -- the refusal.
+    if app.gem_lock.as_ref().is_some_and(|lock| lock.has("pagy")) {
+        app_ctrl.class_methods.insert(Symbol::from("pagy"), Ty::Untyped);
+        let nullable_int = Ty::Union { variants: vec![Ty::Int, Ty::Nil] };
+        let mut pagy = ClassInfo::default();
+        for (m, ty) in [
+            ("page", Ty::Int),
+            ("limit", Ty::Int),
+            ("count", Ty::Int),
+            ("offset", Ty::Int),
+            ("last", Ty::Int),
+            ("pages", Ty::Int),
+            ("from", Ty::Int),
+            ("to", Ty::Int),
+            ("previous", nullable_int.clone()),
+            ("next", nullable_int),
+            ("series_nav", Ty::Str),
+            ("info_tag", Ty::Str),
+        ] {
+            pagy.instance_methods.insert(Symbol::from(m), ty);
+        }
+        classes.insert(ClassId(Symbol::from("Pagy")), pagy);
+        // `include Pagy::Method` resolves; the method itself is on Base.
+        let mut method = ClassInfo::default();
+        method.is_module = true;
+        classes.insert(ClassId(Symbol::from("Pagy::Method")), method);
+        let mut option_error = ClassInfo::default();
+        option_error.parent = Some(ClassId(Symbol::from("ArgumentError")));
+        classes.insert(ClassId(Symbol::from("Pagy::OptionError")), option_error);
+    }
     // `flash` (FlashHash) and the current action/controller names are
     // available on the controller via implicit self, same as in views.
     app_ctrl.class_methods.insert(
@@ -303,7 +341,7 @@ pub(in crate::analyze) fn register(
         }
         for m in [
             "get?", "post?", "put?", "patch?", "delete?", "head?", "options?", "xhr?",
-            "xml_http_request?", "ssl?", "local?", "form_data?",
+            "xml_http_request?", "ssl?", "local?", "form_data?", "inertia?",
         ] {
             request.instance_methods.insert(Symbol::from(m), Ty::Bool);
         }
@@ -370,6 +408,7 @@ pub(in crate::analyze) fn register(
         }
         app_ctrl.class_methods.insert(Symbol::from("request"), request_ty);
     }
+    register_inertia(classes, &mut app_ctrl);
     // HTTP Basic and Token auth (runtime/spinel/http_authentication.rb):
     // each yields the credentials the client sent and answers what the
     // block decided; the `or_request` forms render the 401 challenge
@@ -565,4 +604,60 @@ pub(crate) fn param_value_ty(nilable: bool) -> Ty {
         variants.push(Ty::Nil);
     }
     Ty::Union { variants }
+}
+
+/// `prop` and `inertia_errors` are typed here and have no runtime method:
+/// the controller lowering replaces them with their `_json` variants. A
+/// runtime `prop(String, untyped)` was rejected because the strict targets
+/// cannot compile an untyped parameter.
+fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut ClassInfo) {
+    const RBS: &str = include_str!("../../../runtime/ruby/action_controller/inertia.rbs");
+    let parsed = crate::rbs::parse_app_signatures(RBS)
+        .expect("ActionController::InertiaPage RBS must parse");
+    let page_id = ClassId(Symbol::from("ActionController::InertiaPage"));
+    let page = classes.entry(page_id.clone()).or_default();
+    if let Some(methods) = parsed.get(&page_id) {
+        for (name, ty) in methods {
+            page.instance_methods.insert(name.clone(), ty.clone());
+        }
+    }
+    // Phantom until controller_to_library rewrites to `prop_json`.
+    page.instance_methods.insert(
+        Symbol::from("prop"),
+        Ty::Fn {
+            params: vec![
+                crate::ty::Param {
+                    name: Symbol::from("key"),
+                    ty: Ty::Str,
+                    kind: crate::ty::ParamKind::Required,
+                },
+                crate::ty::Param {
+                    name: Symbol::from("value"),
+                    ty: Ty::Untyped,
+                    kind: crate::ty::ParamKind::Required,
+                },
+            ],
+            block: None,
+            ret: Box::new(Ty::Nil),
+            effects: crate::effect::EffectSet::default(),
+        },
+    );
+    if let Some(methods) = parsed.get(&ClassId(Symbol::from("ActionController::Base"))) {
+        for (name, ty) in methods {
+            app_ctrl.class_methods.insert(name.clone(), ty.clone());
+        }
+    }
+    app_ctrl.class_methods.insert(
+        Symbol::from("inertia_errors"),
+        Ty::Fn {
+            params: vec![crate::ty::Param {
+                name: Symbol::from("errors"),
+                ty: Ty::Untyped,
+                kind: crate::ty::ParamKind::Required,
+            }],
+            block: None,
+            ret: Box::new(Ty::Nil),
+            effects: crate::effect::EffectSet::default(),
+        },
+    );
 }

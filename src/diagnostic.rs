@@ -73,6 +73,7 @@ impl Diagnostic {
             DiagnosticKind::LowerResidue { .. } => "lower_residue",
             DiagnosticKind::UndefinedFilterTarget { .. } => "undefined_filter_target",
             DiagnosticKind::GraphqlNullableField { .. } => "graphql_nullable_field",
+            DiagnosticKind::UnconsumedInitializer { .. } => "unconsumed_initializer",
         }
     }
 
@@ -88,6 +89,7 @@ impl Diagnostic {
             DiagnosticKind::GraphqlNullableField { .. } => Severity::Warning,
             DiagnosticKind::BlankUnlowered { .. } => Severity::Warning,
             DiagnosticKind::LowerResidue { .. } => Severity::Warning,
+            DiagnosticKind::UnconsumedInitializer { .. } => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -213,6 +215,12 @@ impl Diagnostic {
             DiagnosticKind::GraphqlNullableField { field, .. } => format!(
                 "`field :{}` is declared `null: false` but can resolve to nil; when it does, the response carries an error and nulls its parent",
                 field.as_str()
+            ),
+            DiagnosticKind::UnconsumedInitializer { owner, statement, location } => format!(
+                "`{}` ({}, {}) is read by no recognizer: it has no effect on the compiled app",
+                statement.as_str(),
+                owner.as_str(),
+                location.as_str()
             ),
         }
     }
@@ -504,4 +512,14 @@ pub enum DiagnosticKind {
     /// at the `field` call; `value_ty` is what it resolves to. Warning:
     /// the analyzer can see a nil that the data never holds.
     GraphqlNullableField { field: Symbol, value_ty: Ty },
+    /// A boot statement — in `config/initializers/*.rb`, an engine class
+    /// body or `config/application.rb` — that no existing ingest
+    /// recognizer reads, so the compiled app silently runs without it
+    /// (see `ingest::initializer_ledger`). Warning: the statement may be
+    /// harmless, but nothing says so until a recognizer or the inert
+    /// allowlist does. `owner` names where the statement lives (`host
+    /// initializer`, `engine SourceMonitor::Engine class body`, …),
+    /// `statement` its head (`SourceMonitor.configure`), `location` the
+    /// `path:line:col` it starts at.
+    UnconsumedInitializer { owner: Symbol, statement: Symbol, location: Symbol },
 }

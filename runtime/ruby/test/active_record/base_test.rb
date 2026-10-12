@@ -309,6 +309,110 @@ class BaseTest < Minitest::Test
     assert_equal 0, Item.hydrate_count
   end
 
+  # Hash-condition values bind, as Rails binds them: the statement SQLite
+  # plans is `title = ?`, and the values round-trip intact (a quote in a
+  # string, a negative integer).
+  def test_hash_condition_values_bind
+    ["o'k", "plain"].each { |t| it = Item.new; it.title = t; it.save() }
+    rel = ActiveRecord::Relation.new(Item).where(title: "o'k")
+    log = Db.capture_sql { assert_equal ["o'k"], rel.to_a.map(&:title) }
+    assert_equal 1, log.length
+    assert_match(/items\.title = \?/, log[0])
+    refute_match(/o''k/, log[0])
+    assert_equal [], ActiveRecord::Relation.new(Item).where(id: -1).to_a
+  end
+
+  # Every exit that is not a read writes the values in: `to_sql`,
+  # `count_sql`, `exists_sql`, `arel.to_sql`.
+  def test_hash_condition_values_inline_outside_reads
+    rel = ActiveRecord::Relation.new(Item).where(title: "o'k", id: 7)
+    [rel.to_sql, rel.count_sql, rel.exists_sql(1), rel.arel.to_sql].each do |sql|
+      assert_match(/items\.title = 'o''k'/, sql)
+      assert_match(/items\.id = 7/, sql)
+      refute sql.include?("\x01"), sql.inspect
+    end
+  end
+
+  # String conditions stay inline, as Rails writes them.
+  def test_string_condition_values_stay_inline
+    it = Item.new; it.title = "A"; it.save()
+    log = Db.capture_sql { ActiveRecord::Relation.new(Item).where("title = ?", "A").to_a }
+    assert_match(/title = 'A'/, log[0])
+  end
+
+  # Bulk writes run with the values written in.
+  def test_bulk_write_scoped_by_hash_condition
+    %w[A B].each { |t| it = Item.new; it.title = t; it.save() }
+    assert_equal 1, ActiveRecord::Relation.new(Item).where(title: "A").update_all(title: "C")
+    assert_equal %w[B C], ActiveRecord::Relation.new(Item).order("title").to_a.map(&:title)
+  end
+
+  # A mark-like byte pair inside a string literal or after a comment is
+  # text, not a bind; integers past 64 bits, NULL and blobs stay inline.
+  def test_lift_binds_reads_only_marks_outside_literals
+    lift = ->(sql) { ActiveRecord::Relation.lift_binds(sql) }
+    out = lift.call("SELECT 1 WHERE s = 'a''\x017\x02' AND id = \x017\x02")
+    assert_equal "SELECT 1 WHERE s = 'a''\x017\x02' AND id = ?", out[0]
+    assert_equal "SELECT 1 WHERE s = 'a''\x017\x02' AND id = 7", out[1]
+    assert_equal %w[i 7], out[2..]
+    out = lift.call("SELECT 1 -- don't\nWHERE id = \x01'x'\x02")
+    assert_equal "SELECT 1 -- don't\nWHERE id = ?", out[0]
+    assert_equal %w[s x], out[2..]
+    out = lift.call("SELECT 1 WHERE a = \x0112345678901234567890\x02 AND b = \x01NULL\x02 AND c = \x01X'00'\x02")
+    assert_equal "SELECT 1 WHERE a = 12345678901234567890 AND b = NULL AND c = X'00'", out[0]
+    assert_equal 2, out.length
+  end
+
+  # `--` / `/*` inside a double-quoted identifier are identifier text,
+  # not comments. Leaving them as comments swallowed later marks and
+  # made prepare_marked ↔ prepare recurse until SystemStackError
+  # (c6f2a664 tip; sql_identifiers InjectionPurchase).
+  def test_lift_binds_keeps_marks_after_quoted_ident_with_comment_bytes
+    lift = ->(sql) { ActiveRecord::Relation.lift_binds(sql) }
+    table = SqliteAdapter.quote_column_name("\"; DELETE FROM purchases; --")
+    sql = "SELECT * FROM #{table} WHERE name = \x01'x'\x02"
+    out = lift.call(sql)
+    assert_equal "SELECT * FROM #{table} WHERE name = ?", out[0]
+    assert_equal "SELECT * FROM #{table} WHERE name = 'x'", out[1]
+    assert_equal %w[s x], out[2..]
+    refute_includes out[0], "\x01"
+    refute_includes out[1], "\x01"
+    table = SqliteAdapter.quote_column_name("edge/*entries")
+    sql = "SELECT * FROM #{table} WHERE name = \x017\x02"
+    out = lift.call(sql)
+    assert_equal "SELECT * FROM #{table} WHERE name = ?", out[0]
+    assert_equal %w[i 7], out[2..]
+  end
+
+  # A value that already holds \x01 is left unmarked; a sibling hash
+  # condition still marks. prepare_marked must not strip those bytes
+  # from the lifted SQL (blanket delete latch would search for "ab").
+  def test_prepare_marked_preserves_control_bytes_inside_literals
+    needle = "hello\x01world"
+    it = Item.new
+    it.title = needle
+    it.save()
+    rows = ActiveRecord::Relation.new(Item).where(title: needle, id: it.id).to_a
+    assert_equal 1, rows.length
+    assert_equal needle, rows[0].title
+  end
+
+  # The request cache keys a bound read on its values written in, so a
+  # repeat replays instead of re-running, and different values do not.
+  def test_bound_reads_share_the_request_cache_by_value
+    %w[A B].each { |t| it = Item.new; it.title = t; it.save() }
+    Db.query_cache_begin
+    begin
+      log = Db.capture_sql do
+        2.times { assert_equal ["A"], ActiveRecord::Relation.new(Item).where(title: "A").to_a.map(&:title) }
+        assert_equal ["B"], ActiveRecord::Relation.new(Item).where(title: "B").to_a.map(&:title)
+      end
+      assert_equal 2, log.length
+    ensure
+      Db.query_cache_end
+    end
+  end
+
   def test_relation_exists_sql_selects_one_with_limit
     sql = ActiveRecord::Relation.new(Item).where(title: "A").exists_sql(1)
     assert_match(/SELECT 1 AS one FROM items/, sql)

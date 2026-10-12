@@ -35,9 +35,9 @@
 //!   `_columns_sql` — the schema columns as a qualified SELECT list
 //!   `_hydrate_all(sql)` — run a SELECT over `_columns_sql`, typed rows
 
-use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Param};
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, Param};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, Literal};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, TableRef, VarId};
 use crate::lower::arel::{
     ArelOp, ArelVisitor, Assignment, ColRef, ColumnSpec, Delete, Direction, Insert, LimitSpec,
@@ -54,10 +54,11 @@ use exists::{synth_adapter_any, synth_adapter_exists_by_id};
 
 pub(super) fn push_adapter_methods(
     methods: &mut Vec<MethodDef>,
-    owner: &ClassId,
+    model: &Model,
     table: &Table,
     schema: &Schema,
 ) {
+    let owner = &model.name;
     methods.push(synth_adapter_find_by_id(owner, table, schema));
     methods.push(synth_adapter_all(owner, table, schema));
     methods.push(synth_adapter_last(owner, table, schema));
@@ -70,7 +71,7 @@ pub(super) fn push_adapter_methods(
     methods.push(synth_adapter_exists_by_id(owner, table, schema));
     methods.push(synth_adapter_truncate(owner, table, schema));
     methods.push(synth_delete_all(owner, table));
-    methods.push(synth_adapter_reload(owner, table));
+    methods.push(synth_adapter_reload(model, table));
     methods.push(synth_columns_sql(owner, table));
     methods.push(synth_hydrate_all(owner));
 }
@@ -877,13 +878,17 @@ fn synth_adapter_truncate(owner: &ClassId, table: &Table, schema: &Schema) -> Me
 /// reload needs to write into self. Generalizing the visitor with
 /// a "hydrate target = bare ivar / passed-in symbol" option is the
 /// right cleanup once a second use surfaces.
-fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
-    use crate::expr::{ExprNode, LValue, Literal};
+fn synth_adapter_reload(model: &Model, table: &Table) -> MethodDef {
     use crate::span::Span;
 
+    let owner = &model.name;
     let stmt = Symbol::from("stmt");
     let db = ClassId(Symbol::from("Db"));
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+
+    // Rails' `reload` clears the association cache — owned by
+    // associations (same kinds as `assoc_cache_ivar_bindings`).
+    let clear_assoc = super::associations::clear_loaded_flag_assigns(model);
 
     // SQL: "SELECT <cols> FROM <table> WHERE id = " + Db.escape_int(@id) + " LIMIT 1"
     let cols_csv: String = table
@@ -1001,8 +1006,9 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
 
     let finalize = arel_db_call(&db, "finalize", vec![var_ref(&stmt)]);
     let self_ref = Expr::new(Span::synthetic(), ExprNode::SelfRef);
-    // stmt = prepare ; [bind_int(stmt, 1, @id)] ; if step? {…} ; finalize ; self
-    let mut body_exprs = vec![stmt_assign];
+    // clear assoc loaded ; stmt = prepare ; [bind] ; if step? {…} ; finalize ; self
+    let mut body_exprs = clear_assoc;
+    body_exprs.push(stmt_assign);
     if let Some(bind) = bind_id {
         body_exprs.push(bind);
     }

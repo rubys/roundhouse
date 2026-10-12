@@ -1,4 +1,13 @@
 module I18n
   def self.default_locale: () -> Symbol
   def self.locale: () -> Symbol
+
+  class MissingTranslationData < ArgumentError
+  end
+
+  def self.normalize_key: (String key) -> String
+  def self.subtree_translation: (String key) -> String
+  def self.missing_raises: (bool raises, String flipped) -> bool
+  def self.missing_translation: (String key, bool raises) -> String
+  def self.missing_translation_tag: (String key, String details, bool raises) -> String
 end

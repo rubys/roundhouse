@@ -1021,7 +1021,18 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 489 on 2026-10-11: the indifferent hash's conversions
     // (`ActiveSupport.indifferent*`, active_support_ext.rb) walk an untyped
     // Hash/Array value the way `deep_dup` does (+23).
-    const CEILING: usize = 489;
+    // MEASURED 491 on 2026-10-11 (#818): AssociationReflection `#klass` /
+    // `#macro` presence stubs answer nil until synthesized (+2).
+    // MEASURED 496 on 2026-10-11 (#802/#833): portable `word_wrap` helpers
+    // (`word_wrap_ws_next` / `word_wrap_hard_*`) add String-index sites
+    // typed gradually (+5 in action_view/view_helpers.rb).
+    // MEASURED 697 on 2026-10-11 (#834): `active_support_reporters.rb`
+    // (EventReporter, ErrorReporter, ParameterFilter, ExecutionContext)
+    // adds 201. What they hold is caller-defined: the subscriber a
+    // reporter calls, an event payload and its filter, an error context
+    // (`deep_dup` walks it the way the indifferent hash's conversions do),
+    // and the value a `handle` / `record` block answers.
+    const CEILING: usize = 697;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

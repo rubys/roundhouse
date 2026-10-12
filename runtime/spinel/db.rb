@@ -1840,6 +1840,14 @@ module Db
   # `finalize`. The -1 length argument lets sqlite measure the SQL
   # itself (NUL-terminated).
   def self.prepare(sql)
+    return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. Post-lift SQL may still
+  # contain \x01 inside string literals (unmarked bind_literal values);
+  # those bytes are data and must not be stripped or re-dispatched.
+  def self.prepare_plain(sql)
     conn = current_conn
     handle = conn.qc_lookup(sql)
     if handle != 0
@@ -1854,6 +1862,39 @@ module Db
     begin_snapshot(conn)
     ptr = conn.prepare_cached(sql)
     conn.qc_record(sql, ptr)
+    ptr
+  end
+
+  # A Relation read with its hash-condition values marked for binding;
+  # see db_cruby.rb's `prepare_marked`. The result cache records and
+  # replays under `key` (the values written in), so a replay that
+  # promotes re-runs that inline SQL and needs no binds.
+  def self.prepare_marked(marked)
+    binds = ActiveRecord::Relation.lift_binds(marked)
+    sql = binds[0].to_s
+    key = binds[1].to_s
+    return prepare_plain(key) if binds.length <= 2
+    conn = current_conn
+    handle = conn.qc_lookup(key)
+    if handle != 0
+      if @sql_trace
+        $stderr.puts "  CACHE " + key
+      end
+      return handle
+    end
+    record_query(sql)
+    begin_snapshot(conn)
+    ptr = conn.prepare_cached(sql)
+    i = 2
+    while i < binds.length
+      if binds[i] == "i"
+        bind_int(ptr, i / 2, binds[i + 1].to_i)
+      else
+        bind_text(ptr, i / 2, binds[i + 1])
+      end
+      i += 2
+    end
+    conn.qc_record(key, ptr)
     ptr
   end
 

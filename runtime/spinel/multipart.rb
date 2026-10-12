@@ -9,7 +9,7 @@
 # nested key a text field would take (`params["message"]["attachment"]`).
 # The synthesized `<Resource>Params.from_raw` reads it back through
 # `UploadedFile.from_params`, which is the ONE place a params value is
-# narrowed to this class: `Roundhouse::ParamValue` (String | Hash |
+# narrowed to this class: `Roundhouse::ParamValue` (JSON scalars, Hash |
 # Array) is what every target's params tree carries, and this class is
 # a fourth arm only the ruby family's untyped Hash can hold. That is
 # why none of this is in `runtime/ruby/`.

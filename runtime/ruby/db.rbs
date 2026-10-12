@@ -23,6 +23,12 @@ module Db
   def self.prepare: (String) -> Integer
   # Reads with too many SQL shapes bypass the cache; finalize releases them.
   def self.prepare_uncached: (String) -> Integer
+  # `prepare` for SQL carrying `Relation#bind_literal` marks: lifts them
+  # to placeholders and binds the values.
+  def self.prepare_marked: (String) -> Integer
+  # Post-lift / post-inline prepare that never re-enters prepare_marked
+  # (literal \x01 bytes must reach the backend intact).
+  def self.prepare_plain: (String) -> Integer
   def self.step?: (Integer) -> bool
   def self.column_int: (Integer, Integer) -> Integer
   def self.column_float: (Integer, Integer) -> Float

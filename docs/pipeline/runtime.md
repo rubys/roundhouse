@@ -2425,8 +2425,23 @@ Three gaps remain, all on spinel's side:
   (`I18n.locale =`, `with_locale`) is not modeled. Translation is answered
   at compile time from the default locale (`src/i18n`): `t` / `I18n.t`
   with a literal key, attribute names, validation messages and form
-  labels. A key computed at run time, or one the locale lacks, is an
-  error rather than a guess.
+  labels. A key the locale lacks answers as Rails does in the running
+  environment: `Translation missing: en.key`, a template's
+  `translation_missing` span, or `I18n::MissingTranslationData` where
+  `config.i18n.raise_on_missing_translations` is set (`:strict` and a
+  value computed at boot stay errors). A key with run-time text after a
+  literal prefix (`t("statuses.#{v}")`) folds every translation under
+  the prefix into a `case` on the normalized key, falling back to the
+  missing answer or `default:`. Where such a key names a subtree, Rails
+  answers a Hash; here it raises `NotImplementedError`. A key with no
+  literal prefix, or one reaching more than 400 translations, is an
+  error rather than a guess. A `Rails::Engine` gem's `config/locales`
+  load before the app's, read where Bundler installed the gem
+  (`BUNDLE_PATH`, `GEM_HOME`, `GEM_PATH`), so an uninstalled gem's keys
+  stay missing. Engines load in lockfile order, not Rails' railtie
+  order, which differs only when two gems define one key. A gem that is
+  not an engine adds its files from its own code; none is read unless
+  `src/i18n/gems.rs::NON_ENGINE_LOCALES` names its paths.
 - **`fragment_name_with_digest(name, digest_path)` adds no template
   digest**: templates carry none here (see
   `runtime/spinel/action_controller_fragment_caching.rb`), so an omitted

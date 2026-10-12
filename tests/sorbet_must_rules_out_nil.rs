@@ -1,4 +1,6 @@
-//! Sorbet nil assertions remain unsupported until their runtime semantics are shared.
+//! `T.must` lowers to sorbet-runtime's nil check, so its value is the
+//! argument with nil ruled out; `T.must_because` remains unsupported
+//! until its runtime semantics are shared.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -52,13 +54,14 @@ fn action(line: &str) -> String {
 }
 
 #[test]
-fn t_must_requires_a_shared_nil_check() {
+fn t_must_rules_nil_out() {
     let bare = receivers(&action("Line.find_by(id: 1).bogus_after"));
     assert_eq!(bare.len(), 1, "{bare:?}");
     assert!(bare[0].contains("Nil"), "{bare:?}");
+    // The one failure left is `bogus_after` on a Line that cannot be nil.
     let must = receivers(&action("T.must(Line.find_by(id: 1)).bogus_after"));
-    assert!(must.iter().any(|d| d.contains("nil-check")), "{must:?}");
-    assert!(must.iter().any(|d| d.contains("Nil")), "{must:?}");
+    assert_eq!(must.len(), 1, "{must:?}");
+    assert!(must[0].contains("Line") && !must[0].contains("Nil"), "{must:?}");
 }
 
 #[test]

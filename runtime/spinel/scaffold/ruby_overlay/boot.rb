@@ -221,6 +221,9 @@ require_relative "runtime/broadcasts"
 # An app with no jobs has no `ActiveJob::Base` subclass to load this
 # file, and `test/test_helper.rb` calls `ActiveJob` at load time.
 require_relative "runtime/active_job"
+# ActiveJob payload codecs: after the module and its DeserializationError,
+# and after global_id_locator, whose URI parser the record reader uses.
+require_relative "runtime/active_job_serialization"
 # Per-request state per THREAD -- reopens Current, the view slots, the
 # broadcast log, the job queue and the store memo (see the file).
 require_relative "runtime/thread_state"

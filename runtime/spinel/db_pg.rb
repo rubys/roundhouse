@@ -1011,9 +1011,24 @@ module Db
   # A read through the connection's cached named statement for `sql`.
   def self.prepare(sql)
     sql = sql.to_s
+    return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. Post-inline SQL may
+  # still contain \x01 inside string literals (unmarked values).
+  def self.prepare_plain(sql)
     record_query(sql)
     h = current_conn.open_stmt(sql, true)
     h
+  end
+
+  # A Relation read with its values marked for binding (db_cruby.rb's
+  # `prepare_marked`). PostgreSQL spells placeholders $1, $2…, not the
+  # `?` the lift writes, so it runs with its values written in, as it
+  # did before binding.
+  def self.prepare_marked(marked)
+    prepare_plain(ActiveRecord::Relation.inline_sql(marked))
   end
 
   # Reads with too many SQL shapes to cache run as the unnamed statement.

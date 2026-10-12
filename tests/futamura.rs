@@ -112,12 +112,18 @@ fn real_blog_suite_gives_the_same_result_on_source_and_emitted_tree() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let fixture = root.join("fixtures/real-blog");
     assert!(fixture.join("Gemfile.lock").exists(), "generate fixtures/real-blog first");
-    let run = Command::new(root.join("scripts/futamura-suite"))
-        .arg(&fixture)
+    let mut cmd = Command::new(root.join("scripts/futamura-suite"));
+    cmd.arg(&fixture)
         .env("ROUNDHOUSE_BIN", env!("CARGO_BIN_EXE_roundhouse"))
-        .env_remove("BUNDLE_GEMFILE")
-        .output()
-        .unwrap();
+        .env_remove("BUNDLE_GEMFILE");
+    // Whole-route replacement needs Ruby 4.1 started with RUBY_BOX=1.
+    // Run this under such a Ruby with RUBY_BOX=1 set and the suite's GET
+    // requests are served by the lowered app inside Rails; otherwise the
+    // emitted tree runs with whole-route off, as plain Rails.
+    if std::env::var("RUBY_BOX").as_deref() != Ok("1") {
+        cmd.env("FUTAMURA_WHOLE_ROUTE", "off");
+    }
+    let run = cmd.output().unwrap();
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(
         run.status.success(),
@@ -126,6 +132,70 @@ fn real_blog_suite_gives_the_same_result_on_source_and_emitted_tree() {
     );
     // The fixture's suite is green, so SAME must mean zero failures.
     assert!(stdout.contains(" 0 failures, 0 errors"), "{stdout}");
+}
+
+/// Whole-route replacement: a GET action whose code reaches no error
+/// under the `ruby` analysis is served by the lowered app; one that does
+/// stays with Rails, and the ledger names the error and the path to it.
+/// Writes are never considered.
+#[test]
+fn whole_route_lowers_clean_get_actions_and_leaves_the_rest_to_rails() {
+    let src = scratch("wr-src");
+    let out = scratch("wr-out");
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "db/schema.rb", br#"ActiveRecord::Schema.define do
+  create_table "posts", force: :cascade do |t|
+    t.string "title", null: false
+  end
+end
+"#);
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  resources :posts, only: [:index, :show, :create]\nend\n");
+    write(&src, "app/models/application_record.rb", b"class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n");
+    write(&src, "app/models/post.rb", b"class Post < ApplicationRecord\n  def shout\n    title.frobnicate\n  end\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    write(&src, "app/controllers/posts_controller.rb", br#"class PostsController < ApplicationController
+  def index
+    @posts = Post.all
+  end
+
+  def show
+    @post = Post.find(params[:id])
+    @shout = @post.shout
+  end
+
+  def create
+    @post = Post.create!(title: params[:title])
+    redirect_to posts_path
+  end
+end
+"#);
+    write(&src, "app/views/layouts/application.html.erb", b"<html><body><%= yield %></body></html>\n");
+    write(&src, "app/views/posts/index.html.erb", b"<% @posts.each do |post| %><p><%= post.title %></p><% end %>\n");
+    write(&src, "app/views/posts/show.html.erb", b"<h1><%= @post.title %></h1><p><%= @shout %></p>\n");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(stderr.contains("whole-route: 1 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    let residue = stderr.lines().find(|l| l.contains("rails ") && l.contains("posts#show")).unwrap_or_else(|| panic!("{stderr}"));
+    assert!(residue.contains("app/models/post.rb:3") && residue.contains("frobnicate"), "{residue}");
+    assert!(residue.contains("PostsController#show -> Post#shout"), "{residue}");
+
+    let init = fs::read_to_string(out.join("config/initializers/futamura_routes.rb")).unwrap();
+    assert!(init.contains("    posts#index\n"), "{init}");
+    assert!(!init.contains("posts#show") && !init.contains("posts#create"), "{init}");
+    assert!(out.join("vendor/futamura/bridge.rb").exists());
+    assert!(out.join("vendor/futamura/lowered/main.rb").exists());
+    // The lowered app's own tests are not part of the served program.
+    assert!(!out.join("vendor/futamura/lowered/test").exists());
+    // The app itself is still the app.
+    assert_eq!(fs::read(out.join("app/models/post.rb")).unwrap(), fs::read(src.join("app/models/post.rb")).unwrap());
 }
 
 mod query_specialization {

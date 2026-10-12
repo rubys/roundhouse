@@ -643,7 +643,7 @@ fn custom_factory_blocks_are_not_silently_discarded() {
         "def label; name; end; include Comparable",
         "def label; name; end; puts 'side effect'",
         "def other.label; 1; end",
-        "|value| def label; name; end",
+        "|value| value; def label; name; end",
     ] {
         let source = format!("class Owner; State = Data.define(:name) do {block}; end; end");
         assert!(

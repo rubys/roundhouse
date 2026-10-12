@@ -1,14 +1,14 @@
 //! Regression test for roundhouse#296.
 //!
-//! `save!`/`destroy`/`destroy!`/`reload` are declared `() -> Base` in
+//! `save!`/`destroy`/`destroy!` are declared `() -> Base` in
 //! `runtime/ruby/active_record/base.rbs`, literally — not a self-type
 //! (RBS self-types the parser doesn't read yet, per that file's own
-//! comment). Unlike `find`/`create!`, these four are never
+//! comment). Unlike `find`/`create!`, these three are never
 //! monomorphized per model at emit time: every model shares the one
 //! compiled `Base` method, which returns a `Base`-typed value no
 //! matter which subclass calls it.
 //!
-//! Before the fix, the catalog seeded all four as `ReturnKind::SelfType`
+//! Before the fix, the catalog seeded all three as `ReturnKind::SelfType`
 //! (the receiver's own class), so a plain method whose tail calls one
 //! of them — `WidgetStamp#run` below, lifted from the issue — got an
 //! emitted `.rbs` claiming `-> Widget`. Spinel's AOT build refused that:
@@ -17,6 +17,8 @@
 //! binary required — see `tests/testing.md`'s ".rbs-assertion" lane),
 //! so it fails on main for the same reason the real build does: a
 //! false claim in the emitted signature, not merely a missing feature.
+//! `reload` and `lock!` now have concrete receiver-returning forwarders;
+//! `tests/reload_receiver.rs` checks their sidecars and native execution.
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
@@ -78,14 +80,13 @@ fn save_bang_tail_seeds_the_runtime_base_type_not_the_record_class() {
     );
 }
 
-/// `destroy`, `destroy!` and `reload` are declared `() -> Base` the
+/// `destroy` and `destroy!` are declared `() -> Base` the
 /// same way `save!` is (same file, same reasoning) — same bug, same fix.
 #[test]
-fn destroy_destroy_bang_and_reload_tails_also_seed_the_runtime_base_type() {
+fn destroy_and_destroy_bang_tails_keep_the_runtime_base_type() {
     for (method, name) in [
         ("destroy", "widget_destroy"),
         ("destroy!", "widget_destroy_bang"),
-        ("reload", "widget_reload"),
     ] {
         let app = widget_app().write(
             "app/models/widget_stamp.rb",

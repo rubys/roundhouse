@@ -538,6 +538,10 @@ fn emitted_helpers_preserve_parent_active_scope_order_exclusion_and_privacy() {
   def sibling_ids
     other_positioned_siblings.ids
   end
+  def sibling_ids_via_local
+    siblings = all_positioned_siblings
+    siblings.excluding(self).ids
+  end
   def parent_id
     positioning_parent.id
   end
@@ -558,6 +562,7 @@ inactive = make.call(a, 5, false)
 foreign = make.call(b, 1, true)
 raise "parent capture" unless self_record.parent_id == a.id
 raise "scope/parent/order/exclusion" unless self_record.sibling_ids == [earlier.id, later.id]
+raise "local Relation exclusion" unless self_record.sibling_ids_via_local == [earlier.id, later.id]
 raise "compiled reflective wrapper" unless self_record.reflected_sibling_ids == [earlier.id, later.id]
 begin
   self_record.public_reflected_siblings
@@ -594,6 +599,21 @@ siblings = ->(owner) { Comment.where(article_id: owner.id) }
 raise "initial sibling order" unless siblings.call(article).positioned.ids == items.map(&:id)
 raise "default score sequence: #{items.map(&:position_score).inspect}" unless items.map(&:position_score) == [1.0, 2.0, 3.0, 4.0]
 inactive = make.call(article, 5, false)
+ordered = siblings.call(article).order(:position_score)
+ordered_sql = ordered.to_sql
+begin
+  ordered.reorder
+  raise "no-argument reorder was accepted"
+rescue ArgumentError => error
+  raise "wrong reorder error: #{error.message}" unless error.message == "The method .reorder() must contain arguments."
+end
+raise "failed reorder mutated the relation" unless ordered.to_sql == ordered_sql
+loaded = siblings.call(article).order(:position_score)
+loaded_ids = loaded.to_a.map(&:id)
+loaded.clear_ordering
+raise "clear_ordering kept the loaded cache" unless loaded.instance_variable_get(:@records).nil?
+raise "clear_ordering left stale ordered ids reachable" unless loaded.to_a.map(&:id) == loaded_ids
+raise "maximum lost the relation scope" unless ordered.maximum(:position_score) == 5.0
 projected = siblings.call(article).active.positioned.select(:id)
 raise "minimum ignored the relation scope/projection" unless projected.minimum(:position_score) == 1.0
 raise "maximum ignored the relation scope/projection" unless projected.maximum(:position_score) == 4.0

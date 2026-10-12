@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Value;
 
+pub mod gems;
+
 /// Rails 8.1.4's bundled English, in the order its frameworks load it.
 const RAILS_EN: &[(&str, &str)] = &[
     ("activesupport", include_str!("rails/activesupport.en.yml")),
@@ -27,6 +29,23 @@ pub struct Catalog {
     pub locale: String,
     /// Dotted key (`activerecord.attributes.user.email`) → string leaf.
     pub entries: BTreeMap<String, String>,
+    /// What a translation the locale lacks does, per environment.
+    #[serde(default)]
+    pub missing: MissingPolicy,
+}
+
+/// `config.i18n.raise_on_missing_translations`: Rails answers a missing
+/// translation with text unless the running environment sets it, and
+/// then raises `I18n::MissingTranslationData`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MissingPolicy {
+    /// `config/application.rb`'s value, Rails' `false` when unset.
+    pub raises: bool,
+    /// The environments whose own file sets the other value.
+    pub flipped: Vec<String>,
+    /// Why the setting cannot be read at compile time (`:strict`, or a
+    /// value computed at boot); a missing translation then stays an error.
+    pub unknown: Option<String>,
 }
 
 /// One piece of an interpolated message: text known at compile time, or
@@ -55,11 +74,17 @@ impl Catalog {
     /// Rails' English, then `files` (path, source), for `locale`. A file
     /// that does not parse is skipped and reported.
     pub fn load(locale: &str, files: &mut Vec<(String, String)>) -> (Catalog, Vec<(String, String)>) {
+        Catalog::load_with_gems(locale, &[], files)
+    }
+
+    /// As [`Catalog::load`], with the gems' files (already in load order)
+    /// between Rails' English and the app's.
+    pub fn load_with_gems(locale: &str, gems: &[(String, String)], files: &mut Vec<(String, String)>) -> (Catalog, Vec<(String, String)>) {
         files.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut catalog = Catalog { locale: locale.to_string(), entries: BTreeMap::new() };
+        let mut catalog = Catalog { locale: locale.to_string(), ..Default::default() };
         let mut problems = Vec::new();
         let rails = RAILS_EN.iter().map(|(name, src)| (name.to_string(), src.to_string()));
-        for (path, source) in rails.collect::<Vec<_>>().iter().chain(files.iter()) {
+        for (path, source) in rails.collect::<Vec<_>>().iter().chain(gems.iter()).chain(files.iter()) {
             if let Err(e) = catalog.merge_source(source) {
                 problems.push((path.clone(), e));
             }
@@ -125,7 +150,7 @@ impl Catalog {
             .filter(|(k, _)| prefixes.iter().any(|p| k.starts_with(p.as_str())))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        Catalog { locale: self.locale.clone(), entries }
+        Catalog { locale: self.locale.clone(), entries, ..Default::default() }
     }
 
     /// `Model.human_attribute_name(attr)`: the first of
@@ -276,6 +301,22 @@ pub struct Translate {
 }
 
 impl Translate {
+    /// `key` as I18n normalizes it for this call: a view's lazy `.key`
+    /// expanded from the template's path, then `scope:` in front.
+    pub fn full_key(call: &Translate, key: &str) -> Result<String, String> {
+        let key = match key.strip_prefix('.') {
+            Some(rest) => {
+                let view = call.view.as_deref().ok_or("a lazy key outside a template")?;
+                format!("{}.{rest}", view.replace("/_", ".").replace('/', "."))
+            }
+            None => key.to_string(),
+        };
+        Ok(match &call.scope {
+            Some(scope) => format!("{scope}.{key}"),
+            None => key,
+        })
+    }
+
     /// I18n interpolates only when the call passes a value, so with none
     /// `%{x}` and `%%` stay as written.
     pub fn interpolates(&self) -> bool {
@@ -295,25 +336,16 @@ pub enum Fallback {
 pub enum Translation {
     One(String),
     Plural { zero: Option<String>, one: String, other: String },
+    /// No entry and no `default:`: Rails' missing-translation answer for
+    /// `key`, with the locale in front (`en.shop.title`).
+    Missing { key: String },
 }
 
 impl Catalog {
     /// Resolve `call` as I18n's simple backend does, or say why it
     /// cannot be answered at compile time.
     pub fn resolve(&self, call: &Translate) -> Result<Translation, String> {
-        let full = |key: &str| -> Result<String, String> {
-            let key = match key.strip_prefix('.') {
-                Some(rest) => {
-                    let view = call.view.as_deref().ok_or("a lazy key outside a template")?;
-                    format!("{}.{rest}", view.replace("/_", ".").replace('/', "."))
-                }
-                None => key.to_string(),
-            };
-            Ok(match &call.scope {
-                Some(scope) => format!("{scope}.{key}"),
-                None => key,
-            })
-        };
+        let full = |key: &str| Translate::full_key(call, key);
         let mut candidates: Vec<Result<String, String>> = vec![Ok(full(&call.key)?)];
         for default in &call.defaults {
             candidates.push(match default {
@@ -321,14 +353,28 @@ impl Catalog {
                 Fallback::Text(t) => Err(t.clone()),
             });
         }
+        for key in candidates.iter().flatten() {
+            if self.entry(key, call.counted).is_none() && self.is_subtree(key) {
+                return Err(format!("`{key}` names a subtree, which I18n answers as a Hash"));
+            }
+        }
         let found = candidates.iter().find_map(|c| match c {
             Ok(key) => self.entry(key, call.counted),
             Err(text) => Some(Translation::One(text.clone())),
         });
-        let translation = found.ok_or_else(|| format!("translation missing: {}.{}", self.locale, full(&call.key).unwrap_or_default()))?;
+        let missing = format!("{}.{}", self.locale, full(&call.key).unwrap_or_default());
+        let translation = match found {
+            Some(t) => t,
+            None if call.defaults.is_empty() && self.missing.unknown.is_none() => return Ok(Translation::Missing { key: missing }),
+            None => {
+                let why = self.missing.unknown.as_deref().map(|u| format!(" ({u})")).unwrap_or_default();
+                return Err(format!("translation missing: {missing}{why}"));
+            }
+        };
         let templates: Vec<&String> = match &translation {
             Translation::One(t) => vec![t],
             Translation::Plural { zero, one, other } => zero.iter().chain([one, other]).collect(),
+            Translation::Missing { .. } => Vec::new(),
         };
         if !call.interpolates() {
             return Ok(translation);
@@ -343,6 +389,46 @@ impl Catalog {
             }
         }
         Ok(translation)
+    }
+
+    /// Whether `key` has entries beneath it.
+    pub fn is_subtree(&self, key: &str) -> bool {
+        let below = format!("{key}.");
+        self.entries.range(below.clone()..).next().is_some_and(|(k, _)| k.starts_with(&below))
+    }
+
+    /// The keys a call can reach when its key is `base` (already scoped
+    /// and expanded) followed by text known only at run time and ending
+    /// in `tail`: the translations to fold, and the subtrees Rails would
+    /// answer as a Hash. Supersets are harmless, since the run-time key
+    /// is compared to each exactly.
+    pub fn reach(&self, base: &str, tail: &str, counted: bool) -> (Vec<String>, Vec<String>) {
+        let tail = tail.trim_matches('.');
+        let stem = base.trim_end_matches('.');
+        let under = |k: &str| k.starts_with(base) || k == stem;
+        let mut nodes: Vec<String> = Vec::new();
+        for key in self.entries.keys().filter(|k| under(k)) {
+            let mut node = key.as_str();
+            nodes.push(node.to_string());
+            while let Some((parent, _)) = node.rsplit_once('.') {
+                if !under(parent) {
+                    break;
+                }
+                nodes.push(parent.to_string());
+                node = parent;
+            }
+        }
+        nodes.sort();
+        nodes.dedup();
+        let (mut keys, mut subtrees) = (Vec::new(), Vec::new());
+        for node in nodes {
+            match self.entry(&node, counted) {
+                Some(_) if node.ends_with(tail) => keys.push(node),
+                Some(_) => {}
+                None => subtrees.push(node),
+            }
+        }
+        (keys, subtrees)
     }
 
     fn entry(&self, key: &str, counted: bool) -> Option<Translation> {
@@ -722,7 +808,10 @@ mod tests {
         );
         assert!(c.resolve(&Translate { values: vec!["other".into()], ..t("greet") }).is_err());
         assert!(c.resolve(&Translate { values: vec!["name".into()], ..t("greet") }).is_ok());
-        assert!(c.resolve(&t("nope")).is_err());
+        assert_eq!(c.resolve(&t("nope")), Ok(Translation::Missing { key: "en.nope".into() }));
+        assert!(c.resolve(&Translate { defaults: vec![Fallback::Key("also_nope".into())], ..t("nope") }).is_err());
+        let unknown = Catalog { missing: MissingPolicy { unknown: Some("`:strict`".into()), ..Default::default() }, ..c.clone() };
+        assert!(unknown.resolve(&t("nope")).is_err());
         assert!(c.resolve(&t(".title")).is_err());
     }
 
@@ -748,6 +837,21 @@ mod tests {
         let (_, problems) = Catalog::load("en", &mut files);
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].0, "config/locales/bad.yml");
+    }
+
+    #[test]
+    fn a_run_time_key_reaches_the_translations_under_its_prefix() {
+        let c = catalog(&[(
+            "config/locales/en.yml",
+            "en:\n  vis:\n    public: Everyone\n    group:\n      staff: Staff\n    inbox:\n      one: \"1\"\n      other: \"%{count}\"\n  visitor: Guest\n",
+        )]);
+        let (keys, subtrees) = c.reach("vis.", "", false);
+        assert_eq!(keys, vec!["vis.group.staff", "vis.inbox.one", "vis.inbox.other", "vis.public"]);
+        assert_eq!(subtrees, vec!["vis", "vis.group", "vis.inbox"]);
+        let (keys, subtrees) = c.reach("vis.", "", true);
+        assert!(keys.contains(&"vis.inbox".to_string()) && !subtrees.contains(&"vis.inbox".to_string()));
+        assert_eq!(c.reach("vis.", ".staff", false).0, vec!["vis.group.staff"]);
+        assert!(c.resolve(&Translate { key: "vis.group".into(), ..Default::default() }).is_err());
     }
 
     #[test]

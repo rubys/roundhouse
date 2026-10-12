@@ -36,11 +36,22 @@ pub type TablePrefixes = std::collections::HashMap<String, String>;
 mod enum_constants;
 pub(in crate::ingest) use enum_constants::EnumConstants;
 
-/// Scan one file for `module <Ns>; def self.table_name_prefix; "<p>"; end`.
-/// Deliberately narrow: only a module-level `self.` def whose body is a
+/// Scan one file for `module <Ns>; def self.table_name_prefix; "<p>"; end`,
+/// or the same def inside the module's `class << self`.
+/// Deliberately narrow: only a module-level singleton def whose body is a
 /// single string literal. A computed prefix would have to run to be known,
 /// and nothing in the corpus writes one.
 pub fn ingest_table_name_prefixes(source: &[u8], file: &str) -> TablePrefixes {
+    fn literal_prefix(def: &ruby_prism::DefNode<'_>) -> Option<String> {
+        if constant_id_str(&def.name()) != "table_name_prefix" {
+            return None;
+        }
+        let stmts = flatten_statements(def.body()?);
+        if stmts.len() != 1 {
+            return None;
+        }
+        string_value(&stmts[0])
+    }
     let result = super::prism::parse(source, file);
     let root = result.node();
     let mut out = TablePrefixes::new();
@@ -51,22 +62,137 @@ pub fn ingest_table_name_prefixes(source: &[u8], file: &str) -> TablePrefixes {
         let mut full = scope;
         full.extend(name_path);
         let Some(body) = module.body() else { continue };
+        let stmts = flatten_statements(body);
+        // `extend self` makes every instance method a singleton one too, so a
+        // nested module can override an outer `ledger_` with a plain
+        // `def table_name_prefix = ""`.
+        let extends_self = stmts.iter().any(|s| {
+            s.as_call_node().is_some_and(|c| {
+                c.receiver().is_none()
+                    && constant_id_str(&c.name()) == "extend"
+                    && c.arguments().is_some_and(|a| {
+                        let args: Vec<_> = a.arguments().iter().collect();
+                        args.len() == 1 && args[0].as_self_node().is_some()
+                    })
+            })
+        });
+        for stmt in stmts {
+            if let Some(def) = stmt.as_def_node() {
+                let singleton = match def.receiver() {
+                    Some(r) => r.as_self_node().is_some(),
+                    None => extends_self,
+                };
+                if !singleton {
+                    continue;
+                }
+                if let Some(prefix) = literal_prefix(&def) {
+                    out.insert(full.join("::"), prefix);
+                }
+            } else if let Some(sclass) = stmt.as_singleton_class_node() {
+                if sclass.expression().as_self_node().is_none() {
+                    continue;
+                }
+                let Some(sbody) = sclass.body() else { continue };
+                for inner in flatten_statements(sbody) {
+                    let Some(def) = inner.as_def_node() else { continue };
+                    if def.receiver().is_some() {
+                        continue;
+                    }
+                    if let Some(prefix) = literal_prefix(&def) {
+                        out.insert(full.join("::"), prefix);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `isolate_namespace Billing` in an engine body: Rails defines
+/// `Billing.table_name_prefix` as the engine name and `_`
+/// (`billing_`), unless the module already declares one. A
+/// `Billing::Rate` with no `table_name` read `rates` without the
+/// prefix, a table no schema has, and every column read on it was
+/// `no known method`. The written module is the enclosing one it names
+/// (`module Billing; class Engine`), else the name as written.
+pub fn ingest_isolated_namespace_prefixes(source: &[u8], file: &str) -> TablePrefixes {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let mut out = TablePrefixes::default();
+    for (scope, class) in super::util::find_all_classes_with_scope(&root) {
+        let Some(body) = class.body() else { continue };
+        let mut nesting = scope;
+        nesting.extend(class_name_path(&class).unwrap_or_default());
         for stmt in flatten_statements(body) {
-            let Some(def) = stmt.as_def_node() else { continue };
-            if def.receiver().and_then(|r| r.as_self_node()).is_none() {
+            let Some(call) = stmt.as_call_node() else { continue };
+            if call.receiver().is_some() || constant_id_str(&call.name()) != "isolate_namespace" {
                 continue;
             }
-            if constant_id_str(&def.name()) != "table_name_prefix" {
-                continue;
+            let Some(arg) = call.arguments().and_then(|args| args.arguments().iter().next()) else { continue };
+            let Some(written) = constant_path_of(&arg) else { continue };
+            let rooted = arg.as_constant_path_node().is_some_and(|p| super::util::constant_path_is_rooted(&p));
+            let enclosing = (!rooted)
+                .then(|| nesting[..nesting.len().saturating_sub(1)].iter().rposition(|s| *s == written[0]))
+                .flatten();
+            let full = match enclosing {
+                Some(at) => nesting[..at].iter().chain(&written).cloned().collect::<Vec<_>>().join("::"),
+                None => written.join("::"),
+            };
+            let prefix = format!("{}_", crate::naming::underscore(&full).replace('/', "_"));
+            out.insert(full, prefix);
+        }
+    }
+    out
+}
+
+/// Each class one file declares with its own `self.table_name_prefix =
+/// "…"`, by full name. Rails keeps the prefix in a class attribute, so a
+/// model inherits it from its abstract base: an abstract
+/// `PrefixedRecord` that sets `legacy_` gives its
+/// models (`Line`, …) that name no table `legacy_lines`.
+pub fn ingest_class_table_prefixes(source: &[u8], file: &str) -> TablePrefixes {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let mut out = TablePrefixes::default();
+    for (mut scope, class) in super::util::find_all_classes_with_scope(&root) {
+        let Some(prefix) = class.body().and_then(explicit_table_prefix) else { continue };
+        let Some(path) = class_name_path(&class) else { continue };
+        scope.extend(path);
+        out.insert(scope.join("::"), prefix);
+    }
+    out
+}
+
+/// The prefix each abstract base passes down: its own, else its parent's.
+/// `pairs` are the pre-pass's `(abstract class, parent)` pairs; a bare
+/// parent is found the way Ruby finds it, the child's enclosing scopes first.
+pub fn inherited_table_prefixes(own: &TablePrefixes, pairs: &[(String, String)]) -> TablePrefixes {
+    let parents: std::collections::HashMap<&str, &str> = pairs.iter().map(|(c, p)| (c.as_str(), p.as_str())).collect();
+    let known = |name: &str| own.contains_key(name) || parents.contains_key(name);
+    let resolve = |child: &str, parent: &str| -> String {
+        let mut segments: Vec<&str> = child.split("::").collect();
+        segments.pop();
+        while !segments.is_empty() {
+            let candidate = format!("{}::{parent}", segments.join("::"));
+            if known(&candidate) {
+                return candidate;
             }
-            let Some(def_body) = def.body() else { continue };
-            let stmts = flatten_statements(def_body);
-            if stmts.len() != 1 {
-                continue;
+            segments.pop();
+        }
+        parent.to_string()
+    };
+    let mut out = TablePrefixes::default();
+    for (child, _) in pairs {
+        let mut at = child.clone();
+        // A cycle guard: the walk follows `parent` links, so a cyclic
+        // hierarchy must end somewhere.
+        for _ in 0..16 {
+            if let Some(prefix) = own.get(&at) {
+                out.insert(child.clone(), prefix.clone());
+                break;
             }
-            if let Some(prefix) = string_value(&stmts[0]) {
-                out.insert(full.join("::"), prefix);
-            }
+            let Some(parent) = parents.get(at.as_str()) else { break };
+            at = resolve(&at, parent);
         }
     }
     out
@@ -108,14 +234,17 @@ pub fn ingest_model(
     constants.record(source, file);
     constants.finish();
     let bases = super::library_class::ModelBases::new();
-    ingest_model_with_enum_constants(source, file, schema, prefixes, &constants, &bases)
+    ingest_model_with_enum_constants(source, file, schema, prefixes, &TablePrefixes::default(), &constants, &bases)
 }
 
+/// `base_prefixes`: each abstract base's inherited `table_name_prefix`
+/// ([`inherited_table_prefixes`]).
 pub(super) fn ingest_model_with_enum_constants(
     source: &[u8],
     file: &str,
     schema: &Schema,
     prefixes: &TablePrefixes,
+    base_prefixes: &TablePrefixes,
     enum_constants: &EnumConstants,
     model_bases: &super::library_class::ModelBases,
 ) -> IngestResult<Option<Model>> {
@@ -126,8 +255,7 @@ pub(super) fn ingest_model_with_enum_constants(
     // must ingest as `Admin::Report` (the compound `class Admin::Report`
     // spelling already carries its path). Falls back to the scopeless
     // finder for shapes the scoped walk doesn't cover.
-    let (scope, class) = match super::util::find_all_classes_with_scope(&root).into_iter().next()
-    {
+    let (scope, class) = match super::util::primary_class_with_scope(&root) {
         Some((s, c)) => (s, Some(c)),
         None => (Vec::new(), find_first_class(&root)),
     };
@@ -157,12 +285,23 @@ pub(super) fn ingest_model_with_enum_constants(
         let mut segments: Vec<&str> = class_name.as_str().split("::").collect();
         segments.pop();
         let mut prefix = class.body().and_then(explicit_table_prefix).unwrap_or_default();
+        let mut from_module = false;
         while prefix.is_empty() && !segments.is_empty() {
             if let Some(p) = prefixes.get(&segments.join("::")) {
                 prefix = p.clone();
+                from_module = true;
                 break;
             }
             segments.pop();
+        }
+        // No module parent declares one (an empty one still counts): the
+        // class attribute its abstract base set.
+        if prefix.is_empty()
+            && !from_module
+            && let Some(parent) = class.superclass().and_then(|n| constant_path_of(&n))
+            && let Some(inherited) = base_prefixes.get(&model_bases.resolve_superclass(&scope, &parent))
+        {
+            prefix = inherited.clone();
         }
         format!("{prefix}{}", crate::naming::rails_table_name(class_name.as_str()))
     };
@@ -270,6 +409,25 @@ pub(super) fn ingest_model_with_enum_constants(
             // place; `ingest_model_body_item` returns a single item and
             // can't. Library classes get the same treatment one level
             // down, in `walk_decl_body`.
+            //
+            // `alias_method :to, :from` of an instance method this body
+            // already defined copies that def, as the library walk does
+            // (`library_class::alias_source`), and the copy takes the
+            // visibility Ruby gives the alias: the original's
+            // (`Visibility`'s walk). Not one whose body calls `super`:
+            // Ruby's alias reaches the original name's super method and a
+            // renamed copy would reach its own. Anything else stays an
+            // unknown item.
+            if let Some(mut copy) = stmt.as_call_node().and_then(|call| model_alias_method_copy(&call, &body)) {
+                visibility.apply(&statement, &mut copy);
+                body.push(ModelBodyItem::Method {
+                    method: copy,
+                    leading_comments: leading,
+                    leading_blank_line: leading_blank,
+                });
+                prev_end = Some(stmt.location().end_offset());
+                continue;
+            }
             if let Some(alias) = stmt.as_alias_method_node() {
                 let to = super::library_class::alias_keyword_name(&alias.new_name());
                 let from = super::library_class::alias_keyword_name(&alias.old_name());
@@ -455,6 +613,37 @@ pub(super) fn ingest_model_with_enum_constants(
             end: class_loc.end_offset() as u32,
         },
     }))
+}
+
+/// `alias_method :to, :from` (literal names) of the last instance def of
+/// `from` already in `body`, renamed `to`. None when the def calls
+/// `super`.
+fn model_alias_method_copy(call: &ruby_prism::CallNode<'_>, body: &[ModelBodyItem]) -> Option<crate::dialect::MethodDef> {
+    fn calls_super(expr: &Expr) -> bool {
+        let mut found = matches!(&*expr.node, ExprNode::Super { .. });
+        expr.node.for_each_child(&mut |child| found = found || calls_super(child));
+        found
+    }
+    if call.receiver().is_some() || call.block().is_some() || constant_id_str(&call.name()) != "alias_method" {
+        return None;
+    }
+    let args: Vec<_> = call.arguments()?.arguments().iter().collect();
+    let [to, from] = args.as_slice() else { return None };
+    let (to, from) = (symbol_value(to)?, symbol_value(from)?);
+    let source = body.iter().rev().find_map(|item| match item {
+        ModelBodyItem::Method { method, .. }
+            if method.name.as_str() == from && method.receiver == crate::dialect::MethodReceiver::Instance =>
+        {
+            Some(method)
+        }
+        _ => None,
+    })?;
+    if calls_super(&source.body) {
+        return None;
+    }
+    let mut copy = source.clone();
+    copy.name = Symbol::from(to.as_str());
+    Some(copy)
 }
 
 /// Classify one class-body statement into its `ModelBodyItem` variant.
@@ -1221,6 +1410,7 @@ pub(super) fn expand_enum_decl(
             column
         ),
     })?;
+    let labels = dedup_mapping_labels(labels);
     let all_labels = labels.clone();
     let default = default_label.and_then(|d| labels.iter().find(|(l, _)| *l == d).and_then(|(_, v)| {
         match v { EnumStored::Lit(value) => Some(value.clone()), EnumStored::Expr(_) => None }
@@ -1460,7 +1650,7 @@ enum EnumStored {
 /// may name: the mapping itself (`enum :status, STATUSES`), a label
 /// (`NAME => NAME`, `"#{PENDING}": 1`) or a stored value
 /// (`active: ACTIVE`). Collected in source order so an alias
-/// (`ASSOCIATE = POS_USER`) resolves through the constant it names.
+/// (`ROLE_B = ROLE_A`) resolves through the constant it names.
 #[derive(Default)]
 pub(super) struct ClassConsts {
     /// `NAME = "x"`, `NAME = :x`, `NAME = 3`, `NAME = OTHER`.
@@ -1737,6 +1927,22 @@ fn serialized_enum_receiver<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
     let values = receiver.as_call_node()?;
     (constant_id_str(&values.name()) == "values"
         && values.arguments().is_none() && values.block().is_none()).then_some(receiver)
+}
+
+/// A mapping whose labels fold to the same string (`ROLE_B =>
+/// ROLE_B, ROLE_A => ROLE_A` with `ROLE_B = ROLE_A`) is one
+/// entry in the Hash Ruby builds: the first position, the last value.
+/// Kept as written, the generated `self.<plural>` literal would repeat a
+/// key, which Ruby warns about at parse time.
+fn dedup_mapping_labels(labels: Vec<(String, EnumStored)>) -> Vec<(String, EnumStored)> {
+    let mut out: Vec<(String, EnumStored)> = Vec::with_capacity(labels.len());
+    for (label, stored) in labels {
+        match out.iter_mut().find(|(l, _)| *l == label) {
+            Some(slot) => slot.1 = stored,
+            None => out.push((label, stored)),
+        }
+    }
+    out
 }
 
 /// Shared `label => value` extraction for both a braced `HashNode` and a
@@ -2625,6 +2831,7 @@ fn parse_association(
 
     let mut class_name: Option<String> = None;
     let mut foreign_key: Option<String> = None;
+    let mut primary_key: Option<String> = None;
     let mut through: Option<String> = None;
     let mut source: Option<String> = None;
     let mut source_type: Option<String> = None;
@@ -2668,6 +2875,9 @@ fn parse_association(
                 "class_name" => class_name = string_value(&value).map(|s| s.trim_start_matches("::").to_string()),
                 "foreign_key" => {
                     foreign_key = string_value(&value).or_else(|| symbol_value(&value))
+                }
+                "primary_key" => {
+                    primary_key = string_value(&value).or_else(|| symbol_value(&value))
                 }
                 "through" => through = symbol_value(&value),
                 "source" => source = symbol_value(&value),
@@ -2784,6 +2994,7 @@ fn parse_association(
             dependent: dependent.unwrap_or_default(),
             as_interface: as_interface.as_deref().map(Symbol::from),
             scope,
+            primary_key: primary_key.as_deref().map(Symbol::from),
         }),
         "has_one" => Some(Association::HasOne {
             name: name.clone(),
@@ -2798,9 +3009,11 @@ fn parse_association(
                 }),
             foreign_key_explicit,
             dependent: dependent.unwrap_or_default(),
+            through: through.map(|s| Symbol::from(s.as_str())),
             as_interface: as_interface.as_deref().map(Symbol::from),
             scope,
             autosave: autosave.unwrap_or(false),
+            primary_key: primary_key.as_deref().map(Symbol::from),
         }),
         "belongs_to" => Some(Association::BelongsTo {
             name: name.clone(),
@@ -2818,7 +3031,7 @@ fn parse_association(
             default: belongs_to_default,
             touch,
             foreign_type: None,
-            primary_key: None,
+            primary_key: primary_key.as_deref().map(Symbol::from),
         }),
         "has_and_belongs_to_many" => Some(Association::HasAndBelongsToMany {
             name: name.clone(),
@@ -2871,14 +3084,7 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
                     .and_then(|_| call.arguments())
                     .filter(|args| args.arguments().len() == 1)
                     .and_then(|args| symbol_or_string_value(&args.arguments().iter().next()?))
-                    // Shared DDL/DML currently emits bare table names.
-                    // Refuse names needing qualification or SQL quoting.
-                    .filter(|name| {
-                        let mut bytes = name.bytes();
-                        bytes.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-                            && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                            && !crate::naming::is_sqlite_keyword(name)
-                    });
+                    .filter(|name| bare_table_identifier(name));
                 self.writes.push(name.map(|name| (name, offset)));
             } else {
                 let name = node.as_call_and_write_node().map(|w| w.write_name())
@@ -2914,7 +3120,7 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
     };
     ruby_prism::Visit::visit(&mut collector, &body);
     if collector.writes.is_empty() {
-        Ok(None)
+        Ok(table_name_reader_override(&body))
     } else if collector.writes.len() == 1 && collector.writes[0].is_some() {
         Ok(collector.writes.pop().unwrap())
     } else {
@@ -2923,6 +3129,73 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
             message: "table_name binding requires one direct self.table_name assignment to a literal string or symbol naming a safe bare SQL identifier".into(),
         })
     }
+}
+
+/// Shared DDL/DML currently emits bare table names. Refuse names
+/// needing qualification or SQL quoting.
+fn bare_table_identifier(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && !crate::naming::is_sqlite_keyword(name)
+}
+
+/// The other way to name the table: a class-side reader answering one
+/// literal, `def self.table_name = "x"` or `class << self; def
+/// table_name; "x"; end; end` directly in the body (a
+/// `Catalog::Item::Detail`). Rails reads the table through that
+/// method, so it binds the schema row. The direct `def self.` form is
+/// consumed like the setter (lowering writes `def self.table_name` from
+/// `Model::table`); the `class << self` form stays, saying the same name.
+/// Any other shape, or more than one reader, keeps the convention.
+fn table_name_reader_override(body: &Node<'_>) -> Option<(String, usize)> {
+    fn literal_reader(def: &ruby_prism::DefNode<'_>) -> Option<String> {
+        if constant_id_str(&def.name()) != "table_name" || def.parameters().is_some() {
+            return None;
+        }
+        let body = def.body()?;
+        let value = match body.as_statements_node() {
+            Some(stmts) if stmts.body().len() == 1 => stmts.body().iter().next()?,
+            Some(_) => return None,
+            None => body,
+        };
+        symbol_or_string_value(&value).filter(|name| bare_table_identifier(name))
+    }
+    fn statements<'pr>(node: &Node<'pr>) -> Vec<Node<'pr>> {
+        match node.as_statements_node() {
+            Some(stmts) => stmts.body().iter().collect(),
+            None => vec![],
+        }
+    }
+    let mut found = Vec::new();
+    for stmt in statements(body) {
+        if let Some(def) = stmt.as_def_node() {
+            if def.receiver().is_some_and(|r| r.as_self_node().is_some()) {
+                if let Some(name) = literal_reader(&def) {
+                    found.push((name, stmt.location().start_offset()));
+                } else if constant_id_str(&def.name()) == "table_name" {
+                    return None;
+                }
+            }
+        } else if let Some(sclass) = stmt.as_singleton_class_node() {
+            if sclass.expression().as_self_node().is_none() {
+                continue;
+            }
+            for inner in sclass.body().map(|b| statements(&b)).unwrap_or_default() {
+                let Some(def) = inner.as_def_node() else { continue };
+                if def.receiver().is_some() {
+                    continue;
+                }
+                if let Some(name) = literal_reader(&def) {
+                    // Not a body statement: nothing is consumed.
+                    found.push((name, usize::MAX));
+                } else if constant_id_str(&def.name()) == "table_name" {
+                    return None;
+                }
+            }
+        }
+    }
+    (found.len() == 1).then(|| found.pop()).flatten()
 }
 
 pub(crate) fn dependent_from_sym(s: &str) -> Option<crate::dialect::Dependent> {

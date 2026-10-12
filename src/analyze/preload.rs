@@ -167,6 +167,11 @@ impl<'a> ModelIndex<'a> {
         else {
             return None;
         };
+        // A keyed association (`primary_key:`) is not matched on the
+        // owner's id, so the loaded owner is not the inverse's record.
+        if crate::lower::assoc_primary_key::custom_primary_key(decl).is_some() {
+            return None;
+        }
         self.decls.get(target)?.iter().find_map(|a| match a {
             Association::BelongsTo { name, target: t, foreign_key: fk, polymorphic: false, .. }
                 if t == owner && fk == foreign_key =>

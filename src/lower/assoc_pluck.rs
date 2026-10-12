@@ -70,6 +70,13 @@
 //! ONLY `pluck`. `ids` has the same shape and no failing call site;
 //! adding it would be a second untested arm, and the pass that grows one
 //! for a case nothing exercises is the pass that acquires its next bug.
+//!
+//! TEST BODIES too. campfire's `RoomsControllerTest` plucks member ids
+//! before `destroy` so it can assert the enqueued job's args — same
+//! `room.memberships.pluck(:user_id)` shape. That surface lives only on
+//! the fused test walk (`fused::apply_fused_context_rewrites` →
+//! [`rewrite_node`]); this standalone entry covers hook bodies for
+//! direct callers. Do not re-add a second `for_each_test_body` here.
 
 use crate::app::App;
 use crate::expr::{BlockStyle, Expr, ExprNode, Literal};
@@ -77,6 +84,8 @@ use crate::ident::Symbol;
 
 pub fn apply_assoc_pluck_lowering(app: &mut App) {
     let materialized = materialized_assoc_names(app);
+    // Hooks only — test bodies are single-sourced through the fused
+    // context walk so surfaces cannot drift.
     super::for_each_hook_body(app, &mut |e| rewrite(e, &materialized));
 }
 

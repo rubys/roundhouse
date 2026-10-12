@@ -15,7 +15,7 @@ module Tep
     # from with Rails' own rules (runtime/param_builder.rb). The flat
     # hashes above keep only a repeated key's last value, and cannot say
     # `ids[]=1&ids[]=2`.
-    attr_accessor :raw_query, :body_fields
+    attr_accessor :raw_query, :body_fields, :json_body_params
     attr_accessor :remote_host
     attr_accessor :ivars
 
@@ -28,6 +28,10 @@ module Tep
       @query        = Tep.str_hash   # raw query string only
       @raw_query    = +""
       @body_fields  = Tep.str_hash
+      # JSON request params keep their decoded Ruby values. Form and
+      # multipart text fields stay in the String-only `body_fields` map;
+      # multipart files stay in `uploads` below.
+      @json_body_params = {}
       @req_headers  = Tep.str_hash   # downcased header names; renamed
                                      # from `headers` to avoid sharing
                                      # an ivar slot with Response (spinel
@@ -165,7 +169,8 @@ module Tep
     #
     # No-op on bodyless requests. Form parsing handles
     # `application/x-www-form-urlencoded` and `multipart/form-data`
-    # (see `parse_body_params`); @raw_body stays intact either way.
+    # (see `parse_body_params`); JSON stays in @json_body_params and
+    # @raw_body stays intact either way.
     def consume_body(client_fd)
       cl = content_length
       # bytesize, not length: Content-Length counts bytes, and a body
@@ -186,7 +191,9 @@ module Tep
     end
 
     # The body's form fields into @req_params: urlencoded pairs, or the
-    # text and file parts of a multipart body. Shared by the three
+    # text and file parts of a multipart body. JSON is kept separately
+    # in @json_body_params so its values retain their JSON types and do
+    # not participate in request-method override. Shared by the three
     # drains below, which differ only in how they wait for bytes.
     def parse_body_params
       if form?
@@ -209,35 +216,17 @@ module Tep
         begin
           parsed = JSON.parse(@raw_body)
           if parsed.is_a?(Hash)
-            flatten_json(parsed, "")
+            parsed.each do |k, v|
+              @json_body_params[k.to_s] = v
+            end
+          else
+            # ActionDispatch wraps top-level arrays and scalars under
+            # `_json`, keeping request_parameters a Hash.
+            @json_body_params["_json"] = parsed
           end
         rescue JSON::ParserError
           nil
         end
-      end
-      nil
-    end
-
-    # A parsed JSON object into @req_params and @body_fields, spelled
-    # the way a form posts it: `{"blob": {"filename": "a.png"}}` becomes
-    # `blob[filename]`, which is the key shape `Main.request_params`
-    # already nests from a multipart body's fields. Scalars arrive as their `to_s`, null as "". Arrays are
-    # skipped: @req_params holds one value per key, so a form's
-    # repeated `k[]` has no slot here either.
-    def flatten_json(value, prefix)
-      if value.is_a?(Hash)
-        value.each do |k, v|
-          key = prefix.length == 0 ? k.to_s : prefix + "[" + k.to_s + "]"
-          flatten_json(v, key)
-        end
-      elsif value.is_a?(Array)
-        nil
-      elsif value.nil?
-        @req_params[prefix] = +""
-        @body_fields[prefix] = +""
-      else
-        @req_params[prefix] = value.to_s
-        @body_fields[prefix] = value.to_s
       end
       nil
     end

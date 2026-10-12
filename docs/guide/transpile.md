@@ -136,6 +136,18 @@ marked in the output, and the punch list is the inventory. What they
 produce is a survey, not a deployable; a stubbed action renders
 nothing useful.
 
+Boot code gets its own ledger. A statement in `config/initializers/`, in
+an engine class body or in `config/application.rb` that no ingest
+recognizer reads is dropped from the compiled app, so each one is
+reported as `warning[unconsumed_initializer]` with its file and line
+(never an error: the ledger is a warning, and it is not counted as an
+ingest gap). A normal run prints one count line; `--survey` and
+`--allow-unsupported` list every statement, and `--survey` ends with an
+"Initializer ledger" section grouped by statement. Statements that
+provably do nothing in a compiled app (`config.filter_parameters += […]`,
+`config.action_dispatch.cookies_serializer = …`) are not reported; the
+list and its reasons live in `src/ingest/initializer_ledger.rs`.
+
 Before either flag, the `wont_lower` question is worth asking: which
 constructs in this app have no lowering for this target at all. The
 MCP server's [`wont_lower` tool](mcp.md) answers it per target without
@@ -156,9 +168,10 @@ What does NOT come out is sorbet-runtime. An app that annotates with
 it transpiles to a tree that does not need it at run time: a `sig` is
 read (see [`check.md`](check.md)) and then dropped, along with
 `extend T::Sig`, `abstract!` and the rest of the annotations;
-`T.let` / `T.must` / `T.cast` and their siblings become the value they
-wrap; `T.type_alias` constants go with the signatures that were their
-only reader. The two constructs that are class GENERATORS rather than
+`T.let` / `T.cast` and their siblings become the value they
+wrap, and `T.must` becomes the nil check sorbet-runtime makes;
+`T.type_alias` constants go with the signatures that were their only
+reader. The two constructs that are class GENERATORS rather than
 annotations are lowered into the plain Ruby they stand for — a
 `T::Struct` into readers plus the keyword constructor it generates
 (and `==`, where it included `ActsAsComparable`), a `T::Enum` into its

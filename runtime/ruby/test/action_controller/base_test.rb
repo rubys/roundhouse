@@ -86,6 +86,19 @@ class ActionControllerBaseTest < Minitest::Test
     assert_equal 0, @controller.headers.size
   end
 
+  # Rack/Rails semantics a block-form `around_action` relies on when its
+  # `ensure` does `response.headers.merge!(some_hash)`: every valid key
+  # is SET (an existing one overwritten, in place, by name), and the
+  # call answers the store itself so it can be chained.
+  def test_header_merge_sets_each_key_and_returns_self
+    @controller.headers.store_value("X-Quota-Remaining", "1")
+    result = @controller.headers.merge!({ "X-Quota-Remaining" => "5", "X-New" => "ok" })
+    assert_same @controller.headers, result
+    assert_equal "5", @controller.headers["X-Quota-Remaining"]
+    assert_equal "ok", @controller.headers["X-New"]
+    assert_equal 2, @controller.headers.size
+  end
+
   def test_header_delete_keeps_later_headers_in_the_indexed_range
     @controller.headers.store_value("X-First", "first")
     @controller.headers.store_value("X-Delete", "gone")
