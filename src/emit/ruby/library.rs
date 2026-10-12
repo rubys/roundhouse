@@ -6582,14 +6582,11 @@ fn emit_library_class_decl_inner(
     let self_anchor = out_path.with_extension("").to_string_lossy().into_owned();
     let mut s = String::new();
 
-    let external_includes = crate::gems::statically_resolved_external_includes(app);
     let mut emitted_external_require = false;
     for included in &lc.includes {
         let detail = format!("{} includes unresolved {}", lc.name.0, included.0);
-        if external_include_is_enabled(&detail)
-            && let Some(features) = external_includes.get(&detail)
-        {
-            for feature in features {
+        if external_include_is_enabled(&detail) {
+            for feature in super::expr::external_include_features(&detail) {
                 writeln!(s, "require {feature:?}").unwrap();
                 emitted_external_require = true;
             }
@@ -7109,13 +7106,13 @@ fn emit_library_class_decl_inner(
     let replayed: Vec<&Expr> = if replays_foreign_class_body(lc, app) {
         lc.unknown_calls
             .iter()
-            .filter(|call| !is_preserved_external_include(call, &external_includes))
+            .filter(|call| !is_preserved_external_include(call))
             .collect()
     } else {
         let own = app_extension_calls(lc, app);
         for call in &lc.unknown_calls {
             if !own.iter().any(|c| std::ptr::eq(*c, call))
-                && !is_preserved_external_include(call, &external_includes)
+                && !is_preserved_external_include(call)
             {
                 report_dropped_class_body_call(lc, call);
             }
@@ -7605,10 +7602,7 @@ fn report_dropped_class_body_call(lc: &LibraryClass, call: &Expr) {
     ));
 }
 
-fn is_preserved_external_include(
-    call: &Expr,
-    resolved: &std::collections::BTreeMap<String, Vec<String>>,
-) -> bool {
+fn is_preserved_external_include(call: &Expr) -> bool {
     matches!(
         &call.diagnostic,
         Some(crate::diagnostic::DiagnosticKind::Unsupported {
@@ -7616,8 +7610,8 @@ fn is_preserved_external_include(
             detail,
             ..
         }) if construct.as_str() == "include"
-            && resolved.contains_key(detail)
             && external_include_is_enabled(detail)
+            && !super::expr::external_include_features(detail).is_empty()
     )
 }
 

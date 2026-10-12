@@ -26,6 +26,12 @@ thread_local! {
     static EXTERNAL_GEM_NAMESPACES: RefCell<std::collections::BTreeSet<String>> = const {
         RefCell::new(std::collections::BTreeSet::new())
     };
+    /// `gems::statically_resolved_external_includes` of the app being
+    /// emitted, computed once with the namespaces above: it scans every
+    /// class, and asked per class it was most of Mastodon's emit.
+    static EXTERNAL_INCLUDES: RefCell<std::collections::BTreeMap<String, Vec<String>>> = const {
+        RefCell::new(std::collections::BTreeMap::new())
+    };
     /// The emitted path (relative to the output root) of the file being
     /// rendered. A `SOURCE_FILE_PATH` literal anchors on it; `None`
     /// outside a per-file emit, where the literal is written as is.
@@ -80,15 +86,24 @@ pub(super) fn with_core_class_reopen<R>(yes: bool, f: impl FnOnce() -> R) -> R {
 
 pub(super) fn with_external_gem_namespaces<R>(
     namespaces: &std::collections::BTreeSet<String>,
+    includes: std::collections::BTreeMap<String, Vec<String>>,
     f: impl FnOnce() -> R,
 ) -> R {
     let previous = EXTERNAL_GEM_NAMESPACES
         .with(|current| std::mem::replace(&mut *current.borrow_mut(), namespaces.clone()));
+    let previous_includes = EXTERNAL_INCLUDES.with(|current| current.replace(includes));
     let result = f();
     EXTERNAL_GEM_NAMESPACES.with(|current| {
         *current.borrow_mut() = previous;
     });
+    EXTERNAL_INCLUDES.with(|current| current.replace(previous_includes));
     result
+}
+
+/// The literal requires that carry an external include (`detail` is its
+/// "X includes unresolved Y" key), when the emit admitted them.
+pub(super) fn external_include_features(detail: &str) -> Vec<String> {
+    EXTERNAL_INCLUDES.with(|includes| includes.borrow().get(detail).cloned().unwrap_or_default())
 }
 
 pub(crate) fn external_gem_namespace_is_enabled(namespace: &str) -> bool {

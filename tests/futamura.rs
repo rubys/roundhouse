@@ -246,51 +246,6 @@ fn ruby_emit_refusals_do_not_fail_the_futamura_emit() {
     assert!(!stderr.contains("association_primary_key"), "{stderr}");
 }
 
-/// Whole-route replacement serves SQLite only. On another database the
-/// emit skips the `ruby` lowering it would have planned with, and the
-/// tree carries no bridge.
-#[test]
-fn whole_route_is_skipped_at_emit_on_a_non_sqlite_database() {
-    let src = scratch("pg-src");
-    let out = scratch("pg-out");
-    app_with_a_ruby_refusal(&src);
-    write(&src, "config/database.yml", br#"default: &default
-  adapter: postgresql
-  pool: <%= ENV["DB_POOL"] || 5 %>
-
-development:
-  primary:
-    <<: *default
-    database: app_development
-"#);
-    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
-        .args(["--target", "futamura", "-o"])
-        .arg(&out)
-        .arg(&src)
-        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&run.stderr);
-    assert!(run.status.success(), "{stderr}");
-    assert!(stderr.contains("whole-route replacement skipped: it supports SQLite only, and config/database.yml names \"postgresql\""), "{stderr}");
-    assert!(!stderr.contains("GET action(s) served"), "{stderr}");
-    assert!(!out.join("vendor/futamura").exists());
-    assert!(!out.join("config/initializers/futamura_routes.rb").exists());
-
-    // An adapter chosen by ERB may be SQLite: the analysis runs.
-    write(&src, "config/database.yml", b"default:\n  adapter: <%= ENV.fetch(\"DB_ADAPTER\", \"sqlite3\") %>\n");
-    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
-        .args(["--target", "futamura", "-o"])
-        .arg(scratch("pg-out-erb"))
-        .arg(&src)
-        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&run.stderr);
-    assert!(run.status.success(), "{stderr}");
-    assert!(stderr.contains("GET action(s) served"), "{stderr}");
-}
-
 mod query_specialization {
     use std::collections::HashMap;
     use std::path::PathBuf;

@@ -140,32 +140,6 @@ pub struct WholeRoute {
     pub diags: Vec<crate::diagnostic::Diagnostic>,
 }
 
-/// The database `config/database.yml` names, when it names one that
-/// whole-route replacement cannot serve. The bridge refuses such an app
-/// at boot (`bridge.rb`, `primary_adapter`); knowing it here spares the
-/// emit the `ruby` target's lowering of the whole app, which on Mastodon
-/// is nine tenths of the run. Read as text, since the file is ERB: the
-/// answer is a non-SQLite adapter only when every `adapter:` line is a
-/// literal naming one. No file, no adapter line, an ERB-computed
-/// adapter, or SQLite anywhere: `None`, and the analysis runs.
-pub fn unservable_database(fixture: &std::path::Path) -> Option<String> {
-    let text = std::fs::read_to_string(fixture.join("config/database.yml")).ok()?;
-    let mut named = None;
-    for line in text.lines() {
-        let line = line.trim_start();
-        if line.starts_with('#') {
-            continue;
-        }
-        let Some(value) = line.strip_prefix("adapter:") else { continue };
-        let value = value.split(" #").next().unwrap_or("").trim().trim_matches(|c| c == '"' || c == '\'');
-        if value.is_empty() || value.contains("<%") || value.contains("sqlite") {
-            return None;
-        }
-        named.get_or_insert_with(|| value.to_string());
-    }
-    named
-}
-
 /// Add whole-route replacement to `files`: the lowered tree, the bridge,
 /// and an initializer naming the actions `routes::plan` cleared. With no
 /// action cleared nothing is added, and the app stays plain Rails.

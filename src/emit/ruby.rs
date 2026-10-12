@@ -38,9 +38,10 @@ pub use expr::emit_expr;
 
 pub(crate) fn with_external_gem_namespaces<R>(
     namespaces: &std::collections::BTreeSet<String>,
+    includes: std::collections::BTreeMap<String, Vec<String>>,
     f: impl FnOnce() -> R,
 ) -> R {
-    expr::with_external_gem_namespaces(namespaces, f)
+    expr::with_external_gem_namespaces(namespaces, includes, f)
 }
 
 /// Emit a single `MethodDef` as Ruby source (trailing newline included).
