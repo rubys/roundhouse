@@ -278,7 +278,12 @@ fn model_for(model: &Model) -> String {
                         ValidationRule::Presence => {
                             presence.push(format!(":{}", validation.attribute));
                         }
-                        ValidationRule::Length { min, max, message, .. } => {
+                        // Sequel's min/max validators do not share Rails'
+                        // three-state nil rule (unset fails minimum, skips
+                        // a lone maximum, `false` fails both). Emitting
+                        // `:allow_nil` here would claim that match. The
+                        // field is named so the drop is visible.
+                        ValidationRule::Length { min, max, message, allow_nil: _ } => {
                             let msg = message
                                 .as_ref()
                                 .map(|m| format!(", message: {m:?}"))

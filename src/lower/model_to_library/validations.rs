@@ -831,37 +831,28 @@ fn inline_length_check(
     );
 
     let mut inner_stmts: Vec<Expr> = vec![len_assign];
-    if let Some(n) = min {
-        let lt = send(
+    let mut nil_errors: Vec<Expr> = Vec::new();
+    // One pass over the two bounds. `nil_fails_bound` is Rails'
+    // `skip_nil_check?` plus `allow_nil`: unset fails minimum only,
+    // `true` skips nil, `false` fails both.
+    for (bound, n, kind, op) in [
+        (LengthBound::Min, min, "too_short", "<"),
+        (LengthBound::Max, max, "too_long", ">"),
+    ] {
+        let Some(n) = n else { continue };
+        let cmp = send(
             len_read.clone(),
-            "<",
+            op,
             vec![Expr::new(
                 Span::synthetic(),
                 ExprNode::Lit { value: Literal::Int { value: n as i64 } },
             )],
         );
-        let msg = match message {
-            // `message:` override — Rails prefixes the humanized
-            // attribute exactly as it does for the default text.
-            Some(m) => msgs.error(attr.as_str(), "too_short", &ErrorOpts { message: Some(m.to_string()), ..ErrorOpts::count(n) }),
-            None => msgs.error(attr.as_str(), "too_short", &ErrorOpts::count(n)),
-        };
-        inner_stmts.push(if_with_nil_else(lt, errors_push(msg)));
-    }
-    if let Some(n) = max {
-        let gt = send(
-            len_read.clone(),
-            ">",
-            vec![Expr::new(
-                Span::synthetic(),
-                ExprNode::Lit { value: Literal::Int { value: n as i64 } },
-            )],
-        );
-        let msg = match message {
-            Some(m) => msgs.error(attr.as_str(), "too_long", &ErrorOpts { message: Some(m.to_string()), ..ErrorOpts::count(n) }),
-            None => msgs.error(attr.as_str(), "too_long", &ErrorOpts::count(n)),
-        };
-        inner_stmts.push(if_with_nil_else(gt, errors_push(msg)));
+        let push = length_error_push(&msgs, attr, kind, n, message);
+        inner_stmts.push(if_with_nil_else(cmp, push));
+        if nil_fails_bound(bound, allow_nil) {
+            nil_errors.push(length_error_push(&msgs, attr, kind, n, message));
+        }
     }
     let body_seq = seq(inner_stmts);
 
@@ -879,19 +870,6 @@ fn inline_length_check(
             parenthesized: false,
         },
     );
-    let mut nil_errors: Vec<Expr> = Vec::new();
-    let fail_min = min.is_some() && allow_nil != Some(true);
-    let fail_max = max.is_some() && allow_nil == Some(false);
-    if fail_min {
-        if let Some(n) = min {
-            nil_errors.push(length_error_push(&msgs, attr, "too_short", n, message));
-        }
-    }
-    if fail_max {
-        if let Some(n) = max {
-            nil_errors.push(length_error_push(&msgs, attr, "too_long", n, message));
-        }
-    }
     if nil_errors.is_empty() {
         // `allow_nil: true`, or a lone maximum (Rails skips nil).
         return vec![if_with_nil_else(not_nil, body_seq)];
@@ -905,6 +883,21 @@ fn inline_length_check(
         Span::synthetic(),
         ExprNode::If { cond: nil_check, then_branch: nil_arm, else_branch: body_seq },
     )]
+}
+
+enum LengthBound {
+    Min,
+    Max,
+}
+
+/// Whether a nil value fails this bound. `None` is Rails' default
+/// (`skip_nil_check?` is true only for `:maximum`), not a missing flag.
+fn nil_fails_bound(bound: LengthBound, allow_nil: Option<bool>) -> bool {
+    match allow_nil {
+        Some(true) => false,
+        Some(false) => true,
+        None => matches!(bound, LengthBound::Min),
+    }
 }
 
 fn length_error_push(msgs: &Messages, attr: &Symbol, kind: &str, n: usize, message: Option<&str>) -> Expr {

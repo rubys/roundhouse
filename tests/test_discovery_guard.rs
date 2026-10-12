@@ -37,13 +37,10 @@ fn other_toolchain_runners_are_not_path_lists() {
     // command (or, for TypeScript, a recursive find). `for test in [`
     // is the shape that skipped files.
     let expectations = [
-        (
-            "tests/typescript_toolchain.rs",
-            "find test -name '*.test.ts'",
-        ),
+        ("tests/typescript_toolchain.rs", ".arg(\"test\")"),
         (
             "src/emit/typescript/package.rs",
-            "find test -name '*.test.ts'",
+            "no *.test.ts discovered under test/",
         ),
         ("tests/go_toolchain.rs", "\"./..."),
         ("tests/crystal_toolchain.rs", "\"spec\""),
