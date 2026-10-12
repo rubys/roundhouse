@@ -30,6 +30,7 @@ module ActiveRecord
     def own_lists: () -> Relation
     def take_query_lists: (
         Array[String] wheres,
+        Array[Array[String]] where_cols,
         Array[String] joins,
         Array[String] orders,
         Array[String] groups,
@@ -39,6 +40,7 @@ module ActiveRecord
         Hash[Symbol, untyped] attrs
       ) -> Relation
     def copy_string_list: (Array[String] xs) -> Array[String]
+    def copy_cols_list: (Array[Array[String]] xs) -> Array[Array[String]]
     def copy_symbol_list: (Array[Symbol | Hash[Symbol, Symbol]] xs) -> Array[Symbol | Hash[Symbol, Symbol]]
     def copy_scope_attributes: (Hash[Symbol, untyped] attrs) -> Hash[Symbol, untyped]
 
@@ -68,6 +70,10 @@ module ActiveRecord
     # it from the bare `{}` in `initialize`, which carries no element
     # type — the same trap `Base`'s `@errors` documents.
     @scope_attributes: Hash[Symbol, untyped]
+    @where_cols: Array[Array[String]]
+    @hash_columns: Array[String]
+    def hash_column_name: (String col) -> String
+    @opaque_wheres: bool
     def where_scope: (Hash[Symbol, untyped] condition) -> Relation
     def scope_attributes: () -> Hash[Symbol, untyped]
     def merge_seedable_scope: (Hash[String | Symbol, untyped] hash) -> void
@@ -75,6 +81,9 @@ module ActiveRecord
     def excluding: (*untyped records) -> Relation
     def without: (*untyped records) -> Relation
     def or: (Relation other) -> Relation
+    def push_where: (String sql) -> Relation
+    def push_where_cols: (String sql, Array[String] cols) -> Relation
+    def pop_where: () -> String?
     def add_condition: (Hash[String | Symbol, untyped] | String | nil condition, Array[untyped] args, bool negate) -> bool
     def order: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
     def order_sql: (String fragment) -> Relation
@@ -142,6 +151,7 @@ module ActiveRecord
     def references: (*Symbol names) -> Relation
     def merge: (Relation other) -> Relation
     def where_clauses: () -> Array[String]
+    def unscope: (?where: Symbol | String | Array[Symbol | String]?) -> Relation
     def arel: () -> Arel::SelectManager
     def none: () -> Relation
     def reload: () -> Relation

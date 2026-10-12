@@ -74,6 +74,9 @@ module ActiveRecord
       @skip_preloading = false
       @records = nil
       @scope_attributes = {}
+      @where_cols = []
+      @opaque_wheres = false
+      @hash_columns = []
       @from = nil
       @ctes = []
       @shared_lists = false
@@ -103,6 +106,7 @@ module ActiveRecord
         @shared_lists = false
         take_query_lists(
           @wheres,
+          @where_cols,
           @joins,
           @orders,
           @groups,
@@ -117,8 +121,9 @@ module ActiveRecord
 
     # List accumulators go through copy_* so inference types the
     # parameters. Scalars come from `clone` (shallow ivar copy).
-    def take_query_lists(wheres, joins, orders, groups, havings, ctes, includes, attrs)
+    def take_query_lists(wheres, where_cols, joins, orders, groups, havings, ctes, includes, attrs)
       @wheres = copy_string_list(wheres)
+      @where_cols = copy_cols_list(where_cols)
       @joins = copy_string_list(joins)
       @orders = copy_string_list(orders)
       @groups = copy_string_list(groups)
@@ -130,6 +135,15 @@ module ActiveRecord
     end
 
     def copy_string_list(xs)
+      out = []
+      xs.each { |x| out << x }
+      out
+    end
+
+    # Each inner list is built fresh per clause by `push_where_cols` and
+    # nothing appends to it afterwards, so a shallow copy of the outer
+    # list is a faithful copy.
+    def copy_cols_list(xs)
       out = []
       xs.each { |x| out << x }
       out
@@ -240,7 +254,7 @@ module ActiveRecord
       own_lists
       @records = nil
       pred = column_predicate(@model.primary_key.to_s, val)
-      @wheres << "NOT (#{pred})" unless pred.empty?
+      push_where("NOT (#{pred})") unless pred.empty?
       self
     end
 
@@ -262,7 +276,9 @@ module ActiveRecord
       mine = @wheres.length > 0 ? @wheres.join(" AND ") : "1=1"
       other_wheres = other.where_clauses
       theirs = other_wheres.length > 0 ? other_wheres.join(" AND ") : "1=1"
+      @opaque_wheres = true
       @wheres = ["((#{mine}) OR (#{theirs}))"]
+      @where_cols = [[]]
       self
     end
 
@@ -274,14 +290,94 @@ module ActiveRecord
       own_lists
       @records = nil
       return false if condition.nil?
+      @hash_columns = []
       sql = if condition.is_a?(Hash)
         hash_conditions(condition)
       else
         substitute_binds(condition.to_s, args)
       end
       return false if sql == ""
-      @wheres << (negate ? "NOT (#{sql})" : "(#{sql})")
+      clause = negate ? "NOT (#{sql})" : "(#{sql})"
+      push_where_cols(clause, @hash_columns)
       true
+    end
+
+    # `@wheres` and `@where_cols` are parallel lists: entry i of the
+    # second names the columns a hash-built clause i constrains (empty
+    # for raw SQL, `or` composites, merged clauses). Every push and pop
+    # goes through these two so the lists cannot drift apart, and
+    # `unscope(where:)` reads the columns by position -- never by
+    # matching clause text, which a raw string can equal.
+    def push_where(sql)
+      push_where_cols(sql, [])
+    end
+
+    def push_where_cols(sql, cols)
+      @wheres << sql
+      @where_cols << cols.map { |c| c }
+      self
+    end
+
+    def pop_where
+      @where_cols.pop
+      @wheres.pop
+    end
+
+    # Hash-built WHERE clauses record the columns they constrain in
+    # `@where_cols`, aligned with `@wheres`, so `unscope(where:)` can
+    # take them back out. A nested
+    # `table => { col => v }` hash is recorded as `"table."`, which no
+    # bare `unscope(where: :col)` target matches.
+    # Rails' `unscope(where: :col)` / `unscope(where: [:a, :b])`: drop
+    # every hash-built condition on those columns, keep the rest. Only
+    # the `where:` form exists here, and a clause built from one hash
+    # naming several columns cannot be split, so that case raises
+    # instead of dropping the other columns' conditions. Raw-SQL
+    # clauses are never touched, as in Rails.
+    def unscope(where: nil)
+      own_lists
+      @records = nil
+      if @opaque_wheres
+        raise NotImplementedError, "unscope(where:) after merge or or: the merged conditions are not attributed to columns here, so they would silently survive"
+      end
+      targets = []
+      if where.is_a?(Symbol) || where.is_a?(String)
+        targets << where.to_s
+      elsif where.is_a?(Array)
+        i = 0
+        while i < where.length
+          targets << where[i].to_s
+          i += 1
+        end
+      else
+        raise ArgumentError, "unscope supports only where: :column or where: [:a, :b]"
+      end
+      kept = []
+      kept_cols = []
+      @wheres.each_with_index do |clause, idx|
+        cols = @where_cols[idx]
+        hit = false
+        other = false
+        j = 0
+        while j < cols.length
+          if targets.include?(cols[j])
+            hit = true
+          else
+            other = true
+          end
+          j += 1
+        end
+        if hit && other
+          raise ArgumentError, "unscope(where:) cannot split the multi-column condition #{clause}"
+        end
+        unless hit
+          kept << clause
+          kept_cols << cols
+        end
+      end
+      @wheres = kept
+      @where_cols = kept_cols
+      self
     end
 
     # `order` on a LOADED relation sorts the loaded records in memory
@@ -825,7 +921,10 @@ module ActiveRecord
     def merge(other)
       own_lists
       @records = nil
-      other.where_clauses.each { |w| @wheres << w }
+      other.where_clauses.each do |w|
+        push_where(w)
+        @opaque_wheres = true
+      end
       self
     end
 
@@ -845,7 +944,7 @@ module ActiveRecord
     def none
       own_lists
       @records = nil
-      @wheres << "(1 = 0)"
+      push_where("(1 = 0)")
       self
     end
 
@@ -1603,11 +1702,11 @@ module ActiveRecord
       else
         "#{@table}.#{@model.primary_key} = #{bind_literal(id)}"
       end
-      @wheres << sql unless sql.empty?
+      push_where(sql) unless sql.empty?
       begin
         probe_existence(1) > 0
       ensure
-        @wheres.pop unless sql.empty?
+        pop_where unless sql.empty?
       end
     end
 
@@ -1892,13 +1991,13 @@ module ActiveRecord
       @select_sql = nil
       @limit = 1
       @joins << "INNER JOIN friendly_id_slugs ON friendly_id_slugs.sluggable_id = #{@table}.#{@model.primary_key}"
-      @wheres << "friendly_id_slugs.sluggable_type = #{ActiveRecord.adapter.escape_value(@model.name)} AND friendly_id_slugs.slug = #{ActiveRecord.adapter.escape_value(id)}"
+      push_where("friendly_id_slugs.sluggable_type = #{ActiveRecord.adapter.escape_value(@model.name)} AND friendly_id_slugs.slug = #{ActiveRecord.adapter.escape_value(id)}")
       @orders << "friendly_id_slugs.id DESC"
       begin
         rows = load_records
       ensure
         @orders.pop
-        @wheres.pop
+        pop_where
         @joins.pop
         @select_sql = prior_select
         @limit = prior_limit
@@ -1914,14 +2013,14 @@ module ActiveRecord
       key = @model._cast_primary_key(id)
       prior_limit = @limit
       own_lists
-      @wheres << "#{@table}.#{@model.primary_key} = #{bind_literal(key)}"
+      push_where("#{@table}.#{@model.primary_key} = #{bind_literal(key)}")
       begin
         @limit = 1
         rows = load_records
         record = rows.length == 0 ? nil : rows[0]
       ensure
         @limit = prior_limit
-        @wheres.pop
+        pop_where
       end
       if record.nil?
         raise RecordNotFound.new("Couldn't find #{@model.name} with '#{@model.primary_key}'=#{id.inspect}", @model.name, @model.primary_key, id)
@@ -1952,7 +2051,7 @@ module ActiveRecord
       keys = ids.map { |id| @model._cast_primary_key(id) }
       sql_ids = keys.map { |key| ActiveRecord.adapter.escape_value(key) }.join(", ")
       own_lists
-      @wheres << (keys.empty? ? "1=0" : "#{@table}.#{@model.primary_key} IN (#{sql_ids})")
+      push_where((keys.empty? ? "1=0" : "#{@table}.#{@model.primary_key} IN (#{sql_ids})"))
       begin
         if @orders.empty?
           @limit = nil
@@ -1964,7 +2063,7 @@ module ActiveRecord
         @limit = prior_limit
         @offset = prior_offset
         @select_sql = prior_select
-        @wheres.pop
+        pop_where
       end
       if rows.length != expected
         listed = ids.map { |each_id| each_id.inspect }.join(", ")
@@ -1993,7 +2092,7 @@ module ActiveRecord
     def find_by(conditions)
       pushed = add_condition(conditions, [], false)
       record = first
-      @wheres.pop if pushed
+      pop_where if pushed
       record
     end
 
@@ -2065,7 +2164,7 @@ module ActiveRecord
       begin
         record = sole
       ensure
-        @wheres.pop if pushed
+        pop_where if pushed
         @records = prior_records
       end
       record
@@ -2286,15 +2385,28 @@ module ActiveRecord
     # A hash of conditions ANDed: `{is_deleted: false, user_id: 3}` ->
     # `is_deleted = 0 AND user_id = 3`. Array value -> `IN`, nil ->
     # `IS NULL`, nested Hash -> qualified `table.col = ...`.
+    # The name `unscope(where:)` matches a hash condition on: the bare
+    # column, whatever table it was written against (`"comments.col"`,
+    # `comments: { col: }`). Rails matches by attribute name on any table,
+    # so a joined table's predicate on the same column goes too.
+    def hash_column_name(col)
+      return col unless col.include?(".")
+      col.split(".").last.to_s
+    end
+
     def hash_conditions(hash)
+      @hash_columns = []
       parts = []
       hash.each do |key, val|
         if val.is_a?(Hash)
           val.each do |col, v|
-            parts << column_predicate("#{key}.#{col}", v)
+            qualified = "#{key}.#{col}"
+            parts << column_predicate(qualified, v)
+            @hash_columns << hash_column_name(qualified)
           end
         else
           parts << column_predicate(key.to_s, val)
+          @hash_columns << hash_column_name(key.to_s)
         end
       end
       parts.join(" AND ")

@@ -137,6 +137,7 @@ pub mod cable_test_case;
 pub mod view_test_case;
 pub mod current_set;
 pub mod update_writer_check;
+pub mod unscope_check;
 pub mod route_format_suffix;
 pub mod route_url_options;
 pub mod route_helper_receiver;
@@ -517,6 +518,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Rewrites nothing, so it has no ordering constraint of its own —
     // it just has to see the final tree.
     ("update_writer_check", &[]),
+    // Read-only: refuses an `unscope` form the runtime cannot honour.
+    ("unscope_check", &[]),
     // `x.inquiry` / `x.<name>?` → equality against the label; total
     // rewrite of a name no other pass produces or consumes.
     ("inquiry", &[]),
@@ -914,6 +917,8 @@ pub fn apply_post_analyze_lowerings(
     // an `update` site.
     update_writer_check::apply_update_writer_check(app);
     ran!("update_writer_check");
+    diags.extend(unscope_check::apply_unscope_check(app));
+    ran!("unscope_check");
     inquiry::apply_inquiry_lowering(app);
     ran!("inquiry");
     has_one_builder::apply_has_one_builder_lowering(app);
