@@ -423,8 +423,11 @@ fn synthesized_source(
             continue;
         }
         if let Some(attr) = name.strip_suffix('=') {
+            // Ruby assignment returns the RHS. An explicit read keeps that
+            // result without another writer call, and avoids Spinel inferring
+            // an empty-array assignment result as PolyArray instead of RbVal.
             body.push_str(&format!(
-                "  def self.{attr}=(value)\n    {class}.instance.{attr} = value\n  end\n\n"
+                "  def self.{attr}=(value)\n    {class}.instance.{attr} = value\n    value\n  end\n\n"
             ));
         } else {
             body.push_str(&format!(

@@ -1307,7 +1307,7 @@ fn reject_file_blob_fixtures(app: &App, target: BuildTarget) -> Result<(), Strin
 
 /// Scoped Current writes need a verified attached-block/ensure convention.
 fn reject_unsupported_current_scopes(app: &App, target: BuildTarget) -> Result<(), String> {
-    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
         return Ok(());
     }
     fn visit(expr: &crate::expr::Expr, target: &str, found: &mut bool) {

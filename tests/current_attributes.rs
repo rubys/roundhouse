@@ -108,7 +108,7 @@ fn class_level_forwarders_exist_for_every_instance_method() {
     let c = current();
     for m in [
         "def self.user\n    Current.instance.user",
-        "def self.user=(value)\n    Current.instance.user = value",
+        "def self.user=(value)\n    Current.instance.user = value\n    value",
         "def self.account\n    Current.instance.account",
         "def self.request_host",
         "def self.instance",
@@ -243,9 +243,7 @@ class ScopeProbe
 end
 "#;
 
-#[test]
-fn current_set_evaluates_rhs_before_writers_and_saves_after_prior_writer_side_effects() {
-    execute_current(r#"
+const SEQUENTIAL_SAVE_CURRENT: &str = r#"
 class Current < ActiveSupport::CurrentAttributes
   attribute :session, :user
   def session=(value)
@@ -258,17 +256,49 @@ class ScopeProbe
     Current.set(session: "new", user: Current.user) { Current.user }
   end
 end
-"#, r#"
+"#;
+
+const SEQUENTIAL_SAVE_ASSERTIONS: &str = r#"
 Current.session = "old"
 Current.user = "override"
 raise "block must run with pre-evaluated RHS" unless ScopeProbe.run == "override"
 raise "sequential save" unless Current.session == "old" && Current.user == "new"
-"#);
-}
+"#;
 
 #[test]
-fn scoped_current_preserves_sequential_save_set_result_receiver_and_control_flow() {
-    execute_current(SCOPED_CURRENT, r#"
+fn current_set_evaluates_rhs_before_writers_and_saves_after_prior_writer_side_effects() {
+    execute_current(SEQUENTIAL_SAVE_CURRENT, SEQUENTIAL_SAVE_ASSERTIONS);
+}
+
+/// The generated class setter must return its argument after one writer
+/// dispatch. An empty array is the RHS Spinel infers as PolyArray when
+/// the forwarder ends on the assignment send.
+const SETTER_RETURN_CURRENT: &str = r#"
+class Current < ActiveSupport::CurrentAttributes
+  attribute :session, :user, :trace
+
+  def session=(value)
+    super(value)
+    self.user = value unless value.nil?
+  end
+
+  def trace=(value)
+    super(value)
+    self.user = value.object_id
+  end
+end
+"#;
+
+const SETTER_RETURN_ASSERTIONS: &str = r#"
+trace = []
+returned = (Current.trace = trace)
+raise "setter result" unless returned.equal?(trace) && Current.trace.equal?(trace)
+raise "setter dispatch" unless Current.user == trace.object_id
+Current.session = "old"
+raise "coupled setter" unless Current.user == "old"
+"#;
+
+const SCOPED_ASSERTIONS: &str = r#"
 Current.trace = []
 Current.session = "old"
 Current.user = "override"
@@ -284,12 +314,14 @@ raise "break" unless ScopeProbe.breaking == "broken"
 raise "next" unless ScopeProbe.nexting == "nexted"
 raise "hygiene" unless ScopeProbe.hygiene("argument") == ["argument", "sentinel"]
 raise "restore after control flow" unless Current.session == "old" && Current.user == "old"
-"#);
-}
+"#;
 
 #[test]
-fn scoped_current_restores_only_saved_slots_in_order_even_when_setup_raises() {
-    execute_current(SCOPED_CURRENT, r#"
+fn scoped_current_preserves_sequential_save_set_result_receiver_and_control_flow() {
+    execute_current(SCOPED_CURRENT, SCOPED_ASSERTIONS);
+}
+
+const RESTORE_ASSERTIONS: &str = r#"
 def prepare
   Current.fail_get = nil
   Current.fail_write = nil
@@ -350,12 +382,14 @@ Current.fail_write = "old"
 expect_error("writer") { ScopeProbe.run("new", "explicit", false) }
 raise "restore must stop" unless Current.trace.last(2) == [["session=", "old"], ["user=", "old"]]
 raise "restore state" unless Current.session == "old" && Current.user == "old"
-"#);
-}
+"#;
 
 #[test]
-fn reset_keeps_the_instance_and_unrelated_state_without_calling_custom_writers() {
-    execute_current(r#"
+fn scoped_current_restores_only_saved_slots_in_order_even_when_setup_raises() {
+    execute_current(SCOPED_CURRENT, RESTORE_ASSERTIONS);
+}
+
+const RESET_CURRENT: &str = r#"
 class Current < ActiveSupport::CurrentAttributes
   attribute :user
   def user=(value)
@@ -363,26 +397,38 @@ class Current < ActiveSupport::CurrentAttributes
     super(value)
   end
 end
-"#, r#"
+"#;
+
+const RESET_ASSERTIONS: &str = r#"
 Current.user = "ada"
 instance = Current.instance
 instance.instance_variable_set(:@unrelated, 37)
+result = Current.reset
+raise "instance replaced" unless Current.instance.equal?(instance)
+raise "declared storage" unless Current.user.nil?
+raise "unrelated state" unless instance.instance_variable_get(:@unrelated) == 37
+raise "reset return" unless result == {}
+raise "custom writer" unless (Current.user = "ada") == "ada"
+"#;
+
+#[test]
+fn reset_keeps_the_instance_and_unrelated_state_without_calling_custom_writers() {
+    // TracePoint is an external CRuby observation, not part of the
+    // emitted/native contract. Keep the constructor-count regression.
+    execute_current(RESET_CURRENT, &format!(r#"
+Current.user = "ada"
 constructions = 0
 trace = TracePoint.new(:c_call) do |event|
   constructions += 1 if event.method_id == :new && event.self == Current
 end
-result = trace.enable { Current.reset }
-raise "instance replaced" unless Current.instance.equal?(instance)
+trace.enable
+{RESET_ASSERTIONS}
+trace.disable
 raise "constructor rerun" unless constructions == 0
-raise "declared storage" unless Current.user.nil?
-raise "unrelated state" unless instance.instance_variable_get(:@unrelated) == 37
-raise "reset return" unless result == {}
-"#);
+"#));
 }
 
-#[test]
-fn namespaced_and_nested_current_scopes_do_not_share_storage_or_temps() {
-    execute_current(r#"
+const NAMESPACED_CURRENT: &str = r#"
 module Dash
   class Current < ActiveSupport::CurrentAttributes
     attribute :user
@@ -401,7 +447,9 @@ module Other
     attribute :user
   end
 end
-"#, r#"
+"#;
+
+const NAMESPACED_ASSERTIONS: &str = r#"
 Dash::Current.user = "dash"
 Other::Current.user = "other"
 raise "nested values" unless Dash::ScopeProbe.run == ["inner", "outer"]
@@ -411,7 +459,11 @@ dash = Dash::Current.instance
 Dash::Current.reset
 raise "namespaced reset" unless Dash::Current.instance.equal?(dash) && Dash::Current.user.nil?
 raise "other reset" unless Other::Current.user == "other"
-"#);
+"#;
+
+#[test]
+fn namespaced_and_nested_current_scopes_do_not_share_storage_or_temps() {
+    execute_current(NAMESPACED_CURRENT, NAMESPACED_ASSERTIONS);
 }
 
 #[test]
@@ -515,7 +567,10 @@ fn unverified_targets_refuse_current_scopes_before_emitting_unknown_then_sends()
     let mut app = ingest_app_from_tree(tree(&[("app/models/current.rb", GATED_SCOPE)])).expect("ingest");
     roundhouse::session::analyze_and_lower(&mut app);
     for &target in BuildTarget::TRANSPILE {
-        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Futamura) { continue; }
+        // Spinel is admitted only after the ignored native contract below
+        // compiles and runs the freshly emitted project. Every other
+        // unverified target stays refused.
+        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Futamura | BuildTarget::Spinel) { continue; }
         let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
             roundhouse::project::target_files(&app, std::path::Path::new("fixtures/tiny-api"), target)
         });
@@ -523,5 +578,33 @@ fn unverified_targets_refuse_current_scopes_before_emitting_unknown_then_sends()
         assert!(diags.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error
             && d.message.contains("CurrentAttributes") && !d.span.is_synthetic()),
             "{}: {diags:?}", target.as_str());
+    }
+}
+
+/// Fresh compiler emission, not a retained library rewrite. `empty_app`
+/// copies the overlay and `run_spinel` calls `project::target_files` for
+/// Spinel, then compiles that unchanged tree. The consumer is the same
+/// public contract the CRuby tests already run, including the empty-array
+/// setter Spinel rejected when the generated forwarder ended on the
+/// assignment send.
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn emitted_current_contracts_execute_in_native_spinel() {
+    // Each contract is its own fresh `target_files` tree. Wrapping the
+    // shared top-level scripts in one module changes `def` and constant
+    // lookup, and a later contract then observes a nil Current.
+    let contracts = [
+        ("app/models/current.rb", SETTER_RETURN_CURRENT, SETTER_RETURN_ASSERTIONS),
+        ("app/models/current.rb", SEQUENTIAL_SAVE_CURRENT, SEQUENTIAL_SAVE_ASSERTIONS),
+        ("app/models/current.rb", SCOPED_CURRENT, SCOPED_ASSERTIONS),
+        ("app/models/current.rb", SCOPED_CURRENT, RESTORE_ASSERTIONS),
+        ("app/models/current.rb", RESET_CURRENT, RESET_ASSERTIONS),
+        ("app/models/current.rb", NAMESPACED_CURRENT, NAMESPACED_ASSERTIONS),
+    ];
+    for (path, source, assertions) in contracts {
+        emit_and_run::empty_app()
+            .write(path, source)
+            .run_spinel(assertions)
+            .assert_passes();
     }
 }
