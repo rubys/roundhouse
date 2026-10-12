@@ -23,7 +23,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
+use crate::diagnostic::{Diagnostic, Severity};
 use crate::gems::GemCensus;
 use crate::ingest::IngestError;
 use crate::span::SourceFile;
@@ -167,9 +167,14 @@ pub fn render_hotspots(inventory: &CheckInventory) -> String {
         out.push_str("── Hotspots: none (no error diagnostics or survey gaps) ──\n");
         return out;
     }
+    // Ranked total is Σ hotspot.count (analyze errors + peel-shaped
+    // survey gaps), not summary.errors alone — those disagree when
+    // parse errors or survey mounts join the ranking.
+    let ranked: usize = inventory.hotspots.iter().map(|h| h.count).sum();
     out.push_str(&format!(
-        "── Hotspots: {} bucket(s), {} error(s) ranked for peel ──\n",
+        "── Hotspots: {} bucket(s), {} item(s) ranked for peel ({} analyze error(s)) ──\n",
         inventory.hotspots.len(),
+        ranked,
         inventory.summary.errors,
     ));
     for (i, bucket) in inventory.hotspots.iter().enumerate() {
@@ -393,19 +398,12 @@ pub fn suggested_wall(code: &str, message: &str, path: &str) -> Option<String> {
         if message.contains("rate_limit") {
             return Some("controller-macro-rate-limit".into());
         }
-        if let Some(rest) = message.strip_prefix("constant not supported") {
-            let name = rest
-                .split(':')
-                .last()
-                .unwrap_or(rest)
-                .trim()
-                .trim_start_matches("(all targets)")
-                .trim()
-                .trim_start_matches(':')
-                .split_whitespace()
-                .next()
-                .unwrap_or("constant");
-            return Some(format!("unsupported-constant-{name}"));
+        if let Some(name) = unsupported_constant_name(message) {
+            // Keep `::` as `-` so the slug stays path-safe / URL-safe
+            // while preserving the full nested constant identity
+            // (`Net::HTTP::Patch` → `unsupported-constant-Net-HTTP-Patch`).
+            let slug = name.replace("::", "-");
+            return Some(format!("unsupported-constant-{slug}"));
         }
     }
     if code == "send_dispatch_failed" {
@@ -434,6 +432,45 @@ fn ivar_name(message: &str) -> Option<String> {
     None
 }
 
+/// Extract a fully-qualified constant from
+/// `constant not supported (all targets): Net::HTTP::Patch — …`.
+/// Prefer the longest `A::B::C` token after the last `): `, not a raw
+/// `:`-split that collapses nested constants to the last segment.
+fn unsupported_constant_name(message: &str) -> Option<String> {
+    if !message.starts_with("constant not supported") {
+        return None;
+    }
+    let after_paren = message
+        .rsplit_once("): ")
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| {
+            message
+                .strip_prefix("constant not supported")
+                .unwrap_or(message)
+                .trim_start_matches([' ', ':', '-'])
+        });
+    let candidate = after_paren
+        .split(" — ")
+        .next()
+        .unwrap_or(after_paren)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':' && c != '_');
+    if candidate.is_empty() {
+        return None;
+    }
+    // Require at least one CamelCase segment; allow nested `Foo::Bar`.
+    if !candidate
+        .split("::")
+        .all(|part| !part.is_empty() && part.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
+    {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
 fn generic_shape(message: &str) -> String {
     let shape: String = message
         .chars()
@@ -446,7 +483,8 @@ fn generic_shape(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagnostic::{Diagnostic, Severity};
+    use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
+    use crate::ident::Symbol;
     use crate::span::{FileId, Span};
 
     #[test]
@@ -469,6 +507,73 @@ mod tests {
             .as_deref(),
             Some("pay-unmodeled")
         );
+    }
+
+    #[test]
+    fn nested_unsupported_constant_keeps_fqn_in_wall_slug() {
+        // Net::HTTP* still maps to the application-client wall when the
+        // message names the family; use an unrelated nested constant so
+        // the FQN slug path is what we assert.
+        assert_eq!(
+            suggested_wall(
+                "unsupported",
+                "constant not supported (all targets): OmniAuth::Strategies::Developer — unmodeled gem `omniauth`",
+                "app/controllers/sessions_controller.rb"
+            )
+            .as_deref(),
+            Some("unsupported-constant-OmniAuth-Strategies-Developer")
+        );
+        assert_eq!(
+            unsupported_constant_name(
+                "constant not supported (all targets): Net::HTTP::Patch — missing stdlib surface"
+            )
+            .as_deref(),
+            Some("Net::HTTP::Patch")
+        );
+    }
+
+    #[test]
+    fn hotspot_header_ranks_sum_not_analyze_errors_alone() {
+        let sources = vec![SourceFile {
+            path: "/app/config/routes/jumpstart.rb".into(),
+            text: "mount Jumpstart::Engine, at: \"/jumpstart\"\n".into(),
+        }];
+        let d = Diagnostic {
+            span: Span {
+                file: FileId(1),
+                start: 0,
+                end: 40,
+            },
+            kind: DiagnosticKind::Unsupported {
+                target: None,
+                construct: Symbol::from("route mount"),
+                detail: "only top-level literal engine mounts are composed".into(),
+            },
+            severity: Severity::Error,
+            message: "route mount: only top-level literal engine mounts are composed".into(),
+        };
+        let survey = IngestError::Unsupported {
+            file: "/app/config/routes/jumpstart.rb".into(),
+            message: "route mount: only top-level literal engine mounts are composed".into(),
+        };
+        let inv = build(
+            "/app",
+            Path::new("/app"),
+            &sources,
+            &[],
+            &[d],
+            &[survey],
+            None,
+        );
+        assert_eq!(inv.summary.errors, 1);
+        let ranked: usize = inv.hotspots.iter().map(|h| h.count).sum();
+        assert!(ranked >= 2, "survey gap must join ranking: {ranked}");
+        let rendered = render_hotspots(&inv);
+        assert!(
+            rendered.contains(&format!("{ranked} item(s) ranked")),
+            "header must use Σ hotspot counts, got:\n{rendered}"
+        );
+        assert!(rendered.contains("1 analyze error(s)"), "{rendered}");
     }
 
     #[test]

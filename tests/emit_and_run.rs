@@ -11,6 +11,8 @@ mod emit_and_run;
 mod discard;
 #[path = "emit_and_run/pay_exceptions.rs"]
 mod pay_exceptions;
+#[path = "emit_and_run/net_http_patch.rs"]
+mod net_http_patch;
 #[path = "emit_and_run/temporal_index_assign.rs"]
 mod temporal_index_assign;
 #[path = "support/class_attribute.rs"]
