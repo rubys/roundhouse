@@ -198,6 +198,99 @@ end
     assert_eq!(fs::read(out.join("app/models/post.rb")).unwrap(), fs::read(src.join("app/models/post.rb")).unwrap());
 }
 
+/// A minimal app whose `ruby` emit refuses one association (a `through:`
+/// hop keyed on a non-id column, Mastodon's `Status.reblogged_by_accounts`).
+fn app_with_a_ruby_refusal(src: &Path) {
+    write(src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(src, "db/schema.rb", br#"ActiveRecord::Schema.define do
+  create_table "users", force: :cascade do |t|
+    t.string "name", null: false
+  end
+  create_table "posts", force: :cascade do |t|
+    t.string "title", null: false
+    t.integer "user_id", null: false
+    t.integer "reblog_of_id"
+  end
+end
+"#);
+    write(src, "config/routes.rb", b"Rails.application.routes.draw do\n  resources :posts, only: [:index]\nend\n");
+    write(src, "app/models/application_record.rb", b"class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n");
+    write(src, "app/models/user.rb", b"class User < ApplicationRecord\nend\n");
+    write(src, "app/models/post.rb", br#"class Post < ApplicationRecord
+  belongs_to :user
+  has_many :reblogs, foreign_key: "reblog_of_id", class_name: "Post"
+  has_many :reblogged_by_users, through: :reblogs, class_name: "User", source: :user
+end
+"#);
+    write(src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    write(src, "app/controllers/posts_controller.rb", b"class PostsController < ApplicationController\n  def index\n    @posts = Post.all\n  end\nend\n");
+    write(src, "app/views/posts/index.html.erb", b"<% @posts.each do |post| %><p><%= post.title %></p><% end %>\n");
+}
+
+/// The `ruby` emit's errors decide which routes stay on Rails; they are
+/// not futamura's own, and must not fail its emit (Mastodon on 9de9af1e
+/// exited 1 on `Status.reblogged_by_accounts`).
+#[test]
+fn ruby_emit_refusals_do_not_fail_the_futamura_emit() {
+    let src = scratch("leak-src");
+    let out = scratch("leak-out");
+    app_with_a_ruby_refusal(&src);
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(!stderr.contains("association_primary_key"), "{stderr}");
+}
+
+/// Whole-route replacement serves SQLite only. On another database the
+/// emit skips the `ruby` lowering it would have planned with, and the
+/// tree carries no bridge.
+#[test]
+fn whole_route_is_skipped_at_emit_on_a_non_sqlite_database() {
+    let src = scratch("pg-src");
+    let out = scratch("pg-out");
+    app_with_a_ruby_refusal(&src);
+    write(&src, "config/database.yml", br#"default: &default
+  adapter: postgresql
+  pool: <%= ENV["DB_POOL"] || 5 %>
+
+development:
+  primary:
+    <<: *default
+    database: app_development
+"#);
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "-o"])
+        .arg(&out)
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(stderr.contains("whole-route replacement skipped: it supports SQLite only, and config/database.yml names \"postgresql\""), "{stderr}");
+    assert!(!stderr.contains("GET action(s) served"), "{stderr}");
+    assert!(!out.join("vendor/futamura").exists());
+    assert!(!out.join("config/initializers/futamura_routes.rb").exists());
+
+    // An adapter chosen by ERB may be SQLite: the analysis runs.
+    write(&src, "config/database.yml", b"default:\n  adapter: <%= ENV.fetch(\"DB_ADAPTER\", \"sqlite3\") %>\n");
+    let run = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["--target", "futamura", "-o"])
+        .arg(scratch("pg-out-erb"))
+        .arg(&src)
+        .env("ROUNDHOUSE_FUTAMURA_LEDGER", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(stderr.contains("GET action(s) served"), "{stderr}");
+}
+
 mod query_specialization {
     use std::collections::HashMap;
     use std::path::PathBuf;

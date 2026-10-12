@@ -123,9 +123,16 @@ fn is_class_side(r: &MethodReceiver) -> bool {
 /// `lowered` is the app after `analyze_and_lower` (what the `ruby`
 /// target emits from); `diags` every diagnostic that emit reported.
 pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
-    let mut lcs = crate::emit::ruby::lowered_controller_lcs_with_layout(lowered);
-    lcs.extend(crate::emit::ruby::lowered_view_lcs(lowered).1);
-    lcs.extend(crate::emit::ruby::lowered_model_lcs(lowered).0);
+    // Re-lowering pushes the `ruby` emit's refusals into whatever
+    // diagnostic scope is active, which here is futamura's own. They are
+    // already in `diags` (`project::futamura_whole_route`); collected
+    // again they would fail an emit that reports nothing.
+    let (mut lcs, _) = crate::emit::diagnostics::scope(|| {
+        let mut lcs = crate::emit::ruby::lowered_controller_lcs_with_layout(lowered);
+        lcs.extend(crate::emit::ruby::lowered_view_lcs(lowered).1);
+        lcs.extend(crate::emit::ruby::lowered_model_lcs(lowered).0);
+        lcs
+    });
     lcs.extend(lowered.library_classes.iter().cloned());
     let index = Index::new(&lcs);
     // Controllers: their actions keep the app's spans under a

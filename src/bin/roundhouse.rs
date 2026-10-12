@@ -345,11 +345,17 @@ fn run_transpile(
     // specializations call Rails (docs/pipeline/specialization.md).
     // Futamura's whole-route replacement needs the `ruby` target's
     // lowering of the same app, from the ingest shape; built before the
-    // analysis below mutates `app`.
-    let whole_route = if target == BuildTarget::Futamura {
-        Some(project::futamura_whole_route(&app, input)?)
-    } else {
+    // analysis below mutates `app`. Skipped when the app's database is
+    // one the bridge would refuse at boot anyway.
+    let whole_route = if target != BuildTarget::Futamura {
         None
+    } else if let Some(adapter) = roundhouse::emit::futamura::unservable_database(input) {
+        eprintln!(
+            "roundhouse: futamura: whole-route replacement skipped: it supports SQLite only, and config/database.yml names {adapter:?}"
+        );
+        None
+    } else {
+        Some(project::futamura_whole_route(&app, input)?)
     };
     let lower_diags = if target == BuildTarget::Roda {
         Vec::new()
