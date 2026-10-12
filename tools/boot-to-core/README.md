@@ -589,3 +589,37 @@ These are inherited-runtime refusals, not successful constructor exports.
 The next closure still needs genuine constructor/class-side state, exception
 primitives and explicit receiver/native boundaries; provenance alone is not
 execution support. Static check/LSP/WASM fallback remains necessary.
+
+## Round six: CI repair and current main integration
+
+The round-five Spinel scope refusal is now superseded by six fresh native
+Current contracts: setter result/identity, sequential coupled writers,
+receiver/result/control flow, setup/body/restore exceptions, reset identity and
+storage, and namespace/nesting. Generated class writers explicitly return the
+assigned value after one instance-writer dispatch. Other unverified targets,
+defaults, callbacks and source-owned scope dispatch remain refused.
+
+Bare cross-helper keyword calls use the same helper index as emission. Incoming
+optional-keyword tests now compare original Ruby with actual emitted execution;
+the runnable unknown-receiver control still requires its ABI diagnostic.
+Canonical main through
+[870f1c35](https://github.com/rubys/roundhouse/commit/870f1c35e461c5e720f6e4d77a5c6213ce3ea5ca)
+is merged without rewriting contributors. Its Friendly-ID runtime fix clears
+the five failing native toolchain/Tiny-API contracts on the exact hosted Spinel
+pin `19cbcad40ec86f873d46486d280a8e14f9ae9e56`.
+
+Integration also exposed a shared provenance-bit collision: source-file
+locations were mistaken for Current scopes on unverified targets. A public
+TypeScript-emission regression fails before separating those bits and passes
+afterwards; actual Current scopes retain their target gate.
+
+The completed [hosted run on d6899626](https://github.com/rubys/roundhouse/actions/runs/38243172351)
+passed all four unit shards and the native Current lane, but failed Campfire's
+strict ceiling and the native toolchain lane. This is not green CI. The remaining
+Campfire calls are `Net::HTTP.start(..., **timeouts)` and
+`subscription.notification(**payload, badge: badge)`; no diagnostic is suppressed.
+Separate bounded runtime checks confirm that original Ruby accepts the HTTP
+proxy-disable argument and timeout/retry options, while the pinned Spinel package
+raises `ArgumentError` for the third positional argument and for
+`write_timeout`/`max_retries`. Opening the analyzer gate would not fix that runtime
+ABI. Receiver provenance for the notification call remains a separate obligation.

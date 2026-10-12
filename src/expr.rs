@@ -92,7 +92,7 @@ pub fn is_self_binding(expr: &Expr) -> bool {
 /// Its attached block and ensure require verified native block semantics;
 /// target preflight must not mistake its synthetic Kernel#then for a
 /// supported ordinary method merely because analysis knows the block type.
-pub const CURRENT_SET_SCOPE: u64 = 1 << 13;
+pub const CURRENT_SET_SCOPE: u64 = 1 << 17;
 
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
