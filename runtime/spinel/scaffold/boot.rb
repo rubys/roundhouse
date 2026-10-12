@@ -31,9 +31,11 @@ require_relative "runtime/db"
 require_relative "runtime/base64"
 # Module-only Shellwords — packages/shellwords reopens String/Array and
 # poisons String#split (PolyArray → C compile fail). See
-# runtime/spinel/shellwords.rb; defining the module drops BUNDLED's
-# require "shellwords".
-require_relative "runtime/shellwords"
+# runtime/spinel/shellwords_spinel.rb; defining the module drops
+# BUNDLED's library row. Not named shellwords.rb: that stem on
+# runtime/ would answer a bare require and hide stdlib
+# String#shellescape on every target that shares the tree.
+require_relative "runtime/shellwords_spinel"
 require_relative "runtime/json_impl"
 # JsonBuilder — the JSON encoding primitives the Jbuilder lowerer
 # emits calls to (`Views::Articles.article_json` etc.). Separate from

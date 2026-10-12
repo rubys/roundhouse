@@ -48,11 +48,11 @@ require_relative "runtime/db"
 # the stdlib equivalents with semantically-identical implementations
 # for the surface framework Ruby actually uses.
 require_relative "runtime/base64"
-# Module-only Shellwords — packages/shellwords reopens String/Array and
-# poisons String#split (PolyArray → C compile fail). See
-# runtime/spinel/shellwords.rb; defining the module drops BUNDLED's
-# require "shellwords".
-require_relative "runtime/shellwords"
+# stdlib Shellwords, including String#shellescape. The Spinel port is
+# runtime/shellwords_spinel.rb and must not be named shellwords.rb:
+# runtime/ is on $LOAD_PATH, so the library's own name would answer a
+# bare require and hide the method Nokogiri calls.
+require "shellwords"
 require_relative "runtime/json_impl"
 # JsonBuilder — the JSON encoding primitives the Jbuilder lowerer
 # emits calls to (`Views::Articles.article_json` etc.). Separate from

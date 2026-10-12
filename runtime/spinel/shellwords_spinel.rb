@@ -1,5 +1,14 @@
-# Module-only Shellwords for Spinel (and the ruby-family trees that
-# share `spinel_files`).
+# Module-only Shellwords for Spinel.
+#
+# NOT NAMED `shellwords.rb`. `walk_dir_flat` copies every
+# `runtime/spinel/*.rb` into every target tree, and the emitted
+# Rakefile puts `runtime/` on `$LOAD_PATH` (`t.libs << "runtime"`).
+# Under the library's own name this file answers `require "shellwords"`
+# — Nokogiri's, among others — and it does not reopen String, so
+# `String#shellescape` is missing and `bin/rh test ruby` dies at load.
+# Same rule as `cgi_spinel.rb` (commit 1ba94ff2): a shim that stands in
+# for a library on one target must not carry the library's name.
+# CRuby/JRuby boot requires the stdlib; only spinel's boot loads this.
 #
 # Spinel's `packages/shellwords` reopens String and Array with
 # `#shellsplit` / `#shellescape` / `#shelljoin`. That reopen makes
@@ -7,7 +16,7 @@
 # fails C compile (`-Werror=incompatible-pointer-types` on every
 # `parts = s.split(...)` that expects `sp_StrArray *`).
 #
-# Defining `Shellwords` here drops BUNDLED's `require "shellwords"`
+# Defining `Shellwords` here drops BUNDLED's require of the library
 # for the tree (see `project::BUNDLED` — a program-defined constant
 # skips the bundled row). The surface the corpus writes is
 # `Shellwords.escape` only; String/Array core extensions stay out.
