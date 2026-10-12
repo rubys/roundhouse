@@ -200,13 +200,12 @@ fn assert_node_test_passes(fixture: &str, scratch: &Path) {
         String::from_utf8_lossy(&install.stderr),
     );
 
-    // Shell invocation so glob expansion picks up every test file —
-    // passing the directory confuses tsx/node:test when there's no
-    // index entry. tsx registers a module loader so `.ts` imports
-    // resolve at run time.
+    // Recursive discovery. `test/*.test.ts` misses a file added under
+    // a subdirectory, which is how a shipped test goes unrun. tsx
+    // registers a module loader so `.ts` imports resolve at run time.
     let output = Command::new("sh")
         .arg("-c")
-        .arg("./node_modules/.bin/tsx --test test/*.test.ts")
+        .arg("files=$(find test -name '*.test.ts' | sort); test -n \"$files\" || { echo 'no *.test.ts discovered under test/' >&2; exit 1; }; ./node_modules/.bin/tsx --test $files")
         .current_dir(scratch)
         .output()
         .expect("run node --test via tsx");

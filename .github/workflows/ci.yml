@@ -2065,8 +2065,10 @@ jobs:
 
   # -------------------------------------------------------------------
   # (toolchain-ruby retired by the smoke consolidation: smoke-ruby's
-  # README § Test runs the same five driver suites from the published
-  # archive. The harness remains a dev-loop tool:
+  # README § Test runs `bundle exec rake test`, which discovers every
+  # test/**/*_test.rb. A fixed list of five drivers is how the views
+  # and broadcasts files shipped without ever running. The harness
+  # remains a dev-loop tool and runs that same rake task:
   # cargo test --test ruby_toolchain -- --ignored.)
   # -------------------------------------------------------------------
   # Spinel-AOT toolchain. Same emit pipeline as toolchain-ruby (lowered

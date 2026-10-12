@@ -354,12 +354,14 @@ pub fn target_readme(target: BuildTarget) -> String {
              bundle exec rackup\n\
              ```\n"
         }
-        // ruby/jruby Test sections run the same five driver files as
-        // `tests/ruby_toolchain.rs` — NOT `rake test`: the archive's
-        // emitted `test/test_helper.rb` is deliberately Minitest-free
-        // (TestBase, for spinel AOT), while the scaffold's runtime
-        // tests subclass Minitest::Test, so one rake_test_loader
-        // process can't host both populations.
+        // ruby/jruby `## Test` is `rake test`. The Rakefile's
+        // `FileList["test/**/*_test.rb"]` is the suite: emitted
+        // TestBase files run their autorun shim when loaded, and the
+        // scaffold's Minitest::Test files run at exit. A hand-written
+        // list of five drivers (the old README, and
+        // `tests/ruby_toolchain.rs`) left every other shipped file
+        // unrun — views, broadcasts, route helpers — so they drifted
+        // for months while smoke stayed green.
         BuildTarget::Ruby => {
             "This tree is the Rails-shape-without-metaprogramming \
              specimen — see `SPECIMEN.md` for the full architecture \
@@ -383,11 +385,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n\n\
              ## Test\n\
              ```sh\n\
-             bundle exec ruby -Itest -I. test/models/article_test.rb\n\
-             bundle exec ruby -Itest -I. test/models/comment_test.rb\n\
-             bundle exec ruby -Itest -I. test/controllers/articles_controller_test.rb\n\
-             bundle exec ruby -Itest -I. test/controllers/comments_controller_test.rb\n\
-             bundle exec ruby -Itest -I. test/query_count_test.rb\n\
+             bundle exec rake test\n\
              ```\n"
         }
         BuildTarget::Jruby => {
@@ -414,11 +412,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n\n\
              ## Test\n\
              ```sh\n\
-             jruby -S bundle exec jruby -Itest -I. test/models/article_test.rb\n\
-             jruby -S bundle exec jruby -Itest -I. test/models/comment_test.rb\n\
-             jruby -S bundle exec jruby -Itest -I. test/controllers/articles_controller_test.rb\n\
-             jruby -S bundle exec jruby -Itest -I. test/controllers/comments_controller_test.rb\n\
-             jruby -S bundle exec jruby -Itest -I. test/query_count_test.rb\n\
+             jruby -S bundle exec jruby -S rake test\n\
              ```\n"
         }
         BuildTarget::Crystal => {
@@ -7619,11 +7613,15 @@ const BUNDLED: [(&str, &str); 19] = [
     // before the app; spinel's runtime defines it without a package.
     ("SocketError", "socket"),
     // `Shellwords.escape`: a default gem that a booted Rails 8.1 app has
-    // already loaded, so apps call it without a require. INERT on our
-    // trees: `runtime/spinel/shellwords.rb` defines the module (no
-    // String/Array reopen — packages/shellwords' reopen makes
-    // String#split a PolyArray and the Rails tree fails C compile), so
-    // the program-defined-constant clause below drops the row.
+    // already loaded, so apps call it without a require. The Spinel
+    // port is `runtime/spinel/shellwords_spinel.rb` (module only — no
+    // String/Array reopen, because packages/shellwords makes
+    // String#split a PolyArray and the Rails tree fails C compile).
+    // Defining the module drops this row. The file must not be named
+    // `shellwords.rb`: walk_flat copies it into every target and
+    // `runtime/` is on `$LOAD_PATH`, so that name would answer the
+    // require below and hide stdlib `String#shellescape`. CRuby/JRuby
+    // boot requires the stdlib feature by hand.
     ("Shellwords", "shellwords"),
     // `PTY.spawn`: the app writes `require "pty"` (Rails does not load
     // it), but an app file reaches the tree without its requires.

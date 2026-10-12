@@ -102,8 +102,12 @@ count_from_log() {
         function num(s) { gsub(/[^0-9]/, "", s); seen = 1; return s + 0 }
         # cargo: one summary line per test binary
         match($0, /ok\. [0-9]+ passed/)      { cargo += num(substr($0, RSTART, RLENGTH)); next }
-        # the emitted minitest autorun (ruby, jruby): one line per class
+        # the emitted minitest autorun (ruby, jruby): one line per class.
+        # `rake test` also prints minitest's "N runs, …" for the
+        # Minitest::Test files. Those are not TestBase, so the two
+        # shapes do not overlap; add them.
         match($0, /: [0-9]+ tests passed/)   { mini  += num(substr($0, RSTART, RLENGTH)); next }
+        match($0, /[0-9]+ runs,/)            { mini  += num(substr($0, RSTART, RLENGTH)); next }
         # `spin test`: "N/M passed", one native binary per emitted test FILE
         /^[0-9]+\/[0-9]+ passed/             { match($0, /^[0-9]+/)
                                                spin = num(substr($0, RSTART, RLENGTH)); next }
