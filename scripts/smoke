@@ -103,7 +103,7 @@ count_from_log() {
         # cargo: one summary line per test binary
         match($0, /ok\. [0-9]+ passed/)      { cargo += num(substr($0, RSTART, RLENGTH)); next }
         # the emitted minitest autorun (ruby, jruby): one line per class.
-        # `rake test` also prints minitest's "N runs, …" for the
+        # `rake test` also prints minitest "N runs, …" for the
         # Minitest::Test files. Those are not TestBase, so the two
         # shapes do not overlap; add them.
         match($0, /: [0-9]+ tests passed/)   { mini  += num(substr($0, RSTART, RLENGTH)); next }
@@ -281,6 +281,12 @@ case "$TARGET" in
         # case this floor exists to catch. Upgrade to a number if the
         # README's command ever grows a counting flag.
         MIN_TESTS=ran ;;
+    ruby|jruby)
+        # `rake test` sums the TestBase shim lines and minitest
+        # "N runs". real-blog measured 26 + 185 = 211. The previewer
+        # skips 3 tests when ffmpeg is absent (208). 200 still fails
+        # if the view and broadcast files stop loading.
+        MIN_TESTS=200 ;;
     # (csharp's KNOWN-GAP floor of 0 is retired: it now emits `tests/` —
     # an xUnit project running the same 21 — and takes the default.)
 esac
