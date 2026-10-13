@@ -160,3 +160,58 @@ pub enum ReferentialAction {
     SetNull,
     SetDefault,
 }
+
+/// One `db/migrate/<version>_<name>.rb`, as `rails db:migrate` runs it:
+/// the version it records in `schema_migrations` and the schema changes
+/// it makes, in order. Kept beside the folded [`Schema`] (which only
+/// says where the migrations end up) so an emitted app can bring an
+/// existing database up to date, as Rails' `db:migrate` does.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Migration {
+    /// The filename's leading digits (`20260913000001`).
+    pub version: String,
+    /// The migration's file, for messages.
+    pub file: String,
+    pub steps: Vec<MigrationStep>,
+    /// Why the steps above are not the whole migration: a verb the fold
+    /// does not model, or Ruby beside the verbs (a backfill). Such a
+    /// migration is not run by the emitted `db:migrate` (it stops and
+    /// names it), since recording it as applied would claim an effect it
+    /// never had; a fresh database still gets its end state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_renderable: Option<String>,
+    /// Whether the app's schema (`Schema.statements`) already has its
+    /// changes: loading the schema records it as applied, as Rails'
+    /// `assume_migrated_upto_version` does with schema.rb's `version:`. A
+    /// migration newer than schema.rb is not, and `db:prepare` runs it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_schema: bool,
+}
+
+/// A schema change as a database applies it. The tables carried are the
+/// state the change leaves (and, for a rebuild, the state before), so the
+/// DDL is rendered from the same definitions the fold computed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum MigrationStep {
+    /// `create_table`, with the indexes declared in its block.
+    CreateTable { table: Table },
+    DropTable { name: Symbol },
+    RenameTable { from: Symbol, to: Symbol },
+    /// `add_column`, `add_timestamps`, `add_reference`: `ALTER TABLE ...
+    /// ADD COLUMN`, one column each.
+    AddColumns { table: Symbol, columns: Vec<Column> },
+    RenameColumn { table: Symbol, from: Symbol, to: Symbol },
+    /// A change SQLite cannot make in place (`remove_column`,
+    /// `change_column`, `change_column_null`, `change_column_default`):
+    /// the table is copied into its new definition, as Rails' SQLite
+    /// adapter does (`alter_table`).
+    RebuildTable { before: Table, after: Table },
+    /// An index the change added (`add_index`, `add_reference`'s, a
+    /// renamed one under its new name), with the table it indexes.
+    AddIndex { table: Table, index: Index },
+    /// An index the change removed (or a renamed one's old name).
+    RemoveIndex { name: Symbol },
+    /// `execute "UPDATE ..."`: SQL that changes data and not the schema,
+    /// run as written.
+    Execute { sql: String },
+}

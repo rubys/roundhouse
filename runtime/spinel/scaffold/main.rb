@@ -157,7 +157,9 @@ module Main
     (!db_path.nil? && !db_path.empty?) ? db_path : "storage/development.sqlite3"
   end
 
-  def self.configure_default_adapter!
+  # Open the database without touching its schema (db:migrate and
+  # db:prepare decide what to do with it).
+  def self.connect_default_adapter!
     return unless ActiveRecord.adapter.nil?
     path = Main.default_db_path
     # SqliteAdapter.configure delegates to Db.configure (single shared
@@ -165,7 +167,20 @@ module Main
     # Level-3 lowerer-emitted `_adapter_*` path read through one handle.
     SqliteAdapter.configure(path)
     ActiveRecord.adapter = SqliteAdapter
-    Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }
+  end
+
+  # Open the database for serving. A database that was never set up gets
+  # the schema and the versions it includes recorded (as db:prepare
+  # loads it); a set-up one is left alone, as Rails' server does not migrate, and its
+  # pending migrations are named on stderr.
+  def self.configure_default_adapter!
+    return unless ActiveRecord.adapter.nil?
+    Main.connect_default_adapter!
+    pending = ActiveRecord::Migrator.boot(Schema.statements, Migrations.schema_versions, Migrations.all, Rails.env.to_s)
+    if !pending.empty?
+      $stderr.puts pending.length.to_s + " pending migration(s): " + pending.join(", ") +
+        "; `" + $PROGRAM_NAME + " db:migrate` applies them"
+    end
   end
 
   # True for request paths that map to a file under static/: the
@@ -713,11 +728,30 @@ end
 # (no OptionParser — stdlib optparse isn't in the spinel subset).
 port = (ENV["PORT"] || "3000").to_i
 workers = (ENV["WORKERS"] || "1").to_i
+# `db:migrate` / `db:prepare`, as `bin/rails` names them: run against the
+# same database the server opens, then exit.
+command = ARGV.length > 0 ? ARGV[0] : ""
+if command == "db:migrate" || command == "db:prepare"
+  Main.connect_default_adapter!
+  begin
+    ran = if command == "db:migrate"
+            ActiveRecord::Migrator.migrate(Migrations.all, Rails.env.to_s)
+          else
+            ActiveRecord::Migrator.prepare(Schema.statements, Migrations.schema_versions, Migrations.all, Rails.env.to_s)
+          end
+    puts command + ": " + ran.to_s + " migration(s) applied"
+  rescue ActiveRecord::MigrationError => e
+    $stderr.puts command + ": " + e.message
+    exit(1)
+  end
+  exit(0)
+end
 i = 0
 while i < ARGV.length
   arg = ARGV[i]
   if arg == "--help" || arg == "-h"
     puts "usage: " + $PROGRAM_NAME + " [options]"
+    puts "       " + $PROGRAM_NAME + " db:migrate | db:prepare"
     puts ""
     puts "  -p, --port N     listen port (default 3000; PORT env)"
     puts "  -w, --workers N  prefork N processes (default 1; WORKERS env)"
@@ -727,6 +761,9 @@ while i < ARGV.length
     puts "  TEP_SERVER=fiber runs the fiber-per-connection server instead"
     puts "    (HTTP only, one thread; the measurement lane, matz/spinel#4306)"
     puts "  SQLite file: BLOG_DB env (default storage/development.sqlite3)"
+    puts "  db:migrate runs pending migrations; db:prepare sets up a new"
+    puts "    database (the schema and its versions, then newer migrations)"
+    puts "    or migrates an existing one"
     exit(0)
   elsif (arg == "--port" || arg == "-p") && i + 1 < ARGV.length
     port = ARGV[i + 1].to_i

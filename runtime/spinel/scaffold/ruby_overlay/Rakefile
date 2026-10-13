@@ -143,6 +143,22 @@ task :dev => :assets do
   sh(env, "bundle exec puma -C config/puma.rb config.ru")
 end
 
+# Rails' db:migrate / db:prepare against the database the server opens
+# (BLOG_DB, default storage/development.sqlite3).
+namespace :db do
+  desc "Run the migrations this database has not recorded"
+  task :migrate do
+    sh "bundle exec ruby -r ./main -e 'Main.connect_default_adapter!; " \
+       "n = ActiveRecord::Migrator.migrate(Migrations.all, Rails.env.to_s); puts \"db:migrate: \#{n} migration(s) applied\"'"
+  end
+
+  desc "Set up a new database (schema + every version), or migrate an existing one"
+  task :prepare do
+    sh "bundle exec ruby -r ./main -e 'Main.connect_default_adapter!; " \
+       "n = ActiveRecord::Migrator.prepare(Schema.statements, Migrations.schema_versions, Migrations.all, Rails.env.to_s); puts \"db:prepare: \#{n} migration(s) applied\"'"
+  end
+end
+
 # Single-shot CGI smoke (rendering one page to stdout). Useful for
 # eyeballing layout/asset wiring without starting a server.
 desc "Single-shot CGI smoke (REQUEST_METHOD=GET PATH_INFO=/articles)"

@@ -112,7 +112,7 @@ end
             let column = schema.tables[&roundhouse::Symbol::from("events")]
                 .columns
                 .iter()
-                .find(|column| column.name.as_str() == "account")
+                .find(|column| column.name.as_str() == "account_id")
                 .expect("reference column");
             assert!(
                 matches!(&column.col_type, ColumnType::Reference { .. }),
@@ -141,7 +141,7 @@ end
             let column = migrated.tables[&roundhouse::Symbol::from("events")]
                 .columns
                 .iter()
-                .find(|column| column.name.as_str() == "account")
+                .find(|column| column.name.as_str() == "account_id")
                 .expect("migration reference column");
             assert!(
                 matches!(&column.col_type, ColumnType::Reference { .. }),

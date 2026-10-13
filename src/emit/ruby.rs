@@ -422,6 +422,14 @@ pub fn emit_lowered_schema_pair(app: &App) -> Vec<EmittedFile> {
     library::emit_module_file_pair(&funcs, app, PathBuf::from("config/schema.rb"))
 }
 
+/// `config/migrations.rb` (+ `.rbs`): the `Migrations` module whose `all`
+/// lists each migration's version and statements, for the runtime's
+/// `ActiveRecord::Migrator` (`db:migrate`, `db:prepare`).
+pub fn emit_lowered_migrations_pair(app: &App) -> Vec<EmittedFile> {
+    let funcs = crate::lower::lower_migrations_module_functions(app);
+    library::emit_module_file_pair(&funcs, app, PathBuf::from("config/migrations.rb"))
+}
+
 /// Emit `config/routes.rb` in spinel-blog shape — a `RouteTable` module
 /// `RouteTable` module exposing the dispatch data via class methods:
 /// `RouteTable.table` returns the array of `{method:, pattern:,
@@ -838,6 +846,7 @@ fn jbuilder_view_output_path(view_name: &str) -> PathBuf {
 pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     files.extend(emit_lowered_schema_pair(app));
+    files.extend(emit_lowered_migrations_pair(app));
     // routes.rb gets a require-relative header prepended (see
     // emit_lowered_routes); emit the .rb via that path, then derive
     // the .rbs sidecar from the same funcs without the header.

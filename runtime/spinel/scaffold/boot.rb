@@ -118,6 +118,7 @@ require_relative "runtime/active_record_equality_spinel"
 # `transaction_open?` over the Db shim loaded above.
 require_relative "runtime/active_record_db_config"
 require_relative "config/schema"
+require_relative "config/migrations"
 require_relative "runtime/action_dispatch"
 # Typed Request value object (remote_ip / referer / xhr? / env bag) —
 # spinel-tree only; the CRuby overlay keeps its CGI-env-backed Request

@@ -483,6 +483,58 @@ The real-blog fixture generator (`scripts/create-blog`) runs
 always exists by the time ingest runs. See
 [fixture setup](../development/testing.md#fixtures).
 
+## `db/migrate/*.rb` → `App::migrations` → `Migrations.all` → `db:migrate`
+
+Whatever the schema source, the migrations are also read one by one, as
+`rails db:migrate` runs them (`record_migration` in
+`src/ingest/schema.rs`): each keeps its version (the filename's digits)
+and the schema changes it makes, in order (`MigrationStep` in
+`src/schema.rs`). `render_migration_step`
+(`src/emit/shared/schema_sql.rs`) turns each step into the statements
+Rails' SQLite adapter issues:
+
+- `add_column`, `rename_column`, `rename_table`: `ALTER TABLE` in place;
+- `remove_column`, `change_column`, `change_column_null`,
+  `change_column_default`, foreign-key changes: SQLite's table rebuild
+  (new definition, rows copied, old table dropped, new one renamed into
+  place, indexes recreated, foreign keys checked at commit), which
+  Rails' `alter_table` performs;
+- `add_index` / `remove_index` and the indexes a reference or a rename
+  brings: `CREATE INDEX` / `DROP INDEX`;
+- `execute` with a literal `UPDATE` / `INSERT` / `DELETE`: run as written.
+
+`src/lower/migrations_to_library` lowers them to `Migrations.all`
+(`config/migrations.rb`): one array per migration, `[version, why it
+cannot run or "", statement, …]`. A migration with anything else (Ruby
+beside the verbs, a model backfill, DDL through `execute`) is a
+transpile warning, and is recorded as one that cannot run.
+
+`ActiveRecord::Migrator` (`runtime/ruby/active_record/migrator.rb`)
+keeps Rails' bookkeeping, `schema_migrations` and `ar_internal_metadata`:
+
+- `<app> db:migrate` runs each pending migration in its own transaction
+  and records its version; a failure rolls that migration back and
+  stops, exit status 1. A pending migration that cannot run stops it
+  with the reason.
+- `<app> db:prepare` loads `Schema.statements` into a database that was
+  never set up, records the versions the schema includes as applied
+  (`Migrations.schema_versions`: schema.rb's `define(version:)` and older,
+  the versions structure.sql inserts, or every migration when the schema
+  is the fold), then runs the newer ones, as Rails'
+  `assume_migrated_upto_version` and `db:prepare` do. A set-up database
+  is migrated.
+- The server, at boot, sets up a database that was never set up, as
+  before (migrations newer than the schema are left pending); on a
+  set-up one it applies nothing (Rails' server does not
+  migrate) and names the pending migrations on stderr. A database an
+  earlier build created (tables, no `schema_migrations`) keeps the old
+  behaviour: missing tables are created, nothing is recorded.
+
+The Ruby target has the same commands as `rake db:migrate` and
+`rake db:prepare`. `db/seed.sql` records the same versions, so a
+database created from it counts as set up. SQLite only, like the rest of the
+emitted DDL; `down` and rollback are not modeled.
+
 ## Test fixtures: `test/fixtures/*.yml`
 
 Not under `db/` or `config/`, but worth naming here since it rounds
@@ -515,10 +567,12 @@ methods.
 | `src/dialect.rs` | `RouteTable`, `RouteSpec`, `Fixture`, `LibraryClass`, `LibraryFunction` |
 | `src/app.rs` | `App::seeds`, `App::fixtures`, `App::importmap`, `App::rbs_signatures` |
 | `src/rbs.rs` | `sig/**/*.rbs` sidecars → `App::rbs_signatures` |
-| `src/emit/shared/schema_sql.rs` | Schema → CREATE TABLE DDL statements (sibling `seed_sql.rs` renders seed rows) |
+| `src/emit/shared/schema_sql.rs` | Schema → CREATE TABLE DDL statements; `render_migration_step` (sibling `seed_sql.rs` renders seed rows and version stamps) |
 | `src/lower/routes.rs` | `RouteTable` → `Vec<FlatRoute>` |
 | `src/lower/fixtures.rs` | YAML fixtures → loader plan |
 | `src/lower/schema_to_library/` | Schema → `LibraryFunction` (`Schema.statements`) |
+| `src/lower/migrations_to_library/` | App::migrations → `LibraryFunction` (`Migrations.all`) |
+| `runtime/ruby/active_record/migrator.rb` | `db:migrate` / `db:prepare` / boot over `schema_migrations` |
 | `src/lower/routes_to_library/` | FlatRoutes → `Vec<LibraryFunction>` (RouteHelpers + the `RouteTable` dispatch surface + `direct` helpers) |
 | `src/lower/seeds_to_library/` | App::seeds → `LibraryFunction` (`Seeds.run`) |
 | `src/lower/importmap_to_library/` | Importmap → `Vec<LibraryFunction>` (`Importmap.{pins, entry}`) |

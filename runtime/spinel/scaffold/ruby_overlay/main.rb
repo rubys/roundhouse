@@ -451,7 +451,9 @@ module Main
   # Tests configure `:memory:` explicitly through their own setup, so
   # this server default never reaches them (the `adapter.nil?` guard
   # also short-circuits when a test already configured the adapter).
-  def self.configure_default_adapter!
+  # Open the database without touching its schema (the db:migrate and
+  # db:prepare rake tasks decide what to do with it).
+  def self.connect_default_adapter!
     return unless ActiveRecord.adapter.nil?
     db_path = ENV["BLOG_DB"]
     path = (!db_path.nil? && !db_path.empty?) ? db_path : "storage/development.sqlite3"
@@ -460,7 +462,19 @@ module Main
     # Level-3 lowerer-emitted `_adapter_*` path read through one handle.
     SqliteAdapter.configure(path)
     ActiveRecord.adapter = SqliteAdapter
-    Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }
+  end
+
+  # Open the database for serving: a database that was never set up gets
+  # the schema and the versions it includes recorded (as db:prepare
+  # loads it); a set-up one is left alone, as Rails' server does not migrate, and its
+  # pending migrations are named on stderr.
+  def self.configure_default_adapter!
+    return unless ActiveRecord.adapter.nil?
+    Main.connect_default_adapter!
+    pending = ActiveRecord::Migrator.boot(Schema.statements, Migrations.schema_versions, Migrations.all, Rails.env.to_s)
+    unless pending.empty?
+      $stderr.puts "#{pending.length} pending migration(s): #{pending.join(", ")}; `rake db:migrate` applies them"
+    end
   end
 end
 

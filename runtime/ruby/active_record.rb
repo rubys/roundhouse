@@ -7,6 +7,8 @@ require_relative "active_record/base"
 # (`connection`/`transaction`); loading it first would define an empty
 # Base the real one then clobbers.
 require_relative "active_record/connection"
+# Rails' db:migrate / db:prepare (Migrations.all, Schema.statements).
+require_relative "active_record/migrator"
 # Signed ids (`record.signed_id` / `Model.find_signed`) — like
 # connection.rb a reopen-tier file the strict targets do not stage: it
 # calls into ActionController::MessageVerifier, whose PBKDF2/HMAC
