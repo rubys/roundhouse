@@ -64,11 +64,23 @@ module ActiveRecord
   # search) — the `includes(:assoc)` distribute's run lookup; see `base.rb`.
   def self.lower_bound: (Array[Integer] sorted, Integer value) -> Integer
 
+  module Reflection
+    class AssociationReflection
+      def initialize: (Symbol name, untyped counter_cache_column) -> void
+      def name: () -> Symbol
+      def counter_cache_column: () -> untyped
+      def klass: () -> untyped
+      def macro: () -> untyped
+    end
+  end
+
   # Base class for all models. Spinel-friendly shape: zero
   # metaprogramming. Per-model subclasses define their own column
   # accessors, attributes hash, and `[]/[]=` indexers; Base supplies
   # the shared CRUD + lifecycle protocol.
   class Base
+    def self.sanitize_sql_like: (String value, ?String escape_character) -> String
+
     EMPTY_ATTRS: Hash[Symbol, untyped]
     HYDRATE_ATTRS: Hash[Symbol, untyped]
 
@@ -102,6 +114,8 @@ module ActiveRecord
     # it as a pointer and the message is swept while the array holds it.
     @errors: Array[String]
     def errors: () -> Array[String]
+    @error_attributes: Array[String]
+    def error_attributes: () -> Array[String]
 
     def initialize: (?Hash[Symbol, untyped] attrs) -> void
 
@@ -113,8 +127,13 @@ module ActiveRecord
     def self.table_name: () -> String
     def self._table_sql: () -> String
     def self.primary_key: () -> String
+    def self._association_names: () -> Array[Symbol]
+    def self.reflect_on_association: (Symbol | String name) -> ActiveRecord::Reflection::AssociationReflection?
+    def self.reflect_on_association_at: (String needle, Integer i) -> ActiveRecord::Reflection::AssociationReflection?
     def self._cast_primary_key: (Integer | String id) -> (Integer | String | nil)
     def self._string_primary_key: () -> bool
+    def self._friendly_slug_column: () -> String
+    def self._friendly_history: () -> bool
     def self.schema_columns: () -> Array[Symbol]
     def self.schema_time_columns: () -> Array[Symbol]
     def self.schema_date_columns: () -> Array[Symbol]
@@ -237,7 +256,7 @@ module ActiveRecord
     def save!: () -> Base
     def destroy: () -> Base
     def destroy!: () -> Base
-    def reload: () -> Base
+    def reload: (?untyped options) -> Base
     # `lock!` reloads (see the note on the body); `with_lock` (connection.rbs) runs the
     # block in a transaction and answers its value, same gradual
     # `untyped` escape as `self.transaction` in connection.rbs. The

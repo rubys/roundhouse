@@ -56,9 +56,9 @@ module ActiveSupport
   # and the raw attributes of cached records (`RecordCache.fetch`).
   #
   # `as_json` is spelled out for the values those carry — nil, booleans,
-  # numbers, Strings, Symbols, and Arrays/Hashes of them, keys as their
-  # `to_s`, a non-finite Float as null, as Rails answers. Anything else
-  # (a Time, a record) raises rather than encode some other text.
+  # numbers, Strings, Symbols, Times, and Arrays/Hashes of them, keys as
+  # their `to_s`, a non-finite Float as null, as Rails answers. Anything
+  # else (a record) raises rather than encode some other text.
   #
   # `decode` is `JSON.parse`, which is all Rails' is while
   # `ActiveSupport.parse_json_times` keeps its default (off).
@@ -82,9 +82,21 @@ module ActiveSupport
         out
       when Float then value.finite? ? value : nil
       when Symbol then value.to_s
+      when Time then ActiveSupport::JSON.time_json(value)
       when nil, true, false, Integer, String then value
       else raise ArgumentError, "ActiveSupport::JSON.encode: #{value.class} values are not supported yet"
       end
+    end
+
+    # A Time as Rails' `TimeWithZone#as_json` writes it: `xmlschema(3)`,
+    # three fractional digits (truncated, as xmlschema does) and the
+    # offset, with `Z` for UTC. The runtime's Times stand in for
+    # TimeWithZone values in the app's zone, and a zone with no offset is
+    # taken to be UTC (Rails writes `+00:00` for a non-UTC zone at offset
+    # zero, such as London in winter).
+    def self.time_json(t)
+      zone = t.utc_offset == 0 ? "Z" : t.strftime("%:z")
+      t.strftime("%Y-%m-%dT%H:%M:%S") + format(".%03d", t.usec / 1000) + zone
     end
   end
 
@@ -146,6 +158,80 @@ module ActiveSupport
     value.to_s
   end
 
+  # `Hash#to_query` (no namespace), for a receiver `lower::symbolize_keys`
+  # routes here: a Hash whose values may nest, or one inference could not
+  # type (`request.query_parameters.deep_dup.to_query`). It is ONE
+  # grammar on every target, activesupport 8.1's
+  # `core_ext/object/to_query.rb` rule for rule: `key=value`, both
+  # CGI-escaped; a nested Hash is `parent[child]=…`; an Array is
+  # `key[]=…` per element; nil is the bare escaped key; an empty Hash or
+  # Array VALUE is dropped. The `"k=v"` strings of a level are SORTED —
+  # the encoded pairs, not the keys — except under an Array namespace
+  # (a `[]` in it), where order is the array's. The result is a 301
+  # target in EngineeredAt, so it must be byte-identical to Rails'.
+  #
+  # Not `ViewHelpers.to_query`: that is the SHARED scalar rendering in
+  # insertion order, and the nesting version is a ruby-family reopen. A
+  # receiver that is not a Hash raises, as Rails' `Object#to_query`
+  # does for want of its `key` argument.
+  def self.to_query(value)
+    raise ArgumentError, "wrong number of arguments (given 0, expected 1)" unless value.is_a?(Hash)
+    query_pairs(value, "")
+  end
+
+  def self.query_pairs(hash, namespace)
+    pairs = []
+    hash.each do |key, item|
+      empty_container = (item.is_a?(Hash) && item.empty?) || (item.is_a?(Array) && item.empty?)
+      next if empty_container
+      name = namespace.empty? ? key.to_s : "#{namespace}[#{key.to_s}]"
+      pairs << query_value(name, item)
+    end
+    pairs = pairs.sort unless namespace.include?("[]")
+    pairs.join("&")
+  end
+
+  # `CGI.escape`: BYTE-wise, so a non-ASCII character becomes its UTF-8
+  # `%XX` run (`é` -> `%C3%A9`) and a control character its `%09`.
+  # Unreserved is `A-Za-z0-9 _ . - ~`; a space is `+`. The shared
+  # `ViewHelpers.url_encode` is a table over the ASCII punctuation and
+  # passes every other byte through, which is fine for a path segment
+  # a router reads back and wrong for a 301 target.
+  def self.query_escape(text)
+    hex = "0123456789ABCDEF"
+    out = +""
+    i = 0
+    n = text.bytesize
+    while i < n
+      b = text.getbyte(i)
+      if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 45 || b == 46 || b == 95 || b == 126
+        out << b.chr
+      elsif b == 32
+        out << "+"
+      else
+        out << "%" << hex[b / 16] << hex[b % 16]
+      end
+      i += 1
+    end
+    out
+  end
+
+  def self.query_value(name, item)
+    if item.is_a?(Hash)
+      query_pairs(item, name)
+    elsif item.is_a?(Array)
+      prefix = "#{name}[]"
+      return query_escape(prefix) if item.empty?
+      parts = []
+      item.each { |element| parts << query_value(prefix, element) }
+      parts.join("&")
+    elsif item.nil?
+      query_escape(name)
+    else
+      "#{query_escape(name)}=#{query_escape(item.to_s)}"
+    end
+  end
+
   def self.presence(value)
     blank?(value) ? nil : value
   end
@@ -158,15 +244,15 @@ module ActiveSupport
   # allow-list in every corpus site, which is what lets the parameter
   # be declared rather than left untyped.
   def self.presence_in(value, list)
-    list.include?(value.to_s) ? value : nil
+    value.is_a?(String) && list.include?(value) ? value : nil
   end
 
   # Rails' `ActiveModel::Errors#[]` — the messages for ONE attribute,
   # without the humanized attribute prefix (`[ "is not public" ]`, not
-  # `[ "Url is not public" ]`). Reached from `src/lower/errors_index.rs`,
-  # which passes the prefix the `errors.add` / `validates` lowerings
-  # baked in ("Url ", trailing space included so `url` cannot match
-  # `url_host`'s "Url host …" on the space boundary alone).
+  # `[ "Url is not public" ]`). Reached from `src/lower/errors_index.rs`.
+  # A message is picked by the attribute it was added on (`attributes`
+  # runs index for index with `errors`), and then loses the prefix the
+  # `errors.add` / `validates` lowerings baked for that attribute.
   #
   # Takes the accumulator as an ARGUMENT for the same reason `blank?`
   # above does: the shared accumulator is a plain `Array[String]` and
@@ -177,10 +263,10 @@ module ActiveSupport
   # `delete_prefix`: two-integer `String#[]` is the slice spelling every
   # target lowers, and `sub`/`delete_prefix` are the shapes that have
   # bitten this runtime before (a two-string `gsub` has no C# lowering).
-  def self.errors_for(errors, prefix)
+  def self.errors_for(errors, attributes, attribute, prefix)
     out = []
-    errors.each do |m|
-      out << m[prefix.length, m.length - prefix.length] if m.start_with?(prefix)
+    errors.each_with_index do |m, i|
+      out << m[prefix.length, m.length - prefix.length] if attributes[i] == attribute
     end
     out
   end
@@ -222,6 +308,14 @@ module ActiveSupport
     h = {}
     list.each { |x| h[yield x] = x }
     h
+  end
+
+  # Rails' `Array#excluding` (`Array#without` is its alias): Array#-
+  # preserves the receiver's order and any non-excluded duplicates.
+  # Rails flattens one level of the excluded arguments before
+  # subtracting them.
+  def self.excluding(list, *elements)
+    list - elements.flatten(1)
   end
 
   # AS `Enumerable#many?`: the materialized no-block form is a length
@@ -308,6 +402,52 @@ module ActiveSupport
     out = {}
     hash.each { |k, v| out[k.to_s] = v }
     out
+  end
+
+  # Not `stringify_keys`: Rails' indifferent hash converts only a Symbol key, and its Hash and Array values all the way down.
+  def self.indifferent(hash)
+    out = {}
+    return out if hash.nil?
+    hash.each { |key, item| out[ActiveSupport.indifferent_key(key)] = ActiveSupport.indifferent_value(item, false) }
+    out
+  end
+
+  # Not a copy for every Array: Rails converts one written by `[]=` in place, unless it is frozen.
+  def self.indifferent_value(value, in_place)
+    if value.is_a?(Hash)
+      ActiveSupport.indifferent(value)
+    elsif value.is_a?(Array)
+      items = in_place && !value.frozen? ? value : value.dup
+      # Not `map!`: spinel has no in-place map on a poly Array.
+      i = 0
+      while i < items.length
+        items[i] = ActiveSupport.indifferent_value(items[i], in_place)
+        i += 1
+      end
+      items
+    else
+      value
+    end
+  end
+
+  def self.indifferent_key(key)
+    key.is_a?(Symbol) ? key.to_s : key
+  end
+
+  def self.indifferent_keys(keys)
+    keys.map { |key| ActiveSupport.indifferent_key(key) }
+  end
+
+  def self.indifferent_to_hash(value)
+    if value.is_a?(Hash)
+      out = {}
+      value.each { |key, item| out[key] = ActiveSupport.indifferent_to_hash(item) }
+      out
+    elsif value.is_a?(Array)
+      value.map { |item| ActiveSupport.indifferent_to_hash(item) }
+    else
+      value
+    end
   end
 
   # Not `value == false || value == 0`: ActiveModel compares its FALSE_VALUES by string too, so :off and "0" answer false.
@@ -670,12 +810,24 @@ module ActiveSupport
   class TimeZoneData
     attr_reader :name
 
-    def initialize(name, transitions, offsets, initial_offset, rule)
+    def initialize(name, transitions, offsets, initial_offset, rule, dsts)
       @name = name
       @transitions = transitions
       @offsets = offsets
       @initial_offset = initial_offset
       @rule = rule
+      @dsts = dsts
+    end
+
+    # Not `offset_at`: Rails' `TimeZone#utc_offset` is the period's BASE offset, the standard time without daylight saving.
+    def base_offset_at(epoch)
+      n = @transitions.length
+      return @rule[0] if !@rule.empty? && (n == 0 || epoch >= @transitions[n - 1])
+      return @initial_offset if n == 0 || epoch < @transitions[0]
+      i = n - 1
+      i = i - 1 while i > 0 && @transitions[i] > epoch
+      i = i - 1 while i > 0 && @dsts[i]
+      @dsts[i] ? @initial_offset : @offsets[i]
     end
 
     def offset_at(epoch)
@@ -753,9 +905,11 @@ module ActiveSupport
     idx_at = at + timecnt * width
     types_at = idx_at + timecnt
     offsets = []
+    dsts = []
     i = 0
     while i < timecnt
       offsets << be32(b, types_at + b[idx_at + i] * 6)
+      dsts << (b[types_at + b[idx_at + i] * 6 + 4] == 1)
       i = i + 1
     end
     rule = []
@@ -763,7 +917,7 @@ module ActiveSupport
       footer_at = types_at + typecnt * 6 + charcnt + leapcnt * 12 + be32(b, base + 24) + be32(b, base + 20)
       rule = parse_tz_rule(File.binread(path)[footer_at..].to_s.strip)
     end
-    TimeZoneData.new(iana, transitions, offsets, be32(b, types_at), rule)
+    TimeZoneData.new(iana, transitions, offsets, be32(b, types_at), rule, dsts)
   end
 
   # Only the `Mm.w.d` rule form: a `Jn` / `n` footer yields no rule, and the last transition's offset stands.
@@ -814,6 +968,10 @@ module ActiveSupport
   def self.in_time_zone(t, zone)
     return present(t) if zone.nil?
     t.getlocal(find_zone!(zone).offset_at(t.to_i))
+  end
+
+  def self.zone_name(zone)
+    zone.nil? ? nil : zone.name
   end
 
   # Numeric#in_time_zone: epoch seconds before the zone remapping above.
@@ -870,5 +1028,83 @@ module ActiveSupport
     return text if significant.length <= 16
     point = int_part.length - lead + exp
     (negative ? "-" : "") + "0." + significant[0, 16].to_s + "e" + point.to_s
+  end
+
+  def self.rails_zone_names
+    ZONE_NAMES.keys
+  end
+
+  # `Time#formatted_offset`: Rails spells the offset "+09:00", "+00:00" for UTC.
+  def self.formatted_offset(t)
+    ActiveSupport.seconds_to_utc_offset(t.utc_offset)
+  end
+
+  def self.seconds_to_utc_offset(seconds)
+    sign = seconds < 0 ? "-" : "+"
+    abs = seconds.abs
+    hours = abs / 3600
+    minutes = (abs % 3600) / 60
+    sign + (hours < 10 ? "0" : "") + hours.to_s + ":" + (minutes < 10 ? "0" : "") + minutes.to_s
+  end
+
+  class TimeZone
+    attr_reader :name
+
+    def initialize(name, data)
+      @name = name
+      @data = data
+    end
+
+    # Not `[]`: a class-side index reads as an operator on the strict targets; `lower::time_calendar` spells `TimeZone[x]` this way.
+    def self.lookup(name)
+      return nil if name.nil? || name.to_s.empty?
+      begin
+        TimeZone.new(name.to_s, ActiveSupport.find_zone!(name.to_s))
+      rescue ArgumentError
+        nil
+      end
+    end
+
+    def self.all
+      zones = []
+      ActiveSupport.rails_zone_names.each do |zone_name|
+        zones << TimeZone.new(zone_name, ActiveSupport.find_zone!(zone_name))
+      end
+      # Not `sort { |a, b| … }`: a block's parameters do not type on every target, and 152 zones sort cheaply in place.
+      i = 1
+      while i < zones.length
+        current = zones[i]
+        j = i - 1
+        while j >= 0 && zones[j].compare(current) > 0
+          zones[j + 1] = zones[j]
+          j = j - 1
+        end
+        zones[j + 1] = current
+        i = i + 1
+      end
+      zones
+    end
+
+    def compare(other)
+      by_offset = utc_offset <=> other.utc_offset
+      by_offset == 0 ? (name <=> other.name) : by_offset
+    end
+
+    def utc_offset
+      @data.base_offset_at(Time.now.to_i)
+    end
+
+    def formatted_offset
+      ActiveSupport.seconds_to_utc_offset(utc_offset)
+    end
+
+    def to_s
+      "(GMT" + formatted_offset + ") " + @name
+    end
+
+    def now
+      t = Time.now
+      t.getlocal(@data.offset_at(t.to_i))
+    end
   end
 end

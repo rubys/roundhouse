@@ -9,6 +9,13 @@
 // ingests. Assets, JS, images, node_modules and the like never leave disk.
 export const SOURCE_EXT = /\.(rb|erb|haml|jbuilder|ruby|rabl|slim)$/;
 
+// Rails' I18n load path (`config/locales/**/*.yml`). Native ingest walks
+// these; without them in the IDE/playground bundle, scoped helpers like
+// `t ".title"` on the store index fail as `translation missing` even
+// though `roundhouse check` is clean on the same checkout.
+export const LOCALE_EXT = /\.yml$/;
+export const LOCALE_DIRS = ["config/locales"];
+
 // Rails-convention dirs, plus the Roda + Sequel layout (models/, views/,
 // db/migrate/, and the root-level app.rb / db.rb / seeds.rb / config.ru —
 // config.ru is what the roda front-end dispatches on). Each walk/read is a
@@ -19,11 +26,15 @@ export const WALK_DIRS = ["app", "extras", "lib", "config/routes", "models", "vi
 // models, which it does not know), so it rides along when present.
 export const SINGLE_FILES = ["db/schema.rb", "config/routes.rb", "config.ru", "app.rb", "db.rb", "seeds.rb", "Gemfile.lock"];
 
+// Every directory the bundlers walk (sources + locales).
+export const ALL_WALK_DIRS = [...WALK_DIRS, ...LOCALE_DIRS];
+
 // Does a root-relative path belong in the bundle? Used by loaders that
 // enumerate the whole tree (a `webkitdirectory` file input) rather than
 // walking only the dirs above.
 export function wantsPath(rel) {
   if (SINGLE_FILES.includes(rel)) return true;
+  if (LOCALE_DIRS.some((d) => rel.startsWith(d + "/") && LOCALE_EXT.test(rel))) return true;
   if (!SOURCE_EXT.test(rel)) return false;
   return WALK_DIRS.some((d) => rel.startsWith(d + "/"));
 }

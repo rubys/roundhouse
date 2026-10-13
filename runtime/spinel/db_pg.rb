@@ -839,7 +839,13 @@ module Db
   def self.with_connection
     # Re-entrant: a nested lease, or one inside a transaction a BEGIN
     # outside any lease pinned, keeps the thread's connection.
-    return yield if !Thread.current[:db_conn].nil?
+    #
+    # Do not write `return yield if …`: Spinel tip (ea683750+) mis-emits
+    # `sp_oint_arg` around a raising block's int dummy on that form.
+    unless Thread.current[:db_conn].nil?
+      result = yield
+      return result
+    end
     pool = Db.pool_for_thread
     idx = pool.lease
     conn = pool.conn(idx)
@@ -1005,9 +1011,24 @@ module Db
   # A read through the connection's cached named statement for `sql`.
   def self.prepare(sql)
     sql = sql.to_s
+    return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. Post-inline SQL may
+  # still contain \x01 inside string literals (unmarked values).
+  def self.prepare_plain(sql)
     record_query(sql)
     h = current_conn.open_stmt(sql, true)
     h
+  end
+
+  # A Relation read with its values marked for binding (db_cruby.rb's
+  # `prepare_marked`). PostgreSQL spells placeholders $1, $2…, not the
+  # `?` the lift writes, so it runs with its values written in, as it
+  # did before binding.
+  def self.prepare_marked(marked)
+    prepare_plain(ActiveRecord::Relation.inline_sql(marked))
   end
 
   # Reads with too many SQL shapes to cache run as the unnamed statement.
@@ -1319,6 +1340,14 @@ module Db
     return "NULL" if ids.empty?
 
     ids.map { |i| i.to_i.to_s }.join(", ")
+  end
+
+  # The same `IN (...)` batch over string keys (a uuid primary key): each
+  # key quoted as a literal, never `to_i`'d to its leading digits.
+  def self.escape_string_list(ids)
+    return "NULL" if ids.empty?
+
+    ids.map { |i| escape_string(i.to_s) }.join(", ")
   end
 end
 

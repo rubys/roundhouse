@@ -16,9 +16,13 @@
 //! cross-cutting Prism AST helpers live in [`util`].
 
 mod alba;
+mod pagy;
 mod graphql_ruby;
 pub(crate) mod class_attribute;
 mod class_configuration;
+mod dry_initializer;
+mod dry_struct;
+mod dry_types;
 pub mod allow_browser;
 pub mod app;
 mod concern_accessors;
@@ -37,6 +41,8 @@ pub mod library_class;
 pub mod channel_callbacks;
 pub mod current_attributes;
 pub mod delegate;
+mod acts_as_votable;
+mod discard;
 mod model_delegate;
 pub mod thread_mattr;
 pub mod model;
@@ -46,6 +52,8 @@ pub mod on_load_reopen;
 pub mod prism;
 pub mod rbi;
 pub mod rate_limit;
+pub mod inertia;
+pub mod initializer_ledger;
 pub mod roda_app;
 pub mod routes;
 pub mod singleton_class;
@@ -61,6 +69,7 @@ pub mod survey;
 pub mod test;
 pub mod util;
 pub mod view;
+pub mod vite;
 mod visibility;
 
 pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};
@@ -69,7 +78,8 @@ pub use expr::ingest_expr;
 pub use fixture::ingest_fixture_file;
 pub use jbuilder::ingest_jbuilder;
 pub use library_class::{
-    classify_class_file, ingest_library_class, ingest_library_classes, ClassKind,
+    classify_class_file, ingest_library_class, ingest_library_classes,
+    ingest_nested_library_classes, ClassKind,
 };
 pub use model::ingest_model;
 pub use roda_app::{ingest_roda_app_with_vfs, is_roda_app};

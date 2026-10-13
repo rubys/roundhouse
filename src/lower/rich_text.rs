@@ -210,6 +210,7 @@ pub fn synthesize_record_model(app: &mut App) {
     }
     app.models.push(Model {
         sti_subclass_names: Vec::new(),
+        i18n: Default::default(),
         name: class,
         parent: Some(ClassId(Symbol::from("ApplicationRecord"))),
         parent_span: Default::default(),

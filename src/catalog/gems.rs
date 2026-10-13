@@ -166,6 +166,9 @@ pub const GEM_CATALOG: &[GemClass] = &[
             ("klass", GemTy::Untyped),
             ("name", GemTy::Sym),
             ("macro", GemTy::Sym),
+            // Nil when the association did not declare `counter_cache:`
+            // (campfire's Message→Room). Untyped until option ingest lands.
+            ("counter_cache_column", GemTy::Untyped),
         ],
     },
     // Arel — ActiveRecord's low-level SQL AST builder. `sql` wraps a
@@ -215,6 +218,44 @@ pub const GEM_CATALOG: &[GemClass] = &[
         name: "ROTP::Base32",
         class_methods: &[("random", GemTy::Str), ("random_base32", GemTy::Str)],
         instance_methods: &[],
+    },
+    // htmlentities — entity encode/decode; both directions return the
+    // converted String (lobsters' `HtmlEncoder` wraps one instance).
+    GemClass {
+        name: "HTMLEntities",
+        class_methods: &[],
+        instance_methods: &[("encode", GemTy::Str), ("decode", GemTy::Str)],
+    },
+    // commonmarker 2.x — lobsters' Markdowner parses to a node tree,
+    // edits it, and renders it back. The gem on the ruby family,
+    // spinel-commonmarker (same surface over cmark-gfm) on spinel.
+    // Node links answer a Node or nil, and the editing calls answer
+    // what the gem's C side does; those stay gradual.
+    GemClass {
+        name: "Commonmarker",
+        class_methods: &[
+            ("parse", GemTy::Instance("Commonmarker::Node")),
+            ("to_html", GemTy::Str),
+        ],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Commonmarker::Node",
+        class_methods: &[],
+        instance_methods: &[
+            ("type", GemTy::Sym),
+            ("string_content", GemTy::Str),
+            ("string_content=", GemTy::Str),
+            ("to_html", GemTy::Str),
+            ("to_commonmark", GemTy::Str),
+            ("first_child", GemTy::Untyped),
+            ("insert_before", GemTy::Untyped),
+            ("insert_after", GemTy::Untyped),
+            ("append_child", GemTy::Untyped),
+            ("delete", GemTy::Untyped),
+            ("walk", GemTy::Untyped),
+            ("each", GemTy::Untyped),
+        ],
     },
     // RQRCode — QR-code rendering; the `as_*` methods serialize to a
     // String in the requested format.

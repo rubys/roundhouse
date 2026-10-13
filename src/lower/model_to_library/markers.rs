@@ -37,7 +37,16 @@ pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model
     if is_primary_abstract_class(model) {
         return;
     }
-    let prefix = crate::naming::snake_case(model.name.0.as_str());
+    // Rails' `param_key` for a namespaced model joins the segments with
+    // `_` (`Admin::Widget` -> `admin_widget`), never `admin::widget`.
+    let prefix = model
+        .name
+        .0
+        .as_str()
+        .split("::")
+        .map(crate::naming::snake_case)
+        .collect::<Vec<_>>()
+        .join("_");
     // An STI base's rows belong to subclasses, and Rails' dom_class
     // answers the SUBCLASS (`Rooms::Open` rows are `rooms_open`, on
     // the page and in every broadcast target). Hydration here is

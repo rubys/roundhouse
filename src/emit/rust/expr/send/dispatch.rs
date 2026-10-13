@@ -292,7 +292,11 @@ pub(super) fn dispatch_method_by_recv_ty(
         raw_recv_s
     };
     match recv_ty {
-        Some(Ty::Array { .. }) => match method {
+        Some(Ty::Array { elem }) => match method {
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if args.is_empty() && matches!(**elem, Ty::Str | Ty::Int | Ty::Float | Ty::Sym) => {
+                Some(format!("{recv_s}.is_empty()"))
+            }
             "size" | "length" | "count" if args.is_empty() => {
                 // The `as i64` cast makes this non-primary. The
                 // decide pass stamps `NEEDS_PARENS` on this Send
@@ -335,7 +339,7 @@ pub(super) fn dispatch_method_by_recv_ty(
                 // `as i64` cast — non-primary. Decide pass stamps
                 // `NEEDS_PARENS` on this Send for chained-recv use;
                 // consumer wraps. Arg/let-RHS positions stay bare.
-                Some(format!("{recv_s}.len() as i64"))
+                Some(format!("{recv_s}.chars().count() as i64"))
             }
             // `str.to_i` → Ruby semantics: parse leading digits, 0 on
             // parse failure / non-numeric input. Rust's `parse::<i64>`

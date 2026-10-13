@@ -3,6 +3,7 @@ module ActiveSupport
     def self.encode: (untyped value) -> String
     def self.decode: (String text) -> untyped
     def self.jsonable: (untyped value) -> untyped
+    def self.time_json: (::Time t) -> String
   end
   def self.deep_dup: (untyped value) -> untyped
   def self.blank?: (untyped value) -> bool
@@ -10,11 +11,15 @@ module ActiveSupport
   def self.present?: (untyped value) -> bool
   def self.to_param: (untyped value) -> String
 
+  def self.to_query: (Hash[String, Roundhouse::ParamValue] value) -> String
+  def self.query_pairs: (Hash[String, Roundhouse::ParamValue] hash, String namespace) -> String
+  def self.query_escape: (String text) -> String
+  def self.query_value: (String name, Roundhouse::ParamValue item) -> String
   def self.presence: (untyped value) -> untyped
   def self.presence_in: (untyped value, Array[String] list) -> untyped
 
-  # `errors[:field]` -> the messages for that field, prefix stripped.
-  def self.errors_for: (Array[String] errors, String prefix) -> Array[String]
+  # `errors[:field]` -> the messages added on that attribute, prefix stripped.
+  def self.errors_for: (Array[String] errors, Array[String] attributes, String attribute, String prefix) -> Array[String]
 
   # Rails' name for "this signed value does not verify" — see the .rb.
   class MessageVerifier
@@ -23,14 +28,21 @@ module ActiveSupport
     end
   end
   def self.index_by: (untyped list) { (untyped) -> untyped } -> Hash[untyped, untyped]
-  # The lowerer routes only Array receivers to this helper. Relation
-  # receivers keep their typed method, and Array/Relation unions use
-  # the existing size lowering, so an Array contract here cannot coerce
-  # an association into Spinel's poly-array representation.
+  def self.excluding: [A] (Array[A] list, *A elements) -> Array[A]
+  # The lowerer routes Array receivers here, Relation receivers to
+  # `size > 1` (campfire `@room.users.many?`), and Array/Relation unions
+  # the same way. An Array contract cannot coerce an association into
+  # Spinel's poly-array representation because those sites never reach
+  # this helper.
   def self.many?: (Array[Object] list) ?{ (Object item) -> Object } -> bool
   def self.to_sentence: (Array[untyped] list, String words_connector, String two_words_connector, String last_word_connector) -> String
   def self.symbolize_keys: (Hash[String, untyped] hash) -> Hash[Symbol, untyped]
   def self.stringify_keys: (Hash[Symbol, untyped] hash) -> Hash[String, untyped]
+  def self.indifferent: (untyped hash) -> Hash[untyped, untyped]
+  def self.indifferent_value: (untyped value, bool in_place) -> untyped
+  def self.indifferent_key: (untyped key) -> untyped
+  def self.indifferent_keys: (Array[untyped] keys) -> Array[untyped]
+  def self.indifferent_to_hash: (untyped value) -> untyped
   def self.cast_boolean: (untyped value) -> bool?
   def self.squish: (String text) -> String
   def self.squish!: (String text) -> String
@@ -86,13 +98,28 @@ module ActiveSupport
   ZONE_NAMES: Hash[String, String]
   class TimeZoneData
     def name: () -> String
-    def initialize: (String name, Array[Integer] transitions, Array[Integer] offsets, Integer initial_offset, Array[Integer] rule) -> void
+    def initialize: (String name, Array[Integer] transitions, Array[Integer] offsets, Integer initial_offset, Array[Integer] rule, Array[bool] dsts) -> void
     def offset_at: (Integer epoch) -> Integer
+    def base_offset_at: (Integer epoch) -> Integer
     def rule_or: (Integer epoch, Integer fallback) -> Integer
   end
   def self.rule_instant: (Integer year, Integer month, Integer week, Integer wday, Integer secs) -> Integer
   def self.be32: (Array[Integer] b, Integer i) -> Integer
   def self.find_zone!: (String? zone) -> TimeZoneData
+  def self.rails_zone_names: () -> Array[String]
+  def self.formatted_offset: (Time t) -> String
+  def self.seconds_to_utc_offset: (Integer seconds) -> String
+  class TimeZone
+    def name: () -> String
+    def initialize: (String name, TimeZoneData data) -> void
+    def self.lookup: (String? name) -> TimeZone?
+    def self.all: () -> Array[TimeZone]
+    def compare: (TimeZone other) -> Integer
+    def utc_offset: () -> Integer
+    def formatted_offset: () -> String
+    def to_s: () -> String
+    def now: () -> Time
+  end
   def self.parse_tz_rule: (String spec) -> Array[Integer]
   def self.posix_seconds: (String text) -> Integer
   def self.current_zone: () -> TimeZoneData?
@@ -100,6 +127,7 @@ module ActiveSupport
   def self.present: (Time t) -> Time
   def self.present_db: (Time? t) -> Time?
   def self.in_time_zone: (Time t, String? zone) -> Time
+  def self.zone_name: (TimeZone? zone) -> String?
   def self.time_at_epoch: (Integer n) -> Time
   def self.local_time: (Integer y, Integer mo, Integer d, Integer h, Integer mi, Integer s, Integer nsec) -> Time
   def self.number_delimited: (Integer | Float number) -> String

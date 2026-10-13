@@ -397,7 +397,49 @@ fn emit_stmts(stmts: &[Expr]) -> String {
         }
     }
 
-    format!("{}\n{}", emit_stmt(head), emit_stmts(rest))
+    // The final threaded record update can be discarded by a later Ruby
+    // return (`expires_in` ends in `nil`). Keep evaluating the update,
+    // but underscore the unused Elixir binding so warnings-as-errors
+    // stays clean.
+    let head = match &*head.node {
+        ExprNode::Assign {
+            target: LValue::Var { name, .. },
+            value,
+        } if name.as_str() == "record"
+            && !rest.iter().any(later_statement_uses_record) =>
+        {
+            format!("_record = {}", emit_expr(value))
+        }
+        _ => emit_stmt(head),
+    };
+    format!("{}\n{}", head, emit_stmts(rest))
+}
+
+/// Later statements use `record` either by reading the local or by an
+/// implicit-self / `self.record` send that `emit_send` will thread as
+/// a leading `record` argument (`save()` → `save(record)`).
+fn later_statement_uses_record(e: &Expr) -> bool {
+    super::library::references_var(e, "record") || implicit_record_send(e)
+}
+
+fn implicit_record_send(e: &Expr) -> bool {
+    if let ExprNode::Send { recv, method, .. } = &*e.node {
+        let fname = super::library::elixir_fn_name(method.as_str());
+        if threads_record(&fname)
+            && recv
+                .as_ref()
+                .is_none_or(|r| is_record_var(r) || matches!(&*r.node, ExprNode::SelfRef))
+        {
+            return true;
+        }
+    }
+    let mut hit = false;
+    e.node.for_each_child(&mut |c| {
+        if !hit {
+            hit = implicit_record_send(c);
+        }
+    });
+    hit
 }
 
 /// String-accumulator hint consumer — the view/jbuilder lowerer's
@@ -1123,6 +1165,16 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // An element that is never nil or false makes `any?` / `none?` a question of size
+    if matches!(method, "any?" | "none?") && args.is_empty() {
+        if let Some(r) = recv.filter(|r| {
+            matches!(effective_recv_ty(r), Some(crate::ty::Ty::Array { elem }) if matches!(*elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym))
+        }) {
+            let empty = format!("Enum.empty?({})", emit_expr(r));
+            return if method == "none?" { empty } else { format!("not {empty}") };
+        }
+    }
+
     // `recv.empty?` — Array/list → `Enum.empty?`, Hash → `map_size == 0`.
     // An unknown/struct receiver falls through (a struct's own `empty?`
     // method routes via the self-call / method-on-record paths).
@@ -1181,6 +1233,20 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // stored ISO-8601 text into a native UTC `%DateTime{}` — the
     // hand-written `RhDateTime.parse` (runtime/elixir/v2/rh_datetime.ex),
     // not a transpiled `ActiveSupport` module (no such unit exists).
+    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+    if method == "errors_for" && args.len() == 4 {
+        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
+            if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                return format!(
+                    "(fn errors, attributes, attribute, prefix -> for {{m, a}} <- Enum.zip(errors, attributes), a == attribute, do: String.replace_prefix(m, prefix, \"\") end).({}, {}, {}, {})",
+                    emit_expr(&args[0]),
+                    emit_expr(&args[1]),
+                    emit_expr(&args[2]),
+                    emit_expr(&args[3]),
+                );
+            }
+        }
+    }
     if method == "parse_db_time" && args.len() == 1 {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
@@ -1949,6 +2015,14 @@ fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
             if let Some(t) = param_type(&class, name).and_then(concrete) {
                 return Some(t);
             }
+        }
+    }
+    // The form builder synthesizes this call after the view body is typed, and that per-view typer cannot see the record's `errors`
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+        if method.as_str() == "errors_for"
+            && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "ActiveSupport")
+        {
+            return Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) });
         }
     }
     // Fall back to the node's own ty.
@@ -3122,6 +3196,80 @@ mod tests {
         assert_eq!(emit_expr(&outer), "\"SELECT \" <> col <> tail");
         // A genuinely numeric `+` (no string root) stays `+`.
         assert_eq!(emit_expr(&call(var_t("m", Ty::Int), "+", vec![var_t("n", Ty::Int)])), "m + n");
+    }
+
+    fn record_assign(value: Expr) -> Expr {
+        Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Var {
+                    id: VarId(0),
+                    name: Symbol::from("record"),
+                },
+                value,
+            },
+        )
+    }
+
+    fn nil_lit() -> Expr {
+        Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Nil,
+            },
+        )
+    }
+
+    #[test]
+    fn unused_final_record_rebind_uses_underscore_binding() {
+        let updated = var_t("updated_record", Ty::Untyped);
+        let unused = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![record_assign(updated.clone()), nil_lit()],
+            },
+        );
+        assert_eq!(
+            emit_method_body(&unused),
+            "_record = updated_record\nnil"
+        );
+
+        let used = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![
+                    record_assign(updated),
+                    var_t("record", Ty::Untyped),
+                ],
+            },
+        );
+        assert_eq!(emit_method_body(&used), "record = updated_record\nrecord");
+    }
+
+    #[test]
+    fn unused_final_record_rebind_keeps_binding_for_implicit_save() {
+        set_record_methods(["save".to_string()].into_iter().collect());
+        let save = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("save"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let body = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![record_assign(var_t("updated_record", Ty::Untyped)), save, nil_lit()],
+            },
+        );
+        assert_eq!(
+            emit_method_body(&body),
+            "record = updated_record\nsave(record)\nnil"
+        );
+        set_record_methods(Default::default());
     }
 }
 

@@ -126,6 +126,41 @@ module ParamBuilder
     ParamBuilder.build(keys, values, present)
   end
 
+  # A JSON request body already has nested Hash/Array structure, so it
+  # does not go through the bracket-name parser above. Copy its root and
+  # recursively normalize the JSON tree like Rails'
+  # ActionDispatch::ParamBuilder#from_hash. With Rails' default
+  # `perform_deep_munge`, nil array members are removed at every depth;
+  # nil Hash values and empty containers are retained.
+  def self.from_json(params)
+    out = {}
+    params.each do |k, v|
+      out[k.to_s] = ParamBuilder.normalize_json(v)
+    end
+    out
+  end
+
+  # Convert a JSON subtree to Rails' parameter shape: stringify object
+  # keys recursively, drop nil array members, and retain nil object
+  # values, scalar leaves, and empty containers.
+  def self.normalize_json(value)
+    if value.is_a?(Hash)
+      out = {}
+      value.each do |k, v|
+        out[k.to_s] = ParamBuilder.normalize_json(v)
+      end
+      out
+    elsif value.is_a?(Array)
+      out = []
+      value.each do |v|
+        out.push(ParamBuilder.normalize_json(v)) unless v.nil?
+      end
+      out
+    else
+      value
+    end
+  end
+
   # `store_nested_param`, rule for rule. Answers what Rails' answers —
   # `params`, a one-element Array for a trailing `[]` below the top, or
   # nil for an empty key — because callers store that answer.

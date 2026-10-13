@@ -42,21 +42,23 @@ use crate::span::Span;
 
 /// Top-level entry. Walk `body` bottom-up, rewriting recognized
 /// assertion Sends to inline raise statements. Unrecognized Sends
-/// pass through unchanged.
-pub fn inline_assertions(body: &Expr) -> Expr {
+/// pass through unchanged, and so does a recognized name the test
+/// class defines itself (`own`): the call reaches that method, not
+/// Minitest's.
+pub fn inline_assertions(body: &Expr, own: &dyn Fn(&str) -> bool) -> Expr {
     let mut clone = body.clone();
-    inline_assertions_in_place(&mut clone);
+    inline_assertions_in_place(&mut clone, own);
     clone
 }
 
 /// In-place twin. Returns whether any assertion was rewritten (or a
 /// nested Seq flattened as a rewrite's result) so the test lowerer
 /// can skip a follow-up typing pass.
-pub fn inline_assertions_in_place(body: &mut Expr) -> bool {
-    walk_inline(body)
+pub fn inline_assertions_in_place(body: &mut Expr, own: &dyn Fn(&str) -> bool) -> bool {
+    walk_inline(body, own)
 }
 
-fn walk_inline(e: &mut Expr) -> bool {
+fn walk_inline(e: &mut Expr, own: &dyn Fn(&str) -> bool) -> bool {
     if matches!(&*e.node, ExprNode::Seq { .. }) {
         let exprs = match &mut *e.node {
             ExprNode::Seq { exprs } => std::mem::take(exprs),
@@ -65,7 +67,7 @@ fn walk_inline(e: &mut Expr) -> bool {
         let mut out: Vec<Expr> = Vec::with_capacity(exprs.len());
         let mut changed = false;
         for mut child in exprs {
-            if walk_inline(&mut child) {
+            if walk_inline(&mut child, own) {
                 changed = true;
             }
             let node = std::mem::replace(&mut *child.node, ExprNode::SelfRef);
@@ -86,11 +88,11 @@ fn walk_inline(e: &mut Expr) -> bool {
     }
     let mut changed = false;
     e.node.for_each_child_mut(&mut |c| {
-        if walk_inline(c) {
+        if walk_inline(c, own) {
             changed = true;
         }
     });
-    if let Some(replacement) = rewrite_send(e) {
+    if let Some(replacement) = rewrite_send(e, own) {
         *e = replacement;
         return true;
     }
@@ -100,7 +102,7 @@ fn walk_inline(e: &mut Expr) -> bool {
 /// Rewrite a bare-receiver `assert_*`/`refute_*` Send into an inline
 /// raise expression. Returns None for non-assertion Sends so the
 /// caller passes them through unchanged.
-fn rewrite_send(e: &Expr) -> Option<Expr> {
+fn rewrite_send(e: &Expr, own: &dyn Fn(&str) -> bool) -> Option<Expr> {
     let ExprNode::Send { recv, method, args, block, .. } = &*e.node else {
         return None;
     };
@@ -113,6 +115,9 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
         None => {}
         Some(r) if matches!(&*r.node, ExprNode::SelfRef) => {}
         _ => return None,
+    }
+    if own(method.as_str()) {
+        return None;
     }
     let span = e.span;
     match method.as_str() {

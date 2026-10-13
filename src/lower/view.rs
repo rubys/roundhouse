@@ -87,6 +87,9 @@ pub enum ViewHelperKind<'a> {
     Pluralize { count: &'a Expr, word: &'a Expr },
     /// `<%= truncate(text [, opts]) %>`.
     Truncate { text: &'a Expr, opts: Option<&'a Expr> },
+    /// `<%= word_wrap(text [, opts]) %>` — returns ordinary text, so
+    /// the lowering must escape the result before appending it.
+    WordWrap { text: &'a Expr, opts: Option<&'a Expr> },
     /// `<%= stylesheet_link_tag :name [, opts] %>`.
     StylesheetLinkTag { name: &'a Expr, opts: Option<&'a Expr> },
     /// `<%= content_for(:slot) %>` (getter, no body).
@@ -557,6 +560,14 @@ pub fn classify_view_helper<'a>(
             text: &args[0],
             opts: Some(&args[1]),
         }),
+        ("word_wrap", 1) => Some(ViewHelperKind::WordWrap {
+            text: &args[0],
+            opts: None,
+        }),
+        ("word_wrap", 2) => Some(ViewHelperKind::WordWrap {
+            text: &args[0],
+            opts: Some(&args[1]),
+        }),
         ("stylesheet_link_tag", 1) => Some(ViewHelperKind::StylesheetLinkTag {
             name: &args[0],
             opts: None,
@@ -776,6 +787,32 @@ pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {
         // unbound, which is a NameError on every render of the page.
         "rich_text_area" | "rich_textarea" => Some(FormBuilderMethod::RichTextArea),
         _ => None,
+    }
+}
+
+/// The builder methods Rails' default `field_error_proc` wraps in
+/// `<div class="field_with_errors">` when their field has errors: every
+/// control that goes through `Tags::Base#tag`, and the label. A hidden
+/// field, a button, the submit and Action Text's editor are not.
+pub fn wraps_field_errors(method: &str) -> bool {
+    classify_form_builder_method(method).is_some_and(FormBuilderMethod::wraps_field_errors)
+}
+
+impl FormBuilderMethod {
+    pub fn wraps_field_errors(self) -> bool {
+        matches!(
+            self,
+            FormBuilderMethod::Label
+                | FormBuilderMethod::TextField
+                | FormBuilderMethod::TextArea
+                | FormBuilderMethod::PasswordField
+                | FormBuilderMethod::CheckBox
+                | FormBuilderMethod::RadioButton
+                | FormBuilderMethod::Select
+                | FormBuilderMethod::UrlField
+                | FormBuilderMethod::EmailField
+                | FormBuilderMethod::FileField
+        )
     }
 }
 
@@ -1248,6 +1285,15 @@ mod tests {
         assert!(matches!(
             classify_view_helper("link_to", &args),
             Some(ViewHelperKind::LinkTo { opts: Some(_), .. })
+        ));
+    }
+
+    #[test]
+    fn word_wrap_keeps_options_for_the_shared_runtime_helper() {
+        let args = vec![str_lit("one two"), sym("options")];
+        assert!(matches!(
+            classify_view_helper("word_wrap", &args),
+            Some(ViewHelperKind::WordWrap { opts: Some(_), .. })
         ));
     }
 

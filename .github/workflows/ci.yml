@@ -557,9 +557,14 @@ jobs:
       #
       # ruby-vips — pairs with libvips42 above; without the gem the vips
       # loader test dies on `cannot load such file -- vips`.
+      #
+      # markly — `tests/emit_and_run.rs` renders through the real gem on the
+      # CRuby tree (Markly's flag constants, lobsters' Markdowner); without
+      # it the emitted tree's guarded require loads nothing and the test
+      # fails with NameError on Markly.
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
-          gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips
+          gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly
           gem install --no-document activerecord -v '~> 8.1.0'
       # Bounded build → run → free waves: every --all-targets identity still
       # goes through Cargo (lib, bins, each integration target). Finished
@@ -1906,8 +1911,11 @@ jobs:
       # has no per-object method table — or until upstream takes
       # basecamp/once-campfire#280, #279's twin for this file.
         env:
-          FLOOR_TESTS: 550
-          FLOOR_FILES: 69
+          # Tip Campfire suite floor — 552/71 via #818 meta
+          # (assoc_pluck test walk, view.controller, assoc_loaded,
+          # adapter_reload clear, reflect_on_association, walk-stub wipe).
+          FLOOR_TESTS: 552
+          FLOOR_FILES: 71
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
@@ -3536,7 +3544,7 @@ jobs:
             # page, and without its summary.json here the mirrored page drops
             # the AOT bars, the spinel parity badge and the AOT toolchain
             # provenance — a quieter page that reads as a complete one.
-            for lane in rails rails-int rails-jruby ruby ruby-int jruby spinel; do
+            for lane in rails rails-int rails-jruby ruby ruby-int jruby spinel futamura; do
               mkdir -p "_site/bench/lobsters/$lane"
               for f in summary.json rails.json env.json summary.md; do
                 fetch "$BENCH_URL/$lane/$f" "_site/bench/lobsters/$lane/$f" || true

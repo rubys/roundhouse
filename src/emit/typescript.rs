@@ -1838,7 +1838,7 @@ pub(super) fn js_library_class(
     // Hardcoded for the small known set rather than threading the
     // parent's field list through emit_library_class; expand when a
     // new framework parent surface materializes.
-    const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "persisted", "destroyed"];
+    const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "error_attributes", "persisted", "destroyed"];
     for (name, ty, is_static, from_ivar, span) in &fields {
         // ivar-derived fields on a derived class get `declare` —
         // the constructor body's `this.x = ...` (or a parent
@@ -1927,7 +1927,13 @@ pub(super) fn js_library_class(
             // sites lower to `===`, indexing lowers to `[]`, etc.
             // Skipping keeps the file syntactically valid; the
             // bodies remain readable in the source `.rb`.
-            !matches!(
+            //
+            // `HeaderStore#[]` / `#[]=` are the exception: the store
+            // is a class, not a JS object, and call sites on it go
+            // through `.get` / `.set` (see `is_framework_class_recv`).
+            // Those two methods are renamed in `js_class_member`.
+            (class_name == "HeaderStore" && matches!(m.name.as_str(), "[]" | "[]="))
+                || !matches!(
                 m.name.as_str(),
                 "[]" | "[]=" | "==" | "!=" | "<=>" | "<" | ">" | "<=" | ">="
                     | "<<" | ">>" | "+" | "-" | "*" | "/" | "%" | "**"
@@ -2377,7 +2383,14 @@ fn js_class_member(
     }
 
     let raw_name = m.name.as_str();
-    let mname = crate::emit::typescript::library::sanitize_identifier(raw_name);
+    // `HeaderStore#[]` / `#[]=` are emitted as `get` / `set`. The
+    // names aren't legal TS methods, and the call sites on that class
+    // already dispatch to those two names.
+    let mname = match raw_name {
+        "[]" => "get".to_string(),
+        "[]=" => "set".to_string(),
+        _ => crate::emit::typescript::library::sanitize_identifier(raw_name),
+    };
     let is_constructor =
         raw_name == "initialize" && matches!(m.receiver, MethodReceiver::Instance);
 

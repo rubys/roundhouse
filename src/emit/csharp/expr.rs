@@ -426,10 +426,36 @@ fn is_instance_method_of(class_name: &str, method: &str) -> bool {
 }
 
 fn receiver_class_name(r: &Expr) -> Option<String> {
-    match r.ty.as_ref()? {
+    // An ivar reads as `T | nil` until `initialize` assigns it.
+    match r.ty.as_ref()?.peel_nilable() {
         crate::ty::Ty::Class { id, .. } => Some(type_name(id.0.as_str())),
         _ => None,
     }
+}
+
+/// `recv.foo = v` where `recv`'s class defines `foo=` as a method (not an
+/// attribute property): emitted as that method, `FooSet(v)`.
+fn is_writer_method_of(class_name: &str, method: &str) -> bool {
+    let cm = camel(method);
+    let mut cur = Some(class_name.to_string());
+    let mut guard = 0;
+    while let Some(name) = cur {
+        guard += 1;
+        if guard > 32 {
+            break;
+        }
+        let (found, parent) = CLASS_HIERARCHY.with(|h| {
+            h.borrow()
+                .get(&name)
+                .map(|(p, members)| (members.contains(&cm), p.clone()))
+                .unwrap_or((false, None))
+        });
+        if found {
+            return true;
+        }
+        cur = parent;
+    }
+    false
 }
 
 pub(super) fn reset_class_hierarchy() {
@@ -1323,6 +1349,13 @@ fn emit_send(
                 (Some("ActiveSupport"), "parse_db_time") if args.len() == 1 => {
                     return format!("Roundhouse.RhDateTime.Parse({})", args_s[0]);
                 }
+                // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+                (Some("ActiveSupport"), "errors_for") if args.len() == 4 => {
+                    return format!(
+                        "((System.Func<string, string, List<string>>)((attribute, prefix) => ({}).Zip({}, (m, a) => (m, a)).Where(p => p.a == attribute).Select(p => p.m.StartsWith(prefix, System.StringComparison.Ordinal) ? p.m.Substring(prefix.Length) : p.m).ToList()))({}, {})",
+                        args_s[0], args_s[1], args_s[2], args_s[3]
+                    );
+                }
                 // Temporal writer intrinsic: `ActiveSupport.db_now` — current
                 // UTC time in Rails' exact storage form ("YYYY-MM-DD
                 // HH:MM:SS.ffffff"). `fill_timestamps` stamps with it.
@@ -1390,6 +1423,11 @@ fn emit_send(
                 // `long?`.
                 if let Some(conv) = nilable_prop_conversion(base, &args[0]) {
                     return format!("this.{} = {}", pascal(base), conv);
+                }
+            }
+            if let Some(cls) = receiver_class_name(r) {
+                if is_writer_method_of(&cls, method) {
+                    return format!("{}.{}({})", emit_expr(r), pascal(method), args_s[0]);
                 }
             }
             return format!("{}.{} = {}", emit_expr(r), pascal(base), args_s[0]);
@@ -1540,6 +1578,14 @@ fn emit_send(
     // Zero-arg receiver sends: builtin coercions, then property vs method.
     if let (Some(r), true) = (recv, args.is_empty() && block.is_none()) {
         let rs = emit_expr(r);
+        // The receiver's class defines this method itself (a
+        // CacheControlStore's `empty?`, `max_age`): call it, before the
+        // builtin collection mappings of the same names.
+        if let Some(cls) = receiver_class_name(r) {
+            if is_instance_method_of(&cls, method) {
+                return format!("{rs}.{}()", pascal(method));
+            }
+        }
         match method {
             // A non-nullable value-typed receiver (`long`/`double`/`bool`
             // column) is never nil — emit `false` so C# doesn't warn on an
@@ -1552,6 +1598,16 @@ fn emit_send(
                 return "false".to_string()
             }
             "nil?" => return format!("({rs} == null)"),
+            // HeaderStore#delete's `@keys.pop()` — List has RemoveAt, not Pop.
+            // RemoveAt is void and throws on empty; Ruby returns the element or nil.
+            "pop" if recv_is_array(r) => {
+                let elem = array_elem_ty(r)
+                    .map(|t| csharp_ty(&t))
+                    .unwrap_or_else(|| "object?".to_string());
+                return format!(
+                    "((System.Func<{elem}>)(() => {{ if ({rs}.Count == 0) return default; var _last = {rs}[{rs}.Count - 1]; {rs}.RemoveAt({rs}.Count - 1); return _last; }}))()"
+                );
+            }
             "!" => return format!("!({rs})"),
             "to_s" => return format!("(Convert.ToString({rs}) ?? \"\")"),
             "to_i" => return format!("Convert.ToInt64({rs})"),
@@ -1570,6 +1626,12 @@ fn emit_send(
                     format!("({rs}.Length != 0)")
                 };
             }
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if matches!(
+                r.ty.as_ref(),
+                Some(crate::ty::Ty::Array { elem })
+                    if matches!(**elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym)
+            ) => return format!("({rs}.Count == 0)"),
             "upcase" => return format!("{rs}.ToUpperInvariant()"),
             "downcase" => return format!("{rs}.ToLowerInvariant()"),
             "strip" => return format!("{rs}.Trim()"),

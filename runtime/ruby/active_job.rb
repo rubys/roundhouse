@@ -109,11 +109,10 @@ module ActiveJob
   # this was written, with two job classes of different arities and
   # argument types, and the output is byte-identical to CRuby's.
   #
-  # ONE QUEUE, NOT ONE PER QUEUE NAME. `queue_as` is inert here (see
-  # `Base` below) because a single in-process drain has no scheduling
-  # decision to make: there is no worker pool to allocate and no
-  # priority to honour, so recording the name would suggest an ordering
-  # guarantee nothing implements.
+  # ONE QUEUE, NOT ONE PER QUEUE NAME. A payload records its job's
+  # `queue_as` name, as Rails' does, but a single in-process drain has
+  # no scheduling decision to make: there is no worker pool to allocate
+  # and no priority to honour, so every entry runs in arrival order.
   PENDING = []
 
   # Whether a drain exists to pick the work up. Empty means no — and
@@ -151,8 +150,41 @@ module ActiveJob
     nil
   end
 
+  # ---- Serialized payloads --------------------------------------------
+  #
+  # An ActiveJob-format JSON payload (the `job.serialize` hash Rails
+  # hands to Sidekiq), built by `ActiveJob::Payload.build` on the
+  # Ruby-family lanes. A job whose arguments all serialize goes this
+  # way, and the drain looks its records up again when it runs, as
+  # Rails does. Every other job keeps a Proc over its live arguments.
+  #
+  # THE PAYLOAD RIDES THE SAME QUEUE, wrapped in a Proc. A strict target
+  # has one element type per Array, so `PENDING` cannot hold a String
+  # beside its Procs; a Proc that closes over the JSON and runs it
+  # through `perform_payload` is the same `() -> nil` as every other
+  # entry, so the one FIFO and its locking stay as they are. What the
+  # Proc closes over is the serialized text, not the job's objects.
+  def self.enqueue_payload(json)
+    enqueue(-> { perform_payload(json)
+    nil })
+  end
+
   def self.pending_count
     PENDING.length
+  end
+
+  # Run one payload and answer whether a job class took it. The default
+  # knows no job classes: only the Ruby-family lanes build payloads, and
+  # their job registry redefines this (a later definition wins, as in
+  # `thread_state`). A payload reaching this one is reported, not run.
+  def self.perform_payload(json)
+    warn "[job] no job registry for a queued payload"
+    false
+  end
+
+  # Raised when a payload names a record that is gone, as Rails' is.
+  # `discard_on ActiveJob::DeserializationError` drops the job quietly.
+  class DeserializationError < StandardError
   end
 
   # Run every job queued so far, FIFO, and answer how many ran.
@@ -227,7 +259,10 @@ module ActiveJob
   end
 
   class Base
-    # `queue_as :default` — queue routing has no meaning inline.
+    # `queue_as :default` — nothing to do at class load. A job queued as
+    # a payload carries the name as its `queue_name`, read off the
+    # literal at compile time (`lower::job_payload`); the drain still
+    # runs one FIFO.
     def self.queue_as(name = nil)
       nil
     end
@@ -239,8 +274,10 @@ module ActiveJob
     end
 
     # `retry_on` / `discard_on` — error-handling policy for queued
-    # execution; inert inline (an inline job's exception propagates to
-    # the caller, which is the honest development-mode behavior).
+    # execution. Inert here; `discard_on ActiveJob::DeserializationError`
+    # on a payload job is read at compile time into the job registry's
+    # discard table, so the drain drops a job whose record is gone.
+    # `retry_on` has no queue to retry on yet.
     def self.retry_on(error, opts = nil)
       nil
     end

@@ -247,6 +247,7 @@ pub struct ViewLowerCtx<'a> {
         std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
     partial_form_bindings: std::collections::HashMap<ViewKey, PartialFormBinding>,
     route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
+    i18n: std::rc::Rc<crate::i18n::FormI18n>,
     /// Generated RouteHelpers function name -> how many REQUIRED
     /// positionals it takes. See the ViewCtx field of the same name.
     route_helper_arity: std::rc::Rc<std::collections::HashMap<String, usize>>,
@@ -327,6 +328,7 @@ impl<'a> ViewLowerCtx<'a> {
             bool_readers: std::rc::Rc::new(bool_reader_names(app)),
             store_readers: std::rc::Rc::new(store_reader_names(app)),
             partial_form_bindings: partial_form_bindings(&app.views),
+            i18n: std::rc::Rc::new(crate::i18n::FormI18n::of(app)),
             route_helper_names: std::rc::Rc::new(
                 route_helpers.iter().map(|(n, _)| n.clone()).collect(),
             ),
@@ -735,6 +737,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         bool_readers: lx.bool_readers.clone(),
         store_readers: lx.store_readers.clone(),
         route_helper_names: lx.route_helper_names.clone(),
+        i18n: lx.i18n.clone(),
         route_helper_arity: lx.route_helper_arity.clone(),
         form_wrappers: lx.form_wrappers.clone(),
         stylesheets: app.stylesheets.clone(),
@@ -1256,6 +1259,7 @@ pub(crate) fn insert_framework_stubs(
         "builder_text",
         "builder_attr",
         "truncate",
+        "word_wrap",
         "dom_id",
         "dom_class",
         "image_tag",
@@ -1287,6 +1291,7 @@ pub(crate) fn insert_framework_stubs(
         "tag",
         "content_tag",
         "concat",
+        "class_names",
     ];
     for name in html_helpers {
         // Loose signature: variadic kwargs (Untyped) → String. The
@@ -1467,6 +1472,22 @@ pub(crate) fn insert_framework_stubs(
     );
     tag_all_method(&mut inf);
     classes.insert(ClassId(Symbol::from("Inflector")), inf);
+
+    // `errors[:field]` in a view grounds to this (runtime/ruby/active_support_ext.rb).
+    let support = classes.entry(ClassId(Symbol::from("ActiveSupport"))).or_default();
+    let str_array = Ty::Array { elem: Box::new(Ty::Str) };
+    support.class_methods.entry(Symbol::from("errors_for")).or_insert_with(|| {
+        fn_sig(
+            vec![
+                (Symbol::from("errors"), str_array.clone()),
+                (Symbol::from("attributes"), str_array.clone()),
+                (Symbol::from("attribute"), Ty::Str),
+                (Symbol::from("prefix"), Ty::Str),
+            ],
+            str_array.clone(),
+        )
+    });
+    support.class_method_kinds.entry(Symbol::from("errors_for")).or_insert(AccessorKind::Method);
 
     // JsonBuilder — encode_value / encode_string. Used by lowered
     // `*.json.jbuilder` templates (see `jbuilder_to_library`). Both
@@ -4118,6 +4139,8 @@ pub(super) struct ViewCtx {
     /// Empty in single-view test harnesses → both arms (the
     /// pre-gating shape).
     pub(super) route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
+    /// The app's translations for form labels and submit text.
+    pub(super) i18n: std::rc::Rc<crate::i18n::FormI18n>,
     /// Generated RouteHelpers function name -> how many REQUIRED
     /// positionals it takes (`article_path` 1, `articles_path` 0).
     ///

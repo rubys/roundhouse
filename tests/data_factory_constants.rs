@@ -643,7 +643,7 @@ fn custom_factory_blocks_are_not_silently_discarded() {
         "def label; name; end; include Comparable",
         "def label; name; end; puts 'side effect'",
         "def other.label; 1; end",
-        "|value| def label; name; end",
+        "|value| value; def label; name; end",
     ] {
         let source = format!("class Owner; State = Data.define(:name) do {block}; end; end");
         assert!(
@@ -698,7 +698,8 @@ fn admitted_data_factories_are_rejected_before_unverified_target_emission() {
         .collect();
     assert!(errors.is_empty(), "{errors:?}");
     for &target in BuildTarget::TRANSPILE {
-        if matches!(target, BuildTarget::Ruby | BuildTarget::Spinel) {
+        // Futamura's residue is the app itself, run by Ruby: nothing to refuse.
+        if matches!(target, BuildTarget::Ruby | BuildTarget::Spinel | BuildTarget::Futamura) {
             continue;
         }
         let (result, diagnostics) = roundhouse::emit::diagnostics::scope(|| {

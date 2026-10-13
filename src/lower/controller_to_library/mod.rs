@@ -25,6 +25,7 @@
 //! the synthesized `MethodDef`.
 
 mod broadcasts;
+mod inertia;
 mod process_action;
 pub mod params;
 pub mod params_wrapper;
@@ -320,6 +321,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // rewrite controller bodies + register the class with the typer.
     let mut params_specs = self::params::collect_specs(controllers);
     params_specs.mark_file_fields(models);
+    params_specs.mark_keyed_associations(models);
     let params_lcs = self::params::synthesize_params_classes(&params_specs);
 
     // The view↔controller ivar contract: each action view's read-ivars,
@@ -1202,9 +1204,18 @@ fn build_methods(
     // inlining — drop them from the emitted methods. Filter targets
     // that are also called from action bodies (e.g., `_params`
     // helpers — actually those don't appear in before_filters, but
-    // be defensive) stay.
-    let filter_target_names: std::collections::HashSet<&Symbol> =
-        before_filters.iter().map(|f| &f.target).collect();
+    // be defensive) stay. A guarded filter (`if:`/`unless:`) is never
+    // inlined (`inline_before_filters` skips it; see
+    // `filter_is_guarded`) — its target is still called by name from
+    // the preamble, so it's excluded here even when another,
+    // unguarded, before_action on the same controller also names it.
+    let guarded_target_names: std::collections::HashSet<&Symbol> =
+        before_filters.iter().filter(|f| filter_is_guarded(f)).map(|f| &f.target).collect();
+    let filter_target_names: std::collections::HashSet<&Symbol> = before_filters
+        .iter()
+        .map(|f| &f.target)
+        .filter(|t| !guarded_target_names.contains(*t))
+        .collect();
     // A subclassed controller keeps its filter targets: descendants
     // inherit the before_action and their preambles call the target
     // BY NAME (`default_periods` in ModNotesController's dispatcher,
@@ -1573,6 +1584,17 @@ fn filter_applies(f: &Filter, action_name: &Symbol) -> bool {
     }
 }
 
+/// Does `f` carry an `if:`/`unless:` guard (Symbol- or lambda-form)?
+/// A guarded filter is runtime-conditional on something the splice site
+/// can't evaluate, so it can't be spliced into an action body wholesale
+/// — see the comment on `inline_before_filters`.
+fn filter_is_guarded(f: &Filter) -> bool {
+    f.if_cond.is_some()
+        || f.unless_cond.is_some()
+        || f.if_cond_expr.is_some()
+        || f.unless_cond_expr.is_some()
+}
+
 /// May this controller's own filters be inlined into its action bodies
 /// at all?
 ///
@@ -1610,7 +1632,11 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
     let own_priv = |target: &Symbol| privs.iter().any(|a| &a.name == target);
     let mut seen_inlinable = false;
     for f in controller.filters().filter(|f| matches!(f.kind, FilterKind::Before)) {
-        if own_priv(&f.target) {
+        // A guarded own-private filter is never inlined (see
+        // `filter_is_guarded`) — it stays in the preamble exactly like
+        // an ancestor-target filter, so it doesn't count as "inlinable"
+        // for this ordering check either.
+        if own_priv(&f.target) && !filter_is_guarded(f) {
             seen_inlinable = true;
         } else if seen_inlinable {
             return false;
@@ -1623,6 +1649,16 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
 /// filter target's body prepended to the action body. A filter
 /// applies when its `only:` includes the action name, or its
 /// `except:` doesn't, or it has neither (unconditional).
+///
+/// A guarded filter (`if:`/`unless:`) is skipped here regardless —
+/// splicing its target's body straight into the action body would run
+/// it unconditionally, which is a correctness bug, not just a missed
+/// optimization: `before_action :reject_paging, if: :paging?` answered
+/// 401 for every request, paged or not, and the harmful direction is
+/// just as real (`if: :public?` on a cache-header filter would mark
+/// every response publicly cacheable). A guarded filter is left for
+/// `build_filter_preamble`, which already turns `if:`/`unless:` into a
+/// runtime condition (`cond_from_guards`) around the dispatch call.
 ///
 /// A prepended body that can render/redirect/head is followed by
 /// `return if performed?`, exactly as the preamble does for the filters
@@ -1639,7 +1675,7 @@ fn inline_before_filters(
     let action_name = &action.name;
     let mut prepended: Vec<Expr> = Vec::new();
     for f in filters {
-        if !filter_applies(f, action_name) {
+        if !filter_applies(f, action_name) || filter_is_guarded(f) {
             continue;
         }
         // Look up the filter's target action by name in privs.
@@ -1862,7 +1898,11 @@ fn build_filter_preamble(
                 ControllerBodyItem::Filter { filter, .. }
                     if matches!(filter.kind, FilterKind::Before) =>
                 {
-                    if is_own && own_privs_inlined && own_priv_targets.contains(&filter.target) {
+                    if is_own
+                        && own_privs_inlined
+                        && own_priv_targets.contains(&filter.target)
+                        && !filter_is_guarded(filter)
+                    {
                         continue; // inlined into action bodies upstream
                     }
                     push_call(filter, if filter.prepend { &mut prepends } else { &mut preamble });
@@ -2732,10 +2772,14 @@ fn action_to_method(
         if let Some(spec) = spec {
             Ty::Class { id: spec.class_id.clone(), args: vec![] }
         } else {
-            // Fallback for helpers whose permit list we didn't recognize
-            // (campfire's `role_params` builds a bare Hash) — stays
-            // typed-coarse rather than panicking.
-            Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) }
+            // No recognized permit list: the `_params` suffix is a naming
+            // convention, not a contract. A guard filter named
+            // `check_kind_params` can answer `nil` or a `head(...)` result,
+            // not a Hash — pinning Hash[Symbol, untyped] here is the same
+            // mistake the blanket-Nil pin above was (issue #810). Untyped
+            // lets the compiler infer from the body instead; campfire's
+            // `role_params`, which builds a bare Hash, still infers Hash.
+            Ty::Untyped
         }
     } else if is_public {
         // Routed actions terminate in render/redirect → Nil.
@@ -3029,6 +3073,7 @@ fn lower_action_body(
     // `RouteHelpers.<x>_path(@x.id)`, matching the documented Rails
     // polymorphic location form without runtime class dispatch.
     let with_response_location = rewrite_response_location_kwarg(&with_render);
+    let with_response_location = inertia::encode_inertia_values(&with_response_location);
     let with_params = rewrite_params(&with_response_location);
     // After bare `params.expect(...)` / `params.require(:r).permit(...)`
     // canonicalize via `rewrite_params`, replace each permit chain with

@@ -9,9 +9,10 @@ use crate::ide::render_ty;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
-use crate::ident::Symbol;
+use crate::ident::{ClassId, Symbol};
+use std::collections::HashMap;
 
-use super::PreloadCoverage;
+use super::{ClassInfo, PreloadCoverage};
 use super::preload;
 
 
@@ -193,6 +194,104 @@ fn is_unknown_ty(ty: Option<&Ty>) -> bool {
     }
 }
 
+/// A send whose explicit receiver the analysis could not type.
+pub struct UnknownReceiverSend {
+    pub span: crate::span::Span,
+    pub method: Symbol,
+    /// The receiver is the gradual escape (`T.unsafe`, RBS `untyped`)
+    /// rather than an unresolved type.
+    pub gradual: bool,
+    /// The receiver's type is known, but the send resolved to nothing on
+    /// it: what `diagnose` reports as `send_dispatch_failed` in a model
+    /// or controller body, and nothing reports elsewhere.
+    pub known_receiver: bool,
+}
+
+/// Every send, in every emitted body, whose explicit receiver is
+/// unknown or gradual, or known without the send resolving, and which
+/// carries no diagnostic of its own.
+///
+/// Nothing checks such a send: no method table is consulted, so a
+/// misspelled or unimplemented method passes. `diagnose` reports the
+/// unresolved receiver only in model and controller bodies, and not at
+/// all for a gradual one, so in a library class the send is silent. A
+/// drop in errors that only moves sends here is a reclassification, not
+/// progress; `check` prints the count beside the error total.
+///
+/// A receiver whose type names a class the registry does not hold
+/// (`#: (Missing::AccessControl)`) is unknown, not known: there is no
+/// method table to check it against.
+/// True when `method` is registered on the receiver's class (either
+/// side), walking parents and includes. A registered method that returns
+/// `Ty::Var` still counts as resolved for the unknown-receiver ledger.
+fn method_registered_on(
+    classes: &HashMap<ClassId, ClassInfo>,
+    ty: Option<&Ty>,
+    method: &Symbol,
+) -> bool {
+    match ty {
+        Some(Ty::Union { variants }) => {
+            !variants.is_empty()
+                && variants
+                    .iter()
+                    .all(|v| method_registered_on(classes, Some(v), method))
+        }
+        Some(Ty::Class { id, .. }) => {
+            let mut current = Some(id);
+            for _ in 0..32 {
+                let Some(cid) = current else { break };
+                let Some(class) = classes.get(cid) else { break };
+                if class.instance_methods.contains_key(method)
+                    || class.class_methods.contains_key(method)
+                {
+                    return true;
+                }
+                if class
+                    .includes
+                    .iter()
+                    .any(|m| classes.get(m).is_some_and(|inc| {
+                        inc.instance_methods.contains_key(method)
+                            || inc.class_methods.contains_key(method)
+                    }))
+                {
+                    return true;
+                }
+                current = class.parent.as_ref();
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+pub fn unknown_receiver_sends(app: &App, classes: &HashMap<ClassId, ClassInfo>) -> Vec<UnknownReceiverSend> {
+    fn visit(expr: &Expr, classes: &HashMap<ClassId, ClassInfo>, out: &mut Vec<UnknownReceiverSend>) {
+        if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
+            let gradual = matches!(r.ty, Some(Ty::Untyped));
+            let unknown = is_unknown_ty(r.ty.as_ref())
+                || matches!(&r.ty, Some(Ty::Class { id, .. }) if !classes.contains_key(id));
+            // Dispatch evidence, not return shape: a known method that
+            // answers `Ty::Var` is still checked.
+            let known_receiver = !gradual
+                && !unknown
+                && is_unknown_ty(expr.ty.as_ref())
+                && !method_registered_on(classes, r.ty.as_ref(), method);
+            if (gradual || known_receiver || unknown)
+                && expr.diagnostic.is_none()
+                && !expr.span.is_synthetic()
+            {
+                out.push(UnknownReceiverSend { span: expr.span, method: method.clone(), gradual, known_receiver });
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, classes, out));
+    }
+    let mut out = Vec::new();
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, classes, &mut out));
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|s| seen.insert((s.span.file, s.span.start, s.span.end, s.method.clone())));
+    out
+}
+
 /// Short label for what shape of expression resolved to `Untyped`.
 /// Used for the `GradualUntyped` diagnostic message so a single
 /// kind can name the syntactic position without each callsite
@@ -302,6 +401,8 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             DiagnosticKind::UndefinedFilterTarget { .. } => Diagnostic::stub_text(kind),
             // Produced by `graphql::diagnose` as a returned list.
             DiagnosticKind::GraphqlNullableField { .. } => Diagnostic::stub_text(kind),
+            // Produced by `ingest::initializer_ledger` as a returned list.
+            DiagnosticKind::UnconsumedInitializer { .. } => Diagnostic::stub_text(kind),
         };
         if !matches!(
             kind,

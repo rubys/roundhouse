@@ -92,46 +92,39 @@ pub struct FlatRoute {
     /// needed, checkable with plain char comparisons on every target
     /// (`seg_patterns` rides `Route.new`'s `seg_constraints` the way
     /// `int_params` rides its own slot). A route carrying a
-    /// `constraints` entry that DIDN'T compile is refused outright at
-    /// `collect_flat_routes` — it never reaches `out` at all, rather
-    /// than serve a requirement it can't actually check (the original
-    /// bug was exactly that: a route that claims a restriction but
-    /// doesn't enforce it).
+    /// `constraints` entry that DIDN'T compile is marked `refused` and
+    /// left out of every dispatch table, rather than serve a requirement
+    /// it can't actually check (the original bug was exactly that: a
+    /// route that claims a restriction but doesn't enforce it).
     pub seg_patterns: Vec<(String, String)>,
+    /// `Some((param, regex))` when a requirement on this route is outside
+    /// the segment-pattern subset. The route stays out of every dispatch
+    /// table (`flatten_routes`) but its URL helper is still generated
+    /// (`flatten_routes_for_helpers`): building a link needs no matcher,
+    /// and a view that only links to the route must not lose the helper.
+    pub refused: Option<(String, String)>,
 }
 
 /// Compile every non-digit-class requirement on one concrete route
 /// into the router's segment-pattern form, or refuse the WHOLE route
-/// (returning `None`) when any one of them needs more than the
-/// supported subset (`segment_pattern`'s module docs name it).
+/// (returning the first requirement that failed, with no patterns) when
+/// any one of them needs more than the supported subset
+/// (`segment_pattern`'s module docs name it).
 /// Serving the route with only SOME of its requirements enforced
 /// would just reproduce the original bug under a different regex
-/// shape, so nothing partial is ever emitted — `route_desc` names the
-/// route (method, path, and for `resources`, the action) in the
-/// recorded gap.
+/// shape, so nothing partial is ever emitted. Ingest reports each
+/// refused route as a located `unsupported` (`refused_route_diagnostics`).
 fn compile_seg_patterns(
     other_constraints: &[(String, String)],
-    route_desc: &str,
-) -> Option<Vec<(String, String)>> {
+) -> (Vec<(String, String)>, Option<(String, String)>) {
     let mut out = Vec::with_capacity(other_constraints.len());
     for (name, rx) in other_constraints {
         match crate::lower::segment_pattern::compile(rx) {
             Some(pattern) => out.push((name.clone(), pattern)),
-            None => {
-                crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
-                    file: "config/routes.rb".to_string(),
-                    message: format!(
-                        "route dropped from the dispatch table: {route_desc} — `{name}:` \
-                         requirement `{rx}` is outside the router's supported segment-pattern \
-                         subset (no lookahead/backreference/alternation/anchors, and no shape \
-                         needing backtracking)"
-                    ),
-                });
-                return None;
-            }
+            None => return (Vec::new(), Some((name.clone(), rx.clone()))),
         }
     }
-    Some(out)
+    (out, None)
 }
 
 /// Is this constraint regex a plain digit class (`\d+` / `[0-9]+`,
@@ -197,7 +190,7 @@ pub fn standard_resource_actions() -> &'static [(&'static str, HttpMethod, &'sta
 /// describe the same path template.
 pub fn helper_id_segments(app: &App) -> std::collections::HashMap<String, Vec<bool>> {
     let mut out: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
-    for r in flatten_routes(app) {
+    for r in flatten_routes_for_helpers(app) {
         if !r.named || r.as_name.is_empty() {
             continue;
         }
@@ -211,10 +204,24 @@ pub fn helper_id_segments(app: &App) -> std::collections::HashMap<String, Vec<bo
     out
 }
 
+/// The routes the router dispatches: every flattened route except those
+/// refused for a requirement it cannot enforce.
 pub fn flatten_routes(app: &App) -> Vec<FlatRoute> {
+    let mut out = flatten_route_entries(&app.routes.entries);
+    out.retain(|r| r.refused.is_none());
+    out
+}
+
+/// Every flattened route, refused ones included — for URL-helper
+/// generation, which builds a path and never matches one.
+pub fn flatten_routes_for_helpers(app: &App) -> Vec<FlatRoute> {
+    flatten_route_entries(&app.routes.entries)
+}
+
+pub(crate) fn flatten_route_entries(entries: &[RouteSpec]) -> Vec<FlatRoute> {
     let mut out = Vec::new();
     let ctx = Ctx { helpers_enabled: true, ..Ctx::default() };
-    for entry in &app.routes.entries {
+    for entry in entries {
         collect_flat_routes(entry, &mut out, &ctx);
     }
     out
@@ -515,11 +522,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 // route rather than serve it unenforced — a route
                 // that advertises `[^@/.]+` but can't actually check
                 // it is exactly the original bug.
-                let Some(seg_patterns) =
-                    compile_seg_patterns(&constraints, &format!("{method:?} {vpath}"))
-                else {
-                    continue;
-                };
+                let (seg_patterns, refused) = compile_seg_patterns(&constraints);
                 out.push(FlatRoute {
                     method: method.clone(),
                     path: vpath,
@@ -535,6 +538,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     int_params,
                     constraints,
                     seg_patterns,
+                    refused,
                 });
             }
         }
@@ -587,6 +591,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 int_params: vec![],
                 constraints: vec![],
                 seg_patterns: vec![],
+                refused: None,
             });
         }
         RouteSpec::Resources {
@@ -604,7 +609,9 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // `path:` moves the URL segment only; the helpers and the
             // controller below still come from `name`.
             let segment = path_segment.as_deref().unwrap_or(name.as_str());
-            let resource_path = format!("/{segment}");
+            // `path: "/"` (an empty segment) mounts the resource at its
+            // scope's root: `/ping`, not `//ping`.
+            let resource_path = slash_segment(segment);
             // `param: :task_id` renames the member segment (#84). The
             // action table is written with `:id`; substitute here so
             // the path, the helper's param list and the controller's
@@ -693,10 +700,14 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     continue;
                 }
                 let member = suffix.replace(":id", &format!(":{id_param}"));
+                // Empty for an index or show mounted with `path: "/"`; it
+                // stays empty through the nesting (`/account`, not
+                // `/account/`) and is the root `/` only at the very top.
                 let path = format!("{resource_path}{member}");
                 let (nested_path, nested_params) =
                     nest_path(&path, &ctx.parents, ResourceScope::Nested);
                 let full_path = prefix_path(&ctx.ns_path, &nested_path);
+                let full_path = if full_path.is_empty() { "/".to_string() } else { full_path };
                 // A scope PATH can carry a dynamic segment of its own
                 // (`scope path: ":bot_key"`), and it is a helper
                 // argument like any other. `nest_path` only knows the
@@ -741,12 +752,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 // Same fail-closed rule as the `Explicit` arm: a
                 // requirement outside the supported subset refuses
                 // this action's route rather than serve it unenforced.
-                let Some(seg_patterns) = compile_seg_patterns(
-                    &other_constraints,
-                    &format!("{method:?} {full_path} ({action_name})"),
-                ) else {
-                    continue;
-                };
+                let (seg_patterns, refused) = compile_seg_patterns(&other_constraints);
                 out.push(FlatRoute {
                     method: method.clone(),
                     path: full_path.clone(),
@@ -762,6 +768,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     int_params: int_params.clone(),
                     constraints: other_constraints.clone(),
                     seg_patterns: seg_patterns.clone(),
+                    refused: refused.clone(),
                 });
                 // Rails routes `update` on BOTH `PATCH` and `PUT` — the
                 // verb changed in Rails 4 and the older one was kept, so
@@ -790,6 +797,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                         int_params,
                         constraints: other_constraints,
                         seg_patterns,
+                        refused,
                     });
                 }
             }
@@ -879,6 +887,9 @@ fn defaults_for(ctx: &Ctx, params: &[String]) -> Vec<(String, String)> {
 /// segments; guard the bare-`/` and missing-slash edges (`root` inside
 /// a namespace, `get "health"` with no leading slash).
 fn prefix_path(ns: &str, path: &str) -> String {
+    // A root scope (`scope path: "/"`) contributes nothing, and a scope
+    // never ends in a slash: Rails normalizes `//new` to `/new`.
+    let ns = ns.trim_end_matches('/');
     if ns.is_empty() {
         if path.starts_with('/') || path.is_empty() {
             path.to_string()
@@ -916,6 +927,12 @@ fn qualify_controller(module_prefix: &str, controller: &ClassId) -> ClassId {
     }
 }
 
+/// `/<segment>`, or nothing for the empty segment of a resource mounted
+/// at its scope's root (`resources :x, path: "/"`).
+fn slash_segment(segment: &str) -> String {
+    if segment.is_empty() { String::new() } else { format!("/{segment}") }
+}
+
 /// Prepend a scope's `/<parent>/:parent_id` prefix to a child path.
 /// Returns the full path and the list of path-param names in
 /// declaration order (parent first).
@@ -933,14 +950,13 @@ fn nest_path(
     let mut prefix = String::new();
     let mut params: Vec<String> = Vec::new();
     for frame in outer {
-        prefix.push('/');
-        prefix.push_str(&frame.segment);
+        prefix.push_str(&slash_segment(&frame.segment));
         if frame.has_id {
             prefix.push_str(&format!("/:{}_{}", frame.singular, frame.param));
             params.push(format!("{}_{}", frame.singular, frame.param));
         }
     }
-    let (parent, parent_plural) = (innermost.singular.as_str(), innermost.segment.as_str());
+    let (parent, parent_plural) = (innermost.singular.as_str(), slash_segment(&innermost.segment));
     let prefix = &prefix;
     // Rails joins route segments with `/` unconditionally. A bare-verb
     // shortcut arrives here already slash-prefixed (`/reply`), but an
@@ -949,7 +965,7 @@ fn nest_path(
     // at `/rooms/:room_id/@:message_id`. Concatenating raw glued it onto
     // the id (`/rooms/:room_id@:message_id`) and the route never matched.
     let owned_path;
-    let path: &str = if path.starts_with('/') {
+    let path: &str = if path.is_empty() || path.starts_with('/') {
         path
     } else {
         owned_path = format!("/{path}");
@@ -965,16 +981,16 @@ fn nest_path(
         // `/comments/:id/comments/:id` (measured against Rails 8.1).
         ResourceScope::Member => {
             params.push(innermost.param.clone());
-            (format!("{prefix}/{parent_plural}/:{}{path}", innermost.param), params)
+            (format!("{prefix}{parent_plural}/:{}{path}", innermost.param), params)
         }
         // `collection do get "search" end` → `/photos/search` (no id);
         // `get "/(:name)"` → `/photos(/:name)`, never a bare `/:name`.
-        ResourceScope::Collection => (format!("{prefix}/{parent_plural}{path}"), params),
+        ResourceScope::Collection => (format!("{prefix}{parent_plural}{path}"), params),
         // Bare verb declared directly in the block, or a nested resource's
         // own actions: Rails nests under the parent's `/:<singular>_id`
         // — unless the parent is SINGULAR, which has no id to nest under.
         ResourceScope::Nested => {
-            let mut full = format!("{prefix}/{parent_plural}");
+            let mut full = format!("{prefix}{parent_plural}");
             if innermost.has_id {
                 full.push_str(&format!("/:{parent}_{}", innermost.param));
                 params.push(format!("{parent}_{}", innermost.param));

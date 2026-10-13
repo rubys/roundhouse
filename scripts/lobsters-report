@@ -176,6 +176,10 @@ def fmt_dec(n, p = 1) ; format("%.#{p}f", n.to_f) ; end
 # JIT state from a RUBY_DESCRIPTION. The headline lane inherits the ambient
 # RUBYOPT (unlike the matrix, which pins YJIT per lane), so the page must
 # say which JIT level each measurement actually ran — nil when unknown.
+# A lane timed by the Rails replay (the Rails oracle, and Rails running the
+# futamura emit) writes rails.json; the emit lanes write summary.json.
+def lane_file(r) = %w[rails futamura].include?(r['kind']) ? 'rails.json' : 'summary.json'
+
 def jit_label(desc) ; desc && (desc.include?('+YJIT') ? '+YJIT' : 'no JIT') ; end
 
 # Coefficient of variation (%) across a lane's timed iterations — the
@@ -738,7 +742,7 @@ artifact_names = if lanes_mode
   # compared against. Each carries a REPRODUCE.md with the SHAs and the
   # exact commands. Existence-filtered below, so a run without them is fine.
   %w[matrix.json env.json spinel-tree.tgz ruby-tree.tgz] +
-    mrows.map { |r| File.join(r['id'], r['kind'] == 'rails' ? 'rails.json' : 'summary.json') }
+    mrows.map { |r| File.join(r['id'], lane_file(r)) }
 else
   %w[summary.json summary.md rails.json sequence.json env.json emit.log
      matrix/matrix.json jruby/summary.json jruby/summary.md]
@@ -792,7 +796,8 @@ end
 # Colors keyed by lane id (matches the blog bench vocabulary); the
 # kind/yjit fallback covers matrix.json files that predate lane ids.
 mcolor = { 'rails' => COLOR_RAILS, 'rails-int' => '#e89c93', 'rails-jruby' => '#46707f',
-           'ruby' => COLOR_RH, 'ruby-int' => '#b9a3ea', 'jruby' => COLOR_JR }
+           'ruby' => COLOR_RH, 'ruby-int' => '#b9a3ea', 'jruby' => COLOR_JR,
+           'futamura' => '#d68a00' }
 lane_color = ->(r) do
   mcolor[r['id']] ||
     (r['kind'] == 'rails' ? (r['yjit'] ? COLOR_RAILS : '#e89c93')
@@ -890,8 +895,8 @@ if mrows && !mrows.empty?
   lane_iters = {}
   if lanes_mode
     mlive.each do |r|
-      data = sibling(File.join(run_path, r['id']), r['kind'] == 'rails' ? 'rails.json' : 'summary.json')
-      t = r['kind'] == 'rails' ? data : data && data['sequence_timing']
+      data = sibling(File.join(run_path, r['id']), lane_file(r))
+      t = lane_file(r) == 'rails.json' ? data : data && data['sequence_timing']
       im = t && t['iter_ms']
       lane_iters[r['id']] = im if im && im.size > 1
     end

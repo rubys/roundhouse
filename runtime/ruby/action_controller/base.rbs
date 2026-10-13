@@ -113,7 +113,7 @@ module ActionController
     def self.allow_forgery_protection=: (bool) -> void
     # `attr_accessor` produces getter+setter pairs for each name.
     # `params` is a String-keyed Hash whose values are recursive
-    # `Roundhouse::ParamValue` — String leaves, nested Hashes, and
+    # `Roundhouse::ParamValue` — JSON scalar leaves, nested Hashes, and
     # Arrays (Rails-shape `comment[author][name]=x`, `tags[]=a`).
     # Each target's runtime declares its own recursive realization
     # (`runtime/crystal/param_value.cr`, `runtime/typescript/

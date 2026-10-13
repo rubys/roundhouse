@@ -131,6 +131,36 @@ pub(super) fn install_before_filter(
     };
 }
 
+/// Insert a synthetic `after_action` at the front of the controller body.
+/// Used by features that install a root-controller after-filter without
+/// replacing an `Unknown` class-body item (`inertia` see-other).
+pub(super) fn push_after_filter(controller: &mut Controller, target: &str) {
+    let filter = Filter {
+        target_span: crate::span::Span::synthetic(),
+        kind: FilterKind::After,
+        target: Symbol::from(target),
+        from_concern: None,
+        only: Vec::new(),
+        except: Vec::new(),
+        only_style: Default::default(),
+        except_style: Default::default(),
+        if_cond: None,
+        unless_cond: None,
+        if_cond_expr: None,
+        unless_cond_expr: None,
+        block: None,
+        prepend: false,
+    };
+    controller.body.insert(
+        0,
+        ControllerBodyItem::Filter {
+            filter,
+            leading_comments: Vec::new(),
+            leading_blank_line: false,
+        },
+    );
+}
+
 /// `:create` / `[:create, :update]` → the names; anything else → None.
 /// Shared by IR-level macro parsers (`rate_limit`, `invisible_captcha`, …).
 pub(super) fn expr_symbol_list(v: &Expr) -> Option<Vec<Symbol>> {

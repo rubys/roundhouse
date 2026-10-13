@@ -28,7 +28,7 @@ mod emit_and_run;
 use roundhouse::App;
 use roundhouse::dialect::HttpMethod;
 use roundhouse::ingest::ingest_routes;
-use roundhouse::lower::routes::{FlatRoute, flatten_routes};
+use roundhouse::lower::routes::{FlatRoute, flatten_routes, flatten_routes_for_helpers};
 
 fn routes(source: &str) -> Vec<FlatRoute> {
     let mut app = App::default();
@@ -87,6 +87,83 @@ fn backreference_constraint_refuses_the_whole_route() {
         "a backreference is outside the supported subset; the route must be \
          ABSENT: {r:?}"
     );
+}
+
+/// lobsters' domain routes: a lookahead keeps `example.com` whole while
+/// a trailing `.json`/`.rss` stays the format.
+const LOOKAHEAD_DOMAIN: &str = r#"
+  constraints :id => /([^\/]+?)(?=\.json|\.rss|$|\/)/ do
+    get "/domains/:id" => "widgets#show", :as => "domain"
+  end
+"#;
+
+fn ingested(source: &str) -> App {
+    let mut app = App::default();
+    app.routes = ingest_routes(
+        format!("Rails.application.routes.draw do\n{source}\nend\n").as_bytes(),
+        "config/routes.rb",
+    )
+    .expect("ingest routes");
+    app
+}
+
+/// Refusing to DISPATCH a route is not refusing to LINK to it: building
+/// `/domains/example.com` needs no matcher. Dropping the helper with the
+/// route broke every lobsters page that merely links to a domain.
+#[test]
+fn a_refused_route_keeps_its_url_helper() {
+    let app = ingested(LOOKAHEAD_DOMAIN);
+    assert!(find(&flatten_routes(&app), HttpMethod::Get, "/domains/:id").is_none());
+    let helpers = flatten_routes_for_helpers(&app);
+    let domain = find(&helpers, HttpMethod::Get, "/domains/:id").expect("helper route kept");
+    assert!(domain.named && domain.as_name == "domain", "{domain:?}");
+    assert_eq!(domain.refused.as_ref().map(|(p, _)| p.as_str()), Some("id"));
+}
+
+/// The refusal is a located error in `check`, not a survey-only note that
+/// a plain run never prints.
+#[test]
+fn a_refused_route_is_reported_where_its_constraint_is_written() {
+    let app = ingested(LOOKAHEAD_DOMAIN);
+    let refusals: Vec<_> = app
+        .routes
+        .diagnostics
+        .iter()
+        .filter(|d| d.message.contains("route constraint not supported"))
+        .collect();
+    assert_eq!(refusals.len(), 1, "{:?}", app.routes.diagnostics);
+    assert!(refusals[0].message.contains("GET /domains/:id is not dispatched"), "{}", refusals[0].message);
+    assert!(refusals[0].span.end > refusals[0].span.start, "located at the regex: {:?}", refusals[0].span);
+}
+
+/// End to end on the Ruby target: the helper builds the link, the refused
+/// route is not served, and the only errors are the refusal itself.
+#[test]
+fn a_refused_route_links_but_does_not_dispatch() {
+    let run = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("app/controllers/widgets_controller.rb", "class WidgetsController < ApplicationController\n  def show\n    render plain: \"show:#{params[:id]}\"\n  end\n\n  def link\n    render plain: domain_path(\"example.com\")\n  end\nend\n")
+        .write("config/routes.rb", &format!("Rails.application.routes.draw do\n{LOOKAHEAD_DOMAIN}\n  get \"/link\" => \"widgets#link\"\nend\n"))
+        .run_ruby(
+            r#"
+require "stringio"
+def req(path)
+  result = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+  result[0].to_s + "|" + result[2].join
+end
+got = req("/link")
+raise "helper: #{got}" unless got == "200|/domains/example.com"
+got = req("/domains/example.com")
+raise "refused route must not be served: #{got}" unless got.start_with?("404")
+"#,
+        );
+    assert!(
+        !run.errors.is_empty() && run.errors.iter().all(|e| e.contains("route constraint not supported")),
+        "{:?}",
+        run.errors
+    );
+    assert!(run.success, "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
 }
 
 #[test]

@@ -32,7 +32,7 @@ fn lower_and_emit(source: &str) -> (String, Vec<String>) {
 }
 
 #[test]
-fn self_receiver_grounds_to_the_prefix_strip() {
+fn self_receiver_grounds_to_the_attribute_pick() {
     let (out, diags) = lower_and_emit(
         r#"
 class Draft
@@ -43,7 +43,7 @@ end
 "#,
     );
     assert!(
-        out.contains(r#"ActiveSupport.errors_for(errors, "Url ")"#),
+        out.contains(r#"ActiveSupport.errors_for(errors, error_attributes, "url", "Url ")"#),
         "expected the grounded projection:\n{out}"
     );
     assert!(diags.is_empty(), "unexpected residue: {diags:?}");
@@ -89,9 +89,9 @@ end
 }
 
 #[test]
-fn base_declines_with_residue() {
-    // `:base` messages are baked with NO humanized prefix, so there is
-    // no text to match; the site stays dynamic and is ledgered.
+fn base_picks_by_attribute_with_no_prefix() {
+    // `:base` messages are baked with no humanized prefix; the
+    // attribute alone picks them.
     let (out, diags) = lower_and_emit(
         r#"
 class Draft
@@ -102,11 +102,10 @@ end
 "#,
     );
     assert!(
-        out.contains("errors[:base]"),
-        "`:base` should be left alone:\n{out}"
+        out.contains(r#"ActiveSupport.errors_for(errors, error_attributes, "base", "")"#),
+        "expected the `:base` projection:\n{out}"
     );
-    assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
-    assert!(diags[0].contains("errors[:field]"), "{diags:?}");
+    assert!(diags.is_empty(), "unexpected residue: {diags:?}");
 }
 
 #[test]
@@ -156,7 +155,7 @@ end
 "#,
     );
     assert!(
-        out.contains(r#"ActiveSupport.errors_for(errors, "Url ").any?"#),
+        out.contains(r#"ActiveSupport.errors_for(errors, error_attributes, "url", "Url ").any?"#),
         "expected `key?` as a non-empty field projection:\n{out}"
     );
     assert!(!out.contains("messages"), "no `messages` should survive:\n{out}");
@@ -175,7 +174,7 @@ end
 "#,
     );
     assert!(
-        out.contains(r#"ActiveSupport.errors_for(record.errors, "Url ")"#),
+        out.contains(r#"ActiveSupport.errors_for(record.errors, record.error_attributes, "url", "Url ")"#),
         "expected the foreign receiver's projection:\n{out}"
     );
     assert!(diags.is_empty(), "unexpected residue: {diags:?}");
@@ -217,4 +216,20 @@ end
     assert!(out.contains("errors.messages"), "left alone:\n{out}");
     assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
     assert!(diags[0].contains("errors.messages"), "{diags:?}");
+}
+
+#[test]
+fn a_record_that_is_not_a_plain_read_declines_with_residue() {
+    // Picking by attribute reads `errors` and `error_attributes`; a receiver call would run twice.
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  def problems
+    Draft.latest.errors[:url]
+  end
+end
+"#,
+    );
+    assert!(out.contains("Draft.latest.errors[:url]"), "{out}");
+    assert_eq!(diags.len(), 1, "{diags:?}");
 }

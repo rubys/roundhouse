@@ -514,7 +514,7 @@ pub fn push_to_gid_param(
     });
 }
 
-fn gid_model_name(model: &Model) -> Expr {
+pub(crate) fn gid_model_name(model: &Model) -> Expr {
     let str_lit = |value: &str| {
         let mut e = Expr::new(
             crate::span::Span::synthetic(),

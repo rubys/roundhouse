@@ -102,6 +102,29 @@ if (!rodaApp?.content?.includes('r.on "articles"')) fail("roda conversion missin
 const rodaIndex = roda.files?.find((f) => f.path === "views/articles/index.erb");
 if (!rodaIndex?.content?.includes("part(")) fail("roda conversion missing translated views (app.sources plumbing)");
 console.log(`roda: ${roda.files.length} files, app.rb + translated views present`);
+
+// futamura: the app's own tree, still on Rails. The blog has no static
+// query chain, so its output is the identity; an edit that adds one gets
+// spliced (Futamura.records) and defined in the generated initializer.
+console.log("\n=== futamura specialization ===");
+await page.evaluate(() => window.__playground.setTarget("futamura"));
+const ctrlPath = "app/controllers/articles_controller.rb";
+const ctrlSrc = await page.evaluate((p) => window.__playground.source(p), ctrlPath);
+const futId = await page.evaluate(() => window.__playground.output());
+if (futId.error) fail(`futamura errored: ${futId.error}`);
+if (futId.files?.find((f) => f.path === ctrlPath)?.content !== ctrlSrc)
+  fail("futamura changed the blog's controller with no static chain to specialize");
+const ctrlEdit = ctrlSrc.replace(/^  def show$/m, "  def show\n    @latest = Article.where(title: params[:title]).first");
+if (ctrlEdit === ctrlSrc) fail("could not find `def show` in the blog controller");
+await page.evaluate(([p, s]) => window.__playground.editFile(p, s), [ctrlPath, ctrlEdit]);
+const fut = await page.evaluate(() => window.__playground.output());
+if (fut.error) fail(`futamura errored after the edit: ${fut.error}`);
+if (!fut.files?.find((f) => f.path === ctrlPath)?.content?.includes("Futamura.records("))
+  fail("futamura did not splice the added where(...).first chain");
+if (!fut.files?.find((f) => f.path === "config/initializers/futamura.rb")?.content?.includes("Futamura.define("))
+  fail("futamura emitted no initializer define for the spliced site");
+console.log(`futamura: identity on the blog, ${fut.files.length} files with one site spliced`);
+await page.evaluate(([p, s]) => window.__playground.editFile(p, s), [ctrlPath, ctrlSrc]);
 await page.evaluate(() => window.__playground.setTarget("ruby"));
 
 // Switch to typescript for the TS-shaped assertions that follow.

@@ -66,11 +66,14 @@ module ActionDispatch
     def authorization: () -> String?
     def request_parameters: () -> Hash[String, Roundhouse::ParamValue]
     def request_parameters=: (Hash[String, Roundhouse::ParamValue]) -> Hash[String, Roundhouse::ParamValue]
+    def query_parameters: () -> Hash[String, Roundhouse::ParamValue]
+    def query_parameters=: (Hash[String, Roundhouse::ParamValue]) -> Hash[String, Roundhouse::ParamValue]
     def initialize: () -> void
     def get?: () -> bool
     def post?: () -> bool
     def head?: () -> bool
     def xhr?: () -> bool
+    def inertia?: () -> bool
     def fullpath: () -> String
     def original_fullpath: () -> String
     def ssl?: () -> bool

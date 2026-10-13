@@ -101,3 +101,57 @@ fn an_unreferenced_initializer_module_stays_out() {
         app.library_classes.iter().map(|lc| lc.name.0.as_str()).collect::<Vec<_>>()
     );
 }
+
+/// A `module X` / `class X` declaration names X without reading it: an
+/// app model written `module Shops; class Item …` is not the app naming
+/// an initializer's `module Shops`, so that module stays out (the
+/// autoloaded namespace is what the model reopens).
+#[test]
+fn a_namespace_declaration_around_an_app_model_is_not_a_read() {
+    let files: Vec<(&str, &str)> = vec![
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/shops/item.rb",
+            "module Shops\n  class Item < ApplicationRecord\n    self.table_name = \"rooms\"\n  end\nend\n",
+        ),
+        (
+            "config/initializers/shops.rb",
+            "module Shops\n  def self.ids_tag\n    :tag\n  end\nend\n",
+        ),
+    ];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    assert!(
+        !app.library_classes.iter().any(|lc| lc.name.0.as_str() == "Shops"),
+        "classes = {:?}",
+        app.library_classes.iter().map(|lc| lc.name.0.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[path = "support/emit_and_run.rs"]
+mod emit_and_run;
+
+/// The same namespace once the app does read it (`Shops.ids_tag` from a
+/// model nested in `module Shops`): the initializer's module is kept and
+/// its method resolves at run time, so the declaration alone not counting
+/// as a read drops nothing a caller needs.
+#[test]
+fn an_initializer_module_the_app_reads_inside_its_namespace_still_resolves() {
+    let run = emit_and_run::empty_app()
+        .write("config/environments/development.rb", "Rails.application.configure do\n  config.eager_load = false\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("db/schema.rb", SCHEMA)
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write(
+            "app/models/shops/item.rb",
+            "module Shops\n  class Item < ApplicationRecord\n    self.table_name = \"rooms\"\n\n    def tag\n      Shops.ids_tag\n    end\n  end\nend\n",
+        )
+        .write("config/initializers/shops.rb", "module Shops\n  def self.ids_tag\n    :tag\n  end\nend\n")
+        .run_ruby("p Shops::Item.new.tag\n");
+    run.assert_passes();
+    assert_eq!(run.stdout, ":tag\n");
+}

@@ -494,7 +494,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                     }
                     InterpPart::Expr { expr } => {
                         fmt.push_str("%v");
-                        args.push(emit_expr(ctx, expr));
+                        args.push(emit_expr_as_value(ctx, expr));
                     }
                 }
             }
@@ -1289,6 +1289,16 @@ pub(super) fn emit_send(
             return format!("len({}) == 0", emit_expr(ctx, r));
         }
     }
+    // An element that is never nil or false makes `any?` / `none?` a question of size
+    if matches!(method, "any?" | "none?") && args.is_empty() {
+        let never_falsy = |r: &&Expr| {
+            matches!(r.ty.as_ref(), Some(Ty::Array { elem }) if matches!(**elem, Ty::Str | Ty::Int | Ty::Float | Ty::Sym))
+        };
+        if let Some(r) = recv.filter(never_falsy).filter(|r| !is_own_method(ctx, r, method)) {
+            let op = if method == "any?" { ">" } else { "==" };
+            return format!("len({}) {op} 0", emit_expr(ctx, r));
+        }
+    }
 
     // Ruby `arr << x` (Array push) parses as a Send `<<` with one
     // arg. Go: `arr = append(arr, x)`. Statement, not expression —
@@ -1312,6 +1322,36 @@ pub(super) fn emit_send(
                 return format!("{recv_s} = {recv_s} + {}", args_s[0]);
             }
             return format!("{recv_s} = append({recv_s}, {})", args_s[0]);
+        }
+    }
+
+    // Ruby `arr.pop` — remove and return the last element. HeaderStore#delete
+    // uses it as a statement; an assignment would not compile in value
+    // position, and `[:len-1]` panics on empty vs Ruby's nil. The IIFE
+    // mutates the slice (Go closures capture the variable) and returns the
+    // element or the type's zero.
+    if method == "pop" && args.is_empty() {
+        if let Some(r) = recv {
+            // Only a variable or ivar can be resliced. `get_items().pop`
+            // is not an addressable Go location.
+            if matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+                let recv_s = emit_expr(ctx, r);
+                let elem_ty = match r.ty.as_ref().and_then(union_non_nil_core) {
+                    Some(Ty::Array { elem }) => super::ty::go_ty_stub(Some(elem)),
+                    _ => "interface{}".to_string(),
+                };
+                let zero = super::ty::go_zero_value(&elem_ty);
+                return format!(
+                    "func() {elem_ty} {{\n\
+                     \tif len({recv_s}) == 0 {{\n\
+                     \t\treturn {zero}\n\
+                     \t}}\n\
+                     \t_last := {recv_s}[len({recv_s})-1]\n\
+                     \t{recv_s} = {recv_s}[:len({recv_s})-1]\n\
+                     \treturn _last\n\
+                     }}()"
+                );
+            }
         }
     }
 
@@ -2083,6 +2123,13 @@ pub(super) fn emit_send(
                 // — the hand-written `Rh_parse_db_time`
                 // (runtime/go/v2/rh_datetime.go), not a transpiled
                 // `ActiveSupport_*` function (no such unit exists).
+                // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+                if class_name == "ActiveSupport" && method == "errors_for" && args_s.len() == 4 {
+                    return format!(
+                        "func(errors []string, attributes []string, attribute string, prefix string) []string {{ out := []string{{}}; for i, m := range errors {{ if i < len(attributes) && attributes[i] == attribute {{ out = append(out, strings.TrimPrefix(m, prefix)) }} }}; return out }}({}, {}, {}, {})",
+                        args_s[0], args_s[1], args_s[2], args_s[3]
+                    );
+                }
                 if class_name == "ActiveSupport" && method == "parse_db_time" {
                     return format!("Rh_parse_db_time({})", args_s.join(", "));
                 }

@@ -181,6 +181,8 @@ fn article_lowers_with_schema_methods() {
         "delete_all",
         "_columns_sql",
         "_hydrate_all",
+        // #818: class-side name table for `reflect_on_association`.
+        "_association_names",
     ];
     for m in &lc.methods {
         let n = m.name.as_str();
@@ -1457,7 +1459,9 @@ fn build_class_info_extras(lcs: &[LibraryClass]) -> Vec<(ClassId, roundhouse::an
 
 #[test]
 fn lowered_real_blog_typing_residual() {
-    let app = ingest_app(fixture_path()).expect("ingest real-blog");
+    let mut app = ingest_app(fixture_path()).expect("ingest real-blog");
+    // The form partial's `errors[:field]` reaches the view lowering already grounded, as the pipeline grounds it
+    roundhouse::lower::apply_errors_index_lowering(&mut app);
 
     // First pass: build view ClassInfo entries from per-view lowering
     // (cheap — only need the method signatures for the registry, not

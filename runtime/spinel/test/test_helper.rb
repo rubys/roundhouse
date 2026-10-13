@@ -1955,6 +1955,9 @@ module RequestDispatch
       end
       controller.request.request_parameters = body_params
     end
+    # The query string's params alone (`request.query_parameters`), by the
+    # parser the merge above already used.
+    CgiIo.parse_form_into(request_query, controller.request.query_parameters) unless request_query.empty?
     # Raw query for path-option redirects that keep it — same slot every
     # target's dispatcher seeds (`query_string` on the controller).
     controller.query_string = request_query

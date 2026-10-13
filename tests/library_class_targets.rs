@@ -76,6 +76,7 @@ fn emits_plain_library_classes(target: BuildTarget) -> bool {
             | BuildTarget::Spinel
             | BuildTarget::Typescript
             | BuildTarget::TypescriptWorker
+            | BuildTarget::Futamura
         // Roda omitted — same as production: spike does not emit POROs.
     )
 }

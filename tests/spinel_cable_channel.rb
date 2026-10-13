@@ -234,6 +234,77 @@ bare = BareConnection.new(FakeJar.new({}))
 bare.connect
 check("a connection with no identifiers is anonymous", bare.current_user, nil)
 
+# --- a `message` frame: the client's `perform` (#71 item 6) -----------
+#
+# Through `Cable.handle_message`, as the socket's recv loop calls it. The
+# arms of `ActionCable::Channel.perform` are generated per app
+# (`project::apply_cable_actions`) and run natively by
+# `spinel_toolchain::a_cable_action_runs_with_rails_rules_natively`;
+# here one arm is written by hand, the shape the generator writes, so
+# what is under test is the routing: the subscription this socket holds
+# under that identifier, `data` with its JSON types kept, and every way
+# a frame can be wrong dropped without escaping.
+class ActionProbeChannel < ApplicationCable::Channel
+  SEEN = []
+  def input(data) = SEEN << [:input, data["d"]]
+  def speech(data) = SEEN << [:speech, data["on"]]
+  def boom(_data) = raise("boom")
+end
+
+module ActionCable
+  module Channel
+    def self.perform(channel, action, data)
+      if channel.is_a?(ActionProbeChannel)
+        if action == "input"
+          channel.input(data)
+          return true
+        end
+        if action == "speech"
+          channel.speech(data)
+          return true
+        end
+        if action == "boom"
+          channel.boom(data)
+          return true
+        end
+        return false
+      end
+      false
+    end
+  end
+end
+
+# The socket's holder: what `Cable.subscribe` remembered.
+class FakeHolder
+  def initialize(channels) = @channels = channels
+  def channel_for(identifier) = @channels.find { |c| c.identifier == identifier }
+end
+
+PROBE_ID = '{"channel":"ActionProbeChannel"}'
+holder = FakeHolder.new([ActionProbeChannel.new(nil, PROBE_ID, {})])
+frame = ->(identifier, data) { JSON.generate("command" => "message", "identifier" => identifier, "data" => data) }
+
+Cable.handle_message(nil, nil, frame.(PROBE_ID, '{"action":"input","d":"ls\r"}'), holder)
+Cable.handle_message(nil, nil, frame.(PROBE_ID, '{"action":"speech","on":false}'), holder)
+check("a message frame runs the action on that subscription, JSON types kept",
+      ActionProbeChannel::SEEN, [[:input, "ls\r"], [:speech, false]])
+
+ActionProbeChannel::SEEN.clear
+Cable.handle_message(nil, nil, frame.('{"channel":"Nobody"}', '{"action":"input","d":"x"}'), holder)
+Cable.handle_message(nil, nil, frame.(PROBE_ID, '["input"]'), holder)
+Cable.handle_message(nil, nil, frame.(PROBE_ID, "not json"), holder)
+Cable.handle_message(nil, nil, frame.(PROBE_ID, '{"action":"nope"}'), holder)
+check("no subscription, data that is not an object, or an unknown action runs nothing",
+      ActionProbeChannel::SEEN, [])
+
+survived = begin
+  Cable.handle_message(nil, nil, frame.(PROBE_ID, '{"action":"boom"}'), holder)
+  true
+rescue StandardError
+  false
+end
+check("an action that raises is contained", survived, true)
+
 puts
 if FAILURES.empty?
   puts "ALL OK"

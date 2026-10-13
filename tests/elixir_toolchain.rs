@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
-use roundhouse::analyze::Analyzer;
 use roundhouse::emit::elixir;
 use roundhouse::ingest::ingest_app;
 
@@ -43,7 +42,7 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    roundhouse::session::analyze_and_lower(&mut app);
     let files = elixir::emit(&app);
 
     for file in &files {

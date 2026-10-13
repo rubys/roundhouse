@@ -334,19 +334,26 @@ class QcEntry
   end
 
   def cell_kind(row, i)
-    @kinds[row * @ncols + i]
+    v = @kinds[row * @ncols + i]
+    # Spinel tip (ea683750+): Array[Integer]#[] is Integer? (sp_oint).
+    # Coalesce so qc_int / column_int stay plain Integer and
+    # `_adapter_count` does not unify to sp_oint against sp_poly_count_val.
+    v.nil? ? 0 : v
   end
 
   def cell_int(row, i)
-    @ints[row * @ncols + i]
+    v = @ints[row * @ncols + i]
+    v.nil? ? 0 : v
   end
 
   def cell_float(row, i)
-    @floats[row * @ncols + i]
+    v = @floats[row * @ncols + i]
+    v.nil? ? 0.0 : v
   end
 
   def cell_text(row, i)
-    @texts[row * @ncols + i]
+    v = @texts[row * @ncols + i]
+    v.nil? ? "" : v
   end
 end
 
@@ -1359,7 +1366,15 @@ module Db
     # outside any lease pinned (`pin_transaction`), keeps the thread's
     # connection. A second lease would rebind it and, on release, unbind
     # (and roll back) the outer holder's.
-    return yield if !Thread.current[:db_conn].nil?
+    #
+    # Do not write `return yield if …`: Spinel tip (ea683750+) inlines that
+    # form at each call site and, when the block raises, emits
+    # `sp_oint_arg(({ raise…; 0; }))` — an int where sp_oint is required.
+    # Binding the yield result first keeps the early-return path well-typed.
+    unless Thread.current[:db_conn].nil?
+      result = yield
+      return result
+    end
     pool = pool_for_thread
     idx = pool.lease
     conn = pool.conn(idx)
@@ -1825,6 +1840,14 @@ module Db
   # `finalize`. The -1 length argument lets sqlite measure the SQL
   # itself (NUL-terminated).
   def self.prepare(sql)
+    return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. Post-lift SQL may still
+  # contain \x01 inside string literals (unmarked bind_literal values);
+  # those bytes are data and must not be stripped or re-dispatched.
+  def self.prepare_plain(sql)
     conn = current_conn
     handle = conn.qc_lookup(sql)
     if handle != 0
@@ -1839,6 +1862,39 @@ module Db
     begin_snapshot(conn)
     ptr = conn.prepare_cached(sql)
     conn.qc_record(sql, ptr)
+    ptr
+  end
+
+  # A Relation read with its hash-condition values marked for binding;
+  # see db_cruby.rb's `prepare_marked`. The result cache records and
+  # replays under `key` (the values written in), so a replay that
+  # promotes re-runs that inline SQL and needs no binds.
+  def self.prepare_marked(marked)
+    binds = ActiveRecord::Relation.lift_binds(marked)
+    sql = binds[0].to_s
+    key = binds[1].to_s
+    return prepare_plain(key) if binds.length <= 2
+    conn = current_conn
+    handle = conn.qc_lookup(key)
+    if handle != 0
+      if @sql_trace
+        $stderr.puts "  CACHE " + key
+      end
+      return handle
+    end
+    record_query(sql)
+    begin_snapshot(conn)
+    ptr = conn.prepare_cached(sql)
+    i = 2
+    while i < binds.length
+      if binds[i] == "i"
+        bind_int(ptr, i / 2, binds[i + 1].to_i)
+      else
+        bind_text(ptr, i / 2, binds[i + 1])
+      end
+      i += 2
+    end
+    conn.qc_record(key, ptr)
     ptr
   end
 
@@ -2202,6 +2258,14 @@ module Db
     return "NULL" if ids.empty?
 
     ids.map { |i| i.to_i.to_s }.join(", ")
+  end
+
+  # The same `IN (...)` batch over string keys (a uuid primary key): each
+  # key quoted as a literal, never `to_i`'d to its leading digits.
+  def self.escape_string_list(ids)
+    return "NULL" if ids.empty?
+
+    ids.map { |i| escape_string(i.to_s) }.join(", ")
   end
 
   # SQLite stores booleans as 0/1 integers (no native bool type) —
