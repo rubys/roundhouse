@@ -264,6 +264,12 @@ fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
         "HTTP checks must always run"
     );
     assert!(
+        script.contains("seq 1 90")
+            && script.contains("did not become ready")
+            && script.contains("http_code"),
+        "readiness must wait longer than 30s and retry status curls (curl exit 56 flake)"
+    );
+    assert!(
         !script.contains("sccache") && !script.contains("CCACHE"),
         "do not hide the pack compile behind a compiler cache"
     );

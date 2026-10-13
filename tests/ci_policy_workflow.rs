@@ -1129,6 +1129,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
         })
         .unwrap();
     assert!(verify < pages);
+    assert_eq!(
+        steps[pages]["with"]["name"].as_str(),
+        Some("github-pages-${{ github.run_attempt }}"),
+        "per-attempt Pages artifact avoids duplicate github-pages on rerun --failed"
+    );
     assert!(
         jobs["ci-summary"]["needs"]
             .as_sequence()
@@ -1208,6 +1213,11 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
     assert_eq!(
         deploy["steps"][0]["uses"].as_str(),
         Some("actions/deploy-pages@v5")
+    );
+    assert_eq!(
+        deploy["steps"][0]["with"]["artifact_name"].as_str(),
+        Some("github-pages-${{ github.run_attempt }}"),
+        "deploy must consume the per-attempt assemble-site Pages artifact"
     );
 }
 

@@ -930,6 +930,10 @@ class Routing(unittest.TestCase):
         self.assertTrue(plan["extras_advisory"])
         self.assertTrue(plan["spinel"])
         self.assertEqual(plan["extra_compare"], [])
+        npm = ci.select(["scripts/ci-npm"])
+        self.assertEqual(npm["smoke"], plan["smoke"])
+        self.assertEqual(npm["smoke_extra"], plan["smoke_extra"])
+        self.assertIn("campfire-smoke-docker", npm["jobs"])
         self.assertEqual(
             ci.select(["tools/compare/src/main.rs"])["extra_compare"],
             ["crystal", "kotlin", "swift", "csharp", "go", "elixir", "python"],

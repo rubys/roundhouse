@@ -713,7 +713,7 @@ jobs:
             tests/browser_smoke/package-lock.json
             src/emit/typescript/package.rs
       - name: Install harness deps
-        run: npm ci
+        run: $GITHUB_WORKSPACE/scripts/ci-npm ci
         working-directory: tests/browser_smoke
       - name: Install Playwright Chromium (+ system deps)
         run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
@@ -853,7 +853,7 @@ jobs:
           cp wasm/ide/app-src.json  wasm/lib/app-mastodon.json
           printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"roda","label":"Roda + Sequel blog","src":"app-roda.json","open":"app.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"campfire","label":"Campfire","src":"app-campfire.json","open":"app/models/message.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > wasm/lib/apps.json
       - name: Install harness deps (Playwright)
-        run: npm ci
+        run: $GITHUB_WORKSPACE/scripts/ci-npm ci
         working-directory: tests/browser_smoke
       - name: Install Playwright Chromium (+ system deps)
         run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
@@ -924,7 +924,10 @@ jobs:
     outputs: &advisory-outputs
       execution: ${{ steps.result.outputs.status }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 30m: Full validation 38397424326 finished the suite in ~20m of a 25m
+    # budget. Keep the real checks; leave a little headroom for cold cache /
+    # slow Postgres health without papering over a hung suite.
+    timeout-minutes: 30
 
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     # spinel_pg_db runs the PostgreSQL Db shim against this server.
@@ -2803,7 +2806,7 @@ jobs:
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
-          npm install --no-audit --no-fund
+          "$GITHUB_WORKSPACE/scripts/ci-npm" install --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: Resolve and find successful execution for identical Rust archive inputs
         id: reuse
@@ -2919,7 +2922,7 @@ jobs:
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
-          npm install --no-audit --no-fund
+          "$GITHUB_WORKSPACE/scripts/ci-npm" install --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: scripts/smoke spinel
         id: smoke
@@ -3109,15 +3112,43 @@ jobs:
           docker buildx use campfire-docker-cache
           docker buildx build --load -t campfire "${cache_args[@]}" .
           docker run -d --name campfire -p 3000:3000 campfire
-          for i in $(seq 1 30); do
-            curl -sf -o /dev/null localhost:3000/first_run && break
+          # Spinel Campfire often needs >30s after --load before /first_run
+          # answers (Full validation 38397424326: curl exit 56 right after the
+          # old 30s loop). Wait longer, bound each probe, and dump logs before
+          # exiting so a slow boot is not a silent network blip.
+          ready=0
+          for i in $(seq 1 90); do
+            if curl -sf -o /dev/null --max-time 2 localhost:3000/first_run; then
+              ready=1
+              break
+            fi
             sleep 1
           done
-          root=$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/)
-          first=$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/first_run)
+          if [ "$ready" != 1 ]; then
+            echo "::error::campfire container did not become ready within 90s"
+            docker logs campfire || true
+            docker rm -f campfire >/dev/null || true
+            exit 1
+          fi
+          http_code() {
+            local path="$1" code="" attempt
+            for attempt in 1 2 3 4 5; do
+              if code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "localhost:3000$path"); then
+                printf '%s' "$code"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "::error::curl failed for $path after retries"
+            docker logs campfire || true
+            docker rm -f campfire >/dev/null || true
+            exit 1
+          }
+          root=$(http_code /)
+          first=$(http_code /first_run)
           # the sign-in page fetches this; it is a File.binread of a
           # source path the archive has to carry (it once did not)
-          logo=$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/account/logo)
+          logo=$(http_code /account/logo)
           echo "GET / -> $root; GET /first_run -> $first; GET /account/logo -> $logo"
           docker logs campfire
           docker rm -f campfire >/dev/null
@@ -3206,7 +3237,7 @@ jobs:
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e/campfire
-          npm ci --no-audit --no-fund
+          "$GITHUB_WORKSPACE/scripts/ci-npm" ci --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: scripts/smoke campfire
         id: smoke
@@ -3307,7 +3338,7 @@ jobs:
         run: |
           mkdir -p build/assets/controllers
           # Tailwind CSS.
-          (cd e2e && npm install --no-audit --no-fund)
+          (cd e2e && "$GITHUB_WORKSPACE/scripts/ci-npm" install --no-audit --no-fund)
           printf '@import "tailwindcss";\n@source "%s/fixtures/real-blog/app";\n' "$PWD" \
             > e2e/.tailwind-input.css
           (cd e2e && npx @tailwindcss/cli --input .tailwind-input.css \
@@ -3362,7 +3393,7 @@ jobs:
           DEMO="$(mktemp -d)"
           cargo run --release --quiet --bin emit_preview -- \
             --target typescript --profile worker --out "$DEMO" fixtures/real-blog
-          (cd "$DEMO" && npm install --no-audit --no-fund --silent && npm run build)
+          (cd "$DEMO" && "$GITHUB_WORKSPACE/scripts/ci-npm" install --no-audit --no-fund --silent && npm run build)
           mkdir -p _site/blog
           cp -R "$DEMO"/dist/. _site/blog/
           echo "blog demo files:"; find _site/blog -maxdepth 2 -type f | sort
@@ -3866,9 +3897,15 @@ jobs:
         # Verify the copied download bytes against their producer/test report.
         # Failed validations may publish as repros; mismatched bytes may not.
         run: python3 scripts/ci-archive-evidence.py verify --root _site --report _site/ci/archive-results.json
+      # Per-attempt name: `gh run rerun --failed` re-runs assemble when a
+      # dependency (e.g. smoke) failed, and a second default `github-pages`
+      # artifact makes deploy-pages fail with "Multiple artifacts named
+      # github-pages" (Full validation 38397424326 attempt 2). Pair with
+      # full-ci.yml deploy's artifact_name.
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
+          name: github-pages-${{ github.run_attempt }}
           path: _site
       - name: Report successful assembly
         id: ready

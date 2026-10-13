@@ -84,6 +84,12 @@ jobs:
       # mid-cycle. High merge velocity used to starve github-pages whenever
       # the tip-equality check raced a later commit; the site describes the
       # validated snapshot that assembled it, not whatever HEAD is now.
+      #
+      # artifact_name matches assemble-site's per-attempt upload so a
+      # `gh run rerun --failed` that re-assembles cannot leave two default
+      # `github-pages` artifacts for deploy-pages to reject.
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}

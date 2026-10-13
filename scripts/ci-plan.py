@@ -430,7 +430,11 @@ def archive_and_campfire_jobs(path, interpreter_only):
     )
     shared_smoke = (
         path.startswith("e2e/") and not path.startswith("e2e/campfire/")
-    ) or path in {"scripts/smoke", "scripts/ci-playwright-install"}
+    ) or path in {
+        "scripts/smoke",
+        "scripts/ci-playwright-install",
+        "scripts/ci-npm",
+    }
     if campfire_archive or shared_smoke:
         jobs.update(
             (
@@ -549,6 +553,7 @@ def select(
         ) or path in {
             "scripts/smoke",
             "scripts/ci-playwright-install",
+            "scripts/ci-npm",
             "scripts/create-blog",
             "scripts/create-store",
             "bin/rh",
