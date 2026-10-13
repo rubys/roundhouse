@@ -40,6 +40,6 @@ curl -s localhost:9000/articles | head
 Build (Linux — the CI/bench platform; de-risks CSQLite + Foundation):
 
 ```sh
-docker run --rm -v "$PWD":/work -w /work swift:6.1 \
+docker run --rm -v "$PWD":/work -w /work swift:6.2 \
   bash -c 'apt-get update -q && apt-get install -y -q libsqlite3-dev && swift build'
 ```

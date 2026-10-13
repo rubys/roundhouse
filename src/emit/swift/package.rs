@@ -23,6 +23,8 @@ let package = Package(
         // reused showcase SPM tree resolve 2.26.x and fail
         // `swift build -c release` with "no such module 'ServiceContextModule'"
         // under /tmp/rh-swift-pass2 while CI's fresh cache stayed green.
+        // Hummingbird ≥2.27 declares tools-version 6.2 — hosts need Swift 6.2+
+        // (CI installs 6.2 for compare-extra / smoke-extra).
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.28.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird-websocket.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),

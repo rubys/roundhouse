@@ -2254,7 +2254,8 @@ jobs:
         if: matrix.target == 'swift'
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: '6.1'
+          # 6.2: Hummingbird ≥2.27 declares tools-version 6.2 (emit floor 2.28.0).
+          swift-version: '6.2'
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
         timeout-minutes: 8
@@ -2270,9 +2271,9 @@ jobs:
           path: |
             ~/.cache/org.swift.swiftpm
             ~/.swiftpm
-          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.1-${{ hashFiles('src/emit/swift/package.rs') }}
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.2-${{ hashFiles('src/emit/swift/package.rs') }}
           restore-keys: |
-            swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.1-
+            swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.2-
       - name: Install .NET (C#)
         if: matrix.target == 'csharp'
         uses: actions/setup-dotnet@v6
@@ -2708,7 +2709,8 @@ jobs:
         if: matrix.target == 'swift'
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: '6.1'
+          # 6.2: Hummingbird ≥2.27 declares tools-version 6.2 (emit floor 2.28.0).
+          swift-version: '6.2'
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
         timeout-minutes: 8

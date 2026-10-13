@@ -10,7 +10,7 @@ let package = Package(
         // Hummingbird 2.x is the locked HTTP server (plan decision 1).
         // ≥2.28.0 avoids the ServiceContextModule import present in 2.26–2.27
         // (showcase reused SPM trees failed without it; keep in sync with
-        // src/emit/swift/package.rs).
+        // src/emit/swift/package.rs). Requires Swift 6.2+ (HB tools-version).
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.28.0"),
         // Direct import of NIOPosix (ThreadSpecificVariable, NIOThreadPool);
         // already in Hummingbird's tree, declared here for the direct import.
