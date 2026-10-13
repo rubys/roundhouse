@@ -28,6 +28,10 @@ end
 "#;
 
 fn emitted(room: &str) -> String {
+    emitted_with(room, &[])
+}
+
+fn emitted_with(room: &str, extra: &[(String, String)]) -> String {
     let tree: HashMap<PathBuf, Vec<u8>> = vec![
         ("db/schema.rb", SCHEMA),
         ("app/models/room.rb", room),
@@ -46,6 +50,7 @@ fn emitted(room: &str) -> String {
     ]
     .into_iter()
     .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+    .chain(extra.iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())))
     .collect();
     let mut app = ingest_app_from_tree(tree).expect("ingest");
     let _ = roundhouse::session::analyze_and_lower(&mut app);
@@ -88,4 +93,26 @@ fn a_non_sti_type_test_is_left_alone() {
         src.contains("is_a?(String)"),
         "`other.is_a?(String)` is not an STI test and stays exactly as written:\n{src}"
     );
+}
+
+/// The names a row can carry for `is_a?(Chain::L1)` are the subclass and
+/// every STI descendant, however deep the chain. An STI subclass is one
+/// whose parent chain reaches the model within nine hops, so `L9` is the
+/// deepest and `L10` is not an STI subclass at all.
+#[test]
+fn an_sti_test_names_every_descendant_in_a_deep_chain() {
+    let extra: Vec<(String, String)> = (1..=11)
+        .map(|i| {
+            let parent = if i == 1 { "::Room".to_string() } else { format!("Chain::L{}", i - 1) };
+            (
+                format!("app/models/chain/l{i}.rb"),
+                format!("module Chain\n  class L{i} < {parent}\n  end\nend\n"),
+            )
+        })
+        .collect();
+    let room = "class Room < ApplicationRecord\n  def deep?\n    is_a?(Chain::L1)\n  end\nend\n";
+    let src = emitted_with(room, &extra);
+    let line = src.lines().find(|l| l.contains("Chain::L1\"") && l.contains("include?")).expect("the deep? test").trim().to_string();
+    assert!(line.contains("\"Chain::L9\""), "{line}");
+    assert!(!line.contains("\"Chain::L10\""), "ten hops from the model is past the STI bound:\n{line}");
 }

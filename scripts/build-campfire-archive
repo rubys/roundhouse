@@ -78,18 +78,26 @@ TREE="$WORK/campfire"
 
 # ── 1. transpile ──────────────────────────────────────────────────────
 #
-# STRICT: no --allow-unsupported. An unsupported construct is an error and
-# the run writes nothing, which is the ceiling `campfire-conformance`
-# already enforces at 0. A downloadable archive is the wrong place to
-# discover that the ceiling moved.
-step "transpiling $APP → spinel"
+# STRICT by default: no --allow-unsupported. An unsupported construct is an
+# error and the run writes nothing. A downloadable archive is the wrong place
+# to discover that the ceiling moved, so the only allowance is the one
+# `campfire-conformance` enforces, passed in as CAMPFIRE_CEILING_ERRORS when
+# that ceiling is above 0 (set it equal to CEILING_ERRORS there); more
+# errors than that still fail.
+CEILING="${CAMPFIRE_CEILING_ERRORS:-0}"
+allow=()
+[[ "$CEILING" -gt 0 ]] && allow=(--allow-unsupported)
+step "transpiling $APP → spinel (error ceiling $CEILING)"
 (cd "$REPO_ROOT" && cargo run --release --quiet --bin roundhouse -- \
-    --target spinel "$APP" -o "$TREE") 2>"$WORK/emit.log" || {
+    --target spinel "$APP" -o "$TREE" ${allow[@]+"${allow[@]}"}) 2>"$WORK/emit.log" || {
     tail -30 "$WORK/emit.log" >&2
     fail "transpile failed"
 }
 errors=$(grep -c 'error\[' "$WORK/emit.log" || true)
-[[ "$errors" -eq 0 ]] || { grep 'error\[' "$WORK/emit.log" >&2; fail "$errors emit error(s)"; }
+if [[ "$errors" -gt 0 ]]; then
+    grep 'error\[' "$WORK/emit.log" >&2
+    [[ "$errors" -le "$CEILING" ]] || fail "$errors emit error(s), ceiling $CEILING"
+fi
 echo "  $(find "$TREE" -type f | wc -l | tr -d ' ') files"
 
 # ── 2. name the binary after the app ──────────────────────────────────

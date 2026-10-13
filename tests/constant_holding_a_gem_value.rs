@@ -45,3 +45,14 @@ fn a_written_class_name_is_still_a_class_object() {
     assert!(!err.contains("panicked"), "{err}");
     assert!(err.contains("constant not supported (all targets): Money"), "{err}");
 }
+
+/// A cataloged gem (`htmlentities`) is declared, so its constant is a
+/// class and the source constant holding its instance is typed. This is
+/// lobsters' `HtmlEncoder`, whose class body runs `HTMLEntities.new` at
+/// load: a refusal stub there fails the whole app before any request.
+#[test]
+fn a_value_from_a_cataloged_gem_constant_is_typed() {
+    let encoder = "module HtmlEncoder\n  HTML_ENTITIES = HTMLEntities.new\n\n  class << self\n    def encode(string, type = :decimal)\n      HTML_ENTITIES.encode(string, type)\n    end\n  end\nend\n";
+    let err = check(&[("app/models/application_record.rb", RECORD), ("app/models/html_encoder.rb", encoder)]);
+    assert!(!err.contains("constant not supported"), "{err}");
+}

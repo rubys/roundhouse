@@ -119,7 +119,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // local — which is what happened until now — left the write
         // going nowhere and campfire titled every page "Campfire".
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            let local = Symbol::from(crate::naming::safe_local(name.as_str()));
+            let local = Symbol::from(ctx.ivar_local(name.as_str()));
             let rewritten = rewrite_predicates(
                 value,
                 &ctx.nullable_locals,
@@ -1130,7 +1130,7 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     // unrewritten it stayed an ivar on a module
                     // function — nil — and every field died on
                     // `[]` for nil.
-                    let spliced = super::rewrite_ivars_to_locals(&spliced);
+                    let spliced = super::rewrite_ivars_to_locals(&spliced, &ctx.ivar_locals);
                     return emit_io_append(&spliced, ctx);
                 }
             }
@@ -1734,6 +1734,7 @@ mod tests {
             bool_readers: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
+            i18n: Default::default(),
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
             stylesheets: Vec::new(),
@@ -1747,6 +1748,7 @@ mod tests {
             view_name: "messages/_message".to_string(),
             ivar_models: Default::default(),
             str_ivars: Default::default(),
+            ivar_locals: Default::default(),
         }
     }
 

@@ -34,6 +34,7 @@ type Modeler interface {
 	// interface is satisfied even by Base itself.
 	AdapterInsert() int64
 	AdapterUpdate()
+	AdapterTouch()
 	AdapterDelete()
 	// Validations + callbacks — Save() drives `valid?` →
 	// `self.validate`, then `after_create_commit` (or update/destroy).

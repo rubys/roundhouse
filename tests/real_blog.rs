@@ -240,6 +240,9 @@ fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String)
         DiagnosticKind::GraphqlNullableField { field, .. } => {
             ("GraphqlNullableField".into(), format!(":{}", field.as_str()))
         }
+        DiagnosticKind::UnconsumedInitializer { statement, .. } => {
+            ("UnconsumedInitializer".into(), statement.as_str().to_string())
+        }
     }
 }
 

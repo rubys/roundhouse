@@ -809,8 +809,17 @@ end
             controller.body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. }))
         });
         let unrecognized = gaps.iter().any(|gap| gap.to_string().contains("not recognized"));
+        // "block stays": `configure_window(mode: :open) { :ready }` carries
+        // a block, which `class_configuration::expand` never reads for a
+        // keyword-producer writer, so it is never stored. Before the
+        // generic unclaimed-class-body-block survey gap existed
+        // (rubys/roundhouse#778), that left it with NO gap at
+        // all — not stored, not reported, vanished with zero trace. It now
+        // correctly earns that gap, which is the one shape here expected
+        // to stay unrecognized.
+        let expected_unrecognized_block = label == "block stays";
         assert!(
-            stored || !unrecognized,
+            stored || !unrecognized || expected_unrecognized_block,
             "{label} stayed unrecognized; gaps={gaps:?}"
         );
     }

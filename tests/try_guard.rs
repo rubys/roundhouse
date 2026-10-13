@@ -240,3 +240,85 @@ fn a_runtime_method_try_keeps_its_type_through_the_guard() {
         "the desugared `blob.caption` must not diagnose as a failed dispatch:\n{errors:#?}"
     );
 }
+
+/// More unrelated definers than the arm bound can cover: the cover would
+/// need an `is_a?` per class, so the nil guard stays.
+#[test]
+fn a_name_with_more_unrelated_definers_than_the_arm_bound_keeps_the_nil_guard() {
+    let mut files: Vec<(String, String)> = (0..5)
+        .map(|i| (format!("app/services/pinger{i}.rb"), format!("class Pinger{i}\n  def ping\n    {i}\n  end\nend\n")))
+        .collect();
+    files.push((
+        "app/models/user.rb".to_string(),
+        "class User < ApplicationRecord\n  def show(other)\n    other.try(:ping)\n  end\nend\n".to_string(),
+    ));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    let src = emit(&refs);
+    assert!(src.contains("other && other.ping"), "five unrelated definers need five tests:\n{src}");
+    assert!(!src.contains("is_a?(Pinger"), "{src}");
+}
+
+/// A definer that is an ancestor of other definers is the test for all of
+/// them: it is on each descendant's ancestry, so each answers the name.
+#[test]
+fn a_definer_covers_its_definer_descendants_with_one_test() {
+    let mut files: Vec<(String, String)> = vec![(
+        "app/services/pinger.rb".to_string(),
+        "class Pinger\n  def ping\n    0\n  end\nend\n".to_string(),
+    )];
+    for i in 0..5 {
+        files.push((
+            format!("app/services/pinger{i}.rb"),
+            format!("class Pinger{i} < Pinger\n  def ping\n    {i}\n  end\nend\n"),
+        ));
+    }
+    files.push((
+        "app/models/user.rb".to_string(),
+        "class User < ApplicationRecord\n  def show(other)\n    other.try(:ping)\n  end\nend\n".to_string(),
+    ));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    let src = emit(&refs);
+    assert!(src.contains("is_a?(Pinger)"), "the base is the test:\n{src}");
+    assert!(!src.contains("is_a?(Pinger0)"), "{src}");
+    assert!(!src.contains("other && other.ping"), "{src}");
+}
+
+/// A `try` on a NULLABLE receiver types like one on the class itself
+/// (`nil.try` is nil, already in the answer), and the `is_a?` test the
+/// narrowing builds is a Bool. lobsters' layout reads
+/// `@user.try(:username)` with `@user: User?`, and both used to read at
+/// the post-lowering diagnose as failed dispatches on `User?` — errors
+/// on every page that left every route of the app to Rails under
+/// `--target futamura`'s whole-route replacement.
+#[test]
+fn a_try_on_a_nullable_receiver_resolves_through_the_narrowing() {
+    let mut all: Vec<(&str, &str)> = vec![
+        ("db/schema.rb", SCHEMA),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+        ("app/models/user.rb", "class User < ApplicationRecord\nend\n"),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\nend\n"),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/rooms_controller.rb",
+            "class RoomsController < ApplicationController\n  def index\n    @user = User.find_by(name: params[:name])\n    @label = @user.try(:name)\n    @shout = @user.try(\"name\")\n  end\nend\n",
+        ),
+        ("app/views/rooms/index.html.erb", "<p><%= @label %> <%= @shout %></p>\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :rooms\nend\n"),
+    ];
+    all.sort();
+    let tree: HashMap<PathBuf, Vec<u8>> = all
+        .into_iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    let _ = roundhouse::session::analyze_and_lower(&mut app);
+    let errors: Vec<String> = roundhouse::analyze::diagnose(&app)
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::analyze::Severity::Error)
+        .map(|d| d.message)
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+}

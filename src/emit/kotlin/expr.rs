@@ -98,6 +98,13 @@ thread_local! {
     /// the safe default.
     static METHOD_PARAMS: RefCell<HashMap<String, HashSet<String>>> =
         RefCell::new(HashMap::new());
+    /// `"Receiver.method"` → positional parameter types (required and
+    /// optional only, in call order). A hash literal passed in one of
+    /// those slots is pinned to that `Hash[K, V]` instead of the
+    /// blanket `<String, Any?>` — Kotlin maps are invariant, so
+    /// `MutableMap<String, Any?>` is not a `MutableMap<String, String?>`.
+    static METHOD_PARAM_TYS: RefCell<HashMap<String, Vec<crate::ty::Ty>>> =
+        RefCell::new(HashMap::new());
     /// Full `var <name>: <T> = <default>` declarations for locals whose
     /// first assignment is inside a nested scope (an `if`/loop/block) yet are
     /// also assigned at an outer level — Kotlin would scope the in-branch
@@ -215,12 +222,22 @@ pub(super) fn hoisted_decls() -> Vec<String> {
 /// Clear the method-param registry (start of an `emit` run).
 pub(super) fn reset_method_params() {
     METHOD_PARAMS.with(|m| m.borrow_mut().clear());
+    METHOD_PARAM_TYS.with(|m| m.borrow_mut().clear());
 }
 
 /// Register `Receiver.method` → its camelCased parameter names.
 pub(super) fn register_method_params(receiver: &str, method: &str, params: HashSet<String>) {
     METHOD_PARAMS.with(|m| {
         m.borrow_mut().insert(format!("{receiver}.{}", camel(method)), params);
+    });
+}
+
+/// Register positional parameter types for `Receiver.method`. Keyword,
+/// rest, and block params are omitted so index `i` is the i-th
+/// positional argument at the call.
+pub(super) fn register_method_param_tys(receiver: &str, method: &str, tys: Vec<crate::ty::Ty>) {
+    METHOD_PARAM_TYS.with(|m| {
+        m.borrow_mut().insert(format!("{receiver}.{}", camel(method)), tys);
     });
 }
 
@@ -420,7 +437,7 @@ fn class_relation_ref(path: &[crate::ident::Symbol]) -> String {
 /// to keep a transpiled class's real method from being rewritten into a
 /// Kotlin stdlib idiom of the same Ruby name.
 fn recv_declares_method(r: &Expr, method: &str) -> bool {
-    let Some(crate::ty::Ty::Class { id, .. }) = r.ty.as_ref() else {
+    let Some(crate::ty::Ty::Class { id, .. }) = r.ty.as_ref().map(|t| t.peel_nilable()) else {
         return false;
     };
     is_instance_method_of(&type_name(id.0.as_str()), method)
@@ -451,7 +468,8 @@ fn is_instance_method_of(class_name: &str, method: &str) -> bool {
 /// `Ty::Class` (its last `::` segment). Used to consult the instance-method
 /// registry for the call-vs-property decision.
 fn receiver_class_name(r: &Expr) -> Option<String> {
-    match r.ty.as_ref()? {
+    // An ivar reads as `T | nil` until `initialize` assigns it.
+    match r.ty.as_ref()?.peel_nilable() {
         crate::ty::Ty::Class { id, .. } => Some(type_name(id.0.as_str())),
         _ => None,
     }
@@ -934,6 +952,10 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             let n = camel(name.as_str());
             if is_object_tl_field(&n) {
                 format!("{n}.get()")
+            } else if is_param(name.as_str()) {
+                // A parameter of the same name (`head(status)` reading
+                // `@status`) shadows the bare property.
+                format!("this.{}", nonnull_read(n))
             } else {
                 nonnull_read(n)
             }
@@ -954,6 +976,15 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         ExprNode::Send { recv, method, args, block, .. } => {
             let rendered = emit_send(recv.as_ref(), method.as_str(), args, block.as_ref());
             coerce_nullable_finder(rendered, recv.as_ref(), method.as_str(), e.ty.as_ref())
+        }
+        // `("rtl" if false)` as an argument: Kotlin's `if` expression needs
+        // its `else`, which is Ruby's nil.
+        ExprNode::If { cond, then_branch, else_branch }
+            if is_empty_branch(else_branch)
+                && matches!(&*then_branch.node, ExprNode::Lit { value } if !matches!(value, Literal::Nil))
+                && matches!(e.ty.as_ref(), Some(t) if !matches!(t, crate::ty::Ty::Nil)) =>
+        {
+            format!("(if ({}) {} else null)", emit_expr(cond), emit_expr(then_branch))
         }
         ExprNode::If { cond, then_branch, else_branch } => {
             emit_if(cond, then_branch, else_branch)
@@ -1113,6 +1144,13 @@ fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
         .iter()
         .map(|(k, v)| format!("{} to {}", emit_expr(k), emit_expr(v)))
         .collect();
+    // Every value nil (`{"X-Empty" => nil}`): nothing to pin, and `Any?`
+    // would refuse the `MutableMap<String, String?>` the literal is passed
+    // as; Kotlin infers it from that expected type.
+    if matches!(e.ty.as_ref(), Some(crate::ty::Ty::Hash { value, .. }) if matches!(**value, crate::ty::Ty::Nil))
+    {
+        return emit_hash_inferred(entries);
+    }
     // Heterogeneous `<String, Any?>` so a mixed map (Broadcasts payloads,
     // render options) type-checks against `Any?` params. A homogeneous map in
     // return position is re-typed by `wrap_return` (where map invariance is a
@@ -1211,6 +1249,14 @@ fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
     let l = emit_expr(left);
     let r = emit_expr(right);
     match op {
+        // `true && "hot"` is a value, not a Boolean: the right operand when
+        // the left holds, else the left's `false`.
+        BoolOpKind::And
+            if matches!(left.ty.as_ref(), Some(crate::ty::Ty::Bool))
+                && right.ty.as_ref().is_some_and(|t| !matches!(t, crate::ty::Ty::Bool)) =>
+        {
+            format!("(if ({l}) ({r} as Any?) else false)")
+        }
         BoolOpKind::And => format!("{l} && {r}"),
         // `||` is logical-or for Bool results, but Ruby's `x || default`
         // nil-coalescing idiom maps to Kotlin's `?:` when the result
@@ -1671,8 +1717,9 @@ fn emit_send(
             let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
             // Not `ArgumentError(...)`: Kotlin has no such class, and its stdlib spelling is IllegalArgumentException.
             let cls = match joined.as_str() {
-                "" => "RuntimeException".to_string(),
+                "" | "RuntimeError" => "RuntimeException".to_string(),
                 "ArgumentError" => "IllegalArgumentException".to_string(),
+                "IndexError" => "IndexOutOfBoundsException".to_string(),
                 _ => type_name(&joined),
             };
             return format!("throw {cls}({})", args_s[1..].join(", "));
@@ -1711,6 +1758,15 @@ fn emit_send(
                 }
             }
             return format!("{}.{} = {}", emit_expr(r), camel(base), args_s[0]);
+        }
+    }
+
+    // `equal?` is BasicObject identity. Kotlin has no such method on a
+    // transpiled class (`equalPred`); `===` is referential equality,
+    // which is what `assert_same` lowered to this call to ask.
+    if method == "equal?" && args.len() == 1 {
+        if let Some(r) = recv {
+            return format!("(({}) === ({}))", emit_expr(r), args_s[0]);
         }
     }
 
@@ -1889,6 +1945,13 @@ fn emit_send(
         // below, which still sees the real `method`.
         let coercible = if recv_declares_method(r, method) { "\0" } else { method };
         match coercible {
+            // `arr.pop` (HeaderStore#delete) drops the last element.
+            "pop" if recv_is_array(r) => return format!("{rs}.removeLast()"),
+            // A receiver that is statically nil (a Unit call: `assert_nil
+            // controller.head(:no_content)`) is evaluated, and is nil.
+            "nil?" if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Nil)) => {
+                return format!("run {{ {rs}; true }}")
+            }
             "nil?" => return format!("({rs} == null)"),
             "!" => return format!("!({rs})"),
             // Ruby's `nil.to_s` is "" where Kotlin's `null.toString()` is
@@ -2053,7 +2116,11 @@ fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 .collect();
             if let Some(keys) = keys {
                 if kwargs_match_params(recv, method, &keys) {
-                    let mut parts: Vec<String> = head.iter().map(emit_expr).collect();
+                    let mut parts: Vec<String> = head
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| emit_positional_arg(recv, method, i, a))
+                        .collect();
                     for (k, (_, v)) in keys.iter().zip(entries.iter()) {
                         parts.push(format!("{k} = {}", emit_expr(v)));
                     }
@@ -2062,7 +2129,105 @@ fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             }
         }
     }
-    args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
+    args.iter()
+        .enumerate()
+        .map(|(i, a)| emit_positional_arg(recv, method, i, a))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A positional argument. A non-kwargs hash literal whose callee
+/// parameter is a concrete `Hash[K, V]` is built as that Kotlin map
+/// type. Everywhere else the argument emits as itself, so mixed maps
+/// keep the `<String, Any?>` pin.
+fn emit_positional_arg(recv: Option<&Expr>, method: &str, index: usize, arg: &Expr) -> String {
+    if let ExprNode::Hash { entries, kwargs: false } = &*arg.node {
+        if let Some(ty) = method_positional_param_ty(recv, method, index) {
+            if let Some(pinned) = try_emit_pinned_hash(entries, &ty) {
+                return pinned;
+            }
+        }
+    }
+    emit_expr(arg)
+}
+
+fn method_positional_param_ty(
+    recv: Option<&Expr>,
+    method: &str,
+    index: usize,
+) -> Option<crate::ty::Ty> {
+    let start = match recv.map(|r| &*r.node) {
+        Some(ExprNode::Const { path }) => {
+            type_name(&path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"))
+        }
+        None | Some(ExprNode::SelfRef) => CURRENT_CLASS.with(|c| c.borrow().clone()),
+        _ => match recv.and_then(|r| r.ty.as_ref()) {
+            Some(crate::ty::Ty::Class { id, .. }) => type_name(id.0.as_str()),
+            _ => return None,
+        },
+    };
+    let mut cur = Some(start);
+    let mut guard = 0;
+    while let Some(c) = cur {
+        guard += 1;
+        if c.is_empty() || guard > 32 {
+            break;
+        }
+        let found = METHOD_PARAM_TYS.with(|m| {
+            m.borrow()
+                .get(&format!("{c}.{}", camel(method)))
+                .and_then(|tys| tys.get(index).cloned())
+        });
+        if found.is_some() {
+            return found;
+        }
+        cur = CLASS_HIERARCHY.with(|h| h.borrow().get(&c).and_then(|(parent, _)| parent.clone()));
+    }
+    None
+}
+
+/// Build a hash literal as `MutableMap<K, V>` for a concrete parameter
+/// type. Values are assigned into the map (`also`) so a `String` literal
+/// is accepted as `String?` without an unchecked cast, and a wrong value
+/// still fails to compile. `None` when the type is not a pinnable hash
+/// — the caller keeps `emit_hash`'s `<String, Any?>` pin.
+fn try_emit_pinned_hash(entries: &[(Expr, Expr)], ty: &crate::ty::Ty) -> Option<String> {
+    use crate::ty::Ty;
+    let Ty::Hash { key, value } = ty else { return None };
+    if matches!(key.as_ref(), Ty::Hash { .. } | Ty::Array { .. })
+        || matches!(value.as_ref(), Ty::Hash { .. } | Ty::Array { .. })
+        || !hash_elem_pinnable(key)
+        || !hash_elem_pinnable(value)
+    {
+        return None;
+    }
+    let k = kotlin_ty(key);
+    let v = kotlin_ty(value);
+    if entries.is_empty() {
+        return Some(format!("mutableMapOf<{k}, {v}>()"));
+    }
+    let puts: Vec<String> = entries
+        .iter()
+        .map(|(ek, ev)| format!("__rhMap[{}] = {}", emit_expr(ek), emit_expr(ev)))
+        .collect();
+    Some(format!("mutableMapOf<{k}, {v}>().also {{ __rhMap -> {} }}", puts.join("; ")))
+}
+
+fn hash_elem_pinnable(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Untyped | Ty::Var { .. } | Ty::Bottom | Ty::Nil => false,
+        Ty::Union { variants } => {
+            !variants.is_empty()
+                && variants.iter().any(|v| !matches!(v, Ty::Nil))
+                && variants.iter().all(|v| match v {
+                    Ty::Nil => true,
+                    Ty::Untyped | Ty::Var { .. } | Ty::Bottom | Ty::Union { .. } => false,
+                    _ => true,
+                })
+        }
+        _ => true,
+    }
 }
 
 /// Coercion for assigning an untyped value into a nilable scalar
@@ -2090,5 +2255,92 @@ fn nilable_prop_conversion(base: &str, value: &Expr) -> Option<String> {
         Ty::Float => Some(format!("{v}?.toString()?.toDouble()")),
         Ty::Bool => Some(format!("{v}?.toString()?.toBoolean()")),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod equal_and_hash_pin_tests {
+    use super::*;
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::ident::{ClassId, Symbol, VarId};
+    use crate::span::Span;
+    use crate::ty::Ty;
+
+    fn var(name: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from(name) },
+        )
+    }
+
+    fn send(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: true,
+            },
+        )
+    }
+
+    fn str_lit(s: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Str { value: s.to_string() } },
+        )
+    }
+
+    fn quota_hash() -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: vec![
+                    (str_lit("X-Quota-Remaining"), str_lit("5")),
+                    (str_lit("X-New"), str_lit("ok")),
+                ],
+                kwargs: false,
+            },
+        )
+    }
+
+    #[test]
+    fn equal_is_reference_identity() {
+        let out = emit_expr(&send(var("store"), "equal?", vec![var("result")]));
+        assert_eq!(out, "((store) === (result))");
+    }
+
+    #[test]
+    fn merge_hash_pins_to_string_nilable_param() {
+        reset_method_params();
+        register_method_param_tys(
+            "HeaderStore",
+            "merge!",
+            vec![Ty::Hash {
+                key: Box::new(Ty::Str),
+                value: Box::new(Ty::Union { variants: vec![Ty::Str, Ty::Nil] }),
+            }],
+        );
+        let mut recv = var("headers");
+        recv.ty = Some(Ty::Class {
+            id: ClassId(Symbol::from("ActionController::HeaderStore")),
+            args: vec![],
+        });
+        let out = emit_expr(&send(recv, "merge!", vec![quota_hash()]));
+        reset_method_params();
+        assert_eq!(
+            out,
+            "headers.mergeBang(mutableMapOf<String, String?>().also { __rhMap -> __rhMap[\"X-Quota-Remaining\"] = \"5\"; __rhMap[\"X-New\"] = \"ok\" })"
+        );
+    }
+
+    #[test]
+    fn unregistered_hash_arg_keeps_any_pin() {
+        reset_method_params();
+        let out = emit_expr(&send(var("headers"), "merge!", vec![quota_hash()]));
+        assert!(out.contains("mutableMapOf<String, Any?>("), "{out}");
+        assert!(!out.contains(".also"), "{out}");
     }
 }

@@ -70,6 +70,7 @@ fn tiny_blog_round_trips() {
         class_attr_defaults: Default::default(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        i18n: Default::default(),
         span: Span::synthetic(),
     };
 
@@ -137,6 +138,7 @@ fn tiny_blog_round_trips() {
         // Passthrough-only and `serde(skip)` — it never round-trips, so
         // the roundtrip fixture has nothing to say about it.
         binary_assets: Vec::new(),
+        i18n: Default::default(),
         inferred_method_params: Default::default(),
         models: vec![post_model],
         library_classes: vec![],
@@ -151,11 +153,15 @@ fn tiny_blog_round_trips() {
         fixtures: vec![],
         seeds: None,
         importmap: None,
+        inertia: None,
+        vite_manifest: None,
         stylesheets: vec![],
         rbs_signatures: std::collections::HashMap::new(),
         gem_lock: None,
+        loaded_frameworks: None,
         gem_boundary: Default::default(),
         content_helper_allowed_attributes: Vec::new(),
+        content_helper_allowed_tags: Vec::new(),
         helper_method_index: std::collections::HashMap::new(),
         view_visible_controller_methods: std::collections::BTreeSet::new(),
         global_id_locate_models: std::collections::BTreeSet::new(),
@@ -176,6 +182,7 @@ fn tiny_blog_round_trips() {
         concern_spliced_actions: std::collections::HashMap::new(),
         concern_spliced_class_methods: std::collections::HashMap::new(),
         concern_model_items: std::collections::HashMap::new(),
+        concern_included_redefs: std::collections::HashMap::new(),
         render_edges: std::collections::HashMap::new(),
         view_feeders: std::collections::HashMap::new(),
         controller_resolutions: std::collections::HashMap::new(),

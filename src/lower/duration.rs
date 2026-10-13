@@ -118,7 +118,8 @@ pub(crate) fn apply_duration_rewrites(body: &mut Expr, temporal_predicates: bool
     rewrite_expires_in(body);
 }
 
-/// `expires_in <dur>, stale_while_revalidate: <dur>` → seconds.
+/// `expires_in <dur>, stale_while_revalidate: <dur>, stale_if_error:
+/// <dur>` → seconds.
 ///
 /// The same grounding `signed_id`'s `expires_in:` gets, for the
 /// CONTROLLER method of that name: the runtime's
@@ -149,19 +150,21 @@ fn rewrite_expires_in(expr: &mut Expr) {
     }
     let ExprNode::Send { args, .. } = &mut *expr.node else { unreachable!() };
     args[0] = seconds_of(take(&mut args[0]));
-    // `stale_while_revalidate:` rides the trailing kwargs hash and is a
-    // duration in both call sites that pass one.
+    // `stale_while_revalidate:` / `stale_if_error:` both ride the
+    // trailing kwargs hash and are a duration at every call site that
+    // passes one (rubys/roundhouse#679's `stale_if_error: 1.day`).
     if let Some(last) = args.last_mut() {
         if let ExprNode::Hash { entries, kwargs } = &mut *last.node {
             let kwargs = *kwargs;
             let mut rebuilt = entries.clone();
             for (k, v) in rebuilt.iter_mut() {
-                let is_swr = matches!(
+                let is_duration_kwarg = matches!(
                     &*k.node,
                     ExprNode::Lit { value: Literal::Sym { value } }
                         if value.as_str() == "stale_while_revalidate"
+                            || value.as_str() == "stale_if_error"
                 );
-                if is_swr {
+                if is_duration_kwarg {
                     *v = seconds_of(v.clone());
                 }
             }

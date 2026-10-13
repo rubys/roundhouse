@@ -521,3 +521,8 @@ module Sentry
     nil
   end
 end
+
+# OpenTelemetry façade lives in its own file, same reason the swappable
+# ones do (whole-file grain) even though this one never swaps for a real
+# gem on any target — see runtime/ruby/open_telemetry_facade.rb.
+require_relative "open_telemetry_facade"

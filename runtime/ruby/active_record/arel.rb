@@ -21,8 +21,10 @@ module Arel
       @sql = sql
     end
 
+    # The text carries the relation's bind marks so `exists` can splice
+    # them into an enclosing read; printed, the values are written in.
     def to_sql
-      @sql
+      ActiveRecord::Relation.inline_sql(@sql)
     end
 
     def exists

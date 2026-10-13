@@ -1524,6 +1524,7 @@ mod tests {
             bool_readers: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
+            i18n: Default::default(),
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
             stylesheets: Vec::new(),
@@ -1535,6 +1536,7 @@ mod tests {
             partial_extras: Default::default(),
             strict_locals: Default::default(),
             str_ivars: Default::default(),
+            ivar_locals: Default::default(),
             ivar_models: Rc::new(
                 ivar_models
                     .iter()

@@ -117,7 +117,7 @@ fn expires_in(opts: &Expr) -> Option<Expr> {
 /// `<ttl>.to_i` — seconds off an Integer or an ActiveSupport::Duration.
 fn to_i(v: Expr) -> Expr {
     let span = v.span;
-    Expr::new(
+    let mut call = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(v),
@@ -126,5 +126,10 @@ fn to_i(v: Expr) -> Expr {
             block: None,
             parenthesized: true,
         },
-    )
+    );
+    // Typed here: this pass runs after analysis, and an untyped Send on
+    // a typed receiver reads at the post-lowering diagnose as a failed
+    // dispatch (`no known method `to_i` on Integer`).
+    call.ty = Some(crate::ty::Ty::Int);
+    call
 }

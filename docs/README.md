@@ -36,6 +36,12 @@ references explain design, while working plans are point-in-time proposals.
 - [`analyze.md`](pipeline/analyze.md) — type + effect inference.
 - [`lower.md`](pipeline/lower.md) — target-neutral lowerings and the
   post-analyze pass pipeline.
+- [`specialization.md`](pipeline/specialization.md) — every target as a
+  specializer of Rails: the shared decision procedure, and the residue
+  policies (forbidden, runs on Rails, handed to a person) that tell
+  the strict targets, `futamura` and `roda` apart; and `futamura`'s
+  whole-route replacement, which serves the routes the analysis clears
+  from the lowered app in a `Ruby::Box` inside Rails.
 - [`emit.md`](pipeline/emit.md) — per-target emitters and the shared
   emit machinery.
 - [`runtime.md`](pipeline/runtime.md) — the two-layer runtime

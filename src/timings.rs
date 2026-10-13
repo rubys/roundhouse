@@ -35,9 +35,14 @@ fn peak_rss_mb() -> Option<u64> {
 }
 
 /// Run a phase and print measurements only when requested.
+///
+/// Resets the lap boundary afterward so a following `lap` does not
+/// attribute this phase's duration to the next named pass.
 pub fn phase<T>(name: impl std::fmt::Display, f: impl FnOnce() -> T) -> T {
     let _guard = begin(name);
-    f()
+    let result = f();
+    lap_start();
+    result
 }
 
 /// Start a timed span that prints when dropped. `None` when timings are off.
@@ -49,6 +54,29 @@ pub fn begin(name: impl std::fmt::Display) -> Option<Guard> {
         name: name.to_string(),
         start: Instant::now(),
     })
+}
+
+thread_local! {
+    static LAP: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Start a run of laps: the next `lap` measures from here.
+pub fn lap_start() {
+    if *ENABLED {
+        LAP.with(|lap| lap.set(Some(Instant::now())));
+    }
+}
+
+/// Print the time since the previous `lap`/`lap_start` under `name`, so a
+/// sequence of untimed passes names the one that is slow or never ends.
+pub fn lap(name: impl std::fmt::Display) {
+    if !*ENABLED {
+        return;
+    }
+    let now = Instant::now();
+    if let Some(start) = LAP.with(|lap| lap.replace(Some(now))) {
+        drop(Guard { name: name.to_string(), start });
+    }
 }
 
 /// Prints one `roundhouse-timing:` line on drop.

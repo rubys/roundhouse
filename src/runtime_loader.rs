@@ -644,6 +644,10 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
             // `ActionController::masked_authenticity_token`. The
             // namespace struct lives in action_controller_base.rs.
             ("ActionController", "action_controller_base"),
+            // `word_wrap` rejects non-positive widths via
+            // `raise ArgumentError, "…"`.
+            ("raise", "errors_ext"),
+            ("ArgumentError", "errors_ext"),
         ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
@@ -669,6 +673,8 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
             ("RecordNotFound", "errors_ext"),
             ("RecordInvalid", "errors_ext"),
             ("ArgumentError", "errors_ext"),
+            ("RuntimeError", "errors_ext"),
+            ("IndexError", "errors_ext"),
         ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
@@ -723,6 +729,25 @@ where
         out.push(unit);
     }
     Ok(out)
+}
+
+/// Parse every Rust runtime Library entry (no emit) and hand its
+/// classes to `f`. Used by rust emit to seed the Const-recv registry
+/// before `rust_units` walks each file — sibling classes in one
+/// runtime source (`AssociationReflection` next to `Base`) must be
+/// visible when the enclosing class is emitted (#832).
+pub fn rust_library_classes<F>(mut f: F) -> Result<(), String>
+where
+    F: FnMut(&[LibraryClass]),
+{
+    for entry in RUST_RUNTIME {
+        if matches!(entry.mode, Mode::Library) {
+            let classes =
+                parse_library_with_rbs(entry.rb_src.as_bytes(), entry.rbs_src, entry.rb_path)?;
+            f(&classes);
+        }
+    }
+    Ok(())
 }
 
 /// Parse + emit the TypeScript runtime files. Returns one `RuntimeUnit`

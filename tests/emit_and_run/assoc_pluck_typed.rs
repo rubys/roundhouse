@@ -3,6 +3,10 @@
 //! is typed there, so the rewritten `map` has to carry `pluck`'s
 //! `Array[Integer]` or the strict emit reports `no known method `map`
 //! on Array[Comment]` (campfire main's `Room#destroy_later`).
+//!
+//! The same rewrite must reach a TEST body's association pluck
+//! (campfire's `RoomsControllerTest` member-ids assertion) — hook-body
+//! walking alone left that site as `Array#pluck`.
 
 use super::emit_and_run;
 
@@ -25,6 +29,14 @@ class PlucksControllerTest < ActionDispatch::IntegrationTest
     second = article.comments.create!(commenter: "Amy", body: "Second comment")
     assert_equal [first.id, second.id].sort, article.comment_ids_plucked.sort
     assert_equal ["Amy", "Zed"], article.commenters_plucked
+  end
+
+  test "a test body plucks a has_many reader the same way" do
+    article = Article.create!(title: "From test", body: "A body long enough.")
+    first = article.comments.create!(commenter: "Zed", body: "First comment")
+    second = article.comments.create!(commenter: "Amy", body: "Second comment")
+    assert_equal [first.id, second.id].sort, article.comments.pluck(:id).sort
+    assert_equal ["Amy", "Zed"], article.comments.pluck(:commenter).sort
   end
 end
 "#,

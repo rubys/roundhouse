@@ -4,6 +4,8 @@
 //! Roundhouse retains source-position answers and keys inferred values
 //! by Rubydex declaration IDs.
 
+mod hoist;
+
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, OnceLock};
@@ -24,6 +26,7 @@ use rubydex::resolution::Resolver;
 use crate::ident::{ClassId, Symbol};
 use crate::span::{FileId, SourceFile, Span};
 use crate::ty::Ty;
+use hoist::{hoisted_name, nested_namespaces_index, runtime_value_types};
 
 // Rubydex's minimal built-ins stop at Object/Module/Class. Classes
 // without value Consts live in `CORE_RBS_BASE`; value Consts are one
@@ -163,6 +166,9 @@ pub(crate) struct ConstResolver {
     /// Indexed by `FileId - 1`. `None` marks a source that Rubydex did
     /// not index, such as an ERB template.
     files: Vec<Option<FileAnswers>>,
+    /// Each source class or module that others are nested in by name,
+    /// with those nested ones (`A` to `A::B` and `A::B::C`).
+    nested_namespaces: HashMap<Box<str>, Vec<Box<str>>>,
     /// Includes paths, full text and order because answers use file IDs
     /// and byte offsets. Retain no second copy of the source snapshot.
     source_fingerprint: u64,
@@ -360,35 +366,6 @@ fn is_assigned_value(graph: &Graph, declaration: &Declaration) -> bool {
     assigned
 }
 
-/// Literal runtime values come from the same embedded implementations
-/// the name graph indexes. Keep their full owners, not suffix aliases,
-/// and share types between references instead of copying their trees.
-fn runtime_value_types() -> &'static HashMap<String, Arc<Ty>> {
-    static VALUES: std::sync::OnceLock<HashMap<String, Arc<Ty>>> = std::sync::OnceLock::new();
-    VALUES.get_or_init(|| {
-        let mut values: HashMap<String, Arc<Ty>> = HashMap::new();
-        let mut ambiguous = std::collections::HashSet::new();
-        for (_, text) in crate::runtime_files::ruby_sources() {
-            let (_, owners) = crate::runtime_src::parse_module_constant_tables(text, true);
-            for (owner, constants) in owners {
-                for (name, ty) in constants {
-                    let name = format!("{}::{}", owner.0.as_str(), name.as_str());
-                    if ambiguous.contains(&name) {
-                        continue;
-                    }
-                    if values.get(&name).is_some_and(|previous| **previous != ty) {
-                        values.remove(&name);
-                        ambiguous.insert(name);
-                    } else {
-                        values.insert(name, Arc::new(ty));
-                    }
-                }
-            }
-        }
-        values
-    })
-}
-
 impl ConstResolver {
     /// Index real Ruby app sources with their original 1-based file IDs.
     pub(crate) fn from_app_sources(sources: &[SourceFile]) -> Self {
@@ -398,7 +375,11 @@ impl ConstResolver {
         crate::timings::phase("rubydex: resolve", || Resolver::new(&mut graph).resolve());
         let files = crate::timings::phase("rubydex: answers", || collect_answers(&graph, sources));
         drop(graph);
-        Self { files, source_fingerprint: source_fingerprint(sources) }
+        let mut declared: Vec<&str> = files.iter().flatten().flat_map(|file| file.class_definitions.iter().map(|name| name.as_ref())).collect();
+        declared.sort_unstable();
+        declared.dedup();
+        let nested_namespaces = nested_namespaces_index(&declared);
+        Self { files, nested_namespaces, source_fingerprint: source_fingerprint(sources) }
     }
 
     fn file(&self, file: FileId) -> Option<&FileAnswers> {
@@ -493,6 +474,12 @@ impl ConstResolver {
     pub(crate) fn constant_class(&self, value: Span, name: &str) -> Option<ClassId> {
         let declaration = self.constant_declaration(value, name)?;
         self.file(value.file)?.constant_classes.get(&declaration).cloned()
+    }
+
+    /// The source classes and modules declared inside the source class
+    /// or module `name` (`A::B` and `A::B::C` for `A`).
+    pub(crate) fn nested_source_namespaces(&self, name: &str) -> &[Box<str>] {
+        self.nested_namespaces.get(name).map_or(&[], Vec::as_slice)
     }
 
     pub(crate) fn has_source_namespace(&self, name: &str) -> bool {
@@ -735,7 +722,7 @@ fn answer_file(
                 if declaration.as_namespace().is_some() && !is_assigned_value(graph, declaration) {
                     let (class, runtime) = class_cache.entry(id).or_insert_with(|| {
                         (
-                            Arc::new(ClassId(Symbol::from(declaration.name()))),
+                            Arc::new(ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref()))),
                             is_runtime_declaration(graph, declaration),
                         )
                     });
@@ -771,7 +758,7 @@ fn answer_file(
                     } else {
                         None
                     };
-                    ResolvedConstant::Value { declaration: id, name: Arc::new(ClassId(Symbol::from(name))), runtime }
+                    ResolvedConstant::Value { declaration: id, name: Arc::new(ClassId(Symbol::from(hoisted_name(name).as_ref()))), runtime }
                 }
             });
         match answers.references.entry(offset.start()) {
@@ -801,7 +788,7 @@ fn answer_file(
             if let Some(written) = graph.strings().get(name.str()) {
                 let owner = parent.and_then(|id| graph.name_id_to_declaration_id(*id))
                     .and_then(|id| graph.declarations().get(id));
-                let full = owner.map_or_else(|| written.to_string(), |owner| format!("{}::{}", owner.name(), written.as_str()));
+                let full = owner.map_or_else(|| written.to_string(), |owner| format!("{}::{}", hoisted_name(owner.name()), written.as_str()));
                 if matches!(definition, Some(Definition::Class(_) | Definition::Module(_))) {
                     answers.class_definitions.insert(full.clone().into());
                 }
@@ -847,7 +834,7 @@ fn answer_file(
         if let (Some(name), Some(id)) = (name, id) {
             answers.constants.push((offset.end(), name.as_str().into(), *id));
             if let Some(declaration) = graph.declarations().get(id) {
-                answers.constant_classes.insert(*id, ClassId(Symbol::from(declaration.name())));
+                answers.constant_classes.insert(*id, ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref())));
             }
         }
     }
@@ -976,5 +963,26 @@ mod tests {
         let reordered = prepared.for_sources(&sources);
         assert_eq!(resolved_name(&reordered, &sources, 0, "Second"), "Second");
         assert_eq!(resolved_name(&reordered, &sources, 1, "Third"), "Third");
+    }
+
+    /// An app that reads a scalar constant of a runtime module
+    /// (`ActiveRecord::SignedId::SALT = "active_record/signed_id"`, nested
+    /// two modules deep) must get the constant's literal type, or the
+    /// read is refused as an unsupported constant.
+    #[test]
+    fn a_runtime_module_scalar_constant_resolves_with_its_literal_type() {
+        let text = "module SaltProbe\n  R = \"#{ActiveRecord::SignedId::SALT}\".freeze\nend\n";
+        let sources = vec![SourceFile { path: "lib/salt_probe.rb".into(), text: text.into() }];
+        let resolver = ConstResolver::from_app_sources(&sources);
+        let end = (text.find("SALT}").unwrap() + "SALT".len()) as u32;
+        let span = Span { file: FileId(1), start: end - 40, end };
+        let path: Vec<Symbol> = ["ActiveRecord", "SignedId", "SALT"].into_iter().map(Symbol::from).collect();
+        match resolver.reference(span, &path) {
+            Some(Some(ResolvedConstant::Value { name, runtime, .. })) => {
+                assert_eq!(name.0.as_str(), "ActiveRecord::SignedId::SALT");
+                assert_eq!(runtime.as_deref(), Some(&crate::ty::Ty::Str));
+            }
+            _ => panic!("ActiveRecord::SignedId::SALT must resolve to the runtime value"),
+        }
     }
 }

@@ -141,6 +141,12 @@ class ActionResponse
     ?content_type: String,
     ?cache_control_max_age: Integer,
     ?cache_control_public: bool,
+    # Declared in the same position as the Ruby `initialize` — see the
+    # `cookies:` comment above about why order here must track order
+    # there. nil for `relation_find_test.rb`'s bare responses, which
+    # never touch Cache-Control; `cache_control` falls back to the two
+    # legacy readers above when this is nil.
+    ?cache_control_store: ActionController::CacheControlStore?,
     # The comment above about an OPTIONAL parameter behind a missing
     # one applies to this entry too: `headers:` was in the Ruby
     # `initialize` and not here.

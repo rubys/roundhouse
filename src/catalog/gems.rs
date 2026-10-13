@@ -166,6 +166,9 @@ pub const GEM_CATALOG: &[GemClass] = &[
             ("klass", GemTy::Untyped),
             ("name", GemTy::Sym),
             ("macro", GemTy::Sym),
+            // Nil when the association did not declare `counter_cache:`
+            // (campfire's Message→Room). Untyped until option ingest lands.
+            ("counter_cache_column", GemTy::Untyped),
         ],
     },
     // Arel — ActiveRecord's low-level SQL AST builder. `sql` wraps a
@@ -215,6 +218,13 @@ pub const GEM_CATALOG: &[GemClass] = &[
         name: "ROTP::Base32",
         class_methods: &[("random", GemTy::Str), ("random_base32", GemTy::Str)],
         instance_methods: &[],
+    },
+    // htmlentities — entity encode/decode; both directions return the
+    // converted String (lobsters' `HtmlEncoder` wraps one instance).
+    GemClass {
+        name: "HTMLEntities",
+        class_methods: &[],
+        instance_methods: &[("encode", GemTy::Str), ("decode", GemTy::Str)],
     },
     // RQRCode — QR-code rendering; the `as_*` methods serialize to a
     // String in the requested format.

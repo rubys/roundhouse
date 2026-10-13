@@ -89,12 +89,17 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
         walk_postorder(body, &mut |e| {
             super::time_current::rewrite_node(e, &formats);
             super::webmock::rewrite_node(e);
+            // Same Array wall as hook bodies: campfire's destroy test
+            // plucks `room.memberships` for the enqueued job's args.
+            super::assoc_pluck::rewrite_node(e, &materialized);
             super::try_guard::rewrite_node(e, &try_definers, &try_parents);
         });
     });
     // `try_guard` also rewrites test constants and inner-class methods,
-    // which `for_each_test_body` does not reach. The other context
-    // rewrites never walked those surfaces.
+    // which `for_each_test_body` does not reach, and `webmock` the
+    // inner-class methods: an included test helper is carried in as
+    // inner classes (campfire's `PushServiceTestHelper#with_push_service`
+    // switches WebMock off around its real TLS server).
     for tm in &mut app.test_modules {
         for (_, value) in &mut tm.constants {
             walk_postorder(value, &mut |e| {
@@ -104,6 +109,7 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
         for ic in &mut tm.inner_classes {
             for m in &mut ic.methods {
                 walk_postorder(&mut m.body, &mut |e| {
+                    super::webmock::rewrite_node(e);
                     super::try_guard::rewrite_node(e, &try_definers, &try_parents);
                 });
             }
@@ -445,6 +451,7 @@ fn rewrite_hook_node(
     super::number_to_fs::rewrite_node(e);
     super::string_inflections::rewrite_node(e);
     super::to_json::rewrite_node(e);
+    super::preloader::rewrite_node(e);
     super::bigdecimal::rewrite_node(e);
     super::range_enumerable::rewrite_node(e);
     super::csv_generate::rewrite_node(e);
@@ -493,6 +500,7 @@ fn rewrite_view_node(
     super::number_to_fs::rewrite_node(e);
     super::string_inflections::rewrite_node(e);
     super::to_json::rewrite_node(e);
+    super::preloader::rewrite_node(e);
     super::bigdecimal::rewrite_node(e);
     super::range_enumerable::rewrite_node(e);
     super::csv_generate::rewrite_node(e);
@@ -523,6 +531,7 @@ fn rewrite_view_node(
 
 fn rewrite_test_node(e: &mut Expr, skip_full_messages: bool) {
     super::save_without_validation::rewrite_node(e);
+    super::preloader::rewrite_node(e);
     super::bigdecimal::rewrite_node(e);
     super::range_enumerable::rewrite_node(e);
     super::enumerable_ext::rewrite_node(e);

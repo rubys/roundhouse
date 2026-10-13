@@ -96,3 +96,45 @@ fn inferred_ivar_types_reach_signatures() {
         rbs.content
     );
 }
+
+/// An inner class's keyword parameter takes what the tests pass for it,
+/// not only its default's type: campfire's push-service
+/// `Server#hung_up?(within: 5)` is called `hung_up?(within: 0.1)`, and
+/// an `Integer` from the default alone made spinel refuse the Float. The
+/// helper is carried into every test that includes it and its sidecar is
+/// one file by class name, so a module that never makes the call
+/// declares the same type.
+#[test]
+fn an_inner_keyword_takes_the_literal_types_its_tests_pass() {
+    let server = "  class Server\n    def hung_up?(within: 5)\n      within > 0\n    end\n  end\n";
+    let calling = format!(
+        "class CallingTest < ActiveSupport::TestCase\n{server}\n  test \"waits briefly\" do\n    assert Server.new.hung_up?(within: 0.1)\n  end\nend\n"
+    );
+    let quiet = format!(
+        "class QuietTest < ActiveSupport::TestCase\n{server}\n  test \"waits\" do\n    assert Server.new.hung_up?\n  end\nend\n"
+    );
+    let mut app = App::new();
+    for (src, path) in [(&calling, "test/calling_test.rb"), (&quiet, "test/quiet_test.rb")] {
+        app.test_modules.push(
+            ingest_test_file(src.as_bytes(), path).expect("ingest").expect("test class present"),
+        );
+    }
+    Analyzer::new(&app).analyze(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let sidecars: Vec<_> = files
+        .iter()
+        .filter(|f| f.path.to_string_lossy().ends_with("server_inner.rbs"))
+        .collect();
+    assert!(!sidecars.is_empty(), "no Server sidecar: {:?}", files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>());
+    for rbs in sidecars {
+        // A keyword here, or the optional positional ingest flattens an
+        // inline stand-in's keyword to; the type is the claim.
+        assert!(
+            rbs.content.contains("def hung_up?: (?within: (Integer | Float)) -> bool")
+                || rbs.content.contains("def hung_up?: (?(Integer | Float) within) -> bool"),
+            "{}:\n{}",
+            rbs.path.display(),
+            rbs.content
+        );
+    }
+}

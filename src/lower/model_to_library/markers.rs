@@ -37,7 +37,16 @@ pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model
     if is_primary_abstract_class(model) {
         return;
     }
-    let prefix = crate::naming::snake_case(model.name.0.as_str());
+    // Rails' `param_key` for a namespaced model joins the segments with
+    // `_` (`Admin::Widget` -> `admin_widget`), never `admin::widget`.
+    let prefix = model
+        .name
+        .0
+        .as_str()
+        .split("::")
+        .map(crate::naming::snake_case)
+        .collect::<Vec<_>>()
+        .join("_");
     // An STI base's rows belong to subclasses, and Rails' dom_class
     // answers the SUBCLASS (`Rooms::Open` rows are `rooms_open`, on
     // the page and in every broadcast target). Hydration here is
@@ -1195,11 +1204,15 @@ fn push_belongs_to_touches(methods: &mut Vec<MethodDef>, model: &Model) {
                 },
             ));
         }
+        // A stamped column has to reach the row with the timestamp, so
+        // that form finishes with the whole-row `touch_written`; the bare
+        // form's `touch` writes `updated_at` alone, as Rails' does.
+        let finish = if matches!(touch, Touch::Column(_)) { "touch_written" } else { "touch" };
         guarded.push(Expr::new(
             span,
             ExprNode::Send {
                 recv: Some(read_local()),
-                method: Symbol::from("touch"),
+                method: Symbol::from(finish),
                 args: vec![],
                 block: None,
                 parenthesized: false,

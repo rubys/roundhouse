@@ -35,6 +35,13 @@
 #                  lobsters-replay, so the two dirs line up file for file.
 #   --dump-only    dump and exit; skip warmup and timing entirely
 #
+# A `--target futamura` tree passed as --src carries its own whole-route
+# bridge (vendor/futamura/bridge.rb): under Ruby 4.1 with RUBY_BOX=1 the
+# GET actions the analysis cleared are served by the lowered app inside
+# this process, and the summary's "stack" says so. FUTAMURA_WHOLE_ROUTE=off
+# runs the same tree as plain Rails; FUTAMURA_STATS=1 prints how many
+# requests each side served.
+#
 # Self-bootstraps into the lobsters bundle: re-execs itself under
 # `bundle exec` from the --src directory, so it can be run from anywhere.
 
@@ -135,6 +142,11 @@ else
   file_db.close
   mem_db.execute("ANALYZE")
 end
+
+# A futamura tree with whole-route replacement on: its bridge booted the
+# lowered app into a Ruby::Box during initialization.
+WHOLE_ROUTE = defined?(Futamura::WholeRoute) && !Futamura::WholeRoute.box.nil?
+$stderr.puts "whole-route: #{Futamura::WholeRoute.actions.size} GET action(s) served by the lowered app" if WHOLE_ROUTE
 
 # Baseline footprint, sampled AFTER the in-memory seed — same point the
 # emit lanes sample, so the shared fixture is inside both baselines.
@@ -355,7 +367,11 @@ median = sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
 mean = iters.sum / iters.size
 
 summary = {
-  "stack"              => "rails",
+  "stack"              => WHOLE_ROUTE ? "rails+whole-route" : "rails",
+  # The GET actions a futamura tree's whole-route bridge serves from the
+  # lowered app, and how many requests each side served this run.
+  "whole_route"        => WHOLE_ROUTE && { "actions" => Futamura::WholeRoute.actions.size,
+                                           "served" => Futamura::WholeRoute.stats.to_h },
   "generated_at"       => Time.now.utc.iso8601,
   "ruby"               => RUBY_DESCRIPTION,
   "rails"              => Rails::VERSION::STRING,

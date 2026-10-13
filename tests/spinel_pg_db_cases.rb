@@ -20,6 +20,12 @@ module ActiveRecord
 
   class ValueTooLong < StandardError
   end
+
+  # Real ActiveRecord::Rollback (runtime/ruby/active_record/connection.rb);
+  # ar_transaction below rescues it exactly as the real
+  # ActiveRecord::Base.transaction does.
+  class Rollback < StandardError
+  end
 end
 
 def sqlstate_of
@@ -30,6 +36,59 @@ def sqlstate_of
     code = e.result.error_field(PG::PG_DIAG_SQLSTATE).to_s
   end
   code
+end
+
+# A copy, not a require, of ActiveRecord::Base.transaction's control
+# flow (runtime/ruby/active_record/connection.rb) — connection.rb pulls
+# in the rest of the ActiveRecord surface (the adapter, Relation, schema
+# columns) that this narrow Db-level gate does not set up (see the file
+# header: "the test drives the Db surface directly"). The part #693
+# added Db._txn_depth for, and the part the Postgres regression broke,
+# is reproduced verbatim so the cases below exercise the real shape.
+def ar_transaction
+  depth = Db._txn_depth
+  if depth > 0
+    Db._txn_depth = depth + 1
+    begin
+      result = yield
+    rescue ActiveRecord::Rollback
+      Db._txn_depth = depth
+      result = nil
+    rescue Exception => e
+      Db._txn_depth = depth
+      raise e
+    ensure
+      Db._txn_depth = depth
+    end
+  else
+    Db.exec("BEGIN")
+    Db._txn_depth = 1
+    rolled_back = false
+    begin
+      result = yield
+    rescue ActiveRecord::Rollback
+      rolled_back = true
+      Db._txn_depth = 0
+      Db.exec("ROLLBACK")
+      result = nil
+    rescue Exception => e
+      rolled_back = true
+      Db._txn_depth = 0
+      begin
+        Db.exec("ROLLBACK")
+      rescue StandardError
+        nil
+      end
+      raise e
+    ensure
+      if rolled_back
+        nil
+      else
+        Db._txn_depth = 0
+        Db.exec("COMMIT")
+      end
+    end
+  end
 end
 
 $checks = 0
@@ -731,6 +790,130 @@ def case_23(s, schema)
   nil
 end
 
+def probe_name(s)
+  h = Db.prepare_uncached("SELECT name FROM " + s + "txn_probe WHERE id = 1")
+  Db.step?(h)
+  v = Db.column_text(h, 0)
+  Db.finalize(h)
+  v
+end
+
+def case_24(s, schema)
+  # ── #693 regression on Postgres: a flat transaction ──
+  #
+  # ActiveRecord::Base.transaction (connection.rb) reads Db._txn_depth
+  # as its very FIRST statement, for every call — not only to decide
+  # whether to join an already-open one. db_pg.rb never defined
+  # Db._txn_depth / Db._txn_depth=, so ANY Model.transaction on the
+  # PostgreSQL shim raised NoMethodError, flat or nested. Confirmed via
+  # a bare `Db._txn_depth` call before this fix existed.
+  Db.exec("CREATE TABLE " + s + "txn_probe (id integer PRIMARY KEY, name text NOT NULL)")
+  Db.exec("INSERT INTO " + s + "txn_probe (id, name) VALUES (1, 'before')")
+  check_int("depth starts at 0", 0, Db._txn_depth)
+
+  ar_transaction { Db.exec("UPDATE " + s + "txn_probe SET name = 'committed' WHERE id = 1") }
+  check_int("depth returns to 0 after a commit", 0, Db._txn_depth)
+  check_str("a flat transaction commits", "committed", probe_name(s))
+
+  raised = nil
+  begin
+    ar_transaction do
+      Db.exec("UPDATE " + s + "txn_probe SET name = 'should-not-stick' WHERE id = 1")
+      raise "boom"
+    end
+  rescue StandardError => e
+    raised = e
+  end
+  check("a flat transaction's raise propagates", !raised.nil? && raised.message == "boom")
+  check_int("depth returns to 0 after a rollback", 0, Db._txn_depth)
+  check_str("a flat transaction rolls back on raise", "committed", probe_name(s))
+  nil
+end
+
+def case_25(s, schema)
+  # ── #693 regression on Postgres: a nested transaction joins ──
+  #
+  # A nested `transaction` sends no BEGIN of its own — it joins the
+  # outer one (Rails' `requires_new: false` default) — which this
+  # shim can only know by reading Db._txn_depth > 0. Depth going
+  # 0 -> 1 -> 2 -> 1 -> 0 and a SINGLE Postgres transaction covering
+  # both writes (one commit) is the observable proof of the join; a
+  # bug that sent a second BEGIN would not raise (Postgres treats a
+  # nested BEGIN as a no-op with a warning, not an error — so this is
+  # the test that would catch it, not an error-based one).
+  #
+  # NOT covered here: an inner raise rolling back the outer write too.
+  # Reproducing that (raise originating INSIDE the nested block, not
+  # after it returns) surfaced a separate, pre-existing Spinel
+  # exception-dispatch bug — confirmed on CRuby (correct) vs Spinel
+  # (wrong: commits instead of rolling back) with the exact same
+  # connection.rb bytes, and confirmed via the full real_blog pipeline
+  # on SQLite too, so it is not a PostgreSQL or db_pg.rb issue. Flagged
+  # separately rather than asserted on here or silently routed around.
+  ar_transaction do
+    check_int("depth is 1 in the outer block", 1, Db._txn_depth)
+    Db.exec("UPDATE " + s + "txn_probe SET name = 'outer' WHERE id = 1")
+    ar_transaction do
+      check_int("depth is 2 in the joined nested block", 2, Db._txn_depth)
+      Db.exec("UPDATE " + s + "txn_probe SET name = 'inner-committed' WHERE id = 1")
+    end
+    check_int("depth returns to 1 after the nested block returns", 1, Db._txn_depth)
+  end
+  check_int("depth returns to 0 after the outer block commits", 0, Db._txn_depth)
+  check_str("nested and outer commit together", "inner-committed", probe_name(s))
+  nil
+end
+
+def case_26(s, schema)
+  # ── A COMMIT (or ROLLBACK) that itself raises still releases the pin ──
+  #
+  # Db.exec called pin_transaction only AFTER conn.exec(sql) returned.
+  # If COMMIT or ROLLBACK itself raised — here, because the backend's
+  # own session ended from under it — pin_transaction was skipped
+  # entirely: the pin this thread took at BEGIN leaked, and
+  # Db.current_conn stayed wedged on the dead connection for the rest
+  # of the thread's life (roundhouse#693 fixed the same shape in
+  # db.rb's Db.exec). A BEGIN outside a lease pins Db.pool.first (the
+  # same connection Db.current_conn falls back to unleased), so
+  # terminating ITS backend and then trying to COMMIT reproduces the
+  # raise without ever taking a second lease on the pinned connection.
+  #
+  # `Db.with_connection` is re-entrant: once BEGIN has pinned this
+  # thread, it would not lease a second connection at all, just hand
+  # back the SAME pinned one (its own re-entrancy rule — see its
+  # comment) — so sending the termination through it would kill the
+  # connection out from under its OWN statement instead of the pinned
+  # one. `Db.pool.conn(1)`, the shard's other connection, used directly
+  # (as case_23 uses `Db.pool.first.exec` from inside a real lease), is
+  # a genuinely separate session.
+  Db.exec("BEGIN")
+  check("BEGIN pins Db.pool.first", Db.current_conn.equal?(Db.pool.first) && Db.in_lease?)
+  h = Db.prepare_uncached("SELECT pg_backend_pid()")
+  Db.step?(h)
+  pid = Db.column_int(h, 0)
+  Db.finalize(h)
+  Db.pool.conn(1).exec("SELECT pg_terminate_backend(" + pid.to_s + ")")
+  raised = nil
+  begin
+    Db.exec("COMMIT")
+  rescue StandardError => e
+    raised = e
+  end
+  check("COMMIT on a terminated backend raises", !raised.nil?)
+  check("the pin is released even though COMMIT raised", !Db.in_lease?)
+  # pin_transaction also drops the dead connection on PQTRANS_UNKNOWN
+  # (CodeRabbit, #766): Db.current_conn's unleased fallback is this
+  # SAME Db.pool.first object, and PgConn#client only reopens when
+  # @client is nil — releasing just the pin would leave every LATER
+  # unleased Db.exec on this thread hitting the same dead socket
+  # ("pg: connection lost") instead of reconnecting. No manual
+  # Db.pool.first.drop here: that would hide a regression in the drop
+  # above. A plain read on the unleased connection is the proof.
+  check("an unleased read reconnects after the dead connection is dropped",
+        cached_read(s, 1))
+  nil
+end
+
 begin
   case_01(s, schema)
   case_02(s, schema)
@@ -755,6 +938,9 @@ begin
   case_21(s, schema)
   case_22(s, schema)
   case_23(s, schema)
+  case_24(s, schema)
+  case_25(s, schema)
+  case_26(s, schema)
 ensure
   # Close every session first: a failed case can leave one holding locks
   # the DROP would otherwise wait on forever.

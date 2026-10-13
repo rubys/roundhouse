@@ -292,10 +292,16 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             // the constructor's actual return type is `*Class` and
             // `return nil` against a nilable pointer remains correct.
             let truly_void = matches!(ctx.return_ty.as_ref(), Some(Ty::Nil));
-            if truly_void && matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
+            if !truly_void && !ctx.void_method && matches!(&*value.node, ExprNode::If { .. }) {
+                // `return c ? a : b`: no expression `if` in Go, so the
+                // return moves into each branch.
+                let mut out = String::new();
+                emit_return_at(ctx, value, &mut out, 0);
+                out.trim_end().to_string()
+            } else if truly_void && matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
                 "return".to_string()
             } else {
-                format!("return {}", emit_expr(ctx, value))
+                format!("return {}", coerce_return_value(ctx, emit_expr(ctx, value)))
             }
         }
         ExprNode::Seq { exprs } => exprs
@@ -1279,7 +1285,7 @@ pub(super) fn emit_send(
     // Ruby `.empty?` predicate on String/Array/Hash → Go
     // `len(recv) == 0`. Same scope as `length` — collection-shaped.
     if method == "empty?" && args.is_empty() {
-        if let Some(r) = recv {
+        if let Some(r) = recv.filter(|r| !is_own_method(ctx, r, method)) {
             return format!("len({}) == 0", emit_expr(ctx, r));
         }
     }
@@ -1306,6 +1312,36 @@ pub(super) fn emit_send(
                 return format!("{recv_s} = {recv_s} + {}", args_s[0]);
             }
             return format!("{recv_s} = append({recv_s}, {})", args_s[0]);
+        }
+    }
+
+    // Ruby `arr.pop` — remove and return the last element. HeaderStore#delete
+    // uses it as a statement; an assignment would not compile in value
+    // position, and `[:len-1]` panics on empty vs Ruby's nil. The IIFE
+    // mutates the slice (Go closures capture the variable) and returns the
+    // element or the type's zero.
+    if method == "pop" && args.is_empty() {
+        if let Some(r) = recv {
+            // Only a variable or ivar can be resliced. `get_items().pop`
+            // is not an addressable Go location.
+            if matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+                let recv_s = emit_expr(ctx, r);
+                let elem_ty = match r.ty.as_ref().and_then(union_non_nil_core) {
+                    Some(Ty::Array { elem }) => super::ty::go_ty_stub(Some(elem)),
+                    _ => "interface{}".to_string(),
+                };
+                let zero = super::ty::go_zero_value(&elem_ty);
+                return format!(
+                    "func() {elem_ty} {{\n\
+                     \tif len({recv_s}) == 0 {{\n\
+                     \t\treturn {zero}\n\
+                     \t}}\n\
+                     \t_last := {recv_s}[len({recv_s})-1]\n\
+                     \t{recv_s} = {recv_s}[:len({recv_s})-1]\n\
+                     \treturn _last\n\
+                     }}()"
+                );
+            }
         }
     }
 
@@ -1359,7 +1395,7 @@ pub(super) fn emit_send(
     // is also valid and slightly cheaper, but `len(s) == 0` works
     // uniformly across the receiver Tys we see.
     if method == "empty?" && args.is_empty() {
-        if let Some(r) = recv {
+        if let Some(r) = recv.filter(|r| !is_own_method(ctx, r, method)) {
             let recv_s = emit_expr(ctx, r);
             return format!("len({recv_s}) == 0");
         }
@@ -2040,6 +2076,15 @@ pub(super) fn emit_send(
                 return super::library::sanitize(method);
             }
             if args_s.is_empty() {
+                // Inside an instance method of a library class, a bare
+                // name that is no local is a send to self: a real method
+                // takes parens, anything else is the field.
+                if let Some(set) = ctx.self_methods.as_ref().filter(|_| !ctx.in_class_method) {
+                    if set.contains(method) {
+                        return format!("self.{go_m}()");
+                    }
+                    return format!("self.{}", go_field_ident(method));
+                }
                 // Bare reader position (no parens) → field-read form,
                 // suffix stripped (`persisted?` → `Persisted`).
                 go_field_ident(method)
@@ -3116,6 +3161,7 @@ fn is_modeler_member(name: &str) -> bool {
             // subclass overrides with a real SQL-emitting body.
             | "_adapter_insert"
             | "_adapter_update"
+            | "_adapter_touch"
             | "_adapter_delete"
             // Validation + callbacks — Save() drives `valid?` →
             // `self.validate`; create/update/destroy paths drive
@@ -3133,7 +3179,7 @@ fn is_known_go_method(name: &str) -> bool {
     matches!(
         name,
         "save" | "save!" | "destroy" | "destroy!" | "update" | "update!"
-            | "delete" | "touch" | "reload"
+            | "delete" | "touch" | "touch_written" | "reload"
             | "validate" | "attributes"
         // `errors` was here but is now a Base struct field
         // (`*ActiveRecordBase.Errors []string`) reached via Go method
@@ -3310,12 +3356,31 @@ pub(super) fn emit_block_body(ctx: &EmitCtx, e: &Expr) -> String {
     let raw = match &*e.node {
         ExprNode::Seq { exprs } => exprs
             .iter()
-            .map(|sub| emit_expr(ctx, sub))
+            .map(|sub| emit_stmt(ctx, sub))
             .collect::<Vec<_>>()
             .join("\n"),
-        _ => emit_expr(ctx, e),
+        _ => emit_stmt(ctx, e),
     };
     raw.lines().map(|l| format!("\t{l}")).collect::<Vec<_>>().join("\n")
+}
+
+/// `e` emitted where its value is discarded. A zero-arg send there
+/// reads as a field (`recv.Foo`), which Go rejects as unused; in
+/// statement position it can only be a call.
+pub(super) fn emit_stmt(ctx: &EmitCtx, e: &Expr) -> String {
+    let s = emit_expr(ctx, e);
+    match &*e.node {
+        ExprNode::Send { recv: Some(_), args, block: None, .. }
+            if args.is_empty()
+                && !s.ends_with(')')
+                && s.rsplit('.').next().is_some_and(|last| {
+                    !last.is_empty() && last.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                }) =>
+        {
+            format!("{s}()")
+        }
+        _ => s,
+    }
 }
 
 /// Render a `.map { |x| body }` block body: leading exprs in a Seq
@@ -3628,9 +3693,17 @@ fn union_non_nil_core(ty: &Ty) -> Option<&Ty> {
     }
 }
 
+/// `self.m` where the class defines `m` itself: the class's method,
+/// not the builtin collection mapping of the same name.
+fn is_own_method(ctx: &EmitCtx, recv: &Expr, method: &str) -> bool {
+    matches!(&*recv.node, ExprNode::SelfRef)
+        && ctx.self_methods.as_ref().is_some_and(|set| set.contains(method))
+}
+
 fn coerce_return_value(ctx: &EmitCtx, v: String) -> String {
     match ctx.return_ty.as_ref() {
         Some(Ty::Int) if v != "nil" => format!("int64({v})"),
+        Some(Ty::Str | Ty::Sym) if v == "nil" => "\"\"".to_string(),
         Some(Ty::Union { variants }) if v == "nil" => {
             let non_nil: Vec<&Ty> = variants
                 .iter()
@@ -3723,6 +3796,13 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
                 }
             }
         }
+        // `return c ? a : b`: Go has no expression `if`, so the return
+        // moves into each branch, as it does for an `if` in tail position.
+        ExprNode::Return { value }
+            if !ctx.void_method && matches!(&*value.node, ExprNode::If { .. }) =>
+        {
+            emit_return_at(ctx, value, out, depth);
+        }
         ExprNode::Return { value } => {
             // Already a return; don't double up to `return return X`.
             // Void methods elide the value entirely.
@@ -3809,7 +3889,7 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
                     // No-op trailing nil.
                     return;
                 }
-                let v = emit_expr(ctx, e);
+                let v = emit_stmt(ctx, e);
                 indent(out, depth);
                 out.push_str(&v);
                 out.push('\n');

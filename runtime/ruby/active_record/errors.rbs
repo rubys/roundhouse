@@ -30,6 +30,15 @@ module ActiveRecord
     def initialize: (?String message) -> void
   end
 
+  class RecordNotSaved < StandardError
+    def record: () -> Base?
+    def initialize: (?String message, ?Base? record) -> void
+  end
+
+  class ReadOnlyRecord < StandardError
+    def initialize: (?String message) -> void
+  end
+
   # Raised by `Base#save!` when validation fails. `record` is the
   # invalid model; `attr_reader :record` lowers to a getter at ingest.
   class RecordInvalid < StandardError

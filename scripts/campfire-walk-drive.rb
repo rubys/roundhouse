@@ -40,7 +40,7 @@ Main.configure_default_adapter!
 
 # Ledger patches that OVERRIDE emitted app code — they have to run here,
 # after main.rb has pulled in app/models, or the app's own definitions win.
-# See scripts/campfire-walk-stubs.rb.
+# Absent when the walk-stubs ledger is empty / deleted (#818).
 WALK_LATE_PATCHES.each(&:call) if defined?(WALK_LATE_PATCHES)
 
 class Walk

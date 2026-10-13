@@ -1,0 +1,58 @@
+# Typing contract for pagy.rb beside this file.
+class Pagy
+  module Method
+  end
+
+  class OptionError < ArgumentError
+  end
+
+  SERIES_SLOTS: Integer
+  HEX: String
+
+  @page: Integer
+  @limit: Integer
+  @count: Integer
+  @offset: Integer
+  @last: Integer
+  @from: Integer
+  @to: Integer
+  @in_page: Integer
+  @previous: Integer?
+  @next: Integer?
+  @url_left: String
+  @url_right: String
+
+  def initialize: (Integer count, Integer page, Integer limit, String path, String query) -> void
+  def page: () -> Integer
+  def limit: () -> Integer
+  def count: () -> Integer
+  def offset: () -> Integer
+  def last: () -> Integer
+  def pages: () -> Integer
+  def from: () -> Integer
+  def to: () -> Integer
+  def previous: () -> Integer?
+  def next: () -> Integer?
+  def in_page: () -> Integer
+  def info_tag: () -> String
+  def series_nav: () -> String
+  def series_items: () -> Array[Integer]
+  def previous_tag: () -> String
+  def next_tag: () -> String
+  def anchor: (Integer target, String text, String aria_label) -> String
+
+  def self.escape_html: (String text) -> String
+  def self.encode_byte: (Integer b) -> String
+  def self.hex_digit: (Integer b) -> Integer
+  def self.decoded_byte: (String raw, Integer i) -> Integer
+  def self.canonical: (String raw) -> String
+  def self.decoded_text: (String raw) -> String
+  def self.split_query: (String query) -> Array[Array[String]]
+  def self.page_param: (String query) -> Integer
+end
+
+module ActionController
+  class Base
+    def pagy: (ActiveRecord::Relation collection, ?Hash[Symbol, Integer] options) -> [Pagy, ActiveRecord::Relation]
+  end
+end

@@ -745,9 +745,12 @@ fn constant_names_class(expr: &Expr, class: &ClassId) -> bool {
     let ExprNode::Const { path } = &*expr.node else {
         return false;
     };
+    // `::Shop::Refund` names `Shop::Refund`: the leading `::` is an empty
+    // first segment, not part of the name.
     let spelling = path
         .iter()
         .map(|p| p.as_str())
+        .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
         .join("::");
     class.0.as_str() == spelling || class.0.as_str().ends_with(&format!("::{spelling}"))
@@ -835,6 +838,7 @@ struct SourceContractIndex<'a> {
     parents: HashMap<ClassId, &'a ClassId>,
     includes: HashMap<ClassId, Vec<ClassId>>,
     modules: HashSet<ClassId>,
+    data_factories: HashSet<ClassId>,
     unmodeled_constructor_lookup: HashSet<ClassId>,
     fragments: HashMap<ClassId, usize>,
     instance: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
@@ -858,6 +862,7 @@ impl<'a> SourceContractIndex<'a> {
             parents: HashMap::new(),
             includes: HashMap::new(),
             modules: HashSet::new(),
+            data_factories: HashSet::new(),
             unmodeled_constructor_lookup: HashSet::new(),
             fragments: HashMap::new(),
             instance: HashMap::new(),
@@ -872,6 +877,9 @@ impl<'a> SourceContractIndex<'a> {
             class_owners.insert(class.name.clone());
             if class.is_module {
                 index.modules.insert(class.name.clone());
+            }
+            if matches!(class.origin, Some(crate::dialect::LibraryClassOrigin::DataFactory { .. })) {
+                index.data_factories.insert(class.name.clone());
             }
             index.add_fragment(
                 &class.name,
@@ -1118,6 +1126,10 @@ impl<'a> SourceContractIndex<'a> {
             .and_then(|parent| self.declaration(parent, name, receiver, seen))
     }
 
+    /// Find the source declaration governing a call, falling back from class-side
+    /// `new` to instance-side `initialize` for ordinary constructors. Data factories
+    /// are excluded from that fallback because their constructor normalizes arguments
+    /// before invoking the initializer; the two call contracts are not interchangeable.
     fn effective_call(
         &self,
         owner: &ClassId,
@@ -1126,7 +1138,8 @@ impl<'a> SourceContractIndex<'a> {
     ) -> Option<(&'a MethodDef, bool)> {
         self.declaration(owner, name, receiver, &mut HashSet::new())
             .or_else(|| {
-                (name.as_str() == "new" && receiver == MethodReceiver::Class)
+                (name.as_str() == "new" && receiver == MethodReceiver::Class
+                    && !self.data_factories.contains(owner))
                     .then(|| {
                         self.declaration(
                             owner,

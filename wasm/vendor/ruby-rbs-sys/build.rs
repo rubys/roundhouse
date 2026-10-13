@@ -43,10 +43,16 @@ fn build(include_dir: &Path, src_dir: &Path, is_wasm: bool) -> Result<(), Box<dy
         build.flag(&format!("--sysroot={}", sysroot.display()));
         build.include(sysroot.join("include"));
 
-        println!(
-            "cargo:rustc-link-search=native={}",
-            sysroot.join("lib/wasm32-wasi").display()
-        );
+        // Per-target lib dir: SDK 34 dropped the `wasm32-wasi` alias that
+        // older SDKs ship beside `wasm32-wasip1`, so try the Cargo target first.
+        let target = env::var("TARGET").unwrap_or_default();
+        let lib_dir = [target.as_str(), "wasm32-wasip1", "wasm32-wasi"]
+            .into_iter()
+            .filter(|t| !t.is_empty())
+            .map(|t| sysroot.join("lib").join(t))
+            .find(|dir| dir.is_dir())
+            .ok_or_else(|| format!("no wasm32-wasi lib dir under {}", sysroot.display()))?;
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
         build.define("_WASI_EMULATED_MMAN", "1");
         println!("cargo:rustc-link-lib=wasi-emulated-mman");
     }

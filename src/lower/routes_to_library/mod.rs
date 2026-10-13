@@ -21,7 +21,7 @@ use crate::dialect::{HttpMethod, LibraryFunction, Param};
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode, InterpPart, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
-use crate::lower::routes::{flatten_routes, FlatRoute};
+use crate::lower::routes::{flatten_routes, flatten_routes_for_helpers, FlatRoute};
 use crate::lower::typing::{fn_sig, lit_str, lit_sym, with_ty};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -147,7 +147,8 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
     // `String` (not `Array[String]`) keeps the optional tail one type
     // across strict/AOT targets; constraint-free routes keep their
     // 4-/5-arg shape.
-    if !r.int_params.is_empty() {
+    let seg_constraints = crate::lower::segment_pattern::encode_route_constraints(&r.seg_patterns);
+    if !r.int_params.is_empty() || !seg_constraints.is_empty() {
         if r.format.is_none() {
             let mut nil = Expr::new(
                 Span::synthetic(),
@@ -157,6 +158,17 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
             args.push(nil);
         }
         args.push(lit_str(r.int_params.join(" ")));
+    }
+    // Segment-pattern requirements (anything beyond the digit class —
+    // `constraints(slug: %r{[^@/.]+})`, compiled by `segment_pattern`
+    // into a portable, backtrack-free encoding) ride the optional 7th
+    // positional as ONE combined string, the same reason `int_params`
+    // stays a scalar rather than an array: a `nil`-or-`[]` optional
+    // tail collapses to `Any?`/a bare variadic on several strict
+    // targets. Routes with no such requirement keep their existing
+    // 4-/5-/6-arg shape, so unconstrained apps emit byte-identical.
+    if !seg_constraints.is_empty() {
+        args.push(lit_str(seg_constraints));
     }
     let class_path: Vec<Symbol> = class_id
         .0
@@ -198,7 +210,7 @@ pub(crate) fn controller_symbol(class_name: &str) -> String {
 /// `LibraryFunction`s, one per named route. Empty when the app has
 /// no routes.
 pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
-    let flat = flatten_routes(app);
+    let flat = flatten_routes_for_helpers(app);
     if flat.is_empty() {
         return Vec::new();
     }
@@ -400,7 +412,7 @@ pub fn lower_url_option_helpers(app: &App) -> Vec<LibraryFunction> {
     if extra_sets.is_empty() {
         return Vec::new();
     }
-    let flat = flatten_routes(app);
+    let flat = flatten_routes_for_helpers(app);
     let module_path = vec![Symbol::from("RouteHelpers")];
     extra_sets
         .iter()
@@ -1510,7 +1522,7 @@ fn format_variant_demand(
     // against the LONGEST route name it starts with or `story_comments`
     // reads as route `story` with format `comments`.
     let mut names: Vec<String> =
-        flatten_routes(app).into_iter().filter(|r| r.named).map(|r| r.as_name).collect();
+        flatten_routes_for_helpers(app).into_iter().filter(|r| r.named).map(|r| r.as_name).collect();
     names.sort();
     names.dedup();
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));

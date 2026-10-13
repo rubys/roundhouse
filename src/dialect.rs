@@ -114,9 +114,25 @@ pub struct Model {
     /// `Rooms::Open` rows say `rooms_open`, not `room`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sti_subclass_names: Vec<ClassId>,
+
+    /// The catalog entries this model's messages can reach, its i18n
+    /// scope and lookup keys; stamped by `i18n::stamp_models`. Default
+    /// (no app locale) answers Rails' own English.
+    #[serde(default, skip_serializing_if = "crate::i18n::ModelI18n::is_default")]
+    pub i18n: crate::i18n::ModelI18n,
 }
 
 impl Model {
+    /// Rails' `human_attribute_name(attr)` for this model.
+    pub fn human_attribute_name(&self, attr: &str) -> String {
+        self.i18n.human_attribute_name(attr)
+    }
+
+    /// `errors.full_message(attr, message)` as Rails builds it for this model.
+    pub fn full_message(&self, attr: &str, message: &str) -> String {
+        self.i18n.full_message(attr, message)
+    }
+
     pub fn associations(&self) -> impl Iterator<Item = &Association> {
         self.body.iter().filter_map(|item| match item {
             ModelBodyItem::Association { assoc, .. } => Some(assoc),
@@ -398,6 +414,13 @@ pub enum Association {
         /// blockless common case.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         extension: Vec<MethodDef>,
+        /// `primary_key: :source_id` — the OWNER column the foreign key
+        /// matches (Rails' `join_primary_key`). `None` means the owner's
+        /// own key, `id`. Every reader of this association must go
+        /// through [`Association::owner_key`]; falling back to `id`
+        /// silently returns the wrong rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        primary_key: Option<Symbol>,
     },
     HasOne {
         name: Symbol,
@@ -407,6 +430,12 @@ pub enum Association {
         #[serde(default, skip_serializing_if = "is_false")]
         foreign_key_explicit: bool,
         dependent: Dependent,
+        /// `has_one :x, through: :y`. Recorded so consumers that would
+        /// treat the association as a direct query can see it is not;
+        /// the reader is still direct (a pre-existing gap), so anything
+        /// that cannot be right for it must refuse.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        through: Option<Symbol>,
         /// See `HasMany::as_interface`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_interface: Option<Symbol>,
@@ -420,6 +449,13 @@ pub enum Association {
         /// `after_save` that stamps the FK (and `as:` type) then saves.
         #[serde(default, skip_serializing_if = "is_false")]
         autosave: bool,
+        /// `primary_key: :source_id` — the OWNER column the foreign key
+        /// matches (Rails' `join_primary_key`). `None` means the owner's
+        /// own key, `id`. Every reader of this association must go
+        /// through [`Association::owner_key`]; falling back to `id`
+        /// silently returns the wrong rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        primary_key: Option<Symbol>,
     },
     HasAndBelongsToMany {
         name: Symbol,
@@ -436,6 +472,25 @@ impl Association {
             | Association::HasOne { name, .. }
             | Association::HasAndBelongsToMany { name, .. } => name,
         }
+    }
+
+    /// The declared `primary_key:` option, if any. For `has_one` /
+    /// `has_many` it names the OWNER column the foreign key matches;
+    /// for `belongs_to` it names the TARGET column the foreign key
+    /// matches. `None` means `id` (or the table's key) in both cases.
+    pub fn declared_primary_key(&self) -> Option<&Symbol> {
+        match self {
+            Association::BelongsTo { primary_key, .. }
+            | Association::HasMany { primary_key, .. }
+            | Association::HasOne { primary_key, .. } => primary_key.as_ref(),
+            Association::HasAndBelongsToMany { .. } => None,
+        }
+    }
+
+    /// The owner-side column a `has_one` / `has_many` foreign key
+    /// matches: the declared `primary_key:` or `id`.
+    pub fn owner_key(&self) -> Symbol {
+        self.declared_primary_key().cloned().unwrap_or_else(|| Symbol::from("id"))
     }
 }
 
@@ -944,6 +999,12 @@ impl LibraryClass {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "template", rename_all = "snake_case")]
 pub enum LibraryClassOrigin {
+    /// Methods lifted from a constant-assigned `Data.define` block. The call span
+    /// links this class to its owner's constant so emission restores the block
+    /// without changing its declaration order or lexical scope.
+    DataFactory {
+        declaration_span: Span,
+    },
     /// Validated Alba source declarations expanded to ordinary methods before
     /// inference. Analysis checks each constructor site, not a joined type
     /// alone. This remains a source library class, not a model/params sibling.
@@ -981,6 +1042,10 @@ pub enum LibraryClassOrigin {
         members: Vec<Symbol>,
         keyword_init: bool,
     },
+    /// A `Dry::Struct` class lowered into its readers and constructor
+    /// (`ingest::dry_struct`). Carried so a target can tell the coercions
+    /// it generated from the app's own code.
+    DryStruct,
 }
 
 /// A graphql-ruby object type (a class descending from
@@ -1734,6 +1799,17 @@ pub enum RouteSpec {
         /// (`PartsController`) still come from `name`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// Per-param regex restrictions inherited from an enclosing
+        /// `constraints(id: /.../) do … end` block (propagated at
+        /// ingest; see `merge_outer_constraints`). Applies to whichever
+        /// standard action's path carries the matching param name — in
+        /// practice `id`, so `show`/`edit`/`update`/`destroy` but not
+        /// `index`/`new`/`create`. Rails also accepts a `resources
+        /// :x, constraints: { id: /.../ }` kwarg directly; that inline
+        /// spelling is not parsed yet (a separate, pre-existing gap),
+        /// only the block form this field carries.
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        constraints: IndexMap<Symbol, String>,
     },
     /// `namespace :admin do … end` / `scope … do … end` — a routing
     /// scope wrapping nested entries. `namespace :x` is `scope` with
@@ -1892,6 +1968,25 @@ pub struct TestModule {
     /// import-stripper, so the field is informational only there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub includes: Vec<ClassId>,
+}
+
+impl TestModule {
+    /// Whether an instance call of `method` on this test class reaches
+    /// a `def` of its own or of a test class it inherits from (among
+    /// `modules`), before the framework's method of that name. A `def
+    /// self.<method>` is not one: the call is sent to the test instance.
+    pub fn defines_instance_method(&self, modules: &[TestModule], method: &str) -> bool {
+        let mut current = Some(self);
+        for _ in 0..32 {
+            let Some(tm) = current else { break };
+            if tm.helpers.iter().any(|helper| helper.name.as_str() == method && helper.receiver == MethodReceiver::Instance) {
+                return true;
+            }
+            current = tm.parent.as_ref()
+                .and_then(|parent| modules.iter().find(|other| other.name == *parent && other.name != tm.name));
+        }
+        false
+    }
 }
 
 /// A single `test "name" do ... end` block. `name` is the literal

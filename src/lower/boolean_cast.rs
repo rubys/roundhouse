@@ -27,7 +27,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     else {
         return;
     };
-    if method.as_str() != "cast" || args.len() != 1 || !is_boolean_type_new(r) {
+    if !matches!(method.as_str(), "cast" | "deserialize") || args.len() != 1 || !is_boolean_type_new(r) {
         return;
     }
     let value = args[0].clone();
@@ -53,5 +53,6 @@ fn is_boolean_type_new(e: &Expr) -> bool {
         ExprNode::Send { recv: Some(c), method, args, block: None, .. }
             if method.as_str() == "new" && args.is_empty()
                 && matches!(&*c.node, ExprNode::Const { path }
-                    if path.iter().map(|s| s.as_str()).collect::<Vec<_>>() == ["ActiveModel", "Type", "Boolean"]))
+                    if matches!(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice(),
+                        ["ActiveModel", "Type", "Boolean"] | ["ActiveRecord", "Type", "Boolean"])))
 }

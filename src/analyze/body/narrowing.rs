@@ -32,6 +32,33 @@ pub(super) enum VarKey {
     /// condition saw rides along, and a narrowing of it binds the name as
     /// a local for the guarded region (bare `x` resolves local-first).
     Reader(Symbol, Ty),
+    /// `x.attr`: a zero-argument read of a stable attribute of the local
+    /// `x` (`at.confidence && at.confidence >= 0.5`). The type the
+    /// condition saw rides along; narrowing records it under
+    /// [`member_key`] for the guarded region, where the same read is typed
+    /// from it.
+    Member(Symbol, Symbol, Ty),
+}
+
+/// The `local_bindings` key under which a narrowed `x.attr` read is kept.
+/// A `.` cannot occur in a Ruby local, so it never collides with a binding.
+pub(super) fn member_key(local: &Symbol, attr: &Symbol) -> Symbol {
+    Symbol::from(format!("{}.{}", local.as_str(), attr.as_str()))
+}
+
+/// What a condition can learn about the names it tests: `reader` says
+/// whether a bare name is an attribute reader of `self`, `member` whether
+/// `local.attr` is a stable attribute read of the local's record.
+pub(super) struct Probe<'a> {
+    pub reader: &'a dyn Fn(&Symbol) -> Option<Ty>,
+    pub member: &'a dyn Fn(&Symbol, &Symbol) -> Option<Ty>,
+}
+
+impl<'a> Probe<'a> {
+    /// Locals and `self` readers only (no member reads).
+    pub fn without_members(reader: &'a dyn Fn(&Symbol) -> Option<Ty>) -> Self {
+        Probe { reader, member: &|_, _| None }
+    }
 }
 
 /// A condition that narrows a variable's type in the branches of an
@@ -72,17 +99,15 @@ pub(super) enum NarrowPred {
 
 #[cfg(test)]
 pub(super) fn extract_narrowing(cond: &Expr) -> Option<NarrowPred> {
-    extract_narrowing_with(cond, &|_| None)
+    extract_narrowing_with(cond, &Probe::without_members(&|_| None))
 }
 
 /// What a condition guarantees on each side. `is_reader` says whether a bare
 /// name is an attribute reader of `self` (see [`VarKey::Reader`]).
-pub(super) fn extract_narrowing_with(
-    cond: &Expr,
-    is_reader: &dyn Fn(&Symbol) -> Option<Ty>,
-) -> Option<NarrowPred> {
-    let extract_narrowing = |e: &Expr| extract_narrowing_with(e, is_reader);
-    let var_key = |e: &Expr| var_key(e, is_reader);
+pub(super) fn extract_narrowing_with(cond: &Expr, probe: &Probe) -> Option<NarrowPred> {
+    let is_reader = probe.reader;
+    let extract_narrowing = |e: &Expr| extract_narrowing_with(e, probe);
+    let var_key = |e: &Expr| var_key(e, probe);
     match &*cond.node {
         // Ruby's `!` is a method call: `!x` parses as `x.!`. So
         // `!x.nil?` is Send(method="!", recv=Some(Send(method="nil?", recv=Var(x)))).
@@ -126,6 +151,10 @@ pub(super) fn extract_narrowing_with(
                     let ty = const_to_ty(arg)?;
                     Some(NarrowPred::IsA(key, ty))
                 }
+                // `if x.attr`: a bare read of a stable member is a truthiness
+                // guard like `if x`. (Any other send with a receiver says
+                // nothing: `var_key` only answers for a member read.)
+                (_, []) => var_key(cond).map(NarrowPred::IsTruthy),
                 _ => None,
             }
         }
@@ -202,10 +231,19 @@ fn negate_pred(p: NarrowPred) -> NarrowPred {
     }
 }
 
-fn var_key(e: &Expr, is_reader: &dyn Fn(&Symbol) -> Option<Ty>) -> Option<VarKey> {
+fn var_key(e: &Expr, probe: &Probe) -> Option<VarKey> {
+    let is_reader = probe.reader;
     match &*e.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if args.is_empty() && matches!(&*r.node, ExprNode::Var { .. }) =>
+        {
+            let ExprNode::Var { name, .. } = &*r.node else { return None };
+            (probe.member)(name, method).map(|ty| VarKey::Member(name.clone(), method.clone(), ty))
+        }
         ExprNode::Var { name, .. } => Some(VarKey::Local(name.clone())),
         ExprNode::Ivar { name } => Some(VarKey::Ivar(name.clone())),
+        // `(x = value).nil?` tests what it just bound to `x`.
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => Some(VarKey::Local(name.clone())),
         // Bareword implicit-self read — view-partial lowering emits
         // param references as `Send { recv: None, method: <name>,
         // args: [], block: None }`, the same shape `compute` (body/
@@ -355,6 +393,17 @@ fn narrow_binding<F: FnOnce(&Ty) -> Ty>(ctx: &mut Ctx, key: &VarKey, f: F) {
             }
             (n, &mut ctx.local_bindings)
         }
+        VarKey::Member(local, attr, ty) => {
+            // Same "it is there" direction as a reader. The key is only
+            // meaningful while `local` still names the record the guard saw;
+            // callers drop it when the region rebinds `local` (see
+            // [`drop_unstable_members`]).
+            let narrowed = f(ty);
+            if narrowed != Ty::Nil && &narrowed != ty {
+                ctx.local_bindings.insert(member_key(local, attr), narrowed);
+            }
+            return;
+        }
     };
     if let Some(current) = bindings.get(name).cloned() {
         let narrowed = f(&current);
@@ -365,11 +414,29 @@ fn narrow_binding<F: FnOnce(&Ty) -> Ty>(ctx: &mut Ctx, key: &VarKey, f: F) {
 pub(crate) fn remove_nil(ty: &Ty) -> Ty {
     match ty {
         Ty::Union { variants } => {
-            let kept: Vec<Ty> = variants
-                .iter()
-                .filter(|v| !matches!(v, Ty::Nil))
-                .cloned()
-                .collect();
+            // A nested union is peeled too: `pluck(:nullable).first` is
+            // typed `(Integer | nil) | nil`, and peeling only the outer
+            // nil left `x.first || 0.5` nullable (lobsters'
+            // `TrafficHelper.cached_current_intensity`, read on every
+            // request by `set_traffic_style`).
+            let mut kept: Vec<Ty> = Vec::new();
+            for v in variants {
+                match remove_nil(v) {
+                    Ty::Nil => {}
+                    Ty::Union { variants: inner } if matches!(v, Ty::Union { .. }) => {
+                        for t in inner {
+                            if !kept.contains(&t) {
+                                kept.push(t);
+                            }
+                        }
+                    }
+                    t => {
+                        if !kept.contains(&t) {
+                            kept.push(t);
+                        }
+                    }
+                }
+            }
             match kept.len() {
                 0 => Ty::Nil,
                 1 => kept.into_iter().next().unwrap(),
@@ -455,4 +522,88 @@ fn ty_compatible(a: &Ty, b: &Ty) -> bool {
             (a, b),
             (Ty::Array { .. }, Ty::Array { .. }) | (Ty::Hash { .. }, Ty::Hash { .. })
         )
+}
+
+/// Forget every narrowed `x.attr` read whose local `x` the given expressions
+/// may rebind or mutate. A narrowed read stands for "the same value as at the
+/// guard", which only holds while `x` still names the same record and nothing
+/// writes through it. Called with the guarded region (and the condition's
+/// left side) before the region is typed; conservative by construction, so a
+/// region that rebinds `x` anywhere loses the narrowing everywhere.
+pub(super) fn drop_unstable_members(ctx: &mut Ctx, scope: &[&Expr]) {
+    if !ctx.local_bindings.keys().any(|k| k.as_str().contains('.')) {
+        return;
+    }
+    let mut touched: std::collections::HashSet<Symbol> = Default::default();
+    for e in scope {
+        collect_touched_locals(e, &mut touched);
+    }
+    if touched.is_empty() {
+        return;
+    }
+    let any = touched.contains(&Symbol::from("*"));
+    ctx.local_bindings.retain(|k, _| match k.as_str().split_once('.') {
+        Some((local, _)) => !any && !touched.contains(&Symbol::from(local)),
+        None => true,
+    });
+}
+
+/// Locals that `e` rebinds (assignment, block/let parameter, pattern or rescue
+/// binding) or writes through (`x.attr = v`, `x.reload`, `x.update(…)`,
+/// any bang method).
+fn collect_touched_locals(e: &Expr, out: &mut std::collections::HashSet<Symbol>) {
+    fn lvalue(t: &LValue, out: &mut std::collections::HashSet<Symbol>) {
+        if let LValue::Var { name, .. } = t {
+            out.insert(name.clone());
+        }
+    }
+    match &*e.node {
+        ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } => {
+            lvalue(target, out);
+            // `x.attr = v` / `x.attr ||= v` write through `x`.
+            if let LValue::Attr { recv, .. } = target {
+                if let ExprNode::Var { name, .. } = &*recv.node {
+                    out.insert(name.clone());
+                }
+            }
+        }
+        ExprNode::MultiAssign { targets, .. } => {
+            for t in targets {
+                lvalue(t, out);
+            }
+        }
+        ExprNode::Let { name, .. } => {
+            out.insert(name.clone());
+        }
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, .. } => {
+            out.extend(params.iter().cloned());
+            out.extend(rest_param.iter().cloned());
+            out.extend(block_param.iter().cloned());
+            out.extend(extra_params.iter().map(|p| p.name.clone()));
+        }
+        // Pattern and rescue bindings: not worth enumerating, so any local
+        // they could bind is treated as touched by marking a wildcard.
+        ExprNode::CaseMatch { .. } | ExprNode::MatchPredicate { .. } | ExprNode::MatchRequired { .. }
+        | ExprNode::BeginRescue { .. } => {
+            out.insert(Symbol::from("*"));
+        }
+        ExprNode::Send { recv: Some(r), method, .. } => {
+            if let ExprNode::Var { name, .. } = &*r.node {
+                let m = method.as_str();
+                let setter = m.ends_with('=') && !matches!(m, "==" | "!=" | "<=" | ">=" | "===");
+                let mutator = m.ends_with('!')
+                    || matches!(
+                        m,
+                        "reload" | "update" | "touch" | "write_attribute" | "assign_attributes"
+                            | "increment" | "decrement" | "toggle" | "attributes=" | "restore_attributes"
+                            | "clear_attribute_changes"
+                    );
+                if setter || mutator {
+                    out.insert(name.clone());
+                }
+            }
+        }
+        _ => {}
+    }
+    e.node.for_each_child(&mut |c| collect_touched_locals(c, out));
 }

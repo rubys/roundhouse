@@ -23,6 +23,7 @@
 //   node verify-ide.mjs            # (run from wasm/ide/)
 
 import { createRequire } from "node:module";
+import { wantsPath } from "../lib/bundle-rules.mjs";
 const require = createRequire(new URL("../../tests/browser_smoke/", import.meta.url).pathname);
 const { chromium } = require("playwright");
 
@@ -286,14 +287,15 @@ check("open folder: real-blog analyzes as a local app",
 check("open folder: selector shows the local app, no ?app= deep-link",
   local.sel === "__local" && !/app=/.test(local.url), `${local.sel} ${local.url}`);
 check("open folder: status says nothing was uploaded", /nothing uploaded/.test(local.status), local.status);
-// Same inclusion rules as the Node bundler: the walk dirs, the single
-// files (Gemfile.lock among them — the gem census reads it), nothing
-// else (real-blog has test/, bin/, public/… on disk).
+// Same inclusion rules as the Node bundler (`bundle-rules.wantsPath`):
+// walk dirs + locales + single files (Gemfile.lock among them — the gem
+// census reads it), nothing else (real-blog has test/, bin/, public/…
+// on disk). Keep the allowlist in one place so locale yml can't drift.
 check("open folder: only analyzable sources were read",
-  local.paths.every((p) => /^(app|extras|lib|config\/routes|models|views|db\/migrate)\//.test(p)
-    || ["db/schema.rb", "config/routes.rb", "config.ru", "app.rb", "db.rb", "seeds.rb", "Gemfile.lock"].includes(p))
+  local.paths.every((p) => wantsPath(p))
   && local.paths.includes("config/routes.rb") && local.paths.includes("db/schema.rb")
   && local.paths.includes("Gemfile.lock")
+  && local.paths.includes("config/locales/en.yml")
   && local.paths.some((p) => p.startsWith("app/models/")),
   `${local.paths.length} paths`);
 // The ledger, then the gem census (real-blog's lock is on disk), then

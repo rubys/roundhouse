@@ -197,7 +197,7 @@ use crate::models::*;
 #[allow(unused_imports)]
 use crate::views::*;
 #[allow(unused_imports)]
-use crate::errors_ext::{raise, NotImplementedError, RecordNotFound, RecordInvalid};
+use crate::errors_ext::{raise, ArgumentError, NotImplementedError, RecordNotFound, RecordInvalid};
 ";
 
 const MODEL_IMPORTS: &str = "\
@@ -348,18 +348,31 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // calls in a runtime file resolve to other methods in the same
     // file. Cross-unit miscompiles, if they surface, get added to
     // `register_hand_written_runtime` against the concrete site.
-    // Runtime emit (inside `rust_units`) walks `emit_library_class`
-    // before the cross-LC registry exists, so install a default
-    // `EmitCtx` for the duration. Phase 2 of #24 moved the per-class
-    // scope thread-locals (`IVAR_TYPES`, `CLASS_METHOD_PARAM_TYS`,
-    // `STATIC_METHODS`, `CONSTRUCTOR_FIELDS`) onto `EmitCtx` fields;
+    // Runtime emit walks `emit_library_class` inside `rust_units`. Seed
+    // the Const-recv registry from every runtime Library LC first so
+    // sibling classes in one source file resolve — e.g.
+    // `AssociationReflection::new` called from `ActiveRecord::Base`
+    // (#832). An empty `EmitCtx` left that call padded against
+    // Base#initialize and emitted `None` for a Value param. Phase 2
+    // of #24 moved the per-class scope thread-locals onto `EmitCtx`;
     // the `with_X<F>` wrappers panic if no `EmitCtx` is installed.
-    // The empty struct's pipeline-global registries are fine here —
-    // runtime files don't call back into the app's class methods, and
-    // the real `EmitCtx` (populated below by
-    // `collect_global_class_methods`) wraps the subsequent per-file
-    // app emit loop.
-    let runtime_units = crate::emit::rust::expr::with_emit_ctx(EmitCtx::default(), || {
+    // App emit installs a fuller ctx below via
+    // `collect_global_class_methods` (models + runtime + …).
+    let mut runtime_lcs_pre: Vec<crate::dialect::LibraryClass> = Vec::new();
+    crate::runtime_loader::rust_library_classes(|classes| {
+        runtime_lcs_pre.extend(classes.iter().cloned());
+    })
+    .expect("rust runtime parse failed (Ruby source error)");
+    let runtime_emit_ctx = collect_global_class_methods(
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        &runtime_lcs_pre,
+    );
+    let runtime_units = crate::emit::rust::expr::with_emit_ctx(runtime_emit_ctx, || {
         crate::runtime_loader::rust_units(|_path, mut classes| {
             let registry = crate::emit::rust::decide::str_color::build_registry(&classes, &[]);
             crate::emit::rust::decide::str_color::color_classes(&mut classes, &registry);
@@ -849,7 +862,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // from that Ruby file and inherits the split, but these
                 // model impls are generated here, so a tree-level grep
                 // for the name finds it in the runtime and still misses
-                // the model. `smoke (rust)` is what caught that.
+                // the model. `smoke (rust)` is what caught that, and
+                // again for `_insert_row` (fixtures and bulk inserts:
+                // timestamps filled, no validations, no callbacks).
                 format!(
                     "\nimpl {name} {{\n\
                         pub fn mark_persisted_bang(&mut self) {{ }}\n\
@@ -864,6 +879,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                             if self.id == 0 {{ self.id = self._adapter_insert();{after_create_commit} }}\n\
                             else if Self::_adapter_exists_by_id_pred(self.id) {{ self._adapter_update();{after_update_commit} }}\n\
                             else {{ let _ = self._adapter_insert();{after_create_commit} }}\n\
+                            true\n\
+                        }}\n\
+                        pub fn _insert_row(&mut self) -> bool {{\n\
+                            self.fill_timestamps(true);\n\
+                            self.id = self._adapter_insert();\n\
                             true\n\
                         }}\n\
                         pub fn save_bang(&mut self) -> Self {{\n\

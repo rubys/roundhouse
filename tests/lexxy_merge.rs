@@ -125,6 +125,27 @@ fn the_apps_allowed_attributes_are_read_off_its_boot() {
 }
 
 #[test]
+fn the_apps_allowed_tags_are_read_off_its_boot() {
+    let app = app(&[
+        (
+            "app/helpers/content_filters.rb",
+            "module ContentFilters\n  EDITOR_FORMATTING_TAGS = %w[ s u mark table thead tbody tfoot tr th td ]\nend\n",
+        ),
+        (
+            "lib/rails_ext/action_text_allowed_tags.rb",
+            "Rails.application.config.to_prepare do\n  defaults = Class.new.include(ActionText::ContentHelper).new\n  ActionText::ContentHelper.allowed_tags =\n    (ActionText::ContentHelper.allowed_tags || defaults.sanitizer_allowed_tags) | ContentFilters::EDITOR_FORMATTING_TAGS\nend\n",
+        ),
+    ]);
+    assert_eq!(
+        app.content_helper_allowed_tags,
+        ["s", "u", "mark", "table", "thead", "tbody", "tfoot", "tr", "th", "td"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn the_lexxy_gem_adds_its_own_attributes() {
     let app = app(&[("Gemfile.lock", LOCK_WITH_LEXXY)]);
     assert_eq!(
@@ -148,6 +169,25 @@ fn the_allowed_attributes_reach_the_runtime_hook() {
     assert!(
         rt.contains("def self.app_allowed_attributes\n      [\"data-language\"]\n    end"),
         "the generated list replaces the default []"
+    );
+}
+
+#[test]
+fn the_allowed_tags_reach_the_runtime_hook() {
+    use roundhouse::project::{target_files, BuildTarget};
+    let fixture = roundhouse::fixtures::real_blog().to_path_buf();
+    let mut app = roundhouse::ingest::ingest_app(&fixture).expect("ingest real-blog");
+    roundhouse::session::analyze_and_lower(&mut app);
+    app.content_helper_allowed_tags = vec!["s".to_string(), "table".to_string()];
+    let files = target_files(&app, &fixture, BuildTarget::Ruby).expect("ruby files");
+    let rt = &files.iter().find(|(p, _)| p == "runtime/action_text.rb").expect("action_text.rb").1;
+    assert!(
+        rt.contains("def self.app_allowed_tags\n      [\"s\", \"table\"]\n    end"),
+        "the generated tag list replaces the default []:\n{rt}"
+    );
+    assert!(
+        rt.contains("+ app_allowed_tags"),
+        "allowed_tags must append the generated hook"
     );
 }
 

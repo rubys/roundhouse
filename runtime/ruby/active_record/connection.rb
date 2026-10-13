@@ -360,8 +360,13 @@ module ActiveRecord
     # Reject nil before a key-typed adapter can coerce it. Generated
     # models override `_exists_primary_key_input` with schema-selected
     # dispatch (same split as find) so Spinel never compiles String into
-    # an Integer adapter slot.
-    def self.exists?(id)
+    # an Integer adapter slot. No argument asks for any row (Rails'
+    # `exists?(conditions = :none)`); the optional argument is a splat
+    # so "absent" and `nil` stay distinct without an untyped default.
+    def self.exists?(*ids)
+      return all.exists? if ids.empty?
+      raise ArgumentError, "wrong number of arguments (given #{ids.length}, expected 0..1)" if ids.length > 1
+      id = ids[0]
       return false if id.nil?
       _exists_primary_key_input(id)
     end
@@ -505,6 +510,16 @@ module ActiveRecord
     # the outermost transaction rather than rolling it back; `rolled_back`
     # tells `ensure` which happened so the two paths can't double-apply.
     #
+    # Each branch keeps its `rescue` clauses in an inner `begin` and its
+    # `ensure` in an outer one, rather than one `begin/rescue/ensure`.
+    # Spinel inlines a yielding method and its block into the caller, so a
+    # nested `transaction { ... }` lands inside the outer one's protected
+    # body; an exception leaving that inner region's `ensure` then jumped
+    # straight to the outer `ensure` and skipped the outer `rescue` when
+    # both clauses sat on one `begin` — the outermost transaction ran its
+    # COMMIT for an exception raised in a joined block. A `begin/rescue`
+    # nested in a `begin/ensure` gets the right dispatch.
+    #
     # The depth itself reads/writes through `Db._txn_depth`/`=` (see
     # runtime/ruby/db.rbs) rather than `Thread.current` directly: a raw
     # `Thread.current[:k]` read has no declared return type for this
@@ -522,35 +537,37 @@ module ActiveRecord
         Db.exec("SAVEPOINT #{savepoint}") unless savepoint.nil?
         Db._txn_depth = depth + 1
         begin
-          result = yield
-          Db.exec("RELEASE SAVEPOINT #{savepoint}") unless savepoint.nil?
-          result
-        rescue ActiveRecord::Rollback
-          # Swallowed by the joined block that saw it, as in Rails: the
-          # outer transaction carries on and commits.
-          Db._txn_depth = depth
-          unless savepoint.nil?
-            begin
-              Db.exec("ROLLBACK TO SAVEPOINT #{savepoint}")
-              Db.exec("RELEASE SAVEPOINT #{savepoint}")
-            rescue StandardError
-              # SQLite may already have ended the whole transaction; the
-              # Rollback still answers nil, as the outer ROLLBACK's does.
+          begin
+            result = yield
+            Db.exec("RELEASE SAVEPOINT #{savepoint}") unless savepoint.nil?
+            result
+          rescue ActiveRecord::Rollback
+            # Swallowed by the joined block that saw it, as in Rails: the
+            # outer transaction carries on and commits.
+            Db._txn_depth = depth
+            unless savepoint.nil?
+              begin
+                Db.exec("ROLLBACK TO SAVEPOINT #{savepoint}")
+                Db.exec("RELEASE SAVEPOINT #{savepoint}")
+              rescue StandardError
+                # SQLite may already have ended the whole transaction; the
+                # Rollback still answers nil, as the outer ROLLBACK's does.
+              end
             end
-          end
-          result = nil
-        rescue Exception => e
-          Db._txn_depth = depth
-          unless savepoint.nil?
-            begin
-              Db.exec("ROLLBACK TO SAVEPOINT #{savepoint}")
-              Db.exec("RELEASE SAVEPOINT #{savepoint}")
-            rescue StandardError
-              # SQLite may already have ended the whole transaction (see
-              # the outer ROLLBACK below); that must not hide `e`.
+            result = nil
+          rescue Exception => e
+            Db._txn_depth = depth
+            unless savepoint.nil?
+              begin
+                Db.exec("ROLLBACK TO SAVEPOINT #{savepoint}")
+                Db.exec("RELEASE SAVEPOINT #{savepoint}")
+              rescue StandardError
+                # SQLite may already have ended the whole transaction (see
+                # the outer ROLLBACK below); that must not hide `e`.
+              end
             end
+            raise e
           end
-          raise e
         ensure
           Db._txn_depth = depth
         end
@@ -559,25 +576,27 @@ module ActiveRecord
         Db._txn_depth = 1
         rolled_back = false
         begin
-          result = yield
-        rescue ActiveRecord::Rollback
-          # Rails' quiet way out: roll back, raise nothing, answer nil.
-          rolled_back = true
-          Db._txn_depth = 0
-          Db.exec("ROLLBACK")
-          result = nil
-        rescue Exception => e
-          rolled_back = true
-          Db._txn_depth = 0
           begin
+            result = yield
+          rescue ActiveRecord::Rollback
+            # Rails' quiet way out: roll back, raise nothing, answer nil.
+            rolled_back = true
+            Db._txn_depth = 0
             Db.exec("ROLLBACK")
-          rescue StandardError
-            # SQLite may already have ended the transaction itself (a
-            # constraint violation it resolves by aborting the whole
-            # transaction, not just the statement, does this) — the
-            # ROLLBACK's own failure must not hide the real error below.
+            result = nil
+          rescue Exception => e
+            rolled_back = true
+            Db._txn_depth = 0
+            begin
+              Db.exec("ROLLBACK")
+            rescue StandardError
+              # SQLite may already have ended the transaction itself (a
+              # constraint violation it resolves by aborting the whole
+              # transaction, not just the statement, does this) — the
+              # ROLLBACK's own failure must not hide the real error below.
+            end
+            raise e
           end
-          raise e
         ensure
           if rolled_back
             nil
@@ -795,6 +814,24 @@ module ActiveRecord
     # survive); non-Hash inputs raise rather than reach Relation's SQL path.
     def self.find_by(conditions)
       ActiveRecord::Relation.new(self).find_by(conditions.to_h)
+    end
+
+    # `Model.find_or_initialize_by` / `find_or_create_by` /
+    # `find_or_create_by!`: Rails delegates them to `all`, so the
+    # default scope applies to the find and seeds the built record. The
+    # lowered call sites (`lower::first_or_create`) inline the statement
+    # forms; these answer the rest (a receiverless call inside a class
+    # method, an `||` operand).
+    def self.find_or_initialize_by(conditions)
+      ActiveRecord::Relation.new(self).find_or_initialize_by(conditions.to_h)
+    end
+
+    def self.find_or_create_by(conditions)
+      ActiveRecord::Relation.new(self).find_or_create_by(conditions.to_h)
+    end
+
+    def self.find_or_create_by!(conditions)
+      ActiveRecord::Relation.new(self).find_or_create_by!(conditions.to_h)
     end
 
     # `Model.find_sole_by(attrs)` — Rails' `where(attrs).sole`; see

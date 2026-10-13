@@ -214,6 +214,17 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             path: output_path(OutputKind::HandWrittenRuntime { name: "broadcasts.ex" }).path,
             content: include_str!("../../runtime/elixir/v2/broadcasts.ex").to_string(),
         });
+        // Thin AssociationReflection — Base is not on ELIXIR_RUNTIME
+        // yet, but lowered models call `.new/2` from
+        // `reflect_on_association` (#832).
+        out.push(EmittedFile {
+            path: output_path(OutputKind::HandWrittenRuntime {
+                name: "association_reflection.ex",
+            })
+            .path,
+            content: include_str!("../../runtime/elixir/v2/association_reflection.ex")
+                .to_string(),
+        });
 
         // Per-model emit. Elixir has no inheritance, so each model module
         // is standalone: the lowered model LC (defstruct + per-model

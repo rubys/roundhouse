@@ -1203,8 +1203,8 @@ end
         );
         let val_at = method_body(&src, "val_at");
         assert!(
-            val_at.contains("unwrap_or_default()"),
-            "vals[i].to_s on Option must unwrap_or_default:\n{val_at}"
+            !val_at.contains(".map("),
+            "vals[i].to_s on Array[String] must not Option-map a plain String:\n{val_at}"
         );
         let render = method_body(&src, "render");
         assert!(

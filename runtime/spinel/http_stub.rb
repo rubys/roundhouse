@@ -47,6 +47,9 @@ module HttpStub
   # keeps the table's element types flat. Both sides are parsed back to
   # objects at match time (`subset?`).
   STUB_MATCHER_JSON = [ "" ]
+  # Whether the stubs answer at all (`disable`/`enable` below). One slot
+  # in a constant Array, for the reason the table is constants.
+  ENABLED = [ true ]
 
   # One spelling for a URL, whichever side wrote it. WebMock treats
   # `https://www.example.com/` and `https://www.example.com:443/` as the
@@ -148,6 +151,7 @@ module HttpStub
   # body's shape, and a silent pass through to the network is the
   # failure that matters.
   def self.find_for(verb, url, body)
+    return -1 unless ENABLED[0]
     v = verb.to_s.upcase
     i = 0
     saw_matcher = false
@@ -194,6 +198,19 @@ module HttpStub
   # so the lowering stays uniform; the ruby family's delegate passes it
   # on to WebMock, where it means something.
   def self.allow_net_connect(hosts)
+    nil
+  end
+
+  # `WebMock.disable!` / `WebMock.enable!`: while disabled no stub
+  # answers and every request goes to the real `Net::HTTP`; the stubs
+  # stay installed for when it is enabled again, as WebMock keeps them.
+  def self.disable
+    ENABLED[0] = false
+    nil
+  end
+
+  def self.enable
+    ENABLED[0] = true
     nil
   end
 

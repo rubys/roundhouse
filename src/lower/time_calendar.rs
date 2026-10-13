@@ -21,6 +21,19 @@ fn rewrite(expr: &mut Expr) {
 }
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {
+    // Not `TimeZone[name]`: a class-side index is an operator on the strict targets; the runtime port answers it as `lookup`.
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node {
+        if method.as_str() == "[]" && args.len() == 1 && is_time_zone_class(r) {
+            *method = Symbol::from("lookup");
+            return;
+        }
+        if method.as_str() == "formatted_offset" && args.is_empty() && matches!(r.ty, Some(Ty::Time)) {
+            let time = r.clone();
+            *expr.node = active_support_call("formatted_offset", vec![time]);
+            expr.ty = Some(Ty::Str);
+            return;
+        }
+    }
     if let ExprNode::Send { recv: Some(r), method, .. } = &mut *expr.node {
         if is_time_const(r) && method.as_str() == "use_zone" {
             *r = Expr::new(r.span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
@@ -70,7 +83,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     if is_int_value(r) && method.as_str() == "in_time_zone" && args.len() <= 1 {
         let epoch = time_expr(active_support_call("time_at_epoch", vec![r.clone()]));
         let grounded = match args.first() {
-            Some(zone) => active_support_call("in_time_zone", vec![epoch, zone.clone()]),
+            Some(zone) => active_support_call("in_time_zone", vec![epoch, zone_name_arg(zone)]),
             None => active_support_call("present", vec![epoch]),
         };
         *expr.node = grounded;
@@ -89,7 +102,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     }
     if method.as_str() == "in_time_zone" && args.len() <= 1 {
         let grounded = match args.first() {
-            Some(zone) => active_support_call("in_time_zone", vec![r.clone(), zone.clone()]),
+            Some(zone) => active_support_call("in_time_zone", vec![r.clone(), zone_name_arg(zone)]),
             None => active_support_call("present", vec![r.clone()]),
         };
         *expr.node = grounded;
@@ -178,7 +191,7 @@ fn rewrite_date_value(expr: &mut Expr, r: &Expr, method: &str, args: &[Expr]) {
     if method == "in_time_zone" && args.len() <= 1 {
         let midnight = time_expr(active_support_call("date_at_midnight", vec![r.clone()]));
         let grounded = match args.first() {
-            Some(zone) => active_support_call("in_time_zone", vec![midnight, zone.clone()]),
+            Some(zone) => active_support_call("in_time_zone", vec![midnight, zone_name_arg(zone)]),
             None => active_support_call("present", vec![midnight]),
         };
         *expr.node = grounded;
@@ -362,6 +375,24 @@ fn all_range_unit(method: &str) -> Option<&'static str> {
     }
 }
 
+// Not a zone object passed through: `ActiveSupport.in_time_zone` keeps one parameter type, `String?`, so Spinel needs no union for it.
+fn zone_name_arg(zone: &Expr) -> Expr {
+    let is_zone = |t: &Ty| matches!(t, Ty::Class { id, .. } if id.0.as_str() == "ActiveSupport::TimeZone");
+    let zone_object = match &zone.ty {
+        Some(Ty::Union { variants }) => {
+            variants.iter().any(is_zone) && variants.iter().all(|v| is_zone(v) || matches!(v, Ty::Nil))
+        }
+        Some(t) => is_zone(t),
+        None => false,
+    };
+    if !zone_object {
+        return zone.clone();
+    }
+    let mut name = Expr::new(Span::synthetic(), active_support_call("zone_name", vec![zone.clone()]));
+    name.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil] });
+    name
+}
+
 fn time_expr(node: ExprNode) -> Expr {
     let mut e = Expr::new(Span::synthetic(), node);
     e.ty = Some(Ty::Time);
@@ -376,6 +407,12 @@ fn date_expr(node: ExprNode) -> Expr {
 
 fn now() -> Expr {
     time_expr(active_support_call("now", vec![]))
+}
+
+fn is_time_zone_class(expr: &Expr) -> bool {
+    matches!(&*expr.node, ExprNode::Const { path }
+        if matches!(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice(),
+            ["ActiveSupport", "TimeZone"] | ["", "ActiveSupport", "TimeZone"]))
 }
 
 fn active_support_call(method: &str, args: Vec<Expr>) -> ExprNode {

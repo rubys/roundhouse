@@ -38,7 +38,7 @@
 # `self.start` is NOT redefined, and `ipaddr:` — the keyword campfire's
 # DNS-rebinding pin is written on — is the PACKAGE's to honour: since
 # matz/spinel#4420 closed (2026-09-10) `Net::HTTP.start` declares it and
-# `open_connection` connects to it while `Host:` and the TLS name stay
+# its connect connects to it while `Host:` and the TLS name stay
 # `address`. Probed 2026-09-17: `Net::HTTP.start("example.com", 80,
 # ipaddr: "127.0.0.1")` from a spinel binary fails with ECONNREFUSED on
 # 127.0.0.1, exactly as CRuby does, so the pin holds on this lane. The
@@ -51,8 +51,9 @@
 #
 # Last definition wins under spinel, and a redefined method sees the
 # class's other methods and ivars — `transport_request` below is the
-# package's `#request` body re-stated over `open_connection`/`reconnect`/
-# `write_request`/`read_response`, which this file leaves alone.
+# package's `#request` body re-stated over `connect`/`begin_transport`
+# (also defined below) and `write_request`/`read_response`, which this
+# file leaves alone.
 require "net/http"
 require_relative "http_stub"
 require_relative "tcp_socket_stub"
@@ -171,18 +172,26 @@ module Net
     def connect_with_timeout
       limit = @open_timeout.nil? ? 0 : @open_timeout
       target = @ipaddr.empty? ? @address : @ipaddr
-      TcpSocketStub.check(target, @port)
-      return TCPSocket.new(target, @port) if limit <= 0
+      # Spinel tip (9bac0daa+): `@port` is Integer? (sp_oint) while
+      # `TcpSocketStub.check` / `TCPSocket.new` take Integer. Default to
+      # the scheme port the same way `stub_url` does, so a definite
+      # Integer reaches those calls.
+      port = @port
+      if port.nil?
+        port = @use_ssl ? 443 : 80
+      end
+      TcpSocketStub.check(target, port)
+      return TCPSocket.new(target, port) if limit <= 0
       s = Socket.new(Socket::AF_INET, Socket::SOCK_STREAM, 0)
       begin
-        s.connect_nonblock(target, @port)
+        s.connect_nonblock(target, port)
       rescue IO::WaitWritable
         if IO.select(nil, [s], nil, limit).nil?
           s.close
           raise OpenTimeout
         end
         begin
-          s.connect_nonblock(target, @port)
+          s.connect_nonblock(target, port)
         rescue Errno::EISCONN
           # already connected: the wait above is what completed it
         end
@@ -194,6 +203,15 @@ module Net
     # client opens and closes around itself; a started one opens its
     # socket on first use (the lazy `start` above) and reconnects after
     # the `Connection: close` every response carries.
+    #
+    # Through CRuby's two private transport hooks, `connect` and
+    # `begin_transport(req)`, so a subclass that overrides them sees them
+    # run in CRuby's order: campfire's `WebPush::Connections::Stages`
+    # records a connection's stage there and its pool reads it back to
+    # tell a dead idle connection from a push the service may have
+    # (`lower::known_super_forwarding` gives its `(...)` overrides these
+    # signatures). Both are defined here rather than relied on from the
+    # package, which names them only from matz/spinel#8361 on.
     def transport_request(req)
       unless @started
         begin
@@ -203,15 +221,61 @@ module Net
           finish
         end
       end
-      if @socket.nil?
-        open_connection
-      elsif !@fresh
-        reconnect
-      end
-      @fresh = false
+      connect if @socket.nil?
+      begin_transport(req)
       write_request(req)
       read_response(req.method)
     end
+
+    # The package connects direct or not at all (`Net::HTTP.new` raises
+    # given a proxy), so no connection here has one.
+    def proxy?
+      false
+    end
+
+    # CRuby's reuse window for an idle connection. Every response here
+    # carries `Connection: close`, so nothing is reused and it governs
+    # nothing; held so a pool that sets it reads back what it wrote.
+    # (The package holds it too from matz/spinel#8361 on.) Unset reads as
+    # CRuby's default, 2.
+    def keep_alive_timeout
+      @keep_alive_timeout.nil? ? 2 : @keep_alive_timeout
+    end
+
+    def keep_alive_timeout=(seconds)
+      @keep_alive_timeout = seconds
+    end
+
+    def connect
+      @socket = connect_with_timeout
+      if @use_ssl
+        begin
+          tls = OpenSSL::SSL::SSLSocket.new(@socket)
+        rescue NameError
+          raise "net/http: an https request needs the openssl package (require \"openssl\")"
+        end
+        tls.hostname = @address
+        tls.connect
+        @tls = tls
+      end
+      @fresh = true
+      nil
+    end
+
+    # Connects again unless the socket was opened for this request: every
+    # response carries `Connection: close`.
+    def begin_transport(req)
+      unless @fresh
+        @tls.sysclose unless @tls.nil?
+        @socket.close unless @socket.nil?
+        @tls = nil
+        @socket = nil
+        connect
+      end
+      @fresh = false
+      nil
+    end
+    private :connect, :begin_transport
   end
 end
 

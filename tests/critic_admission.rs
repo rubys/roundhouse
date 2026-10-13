@@ -10,6 +10,14 @@ fn refuses(body: &str, expected: &str) {
 }
 
 fn refuses_with(body: &str, expected: &str, extra: &[(&str, &str)]) {
+    gate(body, expected, extra, false);
+}
+
+fn admits(body: &str) {
+    gate(body, "", &[], true);
+}
+
+fn gate(body: &str, expected: &str, extra: &[(&str, &str)], admitted: bool) {
     let root = std::env::temp_dir().join(format!("rh_admission_{}_{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst)));
     for (path, text) in [
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n".to_string()),
@@ -32,6 +40,10 @@ fn refuses_with(body: &str, expected: &str, extra: &[(&str, &str)]) {
         if args[0] != "check" { command.arg("-o").arg(root.join("emitted")); }
         let output = command.output().unwrap();
         let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        if admitted {
+            assert!(output.status.success(), "{args:?} refused {body}: {text}");
+            continue;
+        }
         assert!(!output.status.success(), "{args:?} accepted {body}: {text}");
         assert!(text.contains(expected), "{args:?} lost named refusal {expected}: {text}");
     }
@@ -53,14 +65,25 @@ fn unresolved_declared_classes_are_errors() {
 
 #[test]
 fn new_errors_api_requires_runtime_support() {
-    for body in ["errors.added?(:title, :blank)", "errors.details", "errors.where(:title)", "errors.merge!(errors)", "errors.first.options", "errors.delete(:title); errors.size"] {
+    for body in ["errors.added?(:title, :blank)", "errors.details", "errors.where(:title)", "errors.merge!(errors)", "errors.first.options", "errors.delete(:title); errors.size", "f = title.to_sym; errors.full_message(f, \"is taken\")"] {
         refuses(body, "ActiveModel::Errors");
     }
 }
 
 #[test]
+fn errors_full_message_on_a_literal_field_is_admitted() {
+    admits("errors.full_message(:title, \"is taken\").upcase");
+    admits("other = Probe.new; other.errors.full_message(:base, title.to_s)");
+}
+
+#[test]
+fn errors_full_message_on_a_computed_receiver_is_refused() {
+    refuses("Probe.create!(title: \"x\").errors.full_message(:title, \"is taken\")", "ActiveModel::Errors");
+}
+
+#[test]
 fn non_nil_assertions_require_runtime_support() {
-    refuses("T.must(1) + 1", "non-nil assertion");
+    // `T.must` lowers to sorbet's check (tests/sorbet_must_runs.rs).
     refuses("T.must_because(1) { \"present\" }", "non-nil assertion");
     refuses("1.not_nil!", "not_nil!");
 }
@@ -79,8 +102,6 @@ fn for_scope_is_not_a_block_scope() {
 #[test]
 fn registry_signatures_do_not_supply_missing_runtime() {
     for (body, name) in [
-        ("Rails.event.notify(\"probe\")", "event"),
-        ("Rails.error.set_context(probe: true)", "error"),
         ("ActiveRecord::Base.connected_to(role: :reading) { 7 }", "connected_to"),
         ("Benchmark.realtime { 1 }", "Benchmark"),
         ("\"2020-01-02\".to_date", "to_date"),

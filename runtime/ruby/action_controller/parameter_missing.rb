@@ -31,6 +31,20 @@ module ActionController
   class UnpermittedParameters < StandardError
   end
 
+  # Raised by app code to answer 400; the dispatchers rescue it beside `ParameterMissing`, as Rails' rescue_responses do.
+  class BadRequest < StandardError
+    def initialize(msg = "ActionController::BadRequest")
+      super(msg)
+    end
+  end
+
+  # Raised by app code to answer 422; the dispatchers map it the way Rails' rescue_responses do.
+  class InvalidAuthenticityToken < StandardError
+    def initialize(msg = "ActionController::InvalidAuthenticityToken")
+      super(msg)
+    end
+  end
+
   class UnknownFormat < StandardError
   end
 

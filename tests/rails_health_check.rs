@@ -107,7 +107,11 @@ fn the_typescript_tree_names_no_rails_namespace() {
 fn targets_without_namespaced_controllers_emit_as_before() {
     let (with, without) = (app(true), app(false));
     for &target in BuildTarget::TRANSPILE {
-        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        // Futamura serves `/up` the way the source app does: through Rails.
+        if matches!(
+            target,
+            BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura
+        ) {
             continue;
         }
         // Kotlin's first emit on a thread differs from the next one

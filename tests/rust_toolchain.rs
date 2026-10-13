@@ -206,7 +206,7 @@ use app::router::Router;
 fn routed_captures_and_checked_bytes() {
     for (input, expected) in [("abc", "abc"), ("+%2B", "++"), ("%00", "\0"), ("%2500", "%00"), ("%C3%A9", "é")] {
         let path = format!("/echo/{input}");
-        let hit = Router::match_pattern("/echo/:value", &path, "").expect("route");
+        let hit = Router::match_pattern("/echo/:value", &path, "", "").expect("route");
         assert_eq!(hit["value"], expected);
     }
     assert_eq!(Router::capture_byte(vec![0, 255], 0), 0);

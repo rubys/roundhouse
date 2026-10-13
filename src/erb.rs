@@ -43,6 +43,37 @@ pub struct ErbSegment {
     pub e_end: u32,
 }
 
+/// `yield` / `yield :slot` / `render ...` as the WHOLE body of an output
+/// tag: the view walker emits those without an escape, so `<%==` has
+/// nothing to remove. Asked of Prism: anything chained or operated on the
+/// result (`render("x") + extra`, `yield.upcase`, `render "x" if cond`) is
+/// a different expression whose value the walker would escape, so it is
+/// wrapped in `raw`.
+fn is_unescaped_call(ruby: &str) -> bool {
+    // Inside a method, so a bare `yield` is not a top-level syntax error.
+    let src = format!("def _t\n{ruby}\nend");
+    let result = ruby_prism::parse(src.as_bytes());
+    if result.errors().next().is_some() {
+        return false;
+    }
+    let root = result.node();
+    let Some(program) = root.as_program_node() else { return false };
+    let top = program.statements().body();
+    let mut top_iter = top.iter();
+    // Exactly one top-level statement: the wrapper `def`, not one the body
+    // closed early and followed with more code.
+    let (Some(first), None) = (top_iter.next(), top_iter.next()) else { return false };
+    let Some(def) = first.as_def_node() else { return false };
+    let Some(statements) = def.body().and_then(|b| b.as_statements_node()) else { return false };
+    let stmt_list = statements.body();
+    let mut stmts = stmt_list.iter();
+    let (Some(only), None) = (stmts.next(), stmts.next()) else { return false };
+    if only.as_yield_node().is_some() {
+        return true;
+    }
+    only.as_call_node().is_some_and(|call| call.receiver().is_none() && call.name().as_slice() == b"render")
+}
+
 /// Translate one compiled-Ruby byte offset to a template byte offset.
 ///
 /// Offsets inside a segment translate by delta (clamped to the
@@ -320,10 +351,17 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
                         // (`link_to x, y, class: "..."`) and low-precedence
                         // operators (`a || b`) bind as a single expression.
                         // Ingest unwraps ParenthesesNode transparently.
-                        out.push_str("_buf = _buf + (");
+                        //
+                        // `<%== expr %>` skips the auto-escape: spelled
+                        // `raw((expr))`, the form `<%= raw(expr) %>` already
+                        // lowers unescaped. `yield` and `render` are left
+                        // bare: the walker never escapes either, and its
+                        // classifiers match them as the whole expression.
+                        let raw_wrap = is_raw_output && !is_unescaped_call(ruby);
+                        out.push_str(if raw_wrap { "_buf = _buf + (raw((" } else { "_buf = _buf + (" });
                         record_code(&mut map, out.len(), ruby, body_start, body);
                         out.push_str(ruby);
-                        out.push_str(").to_s\n");
+                        out.push_str(if raw_wrap { "))).to_s\n" } else { ").to_s\n" });
                     }
                 } else if let Some(modifier) = end_tag_modifier(ruby) {
                     // `<% end %>`, and `<% end if cond %>` — a block

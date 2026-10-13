@@ -216,6 +216,13 @@ fn attach_preloads(
         }) else {
             continue;
         };
+        // The batch below keys on the parents' `id`. An association
+        // matched on another owner column (`primary_key:`) keeps its
+        // lazy reader, which honors it, instead of loading the wrong
+        // children.
+        if edge.primary_key.is_some() {
+            continue;
+        }
         let Some(table_ref) = registry.get(&edge.to).and_then(|i| i.table.clone()) else {
             continue;
         };

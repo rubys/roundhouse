@@ -1581,51 +1581,43 @@ EMPTY rather than a bare `nil` — a lone `nil` gives Rust an `Option`
 with nothing to infer from (`E0282` on `None;`), where an empty body is
 a plain `void`.
 
-### `expires_in` records Cache-Control but emits no header
+### `expires_in` records Cache-Control but emits no header — FIXED
 
-`expires_in 1.year, public: true` records the max-age and the
-public/private flag on the controller and stops there. No
-`Cache-Control` header is produced, so a real client is told nothing
-about caching and re-fetches every time.
+**FIXED 2026-10-09** (rubys/roundhouse#679). `expires_in 1.year, public:
+true` — and `response.cache_control.replace(private: true, no_store:
+true)`, the shape a `before_action :set_cache_control_defaults` filter
+actually writes — now both reach the wire. The two TYPED
+`cache_control_max_age` / `cache_control_public` readers remain, now
+delegating to `ActionController::CacheControlStore`
+(`action_controller/base.rb`): one bool/Integer field per Rails option
+(`public`, `private`, `no_store`, `no_cache`, `must_revalidate`,
+`must_understand`, `immutable`, `max_age`, `stale_while_revalidate`,
+`stale_if_error`, `extras`) rather than Rails' one mixed Hash, so no
+strict target pays for an `untyped cache_control`. `to_header` composes
+the `Cache-Control` string in Rails 8.1.4's own branch order (pinned
+against the gem in `cache_control_test.rb`); `commit_cache_control!` (a
+ruby-family reopen, `action_controller/cache_control.rb`, beside
+`cookies.rb`) writes it onto the buffered header store right before
+each wire path's existing header copy — the CRuby overlay's `main.rb`,
+the spinel scaffold's `main.rb`, and the spinel test harness all call
+it. That reopen is also where `response.cache_control`'s Hash-like
+`[]`/`[]=`/`delete`/`merge!`/`replace` surface lives, over the typed
+store.
 
-**Why.** The same unsent extra-header seam the conditional-GET entry
-above describes, approached from the writing side rather than the
-reading side: the CGI harness emits status, body and content type, and
-nothing else. Composing the header string into the buffered `headers`
-hash ahead of that would be work nothing reads — and `@headers[k] = v`
-does not survive the Rust emitter, which renders a Hash index-assign as
-`self.headers[k] = v` where `HashMap` wants `.insert()` (E0594:
-`IndexMut` is not implemented for `HashMap`). That emitter gap is worth
-closing on its own; it is not worth carrying dead code to reach.
+Before this, the previously-described emitter gap (`@headers[k] = v`
+not surviving the Rust emitter as a Hash index-assign) was the blocker
+for EVERY strict target having a header-writing seam at all, not just
+Cache-Control; it stands as a separate gap for those targets, which
+`expires_in` still records into the typed store (reachable from
+`cache_control_max_age` / `cache_control_public`) without writing a
+header, same as before.
 
-**What it costs.** Bandwidth, and only bandwidth — an uncached response
-is a correct response. Nothing an app does depends on the client
-honoring it.
-
-**Where a test differs from a client.** `response.cache_control` reads
-the controller's recorded values directly, not a parsed header, so a
-test asserting `cache_control[:max_age]` sees the right answer while an
-HTTP client sees no header at all. That is the honest reading of what is
-implemented: the VALUE is computed, the TRANSPORT is not.
-
-`stale_while_revalidate:` is accepted and recorded nowhere for the same
-reason — it exists so that campfire's logos and avatars actions, two of
-its three call sites, do not raise ArgumentError on an option this
-method would otherwise not know.
-
-**Shape.** Rails' `response.cache_control` is `{public: true, max_age:
-31556952}` — an Integer and a boolean in one Hash, the type bag every
-strict target pays for. The controller keeps the two facts apart as
-`cache_control_max_age` (Integer) and `cache_control_public` (bool), and
-only the TEST harness reassembles Rails' Hash, since the subscript
-spelling is what a test writes and the harness ships to the Ruby family
-alone. The rest of Rails' options (`must_revalidate:`,
-`stale_if_error:`) join `stale_while_revalidate:` when a call site asks,
-rather than as a splat nothing can type. The seconds argument is
-grounded at the CALL SITE by `lower::duration::rewrite_expires_in` —
-the same `.to_i` unwrap `signed_id(expires_in:)` gets — so the runtime
-signature stays `Integer` and no strict target pays for an `untyped`
-parameter.
+`stale_if_error:` reaches the runtime the same way
+`stale_while_revalidate:` and the seconds argument itself do: grounded
+to seconds at the CALL SITE by `lower::duration::rewrite_expires_in`
+(`1.day` → `86400`), the same `.to_i` unwrap `signed_id(expires_in:)`
+gets, so the runtime signature stays `Integer` and no strict target
+pays for an `untyped` parameter.
 
 ### `Relation#find` raises `RecordNotFound` — as Rails does
 
@@ -2378,7 +2370,7 @@ surface twice. Do it with the golden dumps regenerated in the same
 commit, and check `compare-*` on every target rather than assuming a
 DOM comparison cannot see it.
 
-### Pooled web push connections do not track their stage on spinel — not yet
+### Pooled web push connections on spinel wait on a compact-class fix — not yet
 
 campfire's `WebPush::Connections` (upstream since #351) opens pooled push
 connections as `class HTTP < Net::HTTP; include Stages; end`, where
@@ -2395,29 +2387,61 @@ On the ruby family this runs as written, against Ruby's own net/http
 test helper starts; the twentieth mixes a module into one connection
 with `extend`, the per-object mixin no compiled target has).
 
-On spinel it does not, for two reasons, and both are work not done
-rather than a subset boundary:
+For spinel, the forwarding and the hooks are done:
 
-- **Our side.** The spinel emit refuses `def m(...)` forwarding into
-  `super` (`full argument forwarding not supported`), which is two of
-  the strict-emit errors CI's ceiling counts. The parent methods'
-  signatures are known (`begin_transport(req)`, `connect()`), so the
-  forwarding can be spelled out.
-- **Spinel's side.** `packages/net`'s `Net::HTTP` has neither method:
-  its request path is `request` → `perform` → `reconnect`, and it has no
-  `keep_alive_timeout`. The hooks have to exist there, shaped as CRuby's,
-  for an override of them to mean anything.
+- **The forwarding.** `lower::known_super_forwarding` gives a `(...)`
+  override that only reaches `super` the destination's own
+  parameters when the destination is a stdlib method of known
+  signature. For these two that is CRuby's: `begin_transport(req)` and
+  `connect()`. The strict spinel emit has no errors left.
+- **The hooks.** `runtime/spinel/net_http.rb` routes its transport
+  through `connect` and `begin_transport(req)` in CRuby's order and
+  holds `keep_alive_timeout` and `proxy?`, so an override of either
+  hook runs. It works against the net package before and after
+  matz/spinel#8361, which adds the same methods upstream.
+  `tests/emit_and_run.rs` runs the pattern natively
+  (`forwarding_into_net_http_transport_hooks_runs_on_spinel`).
 
-Until both land, `WebPush::Connections::HTTP` is not defined in the
-spinel binary (spinel warns "defined nowhere in the program"), so a
-pooled push delivery there raises where it reaches the class.
+Three gaps remain, all on spinel's side:
+
+- **The class itself (matz/spinel#8369).** A class nested in a compact
+  `class A::B` body is undefined at run time when it is named like its
+  superclass. campfire's `class WebPush::Connections` + nested
+  `class HTTP < Net::HTTP` is exactly that, and the emit writes nested
+  modules in the compact form too. Until it is fixed, a pooled push
+  delivery on the spinel binary raises NameError where it reaches
+  `WebPush::Connections::HTTP`.
+- **The tests' TLS server.** campfire's push-service test helper serves
+  TLS itself (`OpenSSL::SSL::SSLContext#key=`, a server-side context).
+  spinel's openssl package is a client, so those tests cannot handshake
+  even with the class defined.
+- **Proxies.** One test constructs `Net::HTTP.new(host, port, proxy)`.
+  The net package refuses a proxy at construction.
 
 ### Smaller shapes campfire main reaches, each narrower than Rails
 
 - **`I18n.locale` / `default_locale` answer `:en`** (`runtime/ruby/i18n_locale.rb`),
-  Rails' default when nothing sets one. Setting a locale (`I18n.locale =`,
-  `with_locale`, `config.i18n.default_locale`) and translation (`I18n.t`)
-  are not modeled.
+  Rails' default when nothing sets one. Setting a locale at run time
+  (`I18n.locale =`, `with_locale`) is not modeled. Translation is answered
+  at compile time from the default locale (`src/i18n`): `t` / `I18n.t`
+  with a literal key, attribute names, validation messages and form
+  labels. A key the locale lacks answers as Rails does in the running
+  environment: `Translation missing: en.key`, a template's
+  `translation_missing` span, or `I18n::MissingTranslationData` where
+  `config.i18n.raise_on_missing_translations` is set (`:strict` and a
+  value computed at boot stay errors). A key with run-time text after a
+  literal prefix (`t("statuses.#{v}")`) folds every translation under
+  the prefix into a `case` on the normalized key, falling back to the
+  missing answer or `default:`. Where such a key names a subtree, Rails
+  answers a Hash; here it raises `NotImplementedError`. A key with no
+  literal prefix, or one reaching more than 400 translations, is an
+  error rather than a guess. A `Rails::Engine` gem's `config/locales`
+  load before the app's, read where Bundler installed the gem
+  (`BUNDLE_PATH`, `GEM_HOME`, `GEM_PATH`), so an uninstalled gem's keys
+  stay missing. Engines load in lockfile order, not Rails' railtie
+  order, which differs only when two gems define one key. A gem that is
+  not an engine adds its files from its own code; none is read unless
+  `src/i18n/gems.rs::NON_ENGINE_LOCALES` names its paths.
 - **`fragment_name_with_digest(name, digest_path)` adds no template
   digest**: templates carry none here (see
   `runtime/spinel/action_controller_fragment_caching.rb`), so an omitted
@@ -2434,6 +2458,47 @@ pooled push delivery there raises where it reaches the class.
 - **`Rails.application.env_config` holds what is set and is consulted
   for nothing**: a forgery failure always renders the 422 that
   `action_dispatch.show_exceptions = :rescuable` asks for.
+- **`save` writes the whole row; only `touch` writes what changed.**
+  Rails' partial writes UPDATE the changed columns; this runtime's
+  `_adapter_update` writes every column the record loaded. A bare
+  `touch` (and so `belongs_to … touch: true`) UPDATEs `updated_at`
+  alone (`_adapter_touch`), which is what keeps campfire's
+  trigger-maintained `rooms.messages_count` correct when a message
+  touches its room. A `save`/`update` of a record loaded before a
+  trigger moved one of its columns still writes the stale value back.
+
+### `HashWithIndifferentAccess` is a String-keyed Hash; a call converts its keys at the site
+
+No target can subclass `Hash`, so the class exists only in the
+analyzer, as `HashWithIndifferentAccess[V]` (`analyze::indifferent`).
+`lower::indifferent_access` rewrites each call on a value of that type
+into the String-keyed Hash call. It converts keys and values the way
+Rails does: a Symbol key becomes its String, other keys stay as they
+are, and a written Hash or Array value converts all the way down, an
+Array in place under `[]=`. The value stays a `Hash`, so `is_a?(Hash)`,
+merging it into another hash, and JSON encoding answer as in Rails. A
+method outside the modeled surface is an error, as is any use of the
+constant other than `new`.
+
+Where it differs from Rails:
+
+- **A value whose type is not known.** A Symbol key read from one
+  converts only along a chain of `[]` / `fetch` / `dig` / `first` /
+  `last` reads rooted at an indifferent hash. Once the value is held in
+  a local or passed to a method, the indifferent type is gone and
+  `x[:key]` reads the plain hash, which answers `nil` where Rails
+  answers the value.
+- **An indifferent hash inside an untyped or Array value is copied.**
+  Rails keeps such a hash as it is, shared, when it is nested into
+  another. The runtime cannot tell it from a plain Hash, so it converts
+  it into a new hash.
+- **The constructor drops a source hash's `default` / `default_proc`.**
+- **A value that may not be a Hash takes a String key where Rails raises.**
+  This covers a read on that chain, or a value typed as an indifferent
+  hash OR something else. `h[:name][:x]` on a String value is a
+  `TypeError` in Rails. The converted call asks `"…"["x"]` instead and
+  answers a substring or `nil`. `include?`, `member?` and `delete` are
+  not converted there, since an Array answers them for a Symbol too.
 
 ## Related docs
 
