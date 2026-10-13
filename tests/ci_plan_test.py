@@ -992,6 +992,8 @@ class Results(unittest.TestCase):
                         "default": "success",
                         "minor-gc": "success",
                         "verify-gen": "success",
+                        "parity": "success",
+                        "rest": "success",
                     },
                 }
                 for j in plan["jobs"]
@@ -1096,6 +1098,22 @@ class Results(unittest.TestCase):
                         del outputs[mode]
                     else:
                         outputs[mode] = status
+                    self.assertEqual(ci.check_results(plan, needs), ([], False))
+
+    def test_each_spinel_toolchain_shard_must_actually_pass_for_completion(self):
+        # The suite is a two-shard matrix; each shard writes its own output
+        # key, so one shard's success cannot stand in for the other's.
+        plan = ci.select([], spinel_lane=True)
+        self.assertIn("spinel-toolchain", plan["jobs"])
+        for shard in ["parity", "rest"]:
+            for status in ["failure", "cancelled", "", None]:
+                with self.subTest(shard=shard, status=status):
+                    needs = self.needs(plan)
+                    outputs = needs["spinel-toolchain"]["outputs"]
+                    if status is None:
+                        del outputs[shard]
+                    else:
+                        outputs[shard] = status
                     self.assertEqual(ci.check_results(plan, needs), ([], False))
 
     def test_advisory_ledger_extras_never_claim_complete_under_coe(self):
