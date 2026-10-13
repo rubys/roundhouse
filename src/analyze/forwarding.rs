@@ -81,7 +81,7 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
     for (span, policy) in keyword_calls_with_index(app, &contracts, &actions) {
         if matches!(
             policy,
-            KeywordPolicy::Refuse | KeywordPolicy::RefuseOrdinarySuper
+            KeywordPolicy::Refuse | KeywordPolicy::RefuseKeywords | KeywordPolicy::RefuseOrdinarySuper
         ) {
             out.push(keyword_refusal(span, policy));
         }
@@ -169,7 +169,8 @@ pub(crate) fn methods(app: &App) -> impl Iterator<Item = (&ClassId, &MethodDef)>
         .chain(
             app.test_modules
                 .iter()
-                .flat_map(|t| t.helpers.iter().map(move |m| (&t.name, m))),
+                .flat_map(|t| t.helpers.iter().map(move |m| (&t.name, m))))
+        .chain(app.controllers.iter().flat_map(|c| c.class_methods().map(move |m| (&c.name, m))),
         )
 }
 
@@ -370,12 +371,39 @@ fn destination<'a>(
                 None => context.map(|(owner, _)| owner),
                 Some(r) if matches!(&*r.node, ExprNode::SelfRef) => context.map(|(owner, _)| owner),
                 Some(r) => match (&*r.node, r.ty.as_ref()) {
+                    (ExprNode::Const { path }, ty)
+                        if !r.span.is_synthetic()
+                            && r.decisions & crate::expr::GENERATED_CONST_REF == 0
+                            && contracts.constants.namespace(r.span, path).is_some() =>
+                    {
+                        // A carried helper keeps the source's lexical scope, even
+                        // when inference retained only the constant's short name.
+                        // The index is position-based: validate current spelling
+                        // too, since a generated/renamed node can borrow that span.
+                        let id = contracts.constants.namespace(r.span, path)?;
+                        let absolute = path.first().is_some_and(|p| p.as_str().is_empty());
+                        let spelling = path.iter().filter(|p| !p.as_str().is_empty())
+                            .map(|p| p.as_str()).collect::<Vec<_>>().join("::");
+                        let matches_source = id.0.as_str() == spelling
+                            || (!absolute && id.0.as_str().ends_with(&format!("::{spelling}")));
+                        let matches_type = match ty {
+                            None => true,
+                            Some(Ty::Class { id: inferred, .. }) => inferred == id
+                                || inferred.0.as_str() == spelling,
+                            _ => false,
+                        };
+                        if !matches_source || !matches_type {
+                            return None;
+                        }
+                        return destination_for_class(app, contracts, id, method, receiver);
+                    }
                     (ExprNode::Const { .. }, Some(Ty::Class { id, .. })) => {
                         // Constructor monomorphization can retain the base's
                         // inferred type on a newly named subclass receiver.
                         // Do not admit the base contract for that source name.
                         constant_names_class(r, id).then_some(id)
                     }
+                    (ExprNode::Const { .. }, None) => None,
                     (_, Some(Ty::Class { id, .. })) => Some(id),
                     _ => None,
                 },
@@ -399,13 +427,7 @@ fn destination<'a>(
                 }
                 // A source-defined class .new wins over constructor
                 // dispatch; an instance method called new is ordinary.
-                contracts
-                    .effective_call(c, method, receiver)
-                    .map(|(method, model)| ResolvedDestination {
-                        method,
-                        model,
-                        lookup_owner: c.clone(),
-                    })
+                destination_for_class(app, contracts, c, method, receiver)
             })
         }
         ExprNode::Super { .. } => {
@@ -436,6 +458,54 @@ fn association_method(app: &App, owner: &ClassId, method: &MethodDef) -> bool {
             _ => false,
         })
     })
+}
+
+fn destination_for_class<'a>(
+    app: &App,
+    contracts: &SourceContractIndex<'a>,
+    owner: &ClassId,
+    name: &Symbol,
+    receiver: MethodReceiver,
+) -> Option<ResolvedDestination<'a>> {
+    if constructor::unknown_lookup(contracts, owner, name, receiver) {
+        return None;
+    }
+    let (method, model) = contracts.effective_call(owner, name, receiver)?;
+    // A flattened ClassMethods instance definition is callable on its real
+    // includer, not as a singleton on the source module itself.
+    if receiver == MethodReceiver::Class && contracts.modules.contains(owner)
+        && app.concern_class_method_templates.get(owner)
+            .is_some_and(|spans| spans.contains(&method.name_span))
+    {
+        return None;
+    }
+    Some(ResolvedDestination {
+        method,
+        model,
+        lookup_owner: owner.clone(),
+    })
+}
+
+/// Ruby emission qualifies a cross-helper bare call through this same
+/// application index. Do not borrow it for arbitrary instance dispatch.
+fn helper_keyword_destination<'a>(
+    app: &'a App,
+    contracts: &SourceContractIndex<'a>,
+    context: Option<(&ClassId, &MethodDef)>,
+    call: &Expr,
+) -> Option<ResolvedDestination<'a>> {
+    let (owner, enclosing) = context?;
+    let ExprNode::Send { recv: None, method, .. } = &*call.node else { return None };
+    if !app.helper_method_index.values().any(|helper| helper == owner)
+        || !contracts.verified_hierarchy(owner, &mut HashSet::new())
+        || contracts.declaration(owner, method, enclosing.receiver, &mut HashSet::new()).is_some()
+        || !contracts.includes(owner).is_empty()
+        || contracts.parent(owner).is_some()
+    {
+        return None;
+    }
+    let helper = app.helper_method_index.get(method)?;
+    destination_for_class(app, contracts, helper, method, MethodReceiver::Instance)
 }
 
 fn declaration_error((method, _model): (&MethodDef, bool)) -> Option<&'static str> {
@@ -540,6 +610,9 @@ fn virtual_destinations<'a>(
                 "forwarding virtual dispatch through reopened fragments cannot be verified",
             );
         }
+        if constructor::unknown_lookup(contracts, child, method, enclosing.receiver) {
+            return Err("forwarding virtual constructor lookup cannot be verified");
+        }
         if let Some(candidate) = contracts.effective_call(child, method, enclosing.receiver) {
             candidates.push((child.clone(), candidate));
         }
@@ -550,12 +623,22 @@ fn virtual_destinations<'a>(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeywordPolicy {
     Native,
+    NativeKeywords,
     Legacy,
     Refuse,
+    RefuseKeywords,
     RefuseOrdinarySuper,
 }
 
 pub(crate) fn keyword_refusal(span: Span, policy: KeywordPolicy) -> Diagnostic {
+    if policy == KeywordPolicy::RefuseKeywords {
+        return Diagnostic::unsupported(
+            span,
+            None,
+            "keyword splat into source keyword parameters",
+            "keyword destination's native argument ABI cannot be verified",
+        );
+    }
     if policy == KeywordPolicy::RefuseOrdinarySuper {
         return Diagnostic::unsupported(
             span,
@@ -590,8 +673,7 @@ pub(crate) fn keyword_calls_and_constructor_contracts(
     // contracts outlive this call and borrow `app` alone, so they get an
     // index of their own (a controller is never a constructor).
     let plans = keyword_calls(app);
-    let mut contracts = SourceContractIndex::new(app, &[]);
-    constructor::index_unmodeled_lookup_mutations(app, &mut contracts);
+    let contracts = SourceContractIndex::new(app, &[]);
     (
         plans,
         constructor::constructor_contracts_with_index(app, &contracts),
@@ -621,7 +703,8 @@ fn keyword_calls_with_index(
                 .any(|a| matches!(&*a.node, ExprNode::KeywordSplat { .. }))
         }) && !(fallback && plans.contains_key(&e.span))
         {
-            let policy = if !possible_full_destination(contracts, context, e) {
+            let policy = if !possible_full_destination(contracts, context, e)
+                && !possible_keyword_destination(contracts, context, e) {
                 // Unrelated selectors cannot reach a full contract. Avoid
                 // scanning receiver provenance and hierarchies for each of
                 // their keyword calls in a large application.
@@ -635,7 +718,8 @@ fn keyword_calls_with_index(
                     KeywordPolicy::Legacy
                 }
             } else {
-                let resolved = destination(app, contracts, context, e);
+                let resolved = destination(app, contracts, context, e)
+                    .or_else(|| helper_keyword_destination(app, contracts, context, e));
                 if resolved
                     .as_ref()
                     .is_some_and(|d| d.method.params.iter().any(|p| p.forwarding))
@@ -646,6 +730,12 @@ fn keyword_calls_with_index(
                         KeywordPolicy::Native
                     } else {
                         KeywordPolicy::Refuse
+                    }
+                } else if possible_keyword_destination(contracts, context, e) {
+                    if keyword_contract_error(context, e, resolved, contracts).is_none() {
+                        KeywordPolicy::NativeKeywords
+                    } else {
+                        KeywordPolicy::RefuseKeywords
                     }
                 } else if resolved.is_none()
                     || virtual_destinations(contracts, context, e).map_or(true, |v| {
@@ -675,7 +765,26 @@ fn keyword_calls_with_index(
             .for_each_child(&mut |c| visit(app, contracts, context, c, plans, fallback));
     }
     let mut plans = HashMap::new();
+    let mut template_roots = HashSet::new();
     for (owner, method) in methods(app).chain(actions.iter().map(|(c, m)| (c, m))) {
+        // Non-singleton templates do not execute on the source module.
+        // They may be copied onto an includer or consumed by class-body
+        // macro expansion. Check every surviving copy and real singleton,
+        // not an invented call on the carrier's self.
+        if method.receiver == MethodReceiver::Class
+            && contracts.modules.contains(owner)
+            && method.name_span.file.0 != 0
+            && app
+                .concern_class_method_templates
+                .get(owner)
+                .is_some_and(|spans| spans.contains(&method.name_span))
+        {
+            // Exact roots, not shared/synthetic spans: runtime copies still
+            // participate in the fallback inventory.
+            template_roots.insert(&method.body as *const Expr);
+            template_roots.extend(method.params.iter().filter_map(|p| p.default.as_ref()).map(|e| e as *const Expr));
+            continue;
+        }
         visit(
             app,
             contracts,
@@ -696,7 +805,9 @@ fn keyword_calls_with_index(
         }
     }
     crate::lower::for_each_forwarding_body_ref(app, &mut |e| {
-        visit(app, contracts, None, e, &mut plans, true)
+        if !template_roots.contains(&(e as *const Expr)) {
+            visit(app, contracts, None, e, &mut plans, true)
+        }
     });
     plans
 }
@@ -721,7 +832,25 @@ fn possible_full_destination(
     contracts.full_selectors.contains(method)
         || (method.as_str() == "new"
             && contracts
-                .full_selectors
+                .full_selectors.contains(&Symbol::from("initialize")))
+}
+
+fn possible_keyword_destination(
+    contracts: &SourceContractIndex<'_>,
+    context: Option<(&ClassId, &MethodDef)>,
+    call: &Expr,
+) -> bool {
+    let method = match &*call.node {
+        ExprNode::Send { method, .. } => method,
+        ExprNode::Super { .. } => match context {
+            Some((_, enclosing)) => &enclosing.name,
+            None => return false,
+        },
+        _ => return false,
+    };
+    contracts.keyword_selectors.contains(method)
+        || (method.as_str() == "new"
+            && contracts.keyword_selectors
                 .contains(&Symbol::from("initialize")))
 }
 
@@ -835,6 +964,7 @@ fn constructed_instance(
 /// tree-shaker's conservative runtime lookup intentionally conflates receiver
 /// sides and aliases. Neither is an admission check for source semantics.
 struct SourceContractIndex<'a> {
+    constants: std::sync::Arc<super::body::ConstResolver>,
     parents: HashMap<ClassId, &'a ClassId>,
     includes: HashMap<ClassId, Vec<ClassId>>,
     modules: HashSet<ClassId>,
@@ -845,6 +975,7 @@ struct SourceContractIndex<'a> {
     class: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
     virtual_owners: Vec<&'a ClassId>,
     full_selectors: HashSet<Symbol>,
+    keyword_selectors: HashSet<Symbol>,
     unretained: HashSet<Span>,
     /// The model whose emitted synthesis shadows a source method contract.
     /// Keep the model alongside the span so an unrelated sibling receiver
@@ -859,6 +990,7 @@ impl<'a> SourceContractIndex<'a> {
     /// inherited contracts selected through sends or explicit packet `super`.
     fn new(app: &'a App, actions: &'a [(ClassId, MethodDef)]) -> Self {
         let mut index = Self {
+            constants: app.const_resolver.for_sources(&app.sources),
             parents: HashMap::new(),
             includes: HashMap::new(),
             modules: HashSet::new(),
@@ -869,11 +1001,27 @@ impl<'a> SourceContractIndex<'a> {
             class: HashMap::new(),
             virtual_owners: Vec::new(),
             full_selectors: HashSet::new(),
+            keyword_selectors: HashSet::new(),
             unretained: HashSet::new(),
             unretained_models: HashSet::new(),
         };
         let mut class_owners = HashSet::new();
+        let carried: HashSet<*const LibraryClass> = app.test_modules.iter()
+            .flat_map(|module| module.inner_classes.iter().map(|class| class as *const LibraryClass))
+            .collect();
+        let mut source_copies: Vec<&LibraryClass> = Vec::new();
         for class in classes(app) {
+            // Multiple tests carry the same helper declaration, not Ruby
+            // reopens. Compare the complete copied IR (including source
+            // spans); a genuinely distinct fragment still counts twice.
+            if carried.contains(&(class as *const LibraryClass))
+                && class.methods.iter().any(|m| !m.name_span.is_synthetic())
+            {
+                if source_copies.iter().any(|previous| **previous == *class) {
+                    continue;
+                }
+                source_copies.push(class);
+            }
             class_owners.insert(class.name.clone());
             if class.is_module {
                 index.modules.insert(class.name.clone());
@@ -916,6 +1064,7 @@ impl<'a> SourceContractIndex<'a> {
         // actions, so the includes add nothing a lookup could find.
         for controller in &app.controllers {
             index.add_fragment(&controller.name, controller.parent.as_ref(), std::iter::empty());
+            index.add_methods(&controller.name, controller.class_methods(), false);
         }
         for (owner, method) in actions {
             index.add_methods(owner, std::iter::once(method), false);
@@ -926,6 +1075,12 @@ impl<'a> SourceContractIndex<'a> {
             methods(app)
                 .chain(actions.iter().map(|(c, m)| (c, m)))
                 .filter(|(_, method)| method.params.iter().any(|p| p.forwarding))
+                .map(|(_, method)| method.name.clone()),
+        );
+        index.keyword_selectors.extend(
+            methods(app)
+                .chain(actions.iter().map(|(c, m)| (c, m)))
+                .filter(|(_, method)| method.params.iter().any(|p| p.keyword))
                 .map(|(_, method)| method.name.clone()),
         );
         // Full forwarders need inherited-contract checks too; ordinary
@@ -982,6 +1137,7 @@ impl<'a> SourceContractIndex<'a> {
                 .map(|(span, _)| *span)
                 .collect();
         }
+        constructor::index_unmodeled_lookup_mutations(app, &mut index);
         index
     }
 

@@ -11,15 +11,16 @@
 //! 2. **`reset` nilled the singleton.** `@__instance`'s type is the
 //!    union of what the class assigns it, so one `= nil` made
 //!    `self.instance` answer `Current | Nil` and every class-level
-//!    forwarder register `Untyped`. `reset` now REPLACES the instance,
-//!    which is what resetting a CurrentAttributes MEANS.
+//!    forwarder register `Untyped`. Reset now preserves the instance
+//!    and clears its declared storage. Its execution/identity contract
+//!    is covered in `current_attributes.rs`, not by a synthesized shape.
 //! 3. **The forwarder's body cannot type itself.** `Ty::Class { Current }`
 //!    is both the class object and an instance here, and the
 //!    class-method table is consulted first, so `Current.instance.user`
 //!    looks up the forwarder it is in the middle of computing. The
 //!    answer is copied from the instance twin instead.
 //!
-//! And the Nil arm STAYS. That is the fourth test: `signed_in?` is
+//! And the Nil arm STAYS: `signed_in?` is
 //! `Current.user.present?`, and against a non-nilable type it folds to
 //! `true` — a correct fold of an incorrect type. Stripping nil here (as
 //! the controller-wide ivar seed does) signed everyone in.
@@ -121,18 +122,6 @@ fn a_read_through_the_forwarder_answers_the_model() {
     assert!(
         o.is_empty(),
         "`Current.user.rooms` must dispatch — the write site says `User`: {o:?}"
-    );
-}
-
-/// Ablation for reason 2: `reset` must not nil the slot, or
-/// `self.instance` answers `Current | Nil` and nothing downstream types.
-#[test]
-fn reset_replaces_the_instance_rather_than_nilling_it() {
-    let src = emitted("app/models/current.rb");
-    assert!(
-        src.contains("Thread.current[:__current_attrs_Current] = Current.new")
-            && !src.contains("Thread.current[:__current_attrs_Current] = nil"),
-        "resetting a CurrentAttributes means a fresh instance:\n{src}"
     );
 }
 

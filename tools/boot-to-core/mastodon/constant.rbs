@@ -1,0 +1,3 @@
+class ASCIIFolding
+  def fold: (String) -> String
+end

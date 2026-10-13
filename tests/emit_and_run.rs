@@ -11155,12 +11155,12 @@ end
         .run_ruby(ASSERTIONS).assert_passes();
 }
 
-/// `recv.m(**payload, badge: b)` where nothing types `recv`: the app's
-/// one `m` takes `**rest`, so the `**` the ingest desugar erased is put
-/// back (campfire's `WebPush::Pool#deliver_later`). Passed positionally
-/// it is Ruby 3's `wrong number of arguments (given 1, expected 0)`.
+/// A selector alone cannot prove an untyped receiver's native keyword ABI.
+/// Keep the source packet (so emitted Ruby does not invent a positional Hash),
+/// but retain the unsupported boundary until receiver lookup is verified.
 #[test]
-fn a_keyword_splat_to_an_untyped_receiver_keeps_its_double_splat() {
+fn a_keyword_splat_to_an_untyped_receiver_keeps_its_packet_and_refusal() {
+    let run =
     emit_and_run::real_blog()
         // A MODEL method, as campfire's `Push::Subscription#notification`
         // is: models keep `badge:` a keyword beside `**params`.
@@ -11188,8 +11188,15 @@ article = Article.create!(title: "Splat title", body: "A sufficiently long artic
 comment = Comment.create!(article: article, commenter: "Reader", body: "Comment body")
 got = KwSplatCaller.call([comment], { title: "t" }).map { |n| [n.title, n.badge] }
 raise "keyword splat lost: #{got.inspect}" unless got == [["t", 3]]
-"#)
-        .assert_passes();
+"#);
+    assert!(
+        run.errors
+            .iter()
+            .any(|e| e.contains("keyword destination's native argument ABI cannot be verified")),
+        "an unknown receiver must not borrow a contract by selector: {:?}",
+        run.errors
+    );
+    assert!(run.success, "source packet changed despite refusal: {}", run.stderr);
 }
 
 /// Rails' `association(:name).loaded?` on a belongs_to: false until the
@@ -12021,6 +12028,14 @@ class ProbeServerTest < ActiveSupport::TestCase
 
   test "a module method reads a duration" do
     assert ProbeServerHelper.started_at < Time.now
+  end
+end
+"##)
+        .write("test/models/second_probe_server_test.rb", r##"require "test_helper"
+class SecondProbeServerTest < ActiveSupport::TestCase
+  include ProbeServerHelper
+  test "the same source helper is carried again" do
+    with_server(status: "202 Accepted") { |server| assert_equal "202 Accepted", server.status }
   end
 end
 "##)
@@ -13174,6 +13189,38 @@ puts "PASS friendly oracle"
         )
         .assert_passes();
 }
+fn cross_helper_keyword_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/helpers/stamp_helper.rb", r#"module StampHelper
+  def stamp(value, **attributes)
+    format_stamp(value, **attributes)
+  end
+end
+"#)
+        .write("app/helpers/format_helper.rb", r#"module FormatHelper
+  def format_stamp(value, style: :time, **attributes)
+    [value, style.to_s, attributes[:label].to_s, attributes[:enabled].to_s].join("|")
+  end
+end
+"#)
+}
+
+const CROSS_HELPER_KEYWORD_ASSERTIONS: &str = r#"
+raise "helper defaults" unless StampHelper.stamp("first") == "first|time||"
+raise "helper packet" unless StampHelper.stamp("second", style: :date, label: "kept", enabled: false) == "second|date|kept|false"
+"#;
+
+#[test]
+fn cross_helper_keyword_packets_reach_the_qualified_destination() {
+    cross_helper_keyword_app().run_ruby(CROSS_HELPER_KEYWORD_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn cross_helper_keyword_packets_run_natively() {
+    cross_helper_keyword_app().run_spinel(CROSS_HELPER_KEYWORD_ASSERTIONS).assert_passes();
+}
+
 #[path = "emit_and_run/acts_as_votable.rs"]
 mod acts_as_votable;
 

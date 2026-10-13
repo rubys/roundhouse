@@ -1,0 +1,4 @@
+class QrCodeLink
+  def initialize: (String url) -> String
+  def url: () -> String
+end

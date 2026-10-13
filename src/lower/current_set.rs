@@ -14,14 +14,26 @@
 //! ```ruby
 //! Current.set(request: r) { body }
 //! # →
-//! __current_set_request = Current.request
-//! Current.request = r
+//! value = r
+//! current = Current.instance
+//! saved = false
 //! begin
-//!   body
+//!   old = current.request
+//!   saved = true
+//!   current.request = value
+//!   current.then { body }
 //! ensure
-//!   Current.request = __current_set_request
+//!   current.request = old if saved
 //! end
 //! ```
+//!
+//! All RHSs run before selecting the instance. Rails' Object#with then
+//! saves and writes each slot sequentially: a writer can change the next
+//! getter's answer. Setup belongs INSIDE ensure; a failing getter has not
+//! saved its slot, whereas a failing writer has. Restoration runs in the
+//! original order and stops if a restore writer raises. Keep the user's
+//! attached block (not a lambda value or `.call`) so result, receiver,
+//! break/next and nonlocal return survive.
 //!
 //! ENSURE, NOT A TRAILING ASSIGNMENT, and it is the half that matters:
 //! `Current.set` exists to be exception-safe. campfire's
@@ -33,9 +45,9 @@
 //! NO RUNTIME METHOD, deliberately. A generated `Current.set` would
 //! need one signature covering every subset of attributes a caller
 //! might name, and optional keywords are their own hazard on the strict
-//! targets (docs/pipeline/runtime.md). The shape above uses only the
-//! accessors the flattening already emits, so it compiles wherever they
-//! do.
+//! targets (docs/pipeline/runtime.md). The shape above uses the flattened
+//! accessors and Kernel#then for the attached block. A target must support
+//! that block invocation as well as the scoped ensure.
 //!
 //! WHAT IT DECLINES: a `set` whose argument is not a literal keyword
 //! hash, or whose receiver is not one of the app's own
@@ -44,7 +56,8 @@
 //! reason rather than running the block with the wrong scope.
 
 use crate::app::App;
-use crate::diagnostic::{Diagnostic, Severity};
+use crate::diagnostic::Diagnostic;
+use crate::dialect::{LibraryClass, MethodReceiver};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
@@ -59,27 +72,59 @@ pub fn apply_current_set_lowering(app: &mut App) -> Vec<Diagnostic> {
     if classes.is_empty() {
         return Vec::new();
     }
+    // Replacing Rails #set/#with and calling `.then` is equivalent only
+    // when app methods/accessors/includes do not intercept those sends.
+    let global_shadow = app.library_classes.iter()
+        .filter(|c| matches!(c.name.0.as_str(), "Object" | "Kernel"))
+        .any(|c| scope_dispatch_unproven(c, false));
+    let shadowed: BTreeSet<String> = app.library_classes.iter()
+        .filter(|c| classes.contains(c.name.0.as_str()))
+        .filter(|c| global_shadow || scope_dispatch_unproven(c, true))
+        .map(|c| c.name.0.as_str().to_owned()).collect();
+    // Reserve source identifiers too: an unused formal or pattern binding
+    // need not appear as a Var in the body. The conservative token inventory
+    // also covers block-local names without depending on their reads.
+    let mut used: BTreeSet<String> = app.sources.iter().flat_map(|s| {
+        s.text.split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|s| !s.is_empty()).map(str::to_owned)
+    }).collect();
+    super::for_each_hook_body_ref(app, &mut |e| collect_names(e, &mut used));
+    for view in &app.views { collect_names(&view.body, &mut used); }
+    for tm in &app.test_modules {
+        if let Some(setup) = &tm.setup { collect_names(setup, &mut used); }
+        for t in &tm.tests { collect_names(&t.body, &mut used); }
+        for m in &tm.helpers { collect_names(&m.body, &mut used); }
+    }
     let mut diags = Vec::new();
-    super::for_each_hook_body(app, &mut |e| rewrite(e, &classes, &mut diags));
+    super::for_each_hook_body(app, &mut |e| rewrite(e, &classes, &shadowed, &mut used, &mut diags));
     for view in &mut app.views {
-        rewrite(&mut view.body, &classes, &mut diags);
+        rewrite(&mut view.body, &classes, &shadowed, &mut used, &mut diags);
     }
     for tm in &mut app.test_modules {
         if let Some(setup) = &mut tm.setup {
-            rewrite(setup, &classes, &mut diags);
+            rewrite(setup, &classes, &shadowed, &mut used, &mut diags);
         }
         for t in &mut tm.tests {
-            rewrite(&mut t.body, &classes, &mut diags);
+            rewrite(&mut t.body, &classes, &shadowed, &mut used, &mut diags);
         }
         for m in &mut tm.helpers {
-            rewrite(&mut m.body, &classes, &mut diags);
+            rewrite(&mut m.body, &classes, &shadowed, &mut used, &mut diags);
         }
     }
     diags
 }
 
-fn rewrite(e: &mut Expr, classes: &BTreeSet<String>, diags: &mut Vec<Diagnostic>) {
-    e.node.for_each_child_mut(&mut |c| rewrite(c, classes, diags));
+fn scope_dispatch_unproven(class: &LibraryClass, class_set: bool) -> bool {
+    // Library IR omits some effect-only module reopens, including across
+    // files. An apparently harmless first fragment cannot prove the full
+    // included dispatch graph. Keep that boundary until it is source-closed.
+    !class.includes.is_empty() || class.methods.iter().any(|m|
+        (m.receiver == MethodReceiver::Instance && matches!(m.name.as_str(), "set" | "with" | "then"))
+            || (class_set && m.receiver == MethodReceiver::Class && m.name.as_str() == "set"))
+}
+
+fn rewrite(e: &mut Expr, classes: &BTreeSet<String>, shadowed: &BTreeSet<String>, used: &mut BTreeSet<String>, diags: &mut Vec<Diagnostic>) {
+    e.node.for_each_child_mut(&mut |c| rewrite(c, classes, shadowed, used, diags));
     let span = e.span;
     let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*e.node else { return };
     if method.as_str() != "set" {
@@ -90,15 +135,22 @@ fn rewrite(e: &mut Expr, classes: &BTreeSet<String>, diags: &mut Vec<Diagnostic>
     if !classes.contains(&class) {
         return;
     }
+    if shadowed.contains(&class) {
+        report(span, &class, "app-owned `set`, `with`, `then` dispatch or unresolved included ancestry cannot prove Rails' scoped direct-yield semantics", diags);
+        return;
+    }
     let Some(body) = block else {
         report(span, &class, "it takes no block, so there is no scope to restore after", diags);
         return;
     };
     let Some(pairs) = keyword_pairs(args) else {
-        report(span, &class, "its argument is not a literal keyword hash", diags);
+        report(span, &class, "its argument is not a nonempty literal hash with distinct attribute names", diags);
         return;
     };
-    *e = expand(span, &class, &pairs, body);
+    let mut replacement = expand(span, &class, &pairs, body, used);
+    replacement.ty = e.ty.clone();
+    replacement.decisions = e.decisions | crate::expr::CURRENT_SET_SCOPE;
+    *e = replacement;
 }
 
 /// `[(attribute, value)]` from the single trailing keyword hash.
@@ -109,41 +161,57 @@ fn keyword_pairs(args: &[Expr]) -> Option<Vec<(String, Expr)>> {
         return None;
     }
     let mut out = Vec::new();
+    let mut names = BTreeSet::new();
     for (k, v) in entries {
         let name = match &*k.node {
             ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
             ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
             _ => return None,
         };
+        // Ruby Hash overwrites duplicate keys before #with sees them.
+        // Do not turn that into multiple saves/writes/restores.
+        if !names.insert(name.clone()) { return None; }
         out.push((name, v.clone()));
     }
     Some(out)
 }
 
-fn expand(span: Span, class: &str, pairs: &[(String, Expr)], body: &Expr) -> Expr {
+fn expand(span: Span, class: &str, pairs: &[(String, Expr)], body: &Expr, used: &mut BTreeSet<String>) -> Expr {
     let mut stmts: Vec<Expr> = Vec::new();
-    // Saves FIRST, all of them, then the assignments — the order Rails'
-    // own `set` uses. A save that read an attribute another pair had
-    // already overwritten would restore the wrong value on a call that
-    // names two.
-    let saved: Vec<(String, Symbol)> = pairs
-        .iter()
-        .map(|(name, _)| (name.clone(), Symbol::from(format!("__current_set_{name}"))))
-        .collect();
-    for ((name, _), (_, local)) in pairs.iter().zip(saved.iter()) {
-        stmts.push(assign_local(span, local.clone(), class_read(span, class, name)));
+    let mut values = Vec::new();
+    for (_, value) in pairs {
+        let local = fresh("value", used);
+        stmts.push(assign_local(span, local.clone(), value.clone()));
+        values.push(local);
     }
-    for (name, value) in pairs {
-        stmts.push(class_write(span, class, name, value.clone()));
+    let current = fresh("instance", used);
+    stmts.push(assign_local(span, current.clone(), send(span, const_path(span, class), "instance", vec![])));
+    let mut setup = Vec::new();
+    let mut restore = Vec::new();
+    for ((name, _), value) in pairs.iter().zip(values) {
+        let old = fresh("old", used);
+        let saved = fresh("saved", used);
+        stmts.push(assign_local(span, saved.clone(), boolean(span, false)));
+        setup.push(assign_local(span, old.clone(), send(span, local_read(span, current.clone()), name, vec![])));
+        setup.push(assign_local(span, saved.clone(), boolean(span, true)));
+        setup.push(send(span, local_read(span, current.clone()), &format!("{name}="), vec![local_read(span, value)]));
+        restore.push(Expr::new(span, ExprNode::If {
+            cond: local_read(span, saved),
+            then_branch: send(span, local_read(span, current.clone()), &format!("{name}="), vec![local_read(span, old)]),
+            else_branch: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+        }));
     }
-    let mut restore: Vec<Expr> = Vec::new();
-    for (name, local) in &saved {
-        restore.push(class_write(span, class, name, local_read(span, local.clone())));
-    }
+    setup.push(Expr::new(span, ExprNode::Send {
+        recv: Some(local_read(span, current)),
+        method: Symbol::from("then"),
+        args: vec![],
+        block: Some(body.clone()),
+        parenthesized: false,
+    }));
     stmts.push(Expr::new(
         span,
         ExprNode::BeginRescue {
-            body: body.clone(),
+            body: seq(span, setup),
             rescues: Vec::new(),
             else_branch: None,
             ensure: Some(seq(span, restore)),
@@ -160,26 +228,13 @@ fn seq(span: Span, exprs: Vec<Expr>) -> Expr {
     Expr::new(span, ExprNode::Seq { exprs })
 }
 
-fn class_read(span: Span, class: &str, name: &str) -> Expr {
+fn send(span: Span, receiver: Expr, name: &str, args: Vec<Expr>) -> Expr {
     Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(const_path(span, class)),
+            recv: Some(receiver),
             method: Symbol::from(name),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    )
-}
-
-fn class_write(span: Span, class: &str, name: &str, value: Expr) -> Expr {
-    Expr::new(
-        span,
-        ExprNode::Send {
-            recv: Some(const_path(span, class)),
-            method: Symbol::from(format!("{name}=")),
-            args: vec![value],
+            args,
             block: None,
             parenthesized: false,
         },
@@ -204,17 +259,47 @@ fn const_path(span: Span, class: &str) -> Expr {
     Expr::new(span, ExprNode::Const { path: class.split("::").map(Symbol::from).collect() })
 }
 
+fn boolean(span: Span, value: bool) -> Expr {
+    Expr::new(span, ExprNode::Lit { value: Literal::Bool { value } })
+}
+
+fn fresh(role: &str, used: &mut BTreeSet<String>) -> Symbol {
+    let base = format!("__rh_current_{role}");
+    let mut name = base.clone();
+    let mut suffix = 2;
+    while !used.insert(name.clone()) {
+        name = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    Symbol::from(name)
+}
+
+fn collect_names(expr: &Expr, used: &mut BTreeSet<String>) {
+    match &*expr.node {
+        ExprNode::Var { name, .. } | ExprNode::Let { name, .. }
+        | ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+        | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => { used.insert(name.as_str().into()); }
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, .. } => {
+            used.extend(params.iter().chain(rest_param.iter()).chain(block_param.iter()).map(|n| n.as_str().to_owned()));
+            used.extend(extra_params.iter().map(|p| p.name.as_str().to_owned()));
+        }
+        ExprNode::BeginRescue { rescues, .. } => {
+            used.extend(rescues.iter().filter_map(|r| r.binding.as_ref()).map(|n| n.as_str().to_owned()));
+        }
+        _ => {}
+    }
+    expr.node.for_each_child(&mut |c| collect_names(c, used));
+}
+
 fn report(span: Span, class: &str, why: &str, diags: &mut Vec<Diagnostic>) {
-    let mut d = Diagnostic::unsupported(
+    diags.push(Diagnostic::unsupported(
         span,
         None,
         "CurrentAttributes#set",
         format!(
             "`{class}.set` is served only as a block form over a literal keyword hash, which is what lets the save/restore be spelled at compile time: {why}"
         ),
-    );
-    d.severity = Severity::Warning;
-    diags.push(d);
+    ));
 }
 
 #[cfg(test)]
@@ -233,31 +318,6 @@ mod tests {
 
     fn lowered(app: &App) -> String {
         crate::emit::ruby::emit_expr(&app.test_modules[0].tests[0].body)
-    }
-
-    #[test]
-    fn one_attribute_saves_assigns_and_restores_in_an_ensure() {
-        let mut app = app_with("Current.set(request: r) do\n      work\n    end");
-        let diags = apply_current_set_lowering(&mut app);
-        assert!(diags.is_empty(), "{diags:?}");
-        let out = lowered(&app);
-        assert!(out.contains("__current_set_request = Current.request"), "{out}");
-        assert!(out.contains("Current.request = r"), "{out}");
-        assert!(out.contains("ensure"), "{out}");
-        assert!(out.contains("Current.request = __current_set_request"), "{out}");
-    }
-
-    /// Every save runs before any assignment: with two attributes, a
-    /// save that read after a write would restore the new value.
-    #[test]
-    fn two_attributes_save_before_either_is_written() {
-        let mut app = app_with("Current.set(request: r, user: u) do\n      work\n    end");
-        let diags = apply_current_set_lowering(&mut app);
-        assert!(diags.is_empty(), "{diags:?}");
-        let out = lowered(&app);
-        let save_user = out.find("__current_set_user = Current.user").expect(&out);
-        let write_request = out.find("Current.request = r").expect(&out);
-        assert!(save_user < write_request, "a save ran after a write:\n{out}");
     }
 
     #[test]

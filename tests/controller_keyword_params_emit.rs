@@ -163,3 +163,38 @@ fn the_ruby_family_does_not_report_what_it_renders() {
         assert!(entries.is_empty(), "{target:?} renders these; got {entries:?}");
     }
 }
+
+#[test]
+fn ordinary_library_keywords_and_packets_are_gated_without_a_native_abi() {
+    use roundhouse::project::{BuildTarget, target_files};
+    let mut app = roundhouse::App::new();
+    app.library_classes = roundhouse::ingest::ingest_library_classes(
+        b"class Labels; def self.label(value, prefix: 'x'); prefix; end; def self.run(options); label(7, **options); end; end",
+        "labels.rb",
+    ).unwrap();
+    roundhouse::session::analyze_and_lower(&mut app);
+    for target in [BuildTarget::Ruby, BuildTarget::Typescript] {
+        let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, roundhouse::fixtures::real_blog(), target)
+        });
+        let keywords: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.message.contains("keyword parameter") || d.message.contains("keyword splat")
+            })
+            .collect();
+        if target == BuildTarget::Ruby {
+            assert!(keywords.is_empty(), "{diags:?}");
+        } else {
+            assert!(keywords.iter().any(|d| d.message.contains("`prefix`")), "{diags:?}");
+            assert!(
+                keywords.iter().any(|d| d.message.contains("source keyword parameters")),
+                "{diags:?}"
+            );
+            assert!(
+                !keywords.iter().any(|d| d.message.contains("full argument forwarding")),
+                "{diags:?}"
+            );
+        }
+    }
+}

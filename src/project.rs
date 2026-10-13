@@ -1305,6 +1305,33 @@ fn reject_file_blob_fixtures(app: &App, target: BuildTarget) -> Result<(), Strin
     Ok(())
 }
 
+/// Scoped Current writes need a verified attached-block/ensure convention.
+fn reject_unsupported_current_scopes(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        return Ok(());
+    }
+    fn visit(expr: &crate::expr::Expr, target: &str, found: &mut bool) {
+        if expr.decisions & crate::expr::CURRENT_SET_SCOPE != 0 {
+            *found = true;
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "CurrentAttributes#set",
+                "scoped block invocation and ensure are not verified on this target; use Ruby or JRuby",
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target, found));
+    }
+    let mut found = false;
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| {
+        visit(expr, target.as_str(), &mut found);
+    });
+    if found {
+        return Err(format!("{}: CurrentAttributes#set is not supported; use Ruby or JRuby", target.as_str()));
+    }
+    Ok(())
+}
+
 /// Keep admitted Data factories outside unverified target emitters.
 fn reject_unsupported_data_factories(app: &App, target: BuildTarget) -> Result<(), String> {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel) {
@@ -1829,6 +1856,7 @@ fn target_files_inner(
     report_unsupported_bundled_constants(app, target);
     reject_unsupported_pattern_matches(app, target)?;
     reject_file_blob_fixtures(app, target)?;
+    reject_unsupported_current_scopes(app, target)?;
     reject_unsupported_data_factories(app, target)?;
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
@@ -1839,20 +1867,44 @@ fn target_files_inner(
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
     report_dry_struct_stdlib(app, target);
-    // Full forwarding currently has a native Ruby contract only. A
-    // declaration must be gated even when its body never forwards.
+    // Spinel's Ruby binder carries verified ordinary keyword packets.
+    // Full forwarding and unresolved source contracts remain gated, even
+    // when a declaration's body never forwards.
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
         for (span, policy) in crate::analyze::forwarding::keyword_calls(app) {
+            if target == BuildTarget::Spinel
+                && policy == crate::analyze::forwarding::KeywordPolicy::NativeKeywords
+            {
+                continue;
+            }
             if policy != crate::analyze::forwarding::KeywordPolicy::Legacy {
-                let (construct, detail) = if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
-                    ("keyword splat in ordinary super",
-                     "super destination's native or lowered argument ABI cannot be verified")
-                } else {
-                    ("keyword splat into full argument forwarding",
-                     "native Ruby keyword provenance has no verified carrier on this target")
-                };
-                crate::emit::diagnostics::report_unsupported(span, target.as_str(),
-                    construct, detail);
+                let (construct, detail) =
+                    if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
+                        (
+                            "keyword splat in ordinary super",
+                            "super destination's native or lowered argument ABI cannot be verified",
+                        )
+                    } else if matches!(
+                        policy,
+                        crate::analyze::forwarding::KeywordPolicy::NativeKeywords
+                            | crate::analyze::forwarding::KeywordPolicy::RefuseKeywords
+                    ) {
+                        (
+                            "keyword splat into source keyword parameters",
+                            "native Ruby keywords have no verified argument carrier on this target",
+                        )
+                    } else {
+                        (
+                            "keyword splat into full argument forwarding",
+                            "native Ruby keyword provenance has no verified carrier on this target",
+                        )
+                    };
+                crate::emit::diagnostics::report_unsupported(
+                    span,
+                    target.as_str(),
+                    construct,
+                    detail,
+                );
             }
         }
     }
@@ -5113,6 +5165,19 @@ fn report_positional_rest_param(method: &crate::dialect::MethodDef, target: Buil
 }
 
 fn report_keyword_params(app: &App, target: &str) {
+    for (owner, method) in crate::analyze::forwarding::methods(app) {
+        for param in method.params.iter().filter(|p| p.keyword && !p.rest) {
+            crate::emit::diagnostics::report_unsupported(
+                method.name_span,
+                target,
+                "keyword parameter",
+                format!(
+                    "`{}` on `{}#{}` — this target's native keyword argument ABI is not verified",
+                    param.name, owner.0, method.name,
+                ),
+            );
+        }
+    }
     // Read from the controllers rather than from `library_classes`:
     // the lowered helper is built inside each target's emit and never
     // stored on the App, so a walk over the stored classes finds

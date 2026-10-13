@@ -1,0 +1,5 @@
+class ResponseWithLimit
+  def initialize: (String, Integer) -> void
+  def response: () -> String
+  def limit: () -> Integer
+end

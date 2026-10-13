@@ -26,6 +26,11 @@ pub(super) fn constructor_contracts_with_index<'a>(
     app.library_classes
         .iter()
         .map(|class| &class.name)
+        .chain(app.test_modules
+                .iter()
+                .flat_map(|module| module.inner_classes.iter())
+                .map(|class| &class.name),
+        )
         .chain(app.models.iter().map(|model| &model.name))
         .filter_map(|owner| {
             constructor_contract(contracts, owner).map(|contract| (owner.clone(), contract))
@@ -34,9 +39,8 @@ pub(super) fn constructor_contracts_with_index<'a>(
 }
 
 /// Mark only owners whose class-side `new` lookup can be changed by source
-/// hooks or explicit lookup mutations. Kept out of the general forwarding
-/// index build so ordinary keyword-forwarding analysis does not pay for or
-/// depend on constructor-specific policy.
+/// hooks or explicit lookup mutations. Native source packets and constructor
+/// lowering share this index so neither admits an unchecked default forwarder.
 pub(super) fn index_unmodeled_lookup_mutations(app: &App, index: &mut SourceContractIndex<'_>) {
     let constructor_owner_aliases = constructor_owner_aliases(
         super::classes(app)
@@ -311,6 +315,20 @@ fn scan_method_defaults(
             None,
         );
     }
+}
+
+pub(super) fn unknown_lookup(
+    contracts: &SourceContractIndex<'_>,
+    owner: &ClassId,
+    name: &Symbol,
+    receiver: MethodReceiver,
+) -> bool {
+    name.as_str() == "new"
+        && receiver == MethodReceiver::Class
+        && matches!(
+            constructor_contract(contracts, owner),
+            Some(ConstructorContract::UnknownLookup)
+        )
 }
 
 fn constructor_contract<'a>(

@@ -1,5 +1,5 @@
 //! A keyword passed to `.new` must bind to its source `initialize` slot
-//! after optional keywords are flattened for the emitted Ruby ABI.
+//! without promoting a positional Hash to native Ruby keywords.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -332,7 +332,7 @@ fn emitted() -> Vec<roundhouse::emit::EmittedFile> {
 }
 
 #[test]
-fn constructor_keywords_bind_to_the_flattened_initialize_slots() {
+fn constructor_keywords_keep_the_native_initialize_contract() {
     let emitted = emitted();
     let source = emitted
         .iter()
@@ -340,15 +340,15 @@ fn constructor_keywords_bind_to_the_flattened_initialize_slots() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        source.contains("Tally.new(\"widgets\", 2)"),
-        "the constructor keyword should move to initialize's `step` slot:\n{source}"
+        source.contains("Tally.new(\"widgets\", step: 2)"),
+        "the constructor must retain initialize's `step:` slot:\n{source}"
     );
     assert!(
-        source.contains("Notice.new(\"low stock\", \"reorder\")"),
-        "the constructor keyword should move to initialize's `hint` slot:\n{source}"
+        source.contains("Notice.new(\"low stock\", hint: \"reorder\")"),
+        "the constructor must retain initialize's `hint:` slot:\n{source}"
     );
     assert!(
-        source.contains("ChildTally.new(\"child\", 3)"),
+        source.contains("ChildTally.new(\"child\", step: 3)"),
         "an inherited initialize contract should apply to the child constructor:\n{source}"
     );
     assert!(
@@ -410,7 +410,7 @@ fn constructor_keywords_bind_to_the_flattened_initialize_slots() {
 }
 
 #[test]
-fn unsafe_keyword_order_and_duplicate_keys_are_rejected() {
+fn unverified_constructor_lookup_is_rejected_with_native_keywords() {
     let classes = ingest_library_classes(SOURCE.as_bytes(), "constructors.rb").expect("ingest");
     let mut app = App::new();
     app.library_classes.extend(classes);
@@ -433,17 +433,7 @@ fn unsafe_keyword_order_and_duplicate_keys_are_rejected() {
             "expected a refusal diagnostic for {call:?}: {lower_diagnostics:#?}"
         );
     };
-    for call in [
-        "ConstructorOrder.new(second: tick(\"second\"), first: tick(\"first\"))",
-        "ConstructorOrder.new(first: tick(\"first duplicate\"), first: tick(\"last duplicate\"))",
-        "Tally.new(\"unknown keyword\", unsupported: tick(\"unsupported\"))",
-        "ContextDefaultConstructor.new(second: 2)",
-        "Tally.new(*[\"splat\"], step: 1)",
-        "Tally.new(\"splat\", **{ step: 2 })",
-        "Tally.new(**{ label: \"keyword splat\" })",
-        "ExtendedCustomConstructor.new(**{ label: \"splat\" })",
-        "ConstantDefaultConstructor.new(step: 2)",
-        "RegexDefaultConstructor.new(step: 2)",
+    for call in ["ExtendedCustomConstructor.new(**{ label: \"splat\" })"
     ] {
         assert_refused_at(call, None);
     }
@@ -503,8 +493,8 @@ fn custom_class_side_new_methods_are_not_treated_as_initialize_forwarders() {
         "custom `.new` keeps its class-method keyword contract:\n{emitted}"
     );
     assert!(
-        emitted.contains("ChildCustomConstructor.new(\"y\")"),
-        "an inherited custom `new` uses its flattened keyword slot:\n{emitted}"
+        emitted.contains("ChildCustomConstructor.new(label: \"y\")"),
+        "an inherited custom `new` keeps its keyword slot:\n{emitted}"
     );
     assert!(
         !emitted.contains("ExtendedCustomConstructor.new(\"z\")"),
@@ -552,9 +542,9 @@ fn string_aliases_and_unrelated_receivers_are_classified_conservatively() {
     assert!(
         emit_library(&app).into_iter().any(|file| {
             file.content
-                .contains("UnrelatedReceiverMutation.new(\"accepted\")")
+                .contains("UnrelatedReceiverMutation.new(label: \"accepted\")")
         }),
-        "the known initialize keyword should lower to its positional slot"
+        "the known initialize keyword should keep its native slot"
     );
 }
 
@@ -843,7 +833,7 @@ end
 }
 
 #[test]
-fn an_unqualified_nested_constructor_uses_its_flattened_slots() {
+fn an_unqualified_nested_constructor_uses_its_native_keywords() {
     let source = r#"
 module Outer
   class Item
@@ -878,8 +868,8 @@ end
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        emitted.contains("Item.new(\"nested\")"),
-        "a lexically resolved nested class call should use the flattened initialize slot: {emitted}"
+        emitted.contains("Item.new(label: \"nested\")"),
+        "a lexically resolved nested class call should keep its keyword slot: {emitted}"
     );
     let dir = std::env::temp_dir().join(format!(
         "roundhouse-nested-constructor-{}-{}",

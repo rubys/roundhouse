@@ -88,6 +88,7 @@ SPINEL_TESTS = [
     "open_telemetry_stub_spinel",
     "around_block_filter_spinel",
     "plain_class_optional_keywords_spinel",
+    "current_attributes",
     "active_job_payload",
 ]
 # Inputs of the ActiveJob payload gate (tests/active_job_payload.rs):

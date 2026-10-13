@@ -1,6 +1,6 @@
 //! Shared public Ruby sample for anonymous keyword-rest forwarding tests.
 
-pub const SOURCE: &str = r#"class KeywordForwarder
+pub const SOURCE: &str = r##"class KeywordForwarder
   def forward(**)
     receive(**)
   end
@@ -30,14 +30,24 @@ pub const SOURCE: &str = r#"class KeywordForwarder
     request(kind: tick.next_value, kind: tick.next_value, path: tick.next_value, **)
   end
 
+  def merge_packets(tick)
+    receive(required: tick.next_value, **tick.packet(7), enabled: tick.next_value, **tick.packet(11))
+  end
+
   def receive(required:, enabled: true, token: :missing)
     [:base, required, enabled, token]
   end
 
-  # The anonymous rest keeps these optional keywords as keywords during
-  # ingest; optional-only signatures are still a flattened ABI boundary.
-  def receive_defaults(enabled: true, token: :missing, **)
+  def receive_defaults(enabled: true, token: :missing)
     [enabled, token]
+  end
+
+  def self.label(value, prefix: "λ")
+    "#{prefix}:#{value}"
+  end
+
+  def self.label_from_options(value, options)
+    label(value, **options)
   end
 
   def request(kind:, path:, token: :missing, **)
@@ -62,19 +72,46 @@ end
 class KeywordTick
   attr_reader :count
 
-  def initialize
-    @count = 0
+  def initialize(start: 0)
+    @count = start
   end
 
   def next_value
     @count += 1
   end
+
+  def packet(value)
+    @count += 1
+    {required: value, token: @count}
+  end
 end
-"#;
+"##;
 
 pub const ASSERTIONS: &str = r#"
 forwarder = KeywordForwarder.new
+raise "constructor keyword bound a Hash" unless KeywordTick.new(start: 11).next_value == 12
+raise "constructor keyword splat lost its packet" unless KeywordTick.new(**{start: 19}).next_value == 20
+payload = {start: 9}
+begin
+  KeywordTick.new(payload)
+  raise "positional Hash became constructor keywords"
+rescue ArgumentError
+end
 raise "empty packet changed defaults" unless forwarder.defaults == [true, :missing]
+raise "optional keywords changed order or skipped defaults" unless forwarder.defaults(token: nil) == [true, nil]
+raise "optional false was lost" unless forwarder.defaults(enabled: false) == [false, :missing]
+begin
+  forwarder.defaults(unknown: 7)
+  raise "unknown optional keyword accepted"
+rescue ArgumentError
+end
+raise "class keyword packet became a positional Hash" unless KeywordForwarder.label_from_options(7, {prefix: "Ω"}) == "Ω:7"
+raise "empty class keyword packet lost its default" unless KeywordForwarder.label_from_options(11, {}) == "λ:11"
+begin
+  KeywordForwarder.label_from_options(7, {unknown: "bad"})
+  raise "unknown class keyword accepted"
+rescue ArgumentError
+end
 raise "anonymous keywords supplied a positional argument" unless forwarder.defaults_with_required(required: :ready) == [7, :ready]
 raise "false or nil keywords were lost" unless forwarder.forward(required: false, enabled: false, token: nil) == [:base, false, false, nil]
 raise "local variable replaced the forwarded packet" unless forwarder.with_local(required: 7, enabled: false, token: nil) == [:base, 7, false, nil]
@@ -92,6 +129,10 @@ raise "mixed keyword values changed order, count, or override semantics" unless 
 tick = KeywordTick.new
 result = forwarder.fetch_duplicate_effects(tick)
 raise "duplicate keyword values changed order, last-wins, or count" unless result == [2, 3, :missing] && tick.count == 3
+
+tick = KeywordTick.new
+result = forwarder.merge_packets(tick)
+raise "ordinary keyword packets changed order, last-wins, or count" unless result == [:base, 11, 3, 4] && tick.count == 4
 
 overridden = OverriddenKeywordForwarder.new
 raise "keyword forwarding skipped the override" unless overridden.forward(required: 11, enabled: false, token: nil) == [:override, 11, false, nil]

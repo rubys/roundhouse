@@ -54,18 +54,11 @@ fn emit(helper: &str, view: &str) -> String {
 const NAMED_KWARG: &str =
     "module RoomsHelper\n  def label_for(room, upcase: false)\n    upcase ? room.name.upcase : room.name\n  end\nend\n";
 
-/// A key matching a parameter name binds POSITIONALLY.
+/// Native keywords keep their binding instead of becoming a positional Hash.
 #[test]
-fn a_named_keyword_moves_into_its_positional_slot() {
+fn a_named_keyword_keeps_its_keyword_slot() {
     let src = emit(NAMED_KWARG, "<%= label_for(@rooms.first, upcase: true) %>\n");
-    assert!(
-        src.contains("label_for(@rooms.first, true)") || src.contains(", true)"),
-        "the keyword's VALUE must land positionally:\n{src}"
-    );
-    assert!(
-        !src.contains("upcase: true"),
-        "no keyword may survive against a positional param:\n{src}"
-    );
+    assert!(src.contains("upcase: true"), "the keyword must retain its source binding:\n{src}");
 }
 
 /// A call that already passes it positionally is untouched.
@@ -140,12 +133,8 @@ end
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        src.contains(r#"titled("HQ")"#),
-        "the keyword must bind to its positional slot:\n{src}"
-    );
-    assert!(
-        !src.contains("titled(name:"),
-        "no call site may keep the keyword spelling:\n{src}"
+        src.contains(r#"titled(name: "HQ")"#),
+        "the test helper keeps its native keyword spelling:\n{src}"
     );
 }
 
@@ -207,8 +196,8 @@ end
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        src.contains(r#"stubbed("https://a.example/", "T", "D")"#),
-        "the skipped `url:` must take the definition's default:\n{src}"
+        src.contains(r#"stubbed(title: "T", description: "D")"#),
+        "the skipped `url:` must default in the callee, not at the call site:\n{src}"
     );
     assert!(
         src.contains("relative(b: \"x\")"),
@@ -247,7 +236,7 @@ fn emit_models(files: &[(&str, &str)], keep: &str) -> String {
 /// passed by name on a receiver typed as the class. The Hash used to
 /// bind to `ip` whole, and the unfurl connected to `{ip: "…"}`.
 #[test]
-fn an_instance_methods_keyword_moves_into_its_positional_slot() {
+fn an_instance_methods_keyword_keeps_its_keyword_slot() {
     let src = emit_models(
         &[
             (
@@ -264,8 +253,8 @@ fn an_instance_methods_keyword_moves_into_its_positional_slot() {
         "locator",
     );
     assert!(
-        src.contains(r#"Fetcher.new.fetch(url, "192.0.2.1")"#),
-        "the keyword must bind the flattened `ip` slot positionally:\n{src}"
+        src.contains(r#"Fetcher.new.fetch(url, ip: "192.0.2.1")"#),
+        "the keyword must bind the original `ip:` slot:\n{src}"
     );
     assert!(
         src.contains("Fetcher.new.merge(url, opts: 1)"),

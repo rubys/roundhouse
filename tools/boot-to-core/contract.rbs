@@ -1,0 +1,24 @@
+# Input contract, NOT types inferred from observed execution. These public
+# signatures supply the parameter boundary for Roundhouse's static analysis.
+class EvalProduct
+  def compute: (Integer value) -> Integer
+  def fallback: (String | Integer | bool | nil value) -> (String | Integer | true)
+end
+
+class LeftProduct
+  def label: (Integer id) -> String
+  def rename: (String replacement) -> String
+  def advance: (Integer amount) -> Integer
+  def current: () -> Integer
+  def flag: () -> bool
+  def selected: (String fallback) -> String
+end
+
+class RightProduct
+  def label: (Integer id) -> String
+  def rename: (String replacement) -> String
+  def advance: (Integer amount) -> Integer
+  def current: () -> Integer
+  def flag: () -> nil
+  def selected: (String fallback) -> String
+end

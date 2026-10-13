@@ -29,6 +29,8 @@ def main(argv)
   when 'verify'    then cmd_verify(argv)
   when 'fetch'     then cmd_fetch(argv)
   when 'fixture'   then cmd_fixture(argv)
+  when 'materialize'
+    exec(Gem.ruby, File.join(ROUNDHOUSE_ROOT, 'tools/boot-to-core/materialize.rb'), *argv)
   when 'transpile' then cmd_transpile(argv)
   when 'dev'       then cmd_dev_test_run(argv, 'dev')
   when 'test'      then cmd_dev_test_run(argv, 'test')
@@ -61,6 +63,9 @@ def print_usage
       doctor              Check installed prerequisites; show which subcommands work today.
       fetch <target>      Download a pre-transpiled archive.
       fixture [path]      Generate a Rails source fixture via `rails new`.
+
+    Experimental input (host Ruby + Prism; executes trusted code):
+      materialize         Export declared Ruby method roots into a NEW source project.
 
     Build (requires Rust):
       transpile <target>  Build the source fixture into build/transpiled-blog-<target>/.

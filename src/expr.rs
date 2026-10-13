@@ -88,6 +88,12 @@ pub fn is_self_binding(expr: &Expr) -> bool {
         && matches!(&*expr.node, ExprNode::Cast { value, .. } if matches!(&*value.node, ExprNode::SelfRef))
 }
 
+/// A scoped CurrentAttributes#set replacement, at the original Send span.
+/// Its attached block and ensure require verified native block semantics;
+/// target preflight must not mistake its synthetic Kernel#then for a
+/// supported ordinary method merely because analysis knows the block type.
+pub const CURRENT_SET_SCOPE: u64 = 1 << 17;
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by

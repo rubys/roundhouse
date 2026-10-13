@@ -14,15 +14,22 @@ use crate::span::Span;
 use crate::ty::{ParamKind, Ty};
 
 /// A single builder-yielding call, with the caller's block forwarded through.
+///
+/// `params` are source-backed name/default pairs. A trailing named
+/// keyword-rest (`**params`) is the one formal this specialization binds:
+/// it is empty when omitted, and a call-site keyword packet fills it.
+/// Explicit named keywords, general rest, and forwarding stay refused.
 pub(crate) struct FormWrapperHelper {
     pub(super) params: Vec<(Symbol, Option<Expr>)>,
+    /// Index of the trailing named keyword-rest, when this wrapper has one.
+    pub(super) keyword_rest: Option<usize>,
     pub(super) call: Expr,
 }
 
 fn wrapped_call(m: &MethodDef) -> Option<&Expr> {
     let blk = m.block_param.as_ref()?;
     if m.unsupported_formals.is_some()
-        || m.params.iter().any(|p| p.rest || p.keyword || p.forwarding)
+        || !formals_are_wrapper_bindable(&m.params)
     {
         return None;
     }
@@ -41,6 +48,21 @@ fn wrapped_call(m: &MethodDef) -> Option<&Expr> {
     Some(body)
 }
 
+/// Bind positionals and one trailing named `**params`, not general forwarding.
+fn formals_are_wrapper_bindable(params: &[crate::dialect::Param]) -> bool {
+    params.iter().enumerate().all(|(i, p)| {
+        !p.forwarding
+            && ((!p.rest && !p.keyword)
+                || (i + 1 == params.len()
+                    && p.keyword
+                    && p.rest
+                    && !p.name.as_str().is_empty()
+                    && p.default.is_none()
+                    && !p.from_keyword
+                    && !p.from_kwrest))
+    })
+}
+
 /// Resolve through the actual view-helper surface, not every library method
 /// with a matching name. The form and its caller's builder block must be
 /// visible together, so these one-call wrappers are substituted before the
@@ -57,10 +79,30 @@ pub(super) fn form_wrapper_helpers(app: &App) -> HashMap<String, FormWrapperHelp
             if let ExprNode::Send { block, .. } = &mut *call.node {
                 *block = None;
             }
+            let keyword_rest =
+                m.params.last().and_then(|p| (p.keyword && p.rest).then_some(m.params.len() - 1));
+            let params = m
+                .params
+                .iter()
+                .map(|p| {
+                    let default = if p.keyword && p.rest {
+                        // Ruby binds an omitted `**params` to `{}`. The
+                        // native formal has no default expression; this
+                        // is the specialization's own empty binding.
+                        Some(Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Hash { entries: vec![], kwargs: false },
+                        ))
+                    } else {
+                        p.default.clone()
+                    };
+                    (p.name.clone(), default)
+                })
+                .collect();
             out.insert(
                 m.name.as_str().to_string(),
                 FormWrapperHelper {
-                    params: m.params.iter().map(|p| (p.name.clone(), p.default.clone())).collect(),
+                    params, keyword_rest,
                     call,
                 },
             );
@@ -136,7 +178,13 @@ pub(crate) fn preserve_argument_owners(app: &mut App, registry: &HashMap<ClassId
                     bridge.params.retain(|p| reads.contains(&p.name));
                     let mut params = Vec::new();
                     for p in &mut bridge.params {
+                        // The bridge is a positional required ABI. A copied
+                        // native keyword/rest flag would make `ty_kind`
+                        // disagree with the `ParamKind::Required` slot.
                         p.default = None;
+                        p.keyword = false;
+                        p.rest = false;
+                        p.forwarding = false;
                         p.from_keyword = false;
                         p.from_kwrest = false;
                         let Some(sig) = sig_params.iter().find(|sig| sig.name == p.name) else {

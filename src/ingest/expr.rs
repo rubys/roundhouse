@@ -3077,7 +3077,16 @@ fn ingest_forwardable_arguments(
                 hash.elements().iter().any(|e| e.as_assoc_splat_node().is_some())
             });
             args.push(if has_keyword_splat {
-                Expr::new(value.span, ExprNode::KeywordSplat { value })
+                // Keep the whole written keyword-list span. Generated merge
+                // links share it; a user's explicit `**hash.merge(other)` has
+                // an inner value span instead, so later native projection can
+                // recover only the merges introduced by this argument list.
+                let loc = arg.location();
+                Expr::new(Span {
+                    file: super::sources::file_id(file),
+                    start: loc.start_offset() as u32,
+                    end: loc.end_offset() as u32,
+                }, ExprNode::KeywordSplat { value })
             } else {
                 value
             });

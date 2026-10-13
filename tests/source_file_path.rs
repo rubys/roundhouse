@@ -122,3 +122,14 @@ fn emitted_ruby_answers_the_same_from_another_cwd() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), EXPECTED);
 }
+
+#[test]
+fn source_locations_emit_without_current_scope_support() {
+    let (_emitted, errors) = emit_and_run::empty_app()
+        .write(
+            "app/lib/source_locator.rb",
+            "class SourceLocator\n  def self.file = __FILE__\n  def self.directory = __dir__\nend\n",
+        )
+        .emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+}

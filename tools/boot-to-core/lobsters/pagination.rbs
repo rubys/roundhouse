@@ -1,0 +1,3 @@
+module ApplicationHelper
+  def page_numbers_for_pagination: (Integer, Integer) -> Array[Integer | String]
+end

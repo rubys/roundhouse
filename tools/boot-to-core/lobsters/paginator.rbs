@@ -1,0 +1,5 @@
+class StoriesPaginator
+  def initialize: (nil, ?Integer, ?nil) -> void
+  def per_page: () -> Integer
+  def per_page=: (Integer) -> Integer
+end

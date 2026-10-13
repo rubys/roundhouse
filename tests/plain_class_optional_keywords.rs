@@ -1,23 +1,23 @@
 //! A plain library class's optional keyword parameters, called with
 //! keywords (#800).
 //!
-//! Ingest flattens an all-optional keyword group to positionals with
-//! defaults (`def field(name, type = nil, null = true, description =
-//! nil)`), marking each slot `from_keyword`, and `lower::helper_kwargs`
-//! moves each call's keywords into those slots. That rewrite resolved
-//! the callee only from a receiver typed as a class. A receiver typed as
-//! an instance of the class it is written in (`b = new` in a class
-//! method), `self.`, and a receiverless call from the class's own
-//! methods all fell through, and Ruby bound the whole keyword Hash to
-//! the first flattened slot with no diagnostic.
+//! Ordinary application methods keep the source keyword contract
+//! (`ingest::library_class::ingest_library_method` preserves keywords).
+//! Native Ruby on the same source is the oracle: keywords bind by name
+//! in any order, a skipped slot takes the callee's own default, and an
+//! unknown key or a missing method raises. A quiet diagnostic list is
+//! not that claim — each supported call is executed against the emitted
+//! Ruby and compared with the native control.
 //!
-//! Native Ruby on the same source is the oracle. A call whose keywords
-//! cannot be moved into slot order (a `**` splat, a key that is not a
-//! literal symbol, a skipped slot whose default reads the callee's
-//! context, a `send`) is refused with a named gap instead.
+//! One shape stays refused. `b = new` inside a class method types the
+//! receiver as an untyped instance, so `b.field(:a, **opts)` cannot be
+//! verified against the destination's native keyword ABI. The packet is
+//! not admitted.
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use roundhouse::project::BuildTarget;
 
@@ -62,18 +62,23 @@ const GADGET: &str = r##"module Kwlab
 end
 "##;
 
-const EXPECTED: &str = "[[:a, :string, false, nil], [:b, :string, true, \"kept\"], [:c, nil, true, nil], \
-[[:d, :string, false, nil], [:d, nil, true, \"self\"]], [:e, 8, \"c\"], [:f, 2, \"\"]]\n\
-[[:g, nil, false, nil], [:h, 8, \"inherited\"], [:i, nil, true, \"typed\"]]\n";
-
 const REPORT: &str = "p Kwlab::Builder.report\np Kwlab::Gadget.report\n";
 
 fn native(files: &[(&str, &str)], script: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("roundhouse-kwlab-{}-{}", std::process::id(), files.len()));
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "roundhouse-kwlab-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let mut requires = String::new();
     for (name, source) in files {
         let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         std::fs::write(&path, source).unwrap();
         requires.push_str(&format!("require {:?}\n", path.display().to_string()));
     }
@@ -83,29 +88,41 @@ fn native(files: &[(&str, &str)], script: &str) -> String {
         .output()
         .expect("native Ruby control");
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "native Ruby failed\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Emit the overlay and run `script` through the booted app. `main.rb`
+/// loads every emitted model, so the script names classes, not files.
+fn emitted(files: &[(&str, &str)], script: &str) -> emit_and_run::Run {
+    let mut overlay = emit_and_run::real_blog();
+    for (name, source) in files {
+        overlay = overlay.write(&format!("app/lib/{name}"), source);
+    }
+    overlay.run_ruby(script)
+}
+
+/// The supported claim: native Ruby and the emitted program produce the
+/// same stdout, and analysis/emit report no errors.
+fn assert_matches(files: &[(&str, &str)], script: &str) {
+    let expected = native(files, script);
+    let run = emitted(files, script);
+    run.assert_passes();
+    assert_eq!(run.stdout, expected, "emitted vs native");
 }
 
 #[test]
 fn optional_keywords_bind_by_name_through_every_receiver_shape() {
-    assert_eq!(
-        native(&[("builder.rb", BUILDER), ("gadget.rb", GADGET)], REPORT),
-        EXPECTED,
-        "native control"
-    );
-    let run = emit_and_run::real_blog()
-        .write("app/lib/kwlab/builder.rb", BUILDER)
-        .write("app/lib/kwlab/gadget.rb", GADGET)
-        .run_ruby(&format!(
-            "require_relative \"app/models/kwlab/builder\"\nrequire_relative \"app/models/kwlab/gadget\"\n{REPORT}"
-        ));
-    run.assert_passes();
-    assert_eq!(run.stdout, EXPECTED, "emitted vs native");
+    assert_matches(&[("kwlab/builder.rb", BUILDER), ("kwlab/gadget.rb", GADGET)], REPORT);
 }
 
-/// The issue's reproducer, verbatim: the emitted `def` keeps its
-/// flattened shape, and every call site moves its keywords into it.
+/// The issue's reproducer: `b = new` still binds each keyword by name,
+/// including a skipped slot, without rewriting the call into positional
+/// slot order.
 #[test]
 fn the_issue_reproducer_matches_ruby() {
     const SOURCE: &str = r##"module Kwlab
@@ -121,129 +138,153 @@ fn the_issue_reproducer_matches_ruby() {
   end
 end
 "##;
+    let script = "p Kwlab::Builder.report\n";
     let expected = "[[:a, :string, false, nil], [:b, :string, true, \"kept\"], [:c, nil, true, nil]]\n";
-    assert_eq!(native(&[("builder.rb", SOURCE)], "p Kwlab::Builder.report\n"), expected);
+    assert_eq!(native(&[("kwlab/builder.rb", SOURCE)], script), expected, "native control");
     let (emitted, errors) = emit_and_run::real_blog()
         .write("app/lib/kwlab/builder.rb", SOURCE)
         .emit(BuildTarget::Ruby);
     assert!(errors.is_empty(), "{}", errors.join("\n"));
     let source = std::fs::read_to_string(emitted.join("app/models/kwlab/builder.rb")).unwrap();
     assert!(
-        source.contains("b.field(:a, :string, false)")
-            && source.contains("b.field(:b, :string, true, \"kept\")"),
-        "call sites not moved into slot order:\n{source}"
+        source.contains("def field(name, type = nil, null: true, description: nil)")
+            && source.contains("b.field(:a, :string, null: false)")
+            && source.contains("b.field(:b, :string, description: \"kept\")")
+            && !source.contains("b.field(:a, :string, false)"),
+        "optional keywords were flattened instead of preserved:\n{source}"
     );
-    let main = emitted.join("main").display().to_string();
-    let output = emit_and_run::ruby()
-        .arg("-e")
-        .arg(format!(
-            "require {main:?}\nMain.configure_default_adapter!\nrequire_relative \"app/models/kwlab/builder\"\np Kwlab::Builder.report\n"
-        ))
-        .current_dir(&emitted)
-        .env("BLOG_DB", ":memory:")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), expected, "emitted vs native:\n{source}");
+    assert_matches(&[("kwlab/builder.rb", SOURCE)], script);
 }
 
-/// Emit `report`'s body against the builder and return the errors.
-fn refusal_errors(report: &str) -> Vec<String> {
-    let source = format!(
-        r##"module Kwlab
-  class Builder
+/// A key computed at the call, and `send` / `public_send`, stay Ruby's
+/// dispatch: a Symbol key binds, a String key is unknown, and a missing
+/// method raises `NoMethodError`.
+#[test]
+fn dynamic_keyword_keys_and_send_match_ruby() {
+    const SOURCE: &str = r##"module Kwlab
+  class Dyn
     def field(name, type = nil, null: true, description: nil)
       [name, type, null, description]
     end
 
-    def self.stamp
-      Time.now.to_i
-    end
-
-    def mark(name, at: Builder.stamp, note: "")
-      [name, at, note]
-    end
-
-    def self.report(opts, key)
+    def self.go(key, method_name)
       b = new
-      {report}
-    end
-  end
-end
-"##
-    );
-    let (_emitted, errors) = emit_and_run::real_blog()
-        .write("app/lib/kwlab/builder.rb", &source)
-        .emit(BuildTarget::Ruby);
-    errors
-}
-
-fn assert_refused(report: &str) {
-    let errors = refusal_errors(report);
-    assert!(
-        errors.iter().any(|e| e.contains("flattened keyword arguments not supported")),
-        "`{report}` was not refused; errors: {errors:#?}"
-    );
-}
-
-#[test]
-fn a_keyword_splat_into_flattened_keywords_is_refused() {
-    assert_refused("b.field(:a, **opts)");
-    assert_refused("b.field(:a, null: false, **opts)");
-}
-
-#[test]
-fn a_dynamic_keyword_key_is_refused() {
-    assert_refused("b.field(:a, key => false)");
-    assert_refused("b.field(:a, \"null\" => false)");
-}
-
-#[test]
-fn a_send_with_keywords_to_a_flattened_method_is_refused() {
-    assert_refused("b.send(:field, :a, null: false)");
-    assert_refused("b.public_send(:field, :a, description: \"x\")");
-}
-
-/// A skipped slot is filled with the callee's default only when that
-/// default means the same thing at the call site; the context-free
-/// counterparts of each refused call still move and stay quiet.
-#[test]
-fn a_skipped_slot_whose_default_reads_the_callee_is_refused() {
-    assert_refused("b.mark(:a, note: \"late\")");
-    let errors = refusal_errors("[b.field(:a, null: false), b.mark(:a, at: 1), b.mark(:b), b.field(:c, opts)]");
-    assert!(errors.is_empty(), "{}", errors.join("\n"));
-}
-
-/// The same refusals through a receiver typed as the class, from
-/// another class.
-#[test]
-fn a_typed_receiver_keyword_splat_is_refused() {
-    const CALLER: &str = r##"module Kwlab
-  class Caller
-    def self.run(opts)
-      Kwlab::Builder.new.field(:a, **opts)
+      bound = begin
+        [:ok, b.field(:a, key => false)]
+      rescue ArgumentError => e
+        [:arg, e.class.name, e.message]
+      end
+      sent = begin
+        [:ok, b.send(method_name, :a, null: false), b.public_send(:field, :a, description: "x")]
+      rescue NoMethodError => e
+        [:nomethod, e.class.name, e.message]
+      end
+      [bound, sent]
     end
   end
 end
 "##;
-    let (_emitted, errors) = emit_and_run::real_blog()
-        .write(
-            "app/lib/kwlab/builder.rb",
-            "module Kwlab\n  class Builder\n    def field(name, type = nil, null: true, description: nil)\n      [name, type, null, description]\n    end\n  end\nend\n",
-        )
-        .write("app/lib/kwlab/caller.rb", CALLER)
-        .emit(BuildTarget::Ruby);
-    assert!(
-        errors.iter().any(|e| e.contains("flattened keyword arguments not supported")),
-        "not refused; errors: {errors:#?}"
+    assert_matches(
+        &[("kwlab/dyn.rb", SOURCE)],
+        "p Kwlab::Dyn.go(:null, :field)\n\
+         p Kwlab::Dyn.go(:description, \"field\")\n\
+         p Kwlab::Dyn.go(:nope, :missing)\n\
+         p Kwlab::Dyn.go(\"null\", :field)\n",
     );
 }
 
-/// `self.field(…)` in the base reaches a subclass's `field` when the
-/// receiver is a subclass instance. With different keyword slots there,
-/// no one positional spelling binds for both.
+/// A skipped slot evaluates its default in the callee, not at the call.
+/// `SubMarker.stamp` is 99, but `mark`'s default still calls `Marker.stamp`.
 #[test]
-fn a_subclass_redefinition_with_other_slots_is_refused() {
+fn a_skipped_slot_evaluates_the_callee_default() {
+    const SOURCE: &str = r##"module Kwlab
+  class Marker
+    def self.stamp
+      7
+    end
+
+    def mark(name, at: Marker.stamp, note: "")
+      [name, at, note]
+    end
+
+    def self.report
+      b = new
+      [b.mark(:a, note: "late"), b.mark(:a, at: 1), b.mark(:b)]
+    end
+  end
+
+  class SubMarker < Marker
+    def self.stamp
+      99
+    end
+  end
+end
+"##;
+    assert_matches(
+        &[("kwlab/marker.rb", SOURCE)],
+        "p Kwlab::Marker.report\np Kwlab::SubMarker.new.mark(:z, note: \"sub\")\n",
+    );
+}
+
+/// A typed constructor receiver can take a keyword splat. The callee
+/// owns unknown keys; an explicit keyword and the packet combine in
+/// source order, the later one winning.
+#[test]
+fn a_typed_receiver_keyword_splat_matches_ruby() {
+    const BUILDER: &str = r##"module Kwlab
+  class Builder
+    def field(name, type = nil, null: true, description: nil)
+      [name, type, null, description]
+    end
+  end
+end
+"##;
+    const CALLER: &str = r##"module Kwlab
+  class Caller
+    def self.run(opts)
+      begin
+        [:ok, Kwlab::Builder.new.field(:a, **opts)]
+      rescue ArgumentError => e
+        [:arg, e.class.name, e.message]
+      end
+    end
+
+    def self.overlay(opts)
+      begin
+        [:ok, Kwlab::Builder.new.field(:a, null: true, **opts)]
+      rescue ArgumentError => e
+        [:arg, e.class.name, e.message]
+      end
+    end
+
+    def self.after(opts)
+      begin
+        [:ok, Kwlab::Builder.new.field(:a, **opts, description: "after")]
+      rescue ArgumentError => e
+        [:arg, e.class.name, e.message]
+      end
+    end
+  end
+end
+"##;
+    assert_matches(
+        &[("kwlab/builder.rb", BUILDER), ("kwlab/caller.rb", CALLER)],
+        "p Kwlab::Caller.run({null: false, description: \"d\"})\n\
+         p Kwlab::Caller.run({description: \"only\"})\n\
+         p Kwlab::Caller.run({})\n\
+         p Kwlab::Caller.run({null: false, extra: 1})\n\
+         p Kwlab::Caller.run({\"null\" => false})\n\
+         p Kwlab::Caller.run({nope: 1})\n\
+         p Kwlab::Caller.overlay({null: false, description: \"s\"})\n\
+         p Kwlab::Caller.after({null: false})\n",
+    );
+}
+
+/// `field` in the base reaches the subclass override. The two keyword
+/// orders are different, and each receiver binds the call it actually
+/// reaches.
+#[test]
+fn a_subclass_redefinition_binds_the_method_it_reaches() {
     const BASE: &str = r##"module Kwlab
   class Builder
     def field(name, type = nil, null: true, description: nil)
@@ -253,6 +294,10 @@ fn a_subclass_redefinition_with_other_slots_is_refused() {
     def add(name)
       field(name, description: "base")
     end
+
+    def self.direct
+      new.field(:g, null: false, description: "x")
+    end
   end
 end
 "##;
@@ -261,24 +306,26 @@ end
     def field(name, description: nil, null: true)
       [name, description, null]
     end
+
+    def self.direct
+      new.field(:g, null: false, description: "x")
+    end
   end
 end
 "##;
-    let (_emitted, errors) = emit_and_run::real_blog()
-        .write("app/lib/kwlab/builder.rb", BASE)
-        .write("app/lib/kwlab/gadget.rb", SUB)
-        .emit(BuildTarget::Ruby);
-    assert!(
-        errors.iter().any(|e| e.contains("a subclass or includer redefines this method")),
-        "not refused; errors: {errors:#?}"
+    assert_matches(
+        &[("kwlab/builder.rb", BASE), ("kwlab/gadget.rb", SUB)],
+        "p Kwlab::Gadget.new.add(:g)\n\
+         p Kwlab::Gadget.direct\n\
+         p Kwlab::Builder.new.add(:g)\n\
+         p Kwlab::Builder.direct\n",
     );
 }
 
-/// The same through an included module: a call in the module's body
-/// reaches the includer's own `field` first, so a different slot
-/// layout there is refused too.
+/// A call written in an included module reaches the includer's own
+/// `field` first. Direct and inherited calls keep that method's slots.
 #[test]
-fn an_includer_redefinition_with_other_slots_is_refused() {
+fn an_includer_redefinition_binds_the_method_it_reaches() {
     const FIELDS: &str = r##"module Kwlab
   module Fields
     def field(name, type = nil, null: true, description: nil)
@@ -292,7 +339,7 @@ fn an_includer_redefinition_with_other_slots_is_refused() {
 end
 "##;
     const GADGET: &str = r##"module Kwlab
-  class Gadget
+  class Widget
     include Fields
 
     def field(name, description: nil, null: true)
@@ -301,23 +348,18 @@ end
   end
 end
 "##;
-    let (_emitted, errors) = emit_and_run::real_blog()
-        .write("app/lib/kwlab/fields.rb", FIELDS)
-        .write("app/lib/kwlab/gadget.rb", GADGET)
-        .emit(BuildTarget::Ruby);
-    assert!(
-        errors.iter().any(|e| e.contains("a subclass or includer redefines this method")),
-        "not refused; errors: {errors:#?}"
+    assert_matches(
+        &[("kwlab/fields.rb", FIELDS), ("kwlab/widget.rb", GADGET)],
+        "p Kwlab::Widget.new.add(:w)\np Kwlab::Widget.new.field(:w, null: false, description: \"direct\")\n",
     );
 }
 
-/// Ruby resolves `field` through each included module's own includes:
-/// `Gadget.ancestors` is `[Gadget, Inner, Patch, Fields]`, so `self.field`
-/// in `Fields#add` on a `Gadget` reaches `Patch#field`, which `Inner`
-/// brings in without defining it. Its slots differ, so the call is
-/// refused rather than moved into `Fields#field`'s slots.
+/// Ruby resolves `field` through each included module's own includes.
+/// The app ancestor prefix is `[Gadget, Inner, Patch, Fields]`; runtime
+/// mixins may follow it. `Fields#add` on a `Gadget` therefore reaches
+/// `Patch#field`, whose keyword order differs from `Fields#field`.
 #[test]
-fn a_nested_include_redefinition_with_other_slots_is_refused() {
+fn a_nested_include_redefinition_binds_the_method_it_reaches() {
     const FIELDS: &str = r##"module Kwlab
   module Fields
     def field(name, type = nil, null: true, description: nil)
@@ -338,17 +380,66 @@ end
   end
 end
 "##;
-    const INNER: &str =
-        "module Kwlab\n  module Inner\n    include Patch\n\n    def marker\n      :inner\n    end\n  end\nend\n";
+    const INNER: &str = "module Kwlab\n  module Inner\n    include Patch\n\n    def marker\n      :inner\n    end\n  end\nend\n";
     const GADGET: &str = "module Kwlab\n  class Gadget\n    include Fields\n    include Inner\n  end\nend\n";
+    let files = [
+        ("kwlab/fields.rb", FIELDS),
+        ("kwlab/patch.rb", PATCH),
+        ("kwlab/inner.rb", INNER),
+        ("kwlab/gadget.rb", GADGET),
+    ];
+    let script = "names = Kwlab::Gadget.ancestors.map { |a| a.name }\n\
+                  raise names.inspect unless names.take(4) == \
+                  [\"Kwlab::Gadget\", \"Kwlab::Inner\", \"Kwlab::Patch\", \"Kwlab::Fields\"]\n\
+                  p Kwlab::Gadget.new.add(:n)\n\
+                  p Kwlab::Gadget.new.field(:n, null: false, description: \"p\")\n\
+                  p Kwlab::Gadget.new.marker\n";
+    assert_matches(&files, script);
+}
+
+/// `b = new` does not prove which class runs the method, so a keyword
+/// splat into that receiver's preserved keyword parameters stays refused.
+/// A typed `Kwlab::Host.new` splat of the same method is a different
+/// call and is not this refusal.
+#[test]
+fn an_untyped_receiver_keyword_splat_is_refused() {
+    const SOURCE: &str = r##"module Kwlab
+  class Host
+    def field(name, type = nil, null: true, description: nil)
+      [name, type, null, description]
+    end
+
+    def self.report(opts)
+      b = new
+      b.field(:a, **opts)
+    end
+
+    def self.overlay(opts)
+      b = new
+      b.field(:a, null: false, **opts)
+    end
+  end
+end
+"##;
     let (_emitted, errors) = emit_and_run::real_blog()
-        .write("app/lib/kwlab/fields.rb", FIELDS)
-        .write("app/lib/kwlab/patch.rb", PATCH)
-        .write("app/lib/kwlab/inner.rb", INNER)
-        .write("app/lib/kwlab/gadget.rb", GADGET)
+        .write("app/lib/kwlab/host.rb", SOURCE)
         .emit(BuildTarget::Ruby);
+    let refusals: Vec<_> = errors
+        .iter()
+        .filter(|e| {
+            e.contains("keyword splat into source keyword parameters not supported")
+                && e.contains("keyword destination's native argument ABI cannot be verified")
+        })
+        .collect();
     assert!(
-        errors.iter().any(|e| e.contains("a subclass or includer redefines this method")),
-        "not refused; errors: {errors:#?}"
+        refusals.len() >= 2,
+        "both untyped `b.field(..., **opts)` calls must be refused; errors: {errors:#?}"
+    );
+    assert!(
+        errors.iter().all(|e| {
+            e.contains("keyword splat into source keyword parameters not supported")
+                && e.contains("keyword destination's native argument ABI cannot be verified")
+        }),
+        "unexpected errors beside the unverified keyword ABI: {errors:#?}"
     );
 }

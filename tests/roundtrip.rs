@@ -182,6 +182,7 @@ fn tiny_blog_round_trips() {
         graphql_signatures: Vec::new(),
         concern_spliced_actions: std::collections::HashMap::new(),
         concern_spliced_class_methods: std::collections::HashMap::new(),
+        concern_class_method_templates: std::collections::HashMap::new(),
         concern_model_items: std::collections::HashMap::new(),
         concern_guarded_items: std::collections::HashMap::new(),
         concern_included_redefs: std::collections::HashMap::new(),

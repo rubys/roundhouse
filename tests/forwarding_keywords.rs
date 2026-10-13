@@ -22,6 +22,7 @@ fn compiled_keyword_producers_preserve_identity_order_and_single_evaluation() {
 class Counter
   def initialize; @calls = 0; end
   def produce(factor); @calls += 1; {factor: factor, offset: @calls}; end
+  def merge(factor); {factor: factor+2}; end
   def calls; @calls; end
 end
 class Probe
@@ -51,12 +52,16 @@ class Probe
     kw = {factor: 3}
     Probe.call(11,4,**kw) { |r| r*2+1 }
   end
+  def self.explicit_merge
+    Probe.call(11,4,**Counter.new.merge(5))
+  end
 end
 "#;
     // Without keyword provenance run is an arity error; treating a positional
     // hash as keywords changes positional; duplication/order errors change mixed.
-    let script = "puts Probe.run; puts Probe.positional; puts Probe.mixed; puts Probe.transformed";
-    let expected = "21\npositional\n232\n43\n";
+    // A written .merge is an ordinary producer, not an ingest-created link.
+    let script = "puts Probe.run; puts Probe.positional; puts Probe.mixed; puts Probe.transformed; puts Probe.explicit_merge";
+    let expected = "21\npositional\n232\n43\n49\n";
     native_result(source, script, expected);
     let run = emit_and_run::real_blog()
         .write("app/lib/probe.rb", source)
@@ -95,8 +100,9 @@ end
     let child = std::fs::read_to_string(run.emitted.join("app/models/child.rb")).unwrap();
     assert!(child.contains("super(7, **kw)"), "{child}");
     let ordinary = std::fs::read_to_string(run.emitted.join("app/models/probe.rb")).unwrap();
-    assert!(
-        !ordinary.contains("helper.target(11, 4, **kw)"),
+    // Ordinary source keywords keep the native producer. Flattening
+    // `**kw` into a positional hash would change Ruby's binding.
+    assert!(ordinary.contains("helper.target(11, 4, **kw)"),
         "{ordinary}"
     );
 }
@@ -265,18 +271,21 @@ fn compiled_empty_and_optional_keyword_packets_survive_two_hops() {
 }
 
 #[test]
-fn competing_ordinary_and_full_virtual_keyword_contracts_refuse_projection() {
+fn competing_ordinary_and_full_virtual_keyword_contracts_execute_native_declarations() {
     let source = "class Sink; def self.leaf(factor:,extra:); factor-extra; end; end; class Parent; def run; kw={factor:11,extra:4}; target(**kw); end; def target(factor:); factor; end; end; class Child < Parent; def target(...); Sink.leaf(...); end; end";
     native_result(source, "puts Child.new.run", "7\n");
-    let run = emit_and_run::real_blog()
+    let child = emit_and_run::real_blog()
         .write("app/lib/probe.rb", source)
         .run_ruby("puts Child.new.run");
-    assert!(
-        run.errors.iter().any(|e| e.contains("keyword producer")),
-        "{:?}; actual={}; stderr={}",
-        run.errors,
-        run.stdout,
-        run.stderr
+    child.assert_passes();
+    assert_eq!(child.stdout, "7\n");
+    // The parent's own declaration still rejects the extra key. Native
+    // retention must not turn that ArgumentError into a successful call.
+    let parent = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", source)
+        .run_ruby("begin; Parent.new.run; rescue ArgumentError; puts 'unknown-extra-key'; end");
+    parent.assert_passes();
+    assert_eq!(parent.stdout, "unknown-extra-key\n"
     );
 }
 
@@ -289,4 +298,56 @@ fn keyword_producer_modifier_keeps_operand_grouping() {
         .run_ruby("puts Probe.run");
     run.assert_passes();
     assert_eq!(run.stdout, "11\n");
+}
+
+#[test]
+fn carrier_keyword_packets_check_real_singletons_and_every_includer() {
+    for carrier in [
+        "class << self; def build(**fields); new(**fields); end; end",
+        "module ClassMethods; def build(**fields); new(**fields); end; end; def self.included(base); base.extend(ClassMethods); end",
+    ] {
+        let source = format!(r#"
+module Factory
+  {carrier}
+end
+class Product
+  include Factory
+  def initialize(label:); @label=label; end
+  def label; @label; end
+end
+class Other
+  include Factory
+  def initialize(attributes={{}}); @label=attributes[:label]; end
+  def label; @label; end
+end
+class Probe
+  def self.run; Product.build(label: "native").label; end
+end
+"#);
+        // A real singleton's `new` does not run on an includer. A template
+        // does, but every copied body must be checked, not just Product's.
+        let script = if carrier.starts_with("class << self") {
+            "begin; Factory.build(label: 'singleton'); rescue NoMethodError; puts 'no-new'; end"
+        } else {
+            "puts Probe.run; puts Other.build(label: 'hash').label"
+        };
+        native_result(&source, script, if carrier.starts_with("class << self") {
+            "no-new\n"
+        } else {
+            "native\nhash\n"
+        });
+        let run = emit_and_run::real_blog().write("app/lib/probe.rb", &source).run_ruby(script);
+        assert!(run.errors.iter().any(|e| e.contains("keyword") && e.contains("cannot be verified")),
+            "a surviving copy must not hide an unverified singleton/includer: {:?}", run.errors);
+    }
+    let source = "module Factory; module ClassMethods; def build(**fields); new(**fields); end; end; def self.included(base); base.extend(ClassMethods); end; end; class Product; include Factory; def initialize(label:); @label=label; end; def label; @label; end; end; class Probe; def self.run; options={label:'x'}; begin; Factory.build(**options).label; rescue NoMethodError => error; error.name.to_s; end; end; end";
+    native_result(source, "puts Probe.run", "build\n");
+    let run = emit_and_run::real_blog().write("app/lib/probe.rb", source).run_ruby("puts Probe.run");
+    assert!(run.errors.iter().any(|e| e.contains("keyword destination's native argument ABI cannot be verified")),
+        "a template must not invent a callable Factory.build: {:?}", run.errors);
+    let copy = source.replace("Factory.build(**options)", "Product.build(**options)");
+    native_result(&copy, "puts Probe.run", "x\n");
+    let run = emit_and_run::real_blog().write("app/lib/probe.rb", &copy).run_ruby("puts Probe.run");
+    run.assert_passes();
+    assert_eq!(run.stdout, "x\n");
 }

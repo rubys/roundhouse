@@ -3,6 +3,10 @@
 //! emitted Ruby. In Ruby 3 a positional Hash does not bind keyword
 //! parameters, so `@connection.send(meth, *args, kwargs)` raised where the
 //! source's `**kwargs` worked.
+//!
+//! The untyped `@connection.query` relay still has an unverified keyword
+//! ABI. Its retained refusal is part of this contract: matching this Ruby
+//! execution does not establish support for every possible receiver.
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -43,7 +47,7 @@ puts "keyword splat passed"
 "##;
 
 #[test]
-fn native_and_emitted_ruby_keep_a_forwarded_keyword_splat() {
+fn an_unverified_relay_keeps_its_refusal_and_ruby_keyword_packet() {
     let native = Command::new("ruby")
         .arg("-e")
         .arg(format!("{LIBRARY}\n{ASSERTIONS}"))
@@ -55,8 +59,13 @@ fn native_and_emitted_ruby_keep_a_forwarded_keyword_splat() {
     let run = emit_and_run::real_blog()
         .write("app/lib/keyword_connection_proxy.rb", LIBRARY)
         .run_ruby(ASSERTIONS);
-    run.assert_passes();
-    assert_eq!(run.stdout, "keyword splat passed\n");
+    assert!(!run.errors.is_empty(), "the untyped relay must not earn ABI admission");
+    assert!(run.errors.iter().all(|error|
+        error.contains("keyword splat into source keyword parameters not supported")
+            && error.contains("keyword destination's native argument ABI cannot be verified")),
+        "unexpected diagnostic beside the unverified relay: {:?}", run.errors);
+    assert!(run.success, "emitted Ruby failed: {}", run.stderr);
+    assert_eq!(run.stdout, String::from_utf8_lossy(&native.stdout), "emitted vs native");
     let emitted =
         std::fs::read_to_string(run.emitted.join("app/models/keyword_connection_proxy.rb")).unwrap();
     assert!(emitted.contains("@connection.send(meth, *args, **kwargs, &block)"), "{emitted}");
