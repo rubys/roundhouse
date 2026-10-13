@@ -4957,8 +4957,14 @@ impl Analyzer {
         for info in self.classes.values_mut() {
             info.block_value_methods.clear();
         }
+        // Not the registered method tables: the registry lists the built-in
+        // method there too (`MemoryStore#fetch`), so only the app's own
+        // source can tell that the app replaced it.
         for (class, method) in registry::stdlib::BUILTIN_BLOCK_VALUE_METHODS {
-            found.push((ClassId(Symbol::from(*class)), Symbol::from(*method)));
+            let class_id = ClassId(Symbol::from(*class));
+            if !source_instance_method(app, &class_id, method) {
+                found.push((class_id, Symbol::from(*method)));
+            }
         }
         for (class_id, method) in found {
             self.classes.entry(class_id).or_default().block_value_methods.insert(method);
