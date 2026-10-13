@@ -49,7 +49,7 @@
 //!
 //! ```text
 //! render json: opengraph
-//! render plain: opengraph.as_json_str, content_type: "application/json"
+//! render plain: opengraph.as_json_str, content_type: "application/json; charset=utf-8"
 //! ```
 //!
 //! — which the controller rewrite already lowers on every target, with
@@ -232,7 +232,11 @@ fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>) -> Option<Expr> {
             with_ty(
                 Expr::new(
                     value.span,
-                    ExprNode::Lit { value: Literal::Str { value: "application/json".to_string() } },
+                    ExprNode::Lit {
+                        value: Literal::Str {
+                            value: crate::lower::controller_to_library::rewrites::JSON_RESPONSE_TYPE.to_string(),
+                        },
+                    },
                 ),
                 Ty::Str,
             ),

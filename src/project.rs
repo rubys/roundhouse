@@ -5450,13 +5450,25 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     // `controller_to_library`, which runs at emit time after this gate.
     // Survey a throwaway lower so lowers-added exception Consts (now
     // typed) are still ledgered on strict targets (Thomas 2B).
-    let lowered_controllers =
+    //
+    // The ruby family emits its controllers through the negotiating
+    // lowering, which owns the `respond_to` ledger; this narrow-breadth
+    // pass would re-report every arm that lowering carries as "dropped",
+    // so its diagnostics are discarded there. Other targets lower through
+    // the narrow pass for real and keep them.
+    let lower_throwaway = || {
         crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
             &app.controllers,
             Vec::new(),
             Some(&app.schema),
             &app.views,
-        );
+        )
+    };
+    let lowered_controllers = if matches!(target.as_str(), "spinel" | "ruby" | "jruby") {
+        emit::diagnostics::scope(lower_throwaway).0
+    } else {
+        lower_throwaway()
+    };
     for class in &lowered_controllers {
         for method in &class.methods {
             visit(&method.body);

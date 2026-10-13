@@ -163,14 +163,14 @@ fn a_json_rendered_poro_gets_a_writer_over_the_same_readers() {
 }
 
 /// The call site becomes the Rails idiom for an already-encoded body —
-/// `render plain: <v>.as_json_str, content_type: "application/json"` —
+/// `render plain: <v>.as_json_str, content_type: "application/json; charset=utf-8"` —
 /// which the controller rewrite lowers on every target. No
 /// `JsonRender.encode` is left for a compiled tree to fail to resolve.
 #[test]
 fn the_render_site_serves_the_writers_text_as_json() {
     let src = controller_emit_with(RENDERS_JSON, SPLAT_MODEL);
     assert!(
-        src.contains(r#"render(card.as_json_str, content_type: "application/json")"#),
+        src.contains(r#"render(card.as_json_str, content_type: "application/json; charset=utf-8")"#),
         "{src}"
     );
     assert!(!src.contains("JsonRender"), "{src}");

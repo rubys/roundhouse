@@ -2283,7 +2283,84 @@ pub(crate) fn render_locals_keys(
     use std::collections::{BTreeSet, HashMap};
     let mut acc: HashMap<(String, String), BTreeSet<String>> = HashMap::new();
 
-    fn scan(e: &Expr, own_dir: Option<&str>, acc: &mut std::collections::HashMap<(String, String), std::collections::BTreeSet<String>>) {
+    fn scan(
+        e: &Expr,
+        own_dir: Option<&str>,
+        // View directories a CONTROLLER's bare partial name is looked up
+        // in, own first then each ancestor's, and the partials that exist.
+        lookup_dirs: &[String],
+        existing: &std::collections::HashSet<(String, String)>,
+        acc: &mut std::collections::HashMap<(String, String), std::collections::BTreeSet<String>>,
+    ) {
+        // `render turbo_stream: turbo_stream.update("flash", partial:
+        // "flash", locals: {…})` — the builder's option hash is a
+        // `render partial:` in everything but spelling, and the locals
+        // it names are the partial's interface just the same. The bare
+        // name resolves against `own_dir`, which a controller scan
+        // supplies as the controller's view directory.
+        if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*e.node {
+            let builder = match &*recv.node {
+                ExprNode::Send { recv: None, method, args, block: None, .. } => {
+                    method.as_str() == "turbo_stream" && args.is_empty()
+                }
+                ExprNode::Var { name, .. } => name.as_str() == "turbo_stream",
+                _ => false,
+            };
+            if builder
+                && matches!(
+                    method.as_str(),
+                    "append" | "prepend" | "replace" | "update" | "before" | "after"
+                )
+            {
+                for a in args.iter() {
+                    let ExprNode::Hash { entries, .. } = &*a.node else { continue };
+                    let mut partial: Option<String> = None;
+                    let mut keys: Vec<String> = Vec::new();
+                    for (k, v) in entries {
+                        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                            continue;
+                        };
+                        match (key.as_str(), &*v.node) {
+                            ("partial", ExprNode::Lit { value: Literal::Str { value } }) => {
+                                partial = Some(value.clone());
+                            }
+                            ("locals", ExprNode::Hash { entries: le, .. }) => {
+                                for (lk, _) in le {
+                                    if let ExprNode::Lit { value: Literal::Sym { value } } = &*lk.node {
+                                        keys.push(value.as_str().to_string());
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(p) = partial {
+                        let resolved = match p.rsplit_once('/') {
+                            Some((d, n)) => Some((d.to_string(), n.to_string())),
+                            None => lookup_dirs
+                                .iter()
+                                .find(|d| {
+                                    existing.contains(&(
+                                        camelize_path(&snake_case(d)),
+                                        p.trim_start_matches('_').to_string(),
+                                    ))
+                                })
+                                .or(lookup_dirs.first())
+                                .cloned()
+                                .or_else(|| own_dir.map(str::to_string))
+                                .map(|d| (d, p.clone())),
+                        };
+                        if let Some((d, n)) = resolved {
+                            let key = (
+                                camelize_path(&snake_case(&d)),
+                                n.trim_start_matches('_').to_string(),
+                            );
+                            acc.entry(key).or_default().extend(keys);
+                        }
+                    }
+                }
+            }
+        }
         if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
             if (method.as_str() == "render" || method.as_str() == "render_to_string")
                 && !args.is_empty()
@@ -2373,22 +2450,50 @@ pub(crate) fn render_locals_keys(
                 }
             }
         }
-        e.node.for_each_child(&mut |c| scan(c, own_dir, acc));
+        e.node.for_each_child(&mut |c| scan(c, own_dir, lookup_dirs, existing, acc));
     }
 
+    let existing: std::collections::HashSet<(String, String)> = views
+        .iter()
+        .filter_map(|v| {
+            let (dir, base) = split_view_name(v.name.as_str());
+            (!dir.is_empty() && base.starts_with('_')).then(|| {
+                (camelize_path(&snake_case(dir)), base.trim_start_matches('_').to_string())
+            })
+        })
+        .collect();
     for v in views {
         let (dir, _) = split_view_name(v.name.as_str());
         let own = (!dir.is_empty()).then_some(dir);
-        scan(&v.body, own, &mut acc);
+        let dirs: Vec<String> = own.map(str::to_string).into_iter().collect();
+        scan(&v.body, own, &dirs, &existing, &mut acc);
     }
+    // A controller's BARE partial name in a turbo_stream builder is looked
+    // up in its own view directory, then each ancestor's, as Rails does.
     for c in controllers {
+        let mut dirs: Vec<String> = Vec::new();
+        let mut cur = Some(c);
+        let mut hops = 0;
+        while let Some(ctrl) = cur {
+            if let Some(stem) = ctrl.name.0.as_str().strip_suffix("Controller") {
+                if !stem.is_empty() {
+                    dirs.push(crate::naming::underscore(stem));
+                }
+            }
+            hops += 1;
+            cur = ctrl
+                .parent
+                .as_ref()
+                .and_then(|p| controllers.iter().find(|o| &o.name == p))
+                .filter(|_| hops < 8);
+        }
         for a in c.actions() {
-            scan(&a.body, None, &mut acc);
+            scan(&a.body, None, &dirs, &existing, &mut acc);
         }
     }
     for lc in library_classes {
         for m in &lc.methods {
-            scan(&m.body, None, &mut acc);
+            scan(&m.body, None, &[], &existing, &mut acc);
         }
     }
     // A form-builder local is NOT interface: the bound partial inlines

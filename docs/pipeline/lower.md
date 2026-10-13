@@ -198,6 +198,27 @@ different runtime costs; see the struct's doc). The plain
 per-target paths that can't emit the dispatch; its own doc comment
 calls that the legacy behavior.
 
+On the ruby-family trees (`FormatBreadth::negotiates`: spinel and
+CRuby) the dispatch is Rails' own selection rather than a
+`request_format` sniff. Each arm becomes `negotiate_format([<arms in
+source order>]) == "<fmt>"`, the runtime's `Base#negotiate_format`
+walks the request's formats (a URL-pinned format, else the parsed
+`Accept` list, else html) exactly as `Request#negotiate_mime` does, and
+what no arm answers is `raise ActionController::UnknownFormat` (the
+dispatchers answer 406). `format.turbo_stream` is carried on these
+trees: a bare arm renders `<action>.turbo_stream.erb`, a block may
+`render :sym`, `head`, or `render turbo_stream: turbo_stream.<action>(
+target, partial:, locals:)` (singly or as an Array), and a block that
+only has side effects falls to the implicit template. An arm the tree
+cannot run is an ERROR (`respond_to_negotiate`): a bare arm with no
+template, builders written by app code, `*_all` / attribute options,
+and formats the lowering does not model. The one deliberate exception
+is a json arm whose body needs an encoder the AOT tree lacks (`render
+json: record.errors`, every scaffold's failure arm): it stays a
+warning and answers its html arm, as before. The expected responses
+are measured from actionpack + turbo-rails by
+`tests/support/turbo_respond_to/oracle.rb`.
+
 ### `resolve_before_actions` + `inline_before_filters`
 
 `before_action :set_article` doesn't produce any IR of its own in the

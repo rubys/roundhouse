@@ -1,0 +1,2760 @@
+[
+  {
+    "name": "h_side html",
+    "path": "/probes/h_side",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side turbo",
+    "path": "/probes/h_side",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side json",
+    "path": "/probes/h_side",
+    "accept_label": "json",
+    "env": {},
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "location": null,
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "h_side star",
+    "path": "/probes/h_side",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side none",
+    "path": "/probes/h_side",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side html_turbo",
+    "path": "/probes/h_side",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side png",
+    "path": "/probes/h_side",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_side browser",
+    "path": "/probes/h_side",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side_json html",
+    "path": "/probes/h_side_json",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side_json</p>\n"
+  },
+  {
+    "name": "h_side_json turbo",
+    "path": "/probes/h_side_json",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side_json</p>\n"
+  },
+  {
+    "name": "h_side_json json",
+    "path": "/probes/h_side_json",
+    "accept_label": "json",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"a\":1}"
+  },
+  {
+    "name": "h_side_json star",
+    "path": "/probes/h_side_json",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side_json</p>\n"
+  },
+  {
+    "name": "h_side_json none",
+    "path": "/probes/h_side_json",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side_json</p>\n"
+  },
+  {
+    "name": "h_side_json html_turbo",
+    "path": "/probes/h_side_json",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side_json</p>\n"
+  },
+  {
+    "name": "h_side_json png",
+    "path": "/probes/h_side_json",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_side_json browser",
+    "path": "/probes/h_side_json",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side_json</p>\n"
+  },
+  {
+    "name": "h_multi html",
+    "path": "/probes/h_multi",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi turbo",
+    "path": "/probes/h_multi",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi json",
+    "path": "/probes/h_multi",
+    "accept_label": "json",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"a\":1}"
+  },
+  {
+    "name": "h_multi star",
+    "path": "/probes/h_multi",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi none",
+    "path": "/probes/h_multi",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi html_turbo",
+    "path": "/probes/h_multi",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi png",
+    "path": "/probes/h_multi",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_multi browser",
+    "path": "/probes/h_multi",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_other html",
+    "path": "/probes/h_other",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>other</p>\n"
+  },
+  {
+    "name": "h_other turbo",
+    "path": "/probes/h_other",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>other</p>\n"
+  },
+  {
+    "name": "h_other json",
+    "path": "/probes/h_other",
+    "accept_label": "json",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"a\":1}"
+  },
+  {
+    "name": "h_other star",
+    "path": "/probes/h_other",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>other</p>\n"
+  },
+  {
+    "name": "h_other none",
+    "path": "/probes/h_other",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>other</p>\n"
+  },
+  {
+    "name": "h_other html_turbo",
+    "path": "/probes/h_other",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>other</p>\n"
+  },
+  {
+    "name": "h_other png",
+    "path": "/probes/h_other",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_other browser",
+    "path": "/probes/h_other",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>other</p>\n"
+  },
+  {
+    "name": "h_redirect html",
+    "path": "/probes/h_redirect",
+    "accept_label": "html",
+    "env": {},
+    "status": 302,
+    "content_type": "text/html; charset=utf-8",
+    "location": "http://example.org/elsewhere",
+    "body": ""
+  },
+  {
+    "name": "h_redirect turbo",
+    "path": "/probes/h_redirect",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=h_redirect</template></turbo-stream>\n"
+  },
+  {
+    "name": "h_redirect json",
+    "path": "/probes/h_redirect",
+    "accept_label": "json",
+    "env": {},
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "location": null,
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "h_redirect star",
+    "path": "/probes/h_redirect",
+    "accept_label": "star",
+    "env": {},
+    "status": 302,
+    "content_type": "text/html; charset=utf-8",
+    "location": "http://example.org/elsewhere",
+    "body": ""
+  },
+  {
+    "name": "h_redirect none",
+    "path": "/probes/h_redirect",
+    "accept_label": "none",
+    "env": {},
+    "status": 302,
+    "content_type": "text/html; charset=utf-8",
+    "location": "http://example.org/elsewhere",
+    "body": ""
+  },
+  {
+    "name": "h_redirect html_turbo",
+    "path": "/probes/h_redirect",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 302,
+    "content_type": "text/html; charset=utf-8",
+    "location": "http://example.org/elsewhere",
+    "body": ""
+  },
+  {
+    "name": "h_redirect png",
+    "path": "/probes/h_redirect",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_redirect browser",
+    "path": "/probes/h_redirect",
+    "accept_label": "browser",
+    "env": {},
+    "status": 302,
+    "content_type": "text/html; charset=utf-8",
+    "location": "http://example.org/elsewhere",
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview html",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "html",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview turbo",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview json",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "json",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"a\":1}"
+  },
+  {
+    "name": "h_bare_noview star",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "star",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview none",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "none",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview html_turbo",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview png",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview browser",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "browser",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "any_bare html",
+    "path": "/probes/any_bare",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "any_bare turbo",
+    "path": "/probes/any_bare",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "any_bare json",
+    "path": "/probes/any_bare",
+    "accept_label": "json",
+    "env": {},
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "location": null,
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "any_bare star",
+    "path": "/probes/any_bare",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "any_bare none",
+    "path": "/probes/any_bare",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "any_bare html_turbo",
+    "path": "/probes/any_bare",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "any_bare png",
+    "path": "/probes/any_bare",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "any_bare browser",
+    "path": "/probes/any_bare",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "any_multi html",
+    "path": "/probes/any_multi",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "any_multi turbo",
+    "path": "/probes/any_multi",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "multi"
+  },
+  {
+    "name": "any_multi json",
+    "path": "/probes/any_multi",
+    "accept_label": "json",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "multi"
+  },
+  {
+    "name": "any_multi star",
+    "path": "/probes/any_multi",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "any_multi none",
+    "path": "/probes/any_multi",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "any_multi html_turbo",
+    "path": "/probes/any_multi",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "any_multi png",
+    "path": "/probes/any_multi",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "any_multi browser",
+    "path": "/probes/any_multi",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "mixed html",
+    "path": "/probes/mixed",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>alt</p>\n"
+  },
+  {
+    "name": "mixed turbo",
+    "path": "/probes/mixed",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=mixed</template></turbo-stream>\n"
+  },
+  {
+    "name": "mixed json",
+    "path": "/probes/mixed",
+    "accept_label": "json",
+    "env": {},
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "location": null,
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "mixed star",
+    "path": "/probes/mixed",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>alt</p>\n"
+  },
+  {
+    "name": "mixed none",
+    "path": "/probes/mixed",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>alt</p>\n"
+  },
+  {
+    "name": "mixed html_turbo",
+    "path": "/probes/mixed",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>alt</p>\n"
+  },
+  {
+    "name": "mixed png",
+    "path": "/probes/mixed",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "mixed browser",
+    "path": "/probes/mixed",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>alt</p>\n"
+  },
+  {
+    "name": "force_json html",
+    "path": "/probes/force_json",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"forced\":true}"
+  },
+  {
+    "name": "force_json turbo",
+    "path": "/probes/force_json",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"forced\":true}"
+  },
+  {
+    "name": "force_json json",
+    "path": "/probes/force_json",
+    "accept_label": "json",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"forced\":true}"
+  },
+  {
+    "name": "force_json star",
+    "path": "/probes/force_json",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"forced\":true}"
+  },
+  {
+    "name": "force_json none",
+    "path": "/probes/force_json",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"forced\":true}"
+  },
+  {
+    "name": "force_json html_turbo",
+    "path": "/probes/force_json",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"forced\":true}"
+  },
+  {
+    "name": "force_json png",
+    "path": "/probes/force_json",
+    "accept_label": "png",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"forced\":true}"
+  },
+  {
+    "name": "force_json browser",
+    "path": "/probes/force_json",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"forced\":true}"
+  },
+  {
+    "name": "force_turbo html",
+    "path": "/probes/force_turbo",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_turbo</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_turbo turbo",
+    "path": "/probes/force_turbo",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_turbo</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_turbo json",
+    "path": "/probes/force_turbo",
+    "accept_label": "json",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_turbo</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_turbo star",
+    "path": "/probes/force_turbo",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_turbo</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_turbo none",
+    "path": "/probes/force_turbo",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_turbo</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_turbo html_turbo",
+    "path": "/probes/force_turbo",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_turbo</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_turbo png",
+    "path": "/probes/force_turbo",
+    "accept_label": "png",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_turbo</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_turbo browser",
+    "path": "/probes/force_turbo",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_turbo</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_plain html",
+    "path": "/probes/force_plain",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain turbo",
+    "path": "/probes/force_plain",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_plain</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_plain json",
+    "path": "/probes/force_plain",
+    "accept_label": "json",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "force_plain star",
+    "path": "/probes/force_plain",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain none",
+    "path": "/probes/force_plain",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain html_turbo",
+    "path": "/probes/force_plain",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain png",
+    "path": "/probes/force_plain",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "force_plain browser",
+    "path": "/probes/force_plain",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "pin html",
+    "path": "/probes/pin",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "pin turbo",
+    "path": "/probes/pin",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"remove\" target=\"x\"></turbo-stream>"
+  },
+  {
+    "name": "pin json",
+    "path": "/probes/pin",
+    "accept_label": "json",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"pinned\":true}"
+  },
+  {
+    "name": "pin star",
+    "path": "/probes/pin",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "pin none",
+    "path": "/probes/pin",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "pin html_turbo",
+    "path": "/probes/pin",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "pin png",
+    "path": "/probes/pin",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "pin browser",
+    "path": "/probes/pin",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "semi html",
+    "path": "/probes/semi",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "semi turbo",
+    "path": "/probes/semi",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "semi json",
+    "path": "/probes/semi",
+    "accept_label": "json",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"s\":1}"
+  },
+  {
+    "name": "semi star",
+    "path": "/probes/semi",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "semi none",
+    "path": "/probes/semi",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "semi html_turbo",
+    "path": "/probes/semi",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "semi png",
+    "path": "/probes/semi",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "semi browser",
+    "path": "/probes/semi",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "h_cond html",
+    "path": "/probes/h_cond",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_cond</p>\n"
+  },
+  {
+    "name": "h_cond turbo",
+    "path": "/probes/h_cond",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=h_cond</template></turbo-stream>\n"
+  },
+  {
+    "name": "h_cond json",
+    "path": "/probes/h_cond",
+    "accept_label": "json",
+    "env": {},
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "location": null,
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "h_cond star",
+    "path": "/probes/h_cond",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_cond</p>\n"
+  },
+  {
+    "name": "h_cond none",
+    "path": "/probes/h_cond",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_cond</p>\n"
+  },
+  {
+    "name": "h_cond html_turbo",
+    "path": "/probes/h_cond",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_cond</p>\n"
+  },
+  {
+    "name": "h_cond png",
+    "path": "/probes/h_cond",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_cond browser",
+    "path": "/probes/h_cond",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_cond</p>\n"
+  },
+  {
+    "name": "cond_arm html",
+    "path": "/probes/cond_arm",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "cond_arm turbo",
+    "path": "/probes/cond_arm",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "cond_arm json",
+    "path": "/probes/cond_arm",
+    "accept_label": "json",
+    "env": {},
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "location": null,
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "cond_arm star",
+    "path": "/probes/cond_arm",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "cond_arm none",
+    "path": "/probes/cond_arm",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "cond_arm html_turbo",
+    "path": "/probes/cond_arm",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "cond_arm png",
+    "path": "/probes/cond_arm",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "cond_arm browser",
+    "path": "/probes/cond_arm",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "helper_resp html",
+    "path": "/probes/helper_resp",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=helper_resp</p>\n"
+  },
+  {
+    "name": "helper_resp turbo",
+    "path": "/probes/helper_resp",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=helper_resp</template></turbo-stream>\n"
+  },
+  {
+    "name": "helper_resp json",
+    "path": "/probes/helper_resp",
+    "accept_label": "json",
+    "env": {},
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "location": null,
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "helper_resp star",
+    "path": "/probes/helper_resp",
+    "accept_label": "star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=helper_resp</p>\n"
+  },
+  {
+    "name": "helper_resp none",
+    "path": "/probes/helper_resp",
+    "accept_label": "none",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=helper_resp</p>\n"
+  },
+  {
+    "name": "helper_resp html_turbo",
+    "path": "/probes/helper_resp",
+    "accept_label": "html_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=helper_resp</p>\n"
+  },
+  {
+    "name": "helper_resp png",
+    "path": "/probes/helper_resp",
+    "accept_label": "png",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "helper_resp browser",
+    "path": "/probes/helper_resp",
+    "accept_label": "browser",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=helper_resp</p>\n"
+  },
+  {
+    "name": "h_side q0_html",
+    "path": "/probes/h_side",
+    "accept_label": "q0_html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side q0_only",
+    "path": "/probes/h_side",
+    "accept_label": "q0_only",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side q0_turbo",
+    "path": "/probes/h_side",
+    "accept_label": "q0_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side text_star",
+    "path": "/probes/h_side",
+    "accept_label": "text_star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side star_low",
+    "path": "/probes/h_side",
+    "accept_label": "star_low",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side html_starlow",
+    "path": "/probes/h_side",
+    "accept_label": "html_starlow",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side star_html",
+    "path": "/probes/h_side",
+    "accept_label": "star_html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side upper",
+    "path": "/probes/h_side",
+    "accept_label": "upper",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_side upper_turbo",
+    "path": "/probes/h_side",
+    "accept_label": "upper_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side params",
+    "path": "/probes/h_side",
+    "accept_label": "params",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side ws",
+    "path": "/probes/h_side",
+    "accept_label": "ws",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side empty_items",
+    "path": "/probes/h_side",
+    "accept_label": "empty_items",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side badq",
+    "path": "/probes/h_side",
+    "accept_label": "badq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side dupq",
+    "path": "/probes/h_side",
+    "accept_label": "dupq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side spq",
+    "path": "/probes/h_side",
+    "accept_label": "spq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side turbo_cs",
+    "path": "/probes/h_side",
+    "accept_label": "turbo_cs",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_side app_star",
+    "path": "/probes/h_side",
+    "accept_label": "app_star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side xhtml",
+    "path": "/probes/h_side",
+    "accept_label": "xhtml",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side bigq",
+    "path": "/probes/h_side",
+    "accept_label": "bigq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side negq",
+    "path": "/probes/h_side",
+    "accept_label": "negq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side expq",
+    "path": "/probes/h_side",
+    "accept_label": "expq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side late_html",
+    "path": "/probes/h_side",
+    "accept_label": "late_html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side late_html_q",
+    "path": "/probes/h_side",
+    "accept_label": "late_html_q",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side late_turbo",
+    "path": "/probes/h_side",
+    "accept_label": "late_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side empties_then_html",
+    "path": "/probes/h_side",
+    "accept_label": "empties_then_html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side long_item",
+    "path": "/probes/h_side",
+    "accept_label": "long_item",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_side long_name",
+    "path": "/probes/h_side",
+    "accept_label": "long_name",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_side js",
+    "path": "/probes/h_side",
+    "accept_label": "js",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_side js_star",
+    "path": "/probes/h_side",
+    "accept_label": "js_star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_multi q0_html",
+    "path": "/probes/h_multi",
+    "accept_label": "q0_html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi q0_only",
+    "path": "/probes/h_multi",
+    "accept_label": "q0_only",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi q0_turbo",
+    "path": "/probes/h_multi",
+    "accept_label": "q0_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi text_star",
+    "path": "/probes/h_multi",
+    "accept_label": "text_star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi star_low",
+    "path": "/probes/h_multi",
+    "accept_label": "star_low",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi html_starlow",
+    "path": "/probes/h_multi",
+    "accept_label": "html_starlow",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi star_html",
+    "path": "/probes/h_multi",
+    "accept_label": "star_html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi upper",
+    "path": "/probes/h_multi",
+    "accept_label": "upper",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_multi upper_turbo",
+    "path": "/probes/h_multi",
+    "accept_label": "upper_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi params",
+    "path": "/probes/h_multi",
+    "accept_label": "params",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi ws",
+    "path": "/probes/h_multi",
+    "accept_label": "ws",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi empty_items",
+    "path": "/probes/h_multi",
+    "accept_label": "empty_items",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi badq",
+    "path": "/probes/h_multi",
+    "accept_label": "badq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi dupq",
+    "path": "/probes/h_multi",
+    "accept_label": "dupq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi spq",
+    "path": "/probes/h_multi",
+    "accept_label": "spq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi turbo_cs",
+    "path": "/probes/h_multi",
+    "accept_label": "turbo_cs",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_multi app_star",
+    "path": "/probes/h_multi",
+    "accept_label": "app_star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi xhtml",
+    "path": "/probes/h_multi",
+    "accept_label": "xhtml",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi bigq",
+    "path": "/probes/h_multi",
+    "accept_label": "bigq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi negq",
+    "path": "/probes/h_multi",
+    "accept_label": "negq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi expq",
+    "path": "/probes/h_multi",
+    "accept_label": "expq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi late_html",
+    "path": "/probes/h_multi",
+    "accept_label": "late_html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi late_html_q",
+    "path": "/probes/h_multi",
+    "accept_label": "late_html_q",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi late_turbo",
+    "path": "/probes/h_multi",
+    "accept_label": "late_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi empties_then_html",
+    "path": "/probes/h_multi",
+    "accept_label": "empties_then_html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi long_item",
+    "path": "/probes/h_multi",
+    "accept_label": "long_item",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_multi long_name",
+    "path": "/probes/h_multi",
+    "accept_label": "long_name",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_multi js",
+    "path": "/probes/h_multi",
+    "accept_label": "js",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_multi js_star",
+    "path": "/probes/h_multi",
+    "accept_label": "js_star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  },
+  {
+    "name": "h_bare_noview q0_html",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "q0_html",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview q0_only",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "q0_only",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview q0_turbo",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "q0_turbo",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview text_star",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "text_star",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview star_low",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "star_low",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview html_starlow",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "html_starlow",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview star_html",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "star_html",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview upper",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "upper",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview upper_turbo",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "upper_turbo",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview params",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "params",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview ws",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "ws",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview empty_items",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "empty_items",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview badq",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "badq",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview dupq",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "dupq",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview spq",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "spq",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview turbo_cs",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "turbo_cs",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview app_star",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "app_star",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview xhtml",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "xhtml",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview bigq",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "bigq",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview negq",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "negq",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview expq",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "expq",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview late_html",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "late_html",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview late_html_q",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "late_html_q",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview late_turbo",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "late_turbo",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview empties_then_html",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "empties_then_html",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview long_item",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "long_item",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview long_name",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "long_name",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview js",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "js",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_bare_noview js_star",
+    "path": "/probes/h_bare_noview",
+    "accept_label": "js_star",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "force_plain q0_html",
+    "path": "/probes/force_plain",
+    "accept_label": "q0_html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_plain</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_plain q0_only",
+    "path": "/probes/force_plain",
+    "accept_label": "q0_only",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain q0_turbo",
+    "path": "/probes/force_plain",
+    "accept_label": "q0_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain text_star",
+    "path": "/probes/force_plain",
+    "accept_label": "text_star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain star_low",
+    "path": "/probes/force_plain",
+    "accept_label": "star_low",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain html_starlow",
+    "path": "/probes/force_plain",
+    "accept_label": "html_starlow",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain star_html",
+    "path": "/probes/force_plain",
+    "accept_label": "star_html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain upper",
+    "path": "/probes/force_plain",
+    "accept_label": "upper",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain upper_turbo",
+    "path": "/probes/force_plain",
+    "accept_label": "upper_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain params",
+    "path": "/probes/force_plain",
+    "accept_label": "params",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain ws",
+    "path": "/probes/force_plain",
+    "accept_label": "ws",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_plain</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_plain empty_items",
+    "path": "/probes/force_plain",
+    "accept_label": "empty_items",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain badq",
+    "path": "/probes/force_plain",
+    "accept_label": "badq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_plain</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_plain dupq",
+    "path": "/probes/force_plain",
+    "accept_label": "dupq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_plain</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_plain spq",
+    "path": "/probes/force_plain",
+    "accept_label": "spq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_plain</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_plain turbo_cs",
+    "path": "/probes/force_plain",
+    "accept_label": "turbo_cs",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_plain</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_plain app_star",
+    "path": "/probes/force_plain",
+    "accept_label": "app_star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain xhtml",
+    "path": "/probes/force_plain",
+    "accept_label": "xhtml",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain bigq",
+    "path": "/probes/force_plain",
+    "accept_label": "bigq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain negq",
+    "path": "/probes/force_plain",
+    "accept_label": "negq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_plain</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_plain expq",
+    "path": "/probes/force_plain",
+    "accept_label": "expq",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_plain</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_plain late_html",
+    "path": "/probes/force_plain",
+    "accept_label": "late_html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain late_html_q",
+    "path": "/probes/force_plain",
+    "accept_label": "late_html_q",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain late_turbo",
+    "path": "/probes/force_plain",
+    "accept_label": "late_turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_plain</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_plain empties_then_html",
+    "path": "/probes/force_plain",
+    "accept_label": "empties_then_html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain long_item",
+    "path": "/probes/force_plain",
+    "accept_label": "long_item",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=force_plain</template></turbo-stream>\n"
+  },
+  {
+    "name": "force_plain long_name",
+    "path": "/probes/force_plain",
+    "accept_label": "long_name",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "force_plain js",
+    "path": "/probes/force_plain",
+    "accept_label": "js",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "force_plain js_star",
+    "path": "/probes/force_plain",
+    "accept_label": "js_star",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=force_plain</p>\n"
+  },
+  {
+    "name": "pin .json",
+    "path": "/probes/pin.json",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"pinned\":true}"
+  },
+  {
+    "name": "pin .turbo_stream",
+    "path": "/probes/pin.turbo_stream",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"remove\" target=\"x\"></turbo-stream>"
+  },
+  {
+    "name": "pin .html",
+    "path": "/probes/pin.html",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "pin ?format=json",
+    "path": "/probes/pin?format=json",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"pinned\":true}"
+  },
+  {
+    "name": "pin ?format=turbo_stream",
+    "path": "/probes/pin?format=turbo_stream",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"remove\" target=\"x\"></turbo-stream>"
+  },
+  {
+    "name": "pin ?format=html",
+    "path": "/probes/pin?format=html",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "h_side_json .json",
+    "path": "/probes/h_side_json.json",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"a\":1}"
+  },
+  {
+    "name": "h_side_json .turbo_stream",
+    "path": "/probes/h_side_json.turbo_stream",
+    "accept_label": "html",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_side_json .html",
+    "path": "/probes/h_side_json.html",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side_json</p>\n"
+  },
+  {
+    "name": "h_side_json ?format=json",
+    "path": "/probes/h_side_json?format=json",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"a\":1}"
+  },
+  {
+    "name": "h_side_json ?format=turbo_stream",
+    "path": "/probes/h_side_json?format=turbo_stream",
+    "accept_label": "html",
+    "env": {},
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_side_json ?format=html",
+    "path": "/probes/h_side_json?format=html",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side_json</p>\n"
+  },
+  {
+    "name": "cond_arm json",
+    "path": "/probes/cond_arm",
+    "accept_label": "json",
+    "env": {},
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "location": null,
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "cond_arm j json",
+    "path": "/probes/cond_arm?j=1",
+    "accept_label": "json",
+    "env": {},
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "location": null,
+    "body": "{\"a\":1}"
+  },
+  {
+    "name": "cond_arm html",
+    "path": "/probes/cond_arm",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "cond_arm j html",
+    "path": "/probes/cond_arm?j=1",
+    "accept_label": "html",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "cond_arm turbo",
+    "path": "/probes/cond_arm",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "cond_arm j turbo",
+    "path": "/probes/cond_arm?j=1",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "h"
+  },
+  {
+    "name": "h_cond early",
+    "path": "/probes/h_cond?early=1",
+    "accept_label": "turbo",
+    "env": {},
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "location": null,
+    "body": "<turbo-stream action=\"update\" target=\"f\"><template>turbo=h_cond</template></turbo-stream>\n"
+  },
+  {
+    "name": "h_side xhr none",
+    "path": "/probes/h_side",
+    "accept_label": null,
+    "env": {
+      "HTTP_X_REQUESTED_WITH": "XMLHttpRequest"
+    },
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_side xhr starlow",
+    "path": "/probes/h_side",
+    "accept_label": "html_starlow",
+    "env": {
+      "HTTP_X_REQUESTED_WITH": "XMLHttpRequest"
+    },
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_side</p>\n"
+  },
+  {
+    "name": "h_multi xhr none",
+    "path": "/probes/h_multi",
+    "accept_label": null,
+    "env": {
+      "HTTP_X_REQUESTED_WITH": "XMLHttpRequest"
+    },
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "location": null,
+    "body": ""
+  },
+  {
+    "name": "h_multi xhr starlow",
+    "path": "/probes/h_multi",
+    "accept_label": "html_starlow",
+    "env": {
+      "HTTP_X_REQUESTED_WITH": "XMLHttpRequest"
+    },
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "location": null,
+    "body": "<p>html=h_multi</p>\n"
+  }
+]
