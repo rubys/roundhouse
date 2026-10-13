@@ -75,7 +75,8 @@
       "owner": "compiler",
       "match": "expected response :not_modified",
       "match_test": "CachedResponsesTest#",
-      "note": "`fresh_when` / `stale?` landed earlier; this remaining case wants native ETag/Last-Modified validators on a cached response so a conditional request answers 304. Shared AC response-cache edge."
+      "note": "`fresh_when` / `stale?` landed earlier; this remaining case wants native ETag/Last-Modified validators on a cached response so a conditional request answers 304. Shared AC response-cache edge.",
+      "at_zero": "served with #829; rule stays as a regression tripwire."
     },
     {
       "slug": "fragment-cache-identity",
