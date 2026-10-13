@@ -85,8 +85,8 @@ module ActionDispatch
       # server spellings, and the CGI redirect fallback.
       def self.authorization(env)
         headers = Headers.new(env)
-        headers["Authorization"] || env["X-HTTP-AUTHORIZATION"] ||
-          env["X-HTTP_AUTHORIZATION"] || env["X_HTTP_AUTHORIZATION"] ||
+        headers["Authorization"] || env["X-HTTP_AUTHORIZATION"] ||
+          env["X-HTTP-AUTHORIZATION"] || env["X_HTTP_AUTHORIZATION"] ||
           env["REDIRECT_X_HTTP_AUTHORIZATION"] || headers["X-HTTP-Authorization"]
       end
     end

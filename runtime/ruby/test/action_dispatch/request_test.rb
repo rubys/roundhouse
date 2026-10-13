@@ -110,6 +110,14 @@ class ActionDispatchRequestTest < Minitest::Test
     assert_equal "Bearer redirect", ActionDispatch::Request.for(
       { "REDIRECT_X_HTTP_AUTHORIZATION" => "Bearer redirect" }
     ).authorization
+    # Rails' X-HTTP_AUTHORIZATION wins over the supported X-HTTP-AUTHORIZATION
+    # alias when both are present — Token/Basic helpers read this value.
+    assert_equal "Bearer rails wins", ActionDispatch::Request.for(
+      {
+        "X-HTTP_AUTHORIZATION" => "Bearer rails wins",
+        "X-HTTP-AUTHORIZATION" => "Bearer alias loses",
+      }
+    ).authorization
   end
 
   def test_path_parameters_are_route_only_and_indifferent
