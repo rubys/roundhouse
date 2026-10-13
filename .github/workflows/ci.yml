@@ -2095,12 +2095,28 @@ jobs:
   # closes. Running it (vs `if: false`) keeps the model-suite progress
   # visible and catches regressions in the compile path.
   spinel-toolchain:
-    name: spinel-toolchain (suite)
+    name: spinel-toolchain (suite, ${{ matrix.shard }})
     # Tracks matz/spinel master UNPINNED. Advisory unless ci:spinel focus
     # hardens the CORE lane (spinel-advisory=false).
     needs: [generate-fixture, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
-    outputs: *advisory-outputs
+    # Two shards by test-module name: one runner took ~20 min of a 25 min
+    # ceiling once the parity modules landed. `parity` takes the heaviest
+    # modules; `rest` skips exactly those, so a new module lands in `rest`
+    # by default. Each shard reports its own output key (ci-plan.py
+    # requires both), since a matrix's shared output would let one
+    # shard's success hide the other's failure.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: parity
+            filter: "campfire_caches:: json_request_values:: action_controller_head:: params_wrapper::"
+          - shard: rest
+            filter: "--skip campfire_caches:: --skip json_request_values:: --skip action_controller_head:: --skip params_wrapper::"
+    outputs:
+      parity: ${{ steps.result.outputs.parity }}
+      rest: ${{ steps.result.outputs.rest }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -2136,14 +2152,14 @@ jobs:
           ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
-      - name: cargo test --test spinel_toolchain -- --ignored
-        run: cargo test --test spinel_toolchain -- --ignored --nocapture
+      - name: cargo test --test spinel_toolchain -- --ignored (${{ matrix.shard }})
+        run: cargo test --test spinel_toolchain -- --ignored --nocapture ${{ matrix.filter }}
       # fixtures/tiny-api, the API-only app (#321): `spin build` of the
       # app entry, HTTP requests to the binary, and the model script
       # compiled natively. Filtered by name, so the ignored test named
       # after an open issue (#163) is not selected.
       - name: cargo test --test tiny_api spinel_gate_ -- --ignored
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.shard == 'rest' }}
         run: cargo test --test tiny_api spinel_gate_ -- --ignored --nocapture
 
       # On failure, capture spinel's actual generated C for the failing
@@ -2183,10 +2199,15 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: spinel-toolchain-repro
+          name: spinel-toolchain-repro-${{ matrix.shard }}
           path: ci-spinel-repro
           retention-days: 7
-      - *advisory-result
+      - name: Report actual advisory execution
+        id: result
+        if: always()
+        env:
+          STATUS: ${{ job.status }}
+        run: echo "${{ matrix.shard }}=$STATUS" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------
   # DOM equivalence: boot Rails + the target server side-by-side and
