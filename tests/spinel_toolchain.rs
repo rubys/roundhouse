@@ -104,6 +104,8 @@ fn custom_data_factories_run_natively() {
 mod stdlib_rnp_contract;
 #[path = "spinel_toolchain/stdlib_rnp.rs"]
 mod stdlib_rnp;
+#[path = "spinel_toolchain/response_headers.rs"]
+mod response_headers;
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]

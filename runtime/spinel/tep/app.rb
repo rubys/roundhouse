@@ -50,8 +50,13 @@ module Tep
     # (Tep.display_name). Set by scaffold/main.rb; empty until then.
     attr_accessor :name
 
+    # config.assume_ssl for RAILS_ENV: every request is treated as https
+    # (Rails' ActionDispatch::AssumeSSL). Set by scaffold/main.rb.
+    attr_accessor :assume_ssl
+
     def initialize
       @name = ""
+      @assume_ssl = false
       # Type-seed the Broadcast subscriber registry: a first push pins
       # the element type, then it is dropped.
       @broadcast_subs = [Tep::BroadcastSubscription.new(

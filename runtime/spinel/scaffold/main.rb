@@ -454,6 +454,10 @@ module Main
     req.req_headers.each do |name, value|
       request_obj.env[ActionDispatch::Http::Headers.env_name(name)] = value
     end
+    # config.assume_ssl: TLS ends at a proxy (Tailscale, a load balancer) that
+    # forwards plain http, and Rails' AssumeSSL treats the request as https all
+    # the same: secure cookies, https:// in absolute URLs and redirects.
+    request_obj.env["HTTP_X_FORWARDED_PROTO"] = "https" if Tep::APP.assume_ssl
     # `user_agent` is ALSO a separate reader slot. The overlay twin's
     # `user_agent` reads `@env["HTTP_USER_AGENT"]`; the shared runtime's
     # (`runtime/ruby/action_dispatch/request.rb`) returns `@user_agent`,
@@ -549,7 +553,24 @@ module Main
     # are in scope), so the body ships verbatim here. Same contract as
     # the CRuby overlay dispatch.
     res.body = controller.body
-    res.headers["Location"] = controller.location unless controller.location.nil?
+    # Rails' default response headers (config.action_dispatch.default_headers
+    # under load_defaults 7.0 and later), written first so an action's own
+    # value for any of them wins below.
+    res.headers["X-Frame-Options"] = "SAMEORIGIN"
+    res.headers["X-XSS-Protection"] = "0"
+    res.headers["X-Content-Type-Options"] = "nosniff"
+    res.headers["X-Permitted-Cross-Domain-Policies"] = "none"
+    res.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # redirect_to answers an absolute URL: a path is joined to the request's
+    # protocol and Host, as Rails' _compute_redirect_to_location does. A
+    # non-redirect location (`head :created, location:`) is written as given.
+    location = controller.location
+    unless location.nil?
+      if controller.status >= 300 && controller.status < 400 && location.start_with?("/") && !location.start_with?("//")
+        location = (request_obj.ssl? ? "https://" : "http://") + request_obj.host + location
+      end
+      res.headers["Location"] = location
+    end
     # Content-Type: any render that named its own type carries it to
     # the wire — jbuilder's application/json, turbo's
     # text/vnd.turbo-stream.html (which turbo REQUIRES; it ignores a
@@ -743,6 +764,8 @@ if port <= 0 || port > 65535
   $stderr.puts "invalid port: " + port.to_s
   exit(1)
 end
+serving_env = ENV["RAILS_ENV"].to_s
+Tep::APP.assume_ssl = AppEnvironment.assume_ssl?(serving_env.empty? ? "development" : serving_env)
 Main.configure_default_adapter!
 # Serving, so WAL checkpoints move off the request path: a background
 # thread runs them instead of some request's COMMIT

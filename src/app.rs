@@ -138,6 +138,10 @@ pub struct App {
     /// which answers `defined?(ActiveStorage)` from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loaded_frameworks: Option<Vec<String>>,
+    /// The environments whose `config/environments/<env>.rb` sets
+    /// `config.assume_ssl = true` (TLS ends at a proxy in front of the app).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assume_ssl_envs: Vec<String>,
     /// The classes and method headers the locked gems' Tapioca RBIs
     /// declare ([`crate::gem_boundary`]). Declarations only, read at
     /// ingest when the tree (or the real location of its lockfile) has
@@ -826,6 +830,7 @@ impl App {
             rbs_includes: HashMap::new(),
             gem_lock: None,
             loaded_frameworks: None,
+            assume_ssl_envs: Vec::new(),
             gem_boundary: Default::default(),
             content_helper_allowed_attributes: Vec::new(),
             content_helper_allowed_tags: Vec::new(),
