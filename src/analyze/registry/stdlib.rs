@@ -224,6 +224,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ], &[
         ("rand", Ty::Untyped), ("bytes", Ty::Str), ("seed", Ty::Int),
     ]);
+    // `OpenSSL::Random.random_bytes(n)` — lobsters' `Utils.random_str`.
+    // The openssl library's own on the ruby family; on spinel the
+    // façade alias in `runtime/spinel/facades/sponge.rb`.
+    register_stdlib_class(classes, "OpenSSL::Random", &[("random_bytes", Ty::Str)], &[]);
     // `Turbo::StreamsChannel` — turbo-rails' CLASS-side broadcast API,
     // the one an app reaches for when the payload is not a record's
     // partial: a rendered component, a counter, a status panel. The
@@ -263,6 +267,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("to_s", Ty::Str), ("to_path", Ty::Str), ("extname", Ty::Str),
         ("read", Ty::Str), ("write", Ty::Int),
         ("exist?", Ty::Bool), ("file?", Ty::Bool), ("directory?", Ty::Bool),
+        ("absolute?", Ty::Bool), ("relative?", Ty::Bool),
         ("children", Ty::Array { elem: Box::new(pathname()) }),
     ]);
     // `ActiveSupport::SecurityUtils.secure_compare` — the constant-time
@@ -271,7 +276,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("secure_compare", Ty::Bool), ("fixed_length_secure_compare", Ty::Bool),
     ], &[]);
     register_stdlib_class(classes, "File", &[
-        ("read", Ty::Str), ("binread", Ty::Str), ("write", Ty::Int),
+        ("read", Ty::Str), ("binread", Ty::Str), ("write", Ty::Int), ("binwrite", Ty::Int),
         ("exist?", Ty::Bool), ("exists?", Ty::Bool), ("file?", Ty::Bool),
         ("directory?", Ty::Bool), ("open", Ty::Untyped),
         ("unlink", Ty::Int), ("delete", Ty::Int), ("rename", Ty::Int),
@@ -492,8 +497,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ]);
 
     // `FileUtils` — a default gem / spinel's `packages/fileutils`.
+    // `mkdir_p` answers the directories it was given; `cp` nil for one source
+    // and the source Array for several (CRuby 4.0.5). Both checked against
+    // CRuby and Spinel (tests/support/stdlib_rnp.rs).
     register_stdlib_class(classes, "FileUtils", &[
-        ("mkdir_p", Ty::Untyped), ("makedirs", Ty::Untyped),
+        ("mkdir_p", Ty::Array { elem: Box::new(Ty::Str) }), ("makedirs", Ty::Untyped),
+        ("cp", Ty::Union { variants: vec![Ty::Nil, Ty::Array { elem: Box::new(Ty::Str) }] }),
         ("rm_rf", Ty::Untyped), ("rm_f", Ty::Untyped),
         ("remove_entry", Ty::Nil), ("touch", Ty::Untyped),
     ], &[]);
@@ -663,6 +672,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "Timeout::Error",
         // `rescue EOFError` around `readpartial` on a pipe or a pty.
         "EOFError",
+        // lobsters' `Sponge::OTHER_PEOPLES_PROBLEMS`, a class-body Array
+        // of exception classes. zlib's and Encoding's are Ruby's own and
+        // spinel's (`packages/zlib`, `lib/sp_exc.c`). net/protocol's
+        // `HTTPBadResponse` is CRuby's only: spinel's `packages/net`
+        // does not define it, so `project::unavailable_class_module_construct`
+        // ledgers it there.
+        "Zlib::DataError", "Encoding::CompatibilityError", "Net::HTTPBadResponse",
         // `rescue SQLite3::Exception` — campfire's `ResponseCache` drops
         // its observer on any driver error (see `SQLite3::Database`).
         "SQLite3::Exception", "SQLite3::CantOpenException",
@@ -672,6 +688,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // long to encode. rqrcode_core's classes on the ruby family, the
         // spinel-rqrcode package's (same names, same raise) on spinel.
         "RQRCodeCore::QRCodeRunTimeError", "RQRCodeCore::QRCodeArgumentError",
+        // `rescue CSV::MalformedCSVError` around `CSV.parse` (csv is loaded
+        // by the emitted require, on Spinel by its csv package).
+        "CSV::MalformedCSVError",
     ] {
         register_stdlib_class(classes, exc, &[], &exception_surface);
     }
@@ -801,7 +820,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // real bundled class, without claiming any extra instance methods.
     register_stdlib_class(classes, "URI::HTTP", &[], &[]);
     register_stdlib_class(classes, "URI::HTTPS", &[], &[]);
-    for response in ["Net::HTTPRedirection", "Net::HTTPOK"] {
+    // `res.is_a?(Net::HTTPSuccess)` — lobsters' Github; spinel's
+    // `packages/net` defines the same response family.
+    for response in ["Net::HTTPRedirection", "Net::HTTPOK", "Net::HTTPSuccess"] {
         register_stdlib_class(classes, response, &[], &[]);
     }
     // The implementation is bundled on Ruby/Spinel. Other targets
@@ -865,6 +886,24 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Exception is `Timeout::Error` above. CRuby loads via BUNDLED
     // `require "timeout"`; Spinel gets `runtime/ruby/timeout.rb`.
     register_stdlib_class(classes, "Timeout", &[], &[]);
+    // GC / OpenSSL::HMAC / Enumerator::Product / Enumerator::Lazy (and
+    // FileUtils' `mkdir_p` / `cp`, in its registration above), as an API
+    // reaches for them: `GC.start` between batches, an HMAC
+    // signature of a webhook payload, `Enumerator::Product.new(*lists)` over
+    // route segments, and `is_a?(Enumerator::Lazy)` in a serializer. Only
+    // the calls checked against CRuby and Spinel are registered
+    // (tests/support/stdlib_rnp.rs); another FileUtils call stays a dispatch
+    // error rather than a guess. Each library is loaded by its emitted
+    // require; on Spinel by its fileutils / openssl package.
+    register_stdlib_class(classes, "GC", &[("start", Ty::Nil)], &[]);
+    register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
+    let product = Ty::Class { id: ClassId(Symbol::from("Enumerator::Product")), args: vec![] };
+    register_stdlib_class(classes, "Enumerator::Product", &[("new", product)], &[
+        // `size` is left out: it answers nil or Float::INFINITY for an
+        // unsized or endless factor, and it is not checked on both lanes.
+        ("to_a", Ty::Array { elem: Box::new(Ty::Array { elem: Box::new(Ty::Untyped) }) }),
+    ]);
+    register_stdlib_class(classes, "Enumerator::Lazy", &[], &[]);
     // JSON dispatch is already intrinsic in BodyTyper and the emitters;
     // a source-backed reference must also recognize its exact namespace.
     register_stdlib_class(classes, "JSON", &[], &[]);

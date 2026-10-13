@@ -142,6 +142,26 @@ pub fn from(ty: &Ty) -> Option<Ty> {
     }
 }
 
+/// `with_indifferent_access`'s answer for a GRADUAL receiver: one whose
+/// alternatives are all a Hash, nil or untyped, and at least one is
+/// untyped (a json column's reader, `extras || {}`). Its values are as
+/// unknown as the receiver, so `HashWithIndifferentAccess[untyped]`.
+/// `None` for any other receiver, a typed Hash included (its own table
+/// answers it).
+pub fn from_gradual(ty: &Ty) -> Option<Ty> {
+    fn leaves<'a>(ty: &'a Ty, out: &mut Vec<&'a Ty>) {
+        match ty {
+            Ty::Union { variants } => variants.iter().for_each(|v| leaves(v, out)),
+            other => out.push(other),
+        }
+    }
+    let mut all = Vec::new();
+    leaves(ty, &mut all);
+    (all.iter().any(|v| **v == Ty::Untyped)
+        && all.iter().all(|v| matches!(v, Ty::Untyped | Ty::Nil | Ty::Hash { .. })))
+    .then(|| of(Ty::Untyped))
+}
+
 fn merged_value(other: &Ty) -> Option<Ty> {
     from(other).and_then(|t| value_of(&t).cloned())
 }

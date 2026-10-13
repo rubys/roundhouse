@@ -289,6 +289,13 @@ module ActiveRecord
       @errors
     end
 
+    # The attribute each message in `errors` is on, index for index, so
+    # `errors[:field]` and `field_with_errors` pick a field's messages by
+    # attribute as Rails does rather than by the message's text.
+    def error_attributes
+      @error_attributes
+    end
+
     # The one frozen empty Hash a model's `initialize(attrs = …)` defaults
     # to on the ruby family (`lower::lazy_model_state`). A record built
     # bare — which is every hydration path: `from_row` is `new` then the
@@ -340,6 +347,7 @@ module ActiveRecord
       # (`self.id = (attrs[:id] || 0)` — `|| ""` for a string key), not
       # here: see the class comment on why the base holds no `@id`.
       @errors = []
+      @error_attributes = []
       @id_previously_changed = false
       @persisted = false
       @destroyed = false
@@ -1248,6 +1256,7 @@ module ActiveRecord
 
     def valid?
       @errors = []
+      @error_attributes = []
       validate
       @errors.empty?
     end

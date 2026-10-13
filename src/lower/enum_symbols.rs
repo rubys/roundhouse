@@ -188,6 +188,7 @@ fn rewrite_label(
         Expr::new(value.span, ExprNode::Lit { value: stored.clone() }),
         match stored {
             Literal::Int { .. } => crate::ty::Ty::Int,
+            Literal::Nil => crate::ty::Ty::Nil,
             _ => crate::ty::Ty::Str,
         },
     );

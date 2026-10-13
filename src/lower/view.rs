@@ -790,6 +790,32 @@ pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {
     }
 }
 
+/// The builder methods Rails' default `field_error_proc` wraps in
+/// `<div class="field_with_errors">` when their field has errors: every
+/// control that goes through `Tags::Base#tag`, and the label. A hidden
+/// field, a button, the submit and Action Text's editor are not.
+pub fn wraps_field_errors(method: &str) -> bool {
+    classify_form_builder_method(method).is_some_and(FormBuilderMethod::wraps_field_errors)
+}
+
+impl FormBuilderMethod {
+    pub fn wraps_field_errors(self) -> bool {
+        matches!(
+            self,
+            FormBuilderMethod::Label
+                | FormBuilderMethod::TextField
+                | FormBuilderMethod::TextArea
+                | FormBuilderMethod::PasswordField
+                | FormBuilderMethod::CheckBox
+                | FormBuilderMethod::RadioButton
+                | FormBuilderMethod::Select
+                | FormBuilderMethod::UrlField
+                | FormBuilderMethod::EmailField
+                | FormBuilderMethod::FileField
+        )
+    }
+}
+
 /// Split a FormBuilder method's positional args into its two
 /// Rails-shaped halves: the field-name symbol and the trailing
 /// options hash. `form.text_field :title, class: "..."` yields

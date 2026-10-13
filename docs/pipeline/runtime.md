@@ -1828,34 +1828,35 @@ through it loses those writes. The Rails idiom reassigns
 (`@room = @room.becomes!(Rooms::Closed)`), which is what campfire's two
 sites do; a site that kept both handles would diverge silently.
 
-### `errors[:field]` re-derives its field from the message text
+### `errors[:field]` picks its field by the attribute each message is on
 
 Rails' error accumulator keeps an attribute alongside every message, so
 `errors[:url]` is an exact lookup. Here the accumulator is a plain
-`Array[String]` of FULL messages (`"Url is not public"`), and
-`src/lower/errors_index.rs` grounds the read as
-`ActiveSupport.errors_for(errors, "Url ")` — a prefix match against the
-humanized field name that `errors.add` / `validates` baked at lower
-time.
+`Array[String]` of FULL messages (`"Url is not public"`), with an
+index-for-index companion, `error_attributes`, holding the attribute
+each message was added on. `errors.add` and every `validates` rule push
+to both (`src/lower/errors_add.rs`, `model_to_library/validations.rs`),
+`errors.clear` empties both, and `src/lower/errors_index.rs` grounds
+the read as
+`ActiveSupport.errors_for(errors, error_attributes, "url", "Url ")`:
+the messages added on `url`, less the prefix `errors.format` put before
+them. `:base` takes the empty prefix, as Rails' full message for it
+does. The form builder's `field_with_errors` wrapper asks the same
+question with `any?`.
 
-**Why.** Adding an attribute column changes `@errors`' type in every
-strict target — `Vec<String>` becomes a vector of pairs, and every
-emitted `validate` body, every `errors <<`, and the `full_messages`
-identity fold move with it. The projection is recoverable from the text
-the runtime already stores, so the type stays.
+**Why a companion, not pairs.** Pairs change `@errors`' type in every
+strict target — `Vec<String>` becomes a vector of pairs — and every
+emitted `validate` body, every `errors <<` and the `full_messages`
+identity fold would move with it. A second `Array[String]` leaves every
+reader of `errors` as it was.
 
-**What it costs.** Two cases, both named rather than silent:
-
-- One field's humanized name being a PREFIX of another's — `url` and
-  `url_host` humanize to `"Url"` and `"Url host"` — makes
-  `errors[:url]` also answer `"Url host can't be blank"`, with the
-  wrong prefix stripped. No corpus app has such a pair; an app that did
-  would diverge silently, and that is the case that would force the
-  attribute column.
-- `errors[:base]` DECLINES. Rails attaches `:base` messages to the
-  record, so `errors_add` bakes them with no prefix and there is no
-  text to match. Those sites stay dynamic and join the
-  `errors_index` residue ledger.
+**What it costs.** A message pushed by anything other than those two
+lowerings has no attribute beside it. `errors.delete` and
+`errors.import`, which some apps call, are not modeled; an `errors <<`
+written by hand pushes a message no field claims. Each grounding reads
+the record twice (once for `errors`, once for `error_attributes`), so
+one whose record is a call with arguments or a receiver
+(`Draft.latest.errors[:url]`) stays residue.
 
 ### A Turbo stream name is not signed — CLOSED on the ruby family
 
@@ -2003,6 +2004,62 @@ joined. campfire's own channel comment makes the point — Turbo's stock
 channel "verifies only the signature on the stream name. That name
 carries no expiry and no binding to a user." Both ends of that need
 closing; **neither lane signs**, and that half is the entry below.
+
+### A client's channel action runs on the ruby family
+
+A `{"command":"message"}` frame - the client's
+`subscription.perform(action, data)`: campfire's typing indicator
+(`TypingNotificationsChannel#start`/`#stop`) and its presence `refresh`,
+which a browser sends every 50 seconds so a tab open longer than
+`CONNECTION_TTL` keeps counting as present (rubys/roundhouse#71 item 6).
+Both lanes used to drop it; both now run it on the channel object the
+subscription holds, so whatever `subscribed` left in its ivars is there.
+
+**Rails' rules, on both lanes** (pinned by
+`emit_and_run::a_cable_action_runs_with_rails_rules` and its native twin
+in `spinel_toolchain`, against actioncable 8.1.4's own output):
+
+- An action is a public method of the channel, its app ancestors or its
+  mixins, less `Channel::Base`'s; a private method, a framework method
+  and an unknown name run nothing and are logged.
+- A method of arity exactly 1 is passed `data`, with its `"action"` key
+  still in it; anything else is called with no arguments, so
+  `def optional(data = {})` gets `{}` and `def kw(data, k: 1)` raises the
+  ArgumentError Rails raises.
+- A frame without an action, or with an empty one, is `receive`.
+- `data` keeps its JSON types: `false` stays false. Channel `params`, by
+  contrast, read every value as a String (`ActionCable::Channel::Parameters`);
+  `data` does not follow them, because an action that tests a boolean
+  would otherwise take `"false"` as true.
+- A rejected subscription runs nothing.
+- An action that raises is reported on stderr and contained.
+
+**How each lane finds the method.** The CRuby overlay runs Rails' own
+algorithm in `Channel::Base#perform_action` - `action_methods` by
+reflection, then `public_send`. Spinel has no reflection, so
+`project::apply_cable_actions` writes `ActionCable::Channel.perform`: one
+`is_a?` arm per channel class, most derived first, with one arm per
+action and the arity decided at build time. The lists of Rails' base
+methods the two lanes exclude are the same list, kept in both files.
+
+**Where it differs from Rails, and why:**
+
+- **The methods this pipeline writes into a channel are never actions.**
+  `after_subscribe`, `after_unsubscribe` and `channel_name` are Rails
+  class machinery that `ingest::channel_callbacks` turns into instance
+  methods; a channel that defines one of those names itself loses it as
+  an action too.
+- **Frame order on spinel is strict.** The socket's own green thread
+  runs one frame after another, so a client's actions run in the order
+  sent. Rails, and the CRuby overlay, run commands on a worker pool and
+  two actions from one client may overlap. The overlay's pool is sized
+  by `CABLE_WORKERS` / `RAILS_MAX_THREADS`, not by
+  `config.action_cable.worker_pool_size`; an app that sets the pool to 1
+  to keep a client's actions in order does not get that on the overlay.
+- **`unsubscribe` frames are still ignored on spinel** (the overlay
+  handles them). A subscription ends when its socket closes.
+- **The strict targets** (Go, Rust, TypeScript, ...) do not run actions;
+  their cable glue drops the frame, as before.
 
 ### An open socket outlives the authorization that opened it
 
@@ -2450,6 +2507,14 @@ Three gaps remain, all on spinel's side:
   `token_tag` body is exactly `""` (campfire's header-only forgery
   protection) synthesizes `token_fields_omitted`. Another `token_tag`
   body is not read, and the forms keep their token field.
+- **Only Rails' default `field_error_proc` is modeled.** A label or
+  control whose field has errors renders inside
+  `<div class="field_with_errors">`, decided per render. An app that
+  sets its own `config.action_view.field_error_proc` keeps its form
+  fields as errors. A field's errors are told apart by the attribute
+  each message was added on, as `errors[:field]`'s are (see above).
+  A form over a record that is not one of the app's models (a form
+  object, say) is not wrapped, even when it has errors.
 - **`config.after_initialize` blocks do not run at boot.** campfire has
   two: `Room::MessagesCount.ensure!` (its counter triggers, which
   `schema.rb` cannot dump) and starting the WAL checkpointer outside

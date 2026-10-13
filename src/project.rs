@@ -1439,7 +1439,8 @@ fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
     }
 }
 
-/// The date and decimal coercions `ingest::dry_struct` generates call
+/// The date and decimal coercions `ingest::dry_struct` and
+/// `ingest::dry_initializer` generate call
 /// stdlib the CRuby and JRuby trees load. Spinel's tree has its own
 /// `Date` (`runtime/spinel/date.rb`, ISO `parse` included) and
 /// `BigDecimal()`, but no `DateTime`, `Time.parse` or
@@ -1456,21 +1457,21 @@ fn report_dry_struct_stdlib(app: &App, target: BuildTarget) {
         };
         let construct = match &*expr.node {
             ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "parse" => match &*recv.node {
-                ExprNode::Const { path } if named(path) == ["Time"] => Some(("Time.parse", "Dry::Struct date coercion")),
+                ExprNode::Const { path } if named(path) == ["Time"] => Some(("Time.parse", "dry-types date coercion")),
                 _ => None,
             },
             ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "interpret_loosely" => match &*recv.node {
                 ExprNode::Const { path } if named(path) == ["BigDecimal"] => {
-                    Some(("BigDecimal.interpret_loosely", "Dry::Struct decimal coercion"))
+                    Some(("BigDecimal.interpret_loosely", "dry-types decimal coercion"))
                 }
                 _ => None,
             },
             ExprNode::Send { recv: None, method, .. } if method.as_str() == "BigDecimal" && !spinel => {
-                Some(("BigDecimal()", "Dry::Struct decimal coercion"))
+                Some(("BigDecimal()", "dry-types decimal coercion"))
             }
-            ExprNode::Const { path } if named(path) == ["DateTime"] => Some(("DateTime", "Dry::Struct date coercion")),
+            ExprNode::Const { path } if named(path) == ["DateTime"] => Some(("DateTime", "dry-types date coercion")),
             ExprNode::Const { path } if named(path) == ["Date"] && !spinel => {
-                Some(("Date", "Dry::Struct date coercion"))
+                Some(("Date", "dry-types date coercion"))
             }
             _ => None,
         };
@@ -1485,7 +1486,10 @@ fn report_dry_struct_stdlib(app: &App, target: BuildTarget) {
         expr.node.for_each_child(&mut |child| visit(child, target));
     }
     for lc in &app.library_classes {
-        if lc.origin == Some(crate::dialect::LibraryClassOrigin::DryStruct) {
+        if matches!(
+            lc.origin,
+            Some(crate::dialect::LibraryClassOrigin::DryStruct | crate::dialect::LibraryClassOrigin::DryInitializer)
+        ) {
             for method in &lc.methods {
                 visit(&method.body, target);
             }
@@ -1564,22 +1568,33 @@ fn report_self_bindings(app: &App, target: BuildTarget) {
 /// Ruby family has: `Array#fetch`, `each_slice`, `each_cons`, an
 /// enumerator's `with_object`, `Array[...]` and `Hash[...]`, `include?` on
 /// a `Class`/`Module` value (Module's ancestry query, which the other
-/// targets' `include?` is not) and Kernel's `Rational(...)`, which a
-/// rational literal ingests as. The other emitters render them as the
-/// method name on the receiver, which nothing there defines, so they
-/// refuse each by name.
+/// targets' `include?` is not), Kernel's `Rational(...)`, which a
+/// rational literal ingests as, and Kernel's `Integer(...)` and
+/// `Float(...)`. The other emitters render them as the method name on
+/// the receiver, which nothing there defines, so they refuse each by name.
 fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
         | BuildTarget::Spinel | BuildTarget::Roda) {
         return;
     }
-    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+    // Not per call site: a receiverless send in a model or library body
+    // carries no mark of the method it dispatched to, so an app method of
+    // the same name anywhere keeps its calls out of the refusal.
+    let defines = |name: &str| {
+        app.models.iter().any(|model| model.methods().any(|method| method.name.as_str() == name))
+            || app.library_classes.iter().any(|class| class.methods.iter().any(|method| method.name.as_str() == name))
+            || app.controllers.iter().any(|controller| controller.actions().any(|action| action.name.as_str() == name))
+    };
+    let kernel: Vec<&str> = ["Rational", "Integer", "Float"].into_iter().filter(|name| !defines(name)).collect();
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget, kernel: &[&str]) {
         use crate::expr::ExprNode;
         use crate::ty::Ty;
         if let ExprNode::Send { recv, method, .. } = &*expr.node {
             let recv_ty = recv.as_ref().and_then(|r| r.ty.as_ref());
             let construct = match (recv, method.as_str()) {
-                (None, "Rational") => Some("Kernel#Rational"),
+                (None, "Rational") if kernel.contains(&"Rational") => Some("Kernel#Rational"),
+                (None, "Integer") if kernel.contains(&"Integer") => Some("Kernel#Integer"),
+                (None, "Float") if kernel.contains(&"Float") => Some("Kernel#Float"),
                 (Some(r), "[]") => match &*r.node {
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array[]"),
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash" => Some("Hash[]"),
@@ -1600,9 +1615,9 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 );
             }
         }
-        expr.node.for_each_child(&mut |child| visit(child, target));
+        expr.node.for_each_child(&mut |child| visit(child, target, kernel));
     }
-    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel));
 }
 
 /// `case/in` is not equivalent to the targets' existing `case/when`
@@ -1749,7 +1764,8 @@ pub fn target_files(
     }
     if target == BuildTarget::Ruby {
         let namespaces = crate::gems::locked_external_gem_namespaces(app);
-        return crate::emit::ruby::with_external_gem_namespaces(&namespaces, || {
+        let includes = crate::gems::statically_resolved_external_includes(app);
+        return crate::emit::ruby::with_external_gem_namespaces(&namespaces, includes, || {
             target_files_inner(app, fixture, target)
         });
     }
@@ -3847,6 +3863,240 @@ fn apply_cable_channels(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// `Channel::Base`'s own public instance methods (actioncable 8.1:
+/// `Base.public_instance_methods(true) - Object.public_instance_methods`).
+/// Rails takes them out of `action_methods`, so a client cannot
+/// `perform("stream_from")`; an app ancestor's method of the same name
+/// is taken out with them.
+const CABLE_BASE_PUBLIC_METHODS: &[&str] = &[
+    "__callbacks", "_run_subscribe_callbacks", "_run_subscribe_callbacks!",
+    "_run_unsubscribe_callbacks", "_run_unsubscribe_callbacks!", "_subscribe_callbacks",
+    "_unsubscribe_callbacks", "broadcast_to", "broadcasting_for", "channel_name",
+    "connection", "handler_for_rescue", "identifier", "logger", "params", "perform_action",
+    "periodic_timers=", "pubsub", "rescue_handlers", "rescue_handlers=", "rescue_handlers?",
+    "rescue_with_handler", "run_callbacks", "stop_all_streams", "stop_stream_for",
+    "stop_stream_from", "stream_for", "stream_from", "stream_or_reject_for",
+    "subscribe_to_channel", "unsubscribe_from_channel", "unsubscribed?",
+];
+
+/// Methods this pipeline writes INTO every channel class
+/// (`ingest::channel_callbacks`): the `on_subscribe`/`on_unsubscribe`
+/// chains and the literal `channel_name`. In Rails they are class-level
+/// machinery, never instance methods a client could name, so they are
+/// never actions - even though, here, the channel itself defines them.
+const CABLE_SYNTHESIZED_METHODS: &[&str] = &["after_subscribe", "after_unsubscribe", "channel_name"];
+
+/// How one action is called, decided from its formals the way Rails'
+/// `dispatch_action` decides it from `method(action).arity`.
+enum CableActionCall {
+    /// Arity exactly 1: one required positional, nothing else.
+    WithData,
+    /// Callable with no arguments (every formal optional, or none).
+    Bare,
+    /// Neither: Rails calls it with no arguments and Ruby raises.
+    Raises(String),
+}
+
+fn cable_action_call(method: &crate::dialect::MethodDef) -> CableActionCall {
+    let params = &method.params;
+    let keywordish = |p: &crate::dialect::Param| p.keyword || p.from_keyword || p.from_kwrest;
+    let required_positional = params
+        .iter()
+        .filter(|p| !keywordish(p) && !p.rest && !p.forwarding && p.default.is_none())
+        .count();
+    let required_keywords: Vec<&str> = params
+        .iter()
+        .filter(|p| p.keyword && p.default.is_none() && !p.rest)
+        .map(|p| p.name.as_str())
+        .collect();
+    if params.len() == 1 && required_positional == 1 {
+        return CableActionCall::WithData;
+    }
+    if required_positional > 0 {
+        return CableActionCall::Raises(format!(
+            "wrong number of arguments (given 0, expected {required_positional})"
+        ));
+    }
+    if !required_keywords.is_empty() {
+        let names: Vec<String> = required_keywords.iter().map(|k| format!(":{k}")).collect();
+        let noun = if names.len() == 1 { "keyword" } else { "keywords" };
+        return CableActionCall::Raises(format!("missing {noun}: {}", names.join(", ")));
+    }
+    CableActionCall::Bare
+}
+
+/// Write `ActionCable::Channel.perform(channel, action, data)` - the
+/// dispatch for the client's `subscription.perform(action, data)` (#71
+/// item 6) - into the Spinel lane's `runtime/action_cable.rb`.
+///
+/// Rails finds the method by reflection: `action_methods` is the
+/// channel's public instance methods with its ancestors', less
+/// `Channel::Base`'s, plus those the class defines itself; then
+/// `public_send`. A strict target has neither, so the same set is
+/// worked out here, per channel, from the ingested classes:
+///
+/// - the channel's own public methods, then its mixins and its app
+///   ancestors' with theirs, in Ruby's lookup order - modules a
+///   `config/initializers/` file prepends or includes (`app.module_mixins`)
+///   take their place in it - and the first definition of a name decides,
+///   so a subclass that makes an inherited method private takes it out;
+/// - a method the channel class itself defines publicly stays an action
+///   even when a prepended module makes it private, as in Rails; its arm
+///   raises the NoMethodError `public_send` raises there;
+/// - an inherited name `Channel::Base` also answers is not an action
+///   (`CABLE_BASE_PUBLIC_METHODS`); the methods this pipeline writes
+///   into channels never are (`CABLE_SYNTHESIZED_METHODS`).
+///
+/// ONE ARM PER CHANNEL CLASS, most derived first: the arm is an
+/// `is_a?`, and a parent's arm would otherwise answer for its
+/// subclasses with the parent's set. Each arm repeats the inherited
+/// actions, so no arm needs another's.
+///
+/// The CRuby overlay does not read this: it has reflection, and runs
+/// Rails' own algorithm in its `Channel::Base#perform_action`.
+fn apply_cable_actions(files: &mut [(String, String)], app: &App) {
+    use crate::app::MixinKind;
+    use crate::dialect::{MethodReceiver, MethodVisibility};
+    const HEAD: &str = "    # >>> generated: cable-actions\n";
+    const TAIL: &str = "    # <<< generated: cable-actions\n";
+    const ROOT: &str = "ActionCable::Channel::Base";
+
+    let class_named = |name: &str| app.library_classes.iter().find(|lc| lc.name.0.as_str() == name);
+    // `X.include M` / `X.prepend M` from config/initializers, in registration order.
+    let initializer_mixins = |target: &str, kind: MixinKind| -> Vec<&crate::dialect::LibraryClass> {
+        app.module_mixins
+            .iter()
+            .filter(|m| m.kind == kind && m.target.as_str().trim_start_matches("::") == target)
+            .filter_map(|m| class_named(m.module.as_str().trim_start_matches("::")))
+            .collect()
+    };
+
+    // (depth, name) for every class descending from Base: the same
+    // transitive descent `apply_cable_channels` does, keeping the depth.
+    let mut channels: Vec<(usize, &str)> = Vec::new();
+    let mut known: Vec<(&str, usize)> = vec![(ROOT, 0)];
+    loop {
+        let before = known.len();
+        for lc in &app.library_classes {
+            let name = lc.name.0.as_str();
+            if lc.is_module || known.iter().any(|(k, _)| *k == name) {
+                continue;
+            }
+            let Some(parent) = &lc.parent else { continue };
+            if let Some(&(_, depth)) = known.iter().find(|(k, _)| *k == parent.0.as_str()) {
+                known.push((name, depth + 1));
+                channels.push((depth + 1, name));
+            }
+        }
+        if known.len() == before {
+            break;
+        }
+    }
+    channels.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+
+    let mut generated = String::from(HEAD);
+    generated.push_str("    def self.perform(channel, action, data)\n");
+    for &(_, channel) in &channels {
+        // Ruby's lookup order, up to Base: for each class, the modules an
+        // initializer prepends onto it (newest first), the class, the
+        // modules an initializer includes into it (newest first, so ahead of
+        // the class body's), its own `include`s (last first); then the parent.
+        let mut order: Vec<(&crate::dialect::LibraryClass, bool)> = Vec::new();
+        let mut current = class_named(channel);
+        let mut own = true;
+        while let Some(lc) = current {
+            if lc.name.0.as_str() == ROOT {
+                break;
+            }
+            let class = lc.name.0.as_str();
+            for module in initializer_mixins(class, MixinKind::Prepend).into_iter().rev() {
+                order.push((module, false));
+            }
+            order.push((lc, own));
+            for module in initializer_mixins(class, MixinKind::Include).into_iter().rev() {
+                order.push((module, false));
+            }
+            for include in lc.includes.iter().rev() {
+                if let Some(module) = class_named(include.0.as_str()) {
+                    order.push((module, false));
+                }
+            }
+            own = false;
+            current = lc.parent.as_ref().and_then(|p| class_named(p.0.as_str()));
+        }
+
+        // The definition each name resolves to (the first in that order),
+        // and the names the channel class itself defines publicly: Rails
+        // adds those to `action_methods` even when a prepended module
+        // shadows them, and `public_send` then meets the shadowing method.
+        let mut effective: Vec<(&str, &crate::dialect::MethodDef, bool)> = Vec::new();
+        let mut own_public: Vec<&str> = Vec::new();
+        for (lc, own) in order {
+            for method in &lc.methods {
+                let name = method.name.as_str();
+                if method.receiver != MethodReceiver::Instance {
+                    continue;
+                }
+                if own && method.visibility == MethodVisibility::Public {
+                    own_public.push(name);
+                }
+                if !effective.iter().any(|(n, _, _)| *n == name) {
+                    effective.push((name, method, own));
+                }
+            }
+        }
+
+        let mut arms = String::new();
+        for (name, method, own) in effective {
+            if CABLE_SYNTHESIZED_METHODS.contains(&name) {
+                continue;
+            }
+            let call = if method.visibility == MethodVisibility::Public {
+                let base_name = !own && !own_public.contains(&name) && CABLE_BASE_PUBLIC_METHODS.contains(&name);
+                if method.unsupported_formals.is_some() || base_name {
+                    continue;
+                }
+                match cable_action_call(method) {
+                    CableActionCall::WithData => format!("channel.{name}(data)"),
+                    CableActionCall::Bare => format!("channel.{name}"),
+                    // The message is built from a count and identifiers only,
+                    // so it needs no escaping inside the double quotes.
+                    CableActionCall::Raises(message) => format!("raise ArgumentError, \"{message}\""),
+                }
+            } else if own_public.contains(&name) {
+                // Rails: an action (the class defines it publicly) whose call
+                // `public_send` refuses, since a prepended module made it
+                // private or protected.
+                let kind = if method.visibility == MethodVisibility::Private { "private" } else { "protected" };
+                format!("raise NoMethodError, \"{kind} method '{name}' called for an instance of {channel}\"")
+            } else {
+                continue;
+            };
+            arms.push_str(&format!(
+                "        if action == \"{name}\"\n\
+                 \x20         {call}\n\
+                 \x20         return true\n\
+                 \x20       end\n",
+            ));
+        }
+        // An arm even with no actions in it: a channel that made every
+        // inherited action private must not fall through to its parent's arm.
+        generated.push_str(&format!("      if channel.is_a?({channel})\n{arms}        return false\n      end\n"));
+    }
+    generated.push_str("      false\n    end\n");
+    generated.push_str(TAIL);
+
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("/action_cable.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
 /// Write one `GlobalID::Locator.locate_<model>` entry point into
 /// `runtime/global_id_locator.rb` for every model class an `only:`
 /// names, with the finder spelled as a LITERAL constant.
@@ -3907,6 +4157,29 @@ fn apply_instantiate_named(files: &mut [(String, String)], app: &App) {
     generated.push_str(TAIL);
     for (path, content) in files.iter_mut() {
         if !path.ends_with("active_record_db_config.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
+/// Write `JobRegistry` — each payload job's writer and reader, and the
+/// record locators they use — into `runtime/job_registry.rb`, from
+/// `App::job_plans`. A span replace between markers, like
+/// `apply_global_id_locate`; an app with no payload jobs keeps a
+/// registry whose `perform` answers false.
+fn apply_job_registry(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "  # >>> generated: job-registry\n";
+    const TAIL: &str = "  # <<< generated: job-registry\n";
+    let generated = format!(
+        "{HEAD}{}{TAIL}",
+        crate::lower::job_payload::registry_source(&app.job_plans)
+    );
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("job_registry.rb") {
             continue;
         }
         let Some(start) = content.find(HEAD) else { continue };
@@ -4883,9 +5156,10 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
 /// ruby-family runtime exception stubs (`ruby_family_runtime_constant`).
 fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'static str> {
     // Spinel supplies the other bundled and ruby-family class values,
-    // but recognizes GeneratorError only as a literal rescue name.
+    // but recognizes GeneratorError only as a literal rescue name, and
+    // its `packages/net` stops short of net/protocol's `HTTPBadResponse`.
     if target == "spinel" {
-        return if name == "JSON::GeneratorError" {
+        return if matches!(name, "JSON::GeneratorError" | "Net::HTTPBadResponse") {
             Some("bundled_constant")
         } else {
             None
@@ -4904,6 +5178,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         "URI::HTTP" | "URI::HTTPS" | "URI::Error" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
         | "SocketError"
         | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
+        | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
         | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
         | "Struct" | "Mutex" | "Queue" | "SizedQueue"
         | "Thread::Queue" | "Thread::SizedQueue" | "Thread::Mutex"
@@ -4925,7 +5200,9 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         // runtime/spinel/active_support_cache.rb.
         | "ActiveSupport::Cache" | "ActiveSupport::Cache::MemoryStore"
         // rqrcode_core's / spinel-rqrcode's.
-        | "RQRCodeCore::QRCodeRunTimeError" | "RQRCodeCore::QRCodeArgumentError");
+        | "RQRCodeCore::QRCodeRunTimeError" | "RQRCodeCore::QRCodeArgumentError"
+        | "GC" | "OpenSSL::HMAC" | "CSV::MalformedCSVError"
+        | "Enumerator::Product" | "Enumerator::Lazy");
     if !bundled {
         return None;
     }
@@ -5909,7 +6186,10 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     }
     let public = fixture.join("public");
     if public.exists() {
-        walk_dir_into(&public, "public/", &mut files)?;
+        // Everything under public/, at any depth: Rails serves the directory as
+        // it is (ActionDispatch::Static), and hindmost's terminal loads xterm
+        // from public/vendor/xterm, which the dev-directory skip dropped.
+        walk_dir_into_skipping(&public, "public/", &[], &mut files)?;
     }
     // `test/fixtures/files` — `file_fixture_path`, which `file_fixture`,
     // `fixture_file_upload` and an `ActiveStorage::FixtureSet.blob`
@@ -5938,6 +6218,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     // `cable.rb`, which has its own identity path and its own test.
     apply_cable_connection(&mut files, app);
     apply_cable_channels(&mut files, app);
+    apply_cable_actions(&mut files, app);
     apply_content_layout(&mut files, app);
     apply_content_helper_attributes(&mut files, app);
     apply_content_helper_tags(&mut files, app);
@@ -5950,6 +6231,8 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_global_id_locate(&mut files, app);
     apply_instantiate_named(&mut files, app);
     apply_attachable_locate(&mut files, app);
+    // Same reason: both lanes require `runtime/job_registry.rb`.
+    apply_job_registry(&mut files, app);
     apply_views_aggregator(&mut files);
     apply_models_aggregator(&mut files);
     apply_route_helpers_demand(&mut files);
@@ -7558,7 +7841,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 19] = [
+const BUNDLED: [(&str, &str); 20] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -7631,6 +7914,10 @@ const BUNDLED: [(&str, &str); 19] = [
     // makes its lock directory. A default gem on CRuby/JRuby (Rails has
     // loaded it); spinel takes `packages/fileutils`.
     ("FileUtils", "fileutils"),
+    // `OpenSSL::HMAC.digest` - a default gem on CRuby/JRuby, spinel's
+    // `packages/openssl`; an app that signs a payload without HTTP never
+    // loads it through net/http.
+    ("OpenSSL", "openssl"),
 ];
 
 /// Every gap in a tree, as `(file index, require line)`. One walk,
@@ -8578,6 +8865,16 @@ fn walk_dir_into(
     prefix: &str,
     out: &mut Vec<(String, String)>,
 ) -> Result<(), String> {
+    walk_dir_into_skipping(src, prefix, SKIP_DIRS, out)
+}
+
+/// [`walk_dir_into`] with the directory names to skip given explicitly.
+fn walk_dir_into_skipping(
+    src: &Path,
+    prefix: &str,
+    skip_dirs: &[&str],
+    out: &mut Vec<(String, String)>,
+) -> Result<(), String> {
     if !src.exists() {
         return Err(format!("missing {}/", src.display()));
     }
@@ -8592,7 +8889,7 @@ fn walk_dir_into(
             }
             let path = entry.path();
             let ty = entry.file_type().map_err(|e| format!("stat: {e}"))?;
-            if ty.is_dir() && SKIP_DIRS.contains(&name_str.as_ref()) {
+            if ty.is_dir() && skip_dirs.contains(&name_str.as_ref()) {
                 continue;
             }
             let nested = format!("{sub_prefix}{name_str}");

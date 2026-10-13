@@ -23,8 +23,45 @@ use crate::ident::{ClassId, Symbol};
 use crate::schema::Schema;
 use crate::ty::Ty;
 
+/// A condition on the including class, read from a concern's
+/// `included do`: `self == A` / `self != A` / `in?([A, B])`, under `if`
+/// or `unless`. `classes` are the constants as written.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IncluderGuard {
+    pub classes: Vec<String>,
+    pub negate: bool,
+}
+
+impl IncluderGuard {
+    /// Whether the guard holds for the includer named `includer` (its
+    /// full name). A root-qualified constant (`::Account`) names exactly
+    /// one class and matches only that full name. An unqualified one
+    /// matches the full name or its trailing segments (`Account` admits
+    /// `Billing::Account` only when written in that namespace; the ingest
+    /// sees the bare name, so a suffix match on `::` boundaries is what
+    /// it can do).
+    pub fn admits(&self, includer: &str) -> bool {
+        let hit = self.classes.iter().any(|c| match c.strip_prefix("::") {
+            Some(rooted) => includer == rooted,
+            None => includer == c || includer.ends_with(&format!("::{c}")),
+        });
+        hit != self.negate
+    }
+}
+
+/// One item of [`App::concern_guarded_items`]: the guard, the item, and
+/// `at`, the number of the module's unconditional items
+/// (`concern_model_items`) declared before it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConcernGuardedItem {
+    pub guard: IncluderGuard,
+    pub item: ModelBodyItem,
+    pub at: usize,
+}
+
 /// The top-level IR: a Rails application as data. This is the serializable
 /// deliverable — the thing ingesters produce and emitters consume.
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct App {
     pub schema_version: u32,
@@ -199,6 +236,13 @@ pub struct App {
     /// `locate_signed_<model>(sgid, purpose)`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub global_id_locate_signed_models: BTreeSet<Symbol>,
+    /// How each job's arguments are written to an ActiveJob payload, or
+    /// why the job keeps its Proc. Worked out by
+    /// [`crate::lower::job_payload::plan_jobs`] from the job's call
+    /// sites; read by the Ruby emitter's enqueue rewrite and by
+    /// `project::apply_job_registry`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub job_plans: Vec<crate::lower::job_payload::JobPlan>,
     /// Model names whose attachment sgid the app resolves even when
     /// its SIGNATURE fails — campfire's `%w[ User ]`, read by
     /// [`crate::ingest::on_load_reopen`] from the `from_node` reopen
@@ -397,6 +441,16 @@ pub struct App {
     /// item provenance) can follow when emission needs it.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_model_items: HashMap<ClassId, Vec<ModelBodyItem>>,
+    /// Items an `included do` block declares behind a guard on the
+    /// includer (`has_many :x if self == Account`, `unless in?([A, B])`),
+    /// keyed by module. `included do` runs with `self` bound to each
+    /// includer, so the guard is answered per includer when the module
+    /// is spliced: the item goes to the includers it admits and no
+    /// other. Kept apart from `concern_model_items`, which every
+    /// includer receives; each item records where it stood among those,
+    /// so the splice keeps source order.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub concern_guarded_items: HashMap<ClassId, Vec<ConcernGuardedItem>>,
     /// Instance-method names a concern's `included do` block (re)defines
     /// (`def x`, `alias_method :x, ...`, `define_method`, `attr_*`), keyed by
     /// module. Those statements are not carried as `concern_model_items`, so
@@ -781,6 +835,7 @@ impl App {
             generated_helper_methods: BTreeMap::new(),
             global_id_locate_models: BTreeSet::new(),
             global_id_locate_signed_models: BTreeSet::new(),
+            job_plans: Vec::new(),
             attachable_unsigned_models: Vec::new(),
             pending_attachment_on_load: Vec::new(),
             load_hook_class_macros: Vec::new(),
@@ -798,6 +853,7 @@ impl App {
             concern_spliced_actions: HashMap::new(),
             concern_spliced_class_methods: HashMap::new(),
             concern_model_items: HashMap::new(),
+            concern_guarded_items: HashMap::new(),
             concern_included_redefs: HashMap::new(),
             current_attribute_classes: Vec::new(),
             render_edges: HashMap::new(),
@@ -816,5 +872,35 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod includer_guard_tests {
+    use super::IncluderGuard;
+
+    fn guard(classes: &[&str], negate: bool) -> IncluderGuard {
+        IncluderGuard { classes: classes.iter().map(|c| c.to_string()).collect(), negate }
+    }
+
+    #[test]
+    fn a_root_qualified_constant_admits_only_that_class() {
+        let g = guard(&["::Article"], false);
+        assert!(g.admits("Article"));
+        assert!(!g.admits("Billing::Article"));
+        let g = guard(&["::Billing::Article"], false);
+        assert!(g.admits("Billing::Article"));
+        assert!(!g.admits("Article"));
+        assert!(!g.admits("Shop::Billing::Article"));
+        // `unless self == ::Article` keeps the namespaced includer.
+        assert!(guard(&["::Article"], true).admits("Billing::Article"));
+    }
+
+    #[test]
+    fn an_unqualified_constant_matches_on_segment_boundaries() {
+        let g = guard(&["Article"], false);
+        assert!(g.admits("Article"));
+        assert!(g.admits("Billing::Article"));
+        assert!(!g.admits("BillingArticle"));
     }
 }

@@ -56,3 +56,14 @@ fn a_value_from_a_cataloged_gem_constant_is_typed() {
     let err = check(&[("app/models/application_record.rb", RECORD), ("app/models/html_encoder.rb", encoder)]);
     assert!(!err.contains("constant not supported"), "{err}");
 }
+
+/// commonmarker is cataloged: lobsters' `Markdowner` parses to a node
+/// tree, edits it and renders it back, so its constants are classes and
+/// the parse answers a typed node.
+#[test]
+fn commonmarker_constants_and_nodes_are_typed() {
+    let markdowner = "class Markdowner\n  def self.to_raw(text)\n    root = Commonmarker.parse(text, options: {})\n    root.walk do |node|\n      node.delete if node.type == :image\n    end\n    root.to_commonmark\n  end\n\n  def self.mention(user)\n    link_text = Commonmarker::Node.new(:text)\n    link_text.string_content = user\n    link_text\n  end\nend\n";
+    let err = check(&[("app/models/application_record.rb", RECORD), ("app/models/markdowner.rb", markdowner)]);
+    assert!(!err.contains("constant not supported"), "{err}");
+    assert!(!err.contains("send_dispatch_failed"), "{err}");
+}

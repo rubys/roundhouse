@@ -114,6 +114,8 @@ module ActiveRecord
     # it as a pointer and the message is swept while the array holds it.
     @errors: Array[String]
     def errors: () -> Array[String]
+    @error_attributes: Array[String]
+    def error_attributes: () -> Array[String]
 
     def initialize: (?Hash[Symbol, untyped] attrs) -> void
 

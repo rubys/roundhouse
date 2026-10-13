@@ -15,14 +15,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use roundhouse::analyze::Analyzer;
 use roundhouse::emit::go;
 use roundhouse::ingest::ingest_app;
 
 #[test]
 fn real_blog_runtime_calls_use_qualified_class_names() {
     let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    roundhouse::session::analyze_and_lower(&mut app);
     let files = go::emit(&app);
     for (path, calls) in [
         ("app/v2/flash.go", vec!["NewActionDispatchFlashNow(self)", "NewActionDispatchFlash()"]),
@@ -54,7 +53,7 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    roundhouse::session::analyze_and_lower(&mut app);
     let files = go::emit(&app);
 
     for file in &files {

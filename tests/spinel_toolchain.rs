@@ -27,7 +27,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use roundhouse::analyze::Analyzer;
 
 use roundhouse::ingest::ingest_app;
 
@@ -41,12 +40,18 @@ mod array_excluding_native;
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/dry_initializer.rs"]
+mod dry_initializer;
 #[path = "support/data_factory.rs"]
 mod data_factory;
 #[path = "support/dry_struct.rs"]
 mod dry_struct;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
+#[path = "support/cable_actions.rs"]
+mod cable_actions_contract;
+#[path = "spinel_toolchain/cable_actions.rs"]
+mod cable_actions;
 #[path = "support/cable_broadcast_json.rs"]
 mod cable_broadcast_json_contract;
 #[path = "spinel_toolchain/cable_broadcast_json.rs"]
@@ -81,6 +86,8 @@ mod campfire_caches;
 mod ordinalize;
 #[path = "spinel_toolchain/params_helper_no_permit.rs"]
 mod params_helper_no_permit;
+#[path = "spinel_toolchain/rails_parity.rs"]
+mod rails_parity;
 
 /// Compile and execute the shared custom Data factory contract with Spinel;
 /// successful Ruby emission alone does not establish native target support.
@@ -93,6 +100,10 @@ fn custom_data_factories_run_natively() {
     run.assert_passes();
     assert!(run.stdout.contains("custom Data factory contract passed"));
 }
+#[path = "support/stdlib_rnp.rs"]
+mod stdlib_rnp_contract;
+#[path = "spinel_toolchain/stdlib_rnp.rs"]
+mod stdlib_rnp;
 
 /// The native counterpart of the generic emitted-Ruby regression test.
 #[test]
@@ -164,6 +175,15 @@ fn finite_concern_class_configuration_runs_natively() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// The native half of `emit_and_run::dry_initializer_classes_run_lowered`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn dry_initializer_classes_run_lowered_natively() {
+    let run = dry_initializer::overlay().run_spinel(dry_initializer::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("dry-initializer contract passed"));
 }
 
 /// The native half of `emit_and_run::dry_struct_classes_run_lowered`.
@@ -273,7 +293,8 @@ fn generate_project(fixture: &Path, scratch: &Path) {
     std::fs::create_dir_all(scratch).expect("create scratch");
 
     let mut app = ingest_app(fixture).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    // The shipped tree is built from the post-analyze lowered IR, as `roundhouse --target spinel` builds it
+    roundhouse::session::analyze_and_lower(&mut app);
     let files = roundhouse::project::spinel_base_files(&app, fixture).expect("spinel base files");
     roundhouse::project::write_to_dir(&files, scratch).expect("write spinel tree");
 

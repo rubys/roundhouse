@@ -118,6 +118,10 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // own body wants every one of them applied.
     crate::lower::tag_block_passing::apply_helpers(&mut lcs);
     apply_scope_lowering(&mut lcs, app);
+    // ActiveJob payloads: the enqueue arm of each planned job's
+    // `perform_later`, and `to_gid_uri` beside `to_gid_param`.
+    // Ruby-family only, like the GlobalID runtime it writes through.
+    crate::lower::job_payload::apply_ruby(&mut lcs, app);
     apply_library_partial_render_lowering(&mut lcs, app);
     // The Attachment's readers on a content-type attachable (campfire's
     // `OpengraphEmbed`): Rails hands the partial the Attachment, which
@@ -155,7 +159,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_boolean_lowering(&mut lcs, app);
     apply_hydration_nil_lowering(&mut lcs, app);
     apply_nilsafe_empty_lowering(&mut lcs);
-    apply_time_format_lowering(&mut lcs);
+    apply_time_format_lowering(&mut lcs, app);
     // Same rooting the view pipeline applies, for the same reason one
     // step over: a class nested in a namespace that SHADOWS what it
     // references. `Message::Broadcasts` is where the broadcast lowering
@@ -1531,6 +1535,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             crate::lower::attached::push_preload_scope_methods(&mut lc.methods, model);
             crate::lower::attachable::push_attachable_sgid(&mut lc.methods, model, &attachable);
             crate::lower::broadcasts::push_to_gid_param(&mut lc.methods, model);
+            crate::lower::job_payload::push_model_to_gid_uri(&mut lc.methods, model);
         }
     }
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
@@ -1902,6 +1907,7 @@ pub(crate) fn apply_belongs_to_memoization(lcs: &mut [LibraryClass], app: &App) 
         for (name, fk) in names {
             memoize_reader(lc, &name);
             invalidate_on_fk_write(lc, &name, &fk);
+            invalidate_on_assoc_write(lc, &name, &fk);
         }
     }
 }
@@ -1946,6 +1952,58 @@ fn memoize_reader(lc: &mut LibraryClass, name: &Symbol) {
         }),
         syn(ExprNode::Ivar { name: cache }),
     ];
+}
+
+/// `def <name>=(value)` gains `@<name>_loaded = false` as its first
+/// statement, when it writes `@<fk>` itself.
+///
+/// The association writer sets the key ivar directly rather than through
+/// `<fk>=`, so the reset that writer carries never ran: after a read,
+/// `comment.article = other` and `comment.article = nil` left the reader
+/// answering the owner it had loaded first, where Rails answers `other`
+/// and nil. The reset comes first so the unsaved-owner stash
+/// (`apply_belongs_to_autosave`), which sets the flag again, still wins;
+/// it also keeps a stash replaced by `= nil` from being autosaved.
+fn invalidate_on_assoc_write(lc: &mut LibraryClass, name: &Symbol, fk: &Symbol) {
+    let writer = Symbol::from(format!("{}=", name.as_str()));
+    let Some(m) = lc
+        .methods
+        .iter_mut()
+        .find(|m| m.name == writer && m.receiver == MethodReceiver::Instance)
+    else {
+        return;
+    };
+    fn writes_ivar(e: &Expr, ivar: &Symbol, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Assign { target: LValue::Ivar { name }, .. } = &*e.node {
+            if name == ivar {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| writes_ivar(c, ivar, found));
+    }
+    let mut found = false;
+    writes_ivar(&m.body, fk, &mut found);
+    if !found {
+        return;
+    }
+    let span = m.body.span;
+    let reset = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) },
+            value: Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: false } }),
+        },
+    );
+    let mut stmts = match &*m.body.node {
+        ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![m.body.clone()],
+    };
+    stmts.insert(0, reset);
+    m.body = Expr::new(span, ExprNode::Seq { exprs: stmts });
 }
 
 /// `def <fk>=(value); @<fk> = value; end` gains `@<name>_loaded = false`.
@@ -5801,13 +5859,105 @@ fn widen_fk_zero_guards(expr: &mut Expr, fks: &BTreeSet<Symbol>) {
 /// Zero-arg receiver sends only. Ruby-emit-path pass: the module
 /// function it names is ruby-family runtime, so this must not run from
 /// shared `lower/`.
-pub(crate) fn apply_time_format_lowering(lcs: &mut [LibraryClass]) {
+pub(crate) fn apply_time_format_lowering(lcs: &mut [LibraryClass], app: &App) {
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
             rewrite_rfc2822(&mut m.body);
             rewrite_time_parse(&mut m.body);
         }
     }
+    apply_zoned_json_time_lowering(lcs, app);
+}
+
+/// Every `JsonBuilder.encode_datetime` in `lcs` grounds to the app's
+/// zone (`rewrite_zoned_encode_datetime`) when that zone is not UTC; a
+/// no-op otherwise. Runs with the other time-format rewrites (models'
+/// `as_json` writers, controllers, html views) and on the lowered
+/// jbuilder views, which take no other ruby-family pass.
+pub(crate) fn apply_zoned_json_time_lowering(lcs: &mut [LibraryClass], app: &App) {
+    if !app_presents_time_zoned(app) {
+        return;
+    }
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_zoned_encode_datetime(&mut m.body);
+        }
+    }
+}
+
+/// Whether the app's `config.time_zone` makes Rails write a JSON
+/// timestamp with an offset rather than `Z`.
+///
+/// `TimeWithZone#xmlschema` writes `Z` only when the zone itself is UTC
+/// (its abbreviation is "UTC" or "UCT"): Rails' default, and the names
+/// below. Every other zone writes the offset it has AT THAT INSTANT —
+/// `Europe/Paris` is `+02:00` in October and `+01:00` in January, and
+/// `London` is `+00:00`, not `Z` — so the offset cannot be fixed here.
+/// Ingest lifts the zone into a `config_time_zone` method on the
+/// `Rails::Application` reopen; an app with none presents UTC.
+fn app_presents_time_zoned(app: &App) -> bool {
+    const UTC_ZONES: [&str; 8] =
+        ["UTC", "Etc/UTC", "Universal", "Etc/Universal", "Zulu", "Etc/Zulu", "UCT", "Etc/UCT"];
+    let Some(application) = &app.rails_application else { return false };
+    let Some(method) = application.methods.iter().find(|m| m.name.as_str() == "config_time_zone") else {
+        return false;
+    };
+    let lit = match &*method.body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+        _ => &method.body,
+    };
+    match &*lit.node {
+        ExprNode::Lit { value: Literal::Str { value } } => !UTC_ZONES.contains(&value.as_str()),
+        _ => false,
+    }
+}
+
+/// `JsonBuilder.encode_datetime(raw)` →
+/// `JsonBuilder.encode_value(ActiveSupport.json_time(raw))`, for an app
+/// whose `config.time_zone` is not UTC (`app_presents_time_zoned`).
+///
+/// The jbuilder lowerer and the default `as_json` writer serialize a
+/// datetime column through `encode_datetime`, a string reformat of the
+/// stored UTC text that always ends in `Z`. Rails presents the column
+/// as a `TimeWithZone` in the app's zone, so its JSON carries that
+/// zone's offset. `ActiveSupport.json_time` is the runtime seam that
+/// already renders it (`xmlschema(3)` of the hydrated value, which
+/// `parse_db_time` lands in the app's zone; DST-correct, because the
+/// offset is resolved per instant), and the one a model's own `as_json`
+/// writer uses (`PairEncoding::ZonedTime`).
+///
+/// Ruby-emit-path pass, like `rewrite_rfc2822`: `json_time` ships in
+/// the ruby-family trees (the CRuby/JRuby overlay and the spinel
+/// subset), not on the strict targets, whose runtimes present UTC, so
+/// the shared lowerer keeps emitting `encode_datetime`.
+fn rewrite_zoned_encode_datetime(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_zoned_encode_datetime(c));
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else {
+        return;
+    };
+    if method.as_str() != "encode_datetime" || args.len() != 1 {
+        return;
+    }
+    if !matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "JsonBuilder") {
+        return;
+    }
+    let raw = args[0].clone();
+    let mut zoned = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+            )),
+            method: Symbol::from("json_time"),
+            args: vec![raw],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    zoned.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil] });
+    *method = Symbol::from("encode_value");
+    *args = vec![zoned];
 }
 
 // Not left as `Time.parse`: spinel ships no stdlib `time` (matz/spinel#1118), so it grounds like `rfc2822` above.
@@ -6582,14 +6732,11 @@ fn emit_library_class_decl_inner(
     let self_anchor = out_path.with_extension("").to_string_lossy().into_owned();
     let mut s = String::new();
 
-    let external_includes = crate::gems::statically_resolved_external_includes(app);
     let mut emitted_external_require = false;
     for included in &lc.includes {
         let detail = format!("{} includes unresolved {}", lc.name.0, included.0);
-        if external_include_is_enabled(&detail)
-            && let Some(features) = external_includes.get(&detail)
-        {
-            for feature in features {
+        if external_include_is_enabled(&detail) {
+            for feature in super::expr::external_include_features(&detail) {
                 writeln!(s, "require {feature:?}").unwrap();
                 emitted_external_require = true;
             }
@@ -7109,13 +7256,17 @@ fn emit_library_class_decl_inner(
     let replayed: Vec<&Expr> = if replays_foreign_class_body(lc, app) {
         lc.unknown_calls
             .iter()
-            .filter(|call| !is_preserved_external_include(call, &external_includes))
+            .filter(|call| !is_preserved_external_include(call))
             .collect()
     } else {
         let own = app_extension_calls(lc, app);
         for call in &lc.unknown_calls {
+            // A payload job's `queue_as` and `discard_on
+            // ActiveJob::DeserializationError` are not dropped: the plan
+            // carries them (`lower::job_payload`).
             if !own.iter().any(|c| std::ptr::eq(*c, call))
-                && !is_preserved_external_include(call, &external_includes)
+                && !is_preserved_external_include(call)
+                && !crate::lower::job_payload::modelled_class_body_call(app, lc, call)
             {
                 report_dropped_class_body_call(lc, call);
             }
@@ -7605,10 +7756,7 @@ fn report_dropped_class_body_call(lc: &LibraryClass, call: &Expr) {
     ));
 }
 
-fn is_preserved_external_include(
-    call: &Expr,
-    resolved: &std::collections::BTreeMap<String, Vec<String>>,
-) -> bool {
+fn is_preserved_external_include(call: &Expr) -> bool {
     matches!(
         &call.diagnostic,
         Some(crate::diagnostic::DiagnosticKind::Unsupported {
@@ -7616,8 +7764,8 @@ fn is_preserved_external_include(
             detail,
             ..
         }) if construct.as_str() == "include"
-            && resolved.contains_key(detail)
             && external_include_is_enabled(detail)
+            && !super::expr::external_include_features(detail).is_empty()
     )
 }
 
@@ -8602,8 +8750,9 @@ fn expr_mentions_includes(expr: &Expr) -> bool {
 
 /// One preloadable association, resolved against the app's model set.
 enum PreloadKind {
-    /// (fk column on the owner, target class, target table)
-    BelongsTo { fk: String, target: String, table: String },
+    /// (fk column on the owner, target class, target table, the `Db`
+    /// helper that renders the target's key list for `IN (...)`)
+    BelongsTo { fk: String, target: String, table: String, key_list: &'static str },
     /// (fk column on the target, target class)
     HasMany { fk: String, owner_key: String, target: String },
     /// `has_one` — same FK-on-target batch as has_many, installing one
@@ -8652,12 +8801,29 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                 let Some(target_model) = app.models.iter().find(|m| &m.name == target) else {
                     continue;
                 };
+                // A uuid / string key is a quoted literal in `IN (...)`;
+                // the integer helper would `to_i` it to its leading
+                // digits and find nothing (cf. #310 for `Relation#ids`).
+                let string_key = app
+                    .schema
+                    .tables
+                    .get(&target_model.table.0)
+                    .and_then(|t| t.columns.iter().find(|c| c.primary_key))
+                    .is_some_and(|c| {
+                        matches!(
+                            c.col_type,
+                            crate::schema::ColumnType::Uuid
+                                | crate::schema::ColumnType::String { .. }
+                                | crate::schema::ColumnType::Text
+                        )
+                    });
                 out.push((
                     name.as_str().to_string(),
                     PreloadKind::BelongsTo {
                         fk: foreign_key.as_str().to_string(),
                         target: target.0.as_str().to_string(),
                         table: target_model.table.0.as_str().to_string(),
+                        key_list: if string_key { "escape_string_list" } else { "escape_int_list" },
                     },
                 ));
             }
@@ -8839,7 +9005,7 @@ fn preload_methods_source(model: &crate::dialect::Model, app: &App) -> String {
     // Batch loaders + belongs_to cache setters.
     for (name, kind) in &targets {
         match kind {
-            PreloadKind::BelongsTo { fk, target, table } => {
+            PreloadKind::BelongsTo { fk, target, table, key_list } => {
                 let _ = write!(
                     src,
                     r#"
@@ -8852,7 +9018,7 @@ def self._preload_batch_{name}(records)
   ids.uniq!
   by_id = {{}}
   if ids.length > 0
-    {target}._hydrate_all("SELECT " + {target}._columns_sql + " FROM {table} WHERE {table}.id IN (" + Db.escape_int_list(ids) + ")").each do |rec|
+    {target}._hydrate_all("SELECT " + {target}._columns_sql + " FROM {table} WHERE {table}.id IN (" + Db.{key_list}(ids) + ")").each do |rec|
       by_id[rec.id] = rec
     end
   end

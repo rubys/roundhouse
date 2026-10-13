@@ -310,6 +310,7 @@ fn build(plan: &Plan, span: Span) -> Vec<Expr> {
     // Every declared password must verify. `authenticate` answers the
     // record or `false`, so the calls compose with `&&` directly —
     // the same truthiness the surface API is built on.
+    let auth_ty = Ty::Union { variants: vec![self_ty.clone(), Ty::Bool] };
     let mut check: Option<Expr> = None;
     for (attr, plaintext) in &plan.passwords {
         let call = typed(
@@ -320,7 +321,7 @@ fn build(plan: &Plan, span: Span) -> Vec<Expr> {
                 block: None,
                 parenthesized: true,
             },
-            self_ty.clone(),
+            auth_ty.clone(),
         );
         check = Some(match check {
             None => call,
@@ -331,7 +332,7 @@ fn build(plan: &Plan, span: Span) -> Vec<Expr> {
                     left: prev,
                     right: call,
                 },
-                self_ty.clone(),
+                auth_ty.clone(),
             ),
         });
     }

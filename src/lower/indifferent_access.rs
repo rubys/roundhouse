@@ -24,10 +24,33 @@ fn rewrite(expr: &mut Expr) {
     if !expr.ty.as_ref().is_some_and(|t| !matches!(t, Ty::Var { .. })) {
         return;
     }
+    // An untyped receiver (a json column's reader, `extras || {}`) is the
+    // usual one in a Rails app, and no runtime defines the call itself:
+    // lower it as a Hash receiver's is. The result is typed indifferent,
+    // so the calls chained on it (`.merge!(key => value)`) take the
+    // modeled path instead of being half-converted.
+    if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node
+        && let Some(ty) = untyped_receiver_conversion(method.as_str(), args, recv)
+    {
+        let mut call = support_call(expr.span, "indifferent", vec![recv.clone()]);
+        call.ty = Some(expr.ty.take().filter(indifferent::mentions).unwrap_or(ty));
+        *expr = call;
+        return;
+    }
     if let Some(mut replacement) = rewrite_node(expr.span, expr.decisions, &mut expr.node) {
         replacement.ty = expr.ty.take();
         *expr = replacement;
     }
+}
+
+// Not a receiver of any other class (an app's own `with_indifferent_access`,
+// one already indifferent, which the typed path copies): the gradual ones
+// analysis types the call for.
+fn untyped_receiver_conversion(method: &str, args: &[Expr], recv: &Expr) -> Option<Ty> {
+    if method != "with_indifferent_access" || !args.is_empty() {
+        return None;
+    }
+    indifferent::from_gradual(recv.ty.as_ref()?)
 }
 
 fn rewrite_node(span: Span, decisions: u64, node: &mut ExprNode) -> Option<Expr> {

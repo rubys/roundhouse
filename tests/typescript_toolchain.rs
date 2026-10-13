@@ -15,7 +15,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use roundhouse::analyze::Analyzer;
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
 
@@ -30,7 +29,8 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    // Emit from the post-analyze lowered IR, as `roundhouse --target typescript` does
+    roundhouse::session::analyze_and_lower(&mut app);
     let files = typescript::emit(&app);
 
     for file in &files {
@@ -53,7 +53,8 @@ fn generate_project_with_profile(
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    // Emit from the post-analyze lowered IR, as `roundhouse --target typescript` does
+    roundhouse::session::analyze_and_lower(&mut app);
     let files = typescript::emit_with_profile(&app, profile);
 
     for file in &files {

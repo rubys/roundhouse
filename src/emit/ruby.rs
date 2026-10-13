@@ -38,9 +38,10 @@ pub use expr::emit_expr;
 
 pub(crate) fn with_external_gem_namespaces<R>(
     namespaces: &std::collections::BTreeSet<String>,
+    includes: std::collections::BTreeMap<String, Vec<String>>,
     f: impl FnOnce() -> R,
 ) -> R {
-    expr::with_external_gem_namespaces(namespaces, f)
+    expr::with_external_gem_namespaces(namespaces, includes, f)
 }
 
 /// Emit a single `MethodDef` as Ruby source (trailing newline included).
@@ -334,7 +335,7 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // model bodies tolerate the nil.
     library::apply_hydration_nil_lowering(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
-    library::apply_time_format_lowering(&mut lcs);
+    library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // Runtime-Relation eager loading: per-model `preload_associations`
     // machinery + belongs_to reader cache guards, so `includes(...)`
@@ -342,8 +343,8 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // N+1 lazy reads. Runs last so nothing reprocesses the synthesized
     // bodies (no-op unless the app mentions includes).
     library::apply_preload_lowering(&mut lcs, app);
-    // A belongs_to reader memoizes, and writing the foreign key
-    // invalidates it (no-op for models with no belongs_to). AFTER the
+    // A belongs_to reader memoizes, and writing the foreign key or the
+    // association invalidates it (no-op for models with no belongs_to). AFTER the
     // preload pass, which is what puts the `return @<name>_cache if
     // @<name>_loaded` guard on the reader — this pass memoizes into
     // that same cache and would have nothing to prepend itself to if it
@@ -515,7 +516,7 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     // that argument's escaping comes off (no-op without such a site).
     library::apply_raw_helper_monomorphization(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
-    library::apply_time_format_lowering(&mut lcs);
+    library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // Layout wrap at render call sites — the seam where the @ivars a
     // layout reads are in scope. Converged with the CRuby tree
@@ -560,7 +561,7 @@ pub(crate) fn lowered_controller_lcs_with_layout(app: &App) -> Vec<LibraryClass>
     // that argument's escaping comes off (no-op without such a site).
     library::apply_raw_helper_monomorphization(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
-    library::apply_time_format_lowering(&mut lcs);
+    library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
     lcs
@@ -764,7 +765,7 @@ pub(crate) fn lowered_view_lcs(app: &App) -> (Vec<&crate::dialect::View>, Vec<Li
     // Nullable columns hydrate to nil on the Ruby tree — synthesized
     // `.empty?` predicate forms in view bodies must tolerate it.
     library::apply_nilsafe_empty_lowering(&mut lcs);
-    library::apply_time_format_lowering(&mut lcs);
+    library::apply_time_format_lowering(&mut lcs, app);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // A view whose own namespace shadows a top-level app class
     // (`Views::Stats` over `Stats`) must reference it absolutely, or
@@ -795,7 +796,8 @@ pub fn emit_lowered_jbuilder_views(app: &App) -> Vec<EmittedFile> {
         .iter()
         .filter(|v| v.jbuilder)
         .flat_map(|v| {
-            let lc = crate::lower::lower_jbuilder_to_library_class(v, app);
+            let mut lc = crate::lower::lower_jbuilder_to_library_class(v, app);
+            library::apply_zoned_json_time_lowering(std::slice::from_mut(&mut lc), app);
             let out_path = jbuilder_view_output_path(v.name.as_str());
             library::emit_library_class_pair(&lc, app, out_path)
         })

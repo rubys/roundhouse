@@ -47,6 +47,30 @@ module ActionDispatch
         raise KeyError, "key not found: #{key}"
       end
 
+      # Rails' `Headers` is Enumerable over `each`, which walks every env
+      # pair (`HTTP_*`, the CGI variables and the `rack.*` keys alike),
+      # in env order: `request.headers.map { |key, value| ... }` is how a
+      # request logger or a header filter reads them all. `map` is
+      # spelled out rather than taken from `include Enumerable`, so a
+      # target that compiles this class needs no mixin.
+      #
+      # Without a block both answer an Enumerator over the `[key, value]`
+      # pairs, as Rails' do (`each` is the env's `each_header`, and
+      # Enumerable's `map` is lazy until given a block): the env Hash's
+      # own blockless `each` / `map`.
+      def each
+        return @env.each unless block_given?
+        @env.each { |key, value| yield key, value }
+        self
+      end
+
+      def map
+        return @env.map unless block_given?
+        out = []
+        @env.each { |key, value| out << yield(key, value) }
+        out
+      end
+
       def self.env_name(key)
         name = key.to_s
         return name unless HTTP_HEADER.match?(name)

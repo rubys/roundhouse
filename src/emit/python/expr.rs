@@ -1085,6 +1085,17 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
             }
         }
     }
+    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+    if method == "errors_for" && args.len() == 4 {
+        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
+            if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                return format!(
+                    "(lambda attribute, prefix: [m.removeprefix(prefix) for m, a in zip({}, {}) if a == attribute])({}, {})",
+                    args_s[0], args_s[1], args_s[2], args_s[3]
+                );
+            }
+        }
+    }
     // Temporal writer intrinsic: `ActiveSupport.db_now` — current UTC
     // time in Rails' exact storage form ("YYYY-MM-DD HH:MM:SS.ffffff").
     // `fill_timestamps` stamps with it. (The `Roundhouse.` prefix rides
@@ -1447,6 +1458,8 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
     let is_str = matches!(ty, Some(Ty::Str | Ty::Sym));
     let is_array = matches!(ty, Some(Ty::Array { .. }));
     let is_seq = matches!(ty, Some(Ty::Str | Ty::Sym | Ty::Array { .. } | Ty::Hash { .. }));
+    let never_falsy_elems =
+        matches!(ty, Some(Ty::Array { elem }) if matches!(**elem, Ty::Str | Ty::Int | Ty::Float | Ty::Sym));
     Some(match method {
         // Universal Ruby conversions → Python builtins (which accept any
         // value). Skipped on known user classes, which may define their
@@ -1462,6 +1475,9 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         // to seq types so Flash#empty?/Session#empty? (user methods) keep
         // their own definitions.
         "empty?" if no_args && is_seq => format!("len({recv}) == 0"),
+        // An element that is never nil or false makes `any?` / `none?` a question of size
+        "any?" if no_args && never_falsy_elems => format!("len({recv}) > 0"),
+        "none?" if no_args && never_falsy_elems => format!("len({recv}) == 0"),
         "to_h" if no_args && matches!(ty, Some(Ty::Hash { .. })) => format!("dict({recv})"),
         "to_a" if no_args && matches!(ty, Some(Ty::Array { .. })) => format!("list({recv})"),
         // Ruby's single-element `Array#push(x)` is Python's `list.append`.

@@ -2618,6 +2618,18 @@ fn columns_for_arg(
     }
     let model_class = crate::naming::singularize_camelize(dir);
     out = columns_for_model(&model_class, app);
+    // A namespaced view directory (`api/v1/widgets`) names its record by
+    // the last segment, as Rails' partial lookup does: the namespace is
+    // the controller's. A namespaced model (`admin/widgets` for
+    // `Admin::Widget`) is tried first.
+    if out.is_empty() {
+        if let Some((_, last)) = dir.rsplit_once('/') {
+            out = columns_for_model(&crate::naming::classify_path(dir), app);
+            if out.is_empty() {
+                out = columns_for_model(&crate::naming::singularize_camelize(last), app);
+            }
+        }
+    }
     let _ = arg_name; // arg_name is informational; the dir → model
                      // resolution above is the load-bearing path.
     out

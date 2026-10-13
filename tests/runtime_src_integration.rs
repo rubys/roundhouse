@@ -1032,7 +1032,12 @@ fn every_runtime_method_body_concretely_typed() {
     // reporter calls, an event payload and its filter, an error context
     // (`deep_dup` walks it the way the indifferent hash's conversions do),
     // and the value a `handle` / `record` block answers.
-    const CEILING: usize = 697;
+    // MEASURED 701 on 2026-10-12 (rebased onto main's 697):
+    // `ActionDispatch::Http::Headers#each` / `#map` yield the env's untyped
+    // values and collect the block's untyped answers, as Rails' Enumerable
+    // Headers does (+4 in action_dispatch/headers.rb; their blockless
+    // Enumerator answers add none).
+    const CEILING: usize = 701;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

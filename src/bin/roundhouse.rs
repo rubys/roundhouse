@@ -443,6 +443,26 @@ fn run_transpile(
             None => project::target_files(&app, input, target),
         });
 
+    // Same attribution pass as `analyze_diags` above, run again here:
+    // model-to-library lowering (where an unresolved `alias` is caught,
+    // `lower::model_to_library::resolve_model_aliases`) runs a SECOND
+    // time inside `target_files` itself, to build the actual emitted
+    // method bodies — `analyze_and_lower`'s own lowering pass above
+    // isn't wrapped in `emit::diagnostics::scope`, so a push from
+    // there is silently dropped, and this is the first (and only)
+    // place such a diagnostic is ever collected. Without this second
+    // call, `--survey` (no `--allow-unsupported`) still hard-failed on
+    // an unresolved alias — the Error severity from `diags` alone
+    // gates the exit code below — and it never reached the gap
+    // ledger, which undercounted the app's real gap total.
+    if survey {
+        roundhouse::analyze::attribution::attribute_analysis_gaps(
+            &mut diags,
+            &app,
+            &mut survey_gaps,
+        );
+    }
+
     // Prism syntax errors recorded during ingest join the emit-gap
     // inventory: same `Diagnostic` shape, same print/policy/gate
     // treatment. They lead the list — earliest phase, and usually the
@@ -518,7 +538,23 @@ fn run_transpile(
     // this is the most useful thing in the run, and printing it after
     // the early `return Err` would mean never printing it at all.
     if !survey_gaps.is_empty() {
-        let notes = analyze_diags.iter().filter(|d| d.severity == Severity::Info).count();
+        // `attribute_analysis_gaps` runs twice (once over `analyze_diags`,
+        // once over the emit-phase `diags` — see the call sites above) and
+        // an attributed note can land in EITHER vector, or only in `diags`
+        // when the construct is caught solely during emit (an unresolved
+        // model alias, today's only such case — `resolve_model_aliases`'s
+        // push only ever reaches `diags`' `emit::diagnostics::scope`, never
+        // `analyze_diags`). Counting `analyze_diags` alone could report 0
+        // attributed notes for a run that plainly has some. Count both,
+        // deduped by (span, message) so a construct caught in both passes
+        // for the same source line isn't counted twice.
+        let mut seen = std::collections::HashSet::new();
+        let notes = analyze_diags
+            .iter()
+            .chain(diags.iter())
+            .filter(|d| d.severity == Severity::Info)
+            .filter(|d| seen.insert((d.span, d.message.clone())))
+            .count();
         eprintln!();
         eprint!("{}", roundhouse::ingest::survey::render_report(&survey_gaps));
         eprintln!(

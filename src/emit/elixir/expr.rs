@@ -1165,6 +1165,16 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // An element that is never nil or false makes `any?` / `none?` a question of size
+    if matches!(method, "any?" | "none?") && args.is_empty() {
+        if let Some(r) = recv.filter(|r| {
+            matches!(effective_recv_ty(r), Some(crate::ty::Ty::Array { elem }) if matches!(*elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym))
+        }) {
+            let empty = format!("Enum.empty?({})", emit_expr(r));
+            return if method == "none?" { empty } else { format!("not {empty}") };
+        }
+    }
+
     // `recv.empty?` — Array/list → `Enum.empty?`, Hash → `map_size == 0`.
     // An unknown/struct receiver falls through (a struct's own `empty?`
     // method routes via the self-call / method-on-record paths).
@@ -1223,6 +1233,20 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // stored ISO-8601 text into a native UTC `%DateTime{}` — the
     // hand-written `RhDateTime.parse` (runtime/elixir/v2/rh_datetime.ex),
     // not a transpiled `ActiveSupport` module (no such unit exists).
+    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+    if method == "errors_for" && args.len() == 4 {
+        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
+            if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                return format!(
+                    "(fn errors, attributes, attribute, prefix -> for {{m, a}} <- Enum.zip(errors, attributes), a == attribute, do: String.replace_prefix(m, prefix, \"\") end).({}, {}, {}, {})",
+                    emit_expr(&args[0]),
+                    emit_expr(&args[1]),
+                    emit_expr(&args[2]),
+                    emit_expr(&args[3]),
+                );
+            }
+        }
+    }
     if method == "parse_db_time" && args.len() == 1 {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
@@ -1991,6 +2015,14 @@ fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
             if let Some(t) = param_type(&class, name).and_then(concrete) {
                 return Some(t);
             }
+        }
+    }
+    // The form builder synthesizes this call after the view body is typed, and that per-view typer cannot see the record's `errors`
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+        if method.as_str() == "errors_for"
+            && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "ActiveSupport")
+        {
+            return Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) });
         }
     }
     // Fall back to the node's own ty.

@@ -428,31 +428,36 @@ pub(super) fn ingest_model_with_enum_constants(
                 prev_end = Some(stmt.location().end_offset());
                 continue;
             }
+            // `alias new old` (keyword form). Columns, associations,
+            // `attr_accessor` and `attribute` are synthesized later, in
+            // `lower::model_to_library` — this walk only sees
+            // hand-written `def`s and enum-generated methods, so
+            // resolving here would wrongly refuse an alias naming any
+            // of those (#481: an enum alias failed even though the
+            // model itself emitted fine). Record it as a typed body
+            // item, in order, and let `lower_model_to_library_class`
+            // resolve it after synthesis, with snapshot semantics.
             if let Some(alias) = stmt.as_alias_method_node() {
                 let to = super::library_class::alias_keyword_name(&alias.new_name());
                 let from = super::library_class::alias_keyword_name(&alias.old_name());
-                let copied = to.zip(from).and_then(|(to, from)| {
-                    body.iter().rev().find_map(|item| match item {
-                        ModelBodyItem::Method { method, .. }
-                            if method.name.as_str() == from
-                                && method.receiver == crate::dialect::MethodReceiver::Instance =>
-                        {
-                            let mut copy = method.clone();
-                            copy.name = crate::ident::Symbol::from(to.as_str());
-                            Some(copy)
-                        }
-                        _ => None,
-                    })
-                });
-                if let Some(method) = copied {
-                    body.push(ModelBodyItem::Method {
-                        method,
+                if let Some((to, from)) = to.zip(from) {
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: stmt.location().start_offset() as u32,
+                        end: stmt.location().end_offset() as u32,
+                    };
+                    body.push(ModelBodyItem::Alias {
+                        new: crate::ident::Symbol::from(to.as_str()),
+                        old: crate::ident::Symbol::from(from.as_str()),
                         leading_comments: leading,
                         leading_blank_line: leading_blank,
+                        span,
                     });
                     prev_end = Some(stmt.location().end_offset());
                     continue;
                 }
+                // Neither side is a plain name (e.g. a global variable
+                // alias, `alias $a $b`) — not a method alias at all.
                 return Err(IngestError::Unsupported {
                     file: file.into(),
                     message: "alias names a method this body has not defined".into(),
@@ -1974,6 +1979,8 @@ fn enum_label_pairs<'a>(
             },
             None => match consts.scalar(&value) {
                 Some(lit) => EnumStored::Lit(lit),
+                // `unknown: nil` names a NULL column: a literal too.
+                None if value.as_nil_node().is_some() => EnumStored::Lit(Literal::Nil),
                 None => EnumStored::Expr(ingest_expr(&value, file)?),
             },
         };

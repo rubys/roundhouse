@@ -3,6 +3,7 @@ module ActiveSupport
     def self.encode: (untyped value) -> String
     def self.decode: (String text) -> untyped
     def self.jsonable: (untyped value) -> untyped
+    def self.time_json: (::Time t) -> String
   end
   def self.deep_dup: (untyped value) -> untyped
   def self.blank?: (untyped value) -> bool
@@ -17,8 +18,8 @@ module ActiveSupport
   def self.presence: (untyped value) -> untyped
   def self.presence_in: (untyped value, Array[String] list) -> untyped
 
-  # `errors[:field]` -> the messages for that field, prefix stripped.
-  def self.errors_for: (Array[String] errors, String prefix) -> Array[String]
+  # `errors[:field]` -> the messages added on that attribute, prefix stripped.
+  def self.errors_for: (Array[String] errors, Array[String] attributes, String attribute, String prefix) -> Array[String]
 
   # Rails' name for "this signed value does not verify" — see the .rb.
   class MessageVerifier
