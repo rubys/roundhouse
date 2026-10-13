@@ -213,8 +213,9 @@ fn real_blog_spinel_tests_pass() {
          \n=== stdout ===\n{stdout}\n\
          \n=== stderr ===\n{stderr}",
     );
+    // Word-boundary: `"10 failures".contains("0 failures")` is true.
     assert!(
-        stdout.contains("0 failures") && stdout.contains("0 errors"),
+        stdout.contains(" 0 failures") && stdout.contains(" 0 errors"),
         "rake test exited 0 without a clean minitest summary:\n{stdout}\n{stderr}",
     );
 }
