@@ -100,7 +100,8 @@ jobs:
           set -euo pipefail
           for n in $(seq "${{ github.run_attempt }}" -1 1); do
             name="github-pages-$n"
-            if gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            # --paginate: Full val runs already exceed the default page (30).
+            if gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
                 --jq ".artifacts[] | select(.name == \"$name\" and .expired == false) | .name" \
                 | grep -qx "$name"; then
               echo "name=$name" >> "$GITHUB_OUTPUT"

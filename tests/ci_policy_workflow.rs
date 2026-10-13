@@ -1220,12 +1220,14 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
         .iter()
         .find(|step| step["name"].as_str() == Some("Resolve Pages artifact"))
         .expect("deploy-only rerun needs attempt fallback resolution");
+    let resolve_run = resolve["run"].as_str().unwrap();
     assert!(
-        resolve["run"]
-            .as_str()
-            .unwrap()
-            .contains("github-pages-$n"),
+        resolve_run.contains("github-pages-$n"),
         "resolver must walk github-pages-N attempt names"
+    );
+    assert!(
+        resolve_run.contains("--paginate"),
+        "artifact list must paginate (Full val exceeds default page size)"
     );
     let deploy_pages = deploy_steps
         .iter()
