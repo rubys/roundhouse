@@ -1,0 +1,1394 @@
+[
+  {
+    "name": "implicit html",
+    "path": "/probes/implicit",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html arm"
+  },
+  {
+    "name": "implicit turbo",
+    "path": "/probes/implicit",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>who=implicit</template></turbo-stream>\n"
+  },
+  {
+    "name": "implicit json",
+    "path": "/probes/implicit",
+    "accept": "application/json",
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "body": "{\"ok\":true,\"kind\":\"implicit\"}"
+  },
+  {
+    "name": "implicit star",
+    "path": "/probes/implicit",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html arm"
+  },
+  {
+    "name": "implicit none",
+    "path": "/probes/implicit",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html arm"
+  },
+  {
+    "name": "implicit html_turbo",
+    "path": "/probes/implicit",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html arm"
+  },
+  {
+    "name": "implicit json_html",
+    "path": "/probes/implicit",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "body": "{\"ok\":true,\"kind\":\"implicit\"}"
+  },
+  {
+    "name": "implicit png",
+    "path": "/probes/implicit",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "implicit browser",
+    "path": "/probes/implicit",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html arm"
+  },
+  {
+    "name": "implicit turbo_q",
+    "path": "/probes/implicit",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>who=implicit</template></turbo-stream>\n"
+  },
+  {
+    "name": "inline html",
+    "path": "/probes/inline",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html inline"
+  },
+  {
+    "name": "inline turbo",
+    "path": "/probes/inline",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 201,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template><p class=\"flash\">hello</p>\n</template></turbo-stream>"
+  },
+  {
+    "name": "inline json",
+    "path": "/probes/inline",
+    "accept": "application/json",
+    "status": 422,
+    "content_type": "application/json; charset=utf-8",
+    "body": "{\"error\":\"nope\"}"
+  },
+  {
+    "name": "inline star",
+    "path": "/probes/inline",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html inline"
+  },
+  {
+    "name": "inline none",
+    "path": "/probes/inline",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html inline"
+  },
+  {
+    "name": "inline html_turbo",
+    "path": "/probes/inline",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html inline"
+  },
+  {
+    "name": "inline json_html",
+    "path": "/probes/inline",
+    "accept": "application/json, text/html",
+    "status": 422,
+    "content_type": "application/json; charset=utf-8",
+    "body": "{\"error\":\"nope\"}"
+  },
+  {
+    "name": "inline png",
+    "path": "/probes/inline",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "inline browser",
+    "path": "/probes/inline",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html inline"
+  },
+  {
+    "name": "inline turbo_q",
+    "path": "/probes/inline",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 201,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template><p class=\"flash\">hello</p>\n</template></turbo-stream>"
+  },
+  {
+    "name": "many html",
+    "path": "/probes/many",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html many"
+  },
+  {
+    "name": "many turbo",
+    "path": "/probes/many",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"remove\" target=\"gone\"></turbo-stream><turbo-stream action=\"append\" target=\"list\"><template><p class=\"flash\">added</p>\n</template></turbo-stream>"
+  },
+  {
+    "name": "many json",
+    "path": "/probes/many",
+    "accept": "application/json",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "many star",
+    "path": "/probes/many",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html many"
+  },
+  {
+    "name": "many none",
+    "path": "/probes/many",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html many"
+  },
+  {
+    "name": "many html_turbo",
+    "path": "/probes/many",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html many"
+  },
+  {
+    "name": "many json_html",
+    "path": "/probes/many",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html many"
+  },
+  {
+    "name": "many png",
+    "path": "/probes/many",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "many browser",
+    "path": "/probes/many",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html many"
+  },
+  {
+    "name": "many turbo_q",
+    "path": "/probes/many",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"remove\" target=\"gone\"></turbo-stream><turbo-stream action=\"append\" target=\"list\"><template><p class=\"flash\">added</p>\n</template></turbo-stream>"
+  },
+  {
+    "name": "head_arm html",
+    "path": "/probes/head_arm",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html head"
+  },
+  {
+    "name": "head_arm turbo",
+    "path": "/probes/head_arm",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 422,
+    "content_type": "text/vnd.turbo-stream.html",
+    "body": ""
+  },
+  {
+    "name": "head_arm json",
+    "path": "/probes/head_arm",
+    "accept": "application/json",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "head_arm star",
+    "path": "/probes/head_arm",
+    "accept": "*/*",
+    "status": 422,
+    "content_type": "text/vnd.turbo-stream.html",
+    "body": ""
+  },
+  {
+    "name": "head_arm none",
+    "path": "/probes/head_arm",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html head"
+  },
+  {
+    "name": "head_arm html_turbo",
+    "path": "/probes/head_arm",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html head"
+  },
+  {
+    "name": "head_arm json_html",
+    "path": "/probes/head_arm",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html head"
+  },
+  {
+    "name": "head_arm png",
+    "path": "/probes/head_arm",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "head_arm browser",
+    "path": "/probes/head_arm",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html head"
+  },
+  {
+    "name": "head_arm turbo_q",
+    "path": "/probes/head_arm",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 422,
+    "content_type": "text/vnd.turbo-stream.html",
+    "body": ""
+  },
+  {
+    "name": "render_sym html",
+    "path": "/probes/render_sym",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html render_sym"
+  },
+  {
+    "name": "render_sym turbo",
+    "path": "/probes/render_sym",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>who=render_sym</template></turbo-stream>\n"
+  },
+  {
+    "name": "render_sym json",
+    "path": "/probes/render_sym",
+    "accept": "application/json",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "render_sym star",
+    "path": "/probes/render_sym",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>who=render_sym</template></turbo-stream>\n"
+  },
+  {
+    "name": "render_sym none",
+    "path": "/probes/render_sym",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html render_sym"
+  },
+  {
+    "name": "render_sym html_turbo",
+    "path": "/probes/render_sym",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html render_sym"
+  },
+  {
+    "name": "render_sym json_html",
+    "path": "/probes/render_sym",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html render_sym"
+  },
+  {
+    "name": "render_sym png",
+    "path": "/probes/render_sym",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "render_sym browser",
+    "path": "/probes/render_sym",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html render_sym"
+  },
+  {
+    "name": "render_sym turbo_q",
+    "path": "/probes/render_sym",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>who=render_sym</template></turbo-stream>\n"
+  },
+  {
+    "name": "after_block html",
+    "path": "/probes/after_block",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html after_block"
+  },
+  {
+    "name": "after_block turbo",
+    "path": "/probes/after_block",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>block=set in block</template></turbo-stream>\n"
+  },
+  {
+    "name": "after_block json",
+    "path": "/probes/after_block",
+    "accept": "application/json",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "after_block star",
+    "path": "/probes/after_block",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html after_block"
+  },
+  {
+    "name": "after_block none",
+    "path": "/probes/after_block",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html after_block"
+  },
+  {
+    "name": "after_block html_turbo",
+    "path": "/probes/after_block",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html after_block"
+  },
+  {
+    "name": "after_block json_html",
+    "path": "/probes/after_block",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html after_block"
+  },
+  {
+    "name": "after_block png",
+    "path": "/probes/after_block",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "after_block browser",
+    "path": "/probes/after_block",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html after_block"
+  },
+  {
+    "name": "after_block turbo_q",
+    "path": "/probes/after_block",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>block=set in block</template></turbo-stream>\n"
+  },
+  {
+    "name": "turbo_only html",
+    "path": "/probes/turbo_only",
+    "accept": "text/html",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "turbo_only turbo",
+    "path": "/probes/turbo_only",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>who=turbo_only</template></turbo-stream>\n"
+  },
+  {
+    "name": "turbo_only json",
+    "path": "/probes/turbo_only",
+    "accept": "application/json",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "turbo_only star",
+    "path": "/probes/turbo_only",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>who=turbo_only</template></turbo-stream>\n"
+  },
+  {
+    "name": "turbo_only none",
+    "path": "/probes/turbo_only",
+    "accept": null,
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "turbo_only html_turbo",
+    "path": "/probes/turbo_only",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>who=turbo_only</template></turbo-stream>\n"
+  },
+  {
+    "name": "turbo_only json_html",
+    "path": "/probes/turbo_only",
+    "accept": "application/json, text/html",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "turbo_only png",
+    "path": "/probes/turbo_only",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "turbo_only browser",
+    "path": "/probes/turbo_only",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "turbo_only turbo_q",
+    "path": "/probes/turbo_only",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>who=turbo_only</template></turbo-stream>\n"
+  },
+  {
+    "name": "turbo_first html",
+    "path": "/probes/turbo_first",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html turbo_first"
+  },
+  {
+    "name": "turbo_first turbo",
+    "path": "/probes/turbo_first",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"remove\" target=\"x\"></turbo-stream>"
+  },
+  {
+    "name": "turbo_first json",
+    "path": "/probes/turbo_first",
+    "accept": "application/json",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "turbo_first star",
+    "path": "/probes/turbo_first",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"remove\" target=\"x\"></turbo-stream>"
+  },
+  {
+    "name": "turbo_first none",
+    "path": "/probes/turbo_first",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html turbo_first"
+  },
+  {
+    "name": "turbo_first html_turbo",
+    "path": "/probes/turbo_first",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html turbo_first"
+  },
+  {
+    "name": "turbo_first json_html",
+    "path": "/probes/turbo_first",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html turbo_first"
+  },
+  {
+    "name": "turbo_first png",
+    "path": "/probes/turbo_first",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "turbo_first browser",
+    "path": "/probes/turbo_first",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html turbo_first"
+  },
+  {
+    "name": "turbo_first turbo_q",
+    "path": "/probes/turbo_first",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"remove\" target=\"x\"></turbo-stream>"
+  },
+  {
+    "name": "html_json html",
+    "path": "/probes/html_json",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html html_json"
+  },
+  {
+    "name": "html_json turbo",
+    "path": "/probes/html_json",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html html_json"
+  },
+  {
+    "name": "html_json json",
+    "path": "/probes/html_json",
+    "accept": "application/json",
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "body": "{\"a\":1}"
+  },
+  {
+    "name": "html_json star",
+    "path": "/probes/html_json",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html html_json"
+  },
+  {
+    "name": "html_json none",
+    "path": "/probes/html_json",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html html_json"
+  },
+  {
+    "name": "html_json html_turbo",
+    "path": "/probes/html_json",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html html_json"
+  },
+  {
+    "name": "html_json json_html",
+    "path": "/probes/html_json",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "body": "{\"a\":1}"
+  },
+  {
+    "name": "html_json png",
+    "path": "/probes/html_json",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "html_json browser",
+    "path": "/probes/html_json",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html html_json"
+  },
+  {
+    "name": "html_json turbo_q",
+    "path": "/probes/html_json",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html html_json"
+  },
+  {
+    "name": "any_arm html",
+    "path": "/probes/any_arm",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "any arm"
+  },
+  {
+    "name": "any_arm turbo",
+    "path": "/probes/any_arm",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"remove\" target=\"x\"></turbo-stream>"
+  },
+  {
+    "name": "any_arm json",
+    "path": "/probes/any_arm",
+    "accept": "application/json",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "any arm"
+  },
+  {
+    "name": "any_arm star",
+    "path": "/probes/any_arm",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"remove\" target=\"x\"></turbo-stream>"
+  },
+  {
+    "name": "any_arm none",
+    "path": "/probes/any_arm",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "any arm"
+  },
+  {
+    "name": "any_arm html_turbo",
+    "path": "/probes/any_arm",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"remove\" target=\"x\"></turbo-stream>"
+  },
+  {
+    "name": "any_arm json_html",
+    "path": "/probes/any_arm",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "any arm"
+  },
+  {
+    "name": "any_arm png",
+    "path": "/probes/any_arm",
+    "accept": "image/png",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "any arm"
+  },
+  {
+    "name": "any_arm browser",
+    "path": "/probes/any_arm",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "any arm"
+  },
+  {
+    "name": "any_arm turbo_q",
+    "path": "/probes/any_arm",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"remove\" target=\"x\"></turbo-stream>"
+  },
+  {
+    "name": "inherited html",
+    "path": "/probes/inherited",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html inherited"
+  },
+  {
+    "name": "inherited turbo",
+    "path": "/probes/inherited",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"replace\" target=\"item_7\"><template><p class=\"banner\">from application</p>\n</template></turbo-stream><turbo-stream action=\"after\" target=\"tip\"><template><p class=\"flash\">tip</p>\n</template></turbo-stream>"
+  },
+  {
+    "name": "inherited json",
+    "path": "/probes/inherited",
+    "accept": "application/json",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "inherited star",
+    "path": "/probes/inherited",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html inherited"
+  },
+  {
+    "name": "inherited none",
+    "path": "/probes/inherited",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html inherited"
+  },
+  {
+    "name": "inherited html_turbo",
+    "path": "/probes/inherited",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html inherited"
+  },
+  {
+    "name": "inherited json_html",
+    "path": "/probes/inherited",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html inherited"
+  },
+  {
+    "name": "inherited png",
+    "path": "/probes/inherited",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "inherited browser",
+    "path": "/probes/inherited",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "html inherited"
+  },
+  {
+    "name": "inherited turbo_q",
+    "path": "/probes/inherited",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"replace\" target=\"item_7\"><template><p class=\"banner\">from application</p>\n</template></turbo-stream><turbo-stream action=\"after\" target=\"tip\"><template><p class=\"flash\">tip</p>\n</template></turbo-stream>"
+  },
+  {
+    "name": "plain_all html",
+    "path": "/probes/plain_all",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_all</p>\n"
+  },
+  {
+    "name": "plain_all turbo",
+    "path": "/probes/plain_all",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>turbo=plain_all</template></turbo-stream>\n"
+  },
+  {
+    "name": "plain_all json",
+    "path": "/probes/plain_all",
+    "accept": "application/json",
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "body": "{\"who\":\"plain_all\"}"
+  },
+  {
+    "name": "plain_all star",
+    "path": "/probes/plain_all",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_all</p>\n"
+  },
+  {
+    "name": "plain_all none",
+    "path": "/probes/plain_all",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_all</p>\n"
+  },
+  {
+    "name": "plain_all html_turbo",
+    "path": "/probes/plain_all",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_all</p>\n"
+  },
+  {
+    "name": "plain_all json_html",
+    "path": "/probes/plain_all",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "body": "{\"who\":\"plain_all\"}"
+  },
+  {
+    "name": "plain_all png",
+    "path": "/probes/plain_all",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "plain_all browser",
+    "path": "/probes/plain_all",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_all</p>\n"
+  },
+  {
+    "name": "plain_all turbo_q",
+    "path": "/probes/plain_all",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>turbo=plain_all</template></turbo-stream>\n"
+  },
+  {
+    "name": "plain_two html",
+    "path": "/probes/plain_two",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_two</p>\n"
+  },
+  {
+    "name": "plain_two turbo",
+    "path": "/probes/plain_two",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>turbo=plain_two</template></turbo-stream>\n"
+  },
+  {
+    "name": "plain_two json",
+    "path": "/probes/plain_two",
+    "accept": "application/json",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "plain_two star",
+    "path": "/probes/plain_two",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_two</p>\n"
+  },
+  {
+    "name": "plain_two none",
+    "path": "/probes/plain_two",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_two</p>\n"
+  },
+  {
+    "name": "plain_two html_turbo",
+    "path": "/probes/plain_two",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_two</p>\n"
+  },
+  {
+    "name": "plain_two json_html",
+    "path": "/probes/plain_two",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_two</p>\n"
+  },
+  {
+    "name": "plain_two png",
+    "path": "/probes/plain_two",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "plain_two browser",
+    "path": "/probes/plain_two",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_two</p>\n"
+  },
+  {
+    "name": "plain_two turbo_q",
+    "path": "/probes/plain_two",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>turbo=plain_two</template></turbo-stream>\n"
+  },
+  {
+    "name": "plain_turbo_only html",
+    "path": "/probes/plain_turbo_only",
+    "accept": "text/html",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "plain_turbo_only turbo",
+    "path": "/probes/plain_turbo_only",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>turbo=plain_turbo_only</template></turbo-stream>\n"
+  },
+  {
+    "name": "plain_turbo_only json",
+    "path": "/probes/plain_turbo_only",
+    "accept": "application/json",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "plain_turbo_only star",
+    "path": "/probes/plain_turbo_only",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>turbo=plain_turbo_only</template></turbo-stream>\n"
+  },
+  {
+    "name": "plain_turbo_only none",
+    "path": "/probes/plain_turbo_only",
+    "accept": null,
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "plain_turbo_only html_turbo",
+    "path": "/probes/plain_turbo_only",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>turbo=plain_turbo_only</template></turbo-stream>\n"
+  },
+  {
+    "name": "plain_turbo_only json_html",
+    "path": "/probes/plain_turbo_only",
+    "accept": "application/json, text/html",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "plain_turbo_only png",
+    "path": "/probes/plain_turbo_only",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "plain_turbo_only browser",
+    "path": "/probes/plain_turbo_only",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "plain_turbo_only turbo_q",
+    "path": "/probes/plain_turbo_only",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>turbo=plain_turbo_only</template></turbo-stream>\n"
+  },
+  {
+    "name": "plain_html_only html",
+    "path": "/probes/plain_html_only",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_html_only</p>\n"
+  },
+  {
+    "name": "plain_html_only turbo",
+    "path": "/probes/plain_html_only",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_html_only</p>\n"
+  },
+  {
+    "name": "plain_html_only json",
+    "path": "/probes/plain_html_only",
+    "accept": "application/json",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "plain_html_only star",
+    "path": "/probes/plain_html_only",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_html_only</p>\n"
+  },
+  {
+    "name": "plain_html_only none",
+    "path": "/probes/plain_html_only",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_html_only</p>\n"
+  },
+  {
+    "name": "plain_html_only html_turbo",
+    "path": "/probes/plain_html_only",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_html_only</p>\n"
+  },
+  {
+    "name": "plain_html_only json_html",
+    "path": "/probes/plain_html_only",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_html_only</p>\n"
+  },
+  {
+    "name": "plain_html_only png",
+    "path": "/probes/plain_html_only",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "plain_html_only browser",
+    "path": "/probes/plain_html_only",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_html_only</p>\n"
+  },
+  {
+    "name": "plain_html_only turbo_q",
+    "path": "/probes/plain_html_only",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=plain_html_only</p>\n"
+  },
+  {
+    "name": "plain_none html",
+    "path": "/probes/plain_none",
+    "accept": "text/html",
+    "status": 204,
+    "content_type": null,
+    "body": ""
+  },
+  {
+    "name": "plain_none turbo",
+    "path": "/probes/plain_none",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 204,
+    "content_type": null,
+    "body": ""
+  },
+  {
+    "name": "plain_none json",
+    "path": "/probes/plain_none",
+    "accept": "application/json",
+    "status": 204,
+    "content_type": null,
+    "body": ""
+  },
+  {
+    "name": "plain_none star",
+    "path": "/probes/plain_none",
+    "accept": "*/*",
+    "status": 204,
+    "content_type": null,
+    "body": ""
+  },
+  {
+    "name": "plain_none none",
+    "path": "/probes/plain_none",
+    "accept": null,
+    "status": 204,
+    "content_type": null,
+    "body": ""
+  },
+  {
+    "name": "plain_none html_turbo",
+    "path": "/probes/plain_none",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 204,
+    "content_type": null,
+    "body": ""
+  },
+  {
+    "name": "plain_none json_html",
+    "path": "/probes/plain_none",
+    "accept": "application/json, text/html",
+    "status": 204,
+    "content_type": null,
+    "body": ""
+  },
+  {
+    "name": "plain_none png",
+    "path": "/probes/plain_none",
+    "accept": "image/png",
+    "status": 204,
+    "content_type": null,
+    "body": ""
+  },
+  {
+    "name": "plain_none browser",
+    "path": "/probes/plain_none",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 204,
+    "content_type": null,
+    "body": ""
+  },
+  {
+    "name": "plain_none turbo_q",
+    "path": "/probes/plain_none",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 204,
+    "content_type": null,
+    "body": ""
+  },
+  {
+    "name": "html_bare html",
+    "path": "/probes/html_bare",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=html_bare</p>\n"
+  },
+  {
+    "name": "html_bare turbo",
+    "path": "/probes/html_bare",
+    "accept": "text/vnd.turbo-stream.html, text/html, application/xhtml+xml",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=html_bare</p>\n"
+  },
+  {
+    "name": "html_bare json",
+    "path": "/probes/html_bare",
+    "accept": "application/json",
+    "status": 406,
+    "content_type": "application/json; charset=UTF-8",
+    "body": "{\"status\":406,\"error\":\"Not Acceptable\"}"
+  },
+  {
+    "name": "html_bare star",
+    "path": "/probes/html_bare",
+    "accept": "*/*",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=html_bare</p>\n"
+  },
+  {
+    "name": "html_bare none",
+    "path": "/probes/html_bare",
+    "accept": null,
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=html_bare</p>\n"
+  },
+  {
+    "name": "html_bare html_turbo",
+    "path": "/probes/html_bare",
+    "accept": "text/html, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=html_bare</p>\n"
+  },
+  {
+    "name": "html_bare json_html",
+    "path": "/probes/html_bare",
+    "accept": "application/json, text/html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=html_bare</p>\n"
+  },
+  {
+    "name": "html_bare png",
+    "path": "/probes/html_bare",
+    "accept": "image/png",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  },
+  {
+    "name": "html_bare browser",
+    "path": "/probes/html_bare",
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=html_bare</p>\n"
+  },
+  {
+    "name": "html_bare turbo_q",
+    "path": "/probes/html_bare",
+    "accept": "text/html;q=0.5, text/vnd.turbo-stream.html",
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<p>html=html_bare</p>\n"
+  },
+  {
+    "name": "implicit .json",
+    "path": "/probes/implicit.json",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "body": "{\"ok\":true,\"kind\":\"implicit\"}"
+  },
+  {
+    "name": "implicit .turbo_stream",
+    "path": "/probes/implicit.turbo_stream",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "text/vnd.turbo-stream.html; charset=utf-8",
+    "body": "<turbo-stream action=\"update\" target=\"flash\"><template>who=implicit</template></turbo-stream>\n"
+  },
+  {
+    "name": "html_json .json",
+    "path": "/probes/html_json.json",
+    "accept": "text/html",
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "body": "{\"a\":1}"
+  },
+  {
+    "name": "html_json .turbo_stream",
+    "path": "/probes/html_json.turbo_stream",
+    "accept": "text/html",
+    "status": 406,
+    "content_type": "text/html; charset=UTF-8",
+    "body": ""
+  }
+]

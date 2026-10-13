@@ -9,6 +9,25 @@ module ActionController
   def self.header_value_ok?: (String? v) -> bool
   def self.header_control?: (String c) -> bool
   def self.sanitize_location: (String path) -> String
+  def self.accepted_formats: (String accept) -> Array[String]
+  def self.expand_trailing_stars: (Array[String] items) -> Array[String]
+  def self.star_items: (Array[String] mimes, String rest) -> Array[String]
+  def self.trailing_star_mimes: (String item) -> Array[String]
+  def self.best_item_flags: (Array[String] names, Array[Float] qs) -> Array[bool]
+  def self.best_slot: (Array[String] names, Array[Integer] best, String name) -> Integer
+  def self.flags_for: (Array[Integer] indexes, Integer count) -> Array[bool]
+  def self.flagged_names: (Array[String] names, Array[bool] flags) -> Array[String]
+  def self.flagged_qs: (Array[Float] qs, Array[bool] flags) -> Array[Float]
+  def self.accept_item_names: (Array[String] items) -> Array[String]
+  def self.accept_item_qs: (Array[String] items) -> Array[Float]
+  def self.accept_item_name: (String item) -> String
+  def self.accept_item_q: (String item) -> Float
+  def self.format_name_for_mime: (String mime) -> String
+  def self.outranking_counts: (Array[Float] qs) -> Array[Integer]
+  def self.outranking_count: (Array[Float] qs, Integer at) -> Integer
+  def self.ordered_non_empty: (Array[String] names, Array[Integer] ranks) -> Array[String]
+  def self.rank_index: (Array[Integer] ranks, Integer rank) -> Integer
+  def self.first_requested_format: (Array[String] accepted, Array[String] order) -> String
   def self.strip_leading_controls: (String s) -> String
   def self.strip_trailing_controls: (String s) -> String
   def self.location_host: (String url) -> String
@@ -138,10 +157,24 @@ module ActionController
     def query_string=: (String) -> String
     def accepts_any_format: () -> bool
     def accepts_any_format=: (bool) -> bool
+    def accept_header: () -> String
+    def accept_header=: (String value) -> String
+    def explicit_format: () -> String
+    def explicit_format=: (String) -> String
+    def negotiate_format: (Array[String] order) -> String
+    def negotiate_template_format: (Array[String] order) -> String
+    def negotiate_in: (Array[String] order, bool template) -> String
+    def accepted_format_names: () -> Array[String]
+    def unacceptable_requested_json?: () -> bool
+    def unacceptable_body: () -> String
+    def unacceptable_content_type: () -> String
     def path_parameters: () -> Hash[String, String]
     def path_parameters=: (Hash[String, String]) -> Hash[String, String]
     @headers: ActionController::HeaderStore
     @content_type_explicit: bool
+    @accept_header: String
+    @accepted_format_names: Array[String]?
+    @explicit_format: String
     @head_response: bool
     @cache_control: ActionController::CacheControlStore
     def action_name: () -> String

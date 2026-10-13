@@ -89,7 +89,7 @@ fn a_supered_action_renders_from_the_dispatcher() {
         .split_once("def create")
         .expect("a create method");
     assert!(
-        !body.contains("MissingTemplate") && !body.contains("request_format =="),
+        !body.contains("MissingTemplate") && !body.contains("negotiate_template_format("),
         "the action body must not carry the default render:\n{body}"
     );
     assert!(
@@ -97,7 +97,7 @@ fn a_supered_action_renders_from_the_dispatcher() {
         "dispatcher dispatches: {dispatcher}"
     );
     assert!(
-        dispatcher.contains("performed?") && dispatcher.contains("request_format =="),
+        dispatcher.contains("performed?") && dispatcher.contains("negotiate_template_format("),
         "the dispatcher carries the guarded default render:\n{dispatcher}"
     );
 }
@@ -127,7 +127,7 @@ fn the_subclass_dispatcher_gains_nothing() {
     let files = emit(vec![PARENT, SUBCLASS_WITH_SUPER]);
     let sub = file(&files, "bots_controller.rb");
     assert!(
-        !sub.contains("request_format =="),
+        !sub.contains("negotiate_template_format("),
         "subclass needs no default render:\n{sub}"
     );
     assert!(sub.contains("head(:created"), "{sub}");
@@ -142,11 +142,11 @@ fn a_controller_nobody_supers_is_unchanged() {
     let parent = file(&files, "notes_controller.rb");
     let (dispatcher, body) = parent.split_once("def create").expect("a create method");
     assert!(
-        body.contains("request_format =="),
+        body.contains("negotiate_template_format("),
         "the tail stays in the body:\n{body}"
     );
     assert!(
-        !dispatcher.contains("performed?") || !dispatcher.contains("request_format =="),
+        !dispatcher.contains("performed?") || !dispatcher.contains("negotiate_template_format("),
         "the dispatcher must not grow a render:\n{dispatcher}"
     );
 }

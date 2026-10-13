@@ -1012,7 +1012,7 @@ fn subclass_template_hooks(
                         parenthesized: true,
                     },
                 );
-                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, &[])
+                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, &[], &[])
             };
             methods.push(MethodDef {
                 visibility: crate::dialect::MethodVisibility::Public,
@@ -2231,6 +2231,19 @@ fn inheritor_view_modules(controller: &Controller, all: &[Controller]) -> Vec<St
         .collect()
 }
 
+/// The view modules Rails' partial lookup falls back through: each
+/// ancestor controller's view directory, nearest first
+/// (`ApplicationController` is `Application`).
+fn ancestor_view_modules(controller: &Controller, all: &[Controller]) -> Vec<String> {
+    ancestor_chain(controller, all)
+        .iter()
+        .rev()
+        .filter_map(|c| c.name.0.as_str().strip_suffix("Controller"))
+        .filter(|stem| !stem.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn ancestor_chain<'a>(controller: &Controller, all: &'a [Controller]) -> Vec<&'a Controller> {
     let mut chain: Vec<&'a Controller> = Vec::new();
     let mut cur = controller.parent.as_ref();
@@ -2728,6 +2741,7 @@ fn action_to_method(
         can_respond_within(&a.body, &resolve, &mut std::collections::BTreeSet::new())
     };
     let inheritor_modules = inheritor_view_modules(controller, all_controllers_for_params);
+    let ancestor_modules = ancestor_view_modules(controller, all_controllers_for_params);
     let (body, deferred_tail) = lower_action_body(
         &a.body,
         controller,
@@ -2747,6 +2761,7 @@ fn action_to_method(
         inherited_spec,
         formats_template.as_ref(),
         &inheritor_modules,
+        &ancestor_modules,
     );
     if let Some(tail) = deferred_tail {
         deferred_out.insert(a.name.clone(), tail);
@@ -2968,6 +2983,9 @@ fn lower_action_body(
     inherited_params_spec: Option<&ParamsSpec>,
     formats_only_render: Option<&Symbol>,
     inheritor_modules: &[String],
+    // The Views modules of this controller's ancestors, nearest first,
+    // where a bare partial name is looked up after its own.
+    ancestor_modules: &[String],
 ) -> (Expr, Option<Expr>) {
     // BEFORE everything else: this turns a helper the permit recognizer
     // could not read into one that yields the params class, so every
@@ -2986,7 +3004,16 @@ fn lower_action_body(
         }
         None => body.clone(),
     };
-    let unwrapped = unwrap_respond_to_with_format_dispatch(body, format_breadth);
+    let unwrapped = crate::lower::controller::body::unwrap_respond_to_for_action(
+        body,
+        format_breadth,
+        crate::lower::controller::body::ActionFormats {
+            action: is_public.then_some(action_name),
+            variants,
+            html_template: view_ivars
+                .contains_key(&(views_module_name(controller).unwrap_or_default(), action_name.to_string())),
+        },
+    );
     // `is_public` gates the SYNTHESIS — a private helper's caller does
     // the rendering, so nothing is appended to its body — and nothing
     // else. The render REWRITE runs on both: a private helper that
@@ -3049,10 +3076,12 @@ fn lower_action_body(
         // Two reasons to want that: the tail is about to move to the
         // dispatcher because something else (a subclass past `super`) may
         // respond, or a private helper in this body already has.
-        synthesize_deferred_implicit_render(&unwrapped, action_name, variants, any_template_exists, html_exists)
+        synthesize_deferred_implicit_render(
+            &unwrapped, action_name, variants, any_template_exists, html_exists, format_breadth.negotiates,
+        )
     } else {
         crate::lower::controller::body::synthesize_implicit_render_with_html(
-            &unwrapped, action_name, variants, any_template_exists, html_exists,
+            &unwrapped, action_name, variants, any_template_exists, html_exists, format_breadth.negotiates,
         )
     };
     let module_name = views_module_name(controller);
@@ -3066,6 +3095,7 @@ fn lower_action_body(
             partials,
             action_name,
             inheritor_modules,
+            ancestor_modules,
         )
     };
 

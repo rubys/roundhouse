@@ -162,12 +162,15 @@ fn file(files: Vec<roundhouse::emit::EmittedFile>, needle: &str) -> String {
 fn the_json_arm_serves_each_records_writer() {
     let app = analyzed(STORY);
     let src = file(ruby::emit_lowered_controllers(&app), "stories_controller");
-    assert!(src.contains("request_format == :json"), "the json arm was dropped:\n{src}");
+    assert!(
+        src.contains(r#"negotiate_format(["html", "json"]) == "json""#),
+        "the json arm was dropped:\n{src}"
+    );
     assert!(
         src.contains(r#""[" + @stories.map { |record| record.as_json_str }.join(",") + "]""#),
         "{src}"
     );
-    assert!(src.contains(r#"content_type: "application/json""#), "{src}");
+    assert!(src.contains(r#"content_type: "application/json; charset=utf-8""#), "{src}");
     assert!(!src.contains("JsonRender"), "{src}");
 }
 

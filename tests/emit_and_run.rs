@@ -4537,7 +4537,7 @@ ActiveSupport.use_zone("Pacific/Auckland") do
   controller.process_action(:show)
   expected = '{"due_on":"2024-01-31","observed_at":"2024-02-01T12:47:19.123+13:00"}'
   raise controller.body.inspect unless controller.body == expected
-  raise controller.content_type.inspect unless controller.content_type == "application/json"
+  raise controller.content_type.inspect unless controller.content_type == "application/json; charset=utf-8"
   actual = ActionController::JsonRender.encode(entry.as_json)
   raise actual.inspect unless actual == expected
   entry.update!(due_on: nil)
@@ -4591,6 +4591,8 @@ require_relative "app/controllers/calendar_entries_controller"
 entry = CalendarEntry.create!(due_on: Date.new(2024, 1, 31), observed_at: Time.utc(2024, 1, 31, 23, 47, 19, 123456))
 controller = CalendarEntriesController.new
 controller.params = {"id" => entry.id.to_s}
+# The action has only a json template: Rails 406s an html request for it.
+controller.request_format = :json
 controller.process_action(:show)
 expected = '{"due_on":"2024-01-31","observed_at":"2024-01-31T23:47:19.123Z","due":"2024-01-31"}'
 raise controller.body.inspect unless controller.body == expected

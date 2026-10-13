@@ -67,7 +67,7 @@ fn the_defining_controller_renders_through_a_hook_that_raises() {
     let files = emitted();
     let parent = file(&files, "app/controllers/messages_controller.rb");
     assert!(
-        parent.contains("render(self.__template_show_json, content_type: \"application/json\")"),
+        parent.contains("render(self.__template_show_json, content_type: \"application/json; charset=utf-8\")"),
         "the json branch should render through the hook:\n{parent}"
     );
     assert!(

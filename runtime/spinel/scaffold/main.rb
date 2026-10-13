@@ -333,8 +333,13 @@ module Main
 
     request_format = :html
     request_path = req.path
+    # The format the URL PINS, for `negotiate_format` (a pinned format
+    # beats `Accept`, as `params[:format]` does in Rails). The `Accept`
+    # sniff below does NOT pin: it only seeds `request_format`.
+    explicit_format = ""
     if request_path.end_with?(".json")
       request_format = :json
+      explicit_format = "json"
     end
     # Router.match owns format-suffix matching and its literal-path fallback.
     # Passing the full path also lets an explicit `/feed.json` route match.
@@ -376,6 +381,7 @@ module Main
     # formats one at a time — a Symbol materialized from a runtime
     # String is a shape the strict targets do not share.
     path_format = matched.path_params.fetch("format", "")
+    explicit_format = path_format unless path_format.empty?
     request_format = :json if path_format == "json"
     request_format = :turbo_stream if path_format == "turbo_stream"
     request_format = :rss if path_format == "rss"
@@ -399,10 +405,29 @@ module Main
     # matches the response types the tail of this method can stamp.
     if matched.req_format == :rss
       request_format = :rss
+      explicit_format = "rss"
     elsif matched.req_format == :json
       request_format = :json
+      explicit_format = "json"
     elsif matched.req_format == :xml
       request_format = :xml
+      explicit_format = "xml"
+    end
+
+    # The `?format=json` QUERY parameter: Rails reads `params[:format]`,
+    # route and path parameters over query ones, so it pins only when
+    # nothing above did. Same literal comparisons as above. A PRESENT but
+    # empty value still pins, to a format no template or arm answers
+    # (Rails reads `Mime[""]` as no format at all, so a `respond_to` is a
+    # 406); it is spelled "none" here since "" means unpinned.
+    query_format = req.req_params.fetch("format", "").to_s
+    if explicit_format.empty? && req.req_params.key?("format")
+      explicit_format = query_format.empty? ? "none" : query_format
+      request_format = :json if query_format == "json"
+      request_format = :turbo_stream if query_format == "turbo_stream"
+      request_format = :rss if query_format == "rss"
+      request_format = :xml if query_format == "xml"
+      request_format = :js if query_format == "js"
     end
 
     controller = Main.instantiate_controller(matched.controller)
@@ -523,6 +548,8 @@ module Main
     controller.flash = ActionDispatch::Flash.new(inbound_flash)
     controller.request_format = request_format
     controller.accepts_any_format = Main.accepts_any_format?(req.req_headers.fetch("accept", ""))
+    controller.accept_header = req.req_headers.fetch("accept", "")
+    controller.explicit_format = explicit_format
 
     begin
       controller.process_action(matched.action)
@@ -535,6 +562,14 @@ module Main
       # did not rescue it: Rails' rescue_responses answer :bad_request.
       res.status = 400
       res.body = "<h1>400 Bad Request</h1>"
+      return
+    rescue ActionController::UnknownFormat
+      # A `respond_to` none of whose arms answers the request's format:
+      # Rails' rescue_responses answer :not_acceptable, and
+      # PublicExceptions renders the status page in the requested format.
+      res.status = 406
+      res.body = controller.unacceptable_body
+      res.headers["Content-Type"] = controller.unacceptable_content_type
       return
     rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotSaved, ActionController::InvalidAuthenticityToken
       # Not a 500: Rails' rescue_responses answer these with 422.

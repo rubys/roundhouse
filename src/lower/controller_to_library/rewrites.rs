@@ -126,6 +126,11 @@ pub(super) fn rewrite_render_to_views(
     // where a template this controller lacks may still live. See the
     // `subclass_template_hook` arm below.
     inheritor_modules: &[String],
+    // Views modules of the controller's ancestors, nearest first: where
+    // a bare partial name falls back to when the controller's own
+    // directory has none (`partial: "flash"` in `VotesController` finds
+    // `application/_flash`).
+    ancestor_modules: &[String],
 ) -> Expr {
     // A controller with no Views module of its own (ApplicationController)
     // still renders: `allow_browser`'s fallback is `render template:
@@ -285,6 +290,64 @@ pub(super) fn rewrite_render_to_views(
                     ));
                 }
             }
+            // `render turbo_stream: <builders>[, status:]` — turbo-rails'
+            // renderer, which answers the builders' markup under
+            // `text/vnd.turbo-stream.html; charset=utf-8` (unless the
+            // action already named a type). Composed here from the same
+            // `Broadcasts.turbo_stream_fragment` the `.turbo_stream.erb`
+            // lowering writes, so the `<turbo-stream>` element keeps one
+            // owner per target.
+            if let ExprNode::Hash { entries, kwargs: true } = &*args[0].node {
+                let ts_pos = entries.iter().position(|(k, _)| {
+                    matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                        if value.as_str() == "turbo_stream")
+                });
+                if let Some(pos) = ts_pos {
+                    let rest: Vec<(Expr, Expr)> = entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != pos)
+                        .map(|(_, kv)| kv.clone())
+                        .collect();
+                    let body = match turbo_stream_render_body(&entries[pos].1, module_name, ancestor_modules, partials) {
+                        Ok(body) => body,
+                        Err(reason) => {
+                            crate::lower::controller::body::report_unrunnable_arm(
+                                "turbo_stream",
+                                e.span,
+                                reason,
+                            );
+                            return None;
+                        }
+                    };
+                    if to_string {
+                        return Some(body);
+                    }
+                    let mut new_args = vec![body];
+                    if !rest.is_empty() {
+                        new_args.push(Expr::new(
+                            args[0].span,
+                            ExprNode::Hash { entries: rest, kwargs: true },
+                        ));
+                    }
+                    merge_or_append_kwarg(
+                        &mut new_args,
+                        "content_type",
+                        crate::lower::controller::body::mime_for_format("turbo_stream"),
+                        e.span,
+                    );
+                    return Some(Expr::new(
+                        e.span,
+                        ExprNode::Send {
+                            recv: None,
+                            method: Symbol::from("render"),
+                            args: new_args,
+                            block: block.clone(),
+                            parenthesized: true,
+                        },
+                    ));
+                }
+            }
             // View name comes from `render :index` (a Symbol first arg),
             // `render "index"` / `render "articles/index"` (a String
             // first arg — slashed form names another view module), or
@@ -382,7 +445,7 @@ pub(super) fn rewrite_render_to_views(
                             // plain: v.as_json_str, content_type:
                             // "application/json"`, the writer's text.
                             "json" => {
-                                body = Some((json_render_encode(v), Some("application/json")))
+                                body = Some((json_render_encode(v), Some(JSON_RESPONSE_TYPE)))
                             }
                             // The flattener's dispatch marker, read by
                             // `render_kwargs_have_format` above.
@@ -641,12 +704,12 @@ pub(super) fn rewrite_render_to_views(
                 if is_turbo_stream {
                     (
                         Symbol::from(format!("{}_turbo_stream", view_method.as_str())),
-                        Some("text/vnd.turbo-stream.html"),
+                        Some(crate::lower::controller::body::mime_for_format("turbo_stream")),
                     )
                 } else if json_format {
                     (
                         Symbol::from(format!("{}_json", view_method.as_str())),
-                        Some("application/json"),
+                        Some(JSON_RESPONSE_TYPE),
                     )
                 } else if is_svg {
                     // campfire's avatar initials. Same shape as the two
@@ -955,7 +1018,7 @@ fn json_collection_type(ty: &Ty) -> bool {
 
 /// Prove primitive contents from inferred types or nested literal shapes,
 /// including empty literals whose element types remain unconstrained.
-fn json_primitive_value(value: &Expr) -> bool {
+pub(crate) fn json_primitive_value(value: &Expr) -> bool {
     if value.ty.as_ref().is_some_and(json_primitive_type) {
         return true;
     }
@@ -2790,6 +2853,198 @@ pub(crate) fn const_path(segments: &[&str], span: Span) -> Expr {
             path: segments.iter().map(|s| Symbol::from(*s)).collect(),
         },
     )
+}
+
+/// The type a json RENDER goes out under: Rails stamps the charset on
+/// `render json:` and on a json template, but not on a bodyless `head`
+/// (`head :ok, content_type: :json` is bare `application/json`, which
+/// is why `mime_for_format` keeps that spelling).
+pub(crate) const JSON_RESPONSE_TYPE: &str = "application/json; charset=utf-8";
+
+/// The String a `render turbo_stream: <value>` answers: one
+/// `Broadcasts.turbo_stream_fragment` per builder call, joined without a
+/// separator (turbo-rails hands the renderer an Array and Rails
+/// concatenates it). `Err` carries why this value is not one the
+/// lowering can write down EXACTLY; the caller reports it as an error.
+///
+/// Supported: `turbo_stream.<append|prepend|replace|update|before|after>
+/// (target, partial: "p"[, locals: {…}])` and `turbo_stream.remove(
+/// target)`, with a String/Symbol target or a `dom_id(…)` /
+/// `helpers.dom_id(…)` call, singly or as an Array literal. Everything
+/// else needs turbo-rails behavior the runtime does not carry: the
+/// `*_all` actions (`targets=`), option attributes (`method: :morph`),
+/// block and positional-content forms, `refresh`/custom actions, and
+/// values built by app code (`responder.render(view_context)`).
+fn turbo_stream_render_body(
+    value: &Expr,
+    module_name: Option<&str>,
+    ancestor_modules: &[String],
+    partials: &super::PartialMap,
+) -> Result<Expr, &'static str> {
+    let span = value.span;
+    if let ExprNode::Array { elements, .. } = &*value.node {
+        let parts = elements
+            .iter()
+            .map(|el| turbo_stream_render_body(el, module_name, ancestor_modules, partials))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Array { elements: parts, style: crate::expr::ArrayStyle::Brackets },
+                )),
+                method: Symbol::from("join"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        ));
+    }
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*value.node else {
+        return Err("the value is not a `turbo_stream.<action>(…)` builder call; markup built by \
+                    app code (a responder, a helper) is not lowered");
+    };
+    let is_builder = match &*recv.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. } => {
+            method.as_str() == "turbo_stream" && args.is_empty()
+        }
+        ExprNode::Var { name, .. } => name.as_str() == "turbo_stream",
+        _ => false,
+    };
+    if !is_builder {
+        return Err("the value is not a `turbo_stream.<action>(…)` builder call; markup built by \
+                    app code (a responder, a helper) is not lowered");
+    }
+    let action = method.as_str();
+    if !matches!(action, "append" | "prepend" | "replace" | "update" | "before" | "after" | "remove") {
+        return Err("only append, prepend, replace, update, before, after and remove are \
+                    lowered (`*_all` targets a selector, and the rest are custom actions)");
+    }
+    let Some(target) = args.first() else {
+        return Err("the builder call names no target");
+    };
+    let target = match &*target.node {
+        ExprNode::Lit { value: Literal::Str { .. } } => target.clone(),
+        // The element's `target` attribute is escaped by turbo-rails' tag
+        // helper; the runtime composer writes it as given.
+        ExprNode::StringInterp { .. } => html_escape_call(target),
+        ExprNode::Lit { value: Literal::Sym { value } } => {
+            Expr::new(span, ExprNode::Lit { value: Literal::Str { value: value.as_str().to_string() } })
+        }
+        ExprNode::Send { recv: r, method, args: dom_args, block: None, .. }
+            if method.as_str() == "dom_id"
+                && (1..=2).contains(&dom_args.len())
+                && r.as_ref().is_none_or(|r| {
+                    matches!(&*r.node, ExprNode::Send { recv: None, method, args, .. }
+                        if method.as_str() == "helpers" && args.is_empty())
+                }) =>
+        {
+            crate::lower::view_to_library::view_helpers_call("dom_id", dom_args.clone())
+        }
+        _ => {
+            return Err("the target is not a String (literal or interpolated), a Symbol, or a `dom_id(…)` call");
+        }
+    };
+    let html = if action == "remove" {
+        if args.len() != 1 {
+            return Err("`remove` takes only a target");
+        }
+        Expr::new(span, ExprNode::Lit { value: Literal::Str { value: String::new() } })
+    } else {
+        let [_, options] = args.as_slice() else {
+            return Err("the builder call takes a target and `partial:`/`locals:` options only");
+        };
+        let ExprNode::Hash { entries, .. } = &*options.node else {
+            return Err("positional content and the block form are not lowered; use \
+                        `partial:` (+ `locals:`)");
+        };
+        let mut partial_name: Option<String> = None;
+        let mut locals: Vec<(Symbol, Expr)> = Vec::new();
+        for (k, v) in entries {
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                return Err("an option key is not a Symbol literal");
+            };
+            match key.as_str() {
+                "partial" => match &*v.node {
+                    ExprNode::Lit { value: Literal::Str { value } } => partial_name = Some(value.clone()),
+                    _ => return Err("`partial:` is not a String literal"),
+                },
+                "locals" => {
+                    let ExprNode::Hash { entries: le, .. } = &*v.node else {
+                        return Err("`locals:` is not a Hash literal");
+                    };
+                    for (lk, lv) in le {
+                        let ExprNode::Lit { value: Literal::Sym { value } } = &*lk.node else {
+                            return Err("a `locals:` key is not a Symbol literal");
+                        };
+                        locals.push((value.clone(), lv.clone()));
+                    }
+                }
+                _ => {
+                    return Err("only `partial:` and `locals:` are lowered (`method: :morph` and \
+                                other attributes need a turbo-stream attribute writer)");
+                }
+            }
+        }
+        let Some(partial_name) = partial_name else {
+            return Err("the builder call names no `partial:`");
+        };
+        // Rails looks a bare name up in the controller's own directory,
+        // then each ancestor's. A slashed name names its directory.
+        let (module, stem) = match partial_name.rsplit_once('/') {
+            Some((dir, name)) => (
+                crate::naming::camelize_path(&crate::naming::snake_case(dir)),
+                name.trim_start_matches('_').to_string(),
+            ),
+            None => {
+                let stem = partial_name.trim_start_matches('_').to_string();
+                let found = module_name
+                    .into_iter()
+                    .map(str::to_string)
+                    .chain(ancestor_modules.iter().cloned())
+                    .find(|m| partials.contains_key(&(m.clone(), stem.clone())));
+                match found {
+                    Some(m) => (m, stem),
+                    None => return Err("the partial is not a template this app defines (or is not \
+                                        reachable from this controller)"),
+                }
+            }
+        };
+        let Some(contract) = partials.get(&(module.clone(), stem.clone())) else {
+            return Err("the partial is not a template this app defines");
+        };
+        // A local the partial does not declare would be silently dropped
+        // (the partial's lowered function has no parameter for it).
+        if locals.iter().any(|(name, _)| {
+            let n = name.as_str();
+            n != contract.record
+                && !contract.closure.iter().any(|c| c == n)
+                && !contract.extras.iter().any(|c| c == n)
+        }) {
+            return Err("`locals:` names a local the partial does not declare");
+        }
+        let qualified = format!("{}/{}", crate::naming::underscore(&module), stem);
+        match partial_view_call(&qualified, &locals, Some(&module), partials, span) {
+            Some(call) => call,
+            None => return Err("the partial is not a template this app defines (or is not \
+                                reachable from this controller)"),
+        }
+    };
+    Ok(Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(const_path(&["Broadcasts"], span)),
+            method: Symbol::from("turbo_stream_fragment"),
+            args: vec![
+                Expr::new(span, ExprNode::Lit { value: Literal::Str { value: action.to_string() } }),
+                target,
+                html,
+            ],
+            block: None,
+            parenthesized: true,
+        },
+    ))
 }
 
 /// Like `const_path`, but stamps `Ty::Class` so the emit-time
