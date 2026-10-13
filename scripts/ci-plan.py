@@ -859,11 +859,10 @@ def _advisory_complete(job, need, advisory):
         return True
     if job in LEDGER_EXTRAS:
         return False
-    keys = (
-        ["default", "minor-gc", "verify-gen"]
-        if job == "campfire-spinel-compare"
-        else ["execution"]
-    )
+    keys = {
+        "campfire-spinel-compare": ["default", "minor-gc", "verify-gen"],
+        "spinel-toolchain": ["parity", "rest"],
+    }.get(job, ["execution"])
     return all(need.get("outputs", {}).get(key) == "success" for key in keys)
 
 
