@@ -30,13 +30,57 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             args: vec![],
         },
     );
-    let error_reporter = ClassId(Symbol::from("ActiveSupport::ErrorReporter"));
-    rails_cls.class_methods.insert(
-        Symbol::from("error"),
-        Ty::Class { id: error_reporter.clone(), args: vec![] },
-    );
+    // `Rails.event` / `Rails.error` — ActiveSupport's EventReporter and
+    // ErrorReporter, answered by runtime/ruby/active_support_reporters.rb.
+    // Registered here because a runtime `.rbs` does not feed app analysis.
+    // A block-taking method answers its block's value, which this table
+    // cannot see: `Untyped`.
+    let class = |name: &str| Ty::Class { id: ClassId(Symbol::from(name)), args: vec![] };
+    let sym_hash = || Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let untyped_arr = || Ty::Array { elem: Box::new(Ty::Untyped) };
+    let event_reporter = class("ActiveSupport::EventReporter");
+    let error_reporter = class("ActiveSupport::ErrorReporter");
+    rails_cls.class_methods.insert(Symbol::from("event"), event_reporter.clone());
+    rails_cls.class_methods.insert(Symbol::from("error"), error_reporter.clone());
     classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
-    register_stdlib_class(classes, error_reporter.0.as_str(), &[], &[("report", Ty::Nil)]);
+    register_stdlib_class(classes, "ActiveSupport", &[
+        ("event_reporter", event_reporter.clone()), ("error_reporter", error_reporter.clone()),
+        ("event_reporter=", event_reporter.clone()), ("error_reporter=", error_reporter.clone()),
+        ("filter_parameters", untyped_arr()), ("filter_parameters=", untyped_arr()),
+    ], &[]);
+    register_stdlib_class(classes, "ActiveSupport::EventReporter", &[
+        ("new", event_reporter.clone()),
+        ("context_store", Ty::Untyped), ("context_store=", Ty::Untyped),
+    ], &[
+        ("notify", Ty::Nil), ("debug", Ty::Nil),
+        ("tagged", Ty::Untyped), ("with_debug", Ty::Untyped),
+        ("set_context", sym_hash()), ("clear_context", sym_hash()), ("context", sym_hash()),
+        ("subscribe", untyped_arr()), ("unsubscribe", untyped_arr()),
+        ("subscribers", untyped_arr()), ("debug_mode?", Ty::Bool),
+        ("debug_mode=", Ty::Bool), ("raise_on_error=", Ty::Bool),
+        ("reload_payload_filter", Ty::Untyped),
+    ]);
+    register_stdlib_class(classes, "ActiveSupport::ErrorReporter", &[
+        ("new", error_reporter.clone()),
+    ], &[
+        ("report", Ty::Nil), ("unexpected", Ty::Nil),
+        ("handle", Ty::Untyped), ("record", Ty::Untyped), ("disable", Ty::Untyped),
+        ("set_context", Ty::Untyped),
+        ("subscribe", untyped_arr()), ("unsubscribe", untyped_arr()),
+        ("add_middleware", untyped_arr()),
+        ("logger", Ty::Untyped), ("logger=", Ty::Untyped),
+        ("debug_mode", Ty::Bool), ("debug_mode=", Ty::Bool),
+    ]);
+    register_stdlib_class(classes, "ActiveSupport::ErrorReporter::UnexpectedError", &[], &[
+        ("message", Ty::Str), ("cause", Ty::Untyped), ("backtrace", Ty::Array { elem: Box::new(Ty::Str) }),
+    ]);
+    // activesupport's execution_context.rb: the per-thread context an
+    // error report merges under its own `context:`.
+    register_stdlib_class(classes, "ActiveSupport::ExecutionContext", &[
+        ("set", Ty::Untyped), ("[]=", Ty::Untyped), ("to_h", sym_hash()),
+        ("clear", Ty::Nil), ("push", Ty::Untyped), ("pop", Ty::Untyped), ("flush", Ty::Untyped),
+        ("nestable", Ty::Bool), ("nestable=", Ty::Bool), ("after_change", Ty::Untyped),
+    ], &[]);
 
     // GlobalID mint + Locator — unsigned `param`/`uri`/`signed` and the
     // locate / locate_signed class methods. Return types for locate*
@@ -109,6 +153,27 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     time_cls.class_methods.insert(Symbol::from("at"), time_ty());
     classes.insert(ClassId(Symbol::from("Time")), time_cls);
 
+    // The seconds-based Duration value class the Ruby-family trees ship
+    // (`runtime/spinel/active_support_duration.rb` and its `.rbs`), which
+    // `lower::duration` grounds `30.minutes`
+    // to. Its surface is what that file defines, so a declared
+    // `#: ActiveSupport::Duration` names a modeled dependency. `project`
+    // refuses the value on trees that ship no such class.
+    let duration_ty = || Ty::Class { id: ClassId(Symbol::from("ActiveSupport::Duration")), args: vec![] };
+    let units = [
+        "seconds", "second", "minutes", "minute", "hours", "hour", "days", "day", "weeks", "week",
+        "fortnights", "fortnight", "months", "month", "years", "year",
+    ];
+    let class_side: Vec<(&str, Ty)> = units.iter().map(|u| (*u, duration_ty())).collect();
+    register_stdlib_class(classes, "ActiveSupport::Duration", &class_side, &[
+        ("ago", time_ty()), ("until", time_ty()), ("from_now", time_ty()), ("since", time_ty()),
+        ("to_i", Ty::Int), ("seconds", Ty::Int), ("to_f", Ty::Float), ("to_s", Ty::Str),
+        ("==", Ty::Bool), ("<", Ty::Bool), ("<=", Ty::Bool), (">", Ty::Bool), (">=", Ty::Bool),
+        // Integer `<=>` answers nil for an incomparable operand; Duration
+        // forwards there after unwrapping another Duration.
+        ("<=>", Ty::Union { variants: vec![Ty::Int, Ty::Nil] }),
+    ]);
+
     // Date instances are date-only values, including constructors and
     // parsers. The send dispatcher validates their argument contracts;
     // do not duplicate unvalidated return declarations here. DateTime
@@ -159,6 +224,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ], &[
         ("rand", Ty::Untyped), ("bytes", Ty::Str), ("seed", Ty::Int),
     ]);
+    // `OpenSSL::Random.random_bytes(n)` — lobsters' `Utils.random_str`.
+    // The openssl library's own on the ruby family; on spinel the
+    // façade alias in `runtime/spinel/facades/sponge.rb`.
+    register_stdlib_class(classes, "OpenSSL::Random", &[("random_bytes", Ty::Str)], &[]);
     // `Turbo::StreamsChannel` — turbo-rails' CLASS-side broadcast API,
     // the one an app reaches for when the payload is not a record's
     // partial: a rendered component, a counter, a status panel. The
@@ -198,6 +267,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("to_s", Ty::Str), ("to_path", Ty::Str), ("extname", Ty::Str),
         ("read", Ty::Str), ("write", Ty::Int),
         ("exist?", Ty::Bool), ("file?", Ty::Bool), ("directory?", Ty::Bool),
+        ("absolute?", Ty::Bool), ("relative?", Ty::Bool),
         ("children", Ty::Array { elem: Box::new(pathname()) }),
     ]);
     // `ActiveSupport::SecurityUtils.secure_compare` — the constant-time
@@ -206,7 +276,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("secure_compare", Ty::Bool), ("fixed_length_secure_compare", Ty::Bool),
     ], &[]);
     register_stdlib_class(classes, "File", &[
-        ("read", Ty::Str), ("binread", Ty::Str), ("write", Ty::Int),
+        ("read", Ty::Str), ("binread", Ty::Str), ("write", Ty::Int), ("binwrite", Ty::Int),
         ("exist?", Ty::Bool), ("exists?", Ty::Bool), ("file?", Ty::Bool),
         ("directory?", Ty::Bool), ("open", Ty::Untyped),
         ("unlink", Ty::Int), ("delete", Ty::Int), ("rename", Ty::Int),
@@ -427,8 +497,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ]);
 
     // `FileUtils` — a default gem / spinel's `packages/fileutils`.
+    // `mkdir_p` answers the directories it was given; `cp` nil for one source
+    // and the source Array for several (CRuby 4.0.5). Both checked against
+    // CRuby and Spinel (tests/support/stdlib_rnp.rs).
     register_stdlib_class(classes, "FileUtils", &[
-        ("mkdir_p", Ty::Untyped), ("makedirs", Ty::Untyped),
+        ("mkdir_p", Ty::Array { elem: Box::new(Ty::Str) }), ("makedirs", Ty::Untyped),
+        ("cp", Ty::Union { variants: vec![Ty::Nil, Ty::Array { elem: Box::new(Ty::Str) }] }),
         ("rm_rf", Ty::Untyped), ("rm_f", Ty::Untyped),
         ("remove_entry", Ty::Nil), ("touch", Ty::Untyped),
     ], &[]);
@@ -467,7 +541,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("resolve_public_ips", Ty::Array { elem: Box::new(Ty::Str) }),
         ("blocked_address?", Ty::Bool),
     ], &[]);
-    // `Concurrent` — concurrent-ruby's thread pools and barrier, ported
+    // `Concurrent` — concurrent-ruby's thread pools, barrier and Map, ported
     // into `runtime/spinel/concurrent.rb` (the ruby family runs the gem).
     // ONLY the surface the port implements, the IPAddr rule: campfire's
     // `WebPush::Pool` posts, shuts down, kills and waits on its two
@@ -494,6 +568,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("wait", Ty::Bool),
         ("parties", Ty::Int),
         ("number_waiting", Ty::Int),
+    ]);
+    let concurrent_map = Ty::Class { id: ClassId(Symbol::from("Concurrent::Map")), args: vec![] };
+    register_stdlib_class(classes, "Concurrent::Map", &[], &[
+        ("[]", Ty::Untyped),
+        ("[]=", Ty::Untyped),
+        ("compute_if_absent", Ty::Untyped),
+        ("clear", concurrent_map),
     ]);
     // `Net::HTTP` — a real client on BOTH lanes: CRuby's own stdlib, and
     // spinel's `packages/net` (HTTPS included, since the openssl package
@@ -591,6 +672,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "Timeout::Error",
         // `rescue EOFError` around `readpartial` on a pipe or a pty.
         "EOFError",
+        // lobsters' `Sponge::OTHER_PEOPLES_PROBLEMS`, a class-body Array
+        // of exception classes. zlib's and Encoding's are Ruby's own and
+        // spinel's (`packages/zlib`, `lib/sp_exc.c`). net/protocol's
+        // `HTTPBadResponse` is CRuby's only: spinel's `packages/net`
+        // does not define it, so `project::unavailable_class_module_construct`
+        // ledgers it there.
+        "Zlib::DataError", "Encoding::CompatibilityError", "Net::HTTPBadResponse",
         // `rescue SQLite3::Exception` — campfire's `ResponseCache` drops
         // its observer on any driver error (see `SQLite3::Database`).
         "SQLite3::Exception", "SQLite3::CantOpenException",
@@ -600,6 +688,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // long to encode. rqrcode_core's classes on the ruby family, the
         // spinel-rqrcode package's (same names, same raise) on spinel.
         "RQRCodeCore::QRCodeRunTimeError", "RQRCodeCore::QRCodeArgumentError",
+        // `rescue CSV::MalformedCSVError` around `CSV.parse` (csv is loaded
+        // by the emitted require, on Spinel by its csv package).
+        "CSV::MalformedCSVError",
     ] {
         register_stdlib_class(classes, exc, &[], &exception_surface);
     }
@@ -729,7 +820,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // real bundled class, without claiming any extra instance methods.
     register_stdlib_class(classes, "URI::HTTP", &[], &[]);
     register_stdlib_class(classes, "URI::HTTPS", &[], &[]);
-    for response in ["Net::HTTPRedirection", "Net::HTTPOK"] {
+    // `res.is_a?(Net::HTTPSuccess)` — lobsters' Github; spinel's
+    // `packages/net` defines the same response family.
+    for response in ["Net::HTTPRedirection", "Net::HTTPOK", "Net::HTTPSuccess"] {
         register_stdlib_class(classes, response, &[], &[]);
     }
     // The implementation is bundled on Ruby/Spinel. Other targets
@@ -787,10 +880,30 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Process", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_MONOTONIC", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_REALTIME", &[], &[]);
+    register_stdlib_class(classes, "Process::CLOCK_PROCESS_CPUTIME_ID", &[], &[]);
+    register_stdlib_class(classes, "Process::CLOCK_THREAD_CPUTIME_ID", &[], &[]);
     // Module Const only — `timeout` return is the send special-case.
     // Exception is `Timeout::Error` above. CRuby loads via BUNDLED
     // `require "timeout"`; Spinel gets `runtime/ruby/timeout.rb`.
     register_stdlib_class(classes, "Timeout", &[], &[]);
+    // GC / OpenSSL::HMAC / Enumerator::Product / Enumerator::Lazy (and
+    // FileUtils' `mkdir_p` / `cp`, in its registration above), as an API
+    // reaches for them: `GC.start` between batches, an HMAC
+    // signature of a webhook payload, `Enumerator::Product.new(*lists)` over
+    // route segments, and `is_a?(Enumerator::Lazy)` in a serializer. Only
+    // the calls checked against CRuby and Spinel are registered
+    // (tests/support/stdlib_rnp.rs); another FileUtils call stays a dispatch
+    // error rather than a guess. Each library is loaded by its emitted
+    // require; on Spinel by its fileutils / openssl package.
+    register_stdlib_class(classes, "GC", &[("start", Ty::Nil)], &[]);
+    register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
+    let product = Ty::Class { id: ClassId(Symbol::from("Enumerator::Product")), args: vec![] };
+    register_stdlib_class(classes, "Enumerator::Product", &[("new", product)], &[
+        // `size` is left out: it answers nil or Float::INFINITY for an
+        // unsized or endless factor, and it is not checked on both lanes.
+        ("to_a", Ty::Array { elem: Box::new(Ty::Array { elem: Box::new(Ty::Untyped) }) }),
+    ]);
+    register_stdlib_class(classes, "Enumerator::Lazy", &[], &[]);
     // JSON dispatch is already intrinsic in BodyTyper and the emitters;
     // a source-backed reference must also recognize its exact namespace.
     register_stdlib_class(classes, "JSON", &[], &[]);

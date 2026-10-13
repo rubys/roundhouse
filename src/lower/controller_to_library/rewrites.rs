@@ -1139,6 +1139,12 @@ pub(super) fn rewrite_assoc_through_parent_typed(
         let ExprNode::Ivar { name: parent_name } = &*inner_recv.node else {
             return None;
         };
+        // The foreign key below comes from the ivar's name and the
+        // parent's value from `.id`; an association keyed on another
+        // owner column (`primary_key:`) needs the declaration instead.
+        if params_specs.is_keyed_assoc(assoc_method) {
+            return None;
+        }
         let model_class = crate::naming::singularize_camelize(assoc_method.as_str());
         let fk = format!("{}_id", parent_name.as_str());
         Some(match kind {

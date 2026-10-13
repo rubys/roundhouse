@@ -140,19 +140,11 @@ pub(super) fn ingest_controller_with_nesting(
     // `around_action` don't synthesize the SAME method name: the
     // synthesized method is an ordinary Ruby method, and the child's
     // would otherwise override the parent's instead of coexisting
-    // alongside it through inheritance.
-    // Each `::` segment is kept as written (case included) and prefixed
-    // with its own length, so the encoding is one-to-one: neither
-    // `Admin::WidgetsController` (`5Admin_17WidgetsController`) vs a flat
-    // `AdminWidgetsController` (`22AdminWidgetsController`), nor two names
-    // that only underscore alike (`HTMLParser`, `HtmlParser`), can share it.
-    let around_block_owner_ident = owner
-        .0
-        .as_str()
-        .split("::")
-        .map(|seg| format!("{}{seg}", seg.len()))
-        .collect::<Vec<_>>()
-        .join("_");
+    // alongside it through inheritance. Shared with `app::
+    // expand_class_body_macros`'s own block-form `around_action`
+    // lowering (a concern macro's body can hold one too), so the two
+    // agree on one encoding rather than drifting apart.
+    let around_block_owner_ident = around_block_owner_ident(&owner);
     let mut layout = LayoutDecl::Inherit;
     // Deterministic per-controller numbering for `around_block_filter`'s
     // synthesized method names — bumped once per successfully LOWERED
@@ -253,7 +245,7 @@ pub(super) fn ingest_controller_with_nesting(
                         .unwrap_or("");
                     match around_block_filter(
                         &expr,
-                        raw_text,
+                        Some(raw_text),
                         &around_block_owner_ident,
                         &mut around_block_seq,
                     ) {
@@ -1372,6 +1364,47 @@ pub(crate) fn is_lambda_filter_macro(method: &str) -> bool {
     matches!(method, "before_action" | "after_action" | "prepend_before_action")
 }
 
+/// The length-prefixed encoding of a controller's qualified name that
+/// `around_block_filter` folds into every synthesized method name it
+/// places on that controller. Each `::` segment is kept as written
+/// (case included) and prefixed with its own length, so the encoding is
+/// one-to-one: neither `Admin::WidgetsController`
+/// (`5Admin_17WidgetsController`) vs a flat `AdminWidgetsController`
+/// (`22AdminWidgetsController`), nor two names that only underscore
+/// alike (`HTMLParser`, `HtmlParser`), can share it.
+///
+/// One function so the two places that need it — this file's own
+/// hand-written block-form `around_action` pass
+/// (`ingest_controller_with_nesting`) and `app::
+/// expand_class_body_macros`'s macro-expanded one — agree on the same
+/// encoding instead of drifting apart.
+pub(super) fn around_block_owner_ident(name: &ClassId) -> String {
+    name.0.as_str().split("::").map(|seg| format!("{}{seg}", seg.len())).collect::<Vec<_>>().join("_")
+}
+
+/// The sequence number `around_block_filter` should start COUNTING UP
+/// FROM for `owner_ident` on this controller — one past the highest
+/// `__rh_around_<owner_ident>_<n>` suffix any EARLIER pass already
+/// placed in `body`. `ingest_controller_with_nesting`'s own hand-written
+/// block-form `around_action` pass always runs first and starts its own
+/// counter at 0; `app::expand_class_body_macros` runs afterward, over
+/// the same controller, for whatever block-form `around_action` a
+/// concern macro's body holds — without this, both passes would start
+/// at 0 independently and could synthesize the SAME name (`__rh_around_
+/// <owner_ident>_1`), one definition silently overriding the other
+/// instead of the two filters coexisting as Rails runs them.
+pub(super) fn next_around_block_seq(body: &[ControllerBodyItem], owner_ident: &str) -> u32 {
+    let prefix = format!("__rh_around_{owner_ident}_");
+    body.iter()
+        .filter_map(|item| match item {
+            ControllerBodyItem::Action { action, .. } => action.name.as_str().strip_prefix(prefix.as_str()),
+            _ => None,
+        })
+        .filter_map(|suffix| suffix.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+}
+
 /// A recognized lambda/proc/block-target filter, already ingested to
 /// IR — the shared shape `report_unrecognized_controller_macros`,
 /// `build_filter_preamble`, and `build_sourced_filter_chain` all read,
@@ -1727,9 +1760,23 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
 /// caller keeps the statement whole (`Unknown`, round-tripped verbatim)
 /// and records `reason` as a survey gap — never silently dropped, which
 /// is the bug this lowering exists to fix (rubys/roundhouse#778).
+///
+/// `raw_text` is the ORIGINAL SOURCE of `expr` (see `sugar_dot_paren_
+/// used`'s doc comment for why it has to be source text, not IR) —
+/// `Some` for a hand-written block in a controller body, where that
+/// text is just the statement's own span. `app::expand_class_body_
+/// macros` calls this a second time for a concern macro's own
+/// block-form `around_action`, after `substitute_params` has already
+/// rebuilt the body from IR with no source text of its own to point
+/// to; it passes `None`, which skips exactly that one check (every
+/// other refusal in this function reads `expr` itself, substituted or
+/// not, so none of them are affected) — the narrow, DOCUMENTED gap
+/// between the two paths: a macro-expanded around whose continuation is
+/// called as `block.()` is accepted here, where the same spelling
+/// written directly in a controller would be refused.
 pub(super) fn around_block_filter(
     expr: &Expr,
-    raw_text: &str,
+    raw_text: Option<&str>,
     owner_ident: &str,
     seq: &mut u32,
 ) -> Option<Result<(crate::dialect::Filter, Action), String>> {
@@ -1828,7 +1875,7 @@ pub(super) fn around_block_filter(
 
     match &cont_param {
         Some(cont) => {
-            if sugar_dot_paren_used(raw_text, cont.as_str()) {
+            if raw_text.is_some_and(|text| sugar_dot_paren_used(text, cont.as_str())) {
                 return refuse(format!(
                     "around_action's continuation parameter `{cont}` is invoked as `.()` rather than `.call`, which this does not rewrite"
                 ));

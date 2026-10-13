@@ -2543,6 +2543,45 @@ fn group_try_rhs(rhs: &str) -> String {
     }
 }
 
+/// `equal?` on a class instance is Swift `===`. Value types (Hash →
+/// Dictionary, String, numbers) have no reference identity; those
+/// calls stay methods.
+fn swift_reference_equal(r: &Expr) -> bool {
+    use crate::ty::Ty;
+    match r.ty.as_ref().map(|t| t.peel_nilable()) {
+        Some(Ty::Class { id, .. }) => !matches!(
+            id.0.as_str(),
+            "Hash"
+                | "Array"
+                | "String"
+                | "Integer"
+                | "Float"
+                | "Symbol"
+                | "Regexp"
+                | "TrueClass"
+                | "FalseClass"
+                | "NilClass"
+                | "Numeric"
+                | "Time"
+                | "Date"
+        ),
+        Some(
+            Ty::Hash { .. }
+            | Ty::Array { .. }
+            | Ty::Str
+            | Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Sym
+            | Ty::Nil
+            | Ty::Time,
+        ) => false,
+        // Absent or `Untyped` is `Any?` in Swift, and `===` does not
+        // typecheck on that. Only a proven class reference qualifies.
+        _ => false,
+    }
+}
+
 /// Render a Ruby send as a Swift call, property access, or primitive operation.
 fn emit_send(
     recv: Option<&Expr>,
@@ -2563,6 +2602,18 @@ fn emit_send(
                 if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
                     return format!("Roundhouse.RhDateTime.parse({})", args_s[0]);
                 }
+            }
+        }
+    }
+
+    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+    if method == "errors_for" && args.len() == 4 {
+        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
+            if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                return format!(
+                    "({{ (attribute: String, prefix: String) -> [String] in zip({}, {}).filter {{ $0.1 == attribute }}.map {{ $0.0.hasPrefix(prefix) ? String($0.0.dropFirst(prefix.count)) : $0.0 }} }}({}, {}))",
+                    args_s[0], args_s[1], args_s[2], args_s[3]
+                );
             }
         }
     }
@@ -2694,6 +2745,18 @@ fn emit_send(
             let sn = camel(base);
             let val = coerce_for_prop_assign(r, &sn, &args[0], args_s[0].clone());
             return format!("{}.{sn} = {}", emit_expr(r), val);
+        }
+    }
+
+    // `equal?` is object identity. Swift renames `?` to `Pred`, and no
+    // class defines `equalPred`. `===` is reference identity, and it
+    // only typechecks on class instances — a Hash is a Dictionary
+    // (value type) and stays a call.
+    if method == "equal?" && args.len() == 1 {
+        if let Some(r) = recv {
+            if swift_reference_equal(r) && swift_reference_equal(&args[0]) {
+                return format!("(({}) === ({}))", emit_expr(r), args_s[0]);
+            }
         }
     }
 
@@ -2938,6 +3001,11 @@ fn emit_send(
             "to_f" => return format!("Double(\"\\({rs})\")!"),
             "empty?" => return format!("{rs}.isEmpty"),
             "any?" => return format!("!{rs}.isEmpty"),
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if matches!(
+                array_elem_ty(r),
+                Some(crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym)
+            ) => return format!("{rs}.isEmpty"),
             "length" | "size" => return format!("{rs}.count"),
             "upcase" => return format!("{rs}.uppercased()"),
             "downcase" => return format!("{rs}.lowercased()"),
@@ -3100,5 +3168,65 @@ fn emit_send(
                 .unwrap_or("");
             format!("{try_kw}{name}({})", emit_call_args(recv, method, args))
         }
+    }
+}
+
+#[cfg(test)]
+mod equal_identity_tests {
+    use super::*;
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::{ClassId, Symbol, VarId};
+    use crate::span::Span;
+    use crate::ty::Ty;
+
+    fn var(name: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from(name) },
+        )
+    }
+
+    fn send(recv: Expr, method: &str, arg: Expr) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from(method),
+                args: vec![arg],
+                block: None,
+                parenthesized: true,
+            },
+        )
+    }
+
+    fn header_store(name: &str) -> Expr {
+        let mut recv = var(name);
+        recv.ty = Some(Ty::Class {
+            id: ClassId(Symbol::from("ActionController::HeaderStore")),
+            args: vec![],
+        });
+        recv
+    }
+
+    #[test]
+    fn equal_on_a_class_is_reference_identity() {
+        let out = emit_expr(&send(header_store("store"), "equal?", header_store("result")));
+        assert_eq!(out, "((store) === (result))");
+    }
+
+    #[test]
+    fn equal_on_an_untyped_operand_stays_a_call() {
+        let out = emit_expr(&send(header_store("store"), "equal?", var("result")));
+        assert!(out.contains("equalPred"), "{out}");
+        assert!(!out.contains("==="), "{out}");
+    }
+
+    #[test]
+    fn equal_on_a_hash_stays_a_call() {
+        let mut recv = var("attrs");
+        recv.ty = Some(Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) });
+        let out = emit_expr(&send(recv, "equal?", var("sentinel")));
+        assert!(out.contains("equalPred"), "{out}");
+        assert!(!out.contains("==="), "{out}");
     }
 }

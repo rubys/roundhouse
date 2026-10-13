@@ -468,3 +468,80 @@ end
         );
     }
 }
+
+/// A receiverless `find_or_initialize_by` in an `||` operand of a class
+/// method (`find_by(…) || find_or_initialize_by(owner_id:, name:)`) is no
+/// statement the lowering inlines; the model class answers it as Rails'
+/// `all.find_or_initialize_by`: the found row, else an unsaved record
+/// carrying the conditions.
+/// Ordinary `where(hash)` seeds `scope_for_create` for the runtime
+/// `find_or_*` path (not only association `where_scope`). Held in a
+/// local so statement-position first_or_create lowering does not inline
+/// it away.
+#[test]
+fn ordinary_where_seeds_find_or_initialize_by_at_runtime() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/comment.rb",
+            r#"
+class Comment < ApplicationRecord
+  belongs_to :article
+
+  def self.build_under(article_id, commenter)
+    rel = where(article_id: article_id)
+    rel.find_or_initialize_by(commenter: commenter)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+article = Article.create!(title: "Owner", body: "A sufficiently long body")
+built = Comment.build_under(article.id, "Seeded")
+raise "where seed lost: #{built.article_id.inspect}" unless built.article_id == article.id
+raise "explicit condition lost" unless built.commenter == "Seeded"
+raise "must be unsaved" if built.persisted?
+puts "PASS where seeds find_or_initialize_by"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn a_receiverless_find_or_initialize_by_operand_finds_or_builds() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/comment.rb",
+            r#"
+class Comment < ApplicationRecord
+  belongs_to :article
+
+  def self.find_or_build(name, article:)
+    find_by(article_id: article.id, body: name.downcase) || find_or_initialize_by(article_id: article.id, commenter: name)
+  end
+
+  def self.find_or_save(name, article:)
+    find_by(article_id: article.id, body: name) || find_or_create_by!(article_id: article.id, commenter: name, body: "saved body")
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+article = Article.create!(title: "Owner", body: "A sufficiently long body")
+built = Comment.find_or_build("Ann", article: article)
+raise "built a saved record" if built.persisted?
+raise "conditions lost" unless built.article_id == article.id && built.commenter == "Ann"
+built.body = "ann"
+built.save!
+found = Comment.find_or_build("ANN", article: article)
+raise "did not find the row" unless found.id == built.id
+saved = Comment.find_or_save("Bea", article: article)
+raise "find_or_create_by! did not save" unless saved.persisted? && saved.commenter == "Bea"
+again = Comment.find_or_save("Bea", article: article)
+raise "find_or_create_by! duplicated" unless again.id == saved.id
+puts "PASS"
+"#,
+        )
+        .assert_passes();
+}

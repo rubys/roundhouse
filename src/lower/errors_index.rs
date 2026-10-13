@@ -39,18 +39,9 @@
 //! must itself be a zero-arg `errors` send, which is what makes the
 //! site our accumulator rather than some other object's `[]`.
 //!
-//! VIEWS ARE DELIBERATELY OUT OF SCOPE, unlike
-//! [`super::errors_full_messages`]. The view lowering already owns this
-//! exact shape: `classify_errors_field_predicate` recognizes
-//! `<record>.errors[:field].none? / .any?` — the scaffold's form
-//! partial styles every field from it — and grounds the whole
-//! predicate, `[]` included. Rewriting the inner `[]` here runs FIRST
-//! and leaves that classifier a shape it no longer matches, which takes
-//! the blog's `_form.html.erb` from four grounded predicates to four
-//! `unresolved_type` diagnostics. Scope is therefore hook bodies and
-//! TEST bodies; a view read outside the predicate shape stays exactly
-//! as unsupported as it was, which is honest, and the view lowering is
-//! where it would be claimed.
+//! Views take the same rewrite: the scaffold's form partial reads
+//! `<record>.errors[:field].none?` / `.any?` inside a `class:` array,
+//! which renders through `class_names` at request time.
 
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
@@ -58,8 +49,8 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 use crate::ty::Ty;
 
-/// Rewrite `errors[:field]` reads across every hook body and test body
-/// (NOT views — see the module docs). Returns the residue ledger:
+/// Rewrite `errors[:field]` reads across every hook, test and view body.
+/// Returns the residue ledger:
 /// recognizable `errors[…]` sites left dynamic, with the reason.
 pub fn apply_errors_index_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
@@ -72,6 +63,10 @@ pub fn apply_errors_index_lowering(app: &mut App) -> Vec<Diagnostic> {
         rewrite(body, &data.at(None), &mut diags);
         ledger_messages(body, &mut diags);
     });
+    for view in &mut app.views {
+        rewrite(&mut view.body, &data.at(None), &mut diags);
+        ledger_messages(&mut view.body, &mut diags);
+    }
     diags
 }
 
@@ -186,36 +181,53 @@ fn rewrite_index(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mu
         diags.push(residue(expr, "dynamic field"));
         return;
     };
-    if field.as_str() == "base" {
-        diags.push(residue(expr, ":base carries no humanized prefix"));
+    let ExprNode::Send { recv: Some(reader), .. } = &*expr.node else { unreachable!() };
+    let owner_once = matches!(&*reader.node, ExprNode::Send { recv: owner, .. } if super::errors_add::owner_reads_once(owner.as_ref()));
+    if !owner_once {
+        diags.push(residue(expr, "the record is not a plain read, and picking by attribute reads it twice"));
         return;
     }
-    let ExprNode::Send { recv: Some(reader), .. } = &*expr.node else { unreachable!() };
-    let Some(prefix_text) = labels.message_prefix(reader, field.as_str()).filter(|p| !p.is_empty()) else {
-        diags.push(residue(expr, "errors.format does not put the field before the message"));
+    let Some(prefix_text) = labels.message_prefix(reader, field.as_str()) else {
+        diags.push(residue(expr, "errors.format does not end in the message"));
         return;
     };
     let span = expr.span;
     let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
     let ExprNode::Send { recv, .. } = node else { unreachable!() };
-    let accumulator = recv.expect("checked Some above");
-    let prefix = Expr::new(
+    *expr = errors_for_call(recv.expect("checked Some above"), field.as_str(), prefix_text, span);
+}
+
+/// `ActiveSupport.errors_for(<owner>.errors, <owner>.error_attributes, "<attribute>", "<prefix>")`, typed.
+pub(crate) fn errors_for_call(accumulator: Expr, attribute: &str, prefix_text: String, span: crate::span::Span) -> Expr {
+    let str_lit = |value: String| Expr::new(span, ExprNode::Lit { value: Literal::Str { value } });
+    let ExprNode::Send { recv: owner, .. } = &*accumulator.node else { unreachable!("an errors reader") };
+    let mut attributes = Expr::new(
         span,
-        ExprNode::Lit { value: Literal::Str { value: prefix_text } },
+        ExprNode::Send {
+            recv: owner.clone(),
+            method: Symbol::from("error_attributes"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
     );
-    // Stamp the result: this pass runs *after* analyze, and the
+    attributes.ty = Some(Ty::Array { elem: Box::new(Ty::Str) });
+    let mut support = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
+    support.ty = Some(Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveSupport")), args: vec![] });
+    let mut call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(support),
+            method: Symbol::from("errors_for"),
+            args: vec![accumulator, attributes, str_lit(attribute.to_string()), str_lit(prefix_text)],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    // Stamp the result: callers run *after* analyze, and the
     // post-lowering `diagnose` walk reads stamped types without
     // re-dispatching, so an unstamped synthesis false-positives a
     // `send_dispatch_failed`.
-    expr.ty = Some(Ty::Array { elem: Box::new(Ty::Str) });
-    *expr.node = ExprNode::Send {
-        recv: Some(Expr::new(
-            span,
-            ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
-        )),
-        method: Symbol::from("errors_for"),
-        args: vec![accumulator, prefix],
-        block: None,
-        parenthesized: true,
-    };
+    call.ty = Some(Ty::Array { elem: Box::new(Ty::Str) });
+    call
 }

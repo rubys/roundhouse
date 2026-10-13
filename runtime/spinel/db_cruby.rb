@@ -287,6 +287,71 @@ module Db
     conn.transaction_active? && conn.instance_variable_get(:@rh_snapshot) != :open
   end
 
+  # A request run on a connection this process did not open: the host
+  # Rails app's own, lent by `--target futamura`'s whole-route bridge
+  # (src/emit/futamura/routes.rb). No pool is configured in that mode.
+  #
+  # Why the connection and not the database file: the bridge runs this
+  # runtime inside a Ruby::Box, and a box loads its own copy of every
+  # native extension, sqlite3's included. Two SQLite libraries opening
+  # one file in one process can release each other's POSIX locks
+  # (sqlite.org/howtocorrupt.html, "multiple copies of SQLite"). Calling
+  # through the host's connection object runs the host's copy, so one
+  # library touches the file, and this request sees the host's open
+  # transaction (a test's fixtures) instead of a second view of the file.
+  #
+  # Cleanup is `with_connection`'s minus everything that would touch
+  # the host's state: the read snapshot is ended only if this request
+  # opened one, and a transaction is rolled back only if this fiber
+  # began it (it holds the write permit), never the host's.
+  def self.with_lent_connection(conn)
+    outer = Fiber[:db_handle]
+    as_hash = conn.results_as_hash
+    conn.results_as_hash = false
+    unless conn.instance_variable_get(:@rh_sql_functions)
+      SqlFunctions.install(conn) if defined?(SqlFunctions)
+      conn.instance_variable_set(:@rh_sql_functions, true)
+    end
+    Fiber[:db_handle] = conn
+    request_failed = false
+    begin
+      yield
+    rescue Exception
+      request_failed = true
+      raise
+    ensure
+      cleanup_error = nil
+      begin
+        if conn.instance_variable_get(:@rh_snapshot_depth).to_i > 0
+          conn.instance_variable_set(:@rh_snapshot_depth, 1)
+          read_snapshot_end
+        end
+      rescue StandardError => e
+        cleanup_error = e
+      end
+      begin
+        if permit_owned?
+          begin
+            conn.execute("ROLLBACK") if conn.transaction_active?
+          ensure
+            release_permit
+          end
+        end
+      rescue StandardError => e
+        cleanup_error ||= e
+      end
+      begin
+        release_open_statements(conn)
+      rescue StandardError => e
+        cleanup_error ||= e
+      ensure
+        Fiber[:db_handle] = outer
+        conn.results_as_hash = as_hash
+      end
+      raise cleanup_error if cleanup_error && !request_failed
+    end
+  end
+
   def self.with_connection
     h = nil
     adopt_after_fork
@@ -901,6 +966,15 @@ module Db
   end
 
   def self.prepare(sql)
+    return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. After lift_binds, the
+  # bound/inline SQL may still contain \x01 inside string literals
+  # (bind_literal leaves such values unmarked); those bytes are data,
+  # not marks, and must reach SQLite intact.
+  def self.prepare_plain(sql)
     # A `?`-bearing SQL string is a placeholder query (roundhouse#12):
     # its result depends on the runtime binds set AFTER prepare, which
     # aren't in the SQL key — so it must NOT participate in the
@@ -972,6 +1046,38 @@ module Db
     handle = { stmt: stmt, row: nil, cached: cached, capture: nil, open: open }
     open[stmt] = handle
     handle[:capture] = { rows: [], names: stmt.columns, eof: false, sql: sql } if !qcache.nil? && !parameterized
+    handle
+  end
+
+  # A Relation read with its hash-condition values marked for binding
+  # (`Relation#bind_literal`). `Relation.lift_binds` answers the SQL
+  # with placeholders, which shares the prepared-statement cache by
+  # shape, and the key: the same read with the values written in. The
+  # request result cache is keyed on that, so a bound read and an inline
+  # read of the same rows share an entry, and a partial replay promotes
+  # by re-running it. Kind/value pairs follow from index 2 — "i" an
+  # integer, "s" a string — one per placeholder, in order.
+  def self.prepare_marked(marked)
+    binds = ActiveRecord::Relation.lift_binds(marked)
+    sql = binds[0].to_s
+    key = binds[1].to_s
+    return prepare_plain(key) if binds.length <= 2
+    qcache = Fiber[:rh_qcache]
+    cacheable = !qcache.nil? && !key.include?("?")
+    if cacheable && (hit = qcache[key])
+      return { stmt: nil, row: nil, cached: false, replay: hit, pos: 0, sql: key }
+    end
+    handle = prepare_plain(sql)
+    i = 2
+    while i < binds.length
+      if binds[i] == "i"
+        bind_int(handle, i / 2, binds[i + 1].to_i)
+      else
+        bind_text(handle, i / 2, binds[i + 1])
+      end
+      i += 2
+    end
+    handle[:capture] = { rows: [], names: handle[:stmt].columns, eof: false, sql: key } if cacheable
     handle
   end
 
@@ -1308,6 +1414,14 @@ module Db
     return "NULL" if ids.empty?
 
     ids.map { |i| i.to_i.to_s }.join(", ")
+  end
+
+  # The same `IN (...)` batch over string keys (a uuid primary key): each
+  # key quoted as a literal, never `to_i`'d to its leading digits.
+  def self.escape_string_list(ids)
+    return "NULL" if ids.empty?
+
+    ids.map { |i| escape_string(i.to_s) }.join(", ")
   end
 
   # SQLite stores booleans as 0/1 integers (no native bool type) —

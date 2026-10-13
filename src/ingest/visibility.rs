@@ -24,6 +24,9 @@ pub(super) struct Visibility {
     changed: HashSet<(bool, String)>,
     accessors: HashSet<(bool, String)>,
     defaults: HashMap<usize, MethodVisibility>,
+    /// Walking a concern's `ClassMethods` carrier, whose body is the
+    /// includers' class side rather than a singleton of its own.
+    carrier: bool,
 }
 
 pub(super) fn marker(call: &CallNode<'_>) -> bool {
@@ -214,7 +217,7 @@ impl Visibility {
     fn walk_carrier(&mut self, body: Option<Node<'_>>, file: &str) -> IngestResult<()> {
         // A Concern's ClassMethods module is NOT the concern's own singleton
         // class. Their methods only share a bucket after flattening.
-        let mut carrier = Self::default();
+        let mut carrier = Self { carrier: true, ..Self::default() };
         carrier.walk(body, true, file, None)?;
         self.values.extend(carrier.values);
         Ok(())
@@ -478,6 +481,16 @@ impl Visibility {
                 continue;
             }
             if let Some(sc) = node.as_singleton_class_node() {
+                if self.carrier && class_side && sc.expression().as_self_node().is_some() {
+                    // Not the includers' class side: the carrier module's
+                    // own singleton, whose hooks Ruby runs when
+                    // `ActiveSupport::Concern` extends an includer with it.
+                    return Err(Self::unsupported(
+                        file,
+                        "`class << self` in a concern's `ClassMethods` defines the carrier module's own \
+                         singleton methods (such as an `extended` hook), which are not modeled",
+                    ));
+                }
                 if class_side || sc.expression().as_self_node().is_none() {
                     return Err(Self::unsupported(
                         file,

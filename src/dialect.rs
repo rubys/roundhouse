@@ -267,6 +267,27 @@ pub enum ModelBodyItem {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         leading_blank_line: bool,
     },
+    /// `alias new old` (keyword form), kept unresolved until after
+    /// synthesis. The model walk only sees hand-written `def`s and
+    /// enum-generated methods — columns, associations, `attr_accessor`
+    /// and `attribute` are synthesized later, in
+    /// `lower::model_to_library` — so resolving here would wrongly
+    /// refuse an alias naming any of those. `lower_model_to_library_class`
+    /// resolves it in body order (snapshot semantics: `old` is read as
+    /// defined AT THIS POINT, not as finally defined) and copies the
+    /// resolved `MethodDef` under `new`; an alias it can't resolve stays
+    /// a refusal (gap in survey mode, error in strict mode), same as an
+    /// ordinary unsupported construct.
+    Alias {
+        new: Symbol,
+        old: Symbol,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        leading_comments: Vec<Comment>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        leading_blank_line: bool,
+        #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+        span: Span,
+    },
 }
 
 impl ModelBodyItem {
@@ -277,7 +298,8 @@ impl ModelBodyItem {
         match self {
             Self::Association { span, .. }
             | Self::Validation { span, .. }
-            | Self::Callback { span, .. } => *span,
+            | Self::Callback { span, .. }
+            | Self::Alias { span, .. } => *span,
             Self::Scope { scope, .. } => scope.body.span,
             Self::Method { method, .. } => method.body.span,
             Self::Unknown { expr, .. } => expr.span,
@@ -293,7 +315,8 @@ impl ModelBodyItem {
             | Self::Scope { leading_comments, .. }
             | Self::Callback { leading_comments, .. }
             | Self::Method { leading_comments, .. }
-            | Self::Unknown { leading_comments, .. } => leading_comments,
+            | Self::Unknown { leading_comments, .. }
+            | Self::Alias { leading_comments, .. } => leading_comments,
         }
     }
 
@@ -304,7 +327,8 @@ impl ModelBodyItem {
             | Self::Scope { leading_comments, .. }
             | Self::Callback { leading_comments, .. }
             | Self::Method { leading_comments, .. }
-            | Self::Unknown { leading_comments, .. } => leading_comments,
+            | Self::Unknown { leading_comments, .. }
+            | Self::Alias { leading_comments, .. } => leading_comments,
         }
     }
 
@@ -315,7 +339,8 @@ impl ModelBodyItem {
             | Self::Scope { leading_blank_line, .. }
             | Self::Callback { leading_blank_line, .. }
             | Self::Method { leading_blank_line, .. }
-            | Self::Unknown { leading_blank_line, .. } => *leading_blank_line,
+            | Self::Unknown { leading_blank_line, .. }
+            | Self::Alias { leading_blank_line, .. } => *leading_blank_line,
         }
     }
 
@@ -326,7 +351,8 @@ impl ModelBodyItem {
             | Self::Scope { leading_blank_line, .. }
             | Self::Callback { leading_blank_line, .. }
             | Self::Method { leading_blank_line, .. }
-            | Self::Unknown { leading_blank_line, .. } => *leading_blank_line = v,
+            | Self::Unknown { leading_blank_line, .. }
+            | Self::Alias { leading_blank_line, .. } => *leading_blank_line = v,
         }
     }
 }
@@ -414,6 +440,13 @@ pub enum Association {
         /// blockless common case.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         extension: Vec<MethodDef>,
+        /// `primary_key: :source_id` — the OWNER column the foreign key
+        /// matches (Rails' `join_primary_key`). `None` means the owner's
+        /// own key, `id`. Every reader of this association must go
+        /// through [`Association::owner_key`]; falling back to `id`
+        /// silently returns the wrong rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        primary_key: Option<Symbol>,
     },
     HasOne {
         name: Symbol,
@@ -423,6 +456,12 @@ pub enum Association {
         #[serde(default, skip_serializing_if = "is_false")]
         foreign_key_explicit: bool,
         dependent: Dependent,
+        /// `has_one :x, through: :y`. Recorded so consumers that would
+        /// treat the association as a direct query can see it is not;
+        /// the reader is still direct (a pre-existing gap), so anything
+        /// that cannot be right for it must refuse.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        through: Option<Symbol>,
         /// See `HasMany::as_interface`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_interface: Option<Symbol>,
@@ -436,6 +475,13 @@ pub enum Association {
         /// `after_save` that stamps the FK (and `as:` type) then saves.
         #[serde(default, skip_serializing_if = "is_false")]
         autosave: bool,
+        /// `primary_key: :source_id` — the OWNER column the foreign key
+        /// matches (Rails' `join_primary_key`). `None` means the owner's
+        /// own key, `id`. Every reader of this association must go
+        /// through [`Association::owner_key`]; falling back to `id`
+        /// silently returns the wrong rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        primary_key: Option<Symbol>,
     },
     HasAndBelongsToMany {
         name: Symbol,
@@ -452,6 +498,25 @@ impl Association {
             | Association::HasOne { name, .. }
             | Association::HasAndBelongsToMany { name, .. } => name,
         }
+    }
+
+    /// The declared `primary_key:` option, if any. For `has_one` /
+    /// `has_many` it names the OWNER column the foreign key matches;
+    /// for `belongs_to` it names the TARGET column the foreign key
+    /// matches. `None` means `id` (or the table's key) in both cases.
+    pub fn declared_primary_key(&self) -> Option<&Symbol> {
+        match self {
+            Association::BelongsTo { primary_key, .. }
+            | Association::HasMany { primary_key, .. }
+            | Association::HasOne { primary_key, .. } => primary_key.as_ref(),
+            Association::HasAndBelongsToMany { .. } => None,
+        }
+    }
+
+    /// The owner-side column a `has_one` / `has_many` foreign key
+    /// matches: the declared `primary_key:` or `id`.
+    pub fn owner_key(&self) -> Symbol {
+        self.declared_primary_key().cloned().unwrap_or_else(|| Symbol::from("id"))
     }
 }
 
@@ -1003,6 +1068,13 @@ pub enum LibraryClassOrigin {
         members: Vec<Symbol>,
         keyword_init: bool,
     },
+    /// A `Dry::Struct` class lowered into its readers and constructor
+    /// (`ingest::dry_struct`). Carried so a target can tell the coercions
+    /// it generated from the app's own code.
+    DryStruct,
+    /// A `Dry::Initializer` class given its constructor and readers
+    /// (`ingest::dry_initializer`), for the same reason.
+    DryInitializer,
 }
 
 /// A graphql-ruby object type (a class descending from
@@ -1927,6 +1999,25 @@ pub struct TestModule {
     pub includes: Vec<ClassId>,
 }
 
+impl TestModule {
+    /// Whether an instance call of `method` on this test class reaches
+    /// a `def` of its own or of a test class it inherits from (among
+    /// `modules`), before the framework's method of that name. A `def
+    /// self.<method>` is not one: the call is sent to the test instance.
+    pub fn defines_instance_method(&self, modules: &[TestModule], method: &str) -> bool {
+        let mut current = Some(self);
+        for _ in 0..32 {
+            let Some(tm) = current else { break };
+            if tm.helpers.iter().any(|helper| helper.name.as_str() == method && helper.receiver == MethodReceiver::Instance) {
+                return true;
+            }
+            current = tm.parent.as_ref()
+                .and_then(|parent| modules.iter().find(|other| other.name == *parent && other.name != tm.name));
+        }
+        false
+    }
+}
+
 /// A single `test "name" do ... end` block. `name` is the literal
 /// string passed to the `test` macro; `body` is the block body.
 /// Emission snake-cases `name` for the target's function-name form
@@ -2063,10 +2154,24 @@ pub fn enum_reads_label(model: &Model, column: &Symbol) -> bool {
 }
 
 // Not every string mapping: one whose labels are its values (`%w[…].index_by(&:itself)`) reads the column as it is.
+// One `nil` value is the label of a NULL column (`unknown: nil`): Rails' `EnumType#deserialize` is `mapping.key(value)`.
 pub fn enum_mapping_reads_label(m: &[(String, crate::expr::Literal)]) -> bool {
     use crate::expr::Literal;
-    !m.is_empty()
+    let nils = m.iter().filter(|(_, v)| matches!(v, Literal::Nil)).count();
+    let m: Vec<&(String, Literal)> = m.iter().filter(|(_, v)| !matches!(v, Literal::Nil)).collect();
+    // A mapping of the `nil` entry alone (`{ unknown: nil }`) reads its label too:
+    // NULL is `"unknown"`, and a stored value no label names reads as nil.
+    if nils == 1 && m.is_empty() {
+        return true;
+    }
+    nils <= 1
+        && !m.is_empty()
         && (m.iter().all(|(_, v)| matches!(v, Literal::Int { .. }))
             || (m.iter().all(|(_, v)| matches!(v, Literal::Str { .. }))
-                && m.iter().any(|(l, v)| !matches!(v, Literal::Str { value } if value == l))))
+                && (nils == 1 || m.iter().any(|(l, v)| !matches!(v, Literal::Str { value } if value == l)))))
+}
+
+/// The label an enum mapping gives a NULL column (`unknown: nil`), if any.
+pub fn enum_nil_label(m: &[(String, crate::expr::Literal)]) -> Option<&str> {
+    m.iter().find(|(_, v)| matches!(v, crate::expr::Literal::Nil)).map(|(l, _)| l.as_str())
 }

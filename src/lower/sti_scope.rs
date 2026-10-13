@@ -376,7 +376,18 @@ fn no_arg_send(recv: Expr, method: &str) -> Expr {
 /// this one.
 pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
     let mut out = HashMap::new();
-    let model_named = |id: &ClassId| app.models.iter().find(|m| &m.name == id);
+    // Name -> the FIRST model / library class of that name, the same
+    // element the linear `find`s this replaced answered. Indexed once:
+    // a scan per parent hop is |classes|^2 on a large app.
+    let mut models_by_name: HashMap<&ClassId, &crate::dialect::Model> = HashMap::new();
+    for m in &app.models {
+        models_by_name.entry(&m.name).or_insert(m);
+    }
+    let mut lc_parent: HashMap<&ClassId, &Option<ClassId>> = HashMap::new();
+    for other in &app.library_classes {
+        lc_parent.entry(&other.name).or_insert(&other.parent);
+    }
+    let model_named = |id: &ClassId| models_by_name.get(id).copied();
     for lc in &app.library_classes {
         let mut cursor = lc.parent.clone();
         let mut hops = 0;
@@ -397,11 +408,7 @@ pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
                 }
                 break;
             }
-            cursor = app
-                .library_classes
-                .iter()
-                .find(|other| other.name == parent)
-                .and_then(|other| other.parent.clone());
+            cursor = lc_parent.get(&parent).and_then(|p| (*p).clone());
             hops += 1;
         }
     }

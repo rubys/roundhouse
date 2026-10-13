@@ -43,11 +43,12 @@ const BASE: &str = "ActiveSupport::CurrentAttributes";
 pub fn lower_current_attributes(app: &mut crate::App) {
     let mut generated: Vec<(usize, Vec<MethodDef>)> = Vec::new();
     let mut lowered: Vec<ClassId> = Vec::new();
+    let mut signatures: Vec<(ClassId, Symbol, crate::ty::Ty)> = Vec::new();
     for (i, lc) in app.library_classes.iter_mut().enumerate() {
         if lc.parent.as_ref().map(|p| p.0.as_str()) != Some(BASE) {
             continue;
         }
-        let attrs = take_attribute_decls(lc);
+        let (attrs, declared) = take_attribute_decls(lc);
         let delegates = take_delegate_decls(lc);
         rewrite_super_writers(lc, &attrs);
         let src = synthesized_source(lc, &attrs, &delegates);
@@ -60,7 +61,11 @@ pub fn lower_current_attributes(app: &mut crate::App) {
         });
         let methods = match parsed {
             Ok(classes) if diags.is_empty() => {
-                classes.into_iter().flat_map(|c| c.methods).collect()
+                let mut methods: Vec<MethodDef> = classes.into_iter().flat_map(|c| c.methods).collect();
+                for (name, signature) in declare_attribute_types(&mut methods, &declared) {
+                    signatures.push((lc.name.clone(), name, signature));
+                }
+                methods
             }
             Ok(_) => {
                 super::survey::record_synthesis_failure(
@@ -85,24 +90,78 @@ pub fn lower_current_attributes(app: &mut crate::App) {
     for (i, methods) in generated {
         app.library_classes[i].methods.extend(methods);
     }
+    // Declared like an inline signature, so the analysis reads the
+    // written type in the class's lexical scope (`Context::…`
+    // inside a namespaced `Current`).
+    for (class, name, signature) in signatures {
+        app.rbs_signatures.entry(class).or_default().entry(name).or_insert(signature);
+    }
     app.current_attribute_classes = lowered;
 }
 
 /// `attribute :session, :user, :request` — consumed, not replayed.
-fn take_attribute_decls(lc: &mut LibraryClass) -> Vec<Symbol> {
+/// An attribute may carry its type in a trailing RBS comment
+/// (`attribute :tenant #: Account::Context::Impl`),
+/// which ingest reads as a cast around the call: that type is returned
+/// with each name the call lists. Without unwrapping it the declaration was not taken,
+/// the class got no accessor, and `Current.tenant` had no method.
+fn take_attribute_decls(lc: &mut LibraryClass) -> (Vec<Symbol>, Vec<(Symbol, crate::ty::Ty)>) {
     let mut out = Vec::new();
+    let mut declared = Vec::new();
     lc.unknown_calls.retain(|call| {
+        let (call, declared_ty) = match &*call.node {
+            ExprNode::Cast { value, target_ty } => (value, Some(target_ty)),
+            _ => (call, None),
+        };
         let ExprNode::Send { recv: None, method, args, .. } = &*call.node else { return true };
         if method.as_str() != "attribute" {
             return true;
         }
-        for a in args {
-            if let ExprNode::Lit { value: Literal::Sym { value } } = &*a.node {
-                out.push(value.clone());
-            }
+        let names: Vec<Symbol> = args
+            .iter()
+            .filter_map(|a| match &*a.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+                _ => None,
+            })
+            .collect();
+        if let Some(ty) = declared_ty {
+            declared.extend(names.iter().map(|name| (name.clone(), ty.clone())));
         }
+        out.extend(names);
         false
     });
+    (out, declared)
+}
+
+/// The synthesized reader answers, and the writer takes, an
+/// attribute's declared type, nilable: every attribute reads nil until
+/// the request sets it (and after `reset`), and callers ask exactly that
+/// (`create_tenant unless Current.tenant`). Read as written,
+/// the presence test would fold to true (see current_attributes_typing).
+/// Returns each accessor's signature.
+fn declare_attribute_types(methods: &mut [MethodDef], declared: &[(Symbol, crate::ty::Ty)]) -> Vec<(Symbol, crate::ty::Ty)> {
+    use crate::ty::{Param, ParamKind, Ty};
+    let mut out = Vec::new();
+    for (name, written) in declared {
+        let ty = &match written {
+            Ty::Nil => Ty::Nil,
+            Ty::Union { variants } if variants.contains(&Ty::Nil) => written.clone(),
+            _ => Ty::Union { variants: vec![written.clone(), Ty::Nil] },
+        };
+        let writer = format!("{}=", name.as_str());
+        for method in methods.iter_mut().filter(|m| m.receiver == MethodReceiver::Instance) {
+            let params = if method.name == *name {
+                vec![]
+            } else if method.name.as_str() == writer {
+                vec![Param { name: Symbol::from("value"), ty: ty.clone(), kind: ParamKind::Required }]
+            } else {
+                continue;
+            };
+            let signature = Ty::Fn { params, block: None, ret: Box::new(ty.clone()), effects: method.effects.clone() };
+            method.signature = Some(signature.clone());
+            out.push((method.name.clone(), signature));
+        }
+    }
     out
 }
 

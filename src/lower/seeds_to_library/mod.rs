@@ -98,13 +98,16 @@ pub fn rewrite_assoc_create_with_models_in_place(
 }
 
 fn assoc_create_rewrite(e: &Expr, models: &[crate::dialect::Model]) -> Option<Expr> {
-    let declared_target = |parent: &str, assoc: &str| -> Option<String> {
+    // (target class, declared foreign key, owner column it matches).
+    // The key and column are the declaration's own: a `foreign_key:` or
+    // `primary_key:` is not derivable from the owner's name and `id`.
+    let declared_target = |parent: &str, assoc: &str| -> Option<(String, Symbol, Symbol)> {
         let model = models.iter().find(|m| m.name.0.as_str() == parent)?;
         model.associations().find_map(|a| match a {
-            crate::dialect::Association::HasMany { name, target, .. }
+            crate::dialect::Association::HasMany { name, target, foreign_key, .. }
                 if name.as_str() == assoc =>
             {
-                Some(target.0.as_str().to_string())
+                Some((target.0.as_str().to_string(), foreign_key.clone(), a.owner_key()))
             }
             _ => None,
         })
@@ -148,16 +151,25 @@ fn assoc_create_rewrite(e: &Expr, models: &[crate::dialect::Model]) -> Option<Ex
         Some(Ty::Class { id, .. }) => id.0.as_str().to_string(),
         _ => return None,
     };
-    let assoc_class = declared_target(&parent_class, assoc_method.as_str())
-        .unwrap_or_else(|| crate::naming::singularize_camelize(assoc_method.as_str()));
-    let fk = format!("{}_id", crate::naming::snake_case(&parent_class));
+    let declared = declared_target(&parent_class, assoc_method.as_str());
+    let default_fk = format!("{}_id", crate::naming::snake_case(&parent_class));
+    // An association declaring `primary_key:` matches the owner's
+    // column, not `id`; its foreign key is the declared one.
+    let (assoc_class, fk, owner_key) = match declared {
+        Some((target, fk, owner_key)) => (target, fk.to_string(), owner_key),
+        None => (
+            crate::naming::singularize_camelize(assoc_method.as_str()),
+            default_fk,
+            Symbol::from("id"),
+        ),
+    };
 
-    // Build the FK-id expr: `<parent_expr>.id`.
+    // Build the FK-id expr: `<parent_expr>.<owner key>` (`id` by default).
     let parent_id = Expr::new(
         parent_expr.span,
         ExprNode::Send {
             recv: Some(parent_expr.clone()),
-            method: Symbol::from("id"),
+            method: owner_key,
             args: vec![],
             block: None,
             parenthesized: false,

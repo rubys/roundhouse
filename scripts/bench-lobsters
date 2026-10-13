@@ -38,6 +38,11 @@
 #                   cell would only measure a knob nobody ships. The escape
 #                   hatch (SPINEL_GC_MINOR=0) stays a spinel-side debugging
 #                   tool, not a published row.
+#                   The futamura lane's tree serves the GET actions the
+#                   analysis clears from the lowered app (whole-route
+#                   replacement), which needs Ruby 4.1 with RUBY_BOX=1:
+#                   set FUTAMURA_RUBY to that Ruby's bin directory. Unset,
+#                   the lane runs with whole-route off on the PATH Ruby.
 #                   Rails lanes are skipped (loudly) when the checkout's
 #                   bundle isn't installable; the JVM lanes when jruby
 #                   isn't on PATH. JIT is pinned per lane via RUBYOPT —
@@ -495,8 +500,22 @@ if (( ${#LANES[@]} > 0 )); then
                 FT_ARGS=(--src "$FT_TREE" --warmup 15 --min-iters "$TIME_ITERS" --min-time 10
                          --seq-out "$LDIR/sequence.json" --json "$LDIR/rails.json"
                          --dump "$LDIR/bodies" --defer "$GAPS_JSON")
-                printf '$ RUBYOPT=--yjit ruby scripts/lobsters-rails-replay %s\n\n' "${FT_ARGS[*]}" > "$LDIR/run.log"
-                if RUBYOPT=--yjit ruby "$REPO_ROOT/scripts/lobsters-rails-replay" \
+                # Whole-route replacement (vendor/futamura/bridge.rb) needs
+                # Ruby 4.1's Ruby::Box, started with RUBY_BOX=1. FUTAMURA_RUBY
+                # names that Ruby's bin directory; without it the tree runs
+                # with whole-route off, on the PATH Ruby, and the log says so.
+                # The summary records the Ruby it ran on either way.
+                FT_ENV=(RUBYOPT=--yjit)
+                FT_PATH="$PATH"
+                if [[ -n "${FUTAMURA_RUBY:-}" ]]; then
+                    FT_ENV+=(RUBY_BOX=1 FUTAMURA_STATS=1)
+                    FT_PATH="$FUTAMURA_RUBY:$PATH"
+                else
+                    FT_ENV+=(FUTAMURA_WHOLE_ROUTE=off)
+                    echo "futamura lane: FUTAMURA_RUBY unset, so whole-route replacement is OFF (needs Ruby 4.1 + RUBY_BOX=1)" >> "$LDIR/emit.log"
+                fi
+                printf '$ %s ruby scripts/lobsters-rails-replay %s\n\n' "${FT_ENV[*]}" "${FT_ARGS[*]}" > "$LDIR/run.log"
+                if env PATH="$FT_PATH" "${FT_ENV[@]}" ruby "$REPO_ROOT/scripts/lobsters-rails-replay" \
                         "${FT_ARGS[@]}" >>"$LDIR/run.log" 2>&1; then
                     ok "lane $LANE done"
                     lane_status "$LANE" ok "" ""

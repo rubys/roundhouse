@@ -491,6 +491,54 @@ module ActionCable
       def after_unsubscribe
         nil
       end
+
+      # Rails' `Channel::Base` public instance methods (actioncable 8.1,
+      # less Object's). An inherited method of one of these names is not
+      # an action. The same list is `CABLE_BASE_PUBLIC_METHODS` in
+      # `src/project.rs`, which writes the spinel lane's dispatch - the
+      # two lanes must agree on what a client can call.
+      RAILS_BASE_PUBLIC_METHODS = %w[
+        __callbacks _run_subscribe_callbacks _run_subscribe_callbacks!
+        _run_unsubscribe_callbacks _run_unsubscribe_callbacks! _subscribe_callbacks
+        _unsubscribe_callbacks broadcast_to broadcasting_for channel_name connection
+        handler_for_rescue identifier logger params perform_action periodic_timers=
+        pubsub rescue_handlers rescue_handlers= rescue_handlers? rescue_with_handler
+        run_callbacks stop_all_streams stop_stream_for stop_stream_from stream_for
+        stream_from stream_or_reject_for subscribe_to_channel unsubscribe_from_channel
+        unsubscribed?
+      ].freeze
+
+      # Written into every channel by `ingest::channel_callbacks`; class
+      # machinery in Rails, never an action (`CABLE_SYNTHESIZED_METHODS`).
+      SYNTHESIZED_METHODS = %w[after_subscribe after_unsubscribe channel_name].freeze
+
+      # Rails' `action_methods`: the channel's public methods with its
+      # ancestors' and mixins', less this base's (and Rails' base's),
+      # plus the ones the class defines itself.
+      def self.action_methods
+        @action_methods ||= begin
+          inherited = public_instance_methods(true) - ActionCable::Channel::Base.public_instance_methods(true)
+          names = (inherited.map(&:to_s) - RAILS_BASE_PUBLIC_METHODS) + public_instance_methods(false).map(&:to_s)
+          (names.uniq - SYNTHESIZED_METHODS).freeze
+        end
+      end
+
+      # Rails' `perform_action`: the client's `perform("start", {...})`,
+      # with Rails' own calling rule - a method of arity exactly 1 gets
+      # `data` (its `"action"` key still in it), anything else is called
+      # with no arguments. A rejected subscription and an action the
+      # channel does not answer run nothing and are logged; a raise
+      # propagates to `Cable::Dispatch.perform`, which reports it.
+      def perform_action(data)
+        name = data["action"].to_s
+        action = name.empty? ? "receive" : name
+        if !@rejected && self.class.action_methods.include?(action)
+          method(action).arity == 1 ? public_send(action, data) : public_send(action)
+        else
+          warn "[cable] Unable to process #{self.class}##{action}"
+        end
+        nil
+      end
     end
 
     # THE CHANNEL A NAME RESOLVES TO — the spinel sibling's generated

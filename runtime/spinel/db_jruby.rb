@@ -431,6 +431,14 @@ module Db
   # Placeholder queries reuse one cached statement across bound values;
   # STMT_CACHE_CAP bounds growth for other SQL shapes.
   def self.prepare(sql)
+    return prepare_marked(sql) if sql.include?("\x01")
+    prepare_plain(sql)
+  end
+
+  # Prepare without re-entering prepare_marked. Post-lift SQL may still
+  # contain \x01 inside string literals (unmarked bind_literal values);
+  # those bytes are data and must not be stripped or re-dispatched.
+  def self.prepare_plain(sql)
     # A `?`-bearing SQL string is a placeholder query (roundhouse#12):
     # its result depends on binds set after prepare, which are not in
     # the key, so it never joins the result-replay cache.
@@ -466,6 +474,38 @@ module Db
     st.open[pstmt] = st
     st.sql = sql
     st.capture = { rows: [], names: nil, eof: false } if !qcache.nil? && !parameterized
+    st
+  end
+
+  # A Relation read with its hash-condition values marked for binding;
+  # see db_cruby.rb's `prepare_marked`. `stmt.sql` stays the placeholder
+  # SQL (the statement cache's key); the capture carries the result-cache
+  # key, the read with its values written in, which `finalize` publishes
+  # under and a promoting replay re-runs.
+  def self.prepare_marked(marked)
+    binds = ActiveRecord::Relation.lift_binds(marked)
+    sql = binds[0].to_s
+    key = binds[1].to_s
+    return prepare_plain(key) if binds.length <= 2
+    qcache = Fiber[:rh_qcache]
+    cacheable = !qcache.nil? && !key.include?("?")
+    if cacheable && (hit = qcache[key])
+      st = Stmt.new(nil, false)
+      st.sql = key
+      st.replay = hit
+      return st
+    end
+    st = prepare_plain(sql)
+    i = 2
+    while i < binds.length
+      if binds[i] == "i"
+        bind_int(st, i / 2, binds[i + 1].to_i)
+      else
+        bind_text(st, i / 2, binds[i + 1])
+      end
+      i += 2
+    end
+    st.capture = { rows: [], names: nil, eof: false, key: key } if cacheable
     st
   end
 
@@ -678,8 +718,9 @@ module Db
       # consumer would find an empty, eof-less prefix and promote, which
       # is correct but pointless — leave it out.
       qcache = Fiber[:rh_qcache]
-      if !c[:names].nil? && !qcache.nil? && !qcache.key?(stmt.sql)
-        qcache[stmt.sql] = c
+      key = c[:key] || stmt.sql
+      if !c[:names].nil? && !qcache.nil? && !qcache.key?(key)
+        qcache[key] = c
       end
     end
     release_statement(stmt)
@@ -905,6 +946,14 @@ module Db
     return "NULL" if ids.empty?
 
     ids.map { |i| i.to_i.to_s }.join(", ")
+  end
+
+  # The same `IN (...)` batch over string keys (a uuid primary key): each
+  # key quoted as a literal, never `to_i`'d to its leading digits.
+  def self.escape_string_list(ids)
+    return "NULL" if ids.empty?
+
+    ids.map { |i| escape_string(i.to_s) }.join(", ")
   end
 
   def self.escape_bool(b)

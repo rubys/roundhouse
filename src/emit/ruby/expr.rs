@@ -11,7 +11,7 @@ use crate::ty::Ty;
 
 use super::shared::indent_lines;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 thread_local! {
     /// True while emitting the body of a CORE-CLASS REOPEN (`class
@@ -21,6 +21,56 @@ thread_local! {
     /// see the comment there. Off everywhere else, so ordinary app and
     /// library bodies keep reading the way they always have.
     static IN_CORE_CLASS_REOPEN: Cell<bool> = const { Cell::new(false) };
+    /// Direct, locked unknown-gem namespaces admitted by the Ruby project
+    /// emitter. Other targets retain their constant refusal.
+    static EXTERNAL_GEM_NAMESPACES: RefCell<std::collections::BTreeSet<String>> = const {
+        RefCell::new(std::collections::BTreeSet::new())
+    };
+    /// `gems::statically_resolved_external_includes` of the app being
+    /// emitted, computed once with the namespaces above: it scans every
+    /// class, and asked per class it was most of Mastodon's emit.
+    static EXTERNAL_INCLUDES: RefCell<std::collections::BTreeMap<String, Vec<String>>> = const {
+        RefCell::new(std::collections::BTreeMap::new())
+    };
+    /// The emitted path (relative to the output root) of the file being
+    /// rendered. A `SOURCE_FILE_PATH` literal anchors on it; `None`
+    /// outside a per-file emit, where the literal is written as is.
+    static EMITTED_FILE: RefCell<Option<std::path::PathBuf>> =
+        const { RefCell::new(None) };
+}
+
+/// Run `f` while emitting the file that lands at `out_path` (relative
+/// to the output root), restoring the previous setting after.
+pub(super) fn with_emitted_file<R>(out_path: &std::path::Path, f: impl FnOnce() -> R) -> R {
+    let prev = EMITTED_FILE.with(|c| c.replace(Some(out_path.to_path_buf())));
+    let r = f();
+    EMITTED_FILE.with(|c| *c.borrow_mut() = prev);
+    r
+}
+
+/// `__FILE__` / `__dir__` from a source file the Ruby family emits
+/// elsewhere. Ruby answers the loaded file's absolute path, so this is
+/// the source's app-relative path resolved from the emitted file's own
+/// directory: `app/models/loader.rb` carrying
+/// `lib/x/loader.rb` writes
+/// `File.expand_path("../../lib/x/loader.rb", __dir__)`.
+/// The app root maps to the output root, so walks up from `__FILE__`
+/// land on the files carried there, whatever the process's cwd.
+fn source_file_path(e: &Expr) -> Option<String> {
+    if e.decisions & crate::expr::SOURCE_FILE_PATH == 0 {
+        return None;
+    }
+    let ExprNode::Lit { value: Literal::Str { value } } = &*e.node else { return None };
+    if std::path::Path::new(value).is_absolute() {
+        return None;
+    }
+    let out = EMITTED_FILE.with(|c| c.borrow().clone())?;
+    let ups = out.parent().map_or(0, |d| d.components().count());
+    let rel = format!("{}{}", "../".repeat(ups), value);
+    Some(format!(
+        "File.expand_path({}, __dir__)",
+        emit_node(&ExprNode::Lit { value: Literal::Str { value: rel } })
+    ))
 }
 
 /// Run `f` while emitting a core-class reopen's body (or not). The
@@ -34,9 +84,38 @@ pub(super) fn with_core_class_reopen<R>(yes: bool, f: impl FnOnce() -> R) -> R {
     r
 }
 
+pub(super) fn with_external_gem_namespaces<R>(
+    namespaces: &std::collections::BTreeSet<String>,
+    includes: std::collections::BTreeMap<String, Vec<String>>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let previous = EXTERNAL_GEM_NAMESPACES
+        .with(|current| std::mem::replace(&mut *current.borrow_mut(), namespaces.clone()));
+    let previous_includes = EXTERNAL_INCLUDES.with(|current| current.replace(includes));
+    let result = f();
+    EXTERNAL_GEM_NAMESPACES.with(|current| {
+        *current.borrow_mut() = previous;
+    });
+    EXTERNAL_INCLUDES.with(|current| current.replace(previous_includes));
+    result
+}
+
+/// The literal requires that carry an external include (`detail` is its
+/// "X includes unresolved Y" key), when the emit admitted them.
+pub(super) fn external_include_features(detail: &str) -> Vec<String> {
+    EXTERNAL_INCLUDES.with(|includes| includes.borrow().get(detail).cloned().unwrap_or_default())
+}
+
+pub(crate) fn external_gem_namespace_is_enabled(namespace: &str) -> bool {
+    EXTERNAL_GEM_NAMESPACES.with(|namespaces| namespaces.borrow().contains(namespace))
+}
+
 /// Emit Ruby-family syntax while retaining diagnostics and typed primitive
 /// semantics, including the no-block form of String#bytes with literal &nil.
 pub fn emit_expr(e: &Expr) -> String {
+    if is_locked_external_gem_constant(e) {
+        return emit_node(&e.node);
+    }
     // A site a lowering replaced with a stub — `lower::object_extend`,
     // the arel `ColumnSpec::Named` placeholder — renders as the raise
     // the report describes, so the program fails THERE with the reason
@@ -58,10 +137,31 @@ pub fn emit_expr(e: &Expr) -> String {
             return emit_send_base(recv.as_ref(), method, args, *parenthesized);
         }
     }
+    if let Some(path) = source_file_path(e) {
+        return path;
+    }
     if is_mutable_string_literal(e) {
         return format!("+{}", emit_node(&e.node));
     }
     emit_node(&e.node)
+}
+
+fn is_locked_external_gem_constant(expr: &Expr) -> bool {
+    let Some(DiagnosticKind::Unsupported {
+        construct, detail, ..
+    }) = &expr.diagnostic
+    else {
+        return false;
+    };
+    if construct.as_str() != "constant" {
+        return false;
+    }
+    EXTERNAL_GEM_NAMESPACES.with(|namespaces| {
+        namespaces
+            .borrow()
+            .iter()
+            .any(|root| crate::gems::detail_names_external_namespace(detail, root))
+    })
 }
 
 /// A string literal ingested from `+"literal"`. Written back with its
@@ -250,8 +350,16 @@ fn emit_node(n: &ExprNode) -> String {
         }
         ExprNode::Seq { exprs } => {
             let mut out = String::new();
+            let last = exprs.len().saturating_sub(1);
+            let mut first = true;
             for (i, e) in exprs.iter().enumerate() {
-                if i > 0 {
+                // A self binding whose value nothing reads only informs
+                // the typer: a `#: self as T` comment never runs, and a
+                // `T.bind` keeps just its value, `self`, as `T.cast` does.
+                if i < last && crate::expr::is_self_binding(e) {
+                    continue;
+                }
+                if !first {
                     out.push('\n');
                     if e.leading_blank_line {
                         out.push('\n');
@@ -264,6 +372,7 @@ fn emit_node(n: &ExprNode) -> String {
                         out.push('\n');
                     }
                 }
+                first = false;
                 out.push_str(&emit_expr(e));
             }
             out
@@ -1016,8 +1125,9 @@ fn recv_needs_parens(r: &Expr) -> bool {
 /// collapse `:sym` to a string and need no help. A genuinely symbol-keyed
 /// hash (`Hash[Symbol, _]`, e.g. a keyword-arg hash like
 /// `StoryRepository#@params`) has a different type and is left alone, as
-/// is any `untyped`/unknown receiver — we coerce on positive evidence
-/// only.
+/// is any `untyped`/unknown receiver. A request's params value is
+/// String-keyed at run time whatever the key's static type, so it also
+/// matches (`is_indifferent_params`) and its keys are coerced in full.
 ///
 /// This is the type-directed emit hook (the `[]` analog of the shared
 /// `classify_add`/`_sub`/`_cmp` operator dispatch) where a future
@@ -1032,14 +1142,29 @@ fn is_string_keyed_hash(recv: &Expr) -> bool {
     }
 }
 
+/// Is `recv` a request's params, the indifferent-access store? Either a
+/// params value (`ParamValue`) or the lowered controller's own `@params`,
+/// which is typed as a plain `Hash[String, untyped]` and is told apart
+/// from other hashes by being that ivar.
+fn is_indifferent_params(recv: &Expr) -> bool {
+    match &*recv.node {
+        ExprNode::Ivar { name } if name.as_str() == "params" => true,
+        _ => matches!(recv.ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == crate::analyze::PARAM_VALUE),
+    }
+}
+
 /// Coerce a key indexing a string-keyed hash: a symbol literal `:id` →
-/// `"id"`, an already-string key unchanged, and any dynamic key wrapped
-/// with `.to_s`. Safe on a `Hash[String, _]` — the key is a string, so
-/// `.to_s` is a no-op on a string and repairs a symbol.
-fn coerce_str_key(key: &Expr) -> String {
+/// `"id"`, an already-string key unchanged, and a dynamic key wrapped
+/// with `.to_s`. On params (`indifferent`) every dynamic key is wrapped:
+/// the key may hold a Symbol the static type does not show, and the store
+/// reads it by its String. On a plain `Hash[String, _]` only a key typed
+/// Symbol is, since the signature may sit over a hash that natively
+/// misses a Symbol key and an untyped key is then emitted as written.
+fn coerce_str_key(key: &Expr, indifferent: bool) -> String {
     match &*key.node {
         ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
         ExprNode::Lit { value: Literal::Str { .. } } => emit_expr(key),
+        _ if !indifferent && !matches!(key.ty, Some(Ty::Sym)) => emit_expr(key),
         _ => {
             let k = emit_expr(key);
             if recv_needs_parens(key) { format!("({k}).to_s") } else { format!("{k}.to_s") }
@@ -1066,11 +1191,12 @@ fn coerce_str_sym_key(key: &Expr) -> String {
 /// `h[x]` → `h[x.to_s]` case a literal-only pre-pass could not).
 fn emit_str_hash_access(recv: &Expr, method: &str, args: &[Expr]) -> Option<String> {
     let recv_s = emit_expr(recv);
+    let indifferent = is_indifferent_params(recv);
     match method {
-        "[]" if args.len() == 1 => Some(format!("{recv_s}[{}]", coerce_str_key(&args[0]))),
+        "[]" if args.len() == 1 => Some(format!("{recv_s}[{}]", coerce_str_key(&args[0], indifferent))),
         "[]=" if args.len() == 2 => Some(format!(
             "{recv_s}[{}] = {}",
-            coerce_str_key(&args[0]),
+            coerce_str_key(&args[0], indifferent),
             emit_arg(&args[1])
         )),
         "fetch" | "key?" | "has_key?" | "include?" | "delete" if !args.is_empty() => {
@@ -1531,7 +1657,8 @@ pub(crate) fn ruby_sym_literal(value: &str) -> String {
 }
 
 /// A call or `super` argument. A bare `**` is already a keyword splat;
-/// wrapping it again would print `****`.
+/// wrapping it again would print `****`. A splat the shared lowering
+/// made positional is written back as one.
 fn emit_keyword_forward_arg(arg: &Expr) -> String {
     match &*arg.node {
         ExprNode::KeywordSplat { .. } => emit_node(&arg.node),
@@ -1542,6 +1669,9 @@ fn emit_keyword_forward_arg(arg: &Expr) -> String {
             } else {
                 format!("{pairs}, **")
             }
+        }
+        _ if arg.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0 => {
+            format!("**{}", paren_multiline(emit_arg(arg)))
         }
         _ => emit_arg(arg),
     }
@@ -1587,7 +1717,7 @@ fn emit_lvalue(lv: &LValue) -> String {
             // Index-write target (`h[:x] = …`): coerce the key when writing
             // to a string-keyed hash, same as the read path above.
             let key = if is_string_keyed_hash(recv) {
-                coerce_str_key(index)
+                coerce_str_key(index, is_indifferent_params(recv))
             } else {
                 emit_expr(index)
             };

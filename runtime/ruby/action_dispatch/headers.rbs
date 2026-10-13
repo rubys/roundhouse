@@ -11,6 +11,8 @@ module ActionDispatch
       def key?: (String | Symbol key) -> bool
       def include?: (String | Symbol key) -> bool
       def fetch: (String | Symbol key, *untyped defaults) -> untyped
+      def each: () ?{ (String, untyped) -> void } -> untyped
+      def map: () ?{ (String, untyped) -> untyped } -> untyped
       def self.env_name: (String | Symbol key) -> String
     end
   end

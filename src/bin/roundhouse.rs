@@ -343,6 +343,14 @@ fn run_transpile(
     // See `emit::roda`. Futamura needs the types but none of the
     // lowerings: those rewrite into the runtime's vocabulary, and its
     // specializations call Rails (docs/pipeline/specialization.md).
+    // Futamura's whole-route replacement needs the `ruby` target's
+    // lowering of the same app, from the ingest shape; built before the
+    // analysis below mutates `app`.
+    let whole_route = if target == BuildTarget::Futamura {
+        Some(project::futamura_whole_route(&app, input)?)
+    } else {
+        None
+    };
     let lower_diags = if target == BuildTarget::Roda {
         Vec::new()
     } else if target == BuildTarget::Futamura {
@@ -368,6 +376,28 @@ fn run_transpile(
         _ => diagnose(&app),
     };
     analyze_diags.extend(lower_diags);
+
+    // CRuby can carry an external include only when the lockfile uniquely
+    // identifies its gem and the defining source has a matching literal
+    // top-level require. Keep check's source diagnostic and all strict-target
+    // refusals unchanged.
+    if target == BuildTarget::Ruby {
+        let supported_includes = roundhouse::gems::statically_resolved_external_includes(&app);
+        let external_namespaces = roundhouse::gems::locked_external_gem_namespaces(&app);
+        analyze_diags.retain(|diagnostic| match &diagnostic.kind {
+            roundhouse::diagnostic::DiagnosticKind::Unsupported {
+                construct, detail, ..
+            } if construct.as_str() == "include" => !supported_includes.contains_key(detail),
+            roundhouse::diagnostic::DiagnosticKind::Unsupported {
+                construct, detail, ..
+            } if construct.as_str() == "constant" => !external_namespaces
+                .iter()
+                .any(|namespace| {
+                    roundhouse::gems::detail_names_external_namespace(detail, namespace)
+                }),
+            _ => true,
+        });
+    }
 
     // A residue whose own text says the construct is "unsupported at
     // strict-target emit" has to fail the emit it predicts that for.
@@ -408,7 +438,30 @@ fn run_transpile(
     // single run surfaces the whole inventory instead of dying on the
     // first one.
     let (files_result, mut diags) =
-        roundhouse::emit::diagnostics::scope(|| project::target_files(&app, input, target));
+        roundhouse::emit::diagnostics::scope(|| match &whole_route {
+            Some(wr) => project::futamura_target_files(&app, input, Some(wr)),
+            None => project::target_files(&app, input, target),
+        });
+
+    // Same attribution pass as `analyze_diags` above, run again here:
+    // model-to-library lowering (where an unresolved `alias` is caught,
+    // `lower::model_to_library::resolve_model_aliases`) runs a SECOND
+    // time inside `target_files` itself, to build the actual emitted
+    // method bodies — `analyze_and_lower`'s own lowering pass above
+    // isn't wrapped in `emit::diagnostics::scope`, so a push from
+    // there is silently dropped, and this is the first (and only)
+    // place such a diagnostic is ever collected. Without this second
+    // call, `--survey` (no `--allow-unsupported`) still hard-failed on
+    // an unresolved alias — the Error severity from `diags` alone
+    // gates the exit code below — and it never reached the gap
+    // ledger, which undercounted the app's real gap total.
+    if survey {
+        roundhouse::analyze::attribution::attribute_analysis_gaps(
+            &mut diags,
+            &app,
+            &mut survey_gaps,
+        );
+    }
 
     // Prism syntax errors recorded during ingest join the emit-gap
     // inventory: same `Diagnostic` shape, same print/policy/gate
@@ -433,8 +486,29 @@ fn run_transpile(
     // (gradual_untyped above all) can run to hundreds on a large app,
     // so by default they collapse to a count; --allow-unsupported asks
     // for the full inventory and gets every line.
+    // The initializer ledger is a warning per unconsumed boot statement,
+    // which can run to hundreds on a large app: like the analyze warnings
+    // below it collapses to a count unless `--survey` (which prints the
+    // ledger section) or `--allow-unsupported` asks for the inventory.
+    let list_ledger = survey || allow_unsupported;
+    let is_ledger = |d: &roundhouse::diagnostic::Diagnostic| {
+        matches!(d.kind, roundhouse::diagnostic::DiagnosticKind::UnconsumedInitializer { .. })
+    };
+    let mut ledger_warnings = 0usize;
     for d in &diags {
+        if is_ledger(d) {
+            ledger_warnings += 1;
+            if !list_ledger {
+                continue;
+            }
+        }
         eprintln!("roundhouse: {}", d.render(&app.sources));
+    }
+    if ledger_warnings > 0 && !list_ledger {
+        eprintln!(
+            "roundhouse: {ledger_warnings} unconsumed initializer statement(s) (warnings) — \
+             rerun with --survey to list them"
+        );
     }
     let mut suppressed_warnings = 0usize;
     for d in &analyze_diags {
@@ -451,11 +525,36 @@ fn run_transpile(
         );
     }
 
+    // The initializer ledger section, beside the punch list but NOT part of
+    // its "ingest gap(s)" count: a ledger line is a statement nothing reads,
+    // not a construct ingest failed to parse, and counting it as a gap would
+    // let `attribute_ingest_gaps` downgrade real errors in the same file.
+    if survey && ledger_warnings > 0 {
+        eprintln!();
+        eprint!("{}", roundhouse::ingest::initializer_ledger::render_summary(&diags));
+    }
+
     // The punch list, before the gate: on an app that fails the gate
     // this is the most useful thing in the run, and printing it after
     // the early `return Err` would mean never printing it at all.
     if !survey_gaps.is_empty() {
-        let notes = analyze_diags.iter().filter(|d| d.severity == Severity::Info).count();
+        // `attribute_analysis_gaps` runs twice (once over `analyze_diags`,
+        // once over the emit-phase `diags` — see the call sites above) and
+        // an attributed note can land in EITHER vector, or only in `diags`
+        // when the construct is caught solely during emit (an unresolved
+        // model alias, today's only such case — `resolve_model_aliases`'s
+        // push only ever reaches `diags`' `emit::diagnostics::scope`, never
+        // `analyze_diags`). Counting `analyze_diags` alone could report 0
+        // attributed notes for a run that plainly has some. Count both,
+        // deduped by (span, message) so a construct caught in both passes
+        // for the same source line isn't counted twice.
+        let mut seen = std::collections::HashSet::new();
+        let notes = analyze_diags
+            .iter()
+            .chain(diags.iter())
+            .filter(|d| d.severity == Severity::Info)
+            .filter(|d| seen.insert((d.span, d.message.clone())))
+            .count();
         eprintln!();
         eprint!("{}", roundhouse::ingest::survey::render_report(&survey_gaps));
         eprintln!(

@@ -262,7 +262,11 @@ fn ground_indexed_pluck(expr: &mut Expr) -> bool {
     if crate::analyze::indexed_pluck(method, elem, args).is_none() {
         return false;
     }
-    let var = Symbol::from("__pluck");
+    // Not always `__pluck`: a key local of that name would read the block's element instead.
+    let var = match &*args[0].node {
+        ExprNode::Var { name, .. } if name.as_str() == "__pluck" => Symbol::from("__pluck_element"),
+        _ => Symbol::from("__pluck"),
+    };
     let mut element = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: var.clone() });
     element.ty = Some((**elem).clone());
     let mut value = Expr::new(

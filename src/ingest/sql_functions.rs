@@ -39,6 +39,13 @@ use super::expr::ingest_expr;
 use super::util::constant_id_str;
 
 pub fn extract_sql_functions(source: &[u8], file: &str) -> Vec<SqlFunction> {
+    super::sources::register(file, &String::from_utf8_lossy(source));
+    scan_sql_functions(source, file)
+}
+
+/// The read itself, without registering `file`: the initializer ledger asks
+/// it about a single statement, whose text is not the file's.
+pub(super) fn scan_sql_functions(source: &[u8], file: &str) -> Vec<SqlFunction> {
     struct V<'f> {
         file: &'f str,
         out: Vec<SqlFunction>,
@@ -57,7 +64,6 @@ pub fn extract_sql_functions(source: &[u8], file: &str) -> Vec<SqlFunction> {
         }
     }
 
-    super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let mut v = V { file, out: Vec::new() };
     ruby_prism::Visit::visit(&mut v, &result.node());

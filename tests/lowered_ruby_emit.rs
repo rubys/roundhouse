@@ -145,23 +145,22 @@ fn article_renders_validate_with_inline_checks() {
     // docs/archive/rust-migration-plan.md) — no helper-call into the
     // Validations runtime module. Error messages become string-literal
     // constants; the type-erased `value: untyped` channel is gone.
-    // The Ruby emitter uses postfix-modifier form for single-line
-    // if's, so the assertion matches the natural output shape.
+    // Each message is pushed with the attribute it is on.
     assert!(
-        src.contains(r#"errors << "Title can't be blank" if @title.nil?"#),
+        src.contains("self.errors << \"Title can't be blank\"\n      self.error_attributes << \"title\""),
         "{src}",
     );
     assert!(
-        src.contains(r#"errors << "Body can't be blank" if @body.nil?"#),
+        src.contains("self.errors << \"Body can't be blank\"\n      self.error_attributes << \"body\""),
         "{src}",
     );
     // Length is now also inline (third slice of Phase 2.5(a)).
-    // Expansion: `unless @body.nil?; len = ...; errors << "..." if len < N; end`.
+    // Expansion: `unless @body.nil?; len = ...; if len < N; errors << "..."; …; end; end`.
     // Message matches Rails' full_messages: humanized attribute +
     // "characters" suffix (see model_to_library::validations::humanize).
     assert!(
         src.contains(
-            r#"errors << "Body is too short (minimum is 10 characters)" if len < 10"#
+            r#"errors << "Body is too short (minimum is 10 characters)""#
         ),
         "{src}",
     );
@@ -1759,15 +1758,14 @@ fn lowered_form_partial_form_builder_methods() {
     );
     // `form.text_field :title, class: [...]` → inline `<input
     // type="text" name="article[title]" id="article_title"<value_attr>
-    // class="<simplified>">`. Class-array collapse + html_escape on
-    // the simplified literal land in the StringInterp.
+    // class="<class_names>">`.
     assert!(
         src.contains("name=\\\"article[title]\\\" id=\\\"article_title\\\""),
         "expected inline text_field name/id; got:\n{src}",
     );
     assert!(
-        src.contains("\"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full border-gray-400 focus:outline-blue-600\""),
-        "expected class-array collapsed to base + first hash key; got:\n{src}",
+        src.contains("block shadow-sm rounded-md border px-3 py-2 mt-2 w-full#{if "),
+        "expected the class array to pick its classes per field at render time; got:\n{src}",
     );
     // `form.textarea :body, rows: 4, ...` → inline
     // `<textarea name="article[body]" id="article_body" rows="4"

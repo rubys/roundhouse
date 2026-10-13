@@ -11,6 +11,12 @@
 //! `ivar_unresolved`. The declared type now rides along as an
 //! [`ExprNode::Cast`], which the typer already reads as "this
 //! expression has this type".
+//!
+//! `T.bind(self, Type)` and its RBS inline form, a `#: self as Type`
+//! line, say what `self` is for the rest of the enclosing body. Both
+//! ingest as a statement casting `self`, marked
+//! [`SELF_BINDING`](crate::expr::SELF_BINDING), which the typer reads
+//! as the new type of `self`.
 
 use std::cell::RefCell;
 
@@ -62,7 +68,8 @@ pub(super) fn ascribe(value: Expr, ty: Option<Ty>) -> Expr {
     }
 }
 
-/// The declared type of a `T.let(x, Type)` / `T.cast(x, Type)` call.
+/// The declared type of a `T.let(x, Type)` / `T.cast(x, Type)` /
+/// `T.bind(self, Type)` call.
 pub(super) fn sorbet_declared_type(node: &Node<'_>) -> Option<Ty> {
     let call = node.as_call_node()?;
     let method = call.name();
@@ -72,12 +79,99 @@ pub(super) fn sorbet_declared_type(node: &Node<'_>) -> Option<Ty> {
     if method == "unsafe" {
         return Some(Ty::Untyped);
     }
-    if !matches!(method, "let" | "cast") {
+    if !matches!(method, "let" | "cast" | "bind") {
         return None;
     }
     let args = call.arguments()?.arguments();
     let ty = args.iter().nth(1)?;
     sorbet_type_node(&ty)
+}
+
+/// Mark `expr`, when it is a `Cast` of `self`, as the
+/// [`SELF_BINDING`](crate::expr::SELF_BINDING) a `T.bind(self, Type)` or
+/// `#: self as Type` is; `class_object` when the type is a class object
+/// (`T.class_of(X)`, `singleton(X)`). A `self` left bare (its type
+/// unreadable) binds nothing and is returned as is.
+pub(super) fn bind_self(mut expr: Expr, class_object: bool) -> Expr {
+    if matches!(&*expr.node, ExprNode::Cast { value, .. } if matches!(&*value.node, ExprNode::SelfRef)) {
+        expr.decisions |= crate::expr::SELF_BINDING;
+        if class_object {
+            expr.decisions |= crate::expr::SELF_BINDING_CLASS_OBJECT;
+        }
+    }
+    expr
+}
+
+/// Whether the type a `T.bind(self, Type)` call declares is a class
+/// object, `T.class_of(X)`.
+pub(super) fn sorbet_binds_class_object(node: &Node<'_>) -> bool {
+    node.as_call_node()
+        .and_then(|call| call.arguments()?.arguments().iter().nth(1))
+        .and_then(|ty| ty.as_call_node())
+        .is_some_and(|ty| {
+            ty.name().as_slice() == b"class_of"
+                && ty.receiver().is_some_and(|r| r.as_constant_read_node().is_some_and(|c| c.name().as_slice() == b"T"))
+        })
+}
+
+/// The `#: self as Type` comment directly above the statement starting
+/// at byte `start`, as the self binding it declares, spanning the
+/// comment. RBS inline's spelling of `T.bind(self, Type)`: written on
+/// its own line, it gives `self` that type from the statement below to
+/// the end of the enclosing body. Only blank and comment lines may sit
+/// between the two, and the statement must begin its line. `None` when
+/// there is no such comment or its type is unreadable.
+pub(super) fn leading_self_binding(file: &str, start: usize) -> Option<Expr> {
+    let (at, len, written) = sources::with_text(file, |text| {
+        let before = text.get(..start)?;
+        let mut line_start = before.rfind('\n').map_or(0, |i| i + 1);
+        if !before[line_start..].trim().is_empty() {
+            return None;
+        }
+        while line_start > 0 {
+            let above = &before[..line_start - 1];
+            let above_start = above.rfind('\n').map_or(0, |i| i + 1);
+            let line = &above[above_start..];
+            let comment = line.trim();
+            if let Some(rest) = comment.strip_prefix("#:") {
+                let written = rest.trim().strip_prefix("self ").and_then(|r| r.trim_start().strip_prefix("as "));
+                if let Some(written) = written {
+                    let at = above_start + (line.len() - line.trim_start().len());
+                    return Some((at, comment.len(), written.trim().to_string()));
+                }
+            } else if !comment.is_empty() && !comment.starts_with('#') {
+                return None;
+            }
+            line_start = above_start;
+        }
+        None
+    })??;
+    let span = crate::span::Span {
+        file: sources::file_id(file),
+        start: at as u32,
+        end: (at + len) as u32,
+    };
+    let class_object = written.starts_with("singleton(");
+    let binding = bind_self(ascribe(Expr::new(span, ExprNode::SelfRef), rbs_type(&written)), class_object);
+    crate::expr::is_self_binding(&binding).then_some(binding)
+}
+
+/// Whether the statement list of `len` statements ending at byte `end` is
+/// the body of a modifier (`stmt if cond`, `stmt while cond`): a single
+/// statement followed on its line by the modifier's keyword. Such a body
+/// begins where the statement it belongs to begins, so a comment above
+/// that statement is read there, not again inside it.
+pub(super) fn is_modifier_body(file: &str, len: usize, end: usize) -> bool {
+    len == 1
+        && sources::with_text(file, |text| {
+            let rest = text.get(end..)?.split('\n').next()?.trim_start();
+            Some(["if", "unless", "while", "until"].iter().any(|keyword| {
+                rest.strip_prefix(keyword)
+                    .is_some_and(|after| after.starts_with(|c: char| c.is_whitespace() || c == '(' || c == '!'))
+            }))
+        })
+        .flatten()
+        .unwrap_or(false)
 }
 
 /// What a trailing `#:` comment on a line says about the expression it

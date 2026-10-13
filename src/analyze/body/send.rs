@@ -505,7 +505,13 @@ impl<'a> BodyTyper<'a> {
         // each arm. campfire's `Opengraph::Location.new(url).then { |l|
         // l.read_html }` is the shape: without this the block parameter
         // is unbound and every read through it goes unresolved.
+        // A class that defines its own `then` is not Kernel's: a promise's
+        // `then` yields the fulfilled value, which no signature names, so
+        // its parameters stay unbound.
         if matches!(method.as_str(), "then" | "yield_self" | "tap") {
+            if self.owns_operator(Some(recv_ty), method, class_object_receiver) {
+                return None;
+            }
             return Some(vec![recv_ty.clone()]);
         }
         if method.as_str() == "in_batches" {
@@ -540,6 +546,8 @@ impl<'a> BodyTyper<'a> {
                 | "any?" | "all?" | "none?" | "one?"
                 | "to_h" => Some(vec![(**elem).clone()]),
                 "each_with_index" | "with_index" => Some(vec![(**elem).clone(), Ty::Int]),
+                "each_slice" | "each_cons" => Some(vec![recv_ty.clone()]),
+                "with_object" => Some(vec![(**elem).clone(), Ty::Untyped]),
                 "sort_by!" | "select!" | "reject!" | "keep_if" | "delete_if" => Some(vec![(**elem).clone()]),
                 _ => None,
             },
@@ -1081,8 +1089,18 @@ impl<'a> BodyTyper<'a> {
         // otherwise the gradual answer stands — silence about a method
         // is not a claim that the class lacks it.
         if matches!(method.as_str(), "try" | "try!") {
-            if let (Some(Ty::Class { id, .. }), Some(first)) = (recv_ty, args.first()) {
-                if let ExprNode::Lit { value: crate::expr::Literal::Sym { value: m } } = &*first.node {
+            // A nullable receiver (`@user.try(:username)` with `@user:
+            // User?`) answers the same: `nil.try` is nil, already in the
+            // union below.
+            let recv_ty = recv_ty.map(|t| t.clone().strip_nil());
+            if let (Some(Ty::Class { id, .. }), Some(first)) = (recv_ty.as_ref(), args.first()) {
+                // `try(:m)` and `try("m")` name the same method.
+                let name = match &*first.node {
+                    ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.clone()),
+                    ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Some(Symbol::from(value.as_str())),
+                    _ => None,
+                };
+                if let Some(m) = &name {
                     let mut cur = Some(id.clone());
                     let mut depth = 0;
                     while let Some(cid) = cur {
@@ -1175,7 +1193,14 @@ impl<'a> BodyTyper<'a> {
         // which have no arm for a class the analyzer models only as a
         // name. Blockless (`then` returning an Enumerator) is not a
         // shape any corpus app writes; `Untyped` is the honest answer.
-        if matches!(method.as_str(), "then" | "yield_self") && recv_ty.is_some() {
+        // A class defining its own `then` (a promise's, which yields the
+        // fulfilled value and answers a new promise) is not Kernel's: its
+        // declaration answers, as `block_params_for` leaves the block's
+        // parameters unbound for it.
+        if matches!(method.as_str(), "then" | "yield_self")
+            && recv_ty.is_some()
+            && !self.owns_operator(recv_ty, method, !instance_receiver)
+        {
             return block_ret.cloned().unwrap_or(Ty::Untyped);
         }
         // `Model.transaction { … }` / `ActiveRecord::Base.transaction
@@ -1252,6 +1277,17 @@ impl<'a> BodyTyper<'a> {
             matches!(args.first().and_then(|a| a.ty.as_ref()), Some(Ty::Time));
         match recv_ty {
             None => unknown(),
+            // `with_indifferent_access` on a gradual receiver (a json
+            // column's reader, `extras || {}`): ActiveSupport answers a
+            // String-keyed copy of the Hash whatever it was read from,
+            // and `lower::indifferent_access` lowers the call to that
+            // conversion. Ahead of the gradual absorption below, which
+            // would leave every call chained on it untyped.
+            Some(ty) if method.as_str() == "with_indifferent_access" && args.is_empty()
+                && crate::analyze::indifferent::from_gradual(ty).is_some() =>
+            {
+                crate::analyze::indifferent::from_gradual(ty).unwrap()
+            }
             // RBS-declared gradual receiver. Method dispatch on
             // `Untyped` returns `Untyped` — the gradual choice
             // propagates through the IR. Author-signed opt-out,
@@ -1648,6 +1684,23 @@ impl<'a> BodyTyper<'a> {
                     }
                     return Ty::Class { id: id.clone(), args: args.clone() };
                 }
+                // The built-in containers' own `[]` builds one from its
+                // arguments: `Array[String]` and `Hash[pairs]`. Keys and
+                // values stay Untyped — a fresh `unknown()` Var unions
+                // with Nil on `Hash#[]` and folds `present?` to false
+                // (campfire Opengraph::Metadata#valid_image_content_type).
+                if method.as_str() == "[]" {
+                    match id.0.as_str() {
+                        "Hash" => {
+                            return Ty::Hash {
+                                key: Box::new(Ty::Untyped),
+                                value: Box::new(Ty::Untyped),
+                            };
+                        }
+                        "Array" => return Ty::Array { elem: Box::new(Ty::Untyped) },
+                        _ => {}
+                    }
+                }
                 // Module/Class introspection built-ins — fall through
                 // when no user-defined method shadows them. `name` on
                 // a class returns the class's name as String;
@@ -1964,6 +2017,31 @@ impl<'a> BodyTyper<'a> {
                     {
                         return Ty::Array { elem: other.clone() };
                     }
+                }
+                // `Model.where(..).friendly` (friendly_id): only on a
+                // model lower::friendly_id claimed, whose class side
+                // registers `friendly`. Not a catalog builder: the
+                // runtime answers it for those models alone, so any
+                // other relation keeps the dispatch failure.
+                if method.as_str() == "friendly" {
+                    if let Ty::Class { id, .. } = elem {
+                        if self.classes().get(id).is_some_and(|c| c.class_methods.contains_key(method)) {
+                            return Ty::Array { elem: Box::new(elem.clone()) };
+                        }
+                    }
+                }
+                // `Array#fetch(i)` answers the element or raises
+                // IndexError; a default or a block answers a miss.
+                if method.as_str() == "fetch" {
+                    return match (args, block_ret) {
+                        ([_], None) => elem.clone(),
+                        ([_, default], None) => match &default.ty {
+                            Some(default) if !default.is_open() => union_of(elem.clone(), default.clone()),
+                            _ => Ty::Untyped,
+                        },
+                        ([_], Some(missed)) if !missed.is_open() => union_of(elem.clone(), missed.clone()),
+                        _ => Ty::Untyped,
+                    };
                 }
                 if block_ret.is_none() {
                     if let Some(t) = indexed_pluck(method, elem, args) {
@@ -2850,6 +2928,19 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         "partition" => Ty::Array {
             elem: Box::new(Ty::Array { elem: Box::new(elem.clone()) }),
         },
+        // `each_slice(n)` / `each_cons(n)` yield same-element sub-arrays
+        // when chained as an enumerator (`ids.each_slice(500).flat_map
+        // { |batch| … }`). With a block, MRI returns the receiver — not
+        // the batch array — so keep the block form out of that branch.
+        "each_slice" | "each_cons" => {
+            if block_ret.is_some() {
+                Ty::Array { elem: Box::new(elem.clone()) }
+            } else {
+                Ty::Array {
+                    elem: Box::new(Ty::Array { elem: Box::new(elem.clone()) }),
+                }
+            }
+        }
         // `each`, predicates, and shape-preserving transforms keep elem.
         // `flatten` (no depth): nested Arrays unwrap, and a Relation
         // element contributes its RECORDS — Ruby splices anything with
@@ -2957,7 +3048,8 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         },
         "tally" => Ty::Hash { key: Box::new(elem.clone()), value: Box::new(Ty::Int) },
         // Fold/accumulate — result type depends on the block/seed (untracked).
-        "inject" | "reduce" | "each_with_object" => Ty::Untyped,
+        // `with_object` is the enumerator's `each_with_object` (`each_cons(2).with_object([])`).
+        "inject" | "reduce" | "each_with_object" | "with_object" => Ty::Untyped,
         "to_sentence" => Ty::Str,
         // `Array#to_h { |elem| [k, v] }` — block returns a [k, v]
         // tuple; result is Hash<k, v>. We approximate as Hash<elem, elem>
@@ -3589,6 +3681,10 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         // Kernel#block_given? — bare call inside any method body
         // (`yield x if block_given?` in the runtime's create/create!).
         "block_given?" => Some(Ty::Bool),
+        // Kernel#caller_locations — the frames above the caller
+        // (`Thread::Backtrace::Location`s, untyped here like
+        // Exception#backtrace_locations).
+        "caller_locations" => Some(Ty::Array { elem: Box::new(Ty::Untyped) }),
         // `class` is receiver-aware and handled in `dispatch` itself
         // (preserves `Ty::Class { id }` so chained `obj.class.foo`
         // resolves against `id`'s registry entry).

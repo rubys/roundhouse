@@ -53,6 +53,13 @@ pub(super) fn coerce_arg_for_class_method(method: &str, idx: usize, arg: &Expr) 
 ///    String-producing source (Var/Send/Ivar) → `&(raw)`.
 pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> String {
     use crate::ty::Ty;
+    // Bare `nil` into an Untyped/Value param is JSON null, not
+    // `Option::None` (AssociationReflection.new(name, nil) — #832).
+    if matches!(&*arg.node, ExprNode::Lit { value: Literal::Nil })
+        && super::super::super::ty::rust_value_shaped(param_ty)
+    {
+        return "serde_json::Value::Null".to_string();
+    }
     // Value → primitive narrowing at Send arg position: when arg is
     // `Cast(inner, primitive_ty)` from the `lower::ty_coerce_insertion`
     // Family 2, and inner's body-typer Ty contains Untyped, use the

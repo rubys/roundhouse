@@ -235,6 +235,44 @@ pub(in crate::analyze) fn register(
         }
         classes.insert(ClassId(Symbol::from("ActionController::Page")), page);
     }
+
+    // The pagy gem (runtime/ruby/action_controller/pagy.rb). `pagy` is on
+    // every controller of an app whose Gemfile.lock carries the gem, as
+    // `pagy` is for geared_pagination's method; its RESULT depends on the
+    // collection argument (`[Pagy, <the scope's type>]`), so the call is
+    // typed in `analyze::body` (`pagy_call_ty`) and this entry only makes
+    // the name resolve. The `Pagy` surface below is `pagy.rbs` verbatim;
+    // a method that is not listed (`page_url`, `in`, `options`, the `_js`
+    // helpers, ...) is "no known method on Pagy" -- the refusal.
+    if app.gem_lock.as_ref().is_some_and(|lock| lock.has("pagy")) {
+        app_ctrl.class_methods.insert(Symbol::from("pagy"), Ty::Untyped);
+        let nullable_int = Ty::Union { variants: vec![Ty::Int, Ty::Nil] };
+        let mut pagy = ClassInfo::default();
+        for (m, ty) in [
+            ("page", Ty::Int),
+            ("limit", Ty::Int),
+            ("count", Ty::Int),
+            ("offset", Ty::Int),
+            ("last", Ty::Int),
+            ("pages", Ty::Int),
+            ("from", Ty::Int),
+            ("to", Ty::Int),
+            ("previous", nullable_int.clone()),
+            ("next", nullable_int),
+            ("series_nav", Ty::Str),
+            ("info_tag", Ty::Str),
+        ] {
+            pagy.instance_methods.insert(Symbol::from(m), ty);
+        }
+        classes.insert(ClassId(Symbol::from("Pagy")), pagy);
+        // `include Pagy::Method` resolves; the method itself is on Base.
+        let mut method = ClassInfo::default();
+        method.is_module = true;
+        classes.insert(ClassId(Symbol::from("Pagy::Method")), method);
+        let mut option_error = ClassInfo::default();
+        option_error.parent = Some(ClassId(Symbol::from("ArgumentError")));
+        classes.insert(ClassId(Symbol::from("Pagy::OptionError")), option_error);
+    }
     // `flash` (FlashHash) and the current action/controller names are
     // available on the controller via implicit self, same as in views.
     app_ctrl.class_methods.insert(
