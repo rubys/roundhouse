@@ -187,6 +187,13 @@ fn campfire_docker_recipe_avoids_a_frontend_pull_and_ships_executable_boot() {
             & 0o777,
         0o755
     );
+    // Published `-p` only reaches non-loopback; #865's development default
+    // is localhost, so the image must pin BINDING (campfire-smoke-docker
+    // went red on every tip after 4f9c0410 until this landed).
+    assert!(
+        dockerfile.contains("ENV BINDING=0.0.0.0\n"),
+        "Dockerfile must publish on 0.0.0.0:\n{dockerfile}"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

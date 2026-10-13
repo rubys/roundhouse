@@ -1144,44 +1144,79 @@ start_lane() {
 login_cookie() {
     local lane="$1" port="$2"
     local jar="$LOG_DIR/jar-$lane.txt"
-    rm -f "$jar"
+    local form_body="$LOG_DIR/login-form-$lane.html"
+    local post_body="$LOG_DIR/login-post-$lane.body"
+    rm -f "$jar" "$form_body" "$post_body"
+    # On failure keep form HTML + POST body under $LOG_DIR so a red lane
+    # shows whether /session/new was empty, 5xx, or a CSRF miss — not just
+    # "sign-in returned N".
+    dump_login_failure() {
+        local why="$1"
+        {
+            echo "login_cookie[$lane] $why (port=$port)"
+            echo "--- GET /session/new (first 4k) ---"
+            [[ -f "$form_body" ]] && head -c 4096 "$form_body" || echo "(no form body)"
+            echo
+            echo "--- POST /session (first 4k) ---"
+            [[ -f "$post_body" ]] && head -c 4096 "$post_body" || echo "(no post body)"
+            echo
+            echo "--- cookie jar ---"
+            [[ -f "$jar" ]] && cat "$jar" || echo "(no jar)"
+        } >&2
+        fail "$lane $why"
+    }
     case "$lane" in
         rails|rails-nocache|rails-1p|rails-nocache-1p|rails-truffleruby)
             scripts/campfire-oracle login --out "$ORACLE" --port "$port" --jar "$jar" >/dev/null \
-                || { fail "$lane sign-in failed"; return 1; }
+                || { dump_login_failure "sign-in failed"; return 1; }
             ;;
         ruby|ruby-1p|spinel|spinel-1p|jruby|truffleruby|elixir)
             # The emitted tree verifies campfire's `protect_from_forgery
             # with: :exception` (09567dd7), so the token comes from the
             # lane's own form, under the session cookie that holds it.
             # Elixir still renders the meta tag; rust/go do not.
-            local token code
-            token="$(curl -sS -H 'Accept-Encoding: identity' -c "$jar" \
-                     "http://127.0.0.1:$port/session/new" \
-                     | grep -o 'name="authenticity_token" value="[^"]*"' | head -1 \
-                     | sed 's/.*value="//; s/"$//')"
-            [[ -n "$token" ]] || { fail "$lane served no CSRF token at /session/new"; return 1; }
-            code="$(curl -sS -b "$jar" -c "$jar" -o /dev/null -w '%{http_code}' \
+            local token code form_code
+            form_code="$(curl -sS -H 'Accept-Encoding: identity' -c "$jar" \
+                         -o "$form_body" -w '%{http_code}' \
+                         "http://127.0.0.1:$port/session/new" || echo curl_fail)"
+            token="$(grep -o 'name="authenticity_token" value="[^"]*"' "$form_body" | head -1 \
+                     | sed 's/.*value="//; s/"$//' || true)"
+            [[ -n "$token" ]] || {
+                dump_login_failure "served no CSRF token at /session/new (HTTP $form_code)"
+                return 1
+            }
+            code="$(curl -sS -b "$jar" -c "$jar" -o "$post_body" -w '%{http_code}' \
                     -X POST "http://127.0.0.1:$port/session" \
                     --data-urlencode "email_address=user1@example.com" \
                     --data-urlencode "password=secret123456" \
-                    --data-urlencode "authenticity_token=$token")"
-            [[ "$code" == "302" ]] || { fail "$lane sign-in returned $code"; return 1; }
+                    --data-urlencode "authenticity_token=$token" || echo curl_fail)"
+            [[ "$code" == "302" ]] || {
+                dump_login_failure "sign-in returned $code"
+                return 1
+            }
             ;;
         rust|go|tobi)
             # Header-only forgery protection: no authenticity_token on
             # the page. Sec-Fetch-Site + Origin (with port) is enough on
             # plain HTTP; the session cookie still has to be minted by
             # posting the real form.
-            local code
-            curl -sS -c "$jar" -o /dev/null "http://127.0.0.1:$port/session/new"
-            code="$(curl -sS -b "$jar" -c "$jar" -o /dev/null -w '%{http_code}' \
+            local code form_code
+            form_code="$(curl -sS -c "$jar" -o "$form_body" -w '%{http_code}' \
+                        "http://127.0.0.1:$port/session/new" || echo curl_fail)"
+            [[ "$form_code" == "200" ]] || {
+                dump_login_failure "GET /session/new returned $form_code"
+                return 1
+            }
+            code="$(curl -sS -b "$jar" -c "$jar" -o "$post_body" -w '%{http_code}' \
                     -X POST "http://127.0.0.1:$port/session" \
                     -H "Sec-Fetch-Site: same-origin" \
                     -H "Origin: http://127.0.0.1:$port" \
                     --data-urlencode "email_address=user1@example.com" \
-                    --data-urlencode "password=secret123456")"
-            [[ "$code" == "302" ]] || { fail "$lane sign-in returned $code"; return 1; }
+                    --data-urlencode "password=secret123456" || echo curl_fail)"
+            [[ "$code" == "302" ]] || {
+                dump_login_failure "sign-in returned $code"
+                return 1
+            }
             ;;
     esac
     awk '/session_token|_campfire_session/ {printf "%s=%s; ", $6, $7}' "$jar"

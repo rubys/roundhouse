@@ -3112,21 +3112,27 @@ jobs:
           docker buildx use campfire-docker-cache
           docker buildx build --load -t campfire "${cache_args[@]}" .
           docker run -d --name campfire -p 3000:3000 campfire
-          # Spinel Campfire often needs >30s after --load before /first_run
-          # answers (Full validation 38397424326: curl exit 56 right after the
-          # old 30s loop). Wait longer, bound each probe, and dump logs before
-          # exiting so a slow boot is not a silent network blip.
+          # Wait for /first_run. Bound each probe and dump logs before exit.
+          # After #865 the image must set BINDING=0.0.0.0 (see
+          # scripts/campfire-docker-files); a localhost-only banner means
+          # published ports never reach the process — that is not a slow boot.
           ready=0
+          last_curl=0
           for i in $(seq 1 90); do
             if curl -sf -o /dev/null --max-time 2 localhost:3000/first_run; then
               ready=1
               break
+            else
+              last_curl=$?
             fi
             sleep 1
           done
           if [ "$ready" != 1 ]; then
-            echo "::error::campfire container did not become ready within 90s"
+            echo "::error::campfire container did not become ready within 90s (last curl exit ${last_curl})"
             docker logs campfire || true
+            if docker logs campfire 2>&1 | grep -q 'listening on http://localhost:'; then
+              echo "::error::banner binds localhost — published -p cannot reach it; image needs BINDING=0.0.0.0"
+            fi
             docker rm -f campfire >/dev/null || true
             exit 1
           fi

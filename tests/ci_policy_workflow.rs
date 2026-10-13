@@ -1201,6 +1201,11 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
     );
     assert!(deploy.get("continue-on-error").is_none());
     assert_eq!(deploy["permissions"]["pages"].as_str(), Some("write"));
+    assert_eq!(
+        deploy["permissions"]["actions"].as_str(),
+        Some("read"),
+        "deploy artifact resolver lists this run's github-pages-* uploads"
+    );
     let deploy_text = serde_yaml_ng::to_string(deploy).unwrap();
     assert!(
         !deploy_text.contains("VALIDATED_SHA"),
@@ -1210,14 +1215,30 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
         !deploy_text.contains("Refuse to publish a superseded main snapshot"),
         "main advancing mid-run must not starve github-pages"
     );
-    assert_eq!(
-        deploy["steps"][0]["uses"].as_str(),
-        Some("actions/deploy-pages@v5")
+    let deploy_steps = deploy["steps"].as_sequence().unwrap();
+    let resolve = deploy_steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Resolve Pages artifact"))
+        .expect("deploy-only rerun needs attempt fallback resolution");
+    assert!(
+        resolve["run"]
+            .as_str()
+            .unwrap()
+            .contains("github-pages-$n"),
+        "resolver must walk github-pages-N attempt names"
     );
+    let deploy_pages = deploy_steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/deploy-pages@"))
+        })
+        .expect("deploy-pages step");
     assert_eq!(
-        deploy["steps"][0]["with"]["artifact_name"].as_str(),
-        Some("github-pages-${{ github.run_attempt }}"),
-        "deploy must consume the per-attempt assemble-site Pages artifact"
+        deploy_pages["with"]["artifact_name"].as_str(),
+        Some("${{ steps.pages-artifact.outputs.name }}"),
+        "deploy must consume the resolved per-attempt assemble-site Pages artifact"
     );
 }
 
