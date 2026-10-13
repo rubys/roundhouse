@@ -650,9 +650,9 @@ fn method_return_via_registry(
         if let Some(ty) = cls.instance_methods.get(&Symbol::from(name)) {
             // A `-> self` found on an ancestor answers the class the
             // walk started from, as analyze's dispatch substitutes.
-            let ty = ty.subst_self(&Ty::Class { id: class.clone(), args: Vec::new() });
+            let ty = ty.subst_self(&Ty::Class { id: class.clone(), args: Vec::new().into() });
             let ret = match ty {
-                Ty::Fn { ret, .. } => *ret,
+                Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
                 t => t,
             };
             return match ret {

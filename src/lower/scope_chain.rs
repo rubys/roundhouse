@@ -555,7 +555,7 @@ fn assoc_scope_shape(
     let hash_params: HashSet<Symbol> = match &method_def.signature {
         Some(crate::ty::Ty::Fn { params, .. }) => params
             .iter()
-            .filter(|p| matches!(p.ty, crate::ty::Ty::Hash { .. }))
+            .filter(|p| matches!(*p.ty, crate::ty::Ty::Hash { .. }))
             .map(|p| p.name.clone())
             .collect(),
         _ => HashSet::new(),
@@ -1939,7 +1939,7 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
                         method.as_str(),
                         "offset" | "limit" | "order" | "reorder" | "joins" | "left_outer_joins"
                             | "left_joins" | "includes" | "preload" | "eager_load" | "references" | "group"
-                            | "having" | "merge"
+                            | "having" | "merge" | "unscope"
                     ));
             if is_where
                 || is_relation_terminal(method.as_str(), args, block.as_ref())
@@ -2176,6 +2176,10 @@ fn is_relation_chain_method(name: &str) -> bool {
             // without it here that body never rooted on `__rel` and the
             // search paged every message in the table.
             | "reorder"
+            // `unscope(where: :col)` drops the conditions on a column
+            // (`Discard::Model`'s `with_discarded` is exactly that). An
+            // Array has no `unscope`, so the site can only mean Relation.
+            | "unscope"
     )
 }
 
@@ -5014,7 +5018,7 @@ mod tests {
         let mut comments_var =
             Expr::new(span(), ExprNode::Var { id: VarId(1), name: Symbol::from("comments") });
         comments_var.ty = Some(crate::ty::Ty::Array {
-            elem: Box::new(crate::ty::Ty::Untyped),
+            elem: std::sync::Arc::new(crate::ty::Ty::Untyped),
         });
         let mut args = vec![Expr::new(
             span(),

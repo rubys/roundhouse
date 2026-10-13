@@ -43,7 +43,7 @@ pub(super) fn emit_form_builder_inline(
     ctx: &ViewCtx,
 ) -> Vec<Expr> {
     let (positional, opts) = split_args(args);
-    match kind {
+    let out = match kind {
         FormBuilderMethod::Label => emit_label(
             positional.first().copied(),
             positional.get(1).copied(),
@@ -143,7 +143,49 @@ pub(super) fn emit_form_builder_inline(
             binding,
             ctx,
         ),
+    };
+    wrap_field_errors(out, kind, positional.first().copied(), binding, ctx)
+}
+
+/// Rails' default `field_error_proc`: a control whose field has errors
+/// renders inside `<div class="field_with_errors">`, decided per render.
+fn wrap_field_errors(
+    mut out: Vec<Expr>,
+    kind: FormBuilderMethod,
+    field: Option<&Expr>,
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    if !kind.wraps_field_errors() || !ctx.i18n.has_errors(&binding.model_name) || ctx.i18n.field_error_proc().is_some() {
+        return out;
     }
+    let Some(field_sym) = field_symbol(field) else { return out };
+    // The check box's unchecked-value companion stays outside the wrapper, as Rails renders it
+    let first = usize::from(kind == FormBuilderMethod::CheckBox && out.len() > 1);
+    // Not a leading underscore: Elixir warns on reading such a variable, and its lanes treat warnings as errors
+    let flag = Symbol::from(format!("rh_{}_{}_errors", binding.form_param, field_sym.as_str()));
+    let record = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: binding.record_var.clone() });
+    let has_errors = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: crate::expr::LValue::Var { id: VarId(0), name: flag.clone() },
+            value: crate::lower::errors_index::has_errors_on(Some(record), field_sym.as_str(), Span::synthetic()),
+        },
+    );
+    let when_errors = |text: &str| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: flag.clone() }),
+                then_branch: accumulator_append_call(lit_str(text.to_string()), ctx),
+                else_branch: super::nil_lit(),
+            },
+        )
+    };
+    out.insert(first, when_errors("<div class=\"field_with_errors\">"));
+    out.insert(first, has_errors);
+    out.push(when_errors("</div>"));
+    out
 }
 
 /// `<input name="user[f]" type="hidden" value="0" autocomplete="off">
@@ -162,15 +204,14 @@ fn emit_check_box(
     };
     let model_name = &binding.model_name;
     let field_str = field_sym.as_str();
+    // The unchecked-value companion carries no `autocomplete`
+    // attribute — Rails renders exactly
+    // `<input name="user[f]" type="hidden" value="0">`.
+    let hidden = lit_str(format!("<input name=\"{model_name}[{field_str}]\" type=\"hidden\" value=\"0\">"));
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
         value: format!(
-            // The unchecked-value companion carries no `autocomplete`
-            // attribute — Rails renders exactly
-            // `<input name="user[f]" type="hidden" value="0">`.
-            "<input name=\"{mn}[{f}]\" type=\"hidden\" value=\"0\"><input type=\"checkbox\" value=\"1\"{nid}",
-            mn = model_name,
-            f = field_str,
+            "<input type=\"checkbox\" value=\"1\"{nid}",
             nid = name_id_attrs_for(binding, field_str, opts),
         ),
     });
@@ -237,7 +278,7 @@ fn emit_check_box(
     parts.push(InterpPart::Expr { expr: checked_expr });
     append_attr_parts(&mut parts, opts);
     parts.push(InterpPart::Text { value: ">".to_string() });
-    vec![accumulator_append_call(string_interp(parts), ctx)]
+    vec![accumulator_append_call(hidden, ctx), accumulator_append_call(string_interp(parts), ctx)]
 }
 
 /// `<input type="radio" value="V"[ checked] name="user[f]" id="user_f_v">`
@@ -2290,48 +2331,74 @@ fn string_interp(parts: Vec<InterpPart>) -> Expr {
     )
 }
 
-/// `["base_string", {cond_class: pred, …}]` → `"base_string default_class"`,
-/// where `default_class` is the FIRST key of the conditional hash. The
-/// convention in real-blog is that the first hash entry is the
-/// no-errors variant; picking the first key gives byte-parity with
-/// Rails for the 5 default compare paths. A real if/else over
-/// `record.errors[:field].any?` would be strictly better and is
-/// tracked as a follow-on; this path matches the prior runtime
-/// behavior.
 fn simplify_class_array(v: &Expr) -> Expr {
-    let ExprNode::Array { elements, .. } = &*v.node else {
+    let ExprNode::Array { .. } = &*v.node else {
         return v.clone();
     };
-    let Some(first) = elements.first() else {
-        return v.clone();
-    };
-    let ExprNode::Lit { value: Literal::Str { value: base } } = &*first.node else {
-        return v.clone();
-    };
-    let mut composed = base.clone();
-    if let Some(second) = elements.get(1) {
-        if let ExprNode::Hash { entries, .. } = &*second.node {
-            if let Some((k, _)) = entries.first() {
-                let key_str = match &*k.node {
-                    ExprNode::Lit { value: Literal::Sym { value } } => {
-                        Some(value.as_str().to_string())
-                    }
-                    ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
-                    _ => None,
-                };
-                if let Some(s) = key_str {
-                    composed.push(' ');
-                    composed.push_str(&s);
+    let mut pieces = Vec::new();
+    flatten_class_pieces(v, &mut pieces);
+    // A token is its text, and the condition it renders under when that is only known at render time.
+    let mut tokens: Vec<(String, Option<Expr>)> = Vec::new();
+    for piece in &pieces {
+        match &*piece.node {
+            ExprNode::Lit { value: Literal::Str { value } } => {
+                if !value.trim().is_empty() {
+                    tokens.push((value.clone(), None));
                 }
             }
+            ExprNode::Lit { value: Literal::Bool { value: false } | Literal::Nil } => {}
+            ExprNode::Hash { entries, .. } => {
+                for (k, val) in entries {
+                    let key = match &*k.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                        ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                        _ => return view_helpers_call("class_names", pieces),
+                    };
+                    if key.trim().is_empty() {
+                        continue;
+                    }
+                    match &*val.node {
+                        ExprNode::Lit { value: Literal::Bool { value: true } } => tokens.push((key, None)),
+                        ExprNode::Lit { value: Literal::Bool { value: false } | Literal::Nil } => {}
+                        _ => tokens.push((key, Some(val.clone()))),
+                    }
+                }
+            }
+            _ => return view_helpers_call("class_names", pieces),
         }
     }
-    Expr::new(
-        first.span,
-        ExprNode::Lit {
-            value: Literal::Str { value: composed },
-        },
-    )
+    if tokens.iter().all(|(_, cond)| cond.is_none()) {
+        let text = tokens.into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ");
+        return Expr::new(v.span, ExprNode::Lit { value: Literal::Str { value: text } });
+    }
+    // Not `class_names` here: a conditional token's separator rides with it, which every target can render without a runtime helper
+    let Some((head, None)) = tokens.first().cloned() else {
+        return view_helpers_call("class_names", pieces);
+    };
+    let mut parts = vec![InterpPart::Text { value: head }];
+    for (text, cond) in tokens.into_iter().skip(1) {
+        match cond {
+            None => parts.push(InterpPart::Text { value: format!(" {text}") }),
+            Some(cond) => parts.push(InterpPart::Expr {
+                expr: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If { cond, then_branch: lit_str(format!(" {text}")), else_branch: lit_str(String::new()) },
+                ),
+            }),
+        }
+    }
+    string_interp(parts)
+}
+
+fn flatten_class_pieces(v: &Expr, out: &mut Vec<Expr>) {
+    match &*v.node {
+        ExprNode::Array { elements, .. } => {
+            for e in elements {
+                flatten_class_pieces(e, out);
+            }
+        }
+        _ => out.push(v.clone()),
+    }
 }
 
 #[cfg(test)]

@@ -352,9 +352,9 @@ fn emit_multi_hydrate(
     // the Crystal emit's empty-array default (`[] of String`) would
     // mismatch the appended instances.
     let owner_array_ty = crate::ty::Ty::Array {
-        elem: Box::new(crate::ty::Ty::Class {
+        elem: std::sync::Arc::new(crate::ty::Ty::Class {
             id: owner.clone(),
-            args: vec![],
+            args: vec![].into(),
         }),
     };
     let results_init = assign_var(
@@ -471,13 +471,13 @@ fn push_preload_stmts(
     out.push(assign_var(&pstmt, db_call(&db, "prepare", vec![sql])));
 
     // loaded = [] (typed Array<Target> so the `<<` push types cleanly)
-    let elem_ty = Ty::Class { id: directive.target_class.clone(), args: vec![] };
+    let elem_ty = Ty::Class { id: directive.target_class.clone(), args: vec![].into() };
     let loaded_init = crate::lower::typing::with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
         ),
-        Ty::Array { elem: Box::new(elem_ty) },
+        Ty::Array { elem: std::sync::Arc::new(elem_ty) },
     );
     out.push(assign_var(&loaded, loaded_init));
 
@@ -550,7 +550,7 @@ fn push_preload_stmts(
             Span::synthetic(),
             ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
         ),
-        Ty::Array { elem: Box::new(Ty::Class { id: directive.target_class.clone(), args: vec![] }) },
+        Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: directive.target_class.clone(), args: vec![].into() }) },
     );
     let setter = format!("_preload_{}", assoc);
     let each_block = block1(
@@ -603,9 +603,9 @@ fn push_planned_distribute(
     let stop = Symbol::from(format!("__{}_stop", assoc));
     let group = Symbol::from(format!("__{}_group", assoc));
 
-    let int_array = || Ty::Array { elem: Box::new(Ty::Int) };
-    let target_ty = || Ty::Class { id: directive.target_class.clone(), args: vec![] };
-    let target_array = || Ty::Array { elem: Box::new(target_ty()) };
+    let int_array = || Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
+    let target_ty = || Ty::Class { id: directive.target_class.clone(), args: vec![].into() };
+    let target_array = || Ty::Array { elem: std::sync::Arc::new(target_ty()) };
     let int_var = |name: &Symbol| with_ty(var_ref(name), Ty::Int);
     let typed_send = |recv: Expr, method: &str, args: Vec<Expr>, ty: Ty| {
         with_ty(send_to(recv, method, args, false), ty)
@@ -721,7 +721,7 @@ fn emit_pluck(sel: &Select, table: &Table, col: &super::ir::ColRef, param: bool)
                 Span::synthetic(),
                 ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
             ),
-            crate::ty::Ty::Array { elem: Box::new(elem_ty) },
+            crate::ty::Ty::Array { elem: std::sync::Arc::new(elem_ty) },
         ),
     );
 
@@ -800,8 +800,8 @@ fn emit_group_count(
     let key_read = crate::lower::model_to_library::schema::column_read_method_for(column);
     let key_ty = crate::lower::model_to_library::ty_of_column_slot(column);
     let hash_ty = crate::ty::Ty::Hash {
-        key: Box::new(key_ty),
-        value: Box::new(crate::ty::Ty::Int),
+        key: std::sync::Arc::new(key_ty),
+        value: std::sync::Arc::new(crate::ty::Ty::Int),
     };
     let read_id = next_read_id();
 

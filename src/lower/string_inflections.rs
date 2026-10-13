@@ -29,9 +29,25 @@ fn rewrite(expr: &mut Expr) {
     rewrite_node(expr);
 }
 
-pub(crate) fn rewrite_node(expr: &mut Expr) {
+/// The same grounding over a body a later pass retyped; answers whether
+/// any call was grounded, so the caller knows to type the body again.
+/// The controller lowering runs it after the typed-params rewrite turns
+/// `helper[:field]` (untyped) into `helper.field` (String): only then
+/// does `helper[:field].humanize` have a String receiver.
+pub(crate) fn ground_in_place(expr: &mut Expr) -> bool {
+    fn walk(expr: &mut Expr, changed: &mut bool) {
+        expr.node.for_each_child_mut(&mut |c| walk(c, changed));
+        *changed |= rewrite_node(expr);
+    }
+    let mut changed = false;
+    walk(expr, &mut changed);
+    changed
+}
+
+/// Grounds one call; answers whether it did.
+pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node else {
-        return;
+        return false;
     };
     let name = method.as_str();
     if name == "ordinalize" && args.is_empty() && matches!(r.ty.as_ref(), Some(Ty::Int)) {
@@ -49,17 +65,17 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
             parenthesized: true,
         };
         expr.ty = Some(Ty::Str);
-        return;
+        return true;
     }
     let arity_ok = match name {
         "humanize" | "titleize" | "underscore" | "demodulize" | "singularize" => args.is_empty(),
         // ActiveSupport's `String#remove` takes one or more patterns; the
         // runtime helper takes one. Multi-arg calls stay dynamic.
         "remove" => args.len() == 1,
-        _ => return,
+        _ => return false,
     };
     if !arity_ok || !is_string(r.ty.as_ref()) {
-        return;
+        return false;
     }
     let text = r.clone();
     let method = method.clone();
@@ -78,4 +94,5 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         parenthesized: true,
     };
     expr.ty = Some(Ty::Str);
+    true
 }

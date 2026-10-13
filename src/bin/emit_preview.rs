@@ -13,7 +13,6 @@
 //! or runtime packaging.
 
 use std::path::Path;
-use roundhouse::analyze::Analyzer;
 use roundhouse::emit::{crystal, csharp, elixir, go, kotlin, python, rust, swift, typescript};
 use roundhouse::ingest::ingest_app;
 use roundhouse::profile::DeploymentProfile;
@@ -30,7 +29,7 @@ fn emit() {
     let fixture = args.first().cloned().unwrap_or_else(|| "fixtures/real-blog".into());
 
     let mut app = ingest_app(Path::new(&fixture)).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    roundhouse::session::analyze_and_lower(&mut app);
 
     let (files, default_out_dir) = match target.as_str() {
         "typescript" | "ts" => {

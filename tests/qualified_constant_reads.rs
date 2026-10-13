@@ -105,7 +105,7 @@ fn a_bare_model_read_uses_its_source_declaration() {
     );
     assert_eq!(
         ty_at(&app, 2, 9),
-        Some(Ty::Class { id: ClassId(Symbol::from("Article")), args: vec![] }),
+        Some(Ty::Class { id: ClassId(Symbol::from("Article")), args: vec![].into() }),
     );
 }
 
@@ -116,7 +116,7 @@ fn a_qualified_class_read_is_the_class_not_a_same_named_constant() {
     let ty = ty_at(&app, 2, 9).expect("the constant is typed");
     assert_eq!(
         ty,
-        Ty::Class { id: ClassId(Symbol::from("Workspace::Drafting::Drafting")), args: vec![] },
+        Ty::Class { id: ClassId(Symbol::from("Workspace::Drafting::Drafting")), args: vec![].into() },
         "a read of the class must be the class, not `Core::StageEnum`'s member of the same name"
     );
 }
@@ -129,7 +129,7 @@ fn a_qualified_constant_read_still_resolves_through_its_owner() {
     let ty = ty_at(&app, 2, 9).expect("the constant is typed");
     assert_eq!(
         ty,
-        Ty::Class { id: ClassId(Symbol::from("Core::StageEnum")), args: vec![] },
+        Ty::Class { id: ClassId(Symbol::from("Core::StageEnum")), args: vec![].into() },
         "an enum member is an instance of its enum"
     );
 }
@@ -141,7 +141,7 @@ fn source_references_use_ruby_lexical_nesting_not_the_body_self_class() {
     );
     assert_eq!(
         ty_at(&app, 2, 14),
-        Some(Ty::Class { id: ClassId(Symbol::from("Lexical::Target")), args: vec![] }),
+        Some(Ty::Class { id: ClassId(Symbol::from("Lexical::Target")), args: vec![].into() }),
         "a nested module block includes Lexical in its constant nesting"
     );
     assert!(
@@ -214,7 +214,7 @@ end
     // the type its members were built from.
     assert_eq!(
         ty_at(&app, 2, 10),
-        Some(Ty::Class { id: ClassId(Symbol::from("UI::Selector::Mode")), args: vec![] }),
+        Some(Ty::Class { id: ClassId(Symbol::from("UI::Selector::Mode")), args: vec![].into() }),
         "`DEFAULT_MODE` is `UI::Selector::Mode`, not `UI::Other::Mode`"
     );
     let diagnostics: Vec<String> = roundhouse::analyze::diagnose(&app)
@@ -232,7 +232,7 @@ fn an_absolute_class_uses_the_same_registry_identity_as_a_bare_class() {
     let app = app_with("@a = ::Time.now");
     assert_eq!(
         ty_at(&app, 2, 16),
-        Some(Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![] }),
+        Some(Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![].into() }),
     );
 }
 
@@ -241,7 +241,7 @@ fn an_absolute_nested_constant_keeps_its_root_and_resolves_its_owner() {
     let app = app_with("@a = ::Core::StageEnum::Drafting");
     assert_eq!(
         ty_at(&app, 2, 9),
-        Some(Ty::Class { id: ClassId(Symbol::from("Core::StageEnum")), args: vec![] }),
+        Some(Ty::Class { id: ClassId(Symbol::from("Core::StageEnum")), args: vec![].into() }),
     );
     let parsed = ruby_prism::parse(b"::Core::StageEnum::Drafting");
     let expr = roundhouse::ingest::ingest_expr(&parsed.node().as_program_node().unwrap().statements().as_node(), "root.rb")

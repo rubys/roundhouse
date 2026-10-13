@@ -186,9 +186,10 @@ printf '\n\033[1;32mok\033[0m  %s (%s)\n' \
 # result is 5 MB where the source archive is 13 MB, because none of the
 # Ruby ships and the generated C compresses 9:1.
 #
-# Tolerant of a missing `spin` ON PURPOSE: CI's spinel toolchain is an
-# advisory build of matz/spinel master, and the source archive must keep
-# publishing when it is red.
+# Tolerant of a missing or failing `spin` ON PURPOSE: CI's spinel
+# toolchain tracks matz/spinel master unpinned, and the source archive
+# (`spinel.tgz`, packed above) must keep publishing when the Docker pack
+# cannot. Same skip path as --skip-docker / no `spin` on PATH.
 if (( SKIP_DOCKER )); then
     step "skipping the Docker archive (--skip-docker)"
 elif ! command -v spin >/dev/null 2>&1; then
@@ -198,37 +199,38 @@ else
     step "packing for Docker"
     DOCKER="$WORK/campfire-docker"
     mkdir -p "$DOCKER/app"
-    (cd "$TREE" && spin pack campfire --out "$DOCKER/pack" >"$WORK/pack.log" 2>&1) || {
+    if ! (cd "$TREE" && spin pack campfire --out "$DOCKER/pack" >"$WORK/pack.log" 2>&1); then
         tail -30 "$WORK/pack.log" >&2
-        fail "spin pack failed"
-    }
+        step "skipping the Docker archive (\`spin pack\` failed)"
+        echo "::warning::campfire/docker.tgz not built: spin pack failed (spinel.tgz still published)"
     # A native package whose source the pack could not find is a Makefile
     # that fails on the downloader's machine. spin says so at pack time;
-    # make it fatal here rather than there.
-    if grep -q 'pack: warning' "$WORK/pack.log"; then
+    # make it fatal here rather than there — only when pack itself succeeded.
+    elif grep -q 'pack: warning' "$WORK/pack.log"; then
         grep 'pack: warning' "$WORK/pack.log" >&2
         fail "spin pack left a native package behind"
+    else
+        # What the binary reads at run time: static/ (serve_static), public/
+        # (error pages), db/seed.sql, and the three `Rails.root.join` reads in
+        # the app itself -- config/purchased_by.yml, app/assets/images/logos/
+        # (accounts/logos_controller send_png_file; /account/logo is fetched
+        # by the sign-in page, so a missing file is a 500 on first contact)
+        # and app/assets/images/default-bot-avatar.svg (users/avatars_controller).
+        # The web copies under static/assets/ do not serve those reads: the
+        # controllers open the SOURCE path. storage/ is created by the
+        # Dockerfile so the volume mount has a directory to land on.
+        cp -R "$TREE/static" "$TREE/public" "$TREE/db" "$TREE/config" "$DOCKER/app/"
+        mkdir -p "$DOCKER/app/app/assets/images"
+        cp -R "$TREE/app/assets/images/logos" "$DOCKER/app/app/assets/images/"
+        cp "$TREE/app/assets/images/default-bot-avatar.svg" "$DOCKER/app/app/assets/images/"
+        cp "$APP/MIT-LICENSE" "$DOCKER/"
+        "$REPO_ROOT/scripts/campfire-docker-files" "$DOCKER" \
+            "$ROUNDHOUSE_SHA" "$CAMPFIRE_SHA" "$SPINEL_VERSION"
+        echo "  pack: $(find "$DOCKER/pack" -type f | wc -l | tr -d ' ') files," \
+             "$(du -sh "$DOCKER/pack/src" | cut -f1 | tr -d ' ') of generated C"
+        tar czf "$OUT/campfire/docker.tgz" -C "$WORK" campfire-docker
+        printf '\033[1;32mok\033[0m  %s (%s)\n' \
+            "$OUT/campfire/docker.tgz" \
+            "$(du -h "$OUT/campfire/docker.tgz" | cut -f1 | tr -d ' ')"
     fi
-    # What the binary reads at run time: static/ (serve_static), public/
-    # (error pages), db/seed.sql, and the three `Rails.root.join` reads in
-    # the app itself -- config/purchased_by.yml, app/assets/images/logos/
-    # (accounts/logos_controller send_png_file; /account/logo is fetched
-    # by the sign-in page, so a missing file is a 500 on first contact)
-    # and app/assets/images/default-bot-avatar.svg (users/avatars_controller).
-    # The web copies under static/assets/ do not serve those reads: the
-    # controllers open the SOURCE path. storage/ is created by the
-    # Dockerfile so the volume mount has a directory to land on.
-    cp -R "$TREE/static" "$TREE/public" "$TREE/db" "$TREE/config" "$DOCKER/app/"
-    mkdir -p "$DOCKER/app/app/assets/images"
-    cp -R "$TREE/app/assets/images/logos" "$DOCKER/app/app/assets/images/"
-    cp "$TREE/app/assets/images/default-bot-avatar.svg" "$DOCKER/app/app/assets/images/"
-    cp "$APP/MIT-LICENSE" "$DOCKER/"
-    "$REPO_ROOT/scripts/campfire-docker-files" "$DOCKER" \
-        "$ROUNDHOUSE_SHA" "$CAMPFIRE_SHA" "$SPINEL_VERSION"
-    echo "  pack: $(find "$DOCKER/pack" -type f | wc -l | tr -d ' ') files," \
-         "$(du -sh "$DOCKER/pack/src" | cut -f1 | tr -d ' ') of generated C"
-    tar czf "$OUT/campfire/docker.tgz" -C "$WORK" campfire-docker
-    printf '\033[1;32mok\033[0m  %s (%s)\n' \
-        "$OUT/campfire/docker.tgz" \
-        "$(du -h "$OUT/campfire/docker.tgz" | cut -f1 | tr -d ' ')"
 fi

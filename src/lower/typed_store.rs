@@ -158,7 +158,7 @@ pub(crate) fn push_typed_store_methods(methods: &mut Vec<MethodDef>, model: &Mod
             // stays the gradual escape even as an array (mirrors
             // `register_typed_store_decls`).
             let attr_ty = if a.is_array && !matches!(elem_ty, Ty::Untyped) {
-                Ty::Array { elem: Box::new(elem_ty) }
+                Ty::Array { elem: std::sync::Arc::new(elem_ty) }
             } else {
                 elem_ty
             };

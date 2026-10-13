@@ -13,7 +13,7 @@ use roundhouse::ty::Ty;
 fn param_value() -> Ty {
     Ty::Class {
         id: ClassId(Symbol::from("Roundhouse::ParamValue")),
-        args: vec![],
+        args: vec![].into(),
     }
 }
 
@@ -69,17 +69,17 @@ fn narrowed(input: Ty, path: &[&str]) -> Ty {
 #[test]
 fn core_array_and_hash_tests_retain_concrete_and_recursive_members() {
     let array = Ty::Array {
-        elem: Box::new(Ty::Str),
+        elem: std::sync::Arc::new(Ty::Str),
     };
     let hash = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(Ty::Int),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(Ty::Int),
     };
     assert_eq!(narrowed(array.clone(), &["Array"]), array);
     assert_eq!(
         narrowed(
             Ty::Union {
-                variants: vec![array.clone(), Ty::Nil]
+                variants: vec![array.clone(), Ty::Nil].into()
             },
             &["", "Array"]
         ),
@@ -89,7 +89,7 @@ fn core_array_and_hash_tests_retain_concrete_and_recursive_members() {
     assert_eq!(
         narrowed(
             Ty::Union {
-                variants: vec![hash.clone(), Ty::Str]
+                variants: vec![hash.clone(), Ty::Str].into()
             },
             &["Hash"]
         ),
@@ -98,29 +98,29 @@ fn core_array_and_hash_tests_retain_concrete_and_recursive_members() {
     assert_eq!(
         narrowed(param_value(), &["Array"]),
         Ty::Array {
-            elem: Box::new(param_value())
+            elem: std::sync::Arc::new(param_value())
         }
     );
     assert_eq!(
         narrowed(
             Ty::Union {
-                variants: vec![param_value(), Ty::Nil]
+                variants: vec![param_value(), Ty::Nil].into()
             },
             &["Hash"]
         ),
         Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(param_value())
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(param_value())
         }
     );
 }
 
 #[test]
 fn open_container_members_stay_unresolved_beside_recursive_values() {
-    let open_array = Ty::Array { elem: Box::new(Ty::Var { var: TyVar(0) }) };
+    let open_array = Ty::Array { elem: std::sync::Arc::new(Ty::Var { var: TyVar(0) }) };
     let open_hash = Ty::Hash {
-        key: Box::new(Ty::Var { var: TyVar(1) }),
-        value: Box::new(Ty::Var { var: TyVar(2) }),
+        key: std::sync::Arc::new(Ty::Var { var: TyVar(1) }),
+        value: std::sync::Arc::new(Ty::Var { var: TyVar(2) }),
     };
     assert_eq!(narrowed(open_array.clone(), &["Array"]), open_array);
     assert_eq!(narrowed(open_hash.clone(), &["Hash"]), open_hash);
@@ -134,7 +134,7 @@ fn open_container_members_stay_unresolved_beside_recursive_values() {
         vec![param_value(), open_array.clone()],
         vec![open_array, param_value()],
     ] {
-        let Ty::Array { elem } = narrowed(Ty::Union { variants }, &["Array"]) else {
+        let Ty::Array { elem } = narrowed(Ty::Union { variants: variants.into() }, &["Array"]) else {
             panic!("expected narrowed Array");
         };
         assert_contains(&elem, &Ty::Var { var: TyVar(0) });
@@ -144,7 +144,7 @@ fn open_container_members_stay_unresolved_beside_recursive_values() {
         vec![param_value(), open_hash.clone()],
         vec![open_hash, param_value()],
     ] {
-        let Ty::Hash { key, value } = narrowed(Ty::Union { variants }, &["Hash"]) else {
+        let Ty::Hash { key, value } = narrowed(Ty::Union { variants: variants.into() }, &["Hash"]) else {
             panic!("expected narrowed Hash");
         };
         assert_contains(&key, &Ty::Var { var: TyVar(1) });
@@ -156,20 +156,20 @@ fn open_container_members_stay_unresolved_beside_recursive_values() {
 
 #[test]
 fn false_branches_remove_matching_parameterized_containers() {
-    let array = Ty::Array { elem: Box::new(Ty::Str) };
-    let hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Int) };
+    let array = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
+    let hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Int) };
     for predicate in ["is_a?", "kind_of?", "instance_of?"] {
         assert_eq!(
             narrowed_branches(
-                Ty::Union { variants: vec![array.clone(), hash.clone(), Ty::Nil] },
+                Ty::Union { variants: vec![array.clone(), hash.clone(), Ty::Nil].into() },
                 &["Array"],
                 predicate,
             ),
-            (array.clone(), Ty::Union { variants: vec![hash.clone(), Ty::Nil] }),
+            (array.clone(), Ty::Union { variants: vec![hash.clone(), Ty::Nil].into() }),
         );
         assert_eq!(
             narrowed_branches(
-                Ty::Union { variants: vec![array.clone(), hash.clone()] },
+                Ty::Union { variants: vec![array.clone(), hash.clone()].into() },
                 &["Hash"],
                 predicate,
             ),
@@ -181,11 +181,11 @@ fn false_branches_remove_matching_parameterized_containers() {
 #[test]
 fn unknown_values_and_custom_container_names_do_not_gain_fake_member_types() {
     let gradual_array = Ty::Array {
-        elem: Box::new(Ty::Untyped),
+        elem: std::sync::Arc::new(Ty::Untyped),
     };
     let gradual_hash = Ty::Hash {
-        key: Box::new(Ty::Untyped),
-        value: Box::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::Untyped),
     };
     assert_eq!(narrowed(Ty::Untyped, &["Array"]), gradual_array);
     assert_eq!(narrowed(Ty::Untyped, &["Hash"]), gradual_hash);
@@ -193,10 +193,10 @@ fn unknown_values_and_custom_container_names_do_not_gain_fake_member_types() {
         Ty::Union {
             variants: vec![
                 Ty::Array {
-                    elem: Box::new(Ty::Str),
+                    elem: std::sync::Arc::new(Ty::Str),
                 },
                 Ty::Untyped,
-            ],
+            ].into(),
         },
         &["Array"],
     );
@@ -206,7 +206,7 @@ fn unknown_values_and_custom_container_names_do_not_gain_fake_member_types() {
     );
     let recursive_and_gradual = narrowed(
         Ty::Union {
-            variants: vec![param_value(), gradual_array],
+            variants: vec![param_value(), gradual_array].into(),
         },
         &["Array"],
     );
@@ -215,14 +215,14 @@ fn unknown_values_and_custom_container_names_do_not_gain_fake_member_types() {
         narrowed(param_value(), &["Other", "Array"]),
         Ty::Class {
             id: ClassId(Symbol::from("Other::Array")),
-            args: vec![]
+            args: vec![].into()
         }
     );
     assert_eq!(
         narrowed(param_value(), &["Other", "Hash"]),
         Ty::Class {
             id: ClassId(Symbol::from("Other::Hash")),
-            args: vec![]
+            args: vec![].into()
         }
     );
 }
@@ -359,7 +359,7 @@ end
             .expect("probe method").body;
         let expected = Ty::Class {
             id: ClassId(Symbol::from(format!("ContainerNamespace::{class}"))),
-            args: vec![],
+            args: vec![].into(),
         };
         let mut hits = 0;
         inspect(body, &expected, &mut hits);

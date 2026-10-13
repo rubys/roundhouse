@@ -632,7 +632,7 @@ fn every_runtime_method_body_is_fully_typed() {
                 .into_iter()
                 .map(|(name, ty)| {
                     let ret_ty = match ty {
-                        Ty::Fn { ret, .. } => *ret,
+                        Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
                         other => other,
                     };
                     (name, ret_ty)
@@ -832,7 +832,7 @@ fn every_runtime_method_body_concretely_typed() {
             let entry = class_registry.entry(short_id(&class_id)).or_default();
             for (name, ty) in methods {
                 let ret_ty = match ty {
-                    Ty::Fn { ret, .. } => *ret,
+                    Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
                     other => other,
                 };
                 entry.instance_methods.insert(name, ret_ty);
@@ -1032,7 +1032,19 @@ fn every_runtime_method_body_concretely_typed() {
     // reporter calls, an event payload and its filter, an error context
     // (`deep_dup` walks it the way the indifferent hash's conversions do),
     // and the value a `handle` / `record` block answers.
-    const CEILING: usize = 697;
+    // MEASURED 701 on 2026-10-12 (rebased onto main's 697):
+    // `ActionDispatch::Http::Headers#each` / `#map` yield the env's untyped
+    // values and collect the block's untyped answers, as Rails' Enumerable
+    // Headers does (+4 in action_dispatch/headers.rb; their blockless
+    // Enumerator answers add none).
+    // MEASURED 717 on 2026-10-13 (#829): NullRelation `@where_null` /
+    // borrowed-condition walks and quote-aware If-None-Match members
+    // add gradual sites in `active_record/relation.rb` and
+    // `action_controller/base.rb` (+16).
+    // `ActiveStorage::AttachedMany#map` (the proxy's Enumerable reads for a
+    // jbuilder block over `record.pictures`) adds 1, MEASURED: the value
+    // of its `yield`, the same block-return escape `#each` carries.
+    const CEILING: usize = 718;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
@@ -1093,8 +1105,8 @@ fn empty_html_opts_emits_string_keyed_maps_on_csharp_and_kotlin() {
         ExprNode::Hash { entries: vec![], kwargs: false },
     );
     arg.ty = Some(Ty::Hash {
-        key: Box::new(Ty::Untyped),
-        value: Box::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::Untyped),
     });
     let emitted = roundhouse::emit::kotlin::emit_expr_for_runtime(&arg);
     assert_eq!(

@@ -205,7 +205,7 @@ fn push_becomes_from(app: &mut App, bases: &HashMap<ClassId, ClassId>, recast: &
         }
         let source = Symbol::from("source");
         let record = Symbol::from("record");
-        let sub_ty = Ty::Class { id: lc.name.clone(), args: vec![] };
+        let sub_ty = Ty::Class { id: lc.name.clone(), args: vec![].into() };
         let mut body: Vec<Expr> = vec![Expr::new(
             Span::synthetic(),
             ExprNode::Assign {
@@ -290,7 +290,7 @@ fn push_becomes_from(app: &mut App, bases: &HashMap<ClassId, ClassId>, recast: &
             params: vec![Param::positional(source.clone())],
             body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: body }),
             signature: Some(crate::lower::typing::fn_sig(
-                vec![(source, Ty::Class { id: base.clone(), args: vec![] })],
+                vec![(source, Ty::Class { id: base.clone(), args: vec![].into() })],
                 sub_ty,
             )),
             effects: crate::effect::EffectSet::default(),

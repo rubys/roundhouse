@@ -772,7 +772,7 @@ fn collect_param_types(m: &MethodDef) -> std::collections::HashMap<String, Ty> {
         return out;
     }
     for (p, sig_p) in m.params.iter().zip(params.iter()) {
-        out.insert(p.name.as_str().to_string(), sig_p.ty.clone());
+        out.insert(p.name.as_str().to_string(), (*sig_p.ty).clone());
     }
     out
 }
@@ -981,11 +981,11 @@ mod tests {
         let block_sig = Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::new("k"),
-                ty: Ty::Str,
+                ty: Ty::Str.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: EffectSet::pure(),
         };
         let callee = MethodDef {
@@ -1000,11 +1000,11 @@ mod tests {
             signature: Some(Ty::Fn {
                 params: vec![TyParam {
                     name: Symbol::new("block"),
-                    ty: block_sig.clone(),
+                    ty: block_sig.clone().into(),
                     kind: ParamKind::Block,
-                }],
-                block: Some(Box::new(block_sig)),
-                ret: Box::new(Ty::Nil),
+                }].into(),
+                block: Some(std::sync::Arc::new(block_sig)),
+                ret: std::sync::Arc::new(Ty::Nil),
                 effects: EffectSet::pure(),
             }),
             effects: EffectSet::pure(),

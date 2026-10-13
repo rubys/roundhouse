@@ -7,6 +7,10 @@ module ActiveStorage
   def self.default_variable_content_types: () -> Array[String]
   def self.variable_content_types: () -> Array[String]
   def self.variable_content_type?: (String content_type) -> bool
+  # Executable locations (`:ffmpeg`, `:ffprobe`, …). Values are path strings.
+  self.@paths: Hash[Symbol, String]?
+  def self.paths: () -> Hash[Symbol, String]
+  def self.paths=: (Hash[Symbol, String] value) -> Hash[Symbol, String]
   def self.video_preview_arguments: () -> String
   def self.video_preview_vf_filter: () -> String
   def self.previewers: () -> Array[untyped]
@@ -124,6 +128,7 @@ module ActiveStorage
     def self.poster: (String path) -> String
 
     class VideoPreviewer < ActiveStorage::Previewer
+      def self.preview_timeout: () -> (Integer | Float | nil)
     end
   end
 
@@ -253,6 +258,9 @@ module ActiveStorage
     def first: () -> ActiveStorage::ManyAttachment?
     def _preload_rows: (Array[ActiveStorage::ManyAttachment] rows) -> nil
     def each: () { (ActiveStorage::ManyAttachment) -> untyped } -> Array[ActiveStorage::ManyAttachment]
+    def map: () { (ActiveStorage::ManyAttachment) -> untyped } -> Array[untyped]
+    def size: () -> Integer
+    def empty?: () -> bool
     def _sync_blob_ids: (Array[Integer] blob_ids) -> nil
     def attach_blob: (ActiveStorage::Blob blob) -> nil
     def attach: (String data, String filename, String content_type) -> nil

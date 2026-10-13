@@ -57,7 +57,7 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
     let route_class_id = ClassId(Symbol::from("ActionDispatch::Router::Route"));
     let route_ty = Ty::Class {
         id: route_class_id.clone(),
-        args: vec![],
+        args: vec![].into(),
     };
 
     let mut out: Vec<LibraryFunction> = Vec::new();
@@ -73,7 +73,7 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
                 style: ArrayStyle::Brackets,
             },
         ),
-        Ty::Array { elem: Box::new(route_ty.clone()) },
+        Ty::Array { elem: std::sync::Arc::new(route_ty.clone()) },
     );
     out.push(LibraryFunction {
         module_path: module_path.clone(),
@@ -84,7 +84,7 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
         body: table_body,
         signature: Some(fn_sig(
             vec![],
-            Ty::Array { elem: Box::new(route_ty.clone()) },
+            Ty::Array { elem: std::sync::Arc::new(route_ty.clone()) },
         )),
         effects: EffectSet::default(),
         is_async: false,
@@ -684,7 +684,7 @@ fn build_url_options_function(
         .chain(extras.iter().cloned())
         .collect();
     // The request's path parameters, last: what the RECALL arms read.
-    let recall_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    let recall_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
     LibraryFunction {
         module_path: module_path.to_vec(),
         name: Symbol::from(url_options_helper_name(extras)),
@@ -914,7 +914,7 @@ fn build_helper_function(
             let ty = if i < required {
                 base
             } else {
-                Ty::Union { variants: vec![base, Ty::Nil] }
+                Ty::Union { variants: vec![base, Ty::Nil].into() }
             };
             (Symbol::from(p.clone()), ty)
         })
@@ -942,7 +942,7 @@ fn build_helper_function(
             // default apply failed the C build with an int-conversion.
             // One description, and the default is the one that is
             // always present.
-            ty: crate::ty::Ty::Str,
+            ty: crate::ty::Ty::Str.into(),
             kind: crate::ty::ParamKind::Keyword { required: false },
         });
     }
@@ -970,7 +970,7 @@ fn build_helper_function(
         ));
         sig_params.push((
             format_sym.clone(),
-            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
         ));
         // <path> + (format.to_s == "" ? "" : ".#{format}")
         //
@@ -1108,7 +1108,7 @@ fn build_helper_function(
             // Some(false)` used to override to Integer and is what made
             // campfire's messages_controller_test never link.
             let value_ty = if key.array {
-                Ty::Array { elem: Box::new(param_ty(singular_key(&key.name), false)) }
+                Ty::Array { elem: std::sync::Arc::new(param_ty(singular_key(&key.name), false)) }
             } else if key.record_slug == Some(true) {
                 Ty::Str
             } else {
@@ -1116,7 +1116,7 @@ fn build_helper_function(
             };
             query_sig.push(crate::ty::Param {
                 name: sym,
-                ty: Ty::Union { variants: vec![value_ty, Ty::Nil] },
+                ty: Ty::Union { variants: vec![value_ty, Ty::Nil].into() }.into(),
                 kind: crate::ty::ParamKind::Keyword { required: false },
             });
         }
@@ -2074,7 +2074,7 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
             Span::synthetic(),
             ExprNode::Var { id: VarId(0), name: Symbol::from("params") },
         ),
-        Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
     );
     let call = |recv: Option<Expr>, m: &str, args: Vec<Expr>, ty: Ty| {
         with_ty(
@@ -2154,7 +2154,7 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
         signature: Some(fn_sig(
             vec![(
                 Symbol::from("params"),
-                Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+                Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
             )],
             Ty::Str,
         )),

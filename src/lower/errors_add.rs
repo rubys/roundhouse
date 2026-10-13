@@ -1,5 +1,7 @@
 //! `errors.add` grounding: `errors.add(:field, "msg")` →
-//! `errors << "Field msg"`.
+//! `errors << "Field msg"` and `error_details << ActiveRecord::ErrorDetail.new("field", "msg", "msg")`,
+//! so the accumulator keeps what Rails keeps for each message; `errors.clear`
+//! empties both.
 //!
 //! The shared runtime's error accumulator is a plain `Array[String]` —
 //! the validates lowering bakes humanized full messages at lower time
@@ -80,14 +82,6 @@ pub(crate) struct Labels<'a> {
 }
 
 impl Labels<'_> {
-    /// The text a full message for `field` starts with, before its message;
-    /// `None` when `errors.format` does not end in the message.
-    pub(crate) fn message_prefix(&self, errors_reader: &Expr, field: &str) -> Option<String> {
-        let i18n = self.model(errors_reader);
-        let format = i18n.errors_format().replace("%{attribute}", &i18n.human_attribute_name(field));
-        format.strip_suffix("%{message}").filter(|p| !p.contains("%{message}")).map(str::to_string)
-    }
-
     /// The model whose `errors` this is: the reader's receiver's type, or the owner for `errors` on self.
     fn model(&self, errors_reader: &Expr) -> &crate::i18n::ModelI18n {
         let ExprNode::Send { recv, .. } = &*errors_reader.node else { return &self.data.unknown };
@@ -153,6 +147,31 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
             return;
         }
     }
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node {
+        if method.as_str() == "clear" && args.is_empty() {
+            if let ExprNode::Send { recv: owner, method: em, args: ea, .. } = &*r.node {
+                if em.as_str() == "errors" && ea.is_empty() {
+                    if !owner_reads_once(owner.as_ref()) {
+                        diags.push(residue(expr, "the record is not a plain read, and clearing both arrays reads it twice"));
+                        return;
+                    }
+                    let span = expr.span;
+                    let owner = owner.clone();
+                    let ty = expr.ty.clone();
+                    let clear_errors = std::mem::replace(expr, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
+                    let mut clear_details = Expr::new(
+                        span,
+                        ExprNode::Send { recv: Some(error_details(owner, span)), method: Symbol::from("clear"), args: Vec::new(), block: None, parenthesized: false },
+                    );
+                    clear_details.ty = Some(error_details_ty());
+                    // Details first, so the value is the `errors` array the caller cleared
+                    *expr = Expr::new(span, ExprNode::Seq { exprs: vec![clear_details, clear_errors] });
+                    expr.ty = ty;
+                    return;
+                }
+            }
+        }
+    }
     // Any `add` on an `errors` reader is this pass's construct; decide
     // ground-vs-residue below.
     let recognized = matches!(
@@ -163,6 +182,17 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
                     if em.as_str() == "errors" && ea.is_empty())
     );
     if !recognized {
+        return;
+    }
+    let owner_once = match &*expr.node {
+        ExprNode::Send { recv: Some(r), .. } => match &*r.node {
+            ExprNode::Send { recv: owner, .. } => owner_reads_once(owner.as_ref()),
+            _ => false,
+        },
+        _ => false,
+    };
+    if !owner_once {
+        diags.push(residue(expr, "the record is not a plain read, and pushing the message and its attribute reads it twice"));
         return;
     }
     let matches = matches!(
@@ -230,12 +260,29 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
         Some(ExprNode::Lit { value: Literal::Sym { value } }) => Some(value.as_str().to_string()),
         _ => None,
     };
-    let message = match kind {
-        Some(kind) => {
-            let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!() };
-            parts_expr(span, i18n.full_error(field.as_str(), &kind, &Default::default()), owner.as_ref(), field.as_str())
+    let ExprNode::Send { recv: reader_owner, .. } = &*reader.node else { unreachable!() };
+    let (message, kind, bare) = match kind {
+        Some(kind) => (
+            parts_expr(span, i18n.full_error(field.as_str(), &kind, &Default::default()), reader_owner.as_ref(), field.as_str()),
+            str_lit(span, &kind),
+            parts_expr(span, i18n.error(field.as_str(), &kind, &Default::default()), reader_owner.as_ref(), field.as_str()),
+        ),
+        None => {
+            let bare = msg.clone().unwrap_or_else(|| unreachable!("a missing message is `:invalid`"));
+            if !reads_without_effect_deep(&bare) {
+                diags.push(residue(expr, "the message is not a plain read, and the record keeps it twice"));
+                *expr.node = ExprNode::Send {
+                    recv,
+                    method: Symbol::from("add"),
+                    args: vec![field_expr, bare],
+                    block: None,
+                    parenthesized: true,
+                };
+                return;
+            }
+            // Rails' type for a String message is the message itself
+            (baked_message(i18n, span, field.as_str(), msg), bare.clone(), bare)
         }
-        None => baked_message(i18n, span, field.as_str(), msg),
     };
     // `<<` returns the accumulator it appends to (Array#<< / the errors
     // collection), so the synthesized send's result type is the
@@ -244,14 +291,97 @@ fn rewrite_errors_add(expr: &mut Expr, labels: &Labels, diags: &mut Vec<Diagnost
     // dispatching — leaving `ty = None` here makes it false-positive a
     // `send_dispatch_failed` on a receiver it can see the type of.
     let recv_ty = recv.as_ref().and_then(|r| r.ty.clone());
-    *expr.node = ExprNode::Send {
-        recv,
-        method: Symbol::from("<<"),
-        args: vec![message],
-        block: None,
-        parenthesized: false,
+    let owner = match recv.as_ref().map(|r| &*r.node) {
+        Some(ExprNode::Send { recv: owner, .. }) => owner.clone(),
+        _ => unreachable!("checked errors reader"),
     };
-    expr.ty = recv_ty;
+    let mut push_message = Expr::new(
+        span,
+        ExprNode::Send { recv, method: Symbol::from("<<"), args: vec![message], block: None, parenthesized: false },
+    );
+    push_message.ty = recv_ty.clone();
+    *expr = attributed_push(push_message, owner, field.as_str(), kind, bare, span);
+}
+
+/// `<errors> << msg` followed by `<owner>.error_details << ActiveRecord::ErrorDetail.new("field", type, message)`,
+/// so the accumulator keeps what Rails keeps for each message.
+pub(crate) fn attributed_push(
+    push_message: Expr,
+    owner: Option<Expr>,
+    field: &str,
+    kind: Expr,
+    message: Expr,
+    span: crate::span::Span,
+) -> Expr {
+    let error_ty = crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![].into() };
+    let mut class = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveRecord"), Symbol::from("ErrorDetail")] });
+    class.ty = Some(error_ty.clone());
+    let mut record = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(class),
+            method: Symbol::from("new"),
+            args: vec![str_lit(span, field), typed_str(kind), typed_str(message)],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    record.ty = Some(error_ty);
+    let mut push_detail = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(error_details(owner, span)),
+            method: Symbol::from("<<"),
+            args: vec![record],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    push_detail.ty = Some(error_details_ty());
+    let ty = push_message.ty.clone();
+    let mut both = Expr::new(span, ExprNode::Seq { exprs: vec![push_message, push_detail] });
+    both.ty = ty;
+    both
+}
+
+pub(crate) fn error_details_ty() -> crate::ty::Ty {
+    crate::ty::Ty::Array {
+        elem: std::sync::Arc::new(crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveRecord::ErrorDetail")), args: vec![].into() }),
+    }
+}
+
+/// `<owner>.error_details`, typed.
+pub(crate) fn error_details(owner: Option<Expr>, span: crate::span::Span) -> Expr {
+    let mut e = Expr::new(
+        span,
+        ExprNode::Send { recv: owner, method: Symbol::from("error_details"), args: Vec::new(), block: None, parenthesized: false },
+    );
+    e.ty = Some(error_details_ty());
+    e
+}
+
+fn str_lit(span: crate::span::Span, value: &str) -> Expr {
+    typed_str(Expr::new(span, ExprNode::Lit { value: Literal::Str { value: value.to_string() } }))
+}
+
+fn typed_str(mut e: Expr) -> Expr {
+    if e.ty.is_none() {
+        e.ty = Some(crate::ty::Ty::Str);
+    }
+    e
+}
+
+/// A message the push may evaluate twice, once for the full text and once for the record.
+fn reads_without_effect_deep(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef | ExprNode::Const { .. } => true,
+        ExprNode::StringInterp { parts } => parts.iter().all(|p| match p {
+            InterpPart::Text { .. } => true,
+            InterpPart::Expr { expr } => reads_without_effect_deep(expr),
+        }),
+        // Not a zero-arg call either: nothing proves it leaves state alone, and it would run twice
+        _ => false,
+    }
 }
 
 /// `<errors reader>.full_message(:field, message)`: the one shape whose
@@ -269,6 +399,15 @@ pub(crate) fn full_message_bakes(recv: Option<&Expr>, args: &[Expr], block: Opti
 /// Folding drops the receiver, so only one whose evaluation does nothing.
 fn reads_without_effect(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef)
+}
+
+/// The record an `errors` reader is on, when reading it again is the same record: self, or a plain read.
+pub(crate) fn owner_reads_once(owner: Option<&Expr>) -> bool {
+    // A bare zero-arg call counts: a view's or partial's local reaches here in that shape
+    owner.is_none_or(|o| {
+        reads_without_effect(o)
+            || matches!(&*o.node, ExprNode::Send { recv: None, args, block: None, .. } if args.is_empty())
+    })
 }
 
 /// A looked-up message as a string: a literal when every part is known,

@@ -191,7 +191,7 @@ module Cable
     0
   end
 
-  # Handle one inbound WebSocket frame. Only the `subscribe` command is
+  # Handle one inbound WebSocket frame: `subscribe` and `message` are
   # acted on; pings and unsubscribes are ignored (teardown drops fds,
   # and `Broadcast.unsubscribe_fd` runs on close).
   #
@@ -204,14 +204,52 @@ module Cable
     if frame.nil?
       return 0
     end
-    if frame["command"].to_s != "subscribe"
-      return 0
-    end
+    command = frame["command"].to_s
     identifier = frame["identifier"].to_s
     if identifier.length == 0
       return 0
     end
-    Cable.subscribe(ws, connection, identifier, holder)
+    if command == "subscribe"
+      return Cable.subscribe(ws, connection, identifier, holder)
+    end
+    if command == "message"
+      return Cable.perform(identifier, frame["data"].to_s, holder)
+    end
+    0
+  end
+
+  # A `message` frame - the client's `subscription.perform(action, data)`,
+  # #71 item 6. It goes to the channel this socket SUBSCRIBED under that
+  # identifier, the same object `subscribed` ran on, so whatever state
+  # `subscribed` left in its ivars is there for the action.
+  #
+  # IN FRAME ORDER: this runs on the connection's own green thread, one
+  # frame after another, so two actions from one client never overtake
+  # each other (a terminal's keystrokes stay in the order typed).
+  #
+  # `data` is decoded with its JSON types kept, as Rails decodes it. An
+  # identifier this socket holds no subscription for is logged and
+  # dropped, as Rails logs "Unable to find subscription"; so is a `data`
+  # that is not a JSON object. A raise inside the action is reported and
+  # contained: an unhandled error here would end the process, every
+  # other connection with it.
+  def self.perform(identifier, data_json, holder)
+    channel = holder.channel_for(identifier)
+    if channel.nil?
+      warn "[cable] Unable to find subscription with identifier: " + identifier
+      return 0
+    end
+    data = ActionCable::Channel::Parameters.object(data_json)
+    if data.nil?
+      warn "[cable] Unable to process a message whose data is not a JSON object"
+      return 0
+    end
+    begin
+      channel.perform_action(data)
+    rescue StandardError => e
+      warn "[cable] " + channel.class.to_s + "#perform_action raised: " + e.message
+    end
+    0
   end
 
   # ONE HEARTBEAT THREAD FOR THE PROCESS, not one per connection, and
@@ -460,6 +498,19 @@ module Cable
 
     def channels
       @channels
+    end
+
+    # The confirmed subscription this socket holds under `identifier`, or
+    # nil. Compared as the client sent it: Action Cable's client replays
+    # an identifier byte for byte in every frame it sends for that
+    # subscription.
+    def channel_for(identifier)
+      @channels.each do |channel|
+        if channel.identifier == identifier
+          return channel
+        end
+      end
+      nil
     end
 
     # Rails runs `unsubscribed` and the `after_unsubscribe` chain when a

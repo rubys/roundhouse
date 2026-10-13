@@ -64,6 +64,11 @@ VOLUME /app/storage
 # The archive already carries boot's executable mode; COPY preserves it.
 COPY boot ./boot
 ENV PORT=3000
+# #865 taught the server to bind localhost in development (Rails'
+# ServerCommand#host). Published Docker ports only reach the container's
+# non-loopback interfaces, so the image must listen on 0.0.0.0 — same as
+# production / `rails server -b 0.0.0.0`. Override with `-e BINDING=…`.
+ENV BINDING=0.0.0.0
 EXPOSE 3000
 CMD ["./boot"]
 DOCKERFILE
@@ -129,14 +134,17 @@ docker build -t campfire .
 Serves campfire on http://localhost:3000. The first visit lands on
 campfire's own first-run page, which creates the account, the first user,
 and the first room. The database is created on demand in \`/app/storage\`;
-the named volume keeps it across container restarts.
+the named volume keeps it across container restarts. The image sets
+\`BINDING=0.0.0.0\` so \`-p 3000:3000\` reaches the process (development's
+default \`localhost\` bind would only listen inside the container).
 
 \`\`\`sh
 docker run --rm -p 3000:3000 -v campfire-data:/app/storage campfire
 \`\`\`
 
-\`-e PORT=n\` changes the port inside the container; \`-e SPINEL_WORKERS=n\`
-caps the OS worker threads (default: one per core).
+\`-e PORT=n\` changes the port inside the container; \`-e BINDING=…\`
+overrides the listen address; \`-e SPINEL_WORKERS=n\` caps the OS worker
+threads (default: one per core).
 
 The server runs as uid 1000, not root. The container starts as root only
 to give \`/app/storage\` to that user, so a volume an earlier image

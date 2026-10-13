@@ -216,7 +216,7 @@ fn rewrite(expr: &mut Expr, table: &Builders, self_owner: Option<&ClassId>) {
     // three constructors answer an instance of the target; `create`
     // (non-bang) answers an unsaved-but-present record when validation
     // fails, never nil, so there is no Nil arm on any of them.
-    expr.ty = Some(Ty::Class { id: target.clone(), args: vec![] });
+    expr.ty = Some(Ty::Class { id: target.clone(), args: vec![].into() });
 }
 
 /// The owner column the foreign key matches (`id`, or the association's

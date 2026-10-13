@@ -69,6 +69,7 @@ jobs:
     if: ${{ !cancelled() && needs.preflight.outputs.publish == 'true' && needs.validation.outputs.publication-ready == 'true' && github.repository == 'rubys/roundhouse' && github.ref == 'refs/heads/main' }}
     permissions:
       contents: read
+      actions: read
       pages: write
       id-token: write
     concurrency:
@@ -84,6 +85,34 @@ jobs:
       # mid-cycle. High merge velocity used to starve github-pages whenever
       # the tip-equality check raced a later commit; the site describes the
       # validated snapshot that assembled it, not whatever HEAD is now.
+      #
+      # assemble-site uploads `github-pages-${{ github.run_attempt }}` so a
+      # `gh run rerun --failed` that re-assembles cannot leave two default
+      # `github-pages` artifacts for deploy-pages to reject. When only
+      # deploy is re-run, assemble still owns attempt N-1's artifact —
+      # walk attempt → 1 and take the newest present name.
+      # actions:read lets the resolver list this run's artifacts.
+      - name: Resolve Pages artifact
+        id: pages-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for n in $(seq "${{ github.run_attempt }}" -1 1); do
+            name="github-pages-$n"
+            # --paginate: Full val runs already exceed the default page (30).
+            if gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+                --jq ".artifacts[] | select(.name == \"$name\" and .expired == false) | .name" \
+                | grep -qx "$name"; then
+              echo "name=$name" >> "$GITHUB_OUTPUT"
+              echo "Using Pages artifact $name"
+              exit 0
+            fi
+          done
+          echo "::error::no github-pages-* artifact for run ${{ github.run_id }}"
+          exit 1
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
+        with:
+          artifact_name: ${{ steps.pages-artifact.outputs.name }}

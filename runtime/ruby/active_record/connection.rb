@@ -133,6 +133,25 @@ module ActiveRecord
     end
   end
 
+  # The edges of `Model.transaction`, for work that has to wait for the
+  # COMMIT. No-ops here, so this file stays self-contained; the
+  # Ruby-family job registry (runtime/job_registry.rb) redefines them to
+  # hold the ActiveJob payloads of jobs that set
+  # `enqueue_after_transaction_commit`, and a later definition wins.
+  module TransactionHooks
+    def self.began
+      nil
+    end
+
+    def self.committed
+      nil
+    end
+
+    def self.rolled_back
+      nil
+    end
+  end
+
   # Row set from `Connection#execute` / `#exec_query`. Mirrors the
   # slice of `ActiveRecord::Result` the corpus uses: `to_a`, `first`,
   # `each`, `rows`.
@@ -530,6 +549,9 @@ module ActiveRecord
     # `raise ActiveRecord::Rollback` inside the block rolls the
     # transaction back without the exception escaping, and the call
     # answers nil.
+    #
+    # The outermost transaction's edges are reported to
+    # `TransactionHooks` (above). A nested block reports nothing.
     def self.transaction(isolation: nil, requires_new: nil, joinable: true)
       depth = Db._txn_depth
       if depth > 0
@@ -573,6 +595,7 @@ module ActiveRecord
         end
       else
         Db.exec("BEGIN")
+        ActiveRecord::TransactionHooks.began
         Db._txn_depth = 1
         rolled_back = false
         begin
@@ -583,6 +606,7 @@ module ActiveRecord
             rolled_back = true
             Db._txn_depth = 0
             Db.exec("ROLLBACK")
+            ActiveRecord::TransactionHooks.rolled_back
             result = nil
           rescue Exception => e
             rolled_back = true
@@ -595,6 +619,7 @@ module ActiveRecord
               # transaction, not just the statement, does this) — the
               # ROLLBACK's own failure must not hide the real error below.
             end
+            ActiveRecord::TransactionHooks.rolled_back
             raise e
           end
         ensure
@@ -602,7 +627,21 @@ module ActiveRecord
             nil
           else
             Db._txn_depth = 0
-            Db.exec("COMMIT")
+            begin
+              Db.exec("COMMIT")
+            rescue Exception => e
+              # A failed COMMIT (SQLITE_BUSY, a deferred constraint) leaves
+              # the transaction open: end it, and tell the hooks it rolled
+              # back so nothing held for it is queued by a later COMMIT.
+              begin
+                Db.exec("ROLLBACK")
+              rescue StandardError
+                # Already ended; the COMMIT's error is the one to raise.
+              end
+              ActiveRecord::TransactionHooks.rolled_back
+              raise e
+            end
+            ActiveRecord::TransactionHooks.committed
           end
         end
       end

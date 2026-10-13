@@ -124,7 +124,7 @@ impl<'a> BodyTyper<'a> {
         let scope_ty = args.first().and_then(|a| a.ty.as_ref());
         let records = self.pagy_scope_ty(scope_ty);
         let result = |records: Ty| Ty::Tuple {
-            elems: vec![Ty::Class { id: pagy_id.clone(), args: vec![] }, records],
+            elems: vec![Ty::Class { id: pagy_id.clone(), args: vec![].into() }, records].into(),
         };
         match args {
             [] => {

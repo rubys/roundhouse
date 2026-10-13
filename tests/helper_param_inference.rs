@@ -75,7 +75,7 @@ fn view_call_sites_unify_helper_params_and_stamp_signature() {
         panic!("expected stamped Fn signature, got {:?}", shout.signature);
     };
     assert_eq!(params.len(), 1);
-    assert_eq!(params[0].ty, Ty::Str, "param should unify to Str from the call site");
+    assert_eq!(params[0].ty, Ty::Str.into(), "param should unify to Str from the call site");
     // Body is `msg` — the param read — so the return follows the seed.
     assert_eq!(**ret, Ty::Str);
     // Views are typed once before that harvest; they must be restamped
@@ -135,7 +135,7 @@ fn untyped_view_args_are_no_evidence_not_absorption() {
     };
     assert_eq!(
         params[0].ty,
-        Ty::Str,
+        Ty::Str.into(),
         "an untyped call site is no evidence; it must not widen the param: {:?}",
         params[0].ty
     );

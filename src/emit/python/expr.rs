@@ -660,6 +660,8 @@ fn py_const_path(path: &[crate::ident::Symbol]) -> String {
         Some("ActionDispatch" | "ActionController" | "ActionView") if path.len() >= 2 => {
             path.last().unwrap().to_string()
         }
+        // A sibling of `Base` in active_record_base.py, not an attribute of its `ActiveRecord` class
+        Some("ActiveRecord") if path.len() == 2 && path[1].as_str() == "ErrorDetail" => "ErrorDetail".to_string(),
         _ => path
             .iter()
             .map(|s| s.to_string())
@@ -1447,6 +1449,8 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
     let is_str = matches!(ty, Some(Ty::Str | Ty::Sym));
     let is_array = matches!(ty, Some(Ty::Array { .. }));
     let is_seq = matches!(ty, Some(Ty::Str | Ty::Sym | Ty::Array { .. } | Ty::Hash { .. }));
+    let never_falsy_elems =
+        matches!(ty, Some(Ty::Array { elem }) if matches!(**elem, Ty::Str | Ty::Int | Ty::Float | Ty::Sym));
     Some(match method {
         // Universal Ruby conversions → Python builtins (which accept any
         // value). Skipped on known user classes, which may define their
@@ -1462,6 +1466,9 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         // to seq types so Flash#empty?/Session#empty? (user methods) keep
         // their own definitions.
         "empty?" if no_args && is_seq => format!("len({recv}) == 0"),
+        // An element that is never nil or false makes `any?` / `none?` a question of size
+        "any?" if no_args && never_falsy_elems => format!("len({recv}) > 0"),
+        "none?" if no_args && never_falsy_elems => format!("len({recv}) == 0"),
         "to_h" if no_args && matches!(ty, Some(Ty::Hash { .. })) => format!("dict({recv})"),
         "to_a" if no_args && matches!(ty, Some(Ty::Array { .. })) => format!("list({recv})"),
         // Ruby's single-element `Array#push(x)` is Python's `list.append`.

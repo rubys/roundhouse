@@ -293,7 +293,7 @@ pub(super) fn try_recv_typed_method(
                     // RBS `[]=: (String, String?)` — rust emits
                     // `set_index(&str, Option<String>)`, not Value.
                     let opt_str = crate::ty::Ty::Union {
-                        variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil],
+                        variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil].into(),
                     };
                     let wrapped = super::coerce::coerce_arg_for_param_ty(&args[1], &opt_str);
                     return Some(format!(

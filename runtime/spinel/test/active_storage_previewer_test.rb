@@ -45,12 +45,15 @@ class ActiveStoragePreviewerTest < Minitest::Test
   end
 
   def test_a_file_that_is_not_a_video_raises_rather_than_answering_bytes
+    # path must be bound before skip: otherwise `ensure` turns a skip
+    # (ffmpeg absent) into TypeError from File.exist?(nil).
+    path = nil
     skip "ffmpeg not installed" unless FFMPEG
     path = File.join(Dir.tmpdir, "roundhouse-previewer-#{$$}.txt")
     File.write(path, "not a video")
-    e = assert_raises(RuntimeError) { ActiveStorage::Previewer.poster(path) }
+    e = assert_raises(ActiveStorage::PreviewError) { ActiveStorage::Previewer.poster(path) }
     assert_match(/could not draw a poster/, e.message)
   ensure
-    File.delete(path) if File.exist?(path)
+    File.delete(path) if path && File.exist?(path)
   end
 end

@@ -104,8 +104,8 @@ pub fn functionalize_with_external_duals(
 /// these ivars in library mode.
 fn collect_field_types(methods: &[crate::dialect::MethodDef]) -> HashMap<String, Ty> {
     let mut out = HashMap::new();
-    let hash_ty = || Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) };
-    let array_ty = || Ty::Array { elem: Box::new(Ty::Untyped) };
+    let hash_ty = || Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) };
+    let array_ty = || Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) };
     for m in methods {
         walk(&m.body, &mut |n| match &*n.node {
             ExprNode::Assign { target: LValue::Ivar { name }, value } => match &*value.node {

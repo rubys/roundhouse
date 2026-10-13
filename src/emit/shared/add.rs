@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn array_plus_array_matching_elem_is_array_concat() {
-        let a_ty = Ty::Array { elem: Box::new(Ty::Int) };
+        let a_ty = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
         let l = var_with("a", a_ty.clone());
         let r = var_with("b", a_ty);
         let case = classify_add(&l, &r);
@@ -212,7 +212,7 @@ mod tests {
             "a",
             Ty::Relation { of: ClassId(Symbol::from("Story")) },
         );
-        let r = var_with("b", Ty::Array { elem: Box::new(Ty::Int) });
+        let r = var_with("b", Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
         let case = classify_add(&l, &r);
         let AddCase::ArrayConcat { elem } = case else {
             panic!("expected ArrayConcat");
@@ -224,11 +224,11 @@ mod tests {
     fn array_plus_array_different_elem_is_concat() {
         let l = var_with(
             "a",
-            Ty::Array { elem: Box::new(Ty::Int) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
         );
         let r = var_with(
             "b",
-            Ty::Array { elem: Box::new(Ty::Str) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         );
         // Mismatched element types are still a valid Ruby concat
         // (producing Array<Int|Str>) — not `Incompatible`. Every target
@@ -248,8 +248,8 @@ mod tests {
     #[test]
     fn hash_plus_hash_is_incompatible() {
         let h = Ty::Hash {
-            key: Box::new(Ty::Sym),
-            value: Box::new(Ty::Int),
+            key: std::sync::Arc::new(Ty::Sym),
+            value: std::sync::Arc::new(Ty::Int),
         };
         let l = var_with("a", h.clone());
         let r = var_with("b", h);
@@ -282,7 +282,7 @@ mod tests {
         let u = var_with(
             "a",
             Ty::Union {
-                variants: vec![Ty::Float, Ty::Untyped],
+                variants: vec![Ty::Float, Ty::Untyped].into(),
             },
         );
         let s = var_with("b", Ty::Str);

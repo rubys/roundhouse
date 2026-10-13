@@ -374,7 +374,7 @@ pub mod nil_to_zero_for_string_fields {
                 },
                 AccessorKind::AttributeWriter => match m.signature.as_ref() {
                     Some(Ty::Fn { params, .. }) => match params.first() {
-                        Some(p) => p.ty.clone(),
+                        Some(p) => (*p.ty).clone(),
                         None => continue,
                     },
                     _ => continue,

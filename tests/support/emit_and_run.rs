@@ -61,6 +61,13 @@ pub fn real_blog() -> Overlay {
     Overlay { base: roundhouse::fixtures::real_blog().to_path_buf(), scratch_base: false, edits: Vec::new() }
 }
 
+/// Start from `fixtures/tiny-blog-uuid`: `posts.id` a uuid and
+/// `comments.post_id` a uuid foreign key.
+pub fn tiny_blog_uuid() -> Overlay {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/tiny-blog-uuid");
+    Overlay { base, scratch_base: false, edits: Vec::new() }
+}
+
 /// Start from an empty tree and `write` the app file by file, for a
 /// shape the blog cannot be edited into, such as an app with no views.
 pub fn empty_app() -> Overlay {

@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn str_mod_array_is_string_format() {
         let l = var_typed("a", Ty::Str);
-        let r = var_typed("b", Ty::Array { elem: Box::new(Ty::Int) });
+        let r = var_typed("b", Ty::Array { elem: std::sync::Arc::new(Ty::Int) });
         assert!(matches!(classify_modulo(&l, &r), ModuloCase::StringFormat));
     }
 
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn array_mod_array_is_incompatible() {
-        let arr = Ty::Array { elem: Box::new(Ty::Int) };
+        let arr = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
         let l = var_typed("a", arr.clone());
         let r = var_typed("b", arr);
         assert!(matches!(classify_modulo(&l, &r), ModuloCase::Incompatible));
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn hash_mod_hash_is_incompatible() {
-        let h = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Int) };
+        let h = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Int) };
         let l = var_typed("a", h.clone());
         let r = var_typed("b", h);
         assert!(matches!(classify_modulo(&l, &r), ModuloCase::Incompatible));

@@ -523,7 +523,7 @@ mod tests {
         use crate::ty::Ty;
         // `acc[k] = v` where `acc` is a Flash struct → Flash.put.
         let mut acc = var(&s("acc"));
-        acc.ty = Some(Ty::Class { id: ClassId(s("ActionDispatch::Flash")), args: vec![] });
+        acc.ty = Some(Ty::Class { id: ClassId(s("ActionDispatch::Flash")), args: vec![].into() });
         let index_set = syn(ExprNode::Send {
             recv: Some(acc),
             method: s("[]="),

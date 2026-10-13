@@ -40,14 +40,16 @@ use indexmap::IndexMap;
 use std::path::PathBuf;
 
 use crate::app::App;
+use crate::diagnostic::DiagnosticKind;
 use crate::dialect::{
     Action, Association, Controller, ControllerBodyItem, Dependent, FilterKind, HttpMethod,
     Model, ModelBodyItem, RenderTarget, ValidationRule,
 };
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::lower::routes::{flatten_routes_for_helpers, FlatRoute};
+use crate::lower::lower_model_to_library_class;
 use crate::naming;
-use crate::schema::{ColumnType, Table};
+use crate::schema::{ColumnType, Schema, Table};
 
 use super::ruby::emit_expr;
 use super::EmittedFile;
@@ -255,12 +257,42 @@ fn emit_models(app: &App) -> Vec<EmittedFile> {
                 "models/{}.rb",
                 naming::snake_case(m.name.0.as_str())
             )),
-            content: model_for(m),
+            content: model_for(m, &app.schema),
         })
         .collect()
 }
 
-fn model_for(model: &Model) -> String {
+fn model_for(model: &Model, schema: &Schema) -> String {
+    // Roda converts from the ingest-shape IR directly (see the module
+    // doc), so a `ModelBodyItem::Alias` here has never been through
+    // `lower::model_to_library::resolve_model_aliases` — the pass that
+    // decides whether `old` names anything (a hand-written def, an
+    // enum method, an association reader, attr_accessor, an inherited
+    // ActiveRecord method) or is simply undefined. Emitting an
+    // unresolved alias verbatim produced `alias missing not_defined`,
+    // valid Ruby syntax that raises NameError the moment Sequel loads
+    // the class. Run the real resolver once (discarding the
+    // lowered-for-Ruby method bodies it also builds — Roda doesn't use
+    // them) to get the SAME diagnostic other targets raise for the
+    // same alias, reusing it instead of re-deriving "is this alias
+    // resolvable" from scratch. Only `alias_target_unresolved`
+    // diagnostics are kept: nothing else that lowering pass surfaces
+    // (rich text, typed_store, …) is Roda's concern.
+    let unresolved_alias_diags: Vec<crate::diagnostic::Diagnostic> =
+        if model.body.iter().any(|item| matches!(item, ModelBodyItem::Alias { .. })) {
+            let (_, diags) =
+                crate::emit::diagnostics::scope(|| lower_model_to_library_class(model, schema));
+            diags
+                .into_iter()
+                .filter(|d| {
+                    matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. }
+                        if construct.as_str() == "alias_target_unresolved")
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!("class {} < Sequel::Model", model.name.0));
 
@@ -278,7 +310,12 @@ fn model_for(model: &Model) -> String {
                         ValidationRule::Presence => {
                             presence.push(format!(":{}", validation.attribute));
                         }
-                        ValidationRule::Length { min, max, message } => {
+                        // Sequel's min/max validators do not share Rails'
+                        // three-state nil rule (unset fails minimum, skips
+                        // a lone maximum, `false` fails both). Emitting
+                        // `:allow_nil` here would claim that match. The
+                        // field is named so the drop is visible.
+                        ValidationRule::Length { min, max, message, allow_nil: _ } => {
                             let msg = message
                                 .as_ref()
                                 .map(|m| format!(", message: {m:?}"))
@@ -362,6 +399,23 @@ fn model_for(model: &Model) -> String {
                 // models are ordinary Ruby classes.
                 for l in super::ruby::emit_method(method).lines() {
                     lines.push(format!("  {l}").trim_end().to_string());
+                }
+            }
+            // A resolvable alias (naming a hand-written def, an enum
+            // method, an association reader, attr_accessor, or an
+            // inherited ActiveRecord method) re-emits as plain Ruby
+            // `alias` — Sequel models are ordinary Ruby classes, and
+            // by this point in the class body `old` is a real method,
+            // same as under every other target. An unresolved one
+            // (`resolve_model_aliases` above found nothing `old` could
+            // mean) pushes the SAME diagnostic the other targets raise
+            // for it instead of emitting the dead `alias` line: strict
+            // mode errors, survey mode records the gap.
+            ModelBodyItem::Alias { new, old, span, .. } => {
+                if let Some(diag) = unresolved_alias_diags.iter().find(|d| d.span == *span) {
+                    crate::emit::diagnostics::push(diag.clone());
+                } else {
+                    lines.push(format!("  alias {new} {old}"));
                 }
             }
             ModelBodyItem::Unknown { expr, .. } => {

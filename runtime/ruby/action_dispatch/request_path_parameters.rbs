@@ -1,0 +1,9 @@
+module ActionDispatch
+  class RequestPathParameters
+    @values: Hash[String, String]
+    def initialize: (Hash[String, String] values) -> void
+    def []: (String | Symbol key) -> String?
+    def fetch: (String | Symbol key, *String? defaults) -> String?
+    def key?: (String | Symbol key) -> bool
+  end
+end

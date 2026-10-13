@@ -171,7 +171,7 @@ pub(crate) fn rewrite_node(
             // Under a one-class test the call's receiver IS that class:
             // the narrowing is the guard that makes the call resolve.
             if let ([klass], ExprNode::Send { recv: Some(r), .. }) = (arms.as_slice(), &mut *call.node) {
-                r.ty = Some(Ty::Class { id: crate::ident::ClassId(klass.clone()), args: Vec::new() });
+                r.ty = Some(Ty::Class { id: crate::ident::ClassId(klass.clone()), args: Vec::new().into() });
             }
             let test = arms
                 .into_iter()

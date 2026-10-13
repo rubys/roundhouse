@@ -146,18 +146,18 @@ fn declare_attribute_types(methods: &mut [MethodDef], declared: &[(Symbol, crate
         let ty = &match written {
             Ty::Nil => Ty::Nil,
             Ty::Union { variants } if variants.contains(&Ty::Nil) => written.clone(),
-            _ => Ty::Union { variants: vec![written.clone(), Ty::Nil] },
+            _ => Ty::Union { variants: vec![written.clone(), Ty::Nil].into() },
         };
         let writer = format!("{}=", name.as_str());
         for method in methods.iter_mut().filter(|m| m.receiver == MethodReceiver::Instance) {
             let params = if method.name == *name {
                 vec![]
             } else if method.name.as_str() == writer {
-                vec![Param { name: Symbol::from("value"), ty: ty.clone(), kind: ParamKind::Required }]
+                vec![Param { name: Symbol::from("value"), ty: ty.clone().into(), kind: ParamKind::Required }].into()
             } else {
                 continue;
             };
-            let signature = Ty::Fn { params, block: None, ret: Box::new(ty.clone()), effects: method.effects.clone() };
+            let signature = Ty::Fn { params: params.into(), block: None, ret: std::sync::Arc::new(ty.clone()), effects: method.effects.clone() };
             method.signature = Some(signature.clone());
             out.push((method.name.clone(), signature));
         }

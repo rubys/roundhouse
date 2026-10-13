@@ -50,8 +50,13 @@ module Tep
     # (Tep.display_name). Set by scaffold/main.rb; empty until then.
     attr_accessor :name
 
+    # The address the server listens on (`rails server -b`). Empty: every
+    # interface, the listener the server always had. Set by scaffold/main.rb.
+    attr_accessor :bind_host
+
     def initialize
       @name = ""
+      @bind_host = ""
       # Type-seed the Broadcast subscriber registry: a first push pins
       # the element type, then it is dropped.
       @broadcast_subs = [Tep::BroadcastSubscription.new(

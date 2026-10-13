@@ -347,6 +347,59 @@ check("broadcasting_for joins the channel name to the record's gid",
 params = ActionCable::Channel::Parameters.new({ "room_id" => 1 })
 check("params read indifferently", [params[:room_id], params["room_id"]], [1, 1])
 
+# --- a `message` frame: the client's `perform` (#71 item 6) ----------
+#
+# Through the connection's own frame handler, as the reactor calls it.
+# The connection is allocated rather than built (no socket, no driver);
+# the worker pool and the database lease run in line, so each frame has
+# finished when `handle_message` returns. Which methods are actions and
+# how they are called is the emitted contract's job
+# (`emit_and_run::a_cable_action_runs_with_rails_rules`); this is the
+# routing: the right subscription, JSON types kept, and every way a
+# frame can be wrong dropped without escaping.
+class ActionProbeChannel < ApplicationCable::Channel
+  SEEN = []
+  def input(data) = SEEN << [:input, data["d"]]
+  def speech(data) = SEEN << [:speech, data["on"]]
+  def boom(_data) = raise("boom")
+end
+
+Cable::Workers.define_singleton_method(:post) { |&block| block.call }
+unless defined?(Db)
+  module Db
+    def self.with_connection = yield
+  end
+end
+
+PROBE_ID = '{"channel":"ActionProbeChannel"}'
+socket_conn = Cable::Connection.allocate
+socket_conn.instance_variable_set(:@channels, {
+  PROBE_ID => ActionProbeChannel.new(nil, PROBE_ID, ActionCable::Channel::Parameters.new({})),
+  '{"channel":"Pending"}' => :pending
+})
+frame = ->(identifier, data) { JSON.generate("command" => "message", "identifier" => identifier, "data" => data) }
+
+socket_conn.send(:handle_message, frame.(PROBE_ID, '{"action":"input","d":"ls\r"}'))
+socket_conn.send(:handle_message, frame.(PROBE_ID, '{"action":"speech","on":false}'))
+check("a message frame runs the action on that subscription, JSON types kept",
+      ActionProbeChannel::SEEN, [[:input, "ls\r"], [:speech, false]])
+
+ActionProbeChannel::SEEN.clear
+socket_conn.send(:handle_message, frame.('{"channel":"Nobody"}', '{"action":"input","d":"x"}'))
+socket_conn.send(:handle_message, frame.('{"channel":"Pending"}', '{"action":"input","d":"x"}'))
+socket_conn.send(:handle_message, frame.(PROBE_ID, '["input"]'))
+socket_conn.send(:handle_message, frame.(PROBE_ID, "not json"))
+check("no subscription, a pending one, or data that is not an object runs nothing",
+      ActionProbeChannel::SEEN, [])
+
+survived = begin
+  socket_conn.send(:handle_message, frame.(PROBE_ID, '{"action":"boom"}'))
+  true
+rescue StandardError
+  false
+end
+check("an action that raises is contained", survived, true)
+
 if FAILURES.empty?
   puts "ALL OK"
 else

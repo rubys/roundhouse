@@ -15,6 +15,7 @@
 # which the real ENV object would reject for non-String values.
 require "stringio"
 require_relative "action_dispatch/headers"
+require_relative "action_dispatch/request_path_parameters"
 
 module ActionDispatch
   # `ActionDispatch::TestRequest.create(env)` — see the twin in
@@ -34,11 +35,13 @@ module ActionDispatch
     # The body's params alone - see the twin in
     # runtime/ruby/action_dispatch/request.rb.
     attr_accessor :request_parameters
+    attr_reader :path_parameters
 
     def initialize(env, params = {})
       @env = env
       @params = params
       @request_parameters = {}
+      @path_parameters = RequestPathParameters.new({})
       @session_options = {}
     end
 
@@ -61,12 +64,25 @@ module ActionDispatch
       @params[key.to_s]
     end
 
+    def authorization
+      ActionDispatch::Http::Headers.authorization(@env)
+    end
+
+    def path_parameters=(values)
+      @path_parameters = RequestPathParameters.new(values)
+    end
+
     def request_method
       (@env["REQUEST_METHOD"] || "GET").upcase
     end
 
     def get? = request_method == "GET"
     def post? = request_method == "POST"
+    # Do not route `put?` through `request_method` — that helper upcases,
+    # while Rack/Rails compare the raw env value to literal `"PUT"` (so
+    # `"put"` must stay false). Shared `runtime/ruby` `put?` is likewise
+    # case-sensitive on `@request_method` (no upcase on assign).
+    def put? = @env["REQUEST_METHOD"] == "PUT"
     # Rails' "is this a safe request" idiom is `request.get? ||
     # request.head?`, and campfire writes exactly that in
     # `BlockBannedRequests#safe_request?`. This overlay is the Request

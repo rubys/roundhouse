@@ -83,7 +83,20 @@ fn alias_keyword_copies_a_defined_method_in_a_class_and_module() {
         &roundhouse::schema::Schema::default(),
         &Default::default(),
     ).expect("model alias").expect("model");
-    assert!(ingested.methods().any(|method| method.name.as_str() == "translated_fault_name"));
+    // A model's `alias` is no longer resolved at ingest (columns,
+    // associations, attr_accessor and attribute are synthesized
+    // later, in lower::model_to_library, so ingest can't yet tell a
+    // real gap from a false one — see `ModelBodyItem::Alias`'s doc).
+    // It's recorded as a typed body item here, and only resolved into
+    // a real method once lowering runs.
+    assert!(
+        ingested.body.iter().any(|item| matches!(item,
+            roundhouse::dialect::ModelBodyItem::Alias { new, old, .. }
+                if new.as_str() == "translated_fault_name" && old.as_str() == "display_name")),
+        "{:?}", ingested.body
+    );
+    let lowered = roundhouse::lower::lower_model_to_library_class(&ingested, &roundhouse::schema::Schema::default());
+    assert!(lowered.methods.iter().any(|method| method.name.as_str() == "translated_fault_name"), "{:?}", lowered.methods);
     let err = roundhouse::ingest::ingest_library_classes(
         b"class Probe\n  alias missing gone\nend\n",
         "probe.rb",

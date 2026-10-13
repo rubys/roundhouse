@@ -783,6 +783,7 @@ const RUNTIME_SRC_IMPORTS: &[(&str, &str)] = &[
     ("MatchResult", "router"),
     ("RecordNotFound", "errors"),
     ("RecordInvalid", "errors"),
+    ("ErrorDetail", "active_record_base"),
     ("FormBuilder", "view_helpers"),
     // Db primitive surface (`Db.prepare`, `Db.step?`, `Db.column_*`,
     // `Db.escape_int`, `Db.last_insert_rowid`, …) backing the

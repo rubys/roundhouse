@@ -73,14 +73,14 @@ fn no_block_returns_integer_array_and_block_returns_string() {
         (
             "values",
             Ty::Array {
-                elem: Box::new(Ty::Int),
+                elem: std::sync::Arc::new(Ty::Int),
             },
         ),
         ("yielded", Ty::Str),
         (
             "nil_block",
             Ty::Array {
-                elem: Box::new(Ty::Int),
+                elem: std::sync::Arc::new(Ty::Int),
             },
         ),
     ] {

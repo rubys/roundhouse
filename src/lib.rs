@@ -10,6 +10,8 @@ pub mod app;
 pub mod builder;
 pub mod bytecode;
 pub mod catalog;
+/// Machine-readable `roundhouse check` inventory + ranked hotspot report.
+pub mod check_report;
 pub mod diagnostic;
 pub mod dialect;
 pub mod effect;
@@ -94,3 +96,5 @@ pub use ide::{Position, Reference, TypeAt};
 pub use schema::{Column, ColumnType, ForeignKey, Index, ReferentialAction, Schema, Table};
 pub use span::{FileId, Span};
 pub use ty::{Param, ParamKind, Row, Ty};
+
+pub mod shared;

@@ -71,7 +71,7 @@ fn helper_params(name: &str) -> Vec<roundhouse::ty::Param> {
         .signature
         .expect("helper signature");
     let Ty::Fn { params, .. } = sig else { panic!("helper signature is not Ty::Fn") };
-    params
+    params.to_vec()
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn string_call_site_retypes_an_id_segment() {
     let params = helper_params("qr_code_path");
     assert_eq!(params[0].name.as_str(), "id");
     assert!(
-        matches!(params[0].ty, Ty::Str),
+        matches!(*params[0].ty, Ty::Str),
         "an `id` segment a call site fills with a String must type Str, got {:?}",
         params[0].ty
     );
@@ -90,7 +90,7 @@ fn an_id_call_site_keeps_the_integer_default() {
     let params = helper_params("article_path");
     assert_eq!(params[0].name.as_str(), "id");
     assert!(
-        matches!(params[0].ty, Ty::Int),
+        matches!(*params[0].ty, Ty::Int),
         "a model-backed `id` segment must stay Int, got {:?}",
         params[0].ty
     );
@@ -175,7 +175,7 @@ end
     let Ty::Fn { params, .. } = sig else { panic!("not Ty::Fn") };
     assert_eq!(params[0].name.as_str(), "id");
     assert!(
-        matches!(params[0].ty, Ty::Str),
+        matches!(*params[0].ty, Ty::Str),
         "a segment filled by a concern's signed id must type Str, got {:?}",
         params[0].ty
     );
@@ -213,7 +213,7 @@ fn a_direct_helpers_route_for_is_a_call_site() {
     );
     assert_eq!(params[0].name.as_str(), "user_id");
     assert!(
-        matches!(params[0].ty, Ty::Str),
+        matches!(*params[0].ty, Ty::Str),
         "a segment a `direct` block fills with a signed id must type Str, got {:?}",
         params[0].ty
     );
@@ -248,7 +248,7 @@ fn an_untyped_call_site_does_not_poison_the_direct_seed() {
            end\nend\n",
     );
     assert!(
-        matches!(params[0].ty, Ty::Str),
+        matches!(*params[0].ty, Ty::Str),
         "an untyped caller must not outvote the typed ones, got {:?}",
         params[0].ty
     );
@@ -302,5 +302,5 @@ end
         .signature
         .expect("helper signature");
     let Ty::Fn { params, .. } = sig else { panic!("not Ty::Fn") };
-    params
+    params.to_vec()
 }

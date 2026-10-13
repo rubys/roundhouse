@@ -69,7 +69,7 @@ fn module_singleton_shape() {
     // gives in real ingest.
     let adapter_ty = Ty::Class {
         id: ClassId(Symbol::from("AdapterInterface")),
-        args: vec![],
+        args: vec![].into(),
     };
     let reader = MethodDef {
         visibility: roundhouse::dialect::MethodVisibility::Public,
@@ -84,9 +84,9 @@ fn module_singleton_shape() {
             ExprNode::Ivar { name: Symbol::from("adapter") },
         ),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(adapter_ty.clone()),
+            ret: std::sync::Arc::new(adapter_ty.clone()),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -121,11 +121,11 @@ fn module_singleton_shape() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("value"),
-                ty: adapter_ty.clone(),
+                ty: adapter_ty.clone().into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(adapter_ty.clone()),
+            ret: std::sync::Arc::new(adapter_ty.clone()),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -237,7 +237,7 @@ fn hand_written_runtime_present() {
 fn module_singleton_does_not_fire_on_plain_class() {
     let attr_ty = Ty::Class {
         id: ClassId(Symbol::from("AdapterInterface")),
-        args: vec![],
+        args: vec![].into(),
     };
     let reader = MethodDef {
         visibility: roundhouse::dialect::MethodVisibility::Public,
@@ -252,9 +252,9 @@ fn module_singleton_does_not_fire_on_plain_class() {
             ExprNode::Ivar { name: Symbol::from("adapter") },
         ),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(attr_ty.clone()),
+            ret: std::sync::Arc::new(attr_ty.clone()),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -338,11 +338,11 @@ fn raise_panic_peephole() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("msg"),
-                ty: Ty::Str,
+                ty: Ty::Str.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -379,11 +379,11 @@ fn raise_panic_peephole() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("msg"),
-                ty: Ty::Str,
+                ty: Ty::Str.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -488,9 +488,9 @@ fn time_now_utc_iso8601_peephole() {
         params: vec![],
         body: chain,
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -547,7 +547,7 @@ fn include_array_recv_routes_to_slices_contains() {
         Span::synthetic(),
         ExprNode::Var { id: VarId(0), name: Symbol::from("cols") },
     );
-    cols_var.ty = Some(Ty::Array { elem: Box::new(Ty::Sym) });
+    cols_var.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Sym) });
     let body = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -573,11 +573,11 @@ fn include_array_recv_routes_to_slices_contains() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("cols"),
-                ty: Ty::Array { elem: Box::new(Ty::Sym) },
+                ty: Ty::Array { elem: std::sync::Arc::new(Ty::Sym) }.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Bool),
+            ret: std::sync::Arc::new(Ty::Bool),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -654,11 +654,11 @@ fn negative_index_rewrites_to_len_minus_n() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("records"),
-                ty: Ty::Array { elem: Box::new(Ty::Str) },
+                ty: Ty::Array { elem: std::sync::Arc::new(Ty::Str) }.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -789,9 +789,9 @@ fn class_reflection_rewrites() {
         params: vec![],
         body: class_name_chain,
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -826,9 +826,9 @@ fn class_reflection_rewrites() {
         params: vec![],
         body: bare_name,
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -917,11 +917,11 @@ fn bare_new_in_class_method_resolves_to_constructor() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("attrs"),
-                ty: Ty::Untyped,
+                ty: Ty::Untyped.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Class { id: ClassId(Symbol::from("Widget")), args: vec![] }),
+            ret: std::sync::Arc::new(Ty::Class { id: ClassId(Symbol::from("Widget")), args: vec![].into() }),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -987,9 +987,9 @@ fn implicit_self_method_call_resolution() {
             ExprNode::Ivar { name: Symbol::from("status") },
         ),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -1011,9 +1011,9 @@ fn implicit_self_method_call_resolution() {
         params: vec![],
         body: Expr::new(Span::synthetic(), ExprNode::Lit { value: roundhouse::Literal::Nil }),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -1070,9 +1070,9 @@ fn implicit_self_method_call_resolution() {
             ExprNode::Seq { exprs: vec![s_assign, notify_call, s_return] },
         ),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Str),
+            ret: std::sync::Arc::new(Ty::Str),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -1422,9 +1422,9 @@ fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
         params: vec![],
         body,
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(ret),
+            ret: std::sync::Arc::new(ret),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -1508,7 +1508,7 @@ fn typed_empty_literals_back_propagate() {
             Span::synthetic(),
             ExprNode::Array { elements: vec![], style: Default::default() },
         );
-        e.ty = Some(Ty::Array { elem: Box::new(elem) });
+        e.ty = Some(Ty::Array { elem: std::sync::Arc::new(elem) });
         e
     };
     // Helper: build a typed-empty Hash Expr.
@@ -1517,7 +1517,7 @@ fn typed_empty_literals_back_propagate() {
             Span::synthetic(),
             ExprNode::Hash { entries: vec![], kwargs: false },
         );
-        e.ty = Some(Ty::Hash { key: Box::new(k), value: Box::new(v) });
+        e.ty = Some(Ty::Hash { key: std::sync::Arc::new(k), value: std::sync::Arc::new(v) });
         e
     };
 
@@ -1534,9 +1534,9 @@ fn typed_empty_literals_back_propagate() {
         params: vec![],
         body: typed_array_lit(Ty::Str),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Array { elem: Box::new(Ty::Str) }),
+            ret: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -1558,9 +1558,9 @@ fn typed_empty_literals_back_propagate() {
         params: vec![],
         body: typed_hash_lit(Ty::Str, Ty::Str),
         signature: Some(Ty::Fn {
-            params: vec![],
+            params: vec![].into(),
             block: None,
-            ret: Box::new(Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) }),
+            ret: std::sync::Arc::new(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) }),
             effects: EffectSet::default(),
         }),
         effects: EffectSet::default(),
@@ -1796,8 +1796,8 @@ fn nil_check_to_comma_ok_rewrites_pair() {
     // gate fires.
     let span = Span::synthetic();
     let other_ty = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(Ty::Str),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(Ty::Str),
     };
     let mut other_var = Expr::new(span, ExprNode::Var {
         id: VarId(0),
@@ -1903,7 +1903,7 @@ fn nil_check_to_comma_ok_skips_non_hash_receiver() {
     let span = Span::synthetic();
     // Receiver typed as a Class — should NOT match.
     let mut self_ref = Expr::new(span, ExprNode::SelfRef);
-    self_ref.ty = Some(Ty::Class { id: ClassId(Symbol::from("StubFlash")), args: vec![] });
+    self_ref.ty = Some(Ty::Class { id: ClassId(Symbol::from("StubFlash")), args: vec![].into() });
 
     let index_send = Expr::new(span, ExprNode::Send {
         recv: Some(self_ref),

@@ -1165,6 +1165,16 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // An element that is never nil or false makes `any?` / `none?` a question of size
+    if matches!(method, "any?" | "none?") && args.is_empty() {
+        if let Some(r) = recv.filter(|r| {
+            matches!(effective_recv_ty(r), Some(crate::ty::Ty::Array { elem }) if matches!(*elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym))
+        }) {
+            let empty = format!("Enum.empty?({})", emit_expr(r));
+            return if method == "none?" { empty } else { format!("not {empty}") };
+        }
+    }
+
     // `recv.empty?` — Array/list → `Enum.empty?`, Hash → `map_size == 0`.
     // An unknown/struct receiver falls through (a struct's own `empty?`
     // method routes via the self-call / method-on-record paths).
@@ -1223,6 +1233,27 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // stored ISO-8601 text into a native UTC `%DateTime{}` — the
     // hand-written `RhDateTime.parse` (runtime/elixir/v2/rh_datetime.ex),
     // not a transpiled `ActiveSupport` module (no such unit exists).
+    // `ActiveRecord::ErrorDetail` (runtime/ruby/active_record/base.rb) is a map here: the Elixir model keeps no transpiled Base.
+    if method == "new" && args.len() == 3 {
+        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
+            if path.iter().map(|s| s.as_str()).eq(["ActiveRecord", "ErrorDetail"]) {
+                return format!(
+                    "%{{attribute: {}, kind: {}, message: {}}}",
+                    emit_expr(&args[0]),
+                    emit_expr(&args[1]),
+                    emit_expr(&args[2]),
+                );
+            }
+        }
+    }
+    // `Base#error_messages_for(attribute)`: the messages of the details on `attribute`.
+    if method == "error_messages_for" && args.len() == 1 && (recv.is_some() || is_record_threading_context()) {
+        let record = recv.map(emit_expr).unwrap_or_else(|| "record".to_string());
+        return format!(
+            "(for detail <- {record}.error_details, detail.attribute == {}, do: detail.message)",
+            emit_expr(&args[0]),
+        );
+    }
     if method == "parse_db_time" && args.len() == 1 {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
@@ -1993,6 +2024,13 @@ fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
             }
         }
     }
+    // The form builder synthesizes this call after the view body is typed, and that per-view typer cannot see the record's `errors`
+    if let ExprNode::Send { method, .. } = &*e.node {
+        if method.as_str() == "error_messages_for"
+        {
+            return Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Str) });
+        }
+    }
     // Fall back to the node's own ty.
     match e.ty.as_ref() {
         Some(t) if !matches!(t, crate::ty::Ty::Untyped) => Some(t.clone()),
@@ -2246,7 +2284,7 @@ mod tests {
         })
     }
     fn arr() -> Ty {
-        Ty::Array { elem: Box::new(Ty::Untyped) }
+        Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }
     }
 
     fn unary(method: &str, recv: Expr) -> Expr {
@@ -2400,7 +2438,7 @@ mod tests {
         // the receiver.
         let record = var_t(
             "record",
-            Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Base")), args: vec![] },
+            Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Base")), args: vec![].into() },
         );
         let call = Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
             recv: Some(record),
@@ -2527,7 +2565,7 @@ mod tests {
     #[test]
     fn hash_methods_map_to_elixir_map() {
         let hash = || {
-            var_t("h", Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) })
+            var_t("h", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) })
         };
         let no_args = |m: &str| Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
             recv: Some(hash()),
@@ -2737,7 +2775,7 @@ mod tests {
         // the threaded record) → polymorphic `instance.__struct__.save(
         // instance)`. `instance.id` (a struct field) → field read.
         let mut instance = syn(ExprNode::Var { id: VarId(0), name: sym("instance") });
-        instance.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![] });
+        instance.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![].into() });
         let save_call = call(instance.clone(), "save", vec![]);
         let id_read = call(instance, "id", vec![]);
 
@@ -2751,7 +2789,7 @@ mod tests {
             emit_expr(&call(
                 {
                     let mut v = syn(ExprNode::Var { id: VarId(0), name: sym("instance") });
-                    v.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![] });
+                    v.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![].into() });
                     v
                 },
                 "id",
@@ -2788,7 +2826,7 @@ mod tests {
             emit_expr(&call(var_t("s", Ty::Str), "include?", vec![lit(":")])),
             "String.contains?(s, \":\")"
         );
-        let nilable = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        let nilable = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
         assert_eq!(
             emit_expr(&call(var_t("pp", nilable), "include?", vec![lit(":")])),
             "String.contains?(pp, \":\")"
@@ -2799,7 +2837,7 @@ mod tests {
     fn container_query_methods_dispatch_on_type() {
         // Array receiver → Enum.*; Hash receiver → Map.* / map_size.
         let arr = || var_t("xs", arr());
-        let hsh = || var_t("h", Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) });
+        let hsh = || var_t("h", Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) });
         assert_eq!(emit_expr(&call(arr(), "empty?", vec![])), "Enum.empty?(xs)");
         assert_eq!(emit_expr(&call(hsh(), "empty?", vec![])), "map_size(h) == 0");
         assert_eq!(
@@ -2848,7 +2886,7 @@ mod tests {
             id: VarId(0),
             name: Symbol::from("row"),
         });
-        row.ty = Some(Ty::Class { id: ClassId(Symbol::from("ArticleRow")), args: vec![] });
+        row.ty = Some(Ty::Class { id: ClassId(Symbol::from("ArticleRow")), args: vec![].into() });
         assert_eq!(emit_expr(&call(row, "id", vec![])), "row.id");
 
         set_current_class_name("");
@@ -2989,13 +3027,13 @@ mod tests {
         clear_param_types();
         register_field_types(
             "Article",
-            &[("errors".to_string(), Ty::Array { elem: Box::new(Ty::Str) })],
+            &[("errors".to_string(), Ty::Array { elem: std::sync::Arc::new(Ty::Str) })],
         );
         register_param_types(
             "Views::Articles",
             &[(
                 "article".to_string(),
-                Ty::Class { id: ClassId(Symbol::from("Article")), args: vec![] },
+                Ty::Class { id: ClassId(Symbol::from("Article")), args: vec![].into() },
             )],
         );
         set_current_class_name("Views::Articles");
@@ -3113,8 +3151,8 @@ mod tests {
         let recv = var_t(
             "counts",
             Ty::Hash {
-                key: Box::new(Ty::Int),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Int),
+                value: std::sync::Arc::new(Ty::Int),
             },
         );
         let key = var_t("id", Ty::Int);

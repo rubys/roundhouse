@@ -2460,7 +2460,16 @@ fn js_send_inner(
         match recv_ty {
             // Ruby Array → JS Array (with native method renames where
             // they diverge: `.each` → `.forEach`, `.size` → `.length`).
-            Some(Ty::Array { .. }) => match method {
+            Some(Ty::Array { elem }) => match method {
+                // An element that is never nil or false makes `none?` mean no elements at all
+                "none?" if args.is_empty() && matches!(**elem, Ty::Str | Ty::Int | Ty::Float | Ty::Sym) => {
+                    return Js::binary(
+                        span,
+                        "===",
+                        Js::member(span, js_expr(r), "length"),
+                        Js::num(span, "0"),
+                    );
+                }
                 "each" => {
                     return if args.is_empty() {
                         Js::member(span, js_expr(r), "forEach")
@@ -3789,7 +3798,7 @@ mod array_eq_tests {
     use crate::span::Span;
 
     fn ints() -> Ty {
-        Ty::Array { elem: Box::new(Ty::Int) }
+        Ty::Array { elem: std::sync::Arc::new(Ty::Int) }
     }
 
     fn cmp(method: &str, actual_ty: Option<Ty>) -> String {

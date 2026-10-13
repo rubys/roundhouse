@@ -46,9 +46,10 @@
 #   nothing reads. `records_count` below is the value they need when the
 #   harness starts emitting headers.
 #
-# - `Page#cache_key` / the `etag { @page }` declaration. Conditional GET
-#   is always-stale in this runtime (base.rb's `fresh_when`), so an ETag
-#   contribution has nothing to compare against.
+# - `Page#cache_key` / the `etag { @page }` declaration. String/hash
+#   `fresh_when etag:` can answer 304 (base.rb); record-shaped
+#   `stale?(etag: record)` stays always-stale until a cache_key seam
+#   exists, so a Page ETag contribution still has nothing to compare.
 
 # `Params.str` narrows the query-string scalar below. Required here
 # rather than left to the entry point, for the reason base.rb's

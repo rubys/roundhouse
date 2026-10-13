@@ -27,7 +27,8 @@ use super::library_class::{
     ClassKind, ConcernClassMethodSpans, ConcernEnumDecl, classify_class_file,
     ingest_concern_class_method_spans, ingest_concern_filters,
     ingest_concern_included_redefs, ingest_concern_model_items_with_constants,
-    ingest_helper_method_names, ingest_library_classes, ingest_rails_application_singleton_methods,
+    ingest_helper_method_names, ingest_library_classes, ingest_nested_library_classes,
+    ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model_with_enum_constants;
 use super::routes::{EngineRouteSource, RouteHelperSource, ingest_routes_with_engines};
@@ -562,19 +563,19 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                             let outer = model.name.clone();
                             app.models.push(model);
                             if let Some(classes) =
-                                unwrap_or_record(ingest_library_classes(&source, &path_str))?
+                                unwrap_or_record(ingest_nested_library_classes(&source, &path_str))?
                             {
                                 let nested = nested_under(&outer, classes);
-                                let (concern_items, concern_enum_decls) =
+                                let (concern_items, concern_enum_decls, concern_guarded) =
                                     ingest_concern_model_items_with_constants(
                                         &source, &path_str, &enum_constants,
                                     );
                                 for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
                                     app.concern_included_redefs.entry(id).or_default().push(name);
                                 }
-                                app.concern_model_items.extend(concern_items.into_iter().filter(
-                                    |(id, _)| nested.iter().any(|class| class.name == *id),
-                                ));
+                                append_concern_items(&mut app, concern_items, concern_guarded, |id| {
+                                    nested.iter().any(|class| class.name == *id)
+                                });
                                 concern_enums.extend(concern_enum_decls.into_iter().filter(
                                     |(id, _)| nested.iter().any(|class| class.name == *id),
                                 ));
@@ -602,14 +603,14 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         {
                             app.concern_filters.extend(concern_filters);
                         }
-                        let (concern_items, concern_enum_decls) =
+                        let (concern_items, concern_enum_decls, concern_guarded) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
                             );
                         for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
                             app.concern_included_redefs.entry(id).or_default().push(name);
                         }
-                        app.concern_model_items.extend(concern_items);
+                        append_concern_items(&mut app, concern_items, concern_guarded, |_| true);
                         app.view_visible_controller_methods
                             .extend(ingest_helper_method_names(&source));
                         concern_enums.extend(concern_enum_decls);
@@ -721,19 +722,25 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         let outer = model.name.clone();
                         app.models.push(model);
                         // Classes nested in the model's body are classes
-                        // of their own, exactly as under `app/models`.
-                        if let Ok(classes) = ingest_library_classes(&source, &path_str) {
+                        // of their own, exactly as under `app/models` —
+                        // and, same as there, the plain (non-nested)
+                        // walk would re-walk the model's own class with
+                        // none of its synthesized methods in scope, so
+                        // an alias naming one (an enum predicate, say)
+                        // would hard-fail here and drop every genuinely
+                        // nested class in the file too.
+                        if let Ok(classes) = ingest_nested_library_classes(&source, &path_str) {
                             let nested = nested_under(&outer, classes);
-                            let (concern_items, concern_enum_decls) =
+                            let (concern_items, concern_enum_decls, concern_guarded) =
                                 ingest_concern_model_items_with_constants(
                                     &source, &path_str, &enum_constants,
                                 );
                             for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
                                 app.concern_included_redefs.entry(id).or_default().push(name);
                             }
-                            app.concern_model_items.extend(concern_items.into_iter().filter(
-                                |(id, _)| nested.iter().any(|class| class.name == *id),
-                            ));
+                            append_concern_items(&mut app, concern_items, concern_guarded, |id| {
+                                nested.iter().any(|class| class.name == *id)
+                            });
                             concern_enums.extend(concern_enum_decls.into_iter().filter(
                                 |(id, _)| nested.iter().any(|class| class.name == *id),
                             ));
@@ -1387,14 +1394,14 @@ end
                         {
                             app.concern_filters.extend(concern_filters);
                         }
-                        let (concern_items, concern_enum_decls) =
+                        let (concern_items, concern_enum_decls, concern_guarded) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
                             );
                         for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
                             app.concern_included_redefs.entry(id).or_default().push(name);
                         }
-                        app.concern_model_items.extend(concern_items);
+                        append_concern_items(&mut app, concern_items, concern_guarded, |_| true);
                         app.view_visible_controller_methods
                             .extend(ingest_helper_method_names(&source));
                         concern_enums.extend(concern_enum_decls);
@@ -1811,6 +1818,7 @@ end
     }
     app.i18n = catalog;
     app.i18n.missing = missing_policy(vfs, dir);
+    app.i18n.field_error_proc = field_error_proc_file(vfs, dir);
     crate::i18n::stamp_models(&mut app);
 
     // `sig/**/*.rbs` — user-authored RBS sidecars for app code the
@@ -1962,6 +1970,10 @@ end
         !(bodiless && model_names.contains(lc.name.0.as_str()))
     });
 
+    // A model's `begin include(X) rescue NameError end` becomes its
+    // `include`s (or nothing), now that every module of the app is
+    // known; before the qualification below, which reads them.
+    super::guarded_include::splice_guarded_includes(&mut app);
     // Before the splice: it (and every later consumer) looks concerns up
     // by ClassId, so the lexical-scope resolution has to have happened.
     qualify_relative_includes(&mut app);
@@ -1979,6 +1991,9 @@ end
     // `Dry::Struct` classes become plain readers and a constructor,
     // before anything reads their methods.
     super::dry_struct::lower_dry_structs(&mut app, &sources);
+    // After the structs: an option typed with a struct builds the lowered one.
+    super::dry_initializer::lower_dry_initializers(&mut app, &sources);
+    super::dry_initializer::drop_type_constants(&mut app, &sources);
     // graphql-ruby object types: analyzer-only field methods, so
     // inference carries each type's record class down the schema.
     super::graphql_ruby::lower_graphql_types(&mut app);
@@ -1995,6 +2010,8 @@ end
     splice_concerns_into_models(&mut app);
     splice_concern_class_methods_into_includers(&mut app, &concern_class_method_spans);
     super::acts_as_votable::expand_acts_as_votable(&mut app)?;
+    // After the splice: `include Discard::Model` can arrive through a concern.
+    super::discard::expand_discard_models(&mut app)?;
     super::model_macros::expand_model_macros(&mut app, &sources)?;
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
@@ -2218,9 +2235,28 @@ fn splice_concerns_into_models_named(app: &mut App, only: &[crate::ident::Symbol
             let items: Vec<ModelBodyItem> = concern_ids
                 .iter()
                 .filter(|id| spliced.insert((*id).clone()))
-                .filter_map(|id| app.concern_model_items.get(id).map(|items| (id, items)))
-                .flat_map(|(id, items)| {
-                    items.iter().map(|item| rehome_default_fk(item, id, &model_name))
+                .flat_map(|id| {
+                    // The module's unconditional items with the guarded
+                    // ones that admit this model, in source order (a
+                    // callback's place in the chain is its order).
+                    let plain: &[ModelBodyItem] =
+                        app.concern_model_items.get(id).map_or(&[], Vec::as_slice);
+                    let guarded: &[crate::app::ConcernGuardedItem] =
+                        app.concern_guarded_items.get(id).map_or(&[], Vec::as_slice);
+                    let includer = model_name.0.as_str();
+                    let mut ordered: Vec<&ModelBodyItem> = Vec::new();
+                    for i in 0..=plain.len() {
+                        for g in guarded {
+                            let here = if i == plain.len() { g.at >= i } else { g.at == i };
+                            if here && g.guard.admits(includer) {
+                                ordered.push(&g.item);
+                            }
+                        }
+                        if let Some(item) = plain.get(i) {
+                            ordered.push(item);
+                        }
+                    }
+                    ordered.into_iter().map(|item| rehome_default_fk(item, id, &model_name)).collect::<Vec<_>>()
                 })
                 .collect();
             if items.is_empty() {
@@ -6333,6 +6369,29 @@ fn additional_test_paths<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<V
 /// The classes from `classes` that are NESTED under `outer` — the ones
 /// a model's or controller's own body walk skipped. The outer class
 /// itself is ingested by its own pass and must not be registered twice.
+/// Add one file's concern items to the app's, per module. A concern can
+/// be reopened in another file, and every `included do` block it has runs
+/// for the includer, so a second file's items are appended to the first's
+/// rather than replacing them.
+fn append_concern_items(
+    app: &mut App,
+    items: Vec<(crate::ident::ClassId, Vec<crate::dialect::ModelBodyItem>)>,
+    guarded: super::library_class::ConcernGuardedItems,
+    keep: impl Fn(&crate::ident::ClassId) -> bool,
+) {
+    // A guarded item's `at` counts the unconditional items before it in
+    // its own file; offset it by what earlier files already hold.
+    for (id, items) in guarded.into_iter().filter(|(id, _)| keep(id)) {
+        let offset = app.concern_model_items.get(&id).map_or(0, Vec::len);
+        app.concern_guarded_items.entry(id).or_default().extend(
+            items.into_iter().map(|g| crate::app::ConcernGuardedItem { at: g.at + offset, ..g }),
+        );
+    }
+    for (id, items) in items.into_iter().filter(|(id, _)| keep(id)) {
+        app.concern_model_items.entry(id).or_default().extend(items);
+    }
+}
+
 fn nested_under(
     outer: &crate::ident::ClassId,
     classes: Vec<crate::dialect::LibraryClass>,
@@ -9709,6 +9768,31 @@ fn missing_policy<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::i18n::MissingP
         }
     }
     policy
+}
+
+/// The config file that sets `field_error_proc`, wherever Rails reads it from.
+fn field_error_proc_file<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
+    let mut files = vec![dir.join("config/application.rb")];
+    for sub in ["config/environments", "config/initializers"] {
+        let d = dir.join(sub);
+        let mut found = if vfs.is_dir(&d) { vfs.read_dir(&d).unwrap_or_default() } else { Vec::new() };
+        found.sort();
+        files.extend(found.into_iter().filter(|p| p.extension().is_some_and(|e| e == "rb")));
+    }
+    files.into_iter().find(|path| {
+        vfs.read_to_string(path)
+            .is_ok_and(|source| source.lines().any(assigns_field_error_proc))
+    })
+    .map(|p| p.strip_prefix(dir).unwrap_or(&p).to_string_lossy().into_owned())
+}
+
+/// `….field_error_proc = …`, and not a line that only mentions the name.
+fn assigns_field_error_proc(line: &str) -> bool {
+    let code = line.split('#').next().unwrap_or("");
+    code.match_indices(".field_error_proc").any(|(at, name)| {
+        let rest = code[at + name.len()..].trim_start();
+        rest.starts_with('=') && !rest.starts_with("==")
+    })
 }
 
 /// `:fr`, `:"pt-BR"`, `"fr"` or `'fr'` at the start of `value`, ignoring what follows it.

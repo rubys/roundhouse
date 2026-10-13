@@ -1129,6 +1129,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
         })
         .unwrap();
     assert!(verify < pages);
+    assert_eq!(
+        steps[pages]["with"]["name"].as_str(),
+        Some("github-pages-${{ github.run_attempt }}"),
+        "per-attempt Pages artifact avoids duplicate github-pages on rerun --failed"
+    );
     assert!(
         jobs["ci-summary"]["needs"]
             .as_sequence()
@@ -1196,6 +1201,11 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
     );
     assert!(deploy.get("continue-on-error").is_none());
     assert_eq!(deploy["permissions"]["pages"].as_str(), Some("write"));
+    assert_eq!(
+        deploy["permissions"]["actions"].as_str(),
+        Some("read"),
+        "deploy artifact resolver lists this run's github-pages-* uploads"
+    );
     let deploy_text = serde_yaml_ng::to_string(deploy).unwrap();
     assert!(
         !deploy_text.contains("VALIDATED_SHA"),
@@ -1205,9 +1215,32 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
         !deploy_text.contains("Refuse to publish a superseded main snapshot"),
         "main advancing mid-run must not starve github-pages"
     );
+    let deploy_steps = deploy["steps"].as_sequence().unwrap();
+    let resolve = deploy_steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Resolve Pages artifact"))
+        .expect("deploy-only rerun needs attempt fallback resolution");
+    let resolve_run = resolve["run"].as_str().unwrap();
+    assert!(
+        resolve_run.contains("github-pages-$n"),
+        "resolver must walk github-pages-N attempt names"
+    );
+    assert!(
+        resolve_run.contains("--paginate"),
+        "artifact list must paginate (Full val exceeds default page size)"
+    );
+    let deploy_pages = deploy_steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/deploy-pages@"))
+        })
+        .expect("deploy-pages step");
     assert_eq!(
-        deploy["steps"][0]["uses"].as_str(),
-        Some("actions/deploy-pages@v5")
+        deploy_pages["with"]["artifact_name"].as_str(),
+        Some("${{ steps.pages-artifact.outputs.name }}"),
+        "deploy must consume the resolved per-attempt assemble-site Pages artifact"
     );
 }
 

@@ -95,6 +95,10 @@ pub struct ParamsSpec {
     /// off `<Model>.create(<helper>)`, so nothing has to be threaded
     /// from the pass that decided it.
     pub wants_to_attrs: bool,
+    /// Some call site reads `<helper>.as_json` — synthesize `as_json`,
+    /// Rails' `Parameters#as_json`: the permitted values, String-keyed
+    /// (the class's `to_h`). Demand-gated like `wants_to_attrs`.
+    pub wants_as_json: bool,
     /// Controllers whose bodies declared this exact permit list, in
     /// source order. Two controllers permitting the same fields share
     /// one class (campfire's `FirstRunsController` and `UsersController`
@@ -131,9 +135,42 @@ pub struct ParamsSpecs {
     /// Names of `has_one` / `has_many` associations declared with a
     /// `primary_key:` other than `id` (see [`Self::mark_keyed_associations`]).
     keyed_assocs: std::collections::HashSet<Symbol>,
+    /// Resources a model is named after (with a table), so the model
+    /// lowering gives it the typed `update_from_<x>` variants. `None`
+    /// until [`Self::mark_model_resources`] is told the models: a caller
+    /// that lowers controllers without them keeps every rename.
+    model_resources: Option<std::collections::HashSet<Symbol>>,
 }
 
 impl ParamsSpecs {
+    /// Record which resources name a model with a table: only those get
+    /// the typed update variants (`model_to_library`'s
+    /// `push_update_typed_variants`). An empty model list leaves the
+    /// set unknown.
+    pub fn mark_model_resources(
+        &mut self,
+        models: &[crate::dialect::Model],
+        schema: Option<&crate::schema::Schema>,
+    ) {
+        let Some(schema) = schema else { return };
+        if models.is_empty() {
+            return;
+        }
+        self.model_resources = Some(
+            models
+                .iter()
+                .filter(|m| schema.tables.contains_key(&m.table.0))
+                .map(|m| Symbol::from(crate::naming::snake_case(m.name.0.as_str())))
+                .collect(),
+        );
+    }
+
+    /// Whether some model defines `spec`'s typed update variants (true
+    /// when the models are not known).
+    pub fn has_typed_update(&self, spec: &ParamsSpec) -> bool {
+        self.model_resources.as_ref().is_none_or(|set| set.contains(&spec.resource))
+    }
+
     pub fn iter(&self) -> std::slice::Iter<'_, ParamsSpec> {
         self.specs.iter()
     }
@@ -218,7 +255,7 @@ impl ParamsSpecs {
 /// request carried none).
 fn field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
     if spec.file_fields.contains(field) {
-        Ty::Union { variants: vec![uploaded_file_ty(), Ty::Nil] }
+        Ty::Union { variants: vec![uploaded_file_ty(), Ty::Nil].into() }
     } else {
         Ty::Str
     }
@@ -229,7 +266,7 @@ pub(crate) fn uploaded_file_class() -> ClassId {
 }
 
 fn uploaded_file_ty() -> Ty {
-    Ty::Class { id: uploaded_file_class(), args: vec![] }
+    Ty::Class { id: uploaded_file_class(), args: vec![].into() }
 }
 
 /// The two reads a field takes off a params hash — was it provided,
@@ -309,6 +346,7 @@ pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
 fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut demand: Vec<(ClassId, bool)> = Vec::new();
     let mut to_attrs: Vec<ClassId> = Vec::new();
+    let mut as_json: Vec<ClassId> = Vec::new();
     // Read-only for the whole walk; the two demand lists are applied
     // after it, which is what keeps this a shared borrow.
     let specs_ro: &ParamsSpecs = specs;
@@ -332,6 +370,13 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                 if method.as_str() == "to_attrs" && args.is_empty() {
                     if let Some(class) = params_source_class(recv, &helper_classes, specs_ro) {
                         to_attrs.push(class);
+                    }
+                    return;
+                }
+                // `<params-source>.as_json`: Rails' `Parameters#as_json`.
+                if method.as_str() == "as_json" && args.is_empty() {
+                    if let Some(class) = params_source_class(recv, &helper_classes, specs_ro) {
+                        as_json.push(class);
                     }
                     return;
                 }
@@ -375,6 +420,11 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
             spec.wants_to_attrs = true;
         }
     }
+    for class_id in as_json {
+        if let Some(spec) = specs.specs.iter_mut().find(|s| s.class_id == class_id) {
+            spec.wants_as_json = true;
+        }
+    }
 }
 
 fn walk_all<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
@@ -398,12 +448,14 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 wants_create: false,
                 wants_create_bang: false,
                 wants_to_attrs: false,
+                wants_as_json: false,
                 declaring: Vec::new(),
                 is_canonical: true,
                 file_fields: std::collections::BTreeSet::new(),
             })
             .collect(),
         keyed_assocs: Default::default(),
+        model_resources: None,
     }
 }
 
@@ -447,6 +499,7 @@ fn record(
                 wants_create: false,
                 wants_create_bang: false,
                 wants_to_attrs: false,
+                wants_as_json: false,
                 declaring: vec![controller.clone()],
                 is_canonical: false,
                 file_fields: std::collections::BTreeSet::new(),
@@ -809,7 +862,7 @@ fn build_params_object(
 ) -> Expr {
     use crate::lower::typing::with_ty;
     let span = at.span;
-    let owner_ty = Ty::Class { id: spec.class_id.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: spec.class_id.clone(), args: vec![].into() };
     let local = Symbol::from("__params");
     let var = || {
         with_ty(
@@ -818,8 +871,8 @@ fn build_params_object(
         )
     };
     let param_value_ty =
-        Ty::Class { id: ClassId(Symbol::from("Roundhouse::ParamValue")), args: vec![] };
-    let raw_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(param_value_ty) };
+        Ty::Class { id: ClassId(Symbol::from("Roundhouse::ParamValue")), args: vec![].into() };
+    let raw_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(param_value_ty) };
     let ivar_params = || {
         with_ty(
             Expr::new(span, ExprNode::Ivar { name: Symbol::from("params") }),
@@ -878,6 +931,69 @@ fn build_params_object(
     }
     stmts.push(var());
     with_ty(Expr::new(span, ExprNode::Seq { exprs: stmts }), owner_ty)
+}
+
+/// Each method's name with the type of the value its typed body
+/// answers (its last statement's).
+pub(super) fn helper_answers(methods: &[MethodDef]) -> std::collections::HashMap<Symbol, Option<Ty>> {
+    methods.iter().map(|m| (m.name.clone(), body_tail(&m.body).ty.clone())).collect()
+}
+
+/// `record.update(x)` / `update!(x)` where `x` is TYPED as a params
+/// class no model has a typed update variant for (#856): Rails' `update`
+/// takes the attribute Hash, which is `x.to_attrs`. Runs on a typed
+/// body, so a helper that answers a Hash (`permitted.to_h.except(:k)`)
+/// is left as written, and the class is the one the call site holds
+/// (a controller-qualified list, not the resource's canonical one).
+/// Each class read this way is added to `wanted`.
+///
+/// `answers` is each of the controller's own methods' typed body value
+/// ([`helper_answers`]): a call to one of them counts only when its body
+/// answers the params class, whatever its signature declares.
+pub(super) fn hand_update_the_attrs(
+    body: &mut Expr,
+    specs: &ParamsSpecs,
+    answers: &std::collections::HashMap<Symbol, Option<Ty>>,
+    wanted: &mut std::collections::BTreeSet<ClassId>,
+) {
+    body.node.for_each_child_mut(&mut |c| hand_update_the_attrs(c, specs, answers, wanted));
+    let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &mut *body.node else {
+        return;
+    };
+    if !matches!(method.as_str(), "update" | "update!") || args.len() != 1 {
+        return;
+    }
+    let Some(Ty::Class { id, .. }) = args[0].ty.as_ref() else { return };
+    let Some(spec) = specs.by_class(id) else { return };
+    if let ExprNode::Send { recv, method: helper, args: helper_args, block: None, .. } = &*args[0].node {
+        let own = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) && helper_args.is_empty();
+        if own {
+            if let Some(answer) = answers.get(helper) {
+                if !matches!(answer, Some(Ty::Class { id: a, .. }) if a == id) {
+                    return;
+                }
+            }
+        }
+    }
+    if specs.has_typed_update(spec) {
+        return;
+    }
+    let class_id = spec.class_id.clone();
+    let value = std::mem::replace(&mut args[0], expr(ExprNode::Lit { value: Literal::Nil }, None));
+    let span = value.span;
+    let mut attrs = expr(
+        ExprNode::Send {
+            recv: Some(value),
+            method: Symbol::from("to_attrs"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+        Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }),
+    );
+    attrs.span = span;
+    args[0] = attrs;
+    wanted.insert(class_id);
 }
 
 pub fn helper_spec_map<'a, 'b, I>(
@@ -1263,6 +1379,9 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
     methods.push(synth_from_raw(spec));
     methods.push(synth_index_read(spec));
     methods.push(synth_to_h(spec));
+    if spec.wants_as_json {
+        methods.push(synth_as_json(&spec.class_id));
+    }
     if spec.wants_to_attrs {
         methods.push(synth_to_attrs(&spec.class_id, &spec.fields));
     }
@@ -1466,7 +1585,7 @@ fn synth_except(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     }
     stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
     let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts });
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -1557,13 +1676,13 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
 
     let param_value_ty = Ty::Class {
         id: ClassId(Symbol::from("Roundhouse::ParamValue")),
-        args: vec![],
+        args: vec![].into(),
     };
     let hash_ty = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(param_value_ty),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(param_value_ty),
     };
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
 
     let str_lit = |v: &str| with_ty(
         Expr::new(
@@ -1697,13 +1816,13 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
 /// `""` — the same distinction `<field>_provided` was introduced for.
 /// Writing it would overwrite a column default on create, which is the
 /// data loss the presence slots were added to stop.
-fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+pub(super) fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     use crate::lower::typing::with_ty;
     let attrs = Symbol::from("attrs");
     // The declared type is `initialize`'s parameter type verbatim: this
     // hash is built to be handed straight to it, and a narrower element
     // type would need a widening conversion at every call site.
-    let hash_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
     let attrs_var = || {
         with_ty(
             Expr::new(
@@ -1942,8 +2061,8 @@ fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
         })
         .collect();
     let hash_ty = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(Ty::Str),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(Ty::Str),
     };
     let hash = Expr {
         span: Span::synthetic(),
@@ -1975,18 +2094,51 @@ fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
     }
 }
 
+/// `def as_json; to_h; end` — Rails' `Parameters#as_json` is the
+/// permitted values as a String-keyed Hash, which `to_h` already is.
+fn synth_as_json(owner: &ClassId) -> MethodDef {
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
+    let body = expr(
+        ExprNode::Send {
+            recv: Some(expr(ExprNode::SelfRef, Some(Ty::Class { id: owner.clone(), args: vec![].into() }))),
+            method: Symbol::from("to_h"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+        Some(hash_ty.clone()),
+    );
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("as_json"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], hash_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
 fn fn_sig(params: Vec<(Symbol, Ty)>, ret: Ty) -> Ty {
     Ty::Fn {
         params: params
             .into_iter()
             .map(|(name, ty)| crate::ty::Param {
                 name,
-                ty,
+                ty: ty.into(),
                 kind: crate::ty::ParamKind::Required,
             })
             .collect(),
         block: None,
-        ret: Box::new(ret),
+        ret: std::sync::Arc::new(ret),
         effects: crate::effect::EffectSet::pure(),
     }
 }

@@ -5,7 +5,7 @@ use crate::span::Span;
 use crate::ty::Ty;
 
 fn bigdecimal() -> Ty {
-    Ty::Class { id: ClassId(Symbol::from("BigDecimal")), args: vec![] }
+    Ty::Class { id: ClassId(Symbol::from("BigDecimal")), args: vec![].into() }
 }
 
 fn send(span: Span, recv: Option<Expr>, method: &str, args: Vec<Expr>, ty: Ty) -> Expr {
@@ -29,7 +29,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         // Not `BigDecimal(float)`: it needs a precision, and `Float#to_d`'s own digits are what the runtime helper spells.
         ("to_d", Some(Ty::Float), []) => {
             let mut support = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
-            support.ty = Some(Ty::Class { id: ClassId(Symbol::from("ActiveSupport")), args: vec![] });
+            support.ty = Some(Ty::Class { id: ClassId(Symbol::from("ActiveSupport")), args: vec![].into() });
             let text = send(span, Some(support), "float_decimal_text", vec![r.clone()], Ty::Str);
             send(span, None, "BigDecimal", vec![text], bigdecimal())
         }

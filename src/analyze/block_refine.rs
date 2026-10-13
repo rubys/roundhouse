@@ -83,7 +83,7 @@ fn callee_block_ty(sig: &Ty) -> Option<Ty> {
     params
         .iter()
         .find(|p| matches!(p.kind, ParamKind::Block))
-        .map(|p| p.ty.clone())
+        .map(|p| (*p.ty).clone())
 }
 
 /// Walk `body` for the first `Send { block: Some(Var(name)), .. }`
@@ -122,7 +122,7 @@ fn first_forwarded_callee(body: &Expr, block_name: &Symbol) -> Option<Symbol> {
 fn refine_signature_block(m: &mut crate::dialect::MethodDef, block_ty: Ty) {
     let block_param = Param {
         name: Symbol::new("block"),
-        ty: block_ty.clone(),
+        ty: block_ty.clone().into(),
         kind: ParamKind::Block,
     };
     match m.signature.take() {
@@ -131,7 +131,7 @@ fn refine_signature_block(m: &mut crate::dialect::MethodDef, block_ty: Ty) {
             params.push(block_param);
             m.signature = Some(Ty::Fn {
                 params,
-                block: Some(Box::new(block_ty)),
+                block: Some(std::sync::Arc::new(block_ty)),
                 ret,
                 effects,
             });
@@ -142,15 +142,15 @@ fn refine_signature_block(m: &mut crate::dialect::MethodDef, block_ty: Ty) {
                 .iter()
                 .map(|p| Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped,
+                    ty: Ty::Untyped.into(),
                     kind: ParamKind::Required,
                 })
                 .chain(std::iter::once(block_param))
                 .collect();
             m.signature = Some(Ty::Fn {
-                params: placeholder_params,
-                block: Some(Box::new(block_ty)),
-                ret: Box::new(Ty::Untyped),
+                params: placeholder_params.into(),
+                block: Some(std::sync::Arc::new(block_ty)),
+                ret: std::sync::Arc::new(Ty::Untyped),
                 effects: crate::effect::EffectSet::default(),
             });
         }
@@ -178,17 +178,17 @@ mod tests {
             params: vec![
                 Param {
                     name: Symbol::new("k"),
-                    ty: Ty::Str,
+                    ty: Ty::Str.into(),
                     kind: ParamKind::Required,
                 },
                 Param {
                     name: Symbol::new("v"),
-                    ty: Ty::Untyped,
+                    ty: Ty::Untyped.into(),
                     kind: ParamKind::Required,
                 },
-            ],
+            ].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: EffectSet::pure(),
         }
     }
@@ -208,11 +208,11 @@ mod tests {
             signature: Some(Ty::Fn {
                 params: vec![Param {
                     name: Symbol::new("block"),
-                    ty: block_sig.clone(),
+                    ty: block_sig.clone().into(),
                     kind: ParamKind::Block,
-                }],
-                block: Some(Box::new(block_sig)),
-                ret: Box::new(Ty::Nil),
+                }].into(),
+                block: Some(std::sync::Arc::new(block_sig)),
+                ret: std::sync::Arc::new(Ty::Nil),
                 effects: EffectSet::pure(),
             }),
             effects: EffectSet::pure(),
@@ -289,7 +289,7 @@ mod tests {
         match &block_ty {
             Ty::Fn { params, ret, .. } => {
                 assert_eq!(params.len(), 2, "callee block has 2 args");
-                assert!(matches!(params[0].ty, Ty::Str));
+                assert!(matches!(*params[0].ty, Ty::Str));
                 assert!(matches!(**ret, Ty::Nil));
             }
             other => panic!("expected Ty::Fn block sig, got {other:?}"),
@@ -327,17 +327,17 @@ mod tests {
                 ty: Ty::Fn {
                     params: vec![Param {
                         name: Symbol::new("x"),
-                        ty: Ty::Int,
+                        ty: Ty::Int.into(),
                         kind: ParamKind::Required,
-                    }],
+                    }].into(),
                     block: None,
-                    ret: Box::new(Ty::Untyped),
+                    ret: std::sync::Arc::new(Ty::Untyped),
                     effects: EffectSet::pure(),
-                },
+                }.into(),
                 kind: ParamKind::Block,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Untyped),
+            ret: std::sync::Arc::new(Ty::Untyped),
             effects: EffectSet::pure(),
         };
         fwd.signature = Some(pre_sig.clone());

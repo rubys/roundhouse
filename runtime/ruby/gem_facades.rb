@@ -220,6 +220,10 @@ require_relative "rqrcode_facade"
 # spinel-nokogiri spin package) when the app names Nokogiri.
 require_relative "nokogiri_facade"
 
+# Pay — first-slice exception + class constants (see runtime/ruby/pay.rb).
+# Stripped with the file when Gemfile.lock has no `pay`.
+require_relative "pay"
+
 # SVG::Graph::TimeSeries — SVG statistics graphs. lib/time_series.rb
 # subclasses it and the stats controller instantiates it; off the read
 # benchmark. The app subclass calls these inherited methods, so they

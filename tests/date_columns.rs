@@ -44,14 +44,14 @@ fn columns_constructors_and_callers_preserve_the_date_domain() {
     assert_eq!(
         row.fields[&Symbol::from("due_on")],
         Ty::Union {
-            variants: vec![Ty::Date, Ty::Nil]
+            variants: vec![Ty::Date, Ty::Nil].into()
         }
     );
     for name in ["observed_at", "opens_at"] {
         assert_eq!(
             row.fields[&Symbol::from(name)],
             Ty::Union {
-                variants: vec![Ty::Time, Ty::Nil]
+                variants: vec![Ty::Time, Ty::Nil].into()
             }
         );
     }
@@ -75,7 +75,7 @@ fn columns_constructors_and_callers_preserve_the_date_domain() {
     assert_eq!(
         exprs.last().unwrap().ty,
         Some(Ty::Union {
-            variants: vec![Ty::Date, Ty::Nil]
+            variants: vec![Ty::Date, Ty::Nil].into()
         })
     );
     assert_eq!(roundhouse::ide::render_ty(&Ty::Date), "Date");
@@ -85,7 +85,7 @@ fn columns_constructors_and_callers_preserve_the_date_domain() {
     let Ty::Fn { params, ret, .. } = sig else {
         panic!("expected function: {sig:?}")
     };
-    assert_eq!(params[0].ty, Ty::Date);
+    assert_eq!(params[0].ty, Ty::Date.into());
     assert_eq!(**ret, Ty::Date);
 }
 
@@ -355,14 +355,14 @@ fn date_signatures_normalize_builtins_without_erasing_nominal_namespaces() {
             "nominal",
             Ty::Class {
                 id: ClassId(Symbol::from("Scheduling::Date")),
-                args: vec![],
+                args: vec![].into(),
             },
         ),
     ] {
         let Ty::Fn { params, ret, .. } = signature(name) else {
             panic!("not a function")
         };
-        assert_eq!(params[0].ty, expected);
+        assert_eq!(params[0].ty, expected.clone().into());
         assert_eq!(*ret, expected);
     }
     let Ty::Fn { params, ret, .. } = signature("nested") else {
@@ -371,20 +371,20 @@ fn date_signatures_normalize_builtins_without_erasing_nominal_namespaces() {
     assert_eq!(
         params[0].ty,
         Ty::Array {
-            elem: Box::new(Ty::Union {
-                variants: vec![Ty::Date, Ty::Nil]
+            elem: std::sync::Arc::new(Ty::Union {
+                variants: vec![Ty::Date, Ty::Nil].into()
             })
-        }
+        }.into()
     );
     assert_eq!(
         *ret,
         Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(Ty::Date)
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Date)
         }
     );
     let date = Ty::Union {
-        variants: vec![Ty::Date, Ty::Nil],
+        variants: vec![Ty::Date, Ty::Nil].into(),
     };
     let text = roundhouse::rbs::print_ty(&date);
     let reparsed = roundhouse::rbs::parse_app_signatures(&format!(
@@ -408,14 +408,14 @@ fn date_signatures_normalize_builtins_without_erasing_nominal_namespaces() {
             "nominal",
             Ty::Class {
                 id: ClassId(Symbol::from("Scheduling::Date")),
-                args: vec![],
+                args: vec![].into(),
             },
         ),
     ] {
         let Ty::Fn { params, ret, .. } = &sigs[&Symbol::from(name)] else {
             panic!("not a function")
         };
-        assert_eq!(params[0].ty, expected);
+        assert_eq!(params[0].ty, expected.clone().into());
         assert_eq!(**ret, expected);
     }
 }

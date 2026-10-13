@@ -72,17 +72,32 @@ pub fn attribute_analysis_gaps(diags: &mut [Diagnostic], app: &App, gaps: &mut V
         .and_then(|c| c.unknown().find(|g| g.name == "alba" && g.version.is_some()));
     for d in diags {
         let DiagnosticKind::Unsupported { construct, .. } = &d.kind else { continue };
-        if construct.as_str() != "alba_serialization" {
-            continue;
-        }
-        if let Some(gem) = provider {
-            let attribution = format!(
-                " — roundhouse coverage of the `{}` gem; executable serialization remains unsupported",
-                gem.name
-            );
-            if !d.message.ends_with(&attribution) {
-                d.message.push_str(&attribution);
+        match construct.as_str() {
+            "alba_serialization" => {
+                if let Some(gem) = provider {
+                    let attribution = format!(
+                        " — roundhouse coverage of the `{}` gem; executable serialization remains unsupported",
+                        gem.name
+                    );
+                    if !d.message.ends_with(&attribution) {
+                        d.message.push_str(&attribution);
+                    }
+                }
             }
+            // An `alias new old` roundhouse couldn't resolve after
+            // synthesis. Before this construct existed, an unresolved
+            // model alias was a hard INGEST error, and survey mode
+            // always made that non-fatal (the whole model, not just
+            // the alias line, was dropped — see `ModelBodyItem::Alias`'s
+            // doc). Resolving at lowering time keeps the rest of the
+            // model, but owes survey mode the same non-fatal treatment
+            // for the one line that didn't resolve: demote to Info,
+            // unlike `alba_serialization` above (deliberately still
+            // fatal — see this function's doc).
+            "alias_target_unresolved" => {
+                d.severity = Severity::Info;
+            }
+            _ => continue,
         }
         let Some(source) = d.span.file.0.checked_sub(1)
             .and_then(|i| app.sources.get(i as usize)) else { continue };
@@ -628,6 +643,17 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
         if !eligible(&d.kind) || d.severity == Severity::Info {
             continue;
         }
+        // Catalogued gem classes (e.g. Pay::Charge for `is_a?`) own their
+        // surface: missing methods must stay errors. Downgrading them to
+        // unknown-gem notes would quiet `check` while the empty façade
+        // still NoMethodErrors on emit (invariant 6).
+        if matches!(
+            &d.kind,
+            DiagnosticKind::SendDispatchFailed { recv_ty, .. }
+                if catalogued_class_receiver(recv_ty)
+        ) {
+            continue;
+        }
         if let Some((gem, evidence)) = gem_for(d) {
             sites.push((d.span.file, d.span.start, gem.to_string()));
             mark(d, gem, None);
@@ -692,6 +718,18 @@ fn mark(d: &mut Diagnostic, gem: &str, via_ivar: Option<&str>) {
         None => d.message.push_str(&format!(
             " — likely roundhouse coverage, not an app error (the `{gem}` gem is in the Gemfile and roundhouse does not model it)"
         )),
+    }
+}
+
+/// Receiver class id appears in [`crate::catalog::GEM_CATALOG`]. Roundhouse
+/// already owns that surface — missing methods are intentional refusals,
+/// not unknown-gem notes (invariant 6).
+fn catalogued_class_receiver(ty: &crate::ty::Ty) -> bool {
+    match ty {
+        crate::ty::Ty::Class { id, .. } => crate::catalog::GEM_CATALOG
+            .iter()
+            .any(|g| g.name == id.0.as_str()),
+        _ => false,
     }
 }
 

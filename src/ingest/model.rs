@@ -428,31 +428,36 @@ pub(super) fn ingest_model_with_enum_constants(
                 prev_end = Some(stmt.location().end_offset());
                 continue;
             }
+            // `alias new old` (keyword form). Columns, associations,
+            // `attr_accessor` and `attribute` are synthesized later, in
+            // `lower::model_to_library` — this walk only sees
+            // hand-written `def`s and enum-generated methods, so
+            // resolving here would wrongly refuse an alias naming any
+            // of those (#481: an enum alias failed even though the
+            // model itself emitted fine). Record it as a typed body
+            // item, in order, and let `lower_model_to_library_class`
+            // resolve it after synthesis, with snapshot semantics.
             if let Some(alias) = stmt.as_alias_method_node() {
                 let to = super::library_class::alias_keyword_name(&alias.new_name());
                 let from = super::library_class::alias_keyword_name(&alias.old_name());
-                let copied = to.zip(from).and_then(|(to, from)| {
-                    body.iter().rev().find_map(|item| match item {
-                        ModelBodyItem::Method { method, .. }
-                            if method.name.as_str() == from
-                                && method.receiver == crate::dialect::MethodReceiver::Instance =>
-                        {
-                            let mut copy = method.clone();
-                            copy.name = crate::ident::Symbol::from(to.as_str());
-                            Some(copy)
-                        }
-                        _ => None,
-                    })
-                });
-                if let Some(method) = copied {
-                    body.push(ModelBodyItem::Method {
-                        method,
+                if let Some((to, from)) = to.zip(from) {
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: stmt.location().start_offset() as u32,
+                        end: stmt.location().end_offset() as u32,
+                    };
+                    body.push(ModelBodyItem::Alias {
+                        new: crate::ident::Symbol::from(to.as_str()),
+                        old: crate::ident::Symbol::from(from.as_str()),
                         leading_comments: leading,
                         leading_blank_line: leading_blank,
+                        span,
                     });
                     prev_end = Some(stmt.location().end_offset());
                     continue;
                 }
+                // Neither side is a plain name (e.g. a global variable
+                // alias, `alias $a $b`) — not a method alias at all.
                 return Err(IngestError::Unsupported {
                     file: file.into(),
                     message: "alias names a method this body has not defined".into(),
@@ -1974,6 +1979,8 @@ fn enum_label_pairs<'a>(
             },
             None => match consts.scalar(&value) {
                 Some(lit) => EnumStored::Lit(lit),
+                // `unknown: nil` names a NULL column: a literal too.
+                None if value.as_nil_node().is_some() => EnumStored::Lit(Literal::Nil),
                 None => EnumStored::Expr(ingest_expr(&value, file)?),
             },
         };
@@ -2713,6 +2720,9 @@ fn parse_validates(call: &ruby_prism::CallNode<'_>) -> Vec<crate::dialect::Valid
     let mut attrs: Vec<Symbol> = Vec::new();
     let mut rules: Vec<ValidationRule> = Vec::new();
     let mut allow_blank = false;
+    // Sibling of `length:`, as in `validates :body, length: { minimum: 10 }, allow_nil: true`.
+    // An `allow_nil` inside the length hash wins; this fills only a rule that did not say.
+    let mut allow_nil: Option<bool> = None;
 
     for arg in all_args.iter() {
         if let Some(sym) = symbol_value(&arg) {
@@ -2724,8 +2734,19 @@ fn parse_validates(call: &ruby_prism::CallNode<'_>) -> Vec<crate::dialect::Valid
                 let value = assoc.value();
                 if key.as_str() == "allow_blank" {
                     allow_blank = super::util::bool_value(&value).unwrap_or(false);
+                } else if key.as_str() == "allow_nil" {
+                    allow_nil = super::util::bool_value(&value);
                 } else if let Some(rule) = validation_rule_from_kv(&key, &value) {
                     rules.push(rule);
+                }
+            }
+        }
+    }
+    if let Some(flag) = allow_nil {
+        for rule in &mut rules {
+            if let ValidationRule::Length { allow_nil: slot, .. } = rule {
+                if slot.is_none() {
+                    *slot = Some(flag);
                 }
             }
         }
@@ -2790,9 +2811,14 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>) -> Option<crate::dialect::Val
 
     let mut min: Option<u32> = None;
     let mut max: Option<u32> = None;
+    let mut allow_nil: Option<bool> = None;
     for el in elements.iter() {
         let Some(assoc) = el.as_assoc_node() else { continue };
         let Some(key) = symbol_value(&assoc.key()) else { continue };
+        if key.as_str() == "allow_nil" {
+            allow_nil = super::util::bool_value(&assoc.value());
+            continue;
+        }
         let Some(n) = integer_value(&assoc.value()) else { continue };
         if n < 0 {
             continue;
@@ -2809,7 +2835,7 @@ fn parse_length_rule(value: &ruby_prism::Node<'_>) -> Option<crate::dialect::Val
     if min.is_none() && max.is_none() {
         None
     } else {
-        Some(ValidationRule::Length { min, max, message: None })
+        Some(ValidationRule::Length { min, max, message: None, allow_nil })
     }
 }
 
@@ -3220,7 +3246,7 @@ pub(crate) fn row_from_table(table: &Table) -> Row {
     for col in &table.columns {
         fields.insert(col.name.clone(), ty_of_column_slot(col));
     }
-    Row { fields, rest: None }
+    Row { fields: fields.into(), rest: None }
 }
 
 /// The attributes-row type for a column: `ty_of_column` widened with
@@ -3233,7 +3259,7 @@ pub(crate) fn row_from_table(table: &Table) -> Row {
 fn ty_of_column_slot(col: &crate::schema::Column) -> Ty {
     let base = ty_of_column(&col.col_type);
     if col.nullable && !col.primary_key {
-        Ty::Union { variants: vec![base, Ty::Nil] }
+        Ty::Union { variants: vec![base, Ty::Nil].into() }
     } else {
         base
     }

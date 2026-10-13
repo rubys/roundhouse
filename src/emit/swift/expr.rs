@@ -2606,6 +2606,7 @@ fn emit_send(
         }
     }
 
+
     // Temporal writer intrinsic: `ActiveSupport.db_now` — current UTC time
     // in Rails' exact storage form ("YYYY-MM-DD HH:MM:SS.ffffff").
     // `fill_timestamps` stamps with it so a column's TEXT values stay
@@ -2989,6 +2990,11 @@ fn emit_send(
             "to_f" => return format!("Double(\"\\({rs})\")!"),
             "empty?" => return format!("{rs}.isEmpty"),
             "any?" => return format!("!{rs}.isEmpty"),
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if matches!(
+                array_elem_ty(r),
+                Some(crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym)
+            ) => return format!("{rs}.isEmpty"),
             "length" | "size" => return format!("{rs}.count"),
             "upcase" => return format!("{rs}.uppercased()"),
             "downcase" => return format!("{rs}.lowercased()"),
@@ -3186,7 +3192,7 @@ mod equal_identity_tests {
         let mut recv = var(name);
         recv.ty = Some(Ty::Class {
             id: ClassId(Symbol::from("ActionController::HeaderStore")),
-            args: vec![],
+            args: vec![].into(),
         });
         recv
     }
@@ -3207,7 +3213,7 @@ mod equal_identity_tests {
     #[test]
     fn equal_on_a_hash_stays_a_call() {
         let mut recv = var("attrs");
-        recv.ty = Some(Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) });
+        recv.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) });
         let out = emit_expr(&send(recv, "equal?", var("sentinel")));
         assert!(out.contains("equalPred"), "{out}");
         assert!(!out.contains("==="), "{out}");

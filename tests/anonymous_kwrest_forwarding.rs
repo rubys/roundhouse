@@ -172,6 +172,7 @@ fn anonymous_keywords_and_runtime_guards_are_honest_target_boundaries() {
         ("class Probe; def self.call(**); target(**); end; def self.target(factor:); factor; end; end", "anonymous keyword forwarding"),
         ("class Probe; def self.call(**); target(factor: false, **); end; def self.target(factor:, **); factor; end; end", "anonymous keyword forwarding"),
         ("class Probe; def self.call; defined?(MissingPr197); end; end", "runtime defined? query"),
+        ("class Probe; LOADED = defined?(MissingPr197); end", "runtime defined? query"),
         ("class Probe; def call; defined?(@@missing); end; end", "runtime defined? query"),
         ("class Probe; def call; @@count ||= 11; @@count; end; end", "class variable write"),
         ("class Probe; def call; @@count &&= 11; @@count; end; end", "class variable write"),
@@ -190,9 +191,15 @@ fn anonymous_keywords_and_runtime_guards_are_honest_target_boundaries() {
             });
             let gates: Vec<_> = diags.iter().filter(|d| matches!(&d.kind,
                 DiagnosticKind::Unsupported { construct: name, .. } if name.as_str() == construct)).collect();
+            // Spinel answers `defined?` of a constant path as CRuby does once
+            // the program has loaded (missing constants included), so in a
+            // method body it is not a gate there; in a constant initializer,
+            // which runs while the program loads, and `defined?(@@missing)`
+            // it still is.
             if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby)
                 || (matches!(target, BuildTarget::Spinel)
-                    && construct == "anonymous keyword forwarding")
+                    && (construct == "anonymous keyword forwarding"
+                        || source.contains("def self.call; defined?(MissingPr197)")))
             {
                 assert!(gates.is_empty(), "{target:?}: {diags:?}");
             } else {

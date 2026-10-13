@@ -389,7 +389,7 @@ fn zone_name_arg(zone: &Expr) -> Expr {
         return zone.clone();
     }
     let mut name = Expr::new(Span::synthetic(), active_support_call("zone_name", vec![zone.clone()]));
-    name.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil] });
+    name.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
     name
 }
 
@@ -424,7 +424,7 @@ fn active_support_call(method: &str, args: Vec<Expr>) -> ExprNode {
     );
     recv.ty = Some(Ty::Class {
         id: ClassId(Symbol::from("ActiveSupport")),
-        args: vec![],
+        args: vec![].into(),
     });
     ExprNode::Send {
         recv: Some(recv),

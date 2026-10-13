@@ -1103,7 +1103,41 @@ end
     assert_eq!(title_v.rules.len(), 1);
     assert!(matches!(
         title_v.rules[0],
-        ValidationRule::Length { min: None, max: Some(80), .. }
+        ValidationRule::Length { min: None, max: Some(80), allow_nil: None, .. }
+    ));
+}
+
+#[test]
+fn length_allow_nil_is_ingested() {
+    use roundhouse::{ModelBodyItem, ValidationRule};
+
+    let source = br#"
+class Widget < ApplicationRecord
+  validates :body, length: { minimum: 10 }, allow_nil: true
+  validates :title, length: { maximum: 80, allow_nil: false }
+end
+"#;
+    let schema = roundhouse::schema::Schema::default();
+    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema, &Default::default())
+        .unwrap()
+        .unwrap();
+    let validations: Vec<_> = model
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModelBodyItem::Validation { validation, .. } => Some(validation),
+            _ => None,
+        })
+        .collect();
+    let body = validations.iter().find(|v| v.attribute.as_str() == "body").unwrap();
+    assert!(matches!(
+        body.rules[0],
+        ValidationRule::Length { min: Some(10), allow_nil: Some(true), .. }
+    ));
+    let title = validations.iter().find(|v| v.attribute.as_str() == "title").unwrap();
+    assert!(matches!(
+        title.rules[0],
+        ValidationRule::Length { max: Some(80), allow_nil: Some(false), .. }
     ));
 }
 

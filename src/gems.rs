@@ -315,12 +315,15 @@ const FATES: &[(&str, GemFate)] = &[
     ("acts_as_votable", GemFate::Modeled), // ingest/acts_as_votable: ActsAsVotable::Vote on `votes`; acts_as_votable/acts_as_voter macros -> votes_for/votes + vote_by/liked_by/unvote_by/update_cached_votes (not vote_up_for/get_voted/association extensions)
     ("addressable", GemFate::Modeled), // catalog/gems: Addressable::URI
     ("bcrypt", GemFate::Modeled),      // catalog/gems: BCrypt::*; has_secure_password
+    ("commonmarker", GemFate::Modeled), // catalog/gems: Commonmarker, Commonmarker::Node
     ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); no Warden route guards
+    ("discard", GemFate::Modeled),     // ingest/discard: include Discard::Model -> scopes + predicates + discard/undiscard (not discard_all/undiscard_all); Relation#unscope(where:)
     ("faker", GemFate::Modeled),       // catalog/gems: Faker::*
     ("friendly_id", GemFate::Modeled), // lower/friendly_id + registry: friendly_id/friendly/to_param, Relation#friendly_find (slugged [+history] finder only; slug generation on save, :scoped/:finders/:simple_i18n unmodeled)
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
     ("htmlentities", GemFate::Modeled), // catalog/gems: HTMLEntities
     ("image_processing", GemFate::Modeled), // active_storage variants seam
+    ("inertia_rails", GemFate::Modeled), // ingest/inertia: render inertia:, inertia_share; runtime action_controller/inertia
     ("invisible_captcha", GemFate::Modeled), // before_action + spam? on subtitle honeypot only
     ("kaminari", GemFate::Modeled),    // Relation#page / per / paginate
     ("mail", GemFate::Modeled),        // catalog/gems: Mail::Address; ActionMailer
@@ -474,7 +477,6 @@ const SURFACES: &[(&str, &[&str])] = &[
     ("audited", &["audited", "audits", "own_and_associated_audits", "audit_comment"]),
     ("cancancan", &["can?", "cannot?", "authorize!", "load_and_authorize_resource", "load_resource", "authorize_resource", "current_ability", "accessible_by", "check_authorization", "skip_authorization_check"]),
     ("carrierwave", &["mount_uploader", "mount_uploaders", "remove_avatar!", "store!"]),
-    ("discard", &["discard", "discard!", "undiscard", "undiscard!", "discarded?", "undiscarded?", "kept", "discarded", "with_discarded", "discard_all", "undiscard_all"]),
     ("doorkeeper", &["doorkeeper_authorize!", "doorkeeper_token", "current_resource_owner"]),
     ("enumerize", &["enumerize"]),
     ("geocoder", &["geocoded_by", "reverse_geocoded_by", "geocode", "reverse_geocode", "near", "distance_to", "distance_from", "bearing_to", "within_bounding_box"]),
@@ -994,6 +996,7 @@ BUNDLED WITH
         assert_eq!(fate_of("rubocop-rails"), GemFate::Infrastructure);
         assert_eq!(fate_of("opentelemetry-instrumentation-pg"), GemFate::Infrastructure);
         assert_eq!(fate_of("never-heard-of-it"), GemFate::Unknown);
+        assert_eq!(fate_of("inertia_rails"), GemFate::Modeled);
         assert_eq!(namespace_of("front_matter_parser"), "FrontMatterParser");
         assert_eq!(namespace_of("aws-sdk-s3"), "Aws");
         assert_eq!(namespace_of("rubyzip"), "Zip");

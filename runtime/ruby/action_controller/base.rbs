@@ -207,6 +207,7 @@ module ActionController
     # signature in runtime/spinel/action_controller_head.rbs.
     def head: (Symbol status, ?content_type: String?, ?location: String?) -> void
     def response: () -> Base
+    # Strict stubs; Ruby/Spinel reopen in current.rb fills these in.
     def fresh_when: (untyped subject) -> void
     def stale?: (?etag: untyped) -> bool
     # Integer SECONDS on every duration-shaped keyword —

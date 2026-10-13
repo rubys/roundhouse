@@ -16,7 +16,7 @@ use roundhouse::ty::{ParamKind, Ty};
 fn inline_params(source: &str) -> Vec<(String, ParamKind, Ty)> {
     let signatures = roundhouse::ingest::sorbet_sig::ingest_sorbet_signatures(source.as_bytes());
     let Ty::Fn { params, .. } = &signatures[&ClassId(Symbol::new("Example"))][&Symbol::new("call")] else { panic!() };
-    params.iter().map(|p| (p.name.as_str().to_string(), p.kind.clone(), p.ty.clone())).collect()
+    params.iter().map(|p| (p.name.as_str().to_string(), p.kind.clone(), (*p.ty).clone())).collect()
 }
 
 /// The provider is written as a controller subclass: `diagnose` walks

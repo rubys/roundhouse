@@ -215,12 +215,13 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ -z "$REUSE" ]]; then
-    # `--allow-unsupported` for the same reason the walk uses it: campfire is
-    # a ledger app. The point is to run what DOES work and count it.
+    # Strict emit: tip Campfire checks at 0 errors, so the suite no longer
+    # needs `--allow-unsupported`. An unsupported construct is an error —
+    # the same contract as campfire-conformance's spinel strict emit.
     step "transpiling $APP → $OUT (target: $TARGET)"
     rm -rf "$OUT"
     roundhouse_run \
-        --target "$TARGET" "$APP" -o "$OUT" --allow-unsupported 2>"$OUT.log" | tail -1
+        --target "$TARGET" "$APP" -o "$OUT" 2>"$OUT.log" | tail -1
     echo "  emit diagnostics: $OUT.log"
 
     # The suite's own fixtures populate every table, so the database only

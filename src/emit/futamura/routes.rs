@@ -123,9 +123,16 @@ fn is_class_side(r: &MethodReceiver) -> bool {
 /// `lowered` is the app after `analyze_and_lower` (what the `ruby`
 /// target emits from); `diags` every diagnostic that emit reported.
 pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
-    let mut lcs = crate::emit::ruby::lowered_controller_lcs_with_layout(lowered);
-    lcs.extend(crate::emit::ruby::lowered_view_lcs(lowered).1);
-    lcs.extend(crate::emit::ruby::lowered_model_lcs(lowered).0);
+    // Re-lowering pushes the `ruby` emit's refusals into whatever
+    // diagnostic scope is active, which here is futamura's own. They are
+    // already in `diags` (`project::futamura_whole_route`); collected
+    // again they would fail an emit that reports nothing.
+    let (mut lcs, _) = crate::emit::diagnostics::scope(|| {
+        let mut lcs = crate::emit::ruby::lowered_controller_lcs_with_layout(lowered);
+        lcs.extend(crate::emit::ruby::lowered_view_lcs(lowered).1);
+        lcs.extend(crate::emit::ruby::lowered_model_lcs(lowered).0);
+        lcs
+    });
     lcs.extend(lowered.library_classes.iter().cloned());
     let index = Index::new(&lcs);
     // Controllers: their actions keep the app's spans under a
@@ -175,6 +182,7 @@ pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
     }
 
     let mut out = RoutePlan::default();
+    let mut callees: HashMap<MethodKey, Vec<MethodKey>> = HashMap::new();
     // `ROUNDHOUSE_FUTAMURA_LEDGER=2`: each error and the methods owning it.
     if std::env::var("ROUNDHOUSE_FUTAMURA_LEDGER").as_deref() == Ok("2") {
         for d in &errors {
@@ -205,7 +213,7 @@ pub fn plan(lowered: &App, diags: &[Diagnostic]) -> RoutePlan {
             out.residue.push(format!("{label}: {controller} is not lowered"));
             continue;
         }
-        let reached = reach(&index, controller, first.action.as_str());
+        let reached = reach(&index, &mut callees, controller, first.action.as_str());
         let mut reached_files: HashSet<u32> = HashSet::new();
         for m in reached.keys() {
             if let Some(rs) = ranges.get(m) {
@@ -322,7 +330,7 @@ fn containing_methods<'m>(
     ranges: &'m HashMap<MethodKey, BTreeMap<u32, (u32, u32)>>,
     d: &Diagnostic,
 ) -> Vec<&'m MethodKey> {
-    ranges
+    let mut innermost: Vec<&MethodKey> = ranges
         .iter()
         .filter_map(|(k, rs)| {
             let (s, e) = rs.get(&d.span.file.0)?;
@@ -341,12 +349,21 @@ fn containing_methods<'m>(
         })
         .into_iter()
         .map(|(k, _)| k)
-        .collect()
+        .collect();
+    // Sorted: the ledger's `via` follows the first owner a route
+    // reaches, and the map's order changes from run to run.
+    innermost.sort();
+    innermost
 }
 
 /// Every app method one action can run: its arm of `process_action`
 /// (the filters that apply to it, then the action), closed over calls.
-fn reach(index: &Index, controller: &str, action: &str) -> HashMap<MethodKey, Option<MethodKey>> {
+fn reach(
+    index: &Index,
+    callees: &mut HashMap<MethodKey, Vec<MethodKey>>,
+    controller: &str,
+    action: &str,
+) -> HashMap<MethodKey, Option<MethodKey>> {
     let mut reached: HashMap<MethodKey, Option<MethodKey>> = HashMap::new();
     let mut queue: VecDeque<MethodKey> = VecDeque::new();
     let process = Symbol::from("process_action");
@@ -368,12 +385,30 @@ fn reach(index: &Index, controller: &str, action: &str) -> HashMap<MethodKey, Op
         }
     }
     while let Some(from) = queue.pop_front() {
-        let (class, name, class_side) = &from;
-        for m in index.bodies(class, name, *class_side) {
-            visit(&m.body, &mut |e| enqueue_send(index, e, class, *class_side, &from, &mut reached, &mut queue));
+        let next = callees.entry(from.clone()).or_insert_with(|| callees_of(index, &from));
+        for k in next.iter() {
+            if !reached.contains_key(k) {
+                reached.insert(k.clone(), Some(from.clone()));
+                queue.push_back(k.clone());
+            }
         }
     }
     reached
+}
+
+/// What a method's body may call, in the order the walk meets it. It
+/// does not depend on the route that reached the method, so `plan` keeps
+/// one answer per method across routes: on Mastodon nearly every route
+/// reaches nearly the whole app, and re-walking it per route was most of
+/// the emit.
+fn callees_of(index: &Index, key: &MethodKey) -> Vec<MethodKey> {
+    let (class, name, class_side) = key;
+    let mut seen: HashMap<MethodKey, Option<MethodKey>> = HashMap::new();
+    let mut found: VecDeque<MethodKey> = VecDeque::new();
+    for m in index.bodies(class, name, *class_side) {
+        visit(&m.body, &mut |e| enqueue_send(index, e, class, *class_side, key, &mut seen, &mut found));
+    }
+    found.into()
 }
 
 /// Walk `process_action`'s body for one action: `if [..].include?(

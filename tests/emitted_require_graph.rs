@@ -184,7 +184,8 @@ fn bundled_class_constants_are_ledgered_only_on_targets_without_them() {
      Net::HTTPRedirection, Net::HTTPOK, StringIO, OpenSSL::OpenSSLError,
      Rails::HTML5::SafeListSanitizer, JSON, JSON::ParserError, Struct, Mutex,
      Queue, SizedQueue, Thread::Queue, Thread::SizedQueue, Thread::Mutex,
-     ThreadError, ClosedQueueError, Comparable, Enumerable, JSON::GeneratorError]
+     ThreadError, ClosedQueueError, Comparable, Enumerable, JSON::GeneratorError,
+     Monitor, ConditionVariable, Thread::ConditionVariable, UNIXServer, UNIXSocket, Open3, Find]
   end
 end
 "#),
@@ -221,12 +222,13 @@ end
             assert_eq!(gaps[0].severity, roundhouse::diagnostic::Severity::Error);
             assert!(!gaps[0].span.is_synthetic(), "{gaps:?}");
         } else {
-            assert_eq!(gaps.len(), 26, "{target:?}: {gaps:?}");
+            assert_eq!(gaps.len(), 33, "{target:?}: {gaps:?}");
             for name in ["URI::HTTP", "URI::HTTPS", "URI::Error", "URI::InvalidURIError", "SocketError", "Net::OpenTimeout", "Net::ReadTimeout",
                 "Net::HTTPRedirection", "Net::HTTPOK", "StringIO", "OpenSSL::OpenSSLError",
                 "Rails::HTML5::SafeListSanitizer", "JSON", "JSON::ParserError", "Struct", "Mutex",
                 "Queue", "SizedQueue", "Thread::Queue", "Thread::SizedQueue", "Thread::Mutex",
-                "ThreadError", "ClosedQueueError", "Comparable", "Enumerable", "JSON::GeneratorError"] {
+                "ThreadError", "ClosedQueueError", "Comparable", "Enumerable", "JSON::GeneratorError",
+                "Monitor", "ConditionVariable", "Thread::ConditionVariable", "UNIXServer", "UNIXSocket", "Open3", "Find"] {
                 let gap = gaps.iter().find(|d| d.message.contains(name)).expect(name);
                 assert_eq!(gap.severity, roundhouse::diagnostic::Severity::Error);
                 assert!(!gap.span.is_synthetic(), "{gap:?}");

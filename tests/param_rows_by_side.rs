@@ -22,7 +22,7 @@ fn params_of(files: &[(&str, &str)], class: &str, method: &str, side: MethodRece
         .find(|m| m.name.as_str() == method && m.receiver == side)
         .expect("method");
     let Some(Ty::Fn { params, .. }) = &def.signature else { panic!("typed: {:?}", def.signature) };
-    params.iter().map(|p| p.ty.clone()).collect()
+    params.iter().map(|p| (*p.ty).clone()).collect()
 }
 
 /// The lab's `name_collision`: `self.class.get(path, options)` is the
@@ -71,8 +71,8 @@ fn the_instance_method_keeps_its_own_callers_types() {
     assert_eq!(
         params[1],
         Ty::Hash {
-            key: Box::new(Ty::Union { variants: vec![Ty::Str, unknown()] }),
-            value: Box::new(Ty::Union { variants: vec![Ty::Int, unknown()] }),
+            key: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Str, unknown()].into() }),
+            value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, unknown()].into() }),
         }
     );
 }

@@ -356,8 +356,8 @@ fn synth_row_from_raw(owner: &ClassId, table: &Table) -> MethodDef {
 
     stmts.push(var_ref(instance));
 
-    let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let row_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,

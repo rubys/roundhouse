@@ -22,13 +22,11 @@
 //! app/views.rb — a hand-written aggregator we don't yet emit, tools/),
 //! `runtime/spinel/test/` (target-specific tests), plus the framework
 //! Ruby + per-target primitives flattened into `runtime/`. Then
-//! `bundle exec ruby` each model/controller test against the emitted
-//! code.
-//!
-//! Suites validated: article + comment model tests, articles + comments
-//! controller tests. article_broadcasts and the views suite have known
-//! gaps tracked in `project_lowered_ir_gaps_for_runnability` and aren't
-//! gating yet.
+//! `bundle exec rake test` against the emitted tree. The Rakefile
+//! discovers `test/**/*_test.rb`; a hand-maintained list here is how
+//! `views/articles_test.rb`, `views/articles_json_test.rb`, and
+//! `models/article_broadcasts_test.rb` shipped for months without
+//! ever running.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -102,30 +100,34 @@ fn generate_project(fixture: &Path, scratch: &Path) {
     }
 }
 
-/// Run a single test file via `bundle exec ruby -Itest -I.` and assert
-/// it exits zero. Bundler resolves against
-/// `runtime/spinel/scaffold/Gemfile` (set via BUNDLE_GEMFILE) so the
-/// gem cache populated by CI's ruby/setup-ruby step is reused.
-fn assert_test_passes(scratch: &Path, gemfile: &Path, test_path: &str) {
-    let output = Command::new("bundle")
-        .env("BUNDLE_GEMFILE", gemfile)
-        .arg("exec")
-        .arg("ruby")
-        .arg("-Itest")
-        .arg("-I.")
-        .arg(test_path)
-        .current_dir(scratch)
-        .output()
-        .expect("spawn ruby");
-
-    assert!(
-        output.status.success(),
-        "spinel test failed: {test_path}\n\
-         \n=== stdout ===\n{}\n\
-         \n=== stderr ===\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+/// Every `*_test.rb` under `test/`, relative to the project root, sorted.
+/// The same set `Rake::TestTask`'s `FileList["test/**/*_test.rb"]` names.
+fn discover_test_files(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("readdir {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("_test.rb"))
+            {
+                let rel = path
+                    .strip_prefix(root)
+                    .expect("test file under scratch")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push(rel);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&root.join("test"), root, &mut out);
+    out.sort();
+    out
 }
 
 #[test]
@@ -140,84 +142,80 @@ fn real_blog_spinel_tests_pass() {
     let gemfile = std::fs::canonicalize("runtime/spinel/scaffold/Gemfile")
         .expect("canonicalize scaffold Gemfile");
 
-    for test in [
-        "test/models/article_test.rb",
-        "test/models/comment_test.rb",
-        "test/controllers/articles_controller_test.rb",
-        "test/controllers/comments_controller_test.rb",
-        // Query-count harness (issue #27): asserts /articles eager-loads
-        // comments in 2 queries rather than the 1+N `compare` is blind
-        // to. Rides in via runtime/spinel/test/query_count_test.rb.
-        "test/query_count_test.rb",
-        // `has_json`'s column seam (`runtime/schematized_json.rb`) — a
-        // per-target runtime module, so this is the lane that runs its
-        // unit tests. Rides in the same way query_count_test does.
-        "test/schematized_json_test.rb",
-        // `runtime/broadcasts.rb` plus the two CAPTURE helpers in
-        // test_helper.rb, which are not the same shape as each other
-        // (`assert_turbo_stream_broadcasts` is cumulative at the pinned
-        // turbo-rails, `assert_broadcasts` is a delta) and had no gate
-        // at all: this file shipped in every ruby emit and nothing ever
-        // ran it. Rides in the same way the two above do.
-        "test/broadcasts_test.rb",
-        // The `Dom` selector stub in test_helper.rb — `assert_select`'s
-        // whole substrate, and string rules all the way down, so a
-        // silently-wrong one makes an assertion UNPASSABLE rather than
-        // loose (which reads as a missing feature in the app under
-        // test, not as a broken matcher). Rides in the same way the
-        // three above do.
-        "test/dom_test.rb",
-        // A TIME bind and a temporal COLUMN must be written in the same
-        // format — the adapter inlines escaped values rather than
-        // binding parameters, so a comparison is string-vs-string and a
-        // mismatched bind answers the wrong rows with no error at all.
-        // Rides in the same way the others do.
-        "test/temporal_bind_test.rb",
-        // The ffmpeg half of a video's `Preview`
-        // (`runtime/active_storage_previewer.rb`): draws a clip with
-        // ffmpeg's lavfi source and asserts the poster's PNG header.
-        // Skips itself where ffmpeg is absent.
-        "test/active_storage_previewer_test.rb",
-        // `Relation#find` raising `RecordNotFound` (Rails' whole
-        // distinction between it and `find_by`) and the harness's
-        // `parsed_body`. Both are RUNTIME behavior the compiler's own
-        // suite cannot see, and both fail quietly — a nil `find` is a
-        // NoMethodError several frames from the lookup. Rides in the
-        // same way the others do.
-        "test/relation_find_test.rb",
-        // The form/query parser behind every `params` read
-        // (`CgiIo.parse_form_into`) and the ruby family's nested
-        // `Hash#to_query` (runtime/hash_to_query.rb) — the two halves
-        // of the bracket grammar a route helper's `params:` travels
-        // through, each measured against Rack's and activesupport's
-        // own output. Rides in the same way the others do; the parser's
-        // file had shipped in every emit with nothing running it.
-        "test/cgi_io_test.rb",
-        "test/hash_to_query_test.rb",
-        // The ruby family's Array attribute value
-        // (runtime/attr_value_text.rb): Rails' `class:` conditional
-        // list, forwarded whole by campfire's `link_to_room`, measured
-        // against Rails 8.1's `link_to`. Rides in the same way.
-        "test/attr_value_text_test.rb",
-        // The ruby family's Turbo stream-name signer
-        // (runtime/turbo_streams.rb): two names Rails minted for a known
-        // secret, so a match is interoperation rather than
-        // self-consistency, plus the refusals. Rides in the same way.
-        "test/turbo_streams_test.rb",
-        // The ruby family's forgery check
-        // (runtime/request_forgery_protection.rb): param and header
-        // tokens against the session's, the 422, and the Origin rule.
-        // Rides in the same way.
-        "test/request_forgery_protection_test.rb",
-        // The ruby family's signed session and flash cookies
-        // (runtime/signed_cookies.rb): a round trip, and every
-        // client-written variant reading as absent.
-        "test/signed_cookies_test.rb",
-        // The key everything above signs with when SECRET_KEY_BASE is
-        // unset (runtime/local_secret.rb): generated, kept owner-only,
-        // read back, never empty.
-        "test/local_secret_test.rb",
+    let discovered = discover_test_files(&scratch);
+    assert!(
+        discovered.len() >= 23,
+        "expected the emitted suite plus runtime/spinel/test, got {} files:\n{}",
+        discovered.len(),
+        discovered.join("\n"),
+    );
+    for required in [
+        "test/views/articles_test.rb",
+        "test/views/articles_json_test.rb",
+        "test/models/article_broadcasts_test.rb",
+        "test/route_helpers_test.rb",
+        "test/tools/check_spinel_subset_test.rb",
     ] {
-        assert_test_passes(&scratch, &gemfile, test);
+        assert!(
+            discovered.iter().any(|p| p == required),
+            "{required} is not in the emitted test tree:\n{}",
+            discovered.join("\n"),
+        );
     }
+
+    let rakefile = std::fs::read_to_string(scratch.join("Rakefile")).expect("Rakefile");
+    assert!(
+        rakefile.contains("t.test_files = FileList[\"test/**/*_test.rb\"]"),
+        "Rakefile no longer discovers every test file:\n{rakefile}",
+    );
+
+    // The runner's list, not ours. A narrowed FileList fails here even
+    // when the walk above still sees the files on disk.
+    let listed = Command::new("bundle")
+        .env("BUNDLE_GEMFILE", &gemfile)
+        .arg("exec")
+        .arg("ruby")
+        .arg("-e")
+        .arg("require \"rake\"; puts FileList[\"test/**/*_test.rb\"].sort")
+        .current_dir(&scratch)
+        .output()
+        .expect("list rake test files");
+    assert!(
+        listed.status.success(),
+        "rake file list failed\n=== stdout ===\n{}\n=== stderr ===\n{}",
+        String::from_utf8_lossy(&listed.stdout),
+        String::from_utf8_lossy(&listed.stderr),
+    );
+    let mut rake_files: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    rake_files.sort();
+    assert_eq!(
+        rake_files, discovered,
+        "rake's FileList drifted from the files on disk",
+    );
+
+    let output = Command::new("bundle")
+        .env("BUNDLE_GEMFILE", &gemfile)
+        .arg("exec")
+        .arg("rake")
+        .arg("test")
+        .current_dir(&scratch)
+        .output()
+        .expect("spawn rake test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "rake test failed\n\
+         \n=== stdout ===\n{stdout}\n\
+         \n=== stderr ===\n{stderr}",
+    );
+    // Word-boundary: `"10 failures".contains("0 failures")` is true.
+    assert!(
+        stdout.contains(" 0 failures") && stdout.contains(" 0 errors"),
+        "rake test exited 0 without a clean minitest summary:\n{stdout}\n{stderr}",
+    );
 }

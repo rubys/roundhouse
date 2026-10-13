@@ -1619,6 +1619,12 @@ fn emit_send(
                     format!("({rs}.Length != 0)")
                 };
             }
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if matches!(
+                r.ty.as_ref(),
+                Some(crate::ty::Ty::Array { elem })
+                    if matches!(**elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym)
+            ) => return format!("({rs}.Count == 0)"),
             "upcase" => return format!("{rs}.ToUpperInvariant()"),
             "downcase" => return format!("{rs}.ToLowerInvariant()"),
             "strip" => return format!("{rs}.Trim()"),

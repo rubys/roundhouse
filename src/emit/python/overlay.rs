@@ -289,6 +289,7 @@ fn emit_models(models: &[LibraryClass]) -> Result<String, String> {
         ("ActiveRecord.", "from app.active_record_base import ActiveRecord\n"),
         ("RecordNotFound", "from app.errors import RecordNotFound\n"),
         ("RecordInvalid", "from app.errors import RecordInvalid\n"),
+        ("ErrorDetail(", "from app.active_record_base import ErrorDetail\n"),
         // The temporal intrinsics (`ActiveSupport.db_now` et al)
         // render as `Roundhouse.RhDateTime.*` — same content-scan
         // import the legacy model emit makes.

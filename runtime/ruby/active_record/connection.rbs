@@ -5,6 +5,12 @@ module ActiveRecord
   class Rollback < StandardError
   end
 
+  module TransactionHooks
+    def self.began: () -> nil
+    def self.committed: () -> nil
+    def self.rolled_back: () -> nil
+  end
+
   class IntegerKeyCast
     @valid: bool
     @value: Integer

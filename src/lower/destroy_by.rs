@@ -87,9 +87,9 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     // them rather than inventing another answer.
     let result_ty = match (terminal, &relation_ty) {
         ("destroy_all", Ty::Relation { of }) => Ty::Array {
-            elem: Box::new(Ty::Class { id: of.clone(), args: vec![] }),
+            elem: std::sync::Arc::new(Ty::Class { id: of.clone(), args: vec![].into() }),
         },
-        ("sole", Ty::Relation { of }) => Ty::Class { id: of.clone(), args: vec![] },
+        ("sole", Ty::Relation { of }) => Ty::Class { id: of.clone(), args: vec![].into() },
         _ => Ty::Int,
     };
 

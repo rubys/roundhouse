@@ -44,7 +44,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         parenthesized: true,
     };
     expr.ty = Some(Ty::Union {
-        variants: vec![Ty::Bool, Ty::Nil],
+        variants: vec![Ty::Bool, Ty::Nil].into(),
     });
 }
 

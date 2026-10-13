@@ -355,22 +355,22 @@ impl Reader<'_> {
 
 fn untyped_fn() -> Ty {
     Ty::Fn {
-        params: vec![Param { name: Symbol::new("args"), ty: Ty::Untyped, kind: ParamKind::Rest }],
+        params: vec![Param { name: Symbol::new("args"), ty: Ty::Untyped.into(), kind: ParamKind::Rest }].into(),
         block: None,
-        ret: Box::new(Ty::Untyped),
+        ret: std::sync::Arc::new(Ty::Untyped),
         effects: EffectSet::pure(),
     }
 }
 
 fn reader_fn(ret: Ty) -> Ty {
-    Ty::Fn { params: Vec::new(), block: None, ret: Box::new(ret), effects: EffectSet::pure() }
+    Ty::Fn { params: Vec::new().into(), block: None, ret: std::sync::Arc::new(ret), effects: EffectSet::pure() }
 }
 
 fn writer_fn(ty: Ty) -> Ty {
     Ty::Fn {
-        params: vec![Param { name: Symbol::new("value"), ty: ty.clone(), kind: ParamKind::Required }],
+        params: vec![Param { name: Symbol::new("value"), ty: ty.clone().into(), kind: ParamKind::Required }].into(),
         block: None,
-        ret: Box::new(ty),
+        ret: std::sync::Arc::new(ty),
         effects: EffectSet::pure(),
     }
 }
@@ -453,12 +453,12 @@ fn lenient_signature(
             .into_iter()
             .map(|(name, kind)| {
                 let ty = declared.remove(&name).unwrap_or(Ty::Untyped);
-                Param { name: Symbol::new(&name), ty, kind }
+                Param { name: Symbol::new(&name), ty: ty.into(), kind }
             })
             .collect(),
         // A parameter list this reader does not take apart: accept
         // anything rather than assert an arity.
-        None => vec![Param { name: Symbol::new("args"), ty: Ty::Untyped, kind: ParamKind::Rest }],
+        None => vec![Param { name: Symbol::new("args"), ty: Ty::Untyped.into(), kind: ParamKind::Rest }],
     };
-    Ty::Fn { params, block: None, ret: Box::new(ret), effects: EffectSet::pure() }
+    Ty::Fn { params: params.into(), block: None, ret: std::sync::Arc::new(ret), effects: EffectSet::pure() }
 }

@@ -301,7 +301,7 @@ fn collection_text(value: &Expr, id: &ClassId) -> Expr {
     let item = Symbol::from("record");
     let item_ref = with_ty(
         Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: item.clone() }),
-        Ty::Class { id: id.clone(), args: vec![] },
+        Ty::Class { id: id.clone(), args: vec![].into() },
     );
     let block = Expr::new(
         span,
@@ -328,7 +328,7 @@ fn collection_text(value: &Expr, id: &ClassId) -> Expr {
             ty,
         )
     };
-    let mapped = send(value.clone(), "map", vec![], Some(block), Ty::Array { elem: Box::new(Ty::Str) });
+    let mapped = send(value.clone(), "map", vec![], Some(block), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
     let joined = send(mapped, "join", vec![str_lit(",")], None, Ty::Str);
     let open = send(str_lit("["), "+", vec![joined], None, Ty::Str);
     send(open, "+", vec![str_lit("]")], None, Ty::Str)

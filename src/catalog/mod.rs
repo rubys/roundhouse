@@ -183,7 +183,7 @@ pub enum ReturnKind {
     Str,
     /// Reference to a concrete class by dotted-name path
     /// (e.g. `"ActiveModel::Errors"`). Analyzer instantiates as
-    /// `Ty::Class { id: ClassId(<path>), args: vec![] }`.
+    /// `Ty::Class { id: ClassId(<path>), args: vec![].into() }`.
     /// Used by `#errors` to reference the ActiveModel::Errors
     /// class without needing it to be a user-defined model.
     ClassRef(&'static str),

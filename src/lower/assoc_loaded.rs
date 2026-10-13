@@ -262,20 +262,27 @@ pub(crate) fn rewrite_node(
     // Scope by the association receiver's model (`message` in
     // `message.boosts.loaded?`), not a global name set — a has_one or
     // plain method of the same name on another class must stay.
-    let Some(owner_model) =
-        resolve_owner_model(owner.as_ref(), enclosing, sole_includer, by_model, assoc)
-    else {
+    let resolved = resolve_owner_model(owner.as_ref(), enclosing, sole_includer, by_model, assoc)
+        .filter(|id| by_model.get(id).is_some_and(|names| names.contains(assoc)));
+    // A view/test receiver whose model the name does not single out
+    // (`widget.parts.loaded?` in a partial, when Widget and Gadget both
+    // `has_many :parts`): the same widening `association(:name).loaded?`
+    // takes below. Every declaring model synthesizes the same flat
+    // predicate, so the spelling is right whichever one the receiver is.
+    let stamp = match (&resolved, owner) {
+        (None, Some(base)) => match widened_owner(base, enclosing, by_model, assoc) {
+            Some(id) => Some(id),
+            None => return,
+        },
+        (None, None) => return,
+        (Some(_), _) => None,
+    };
+    let Some(owner_model) = resolved.or_else(|| stamp.clone()) else {
         return;
     };
-    let Some(names) = by_model.get(&owner_model) else {
-        return;
-    };
-    if !names.contains(assoc) {
-        return;
-    }
     let flat = Symbol::from(flat_name(assoc));
     let reload_ty = reload.then(|| Ty::Array {
-        elem: Box::new(inner.ty.as_ref().and_then(|t| match t {
+        elem: std::sync::Arc::new(inner.ty.as_ref().and_then(|t| match t {
             Ty::Array { elem } => Some((**elem).clone()),
             _ => None,
         }).unwrap_or(Ty::Untyped)),
@@ -288,11 +295,17 @@ pub(crate) fn rewrite_node(
             let mut s = Expr::new(inner.span, ExprNode::SelfRef);
             s.ty = Some(Ty::Class {
                 id: owner_model,
-                args: vec![],
+                args: vec![].into(),
             });
             Some(s)
         }
-        Some(base) => Some(base.clone()),
+        Some(base) => {
+            let mut recv = base.clone();
+            if let Some(id) = stamp {
+                recv.ty = Some(Ty::Class { id, args: vec![].into() });
+            }
+            Some(recv)
+        }
     };
     let mut rewritten = Expr::new(
         expr.span,
@@ -306,6 +319,40 @@ pub(crate) fn rewrite_node(
     );
     rewritten.ty = Some(reload_ty.unwrap_or(Ty::Bool));
     *expr = rewritten;
+}
+
+/// The model to stamp on a view/test receiver of `<recv>.<name>.loaded?`
+/// (or `.reload`) that `resolve_owner_model` could not single out: some
+/// model declares `has_many :<name>`, and the receiver is not typed as
+/// (or as a union with) a model that lacks it. `None` in a model method,
+/// where an unresolved receiver stays as written. The first declaring
+/// model by name, so the stamp does not depend on map order.
+fn widened_owner(
+    base: &Expr,
+    enclosing: Option<&ClassId>,
+    by_model: &HashMap<ClassId, HashSet<Symbol>>,
+    name: &Symbol,
+) -> Option<ClassId> {
+    if enclosing.is_some_and(|id| by_model.contains_key(id)) {
+        return None;
+    }
+    let typed_as_model = |ty: &Ty| matches!(ty, Ty::Class { id, .. } if by_model.contains_key(id));
+    let refused = match base.ty.as_ref() {
+        Some(ty @ Ty::Class { .. }) => typed_as_model(ty),
+        // A union with a model alternative that lacks the name (the
+        // others' would have resolved it already).
+        Some(Ty::Union { variants }) => variants.iter().any(typed_as_model),
+        _ => false,
+    };
+    if refused {
+        return None;
+    }
+    by_model
+        .iter()
+        .filter(|(_, names)| names.contains(name))
+        .map(|(id, _)| id)
+        .min_by(|a, b| a.0.as_str().cmp(b.0.as_str()))
+        .cloned()
 }
 
 /// True when at least one model synthesizes `<name>_loaded?`.
@@ -387,7 +434,7 @@ fn rewrite_association_loaded(
                     })
                     .or_else(|| a_model_declaring(flat_loaded, &name));
                 if let Some(id) = stamp {
-                    recv.ty = Some(Ty::Class { id, args: vec![] });
+                    recv.ty = Some(Ty::Class { id, args: vec![].into() });
                 }
                 let mut rewritten = Expr::new(
                     expr.span,
@@ -423,10 +470,7 @@ fn rewrite_association_loaded(
     let new_recv = match owner {
         None => {
             let mut s = Expr::new(inner.span, ExprNode::SelfRef);
-            s.ty = Some(Ty::Class {
-                id: owner_model,
-                args: vec![],
-            });
+            s.ty = Some(Ty::Class { id: owner_model, args: vec![].into() });
             Some(s)
         }
         Some(base) => Some(base.clone()),
@@ -499,7 +543,7 @@ fn rewrite_association_target(
             let mut s = Expr::new(inner.span, ExprNode::SelfRef);
             s.ty = Some(Ty::Class {
                 id: owner_model,
-                args: vec![],
+                args: vec![].into(),
             });
             Some(s)
         }

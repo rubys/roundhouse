@@ -66,7 +66,7 @@ end
     assert_eq!(ret_of(&ty), Some(Ty::Str));
     let Ty::Fn { params, .. } = &ty else { panic!("expected a function type, got {ty:?}") };
     assert_eq!(params.len(), 1);
-    assert_eq!(params[0].ty, Ty::Str);
+    assert_eq!(params[0].ty, Ty::Str.into());
 }
 
 #[test]

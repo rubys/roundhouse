@@ -1721,6 +1721,14 @@ pub(super) fn rewrite_update_to_typed_variant(
             return None;
         }
         let spec = match_params_helper(&args[0], &helper_specs, params_specs)?;
+        // The variant exists only on the model the resource is named
+        // after. With none (a record wrapped under another key), the
+        // call stays Rails' `update` / `update!`; once the body is typed,
+        // `params::hand_update_the_attrs` gives it the attribute Hash
+        // when the argument turns out to be the params object (#856).
+        if !params_specs.has_typed_update(spec) {
+            return None;
+        }
         Some(Expr::new(
             e.span,
             ExprNode::Send {
@@ -2800,7 +2808,7 @@ pub(crate) fn typed_exception_const(segments: &[&str], span: Span) -> Expr {
     let mut expr = const_path(segments, span);
     expr.ty = Some(crate::ty::Ty::Class {
         id: crate::ident::ClassId(Symbol::from(name)),
-        args: vec![],
+        args: vec![].into(),
     });
     expr
 }

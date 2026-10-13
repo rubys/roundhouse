@@ -64,7 +64,7 @@ pub fn shape(method: &str, args: &[Expr], has_block: bool) -> Option<Shape> {
 }
 
 pub fn of(value: Ty) -> Ty {
-    Ty::Class { id: ClassId(Symbol::from(CLASS)), args: vec![value] }
+    Ty::Class { id: ClassId(Symbol::from(CLASS)), args: vec![value].into() }
 }
 
 pub fn value_of(ty: &Ty) -> Option<&Ty> {
@@ -85,8 +85,8 @@ fn indifferent_keys(key: &Ty) -> bool {
 pub fn converted(ty: &Ty) -> Ty {
     match ty {
         Ty::Hash { key, value } if indifferent_keys(key) => of(converted(value)),
-        Ty::Hash { key, value } => Ty::Hash { key: key.clone(), value: Box::new(converted(value)) },
-        Ty::Array { elem } => Ty::Array { elem: Box::new(converted(elem)) },
+        Ty::Hash { key, value } => Ty::Hash { key: key.clone(), value: std::sync::Arc::new(converted(value)) },
+        Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(converted(elem)) },
         Ty::Union { variants } => Ty::Union { variants: variants.iter().map(converted).collect() },
         other => other.clone(),
     }
@@ -95,11 +95,11 @@ pub fn converted(ty: &Ty) -> Ty {
 pub fn plain(ty: &Ty) -> Ty {
     match ty {
         Ty::Class { id, args } if id.0.as_str() == CLASS => Ty::Hash {
-            key: Box::new(Ty::Str),
-            value: Box::new(plain(args.first().unwrap_or(&Ty::Untyped))),
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(plain(args.first().unwrap_or(&Ty::Untyped))),
         },
-        Ty::Hash { key, value } => Ty::Hash { key: Box::new(plain(key)), value: Box::new(plain(value)) },
-        Ty::Array { elem } => Ty::Array { elem: Box::new(plain(elem)) },
+        Ty::Hash { key, value } => Ty::Hash { key: std::sync::Arc::new(plain(key)), value: std::sync::Arc::new(plain(value)) },
+        Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(plain(elem)) },
         Ty::Union { variants } => Ty::Union { variants: variants.iter().map(plain).collect() },
         Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(plain).collect() },
         Ty::Class { id, args } => Ty::Class { id: id.clone(), args: args.iter().map(plain).collect() },
@@ -135,11 +135,31 @@ pub fn from(ty: &Ty) -> Option<Ty> {
             match values.len() {
                 0 => Some(of(Ty::Untyped)),
                 1 => Some(of(values.pop().unwrap())),
-                _ => Some(of(Ty::Union { variants: values })),
+                _ => Some(of(Ty::Union { variants: values.into() })),
             }
         }
         _ => None,
     }
+}
+
+/// `with_indifferent_access`'s answer for a GRADUAL receiver: one whose
+/// alternatives are all a Hash, nil or untyped, and at least one is
+/// untyped (a json column's reader, `extras || {}`). Its values are as
+/// unknown as the receiver, so `HashWithIndifferentAccess[untyped]`.
+/// `None` for any other receiver, a typed Hash included (its own table
+/// answers it).
+pub fn from_gradual(ty: &Ty) -> Option<Ty> {
+    fn leaves<'a>(ty: &'a Ty, out: &mut Vec<&'a Ty>) {
+        match ty {
+            Ty::Union { variants } => variants.iter().for_each(|v| leaves(v, out)),
+            other => out.push(other),
+        }
+    }
+    let mut all = Vec::new();
+    leaves(ty, &mut all);
+    (all.iter().any(|v| **v == Ty::Untyped)
+        && all.iter().all(|v| matches!(v, Ty::Untyped | Ty::Nil | Ty::Hash { .. })))
+    .then(|| of(Ty::Untyped))
 }
 
 fn merged_value(other: &Ty) -> Option<Ty> {
@@ -150,7 +170,7 @@ fn without_nil(ty: &Ty) -> Ty {
     match ty {
         Ty::Union { variants } => {
             let mut kept: Vec<Ty> = variants.iter().filter(|v| **v != Ty::Nil).cloned().collect();
-            if kept.len() == 1 { kept.pop().unwrap() } else { Ty::Union { variants: kept } }
+            if kept.len() == 1 { kept.pop().unwrap() } else { Ty::Union { variants: kept.into() } }
         }
         other => other.clone(),
     }
@@ -175,10 +195,10 @@ pub fn method_ty(
             let other = merged_value(args[0].ty.as_ref()?)?;
             of(super::body::union_of(value.clone(), other))
         }
-        Shape::Copy if method == "to_h" => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(value.clone()) },
+        Shape::Copy if method == "to_h" => Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(value.clone()) },
         Shape::Copy => same(),
-        Shape::ToHash => plain(&Ty::Hash { key: Box::new(Ty::Str), value: Box::new(value.clone()) }),
-        Shape::SymbolizeKeys => Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(plain(value)) },
+        Shape::ToHash => plain(&Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(value.clone()) }),
+        Shape::SymbolizeKeys => Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(plain(value)) },
         Shape::Plain => match method {
             "freeze" | "deep_dup" | "select" | "filter" | "reject" | "select!" | "filter!" | "reject!" | "keep_if"
             | "delete_if" | "clear" | "each" | "each_pair" | "each_key" | "each_value" => same(),

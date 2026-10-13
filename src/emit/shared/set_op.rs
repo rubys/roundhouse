@@ -61,7 +61,7 @@ mod tests {
     }
 
     fn int_array(name: &str) -> Expr {
-        var_typed(name, Ty::Array { elem: Box::new(Ty::Int) })
+        var_typed(name, Ty::Array { elem: std::sync::Arc::new(Ty::Int) })
     }
 
     #[test]
@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn array_and_array_different_elem_is_intersect() {
         let l = int_array("a");
-        let r = var_typed("b", Ty::Array { elem: Box::new(Ty::Str) });
+        let r = var_typed("b", Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         assert!(matches!(
             classify_set_op("&", &l, &r),
             SetOpCase::ArrayIntersect { elem: Ty::Int }
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn array_or_array_different_elem_is_union() {
         let l = int_array("a");
-        let r = var_typed("b", Ty::Array { elem: Box::new(Ty::Str) });
+        let r = var_typed("b", Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         assert!(matches!(
             classify_set_op("|", &l, &r),
             SetOpCase::ArrayUnion { elem: Ty::Int }

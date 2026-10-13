@@ -1341,6 +1341,14 @@ module Db
 
     ids.map { |i| i.to_i.to_s }.join(", ")
   end
+
+  # The same `IN (...)` batch over string keys (a uuid primary key): each
+  # key quoted as a literal, never `to_i`'d to its leading digits.
+  def self.escape_string_list(ids)
+    return "NULL" if ids.empty?
+
+    ids.map { |i| escape_string(i.to_s) }.join(", ")
+  end
 end
 
 # Temporal intrinsics, chained off Db as db.rb chains them.

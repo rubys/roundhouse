@@ -202,6 +202,8 @@ use crate::errors_ext::{raise, ArgumentError, NotImplementedError, RecordNotFoun
 
 const MODEL_IMPORTS: &str = "\
 #[allow(unused_imports)]
+use crate::active_record_base::ErrorDetail;
+#[allow(unused_imports)]
 use crate::param_value::ParamValue;
 #[allow(unused_imports)]
 use crate::params::{self, Params};
@@ -869,6 +871,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     "\nimpl {name} {{\n\
                         pub fn mark_persisted_bang(&mut self) {{ }}\n\
                         pub fn errors(&self) -> Vec<String> {{ crate::errors_ext::validation_errors_snapshot() }}\n\
+                        pub fn error_details(&self) -> Vec<crate::active_record_base::ErrorDetail> {{ crate::errors_ext::validation_error_details_snapshot().iter().map(|(a, k, m)| crate::active_record_base::ErrorDetail::new(a, k, m)).collect() }}\n\
+                        pub fn push_error_detail(error: crate::active_record_base::ErrorDetail) {{ crate::errors_ext::validation_error_details_push(error.attribute(), error.kind(), error.message()) }}\n\
+                        pub fn error_messages_for(&self, attribute: &str) -> Vec<String> {{ crate::errors_ext::validation_error_details_snapshot().into_iter().filter(|(a, _, _)| a == attribute).map(|(_, _, m)| m).collect() }}\n\
                         pub fn save(&mut self) -> bool {{\n\
                             crate::errors_ext::validation_errors_clear();\n\
                             self.validate();\n\
@@ -927,10 +932,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             // and the bare `errors().push` falls through harmlessly
             // until updated.
             let content = format!("{MODEL_IMPORTS}{body}{ar_shim}");
-            let content = content.replace(
-                "self.errors().push(",
-                "crate::errors_ext::validation_errors_push(",
-            );
+            let content = content
+                .replace("self.errors().push(", "crate::errors_ext::validation_errors_push(")
+                .replace("self.error_details().push(", "Self::push_error_detail(");
             files.push(EmittedFile {
                 path: PathBuf::from(format!("src/models/{stem}.rs")),
                 content,
@@ -2328,7 +2332,7 @@ fn collect_global_class_methods(
                     .iter()
                     .map(|p| Param {
                         name: Symbol::from(p.as_str()),
-                        ty: Ty::Untyped,
+                        ty: Ty::Untyped.into(),
                         kind: ParamKind::Required,
                     })
                     .collect(),

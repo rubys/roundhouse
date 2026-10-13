@@ -73,7 +73,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     let span = body.span;
     let csv_ty = Ty::Class {
         id: ClassId(Symbol::from("CSV")),
-        args: vec![],
+        args: vec![].into(),
     };
     let mut target = Expr::new(
         span,

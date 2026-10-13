@@ -1,5 +1,6 @@
 //! `json.partial! @record` (#322), and the record with options,
-//! `json.partial!(@record, partial: "…", as: :x)`.
+//! `json.partial!(@record, partial: "…", as: :x)` or
+//! `json.partial!(@record, cached: true)`.
 //!
 //! Jbuilder's `partial!` with one Active Model argument renders the
 //! record's own partial, `record.to_partial_path` (`widgets/_widget`
@@ -36,6 +37,8 @@ const ROUTES: &str = r#"Rails.application.routes.draw do
   get "widgets/:id/stray", to: "widgets#stray", defaults: { format: :json }
   get "widgets/:id/extra", to: "widgets#extra", defaults: { format: :json }
   get "widgets/:id/entry", to: "widgets#entry", defaults: { format: :json }
+  get "widgets/:id/cached", to: "widgets#cached", defaults: { format: :json }
+  get "widgets/:id/aliased_cached", to: "widgets#aliased_cached", defaults: { format: :json }
   namespace :admin do
     get "widgets/:id", to: "widgets#show", defaults: { format: :json }
   end
@@ -72,6 +75,16 @@ const CONTROLLER: &str = r#"class WidgetsController < ApplicationController
     @widget = Widget.find(params[:id])
     render :entry
   end
+
+  def cached
+    @widget = Widget.find(params[:id])
+    render :cached
+  end
+
+  def aliased_cached
+    @widget = Widget.find(params[:id])
+    render :aliased_cached
+  end
 end
 "#;
 
@@ -89,6 +102,13 @@ end
 
 /// The record first, with options.
 const ALIASED: &str = "json.partial!(@widget, partial: \"widgets/widget\", as: :widget)\n";
+
+/// `cached: true` after the record. Jbuilder takes `cached` out of the
+/// partial's locals with its other options; for a single record it
+/// only turns on fragment caching, which changes nothing rendered.
+const CACHED: &str = "json.partial!(@widget, cached: true)\n";
+const ALIASED_CACHED: &str =
+    "json.partial!(@widget, partial: \"widgets/widget\", as: :widget, cached: true)\n";
 
 /// A local that names no model of the app.
 const STRAY: &str = "json.partial! @gadget\n";
@@ -132,6 +152,8 @@ fn emitted() -> Vec<(String, String)> {
         ("app/views/widgets/detail.json.jbuilder", DETAIL),
         ("app/views/widgets/wrapped.json.jbuilder", WRAPPED),
         ("app/views/widgets/aliased.json.jbuilder", ALIASED),
+        ("app/views/widgets/cached.json.jbuilder", CACHED),
+        ("app/views/widgets/aliased_cached.json.jbuilder", ALIASED_CACHED),
         ("app/views/widgets/stray.json.jbuilder", STRAY),
         ("app/views/widgets/extra.json.jbuilder", EXTRA),
         ("app/views/widgets/entry.json.jbuilder", ENTRY),
@@ -198,6 +220,13 @@ fn a_record_renders_its_models_partial() {
         src.contains("io << Views::Widgets.widget_json(widget)"),
         "the same call with options after the record:\n{src}"
     );
+    for template in ["cached", "aliased_cached"] {
+        let src = view(&files, &format!("widgets/{template}_json.rb"));
+        assert!(
+            src.contains("io << Views::Widgets.widget_json(widget)"),
+            "{template}: `cached:` is a rendering option, not a local:\n{src}"
+        );
+    }
 }
 
 /// The path comes from the model the local is named after. A local
@@ -259,7 +288,7 @@ fn the_templates_render_what_jbuilder_renders() {
     }
     std::fs::write(dir.join("app/views.rb"), "").unwrap();
     let mut requires = String::new();
-    for name in ["_widget_json.rb", "detail_json.rb", "wrapped_json.rb", "aliased_json.rb"] {
+    for name in ["_widget_json.rb", "detail_json.rb", "wrapped_json.rb", "aliased_json.rb", "cached_json.rb"] {
         let file = dir.join("app/views/widgets").join(name);
         requires.push_str(&format!("require {:?}\n", file.display().to_string()));
     }
@@ -274,6 +303,7 @@ puts JSON.generate(
   "detail" => JSON.parse(Views::Widgets.detail_json(widget)),
   "wrapped" => JSON.parse(Views::Widgets.wrapped_json(widget)),
   "aliased" => JSON.parse(Views::Widgets.aliased_json(widget)),
+  "cached" => JSON.parse(Views::Widgets.cached_json(widget)),
 )
 "#,
         runtime = runtime.display().to_string()
@@ -290,7 +320,8 @@ puts JSON.generate(
     let expected = concat!(
         r#"{"detail":{"id":1,"name":"b"},"#,
         r#""wrapped":{"kind":"wrapped","widget":{"id":1,"name":"b"}},"#,
-        r#""aliased":{"id":1,"name":"b"}}"#,
+        r#""aliased":{"id":1,"name":"b"},"#,
+        r#""cached":{"id":1,"name":"b"}}"#,
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
 }

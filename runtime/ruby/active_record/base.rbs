@@ -78,6 +78,16 @@ module ActiveRecord
   # metaprogramming. Per-model subclasses define their own column
   # accessors, attributes hash, and `[]/[]=` indexers; Base supplies
   # the shared CRUD + lifecycle protocol.
+  class ErrorDetail
+    @attribute: String
+    @kind: String
+    @message: String
+    def attribute: () -> String
+    def kind: () -> String
+    def message: () -> String
+    def initialize: (String attribute, String kind, String message) -> void
+  end
+
   class Base
     def self.sanitize_sql_like: (String value, ?String escape_character) -> String
 
@@ -114,6 +124,9 @@ module ActiveRecord
     # it as a pointer and the message is swept while the array holds it.
     @errors: Array[String]
     def errors: () -> Array[String]
+    @error_details: Array[ErrorDetail]
+    def error_details: () -> Array[ErrorDetail]
+    def error_messages_for: (String attribute) -> Array[String]
 
     def initialize: (?Hash[Symbol, untyped] attrs) -> void
 

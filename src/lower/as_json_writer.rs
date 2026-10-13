@@ -184,7 +184,7 @@ fn typed_value(pair: &JsonPair, enc: &PairEncoding) -> Expr {
         PairEncoding::Scalar(ty) => json_builder_call("encode_value", value(ty.clone())),
         PairEncoding::StringArray => json_builder_call(
             "encode_string_array",
-            value(Ty::Array { elem: Box::new(Ty::Str) }),
+            value(Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
         ),
         PairEncoding::DateColumn | PairEncoding::ZonedTime => {
             let PairValue::Reader(name) = &pair.value else {
@@ -192,14 +192,14 @@ fn typed_value(pair: &JsonPair, enc: &PairEncoding) -> Expr {
             };
             let raw = with_ty(
                 self_send(&format!("{}_raw", name.as_str())),
-                Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+                Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
             );
             let text = if matches!(enc, PairEncoding::DateColumn) {
                 date_column_text(raw)
             } else {
                 with_ty(
                     send(Some(const_ref("ActiveSupport")), "json_time", vec![raw], true),
-                    Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+                    Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
                 )
             };
             json_builder_call("encode_value", text)
@@ -271,7 +271,7 @@ fn encoded_value(pair: &JsonPair, table: Option<&Table>) -> Expr {
                     "encode_value",
                     date_column_text(with_ty(
                         self_send(&raw),
-                        Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+                        Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
                     )),
                 ),
                 Some(ColumnType::DateTime | ColumnType::Time) => {
@@ -295,11 +295,11 @@ fn column_type(table: Option<&Table>, name: &Symbol) -> Option<ColumnType> {
 fn date_column_text(raw: Expr) -> Expr {
     let date = with_ty(
         send(Some(const_ref("ActiveSupport")), "parse_db_date", vec![raw], true),
-        Ty::Union { variants: vec![Ty::Date, Ty::Nil] },
+        Ty::Union { variants: vec![Ty::Date, Ty::Nil].into() },
     );
     with_ty(
         send(Some(const_ref("ActiveSupport")), "format_db_date", vec![date], true),
-        Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+        Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
     )
 }
 

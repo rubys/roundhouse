@@ -141,6 +141,64 @@ pub(crate) fn ground_body(body: &mut Expr, defs: &AppDefinitions) -> bool {
     changed
 }
 
+/// Ground the predicates in the VALUE positions of one lowered,
+/// already-typed jbuilder body (`json.note(widget.note.presence ||
+/// "none")`).
+///
+/// [`apply_blank_lowering`] walks no view body, so a predicate in a
+/// jbuilder value stayed a dynamic call: on CRuby the overlay serves
+/// it, on Spinel it raised `undefined method 'presence' for nil`. The
+/// grounding is the one every app body gets, `Runtime` arm included,
+/// so an untyped receiver becomes `ActiveSupport.presence(x)`.
+///
+/// Everything inside a value counts, the condition of a ternary or an
+/// `if` there included (`json.flag(note.present? ? "y" : "n")`): the
+/// grounded predicate answers a Boolean, which any condition takes.
+/// Template-level `if` / `unless` conditions are grounded the same way:
+/// jbuilder never runs the ERB view-condition rewrite
+/// (`view_to_library::predicates`), and Spinel has no `String#present?`
+/// / `NilClass#present?`, so leaving the call dynamic is a NameError.
+pub(crate) fn ground_jbuilder_values(body: &mut Expr, defs: &AppDefinitions) -> bool {
+    fn walk(expr: &mut Expr, in_value: bool, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) -> bool {
+        if !in_value {
+            match &mut *expr.node {
+                ExprNode::If { cond, then_branch, else_branch } => {
+                    // Condition is a value for blank predicates; branches
+                    // stay template-shaped (pairs / nested ifs).
+                    let cond_changed = walk(cond, true, defs, diags);
+                    let then_changed = walk(then_branch, false, defs, diags);
+                    let else_changed = walk(else_branch, false, defs, diags);
+                    return cond_changed || then_changed || else_changed;
+                }
+                ExprNode::Seq { exprs } => {
+                    let mut changed = false;
+                    for e in exprs {
+                        changed |= walk(e, false, defs, diags);
+                    }
+                    return changed;
+                }
+                _ => {}
+            }
+        }
+        let mut changed = false;
+        expr.node.for_each_child_mut(&mut |c| {
+            if walk(c, true, defs, diags) {
+                changed = true;
+            }
+        });
+        if try_rewrite(expr, defs, diags) {
+            changed = true;
+        }
+        changed
+    }
+    let mut diags = Vec::new();
+    let changed = walk(body, false, defs, &mut diags);
+    for d in diags {
+        crate::emit::diagnostics::push(d);
+    }
+    changed
+}
+
 /// Which classes define their own `blank?`/`present?`/`presence`
 /// (leave the dispatch alone) or an `empty?` (ground through it).
 /// Keyed by the class name's last segment — the same resolution
@@ -180,7 +238,7 @@ impl AppDefinitions {
         Self { own_predicate, own_empty }
     }
 
-    fn collect(app: &App) -> Self {
+    pub(crate) fn collect(app: &App) -> Self {
         let mut own_predicate = HashSet::new();
         let mut own_empty = HashSet::new();
         let mut note = |class: &str, method: &str| {
@@ -658,11 +716,11 @@ fn try_rewrite_compact_blank(
     let (params, out_ty) = match shape {
         Shape::Array { elem } => (
             vec![Symbol::new("__cb")],
-            Ty::Array { elem: Box::new(non_nil(&elem)) },
+            Ty::Array { elem: std::sync::Arc::new(non_nil(&elem)) },
         ),
         Shape::Hash { key, value } => (
             vec![Symbol::new("_k"), Symbol::new("__cb")],
-            Ty::Hash { key: Box::new(key), value: Box::new(non_nil(&value)) },
+            Ty::Hash { key: std::sync::Arc::new(key), value: std::sync::Arc::new(non_nil(&value)) },
         ),
     };
     let block = mk(
@@ -731,7 +789,7 @@ fn non_nil(t: &Ty) -> Ty {
             match kept.len() {
                 0 => Ty::Untyped,
                 1 => kept.remove(0),
-                _ => Ty::Union { variants: kept },
+                _ => Ty::Union { variants: kept.into() },
             }
         }
         other => other.clone(),
@@ -984,7 +1042,7 @@ fn non_nil_ty(r: &Expr) -> Ty {
                 variants.iter().filter(|v| !matches!(v, Ty::Nil)).cloned().collect();
             match non_nil.len() {
                 1 => non_nil.into_iter().next().unwrap(),
-                _ => Ty::Union { variants: non_nil },
+                _ => Ty::Union { variants: non_nil.into() },
             }
         }
         Some(t) => t.clone(),

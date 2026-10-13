@@ -713,7 +713,7 @@ jobs:
             tests/browser_smoke/package-lock.json
             src/emit/typescript/package.rs
       - name: Install harness deps
-        run: npm ci
+        run: $GITHUB_WORKSPACE/scripts/ci-npm ci
         working-directory: tests/browser_smoke
       - name: Install Playwright Chromium (+ system deps)
         run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
@@ -853,7 +853,7 @@ jobs:
           cp wasm/ide/app-src.json  wasm/lib/app-mastodon.json
           printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"roda","label":"Roda + Sequel blog","src":"app-roda.json","open":"app.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"campfire","label":"Campfire","src":"app-campfire.json","open":"app/models/message.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > wasm/lib/apps.json
       - name: Install harness deps (Playwright)
-        run: npm ci
+        run: $GITHUB_WORKSPACE/scripts/ci-npm ci
         working-directory: tests/browser_smoke
       - name: Install Playwright Chromium (+ system deps)
         run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
@@ -924,7 +924,10 @@ jobs:
     outputs: &advisory-outputs
       execution: ${{ steps.result.outputs.status }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 30m: Full validation 38397424326 finished the suite in ~20m of a 25m
+    # budget. Keep the real checks; leave a little headroom for cold cache /
+    # slow Postgres health without papering over a hung suite.
+    timeout-minutes: 30
 
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     # spinel_pg_db runs the PostgreSQL Db shim against this server.
@@ -1911,11 +1914,11 @@ jobs:
       # has no per-object method table — or until upstream takes
       # basecamp/once-campfire#280, #279's twin for this file.
         env:
-          # Tip Campfire suite floor — 552/71 via #818 meta
-          # (assoc_pluck test walk, view.controller, assoc_loaded,
-          # adapter_reload clear, reflect_on_association, walk-stub wipe).
-          FLOOR_TESTS: 552
-          FLOOR_FILES: 71
+          # Tip Campfire suite floor — 555/74 via hygiene + conditional GET
+          # (strict suite emit, ActiveStorage.paths + timed poster,
+          # NullRelation, fresh_when ETag → 304).
+          FLOOR_TESTS: 555
+          FLOOR_FILES: 74
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
@@ -2065,8 +2068,10 @@ jobs:
 
   # -------------------------------------------------------------------
   # (toolchain-ruby retired by the smoke consolidation: smoke-ruby's
-  # README § Test runs the same five driver suites from the published
-  # archive. The harness remains a dev-loop tool:
+  # README § Test runs `bundle exec rake test`, which discovers every
+  # test/**/*_test.rb. A fixed list of five drivers is how the views
+  # and broadcasts files shipped without ever running. The harness
+  # remains a dev-loop tool and runs that same rake task:
   # cargo test --test ruby_toolchain -- --ignored.)
   # -------------------------------------------------------------------
   # Spinel-AOT toolchain. Same emit pipeline as toolchain-ruby (lowered
@@ -2095,12 +2100,29 @@ jobs:
   # closes. Running it (vs `if: false`) keeps the model-suite progress
   # visible and catches regressions in the compile path.
   spinel-toolchain:
-    name: spinel-toolchain (suite)
+    name: spinel-toolchain (suite, ${{ matrix.shard }})
     # Tracks matz/spinel master UNPINNED. Advisory unless ci:spinel focus
     # hardens the CORE lane (spinel-advisory=false).
     needs: [generate-fixture, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
-    outputs: *advisory-outputs
+    # Two shards by test-module name: one runner took ~20 min of a 25 min
+    # ceiling once the parity modules landed. Each test is one Spinel
+    # build of about the same cost, so balance by count: `parity` lists
+    # 20 tests' modules; `rest` skips exactly those (19 tests + the
+    # tiny_api gates), so a new module lands in `rest` by default. Each shard reports its own output key (ci-plan.py
+    # requires both), since a matrix's shared output would let one
+    # shard's success hide the other's failure.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: parity
+            filter: "campfire_caches:: json_request_values:: action_controller_head:: params_wrapper:: strong_params:: cable_actions:: cable_broadcast_json:: lambda_signatures:: rails_parity::"
+          - shard: rest
+            filter: "--skip campfire_caches:: --skip json_request_values:: --skip action_controller_head:: --skip params_wrapper:: --skip strong_params:: --skip cable_actions:: --skip cable_broadcast_json:: --skip lambda_signatures:: --skip rails_parity::"
+    outputs:
+      parity: ${{ steps.result.outputs.parity }}
+      rest: ${{ steps.result.outputs.rest }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -2136,14 +2158,14 @@ jobs:
           ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
-      - name: cargo test --test spinel_toolchain -- --ignored
-        run: cargo test --test spinel_toolchain -- --ignored --nocapture
+      - name: cargo test --test spinel_toolchain -- --ignored (${{ matrix.shard }})
+        run: cargo test --test spinel_toolchain -- --ignored --nocapture ${{ matrix.filter }}
       # fixtures/tiny-api, the API-only app (#321): `spin build` of the
       # app entry, HTTP requests to the binary, and the model script
       # compiled natively. Filtered by name, so the ignored test named
       # after an open issue (#163) is not selected.
       - name: cargo test --test tiny_api spinel_gate_ -- --ignored
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.shard == 'rest' }}
         run: cargo test --test tiny_api spinel_gate_ -- --ignored --nocapture
 
       # On failure, capture spinel's actual generated C for the failing
@@ -2183,10 +2205,15 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: spinel-toolchain-repro
+          name: spinel-toolchain-repro-${{ matrix.shard }}
           path: ci-spinel-repro
           retention-days: 7
-      - *advisory-result
+      - name: Report actual advisory execution
+        id: result
+        if: always()
+        env:
+          STATUS: ${{ job.status }}
+        run: echo "${{ matrix.shard }}=$STATUS" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------
   # DOM equivalence: boot Rails + the target server side-by-side and
@@ -2782,7 +2809,7 @@ jobs:
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
-          npm install --no-audit --no-fund
+          "$GITHUB_WORKSPACE/scripts/ci-npm" install --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: Resolve and find successful execution for identical Rust archive inputs
         id: reuse
@@ -2898,7 +2925,7 @@ jobs:
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
-          npm install --no-audit --no-fund
+          "$GITHUB_WORKSPACE/scripts/ci-npm" install --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: scripts/smoke spinel
         id: smoke
@@ -3088,15 +3115,49 @@ jobs:
           docker buildx use campfire-docker-cache
           docker buildx build --load -t campfire "${cache_args[@]}" .
           docker run -d --name campfire -p 3000:3000 campfire
-          for i in $(seq 1 30); do
-            curl -sf -o /dev/null localhost:3000/first_run && break
+          # Wait for /first_run. Bound each probe and dump logs before exit.
+          # After #865 the image must set BINDING=0.0.0.0 (see
+          # scripts/campfire-docker-files); a localhost-only banner means
+          # published ports never reach the process — that is not a slow boot.
+          ready=0
+          last_curl=0
+          for i in $(seq 1 90); do
+            if curl -sf -o /dev/null --max-time 2 localhost:3000/first_run; then
+              ready=1
+              break
+            else
+              last_curl=$?
+            fi
             sleep 1
           done
-          root=$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/)
-          first=$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/first_run)
+          if [ "$ready" != 1 ]; then
+            echo "::error::campfire container did not become ready within 90s (last curl exit ${last_curl})"
+            docker logs campfire || true
+            if docker logs campfire 2>&1 | grep -q 'listening on http://localhost:'; then
+              echo "::error::banner binds localhost — published -p cannot reach it; image needs BINDING=0.0.0.0"
+            fi
+            docker rm -f campfire >/dev/null || true
+            exit 1
+          fi
+          http_code() {
+            local path="$1" code="" attempt
+            for attempt in 1 2 3 4 5; do
+              if code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "localhost:3000$path"); then
+                printf '%s' "$code"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "::error::curl failed for $path after retries"
+            docker logs campfire || true
+            docker rm -f campfire >/dev/null || true
+            exit 1
+          }
+          root=$(http_code /)
+          first=$(http_code /first_run)
           # the sign-in page fetches this; it is a File.binread of a
           # source path the archive has to carry (it once did not)
-          logo=$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/account/logo)
+          logo=$(http_code /account/logo)
           echo "GET / -> $root; GET /first_run -> $first; GET /account/logo -> $logo"
           docker logs campfire
           docker rm -f campfire >/dev/null
@@ -3185,7 +3246,7 @@ jobs:
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e/campfire
-          npm ci --no-audit --no-fund
+          "$GITHUB_WORKSPACE/scripts/ci-npm" ci --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: scripts/smoke campfire
         id: smoke
@@ -3286,7 +3347,7 @@ jobs:
         run: |
           mkdir -p build/assets/controllers
           # Tailwind CSS.
-          (cd e2e && npm install --no-audit --no-fund)
+          (cd e2e && "$GITHUB_WORKSPACE/scripts/ci-npm" install --no-audit --no-fund)
           printf '@import "tailwindcss";\n@source "%s/fixtures/real-blog/app";\n' "$PWD" \
             > e2e/.tailwind-input.css
           (cd e2e && npx @tailwindcss/cli --input .tailwind-input.css \
@@ -3341,7 +3402,7 @@ jobs:
           DEMO="$(mktemp -d)"
           cargo run --release --quiet --bin emit_preview -- \
             --target typescript --profile worker --out "$DEMO" fixtures/real-blog
-          (cd "$DEMO" && npm install --no-audit --no-fund --silent && npm run build)
+          (cd "$DEMO" && "$GITHUB_WORKSPACE/scripts/ci-npm" install --no-audit --no-fund --silent && npm run build)
           mkdir -p _site/blog
           cp -R "$DEMO"/dist/. _site/blog/
           echo "blog demo files:"; find _site/blog -maxdepth 2 -type f | sort
@@ -3845,9 +3906,15 @@ jobs:
         # Verify the copied download bytes against their producer/test report.
         # Failed validations may publish as repros; mismatched bytes may not.
         run: python3 scripts/ci-archive-evidence.py verify --root _site --report _site/ci/archive-results.json
+      # Per-attempt name: `gh run rerun --failed` re-runs assemble when a
+      # dependency (e.g. smoke) failed, and a second default `github-pages`
+      # artifact makes deploy-pages fail with "Multiple artifacts named
+      # github-pages" (Full validation 38397424326 attempt 2). Pair with
+      # full-ci.yml deploy's artifact_name.
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
+          name: github-pages-${{ github.run_attempt }}
           path: _site
       - name: Report successful assembly
         id: ready

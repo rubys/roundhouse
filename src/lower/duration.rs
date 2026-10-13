@@ -510,7 +510,7 @@ pub(crate) fn rewrite_durations(expr: &mut Expr) {
         let mut duration_const = Expr::new(span, ExprNode::Const { path });
         duration_const.ty = Some(Ty::Class {
             id: ClassId(Symbol::from("ActiveSupport::Duration")),
-            args: vec![],
+            args: vec![].into(),
         });
         *expr.node = ExprNode::Send {
             recv: Some(duration_const),

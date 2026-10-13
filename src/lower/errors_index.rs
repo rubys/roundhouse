@@ -1,56 +1,30 @@
 //! `errors[:field]` grounding: `<recv>.errors[:field]` →
-//! `ActiveSupport.errors_for(<recv>.errors, "Field ")`.
+//! `<recv>.error_messages_for("field")`.
 //!
-//! The shared runtime's error accumulator is a plain `Array[String]` of
-//! FULL messages — [`super::errors_add`] owns that invariant and bakes
-//! `"#{humanized_field} #{message}"` at lower time, and
-//! [`super::errors_full_messages`] folds Rails' `full_messages` hop
-//! away because on our shape it is the identity. Rails' `errors[:field]`
-//! is the other projection of the same data: the messages for one
-//! attribute, WITHOUT the humanized prefix (`[ "is not public" ]`, not
-//! `[ "Url is not public" ]`).
+//! The shared runtime's `errors` is a plain `Array[String]` of FULL
+//! messages, and `error_details` holds the `ActiveRecord::ErrorDetail`
+//! each was added with — [`super::errors_add`] and the `validates`
+//! lowering push both. Rails' `errors[:field]` is the messages on one
+//! attribute WITHOUT its humanized name (`[ "is not public" ]`, not
+//! `[ "Url is not public" ]`), which `Base#error_messages_for` answers
+//! from the details, under any `errors.format` and for `:base` alike.
 //!
 //! Left alone the site is not merely unsupported, it is silently wrong
 //! on CRuby too: `Array#[]` with a Symbol raises `TypeError: no implicit
 //! conversion of Symbol into Integer`, which is what campfire's
-//! `Opengraph::LocationTest` reported for three tests. So the pass
-//! rewrites to a helper that re-derives the projection from the baked
-//! prefix — the same "one shared `runtime/ruby` body prices every
-//! target" placement [`super::presence_in`] documents, in the same
-//! `ActiveSupport` module.
-//!
-//! WHAT THE PREFIX RE-DERIVATION CANNOT SEE. The accumulator keeps no
-//! attribute column, so the helper matches on text. If one attribute's
-//! humanized name is a PREFIX of another's — `url` and `url_host`
-//! humanize to `"Url"` and `"Url host"` — then `errors[:url]` also
-//! matches `"Url host can't be blank"` and answers `"host can't be
-//! blank"`. That is a real divergence from Rails and it is recorded in
-//! `docs/pipeline/runtime.md`; the fix is an attribute column on the
-//! accumulator, which changes `@errors`' type in every strict target
-//! and is not worth it until a corpus site needs it.
-//!
-//! `:base` DECLINES. Rails attaches `:base` messages to the record
-//! rather than a field, and `errors_add` accordingly bakes them with NO
-//! prefix — there is no text for the helper to match on, and every
-//! prefixed message would be a false negative. Those sites join the
-//! residue ledger instead.
+//! `Opengraph::LocationTest` reported for three tests.
 //!
 //! Purely shape-directed, like its two siblings: the receiver of `[]`
 //! must itself be a zero-arg `errors` send, which is what makes the
 //! site our accumulator rather than some other object's `[]`.
 //!
-//! VIEWS ARE DELIBERATELY OUT OF SCOPE, unlike
-//! [`super::errors_full_messages`]. The view lowering already owns this
-//! exact shape: `classify_errors_field_predicate` recognizes
-//! `<record>.errors[:field].none? / .any?` — the scaffold's form
-//! partial styles every field from it — and grounds the whole
-//! predicate, `[]` included. Rewriting the inner `[]` here runs FIRST
-//! and leaves that classifier a shape it no longer matches, which takes
-//! the blog's `_form.html.erb` from four grounded predicates to four
-//! `unresolved_type` diagnostics. Scope is therefore hook bodies and
-//! TEST bodies; a view read outside the predicate shape stays exactly
-//! as unsupported as it was, which is honest, and the view lowering is
-//! where it would be claimed.
+//! `errors.to_hash` is the same projection for every attribute at once:
+//! `ActiveSupport.errors_to_hash(<recv>.error_details)` groups the
+//! details' messages by attribute, in the order Rails does.
+//!
+//! Views take the same rewrite: the scaffold's form partial reads
+//! `<record>.errors[:field].none?` / `.any?` inside a `class:` array,
+//! which renders through `class_names` at request time.
 
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
@@ -58,20 +32,23 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 use crate::ty::Ty;
 
-/// Rewrite `errors[:field]` reads across every hook body and test body
-/// (NOT views — see the module docs). Returns the residue ledger:
+/// Rewrite `errors[:field]` reads across every hook, test and view body.
+/// Returns the residue ledger:
 /// recognizable `errors[…]` sites left dynamic, with the reason.
 pub fn apply_errors_index_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
-    let data = super::errors_add::LabelData::of(app);
-    super::for_each_owned_hook_body(app, &mut |owner, body| {
-        rewrite(body, &data.at(owner), &mut diags);
+    super::for_each_owned_hook_body(app, &mut |_, body| {
+        rewrite(body, &mut diags);
         ledger_messages(body, &mut diags);
     });
     super::for_each_test_body(app, &mut |body| {
-        rewrite(body, &data.at(None), &mut diags);
+        rewrite(body, &mut diags);
         ledger_messages(body, &mut diags);
     });
+    for view in &mut app.views {
+        rewrite(&mut view.body, &mut diags);
+        ledger_messages(&mut view.body, &mut diags);
+    }
     diags
 }
 
@@ -117,7 +94,7 @@ fn send(span: crate::span::Span, recv: Expr, method: &str, args: Vec<Expr>, ty: 
 }
 
 // Not a Hash: the accumulator is the Array of full messages, so each `messages` question is asked of it directly.
-fn rewrite_messages(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mut Vec<Diagnostic>) {
+fn rewrite_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     let span = expr.span;
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else { return };
     if !is_messages_read(r) {
@@ -132,8 +109,8 @@ fn rewrite_messages(expr: &mut Expr, labels: &super::errors_add::Labels, diags: 
         }
         ("key?" | "has_key?" | "include?" | "member?", [field]) => {
             let field = field.clone();
-            let mut index = send(span, accumulator, "[]", vec![field], Ty::Array { elem: Box::new(Ty::Str) });
-            rewrite_index(&mut index, labels, diags);
+            let mut index = send(span, accumulator, "[]", vec![field], Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
+            rewrite_index(&mut index, diags);
             Some(send(span, index, "any?", vec![], Ty::Bool))
         }
         ("blank?" | "empty?", []) => Some(send(span, accumulator, "empty?", vec![], Ty::Bool)),
@@ -145,10 +122,39 @@ fn rewrite_messages(expr: &mut Expr, labels: &super::errors_add::Labels, diags: 
     }
 }
 
-fn rewrite(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mut Vec<Diagnostic>) {
-    expr.node.for_each_child_mut(&mut |c| rewrite(c, labels, diags));
-    rewrite_messages(expr, labels, diags);
-    rewrite_index(expr, labels, diags);
+fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+    expr.node.for_each_child_mut(&mut |c| rewrite(c, diags));
+    rewrite_messages(expr, diags);
+    rewrite_index(expr, diags);
+    rewrite_to_hash(expr);
+}
+
+/// `<owner>.errors.to_hash` → `ActiveSupport.errors_to_hash(<owner>.error_details)`, typed.
+fn rewrite_to_hash(expr: &mut Expr) {
+    let ExprNode::Send { recv: Some(reader), method, args, block: None, .. } = &*expr.node else { return };
+    if method.as_str() != "to_hash" || !args.is_empty() || !is_errors_read(reader) {
+        return;
+    }
+    let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
+    let span = expr.span;
+    let mut details = Expr::new(
+        span,
+        ExprNode::Send { recv: owner.clone(), method: Symbol::from("error_details"), args: Vec::new(), block: None, parenthesized: false },
+    );
+    details.ty = Some(super::errors_add::error_details_ty());
+    let mut support = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
+    support.ty = Some(Ty::Class { id: crate::ident::ClassId(Symbol::from("ActiveSupport")), args: vec![].into() });
+    let mut call = Expr::new(
+        span,
+        ExprNode::Send { recv: Some(support), method: Symbol::from("errors_to_hash"), args: vec![details], block: None, parenthesized: true },
+    );
+    call.ty = Some(Ty::Hash {
+        key: std::sync::Arc::new(Ty::Sym),
+        value: std::sync::Arc::new(Ty::Array {
+            elem: std::sync::Arc::new(Ty::Str),
+        }),
+    });
+    *expr = call;
 }
 
 fn ledger_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
@@ -158,15 +164,15 @@ fn ledger_messages(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
             "errors.messages",
             expr.span,
             "whole_hash",
-            "`errors.messages` grounds only as `[]`, `key?`, `blank?`/`empty?` or `present?`/`any?`; the error \
-             accumulator keeps no attribute column to build the Hash from"
+            "`errors.messages` grounds only as `[]`, `key?`, `blank?`/`empty?` or `present?`/`any?`; the whole \
+             Hash is not built"
                 .to_string(),
         ));
     }
     expr.node.for_each_child_mut(&mut |c| ledger_messages(c, diags));
 }
 
-fn rewrite_index(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mut Vec<Diagnostic>) {
+fn rewrite_index(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     let matches_shape = matches!(
         &*expr.node,
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
@@ -186,36 +192,28 @@ fn rewrite_index(expr: &mut Expr, labels: &super::errors_add::Labels, diags: &mu
         diags.push(residue(expr, "dynamic field"));
         return;
     };
-    if field.as_str() == "base" {
-        diags.push(residue(expr, ":base carries no humanized prefix"));
-        return;
-    }
-    let ExprNode::Send { recv: Some(reader), .. } = &*expr.node else { unreachable!() };
-    let Some(prefix_text) = labels.message_prefix(reader, field.as_str()).filter(|p| !p.is_empty()) else {
-        diags.push(residue(expr, "errors.format does not put the field before the message"));
-        return;
-    };
     let span = expr.span;
     let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
     let ExprNode::Send { recv, .. } = node else { unreachable!() };
-    let accumulator = recv.expect("checked Some above");
-    let prefix = Expr::new(
+    let ExprNode::Send { recv: owner, .. } = *recv.expect("checked Some above").node else { unreachable!() };
+    *expr = messages_on(owner, field.as_str(), span);
+}
+
+/// `<owner>.error_messages_for("<field>")`, typed.
+pub(crate) fn messages_on(owner: Option<Expr>, field: &str, span: crate::span::Span) -> Expr {
+    let mut lit = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: field.to_string() } });
+    lit.ty = Some(Ty::Str);
+    let mut e = Expr::new(
         span,
-        ExprNode::Lit { value: Literal::Str { value: prefix_text } },
+        ExprNode::Send { recv: owner, method: Symbol::from("error_messages_for"), args: vec![lit], block: None, parenthesized: true },
     );
-    // Stamp the result: this pass runs *after* analyze, and the
-    // post-lowering `diagnose` walk reads stamped types without
-    // re-dispatching, so an unstamped synthesis false-positives a
-    // `send_dispatch_failed`.
-    expr.ty = Some(Ty::Array { elem: Box::new(Ty::Str) });
-    *expr.node = ExprNode::Send {
-        recv: Some(Expr::new(
-            span,
-            ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
-        )),
-        method: Symbol::from("errors_for"),
-        args: vec![accumulator, prefix],
-        block: None,
-        parenthesized: true,
-    };
+    // Stamp the result: callers run *after* analyze, and the post-lowering
+    // `diagnose` walk reads stamped types without re-dispatching.
+    e.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
+    e
+}
+
+/// `<owner>.error_messages_for("<field>").any?`, typed.
+pub(crate) fn has_errors_on(owner: Option<Expr>, field: &str, span: crate::span::Span) -> Expr {
+    send(span, messages_on(owner, field, span), "any?", vec![], Ty::Bool)
 }

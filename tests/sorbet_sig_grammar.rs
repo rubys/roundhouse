@@ -20,12 +20,12 @@ fn read(sig: &str, def: &str) -> Ty {
 }
 
 fn class(id: &str) -> Ty {
-    Ty::Class { id: ClassId(Symbol::new(id)), args: vec![] }
+    Ty::Class { id: ClassId(Symbol::new(id)), args: vec![].into() }
 }
 
 fn signature(ty: &Ty) -> (Vec<Ty>, Ty) {
     let Ty::Fn { params, ret, .. } = ty else { panic!("{ty:?}") };
-    (params.iter().map(|p| p.ty.clone()).collect(), (**ret).clone())
+    (params.iter().map(|p| (*p.ty).clone()).collect(), (**ret).clone())
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn class_of_is_the_class_it_names_even_for_a_builtin() {
     );
     let (params, ret) = signature(&ty);
     assert_eq!(params[0], class("Cart"));
-    assert_eq!(params[1], Ty::Union { variants: vec![class("String"), Ty::Nil] });
+    assert_eq!(params[1], Ty::Union { variants: vec![class("String"), Ty::Nil].into() });
     assert_eq!(ret, class("Cart"));
 }
 
@@ -71,7 +71,7 @@ fn shapes_tuples_and_parentheses() {
         "def m(a, b); end",
     );
     let (params, ret) = signature(&ty);
-    assert_eq!(params[0], Ty::Tuple { elems: vec![Ty::Int, Ty::Str] });
+    assert_eq!(params[0], Ty::Tuple { elems: vec![Ty::Int, Ty::Str].into() });
     assert_eq!(params[1], Ty::Int);
     let Ty::Record { row } = ret else { panic!() };
     assert_eq!(row.fields[&Symbol::new("max")], Ty::Int);
@@ -97,18 +97,18 @@ fn a_proc_type_is_a_callable_and_a_block_parameter_is_the_methods_block() {
     );
     let Ty::Fn { params, block, ret, .. } = &ty else { panic!() };
     assert_eq!(**ret, Ty::Str);
-    assert_eq!(params[0].ty, Ty::Int);
+    assert_eq!(params[0].ty, Ty::Int.into());
     assert_eq!(params[1].kind, ParamKind::Block);
-    let Ty::Fn { params: block_params, ret: block_ret, .. } = &params[1].ty else {
+    let Ty::Fn { params: block_params, ret: block_ret, .. } = &*params[1].ty else {
         panic!("{:?}", params[1].ty)
     };
-    assert_eq!(block_params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(), vec![class("Cart"), Ty::Int]);
+    assert_eq!(block_params.iter().map(|p| (*p.ty).clone()).collect::<Vec<_>>(), vec![class("Cart"), Ty::Int]);
     assert_eq!(**block_ret, Ty::Str);
-    assert_eq!(block.as_deref(), Some(&params[1].ty));
+    assert_eq!(block.as_deref(), Some(&*params[1].ty));
 
     let ty = read("sig { params(blk: T.nilable(T.proc.void)).void }", "def m(&blk); end");
     let Ty::Fn { params, block, .. } = &ty else { panic!() };
-    let Ty::Fn { ret, .. } = &params[0].ty else { panic!("{:?}", params[0].ty) };
+    let Ty::Fn { ret, .. } = &*params[0].ty else { panic!("{:?}", params[0].ty) };
     assert_eq!(**ret, Ty::Nil);
     assert!(block.is_some());
 }

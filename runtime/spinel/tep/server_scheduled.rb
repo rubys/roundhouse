@@ -54,7 +54,7 @@ module Tep
       end
 
       def run(port, workers, quiet)
-        sfd = Sock.sphttp_listen(port, workers > 1 ? 1 : 0)
+        sfd = Sock.sphttp_listen_on(Tep::APP.bind_host, port, workers > 1 ? 1 : 0)
         if sfd < 0
           # Loud + nonzero exit: the one plausible cause on a sane host
           # is another process already bound to the port, and silently
@@ -72,7 +72,7 @@ module Tep
           # redirected (not a TTY) C stdio block-buffers, and a banner
           # that only shows up at exit is no banner at all.
           puts Tep.display_name + " (" + RUBY_ENGINE +
-               ") listening on http://0.0.0.0:" + port.to_s +
+               ") listening on http://" + (Tep::APP.bind_host.empty? ? "0.0.0.0" : Tep::APP.bind_host) + ":" + port.to_s +
                ", pid " + Sock.sphttp_getpid.to_s
           puts "  one fiber per connection (TEP_SERVER=fiber); OS workers: " +
                "1, the main thread; processes: " + Tep.processes_desc(workers)

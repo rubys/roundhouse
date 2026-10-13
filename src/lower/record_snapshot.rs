@@ -77,6 +77,6 @@ fn rewrite_node(expr: &mut Expr) {
     let attrs = args[0].clone();
     let base = constant(span, &["ActiveRecord", "Base"]);
     let mut call = send(span, base, "instantiate_named", vec![name, attrs]);
-    call.ty = Some(Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Base")), args: vec![] });
+    call.ty = Some(Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Base")), args: vec![].into() });
     *expr = call;
 }

@@ -49,6 +49,84 @@
       "note": "`Message.where(...).with_presentation.to_a`, then `assert_no_queries { … every presentation association … }`. Rails runs the preloads inside `to_a`; the ruby family defers them (`ActiveRecord::PendingPreload`, `lower::deferred_preload`, de8edb3) until the first association read on any record of the group, so the same nine batched queries — creators, avatars, rich texts, their embeds, attachments, boosts, boosters, their avatars, rooms — land inside the block. Nothing is N+1 and nothing is missing; the queries are counted in the wrong window. Closing it means running a loaded relation's includes eagerly again, which is a choice about the deferral (it was made for pages that serve a cached collection), not a missing feature."
     },
     {
+      "slug": "ar-database-tasks",
+      "title": "`ActiveRecord::Tasks::DatabaseTasks` — schema/prepare/migrate repair surface",
+      "owner": "compiler",
+      "match": "uninitialized constant ActiveRecord::Tasks",
+      "note": "campfire's `Room::MessagesCountTasksTest` and the rake prepend reach `ActiveRecord::Tasks::DatabaseTasks` to repair SQLite trigger-kept `rooms.messages_count` across development/test DBs. The constant is absent from the emit, so the whole file is 0/4. Shared AR tasks facade — not Campfire-only once modeled."
+    },
+    {
+      "slug": "nokogiri-css-class",
+      "title": "Nokogiri CSS class matcher in controller asserts (`css-class(@class,…)`)",
+      "owner": "compiler",
+      "match": "nokogiri-builtin:css-class",
+      "note": "`Messages::BoostsControllerTest` asserts a quick-boost control via a CSS class XPath that the emitted Nokogiri/assert path rejects (`Invalid expression: … css-class(@class,…)`). Harness/XML assert surface shared by any controller test using the same matcher."
+    },
+    {
+      "slug": "action-view-base-missing",
+      "title": "`ActionView::Base` unnamed in fragment/cache tests",
+      "owner": "compiler",
+      "match": "uninitialized constant ActionView::Base",
+      "note": "`FragmentRenderingTest#test_message_controls_survive_creator_edits…` names `ActionView::Base` (cache lookup / fragment store identity). The constant is not on the emit; sibling fragment fails share the same file's cache story."
+    },
+    {
+      "slug": "native-validators-304",
+      "title": "Conditional GET keeps native validators (`304 Not Modified`)",
+      "owner": "compiler",
+      "match": "expected response :not_modified",
+      "match_test": "CachedResponsesTest#",
+      "note": "`fresh_when` / `stale?` landed earlier; this remaining case wants native ETag/Last-Modified validators on a cached response so a conditional request answers 304. Shared AC response-cache edge.",
+      "at_zero": "served with #829; rule stays as a regression tripwire."
+    },
+    {
+      "slug": "fragment-cache-identity",
+      "title": "Fragment / collection cache identity and bounded store",
+      "owner": "compiler",
+      "match": ".",
+      "match_test": "FragmentRenderingTest#",
+      "note": "Five fails in one file: `assert_same` on the bounded MemoryStore, jbuilder HTML token state, detached-broadcast `to_html` on nil, cross-room content-validated hits, plus the `ActionView::Base` constant (also matched above when that message wins). Shared view/cache runtime — largest file-green opportunity on the tip suite."
+    },
+    {
+      "slug": "message-creation-tx",
+      "title": "Message create transaction — FTS index / unread / outer rollback",
+      "owner": "compiler",
+      "match": ".",
+      "match_test": "(Message::CreationTest|MessageCreationCommitTest|Message::SearchableTest)#",
+      "note": "Creation commit ordering, failed index/unread rollback, outer rollback restoring counter/jobs, and searchable reindex word replace. High density if one AR transaction / after_create_commit seam is wrong."
+    },
+    {
+      "slug": "sqlite-wal-checkpoint",
+      "title": "SQLite WAL auto-checkpoint / test-thread policy",
+      "owner": "compiler",
+      "match": ".",
+      "match_test": "SqliteWalCheckpointTest#",
+      "note": "File is mostly green (13/15); remaining: disable WAL auto-checkpoint so commits do not fsync on the writer, and do not start a background thread in test by default. Shared adapter knobs."
+    },
+    {
+      "slug": "record-cache-admit",
+      "title": "RecordCache budget / epoch / open-transaction admit rules",
+      "owner": "compiler",
+      "match": ".",
+      "match_test": "RecordCacheTest#test_disabled_budget_missing_epoch",
+      "note": "One fail beside a mostly-green cache file: disabled budget, missing epoch, and open transactions must always query and never admit. Shared MemoryStore/RecordCache policy."
+    },
+    {
+      "slug": "sidebar-cached-direct-sort",
+      "title": "Cached direct room still sorts by latest message when already unread",
+      "owner": "compiler",
+      "match": ".",
+      "match_test": "Users::SidebarsControllerTest#test_a_cached_direct_that_is_already_unread",
+      "note": "Silent DOM divergence: expected `data-sorted-list-number` for a cached unread direct. Peel after cache/304 work."
+    },
+    {
+      "slug": "room-destroy-batching",
+      "title": "Room destroy — per-message txs and member connection reset broadcast",
+      "owner": "compiler",
+      "match": ".",
+      "match_test": "RoomTest#(test_a_room_destroyed_later|test_each_message_is_destroyed_in_its_own_transaction)",
+      "note": "`assert_broadcast_on` for connection reset after late destroy, and per-message destroy transaction interleaving. Shared cable recording + destroy batching."
+    },
+    {
       "slug": "presentation-preload-introspection",
       "title": "`ActionText::RichText#embeds` — a presentation-preload test walks the rich text's attached blobs",
       "owner": "compiler",
@@ -331,8 +409,8 @@
       "title": "`belongs_to` autosave — an unsaved target saved with its owner",
       "owner": "compiler",
       "match": "Validation failed: Creator must exist",
-      "note": "Assigning an unsaved record and saving the owner saves the target first in Rails. The emit reads `value.id` (0) and the presence validation fails. Carries a stub entry in scripts/campfire-walk-stubs.rb, so the count here is what the stub does NOT cover.",
-      "stubbed": true
+      "note": "Assigning an unsaved record and saving the owner saves the target first in Rails. The emit used to read `value.id` (0) and fail presence validation. Served with belongs_to defaults / autosave flattening; walk-stubs ledger deleted with #818.",
+      "at_zero": "served with #818 tip-compat (FirstRun/grant_to peel); rule stays as a regression tripwire."
     },
     {
       "slug": "active-storage-attachments",

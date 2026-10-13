@@ -282,7 +282,7 @@ fn seed_ivars_for_class(
             let wrapped = match &ty {
                 Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)) => ty,
                 other => Ty::Union {
-                    variants: vec![other.clone(), Ty::Nil],
+                    variants: vec![other.clone(), Ty::Nil].into(),
                 },
             };
             (name, wrapped)
@@ -320,7 +320,7 @@ fn merge_ivar_maps(into: &mut HashMap<Symbol, Ty>, from: HashMap<Symbol, Ty>) {
                         match variants.len() {
                             0 => Ty::Nil,
                             1 => variants.pop().unwrap(),
-                            _ => Ty::Union { variants },
+                            _ => Ty::Union { variants: variants.into() },
                         }
                     }
                 });
@@ -434,12 +434,12 @@ fn build_method_ctx(
     ivars: &HashMap<Symbol, Ty>,
 ) -> Ctx {
     let mut ctx = Ctx::default();
-    ctx.self_ty = Some(Ty::Class { id: class_id.clone(), args: vec![] });
+    ctx.self_ty = Some(Ty::Class { id: class_id.clone(), args: vec![].into() });
     ctx.ivar_bindings = ivars.clone();
     if let Some(class_sigs) = sigs.get(class_id) {
         if let Some(Ty::Fn { params, .. }) = class_sigs.get(&method.name) {
             for (param, p) in method.params.iter().zip(params.iter()) {
-                ctx.local_bindings.insert(param.name.clone(), p.ty.clone());
+                ctx.local_bindings.insert(param.name.clone(), (*p.ty).clone());
             }
         }
     }
@@ -480,10 +480,10 @@ fn qualified_runtime_signatures_seed_contexts_and_results() {
     let (registry, sigs, _) = build_class_registry();
     let classes = ingest_runtime_classes();
     let row = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(Ty::Untyped),
     };
-    let rows = Ty::Array { elem: Box::new(row) };
+    let rows = Ty::Array { elem: std::sync::Arc::new(row) };
     for (class, method, name, expected) in [
         ("ActiveRecord::Result", "initialize", "rows", rows.clone()),
         ("ActiveRecord::Connection", "quote_string", "str", Ty::Str),
@@ -510,7 +510,7 @@ fn qualified_runtime_signatures_seed_contexts_and_results() {
             Symbol::new("result"),
             Ty::Class {
                 id: ClassId(Symbol::new(class)),
-                args: vec![],
+                args: vec![].into(),
             },
         );
         typer.analyze_expr(&mut probes[0].methods[0].body, &ctx);
@@ -518,7 +518,7 @@ fn qualified_runtime_signatures_seed_contexts_and_results() {
         // the constructor above still takes the row hashes.
         assert_eq!(
             probes[0].methods[0].body.ty,
-            Some(Ty::Array { elem: Box::new(Ty::Array { elem: Box::new(Ty::Untyped) }) }),
+            Some(Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }) }),
             "{class}"
         );
     }
@@ -531,7 +531,7 @@ fn qualified_finder_signatures_seed_contexts_and_results() {
     let (registry, sigs, _) = build_class_registry();
     let classes = ingest_runtime_classes();
     let key_class = ClassId(Symbol::new("ActiveRecord::IntegerKeyCast"));
-    let input = Ty::Union { variants: vec![Ty::Int, Ty::Float, Ty::Str, Ty::Nil] };
+    let input = Ty::Union { variants: vec![Ty::Int, Ty::Float, Ty::Str, Ty::Nil].into() };
     for (class, method, expected) in [
         ("ActiveRecord::IntegerKeyCast", "initialize", vec![("valid", Ty::Bool), ("value", Ty::Int)]),
         ("ActiveRecord::IntegerKeyCast", "parse", vec![("id", input.clone())]),
@@ -546,11 +546,11 @@ fn qualified_finder_signatures_seed_contexts_and_results() {
         }
     }
     let Ty::Fn { ret, .. } = &sigs[&key_class][&Symbol::new("parse")] else { panic!("parse signature"); };
-    assert_eq!(ret.as_ref(), &Ty::Class { id: key_class.clone(), args: vec![] });
+    assert_eq!(ret.as_ref(), &Ty::Class { id: key_class.clone(), args: vec![].into() });
     let source = b"class Probe; def valid(cast); cast.valid; end; def value(cast); cast.value; end; end";
     let mut probes = ingest_library_classes(source, "probe.rb").unwrap();
     let mut ctx = Ctx::default();
-    ctx.local_bindings.insert(Symbol::new("cast"), *ret.clone());
+    ctx.local_bindings.insert(Symbol::new("cast"), std::sync::Arc::unwrap_or_clone(ret.clone()));
     let typer = BodyTyper::new(&registry);
     for method in &mut probes[0].methods {
         typer.analyze_expr(&mut method.body, &ctx);

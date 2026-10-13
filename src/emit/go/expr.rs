@@ -494,7 +494,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                     }
                     InterpPart::Expr { expr } => {
                         fmt.push_str("%v");
-                        args.push(emit_expr(ctx, expr));
+                        args.push(emit_expr_as_value(ctx, expr));
                     }
                 }
             }
@@ -810,8 +810,8 @@ pub(super) fn emit_send(
                     if let ExprNode::Hash { .. } = &*a.node {
                         let mut widened = a.clone();
                         widened.ty = Some(Ty::Hash {
-                            key: Box::new(Ty::Str),
-                            value: Box::new(Ty::Untyped),
+                            key: std::sync::Arc::new(Ty::Str),
+                            value: std::sync::Arc::new(Ty::Untyped),
                         });
                         return emit_expr(ctx, &widened);
                     }
@@ -1287,6 +1287,16 @@ pub(super) fn emit_send(
     if method == "empty?" && args.is_empty() {
         if let Some(r) = recv.filter(|r| !is_own_method(ctx, r, method)) {
             return format!("len({}) == 0", emit_expr(ctx, r));
+        }
+    }
+    // An element that is never nil or false makes `any?` / `none?` a question of size
+    if matches!(method, "any?" | "none?") && args.is_empty() {
+        let never_falsy = |r: &&Expr| {
+            matches!(r.ty.as_ref(), Some(Ty::Array { elem }) if matches!(**elem, Ty::Str | Ty::Int | Ty::Float | Ty::Sym))
+        };
+        if let Some(r) = recv.filter(never_falsy).filter(|r| !is_own_method(ctx, r, method)) {
+            let op = if method == "any?" { ">" } else { "==" };
+            return format!("len({}) {op} 0", emit_expr(ctx, r));
         }
     }
 

@@ -32,7 +32,7 @@ pub enum Effect {
 }
 
 /// The set of effects a computation may perform. Empty set == pure.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EffectSet {
     pub effects: BTreeSet<Effect>,
 }

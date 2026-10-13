@@ -174,7 +174,13 @@ not add generic class-object/Relation support to strict targets.
 | Params | `params.expect`, `params.require(...).permit(...)`, `params[:id]`; typed by the schema they're assigned to | + nested permits, arrays, `params.merge`, indifferent access; a missing resource answers 400; JSON bodies wrapped under the model name (`wrap_parameters`, on by default since `load_defaults 7.0`) |
 | Responses | `render` (template, partial, `json:`, `status:`), `redirect_to` (record, path, `status:`), `respond_to` with `format.html`/`format.json`, `flash` and `flash.now` | + `expires_in`, `stale?`/`fresh_when` (answered as always fresh — a deliberate divergence), `cookies` and `cookies.signed`/`.permanent`, `session`, `helper_method`, `layout` |
 | Concerns | `include`d modules with `included do` filter blocks | + `class_methods`, concern-defined actions and helpers |
-| Auth | — | `Current` attributes, `authenticate_by`, signed/global ids, `has_secure_password` sessions |
+| Auth and request | — | `Current` attributes, `authenticate_by`, signed/global ids, `has_secure_password` sessions; `request.headers` (`[]`, `fetch`, `key?`, case-insensitive HTTP and Rack names), `request.authorization` (including Rack and legacy authorization env keys), route-only `request.path_parameters`, and HTTP Token/Bearer and Basic auth helpers |
+
+The Spinel dispatcher forwards incoming request headers into the request's
+Rack env (`HTTP_*`, plus unprefixed `CONTENT_TYPE` and `CONTENT_LENGTH`).
+Token and Bearer schemes are matched case-insensitively. This covers the
+request/authentication surface, not application-specific authorization
+policy or unsupported route behavior.
 
 `ActionController::Head#head` takes a positional status and optional
 options hash. Roundhouse supports registered status symbols, integer
@@ -218,15 +224,15 @@ promise in the API prose.
 
 | Component | Status |
 |---|---|
-| Action Cable | Every server target: `/cable`, `turbo_stream_from` subscriptions, model broadcasts. Campfire tier adds application channels with `subscribed`/`unsubscribed`, `stream_for`, and presence. |
-| Active Job | Campfire tier: `perform_later` runs on an in-process queue in the app; `ActiveJob::TestHelper` assertions in the tests. No external queue adapter. |
+| Action Cable | Every server target: `/cable`, `turbo_stream_from` subscriptions, model broadcasts. Campfire tier adds application channels with `subscribed`/`unsubscribed`, `stream_for`, and presence, and client actions (`subscription.perform(action, data)`) with Rails' rules for which methods are actions and which receive `data`. |
+| Active Job | Campfire tier: `perform_later` runs on an in-process queue in the app; `ActiveJob::TestHelper` assertions in the tests. On the Ruby-family lanes a job is queued as a serialized ActiveJob payload (GlobalID records, primitives, Symbols, Times and Arrays of them), honoring `queue_as`, `discard_on ActiveJob::DeserializationError` and `enqueue_after_transaction_commit`; a job with other argument types keeps a closure, with a warning. No external queue adapter. |
 | Active Storage | Campfire tier: blobs and attachments, the disk service, the engine's routes (redirect and representation), variants via libvips on Spinel. No cloud services. |
 | Action Text | Campfire tier: `has_rich_text`, the safe-list sanitizer, attachment rendering. |
 | Action Mailer | Ruby tier: mailer classes, `mail(...)`, `deliver_now`/`deliver_later` — delivery appends to `ActionMailer::Base.deliveries` (Rails' `:test` method, which the emitted tests assert against). No SMTP. |
 | Routing | `resources`/`resource` (nested, `only:`/`except:`, `member`/`collection`), `namespace`/`scope`, `root`, `get`/`post`/…, `constraints`, format suffixes, Active Storage's mounted engine, Devise's `devise_for` (static default four: session/registration/password/confirmation + `controllers:` overrides for those mappings only — not model-module-driven), `devise_scope` as a path-transparent wrapper, and `with_options` (its options deep-merged into each block-free route call inside, the call's own keys winning; a child with its own block, a block parameter, or two hash values under one key is declined). Not: Devise `authenticate`/`authenticated`/`unauthenticated` route guards (unsupported because Warden constraints are not enforced; strict ingest fails, while survey mode records a gap and omits their route blocks), `concern`, `direct` (a custom URL helper with an arbitrary body — dropped), `mount` of any other engine, Doorkeeper's DSL, Devise OmniAuth callback routes, Devise `skip:`/`only:`/`path:` options, model-driven module narrowing. |
 | Configuration | `config.x.*`, initializers that define constants or mix modules into models, `Rails.application.config` reads, the app's inflections. Not: `Rails.application.credentials`. |
 | Caching | Fragment caching (`cache` in views, keyed by record) and `Rails.cache.fetch`, in-process. |
-| Gems | The census names what is modeled. Modeled today: bcrypt, devise (route helpers + static `devise_for`; no Warden route guards), image_processing/ruby-vips (Spinel), invisible_captcha, pretender, rqrcode, useragent, web-push, net-http-persistent, concurrent-ruby's thread pool, importmap-rails, turbo-rails, stimulus-rails, tailwindcss-rails, jbuilder, propshaft. Everything else in a Gemfile is either infrastructure (never enters the analysis) or unknown. |
+| Gems | The census names what is modeled. Modeled today: bcrypt, devise (route helpers + static `devise_for`; no Warden route guards), image_processing/ruby-vips (Spinel), inertia_rails (`render inertia:` with a literal component and props, `inertia_share`, optional and deferred props written inline as `InertiaRails.optional { }` or `InertiaRails.defer { }`, partial reloads, the version check, `inertia: { errors: }` redirects; no SSR, no merge/scroll/once props, no dot-path partial keys, no optional or deferred wrapper returned from a helper method), invisible_captcha, pretender, rqrcode, useragent, web-push, net-http-persistent, concurrent-ruby's thread pool, importmap-rails, turbo-rails, stimulus-rails, tailwindcss-rails, jbuilder, propshaft. Everything else in a Gemfile is either infrastructure (never enters the analysis) or unknown. |
 
 ## What is not lowered, anywhere
 

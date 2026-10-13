@@ -87,7 +87,7 @@ fn sequel_models_converge_on_rails_shape() {
         validations.iter().any(|v| v.attribute.as_str() == "body"
             && v.rules.iter().any(|r| matches!(
                 r,
-                ValidationRule::Length { min: Some(10), max: None, message: Some(m) }
+                ValidationRule::Length { min: Some(10), max: None, message: Some(m), .. }
                     if m == "must be at least 10 characters"
             ))),
         "min-length with custom message on body: {validations:?}"

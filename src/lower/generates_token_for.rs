@@ -247,9 +247,9 @@ pub(crate) fn push_token_for_methods(methods: &mut Vec<MethodDef>, model: &Model
             return;
         }
     };
-    let record = Ty::Class { id: model.name.clone(), args: vec![] };
-    let nilable_record = Ty::Union { variants: vec![record.clone(), Ty::Nil] };
-    let meta_ty = Ty::Array { elem: Box::new(Ty::Untyped) };
+    let record = Ty::Class { id: model.name.clone(), args: vec![].into() };
+    let nilable_record = Ty::Union { variants: vec![record.clone(), Ty::Nil].into() };
+    let meta_ty = Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) };
     for mut m in synthesized {
         // Declared signatures, so the sidecar the strict targets compile
         // from says what the registry already says (`register_generates_

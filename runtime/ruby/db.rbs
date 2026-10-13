@@ -73,6 +73,7 @@ module Db
   def self.escape_string: (String) -> String
   def self.escape_int: (Integer) -> String
   def self.escape_int_list: (Array[Integer]) -> String
+  def self.escape_string_list: (Array[String]) -> String
   # Nullable-column writes: nil renders the SQL keyword NULL, so a
   # column the schema calls nullable round-trips as nil rather than as
   # the type's zero.

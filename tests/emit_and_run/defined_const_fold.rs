@@ -1,7 +1,8 @@
 //! `defined?(Const)` guards that the tree, lockfile and application.rb
 //! decide are folded away before emit; the live branch must still run
 //! and the dead one must not, in the emitted Ruby. The spinel gate
-//! must stop refusing the folded `defined?`.
+//! must stop refusing the folded `defined?`, and leaves an unfolded one
+//! to Spinel only where it runs after load.
 
 use roundhouse::project::BuildTarget;
 
@@ -43,7 +44,24 @@ fn spinel_no_longer_refuses_a_folded_defined() {
         .emit(BuildTarget::Spinel);
     let refused: Vec<_> = errors.iter().filter(|e| e.contains("defined?")).collect();
     // `defined?(DefinedProbe::Missing)`: the prefix resolves, the tail
-    // is unprovable, so exactly that one stays refused.
+    // is unprovable, so the fold leaves it. In a method body it runs
+    // after load, where Spinel answers it from the whole program as
+    // CRuby does (nil here), so it is not refused either.
+    assert!(refused.is_empty(), "{refused:#?}");
+}
+
+#[test]
+fn spinel_still_refuses_an_unfolded_defined_while_loading() {
+    // The same unprovable guard in a constant initializer runs while the
+    // program loads, where CRuby can answer nil for a constant Spinel
+    // already has: it stays refused.
+    let source = "class DefinedProbe\n  MISSING = defined?(DefinedProbe::Missing) ? :yes : :no\n  STORAGE = defined?(ActiveStorage) ? :yes : :no\nend\n";
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("app/models/defined_probe.rb", source)
+        .emit(BuildTarget::Spinel);
+    let refused: Vec<_> = errors.iter().filter(|e| e.contains("defined?")).collect();
+    // `defined?(ActiveStorage)` folds in either position; only the
+    // unprovable one is refused.
     assert_eq!(refused.len(), 1, "{refused:#?}");
 }
 

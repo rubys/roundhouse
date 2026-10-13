@@ -1980,6 +1980,12 @@ fn emit_send(
             "to_f" => return format!("{rs}.toString().toDouble()"),
             "empty?" => return format!("{rs}.isEmpty()"),
             "any?" => return format!("{rs}.isNotEmpty()"),
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if matches!(
+                r.ty.as_ref(),
+                Some(crate::ty::Ty::Array { elem })
+                    if matches!(**elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym)
+            ) => return format!("{rs}.isEmpty()"),
             "upcase" => return format!("{rs}.uppercase()"),
             "downcase" => return format!("{rs}.lowercase()"),
             "strip" => return format!("{rs}.trim()"),
@@ -2319,14 +2325,14 @@ mod equal_and_hash_pin_tests {
             "HeaderStore",
             "merge!",
             vec![Ty::Hash {
-                key: Box::new(Ty::Str),
-                value: Box::new(Ty::Union { variants: vec![Ty::Str, Ty::Nil] }),
+                key: std::sync::Arc::new(Ty::Str),
+                value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
             }],
         );
         let mut recv = var("headers");
         recv.ty = Some(Ty::Class {
             id: ClassId(Symbol::from("ActionController::HeaderStore")),
-            args: vec![],
+            args: vec![].into(),
         });
         let out = emit_expr(&send(recv, "merge!", vec![quota_hash()]));
         reset_method_params();

@@ -846,3 +846,23 @@ pub(crate) fn is_view_helper_marker_include(path: &[&str]) -> bool {
 pub(crate) fn is_active_model_marker_include(path: &[&str]) -> bool {
     matches!(path, ["ActiveModel", ..])
 }
+
+/// `ActiveSupport::Concern` in an include list, written as `include`
+/// where the idiom is `extend`. On Rails, including (rather than
+/// extending) `Concern` is a harmless slip: `Module#include` runs
+/// `ActiveSupport::Concern`'s own `append_features`/`included`/
+/// `class_methods` defs as unused INSTANCE methods of the includer,
+/// since nothing ever calls them that way, and the module otherwise
+/// stays a plain module with its own methods untouched. No target
+/// ships `ActiveSupport::Concern`, so recording the include would make
+/// it an unresolved external class the Ruby emit cannot load; dropping
+/// it here is exactly as sound as Rails' own behavior, and cheaper than
+/// giving the misuse a diagnostic location it does not need.
+///
+/// Called from the library-class decl walk only: a module written this
+/// way is a library class (a mailer concern, in the wild), never a
+/// model — models record their includes separately in
+/// `analyze::body_includes`.
+pub(crate) fn is_concern_marker_include(path: &[&str]) -> bool {
+    matches!(path, ["ActiveSupport", "Concern"])
+}
