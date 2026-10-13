@@ -1,35 +1,41 @@
-//! Emitted SPM scaffold must pin Hummingbird past the ServiceContextModule era.
+//! Emitted SPM scaffold must keep Hummingbird on the ServiceContextModule line
+//! and declare that product explicitly.
 //!
 //! Showcase `swift build -c release` under a reused `/tmp/rh-swift-pass2` tree
-//! resolved Hummingbird 2.26.x (which `import ServiceContextModule`) while CI's
-//! fresher cache stayed green. The floor is `from: "2.28.0"` in the shared emit
-//! home (`src/emit/swift/package.rs`); `swift-reference/Package.swift` stays in
-//! sync. This gate does not need a Swift toolchain — only the emitted text.
+//! resolved Hummingbird 2.26.x but missed `ServiceContextModule`. Cap below
+//! 2.27 (tools-version 6.2 / broken swift-websocket on 6.2.1) and force the
+//! product into the App target. Gate is text-only — no Swift toolchain needed.
 
 use std::path::PathBuf;
 
 use roundhouse::App;
 use roundhouse::emit::swift;
 
-const HUMMINGBIRD_PIN: &str = r#"from: "2.28.0""#;
+const HUMMINGBIRD_RANGE: &str = r#""2.26.0"..<"2.27.0""#;
+const SERVICE_CONTEXT_PRODUCT: &str =
+    r#".product(name: "ServiceContextModule", package: "swift-service-context")"#;
 
 #[test]
-fn emitted_package_swift_pins_hummingbird_past_service_context_module() {
+fn emitted_package_swift_caps_hummingbird_and_declares_service_context() {
     let files = swift::emit(&App::new());
     let package = files
         .iter()
         .find(|f| f.path == PathBuf::from("Package.swift"))
         .expect("emit must produce Package.swift");
     assert!(
-        package.content.contains(HUMMINGBIRD_PIN),
-        "Package.swift must pin Hummingbird ≥2.28.0 (dropped ServiceContextModule):\n{}",
+        package.content.contains(HUMMINGBIRD_RANGE),
+        "Package.swift must cap Hummingbird below 2.27:\n{}",
         package.content
     );
     assert!(
-        package
-            .content
-            .contains("hummingbird-project/hummingbird.git"),
-        "Package.swift must still declare the Hummingbird package"
+        package.content.contains("swift-service-context.git"),
+        "Package.swift must declare swift-service-context:\n{}",
+        package.content
+    );
+    assert!(
+        package.content.contains(SERVICE_CONTEXT_PRODUCT),
+        "App target must depend on ServiceContextModule:\n{}",
+        package.content
     );
 }
 
@@ -37,7 +43,11 @@ fn emitted_package_swift_pins_hummingbird_past_service_context_module() {
 fn swift_reference_package_stays_in_sync_with_emit_pin() {
     let reference = include_str!("../swift-reference/Package.swift");
     assert!(
-        reference.contains(HUMMINGBIRD_PIN),
-        "swift-reference/Package.swift must match src/emit/swift/package.rs Hummingbird pin"
+        reference.contains(HUMMINGBIRD_RANGE),
+        "swift-reference/Package.swift must match emit Hummingbird range"
+    );
+    assert!(
+        reference.contains(SERVICE_CONTEXT_PRODUCT),
+        "swift-reference/Package.swift must declare ServiceContextModule"
     );
 }

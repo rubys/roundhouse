@@ -118,11 +118,10 @@ fn uv_cache_keys_use_the_generated_dependency_source_before_emit() {
 }
 
 /// Swift compare-extra is the hosted outlier (~7–8 billable minutes). The
-/// job installs Swift 6.2 (Hummingbird ≥2.27 tools-version) and runs the
-/// same framework-tests + `scripts/compare swift` check; it must cache
-/// SwiftPM checkouts so the Hummingbird/NIO clone is not paid on every
-/// run. Smoke uses the same cache key because its README `swift build`
-/// fetches the same pins.
+/// job still installs Swift 6.1 and runs the same framework-tests +
+/// `scripts/compare swift` check; it must cache SwiftPM checkouts so the
+/// Hummingbird/NIO clone is not paid on every run. Smoke uses the same
+/// cache key because its README `swift build` fetches the same pins.
 #[test]
 fn swift_compare_and_smoke_cache_swiftpm_checkouts() {
     let workflow: serde_yaml_ng::Value =
@@ -141,7 +140,7 @@ fn swift_compare_and_smoke_cache_swiftpm_checkouts() {
             .unwrap_or_else(|| panic!("{job} installs Swift"));
         assert_eq!(
             setup["with"]["swift-version"].as_str(),
-            Some("6.2"),
+            Some("6.1"),
             "{job}"
         );
         let cache = steps
@@ -162,7 +161,7 @@ fn swift_compare_and_smoke_cache_swiftpm_checkouts() {
             "{job}: {key}"
         );
         assert!(
-            key.contains("swift6.2"),
+            key.contains("swift6.1"),
             "{job}: cache key must track the Swift major.minor: {key}"
         );
         keys.push(key.to_string());
