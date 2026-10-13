@@ -2191,6 +2191,10 @@ fn model_body_names(models: &[Model]) -> std::collections::HashSet<Symbol> {
                         walk(c, &mut out);
                     }
                 }
+                ModelBodyItem::Alias { new, old, .. } => {
+                    out.insert(new.clone());
+                    out.insert(old.clone());
+                }
                 ModelBodyItem::Association { .. } | ModelBodyItem::Validation { .. } => {}
             }
         }
@@ -3269,6 +3273,12 @@ fn enum_setter_value(model: &Model, col: &Column, value: Expr) -> Option<Expr> {
 
 // Not a helper answering nil itself: a nullable column's nil has to stay nil, and `enum_int` answers an Integer.
 fn nil_guarded(col: &Column, raw: Expr, call: Expr) -> Expr {
+    let nil = with_ty(Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }), Ty::Nil);
+    nil_guarded_as(col, raw, call, nil)
+}
+
+/// [`nil_guarded`], answering `when_nil` for a nil `raw`.
+fn nil_guarded_as(col: &Column, raw: Expr, call: Expr, when_nil: Expr) -> Expr {
     if !matches!(super::ty_of_column_slot(col), Ty::Union { .. }) {
         return call;
     }
@@ -3279,10 +3289,14 @@ fn nil_guarded(col: &Column, raw: Expr, call: Expr) -> Expr {
         ),
         Ty::Bool,
     );
-    let nil = with_ty(Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }), Ty::Nil);
+    let ty = if matches!(*when_nil.node, ExprNode::Lit { value: Literal::Nil }) {
+        super::ty_of_column_slot(col)
+    } else {
+        call.ty.clone().unwrap_or_else(|| super::ty_of_column_slot(col))
+    };
     with_ty(
-        Expr::new(Span::synthetic(), ExprNode::If { cond: is_nil, then_branch: nil, else_branch: call }),
-        super::ty_of_column_slot(col),
+        Expr::new(Span::synthetic(), ExprNode::If { cond: is_nil, then_branch: when_nil, else_branch: call }),
+        ty,
     )
 }
 
@@ -3296,6 +3310,7 @@ fn enum_label_read(model: &Model, col: &Column) -> Option<Expr> {
         super::ty_of_column_slot(col),
     );
     let (labels, values, value_ty) = enum_arrays(model, col)?;
+    let nil_label = enum_nil_label(model, col);
     let method = if value_ty == Ty::Int { "enum_label" } else { "enum_label_str" };
     let non_nil = with_ty(stored.clone(), value_ty);
     let call = with_ty(
@@ -3311,15 +3326,37 @@ fn enum_label_read(model: &Model, col: &Column) -> Option<Expr> {
         ),
         Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
     );
-    Some(with_ty(nil_guarded(col, stored, call), Ty::Union { variants: vec![Ty::Str, Ty::Nil] }))
+    // A NULL column reads as the mapping's `nil` label when it has one.
+    let read = match nil_label {
+        Some(label) => nil_guarded_as(col, stored, call, with_ty(lit_str(label), Ty::Str)),
+        None => nil_guarded(col, stored, call),
+    };
+    Some(with_ty(read, Ty::Union { variants: vec![Ty::Str, Ty::Nil] }))
+}
+
+/// The mapping's `nil` entry's label (`unknown: nil`), if any.
+fn enum_nil_label(model: &Model, col: &Column) -> Option<String> {
+    crate::dialect::enum_nil_label(model.enums.get(&col.name)?).map(str::to_string)
 }
 
 /// The mapping as two parallel literal Arrays, and the stored values' type — `None` for a mapping that mixes kinds.
 fn enum_arrays(model: &Model, col: &Column) -> Option<(Expr, Expr, Ty)> {
     let mapping = model.enums.get(&col.name)?;
+    // The `nil` entry is not a stored value: the reader and the writer
+    // answer it on their own (see `enum_nil_label`).
+    let mapping: Vec<&(String, Literal)> =
+        mapping.iter().filter(|(_, v)| !matches!(v, Literal::Nil)).collect();
     let value_ty = match mapping.first().map(|(_, v)| v) {
         Some(Literal::Int { .. }) => Ty::Int,
         Some(Literal::Str { .. }) => Ty::Str,
+        // The `nil` entry alone (`{ unknown: nil }`): no stored value has a
+        // label, so the arrays are empty and typed by the column. The reader
+        // answers nil for any stored value and the writer refuses it, as
+        // Rails does (`'1' is not a valid kind`).
+        None if enum_nil_label(model, col).is_some() => match ty_of_column(&col.col_type) {
+            ty @ (Ty::Int | Ty::Str) => ty,
+            _ => return None,
+        },
         _ => return None,
     };
     let mut labels = Vec::new();
@@ -3346,6 +3383,7 @@ fn enum_arrays(model: &Model, col: &Column) -> Option<(Expr, Expr, Ty)> {
 
 fn enum_int_call(model: &Model, col: &Column, text: Expr) -> Option<Expr> {
     let (labels, values, value_ty) = enum_arrays(model, col)?;
+    let text_for_nil = text.clone();
     let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. });
     let method = match (&value_ty, nullable) {
         (Ty::Int, false) => "enum_int",
@@ -3374,7 +3412,7 @@ fn enum_int_call(model: &Model, col: &Column, text: Expr) -> Option<Expr> {
     }
     args.push(attr);
     let ret = if nullable { Ty::Union { variants: vec![value_ty, Ty::Nil] } } else { value_ty };
-    Some(with_ty(
+    let call = with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::Send {
@@ -3385,6 +3423,29 @@ fn enum_int_call(model: &Model, col: &Column, text: Expr) -> Option<Expr> {
                 parenthesized: true,
             },
         ),
+        ret.clone(),
+    );
+    // The `nil` entry's label writes NULL (`kind = "unknown"`), which
+    // only a nullable column can hold.
+    let Some(label) = enum_nil_label(model, col).filter(|_| nullable) else {
+        return Some(call);
+    };
+    let is_label = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(text_for_nil),
+                method: Symbol::from("=="),
+                args: vec![with_ty(lit_str(label), Ty::Str)],
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        Ty::Bool,
+    );
+    let nil = with_ty(Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }), Ty::Nil);
+    Some(with_ty(
+        Expr::new(Span::synthetic(), ExprNode::If { cond: is_label, then_branch: nil, else_branch: call }),
         ret,
     ))
 }

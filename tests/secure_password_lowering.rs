@@ -53,6 +53,33 @@ fn secure_password_synthesizes_authenticate_and_accessors() {
     assert!(find("password_confirmation=").is_some());
 }
 
+/// Rails answers the record or `false`, and the signature says so:
+/// spinel trusts a `--rbs` seed and refuses one its body contradicts,
+/// so `-> User` alone stopped campfire's build at the `false` arm.
+#[test]
+fn authenticate_signature_answers_the_record_or_false() {
+    use roundhouse::ty::Ty;
+    let app = app_with("class User < ApplicationRecord\n  has_secure_password\nend\n");
+    let user = app.models.iter().find(|m| m.name.0.as_str() == "User").expect("User model");
+    let lc = lower_model_to_library_class(user, &app.schema);
+    let auth = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "authenticate" && m.receiver == MethodReceiver::Instance)
+        .expect("authenticate synthesized");
+    let Some(Ty::Fn { ret, .. }) = &auth.signature else {
+        panic!("authenticate carries a signature: {:?}", auth.signature);
+    };
+    let Ty::Union { variants } = &**ret else {
+        panic!("authenticate returns a union: {ret:?}");
+    };
+    assert!(variants.iter().any(|v| matches!(v, Ty::Bool)), "{ret:?}");
+    assert!(
+        variants.iter().any(|v| matches!(v, Ty::Class { id, .. } if id.0.as_str() == "User")),
+        "{ret:?}",
+    );
+}
+
 #[test]
 fn custom_authenticate_wins_over_synthesis() {
     let app = app_with(

@@ -1838,7 +1838,7 @@ pub(super) fn js_library_class(
     // Hardcoded for the small known set rather than threading the
     // parent's field list through emit_library_class; expand when a
     // new framework parent surface materializes.
-    const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "persisted", "destroyed"];
+    const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "error_attributes", "persisted", "destroyed"];
     for (name, ty, is_static, from_ivar, span) in &fields {
         // ivar-derived fields on a derived class get `declare` —
         // the constructor body's `this.x = ...` (or a parent

@@ -109,11 +109,10 @@ module ActiveJob
   # this was written, with two job classes of different arities and
   # argument types, and the output is byte-identical to CRuby's.
   #
-  # ONE QUEUE, NOT ONE PER QUEUE NAME. `queue_as` is inert here (see
-  # `Base` below) because a single in-process drain has no scheduling
-  # decision to make: there is no worker pool to allocate and no
-  # priority to honour, so recording the name would suggest an ordering
-  # guarantee nothing implements.
+  # ONE QUEUE, NOT ONE PER QUEUE NAME. A payload records its job's
+  # `queue_as` name, as Rails' does, but a single in-process drain has
+  # no scheduling decision to make: there is no worker pool to allocate
+  # and no priority to honour, so every entry runs in arrival order.
   PENDING = []
 
   # Whether a drain exists to pick the work up. Empty means no — and
@@ -260,7 +259,10 @@ module ActiveJob
   end
 
   class Base
-    # `queue_as :default` — queue routing has no meaning inline.
+    # `queue_as :default` — nothing to do at class load. A job queued as
+    # a payload carries the name as its `queue_name`, read off the
+    # literal at compile time (`lower::job_payload`); the drain still
+    # runs one FIFO.
     def self.queue_as(name = nil)
       nil
     end
@@ -272,8 +274,10 @@ module ActiveJob
     end
 
     # `retry_on` / `discard_on` — error-handling policy for queued
-    # execution; inert inline (an inline job's exception propagates to
-    # the caller, which is the honest development-mode behavior).
+    # execution. Inert here; `discard_on ActiveJob::DeserializationError`
+    # on a payload job is read at compile time into the job registry's
+    # discard table, so the drain drops a job whose record is gone.
+    # `retry_on` has no queue to retry on yet.
     def self.retry_on(error, opts = nil)
       nil
     end

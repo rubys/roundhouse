@@ -1277,6 +1277,17 @@ impl<'a> BodyTyper<'a> {
             matches!(args.first().and_then(|a| a.ty.as_ref()), Some(Ty::Time));
         match recv_ty {
             None => unknown(),
+            // `with_indifferent_access` on a gradual receiver (a json
+            // column's reader, `extras || {}`): ActiveSupport answers a
+            // String-keyed copy of the Hash whatever it was read from,
+            // and `lower::indifferent_access` lowers the call to that
+            // conversion. Ahead of the gradual absorption below, which
+            // would leave every call chained on it untyped.
+            Some(ty) if method.as_str() == "with_indifferent_access" && args.is_empty()
+                && crate::analyze::indifferent::from_gradual(ty).is_some() =>
+            {
+                crate::analyze::indifferent::from_gradual(ty).unwrap()
+            }
             // RBS-declared gradual receiver. Method dispatch on
             // `Untyped` returns `Untyped` — the gradual choice
             // propagates through the IR. Author-signed opt-out,

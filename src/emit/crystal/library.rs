@@ -273,7 +273,7 @@ fn render_class(lc: &LibraryClass) -> String {
     // Crystal's "instance variable already declared" error. Same set
     // TS uses (typescript.rs::INHERITED_FIELD_NAMES) — kept aligned
     // because both targets share the same ActiveRecord::Base shape.
-    const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "persisted", "destroyed"];
+    const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "error_attributes", "persisted", "destroyed"];
     let extends_active_record_base = matches!(lc.parent.as_ref(), Some(p) if {
         let raw = p.0.as_str();
         // Either explicitly `ActiveRecord::Base` OR an

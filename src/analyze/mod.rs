@@ -4957,8 +4957,14 @@ impl Analyzer {
         for info in self.classes.values_mut() {
             info.block_value_methods.clear();
         }
+        // Not the registered method tables: the registry lists the built-in
+        // method there too (`MemoryStore#fetch`), so only the app's own
+        // source can tell that the app replaced it.
         for (class, method) in registry::stdlib::BUILTIN_BLOCK_VALUE_METHODS {
-            found.push((ClassId(Symbol::from(*class)), Symbol::from(*method)));
+            let class_id = ClassId(Symbol::from(*class));
+            if !source_instance_method(app, &class_id, method) {
+                found.push((class_id, Symbol::from(*method)));
+            }
         }
         for (class_id, method) in found {
             self.classes.entry(class_id).or_default().block_value_methods.insert(method);
@@ -5530,6 +5536,20 @@ impl Analyzer {
                 let from = sites.len();
                 self.collect_send_sites(&scope_item.body, Some(&model.name), true, helpers, &mut sites);
                 self.record_callers(&model.name, &sites[from..]);
+            }
+            // A block-form lifecycle hook (`after_create_commit -> {
+            // room.receive(self) }`) is a method body that only becomes
+            // a method at lowering, so its calls were never sites: the
+            // callee's parameters stayed untyped. campfire's
+            // `Room#receive(message)` was, and through it the message
+            // `Room::PushMessageJob` is enqueued with.
+            for item in model.body.iter() {
+                let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+                if let Some(body) = block_callback_body(expr) {
+                    let from = sites.len();
+                    self.collect_send_sites(body, Some(&model.name), false, helpers, &mut sites);
+                    self.record_callers(&model.name, &sites[from..]);
+                }
             }
         }
         for lc in &app.library_classes {
@@ -7250,6 +7270,17 @@ fn build_sourced_filter_chain(
         }
     }
     (chain, block_bindings)
+}
+
+/// The body of a block-form model lifecycle hook — `after_save do … end`
+/// or `after_create_commit -> { … }` — on the shape
+/// `model_to_library::block_callback_shape` accepts and lowers to a method.
+fn block_callback_body(expr: &Expr) -> Option<&Expr> {
+    let (callback, _, _) = crate::lower::model_to_library::block_callback_shape(expr)?;
+    match &*callback.node {
+        ExprNode::Lambda { body, .. } => Some(body),
+        _ => None,
+    }
 }
 
 /// `only:` / `except:` of a block-form filter call, from its keyword

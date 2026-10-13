@@ -226,6 +226,37 @@ pub const GEM_CATALOG: &[GemClass] = &[
         class_methods: &[],
         instance_methods: &[("encode", GemTy::Str), ("decode", GemTy::Str)],
     },
+    // commonmarker 2.x — lobsters' Markdowner parses to a node tree,
+    // edits it, and renders it back. The gem on the ruby family,
+    // spinel-commonmarker (same surface over cmark-gfm) on spinel.
+    // Node links answer a Node or nil, and the editing calls answer
+    // what the gem's C side does; those stay gradual.
+    GemClass {
+        name: "Commonmarker",
+        class_methods: &[
+            ("parse", GemTy::Instance("Commonmarker::Node")),
+            ("to_html", GemTy::Str),
+        ],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Commonmarker::Node",
+        class_methods: &[],
+        instance_methods: &[
+            ("type", GemTy::Sym),
+            ("string_content", GemTy::Str),
+            ("string_content=", GemTy::Str),
+            ("to_html", GemTy::Str),
+            ("to_commonmark", GemTy::Str),
+            ("first_child", GemTy::Untyped),
+            ("insert_before", GemTy::Untyped),
+            ("insert_after", GemTy::Untyped),
+            ("append_child", GemTy::Untyped),
+            ("delete", GemTy::Untyped),
+            ("walk", GemTy::Untyped),
+            ("each", GemTy::Untyped),
+        ],
+    },
     // RQRCode — QR-code rendering; the `as_*` methods serialize to a
     // String in the requested format.
     GemClass {

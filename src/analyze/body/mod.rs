@@ -839,7 +839,7 @@ impl<'a> BodyTyper<'a> {
                             unknown()
                         }
                     }
-                    Some(Some(ResolvedConstant::Value { declaration, name, runtime })) => {
+                    Some(Some(ResolvedConstant::Value { declaration, name, runtime, runtime_decl })) => {
                         // Concern splices retain the resolved value owner.
                         // Test-helper splice lifts a foreign module's
                         // constant onto the test class as a bare name
@@ -878,6 +878,12 @@ impl<'a> BodyTyper<'a> {
                             // Not left unknown: ingest turned `Result = Struct.new(…)` into the class it defines.
                             None if self.classes().get(&id).is_some_and(|c| c.app_declared) => {
                                 expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
+                                Ty::Class { id, args: vec![] }
+                            }
+                            // A runtime façade's alias (`OpenSSL::Random =
+                            // RandomSource`) of a class the registry models
+                            // by that exact name: the registry's answer.
+                            None if *runtime_decl && self.classes().contains_key(&id) => {
                                 Ty::Class { id, args: vec![] }
                             }
                             None => unknown(),
@@ -1858,6 +1864,15 @@ impl<'a> BodyTyper<'a> {
                 {
                     return send::bigdecimal();
                 }
+                // Not with a Hash argument: `exception: false` answers nil where the conversion fails.
+                if recv.is_none() && block.is_none()
+                    && ((method.as_str() == "Integer" && matches!(args.len(), 1 | 2)) || (method.as_str() == "Float" && args.len() == 1))
+                    && !args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { .. }))
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && !self.app_defines(ctx.self_ty.as_ref(), method)
+                {
+                    return if method.as_str() == "Integer" { Ty::Int } else { Ty::Float };
+                }
                 if recv.is_none() && method.as_str() == "Array" && args.len() == 1
                     && block.is_none()
                     && (matches!(dispatched, Ty::Var { .. })
@@ -1892,6 +1907,19 @@ impl<'a> BodyTyper<'a> {
                             target: None,
                             construct: Symbol::from("ActiveModel::Errors"),
                             detail: format!("`errors[:field]` cannot pick a field's messages: {reason}"),
+                        });
+                    }
+                }
+                if matches!(recv_ty.as_ref(), Some(Ty::Class { args: model, .. }) if !model.is_empty())
+                    && crate::lower::view::wraps_field_errors(method.as_str())
+                    && expr.diagnostic.is_none()
+                {
+                    let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c);
+                    if let Some(file) = &catalog.field_error_proc {
+                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                            target: None,
+                            construct: Symbol::from("field_with_errors"),
+                            detail: format!("`{method}` renders through the `field_error_proc` {file} sets, which is not modeled"),
                         });
                     }
                 }

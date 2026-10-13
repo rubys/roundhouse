@@ -72,10 +72,23 @@ const CORE_VALUE_CONSTS: &[(&str, &str, fn() -> Ty)] = &[
     ("File", "LOCK_EX", || Ty::Int),
     ("File", "LOCK_NB", || Ty::Int),
     ("File", "LOCK_UN", || Ty::Int),
+    // `path.start_with?(root + File::SEPARATOR)`, a `PATH` joined with
+    // `File::PATH_SEPARATOR`, and `File.open(path, File::RDONLY |
+    // File::NOFOLLOW | File::NONBLOCK)`; CRuby and spinel answer the same
+    // values.
+    ("File", "SEPARATOR", || Ty::Str),
+    ("File", "PATH_SEPARATOR", || Ty::Str),
+    ("File", "NOFOLLOW", || Ty::Int),
+    ("File", "NONBLOCK", || Ty::Int),
     ("Encoding", "UTF_8", encoding_ty),
     ("Encoding", "BINARY", encoding_ty),
     ("Encoding", "ASCII_8BIT", encoding_ty),
     ("Encoding", "US_ASCII", encoding_ty),
+    // `http.verify_mode = OpenSSL::SSL::VERIFY_PEER` — lobsters' Sponge.
+    // The openssl library's on the ruby family, spinel's
+    // `packages/openssl` (same values) on spinel.
+    ("OpenSSL::SSL", "VERIFY_NONE", || Ty::Int),
+    ("OpenSSL::SSL", "VERIFY_PEER", || Ty::Int),
 ];
 
 /// Classes that own rows in `CORE_VALUE_CONSTS`, with their RBS parents.
@@ -84,6 +97,7 @@ const CORE_VALUE_CLASSES: &[(&str, &str)] = &[
     ("IO", "Object"),
     ("File", "IO"),
     ("Encoding", "Object"),
+    ("OpenSSL::SSL", "Object"),
 ];
 
 fn encoding_ty() -> Ty {
@@ -143,7 +157,9 @@ const RUNTIME_URI_PREFIX: &str = "roundhouse-runtime:";
 
 pub(super) enum ResolvedConstant {
     Namespace { class: Arc<ClassId>, runtime: bool },
-    Value { declaration: DeclarationId, name: Arc<ClassId>, runtime: Option<Arc<Ty>> },
+    /// `runtime_decl`: declared only by the runtime's sources, so a
+    /// registry class of the same exact name describes this constant.
+    Value { declaration: DeclarationId, name: Arc<ClassId>, runtime: Option<Arc<Ty>>, runtime_decl: bool },
 }
 
 /// Rubydex answers for one source file.
@@ -751,14 +767,15 @@ fn answer_file(
                                 .is_some_and(|document| document.uri() == CORE_URI)
                         })
                     });
+                    let runtime_decl = !app_write && is_runtime_declaration(graph, declaration);
                     let runtime = if let Some(ty) = builtin {
                         Some(Arc::new(ty))
-                    } else if !app_write && is_runtime_declaration(graph, declaration) {
+                    } else if runtime_decl {
                         runtime_value_types().get(declaration.name()).cloned()
                     } else {
                         None
                     };
-                    ResolvedConstant::Value { declaration: id, name: Arc::new(ClassId(Symbol::from(hoisted_name(name).as_ref()))), runtime }
+                    ResolvedConstant::Value { declaration: id, name: Arc::new(ClassId(Symbol::from(hoisted_name(name).as_ref()))), runtime, runtime_decl }
                 }
             });
         match answers.references.entry(offset.start()) {

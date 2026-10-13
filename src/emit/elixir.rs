@@ -114,6 +114,10 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                 "errors".to_string(),
                 crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) },
             ));
+            fields.push((
+                "error_attributes".to_string(),
+                crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) },
+            ));
             let name = model.name.0.as_str();
             expr::register_field_types(name, &fields);
             let row_fields: Vec<(String, crate::ty::Ty)> = table

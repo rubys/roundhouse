@@ -136,18 +136,88 @@ fn dynamic_segment_path_is_unsupported_not_served_without_its_param() {
     }
 }
 
+/// `path: ""` / `path: "/"` mounts the resource at its scope's root.
+/// Rails 8.1 (`bin/rails routes`):
+///
+/// ```text
+///       parts GET    /                  parts#index
+///    new_part GET    /new               parts#new
+///        part GET    /:id               parts#show
+///   edit_part GET    /:id/edit          parts#edit
+/// ping_api_gadgets GET /api/ping        api/gadgets#ping
+///             DELETE /api/tokens(/:id)  api/gadgets#destroy
+/// ```
 #[test]
-fn empty_path_is_unsupported_not_the_resource_name() {
-    // Rails mounts `path: ""` / `path: "/"` at the root (`GET /` is
-    // `parts#index`), not at `/parts`.
+fn empty_path_mounts_the_resource_at_its_scope_root() {
     for value in [r#""""#, r#""/""#, r#""//""#] {
-        let err = ingest_routes(
-            format!("Rails.application.routes.draw do\n  resources :parts, path: {value}\nend\n")
-                .as_bytes(),
-            "config/routes.rb",
-        )
-        .map(|t| format!("ingested: {t:?}"))
-        .expect_err("empty path: should be unsupported");
-        assert!(err.to_string().contains("mounts the resource at the root"), "{value}: {err}");
+        let got = table(&routes(&format!("  resources :parts, path: {value}")));
+        assert_eq!(
+            got,
+            [
+                "parts / Parts#index",
+                "new_part /new Parts#new",
+                "part /:id Parts#show",
+                "edit_part /:id/edit Parts#edit",
+            ]
+            .map(|s| s.replace("Parts#", "PartsController#")),
+            "{value}"
+        );
+    }
+    let flat = routes(
+        "  namespace :api do\n    resources :gadgets, path: '/', only: %i[] do\n      collection do\n        get :ping\n        delete '/tokens/(:id)', to: 'gadgets#destroy'\n      end\n    end\n  end",
+    );
+    let paths: Vec<String> = flat
+        .iter()
+        .map(|r| format!("{:?} {} {}#{}", r.method, r.path, r.controller.0.as_str(), r.action.as_str()))
+        .collect();
+    assert!(paths.contains(&"Get /api/ping Api::GadgetsController#ping".to_string()), "{paths:#?}");
+    assert!(
+        paths.iter().any(|p| p.starts_with("Delete /api/tokens") && p.ends_with("Api::GadgetsController#destroy")),
+        "{paths:#?}"
+    );
+    assert!(!paths.iter().any(|p| p.contains("//")), "{paths:#?}");
+}
+
+/// Nested under another resource or a namespace, an empty `path:` adds
+/// nothing to the parent's path: Rails normalizes `/account/` to
+/// `/account`. Only a resource at the very top is served at `/`.
+#[test]
+fn empty_path_nested_resource_has_no_trailing_slash() {
+    let paths = |source: &str| -> Vec<String> {
+        routes(source)
+            .iter()
+            .filter(|r| r.method == HttpMethod::Get)
+            .map(|r| format!("{} {}#{}", r.path, r.controller.0.as_str(), r.action.as_str()))
+            .collect()
+    };
+    let got = paths("  resource :account, only: %i[] do\n    resource :profile, path: '/', only: %i[show]\n  end");
+    assert_eq!(got, ["/account ProfilesController#show"], "{got:#?}");
+    let got = paths("  resources :users, only: %i[] do\n    resources :posts, path: '/', only: %i[index show]\n  end");
+    assert_eq!(
+        got,
+        ["/users/:user_id PostsController#index", "/users/:user_id/:id PostsController#show"],
+        "{got:#?}"
+    );
+    let got = paths("  namespace :api do\n    resources :gadgets, path: '/', only: %i[index]\n  end");
+    assert_eq!(got, ["/api Api::GadgetsController#index"], "{got:#?}");
+}
+
+/// A root scope (`scope path: "/"`) adds nothing either: the resource
+/// mounted at its root is served at `/`, `/new`, `/:id`, never `//new`.
+#[test]
+fn empty_path_resource_in_a_root_scope_has_no_double_slash() {
+    for scope in [r#""/""#, r#""""#] {
+        let got = table(&routes(&format!("  scope path: {scope} do\n    resources :parts, path: \"/\"\n  end")));
+        assert_eq!(
+            got,
+            [
+                "parts / Parts#index",
+                "new_part /new Parts#new",
+                "part /:id Parts#show",
+                "edit_part /:id/edit Parts#edit",
+            ]
+            .map(|s| s.replace("Parts#", "PartsController#")),
+            "scope path: {scope}"
+        );
     }
 }

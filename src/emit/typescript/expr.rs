@@ -1834,6 +1834,51 @@ fn js_send_inner(
             }
         }
     }
+    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+    if method == "errors_for" && args.len() == 4 {
+        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
+            if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                let typed_param = |name: &str, ty: &str| JsParam {
+                    name: name.into(),
+                    optional: false,
+                    ty: Some(TsType(ty.into())),
+                    default: None,
+                };
+                let string_param = |name: &str| typed_param(name, "string");
+                let arrow = |params: Vec<JsParam>, body: Js| {
+                    Js::synth(JsExpr::Arrow { params, body: ArrowBody::Expr(body), is_async: false })
+                };
+                let carries = arrow(
+                    vec![string_param("__m"), typed_param("__i", "number")],
+                    Js::binary(
+                        span,
+                        "===",
+                        Js::index(span, synth_ident("__attributes"), synth_ident("__i")),
+                        synth_ident("__attribute"),
+                    ),
+                );
+                let rest = arrow(
+                    vec![string_param("__m")],
+                    Js::method_call(
+                        span,
+                        synth_ident("__m"),
+                        "slice",
+                        vec![Js::member(span, synth_ident("__prefix"), "length")],
+                    ),
+                );
+                let filtered = Js::method_call(span, js_expr(&args[0]), "filter", vec![carries]);
+                let body = Js::method_call(span, filtered, "map", vec![rest]);
+                return Js::call(
+                    span,
+                    arrow(
+                        vec![typed_param("__attributes", "string[]"), string_param("__attribute"), string_param("__prefix")],
+                        body,
+                    ),
+                    vec![js_expr(&args[1]), js_expr(&args[2]), js_expr(&args[3])],
+                );
+            }
+        }
+    }
     // Temporal writer intrinsic: `ActiveSupport.db_now` — current
     // UTC time in Rails' exact storage form ("YYYY-MM-DD
     // HH:MM:SS.ffffff"). `fill_timestamps` stamps with it so a
@@ -2460,7 +2505,16 @@ fn js_send_inner(
         match recv_ty {
             // Ruby Array → JS Array (with native method renames where
             // they diverge: `.each` → `.forEach`, `.size` → `.length`).
-            Some(Ty::Array { .. }) => match method {
+            Some(Ty::Array { elem }) => match method {
+                // An element that is never nil or false makes `none?` mean no elements at all
+                "none?" if args.is_empty() && matches!(**elem, Ty::Str | Ty::Int | Ty::Float | Ty::Sym) => {
+                    return Js::binary(
+                        span,
+                        "===",
+                        Js::member(span, js_expr(r), "length"),
+                        Js::num(span, "0"),
+                    );
+                }
                 "each" => {
                     return if args.is_empty() {
                         Js::member(span, js_expr(r), "forEach")

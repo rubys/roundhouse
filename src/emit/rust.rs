@@ -869,6 +869,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     "\nimpl {name} {{\n\
                         pub fn mark_persisted_bang(&mut self) {{ }}\n\
                         pub fn errors(&self) -> Vec<String> {{ crate::errors_ext::validation_errors_snapshot() }}\n\
+                        pub fn error_attributes(&self) -> Vec<String> {{ crate::errors_ext::validation_error_attributes_snapshot() }}\n\
                         pub fn save(&mut self) -> bool {{\n\
                             crate::errors_ext::validation_errors_clear();\n\
                             self.validate();\n\
@@ -927,10 +928,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             // and the bare `errors().push` falls through harmlessly
             // until updated.
             let content = format!("{MODEL_IMPORTS}{body}{ar_shim}");
-            let content = content.replace(
-                "self.errors().push(",
-                "crate::errors_ext::validation_errors_push(",
-            );
+            let content = content
+                .replace("self.errors().push(", "crate::errors_ext::validation_errors_push(")
+                .replace("self.error_attributes().push(", "crate::errors_ext::validation_error_attributes_push(");
             files.push(EmittedFile {
                 path: PathBuf::from(format!("src/models/{stem}.rs")),
                 content,

@@ -181,3 +181,21 @@ end
     );
     assert!(diags.is_empty(), "{diags:?}");
 }
+
+#[test]
+fn a_record_that_is_not_a_plain_read_stays_residue() {
+    // The message and its attribute are two pushes; a receiver call would run once per push.
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  def flag
+    Draft.latest.errors.add(:title, "is odd")
+    Draft.latest.errors.clear
+  end
+end
+"#,
+    );
+    assert!(out.contains(r#"Draft.latest.errors.add(:title, "is odd")"#), "{out}");
+    assert!(out.contains("Draft.latest.errors.clear"), "{out}");
+    assert_eq!(diags.len(), 2, "{diags:?}");
+}

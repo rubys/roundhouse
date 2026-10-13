@@ -127,6 +127,20 @@ pub(super) fn emit_send(
             }
         }
     }
+    // `ActiveSupport.errors_for(errors, attributes, attribute, prefix)` (runtime/ruby/active_support_ext.rb): the messages added on `attribute`, without their prefix.
+    if method == "errors_for" && args.len() == 4 {
+        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
+            if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                return format!(
+                    "{{ let attribute: String = ({}).to_string(); let prefix: String = ({}).to_string(); ({}).iter().zip(({}).iter()).filter(|(_, a)| **a == attribute).map(|(m, _)| m.strip_prefix(prefix.as_str()).unwrap_or(m).to_string()).collect::<Vec<String>>() }}",
+                    emit_expr(&args[2]),
+                    emit_expr(&args[3]),
+                    emit_expr(&args[0]),
+                    emit_expr(&args[1]),
+                );
+            }
+        }
+    }
     if let Some(s) = try_constructor_field_assign(recv, method, args) { return s; }
     if let Some(s) = try_stdlib_class_method(recv, method, args) { return s; }
     if let Some(s) = try_binary_operator(recv, method, args) { return s; }

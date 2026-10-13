@@ -32,6 +32,10 @@ pub struct Catalog {
     /// What a translation the locale lacks does, per environment.
     #[serde(default)]
     pub missing: MissingPolicy,
+    /// The file that sets `config.action_view.field_error_proc`, when the
+    /// app replaces Rails' `field_with_errors` wrapper.
+    #[serde(default)]
+    pub field_error_proc: Option<String>,
 }
 
 /// `config.i18n.raise_on_missing_translations`: Rails answers a missing
@@ -264,13 +268,12 @@ impl ErrorOpts {
     }
 }
 
-/// Why `errors[:field]`, which finds a field's messages by the text
-/// `format` puts before them, cannot be answered under `format`.
+/// Why `errors[:field]`, which strips the text `format` puts before a
+/// field's messages, cannot be answered under `format`.
 pub fn errors_index_refusal(format: &str) -> Option<&'static str> {
     match format.strip_suffix("%{message}") {
         None => Some("errors.format does not end in the message"),
         Some(before) if before.contains("%{message}") => Some("errors.format names the message twice"),
-        Some("") => Some("errors.format puts nothing before the message to tell the field by"),
         Some(_) => None,
     }
 }
@@ -614,6 +617,17 @@ impl FormI18n {
             .map(str::to_string)
             .or_else(|| model.map(|m| m.human_attribute_name(method)))
             .unwrap_or_else(|| humanize(method))
+    }
+
+    /// Whether the form's record is one of the app's models, or a record
+    /// nested under one, so it answers `errors` as Rails' wrapper requires.
+    pub fn has_errors(&self, object_name: &str) -> bool {
+        self.models.contains_key(object_name.split('[').next().unwrap_or(object_name))
+    }
+
+    /// The app's own `field_error_proc`, which this wrapper does not model.
+    pub fn field_error_proc(&self) -> Option<&str> {
+        self.catalog.field_error_proc.as_deref()
     }
 
     /// `form.submit`'s default text for `key` (`create`/`update`), as
