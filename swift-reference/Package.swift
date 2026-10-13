@@ -8,7 +8,10 @@ let package = Package(
     platforms: [.macOS(.v14)],
     dependencies: [
         // Hummingbird 2.x is the locked HTTP server (plan decision 1).
-        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.5.0"),
+        // ≥2.28.0 avoids the ServiceContextModule import present in 2.26–2.27
+        // (showcase reused SPM trees failed without it; keep in sync with
+        // src/emit/swift/package.rs).
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.28.0"),
         // Direct import of NIOPosix (ThreadSpecificVariable, NIOThreadPool);
         // already in Hummingbird's tree, declared here for the direct import.
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),

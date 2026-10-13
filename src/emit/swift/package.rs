@@ -18,7 +18,12 @@ let package = Package(
     name: "roundhouse-app",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.5.0"),
+        // ≥2.28.0: Hummingbird 2.26–2.27 import ServiceContextModule (via
+        // tracing); 2.28 dropped that import. Floating from 2.5.0 let a
+        // reused showcase SPM tree resolve 2.26.x and fail
+        // `swift build -c release` with "no such module 'ServiceContextModule'"
+        // under /tmp/rh-swift-pass2 while CI's fresh cache stayed green.
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.28.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird-websocket.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
     ],
