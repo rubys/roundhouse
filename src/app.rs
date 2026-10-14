@@ -355,6 +355,12 @@ pub struct App {
     /// kept mixin supplies.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub initializer_filters: Vec<InitializerFilter>,
+    /// Whether ingest generated `AppInitializers` from the app's
+    /// `after_initialize` callbacks, so the emitted boot calls its `run`.
+    /// Recorded rather than inferred from the class name, which an app
+    /// may use for a class of its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runs_after_initialize: bool,
     /// SQL functions an initializer registers on every SQLite
     /// connection (`raw_connection.create_function("regexp", 2) do …`,
     /// `create_aggregate("stddev", 1) do step … finalize … end`).
@@ -845,6 +851,7 @@ impl App {
             time_formats: BTreeMap::new(),
             module_mixins: Vec::new(),
             initializer_filters: Vec::new(),
+            runs_after_initialize: false,
             sql_functions: Vec::new(),
             rails_application: None,
             concern_filters: HashMap::new(),

@@ -111,12 +111,39 @@ fn a_to_prepare_block_is_unwrapped_like_the_recognizers_and_only_the_unread_stat
 }
 
 #[test]
-fn an_after_initialize_hook_is_one_unconsumed_statement() {
+fn an_after_initialize_hook_is_carried_and_an_i18n_store_one_is_not() {
+    // The carried callback (`AppInitializers.run`) consumes the hook; one
+    // that only stores I18n translations is skipped by that reader, so it
+    // is still one unconsumed statement.
     let (_, ledger) = ingest(&[(
         "config/initializers/hooks.rb",
-        "Rails.application.config.after_initialize do\n  Mailer.verify!\nend\n",
+        "Rails.application.config.after_initialize do\n  Mailer.verify!\nend\n\
+         Rails.application.config.after_initialize do\n  \
+         I18n.backend.store_translations(:pl, {})\nend\n",
     )]);
     assert_eq!(statements(&ledger), ["Rails.application.config.after_initialize"]);
+    assert_eq!(location(&ledger[0]), "config/initializers/hooks.rb:4:1");
+}
+
+#[test]
+fn an_after_initialize_hook_that_needs_its_surroundings_is_not_carried() {
+    // `do |app|` takes the application Rails yields, and the second reads
+    // the initializer's own local: a carried body runs without either, so
+    // both stay unconsumed. A comment naming the I18n store does not make
+    // the third an I18n block; it is carried.
+    let (_, ledger) = ingest(&[(
+        "config/initializers/hooks.rb",
+        "limit = 5\n\
+         Rails.application.config.after_initialize do |app|\n  Mailer.verify!(app)\nend\n\
+         Rails.application.config.after_initialize do\n  Mailer.verify!(limit)\nend\n\
+         Rails.application.config.after_initialize do\n  # I18n.backend.store_translations\n  Mailer.verify!\nend\n",
+    )]);
+    let hooks: Vec<&str> = ledger
+        .iter()
+        .filter(|d| statement(d) == "Rails.application.config.after_initialize")
+        .map(location)
+        .collect();
+    assert_eq!(hooks, ["config/initializers/hooks.rb:2:1", "config/initializers/hooks.rb:5:1"]);
 }
 
 #[test]

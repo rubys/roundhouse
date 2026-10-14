@@ -77,9 +77,9 @@ use crate::span::{SourceFile, Span};
 use crate::vfs::Vfs;
 
 use super::app::{
-    default_locale_line, declares_rails_engine, extract_autoload_lib_ignores,
-    extract_autoload_path_roots, extract_config_assignments, extract_config_time_zone,
-    extract_initializer_filters, extract_module_mixins, extract_session_cookie_key,
+    after_initialize_callback, default_locale_line, declares_rails_engine,
+    extract_autoload_lib_ignores, extract_autoload_path_roots, extract_config_assignments,
+    extract_config_time_zone, extract_initializer_filters, extract_module_mixins, extract_session_cookie_key,
     extract_time_formats, extract_variable_content_type_exclusions,
     extract_video_preview_arguments, extract_video_previewer_replacement,
     extract_vips_loader_policy, forgery_strategy_line, kaminari_default_per_page,
@@ -190,6 +190,12 @@ const RECOGNIZERS: &[Recognizer] = &[
         origins: INIT,
         levels: TOP_HOOK,
         reads: |p| !extract_initializer_filters(p.text.as_bytes(), PROBE).is_empty(),
+    },
+    Recognizer {
+        name: "after_initialize (Rails.application.config.after_initialize do … end)",
+        origins: INIT,
+        levels: TOP,
+        reads: |p| p.node.as_call_node().is_some_and(|c| after_initialize_callback(&c).is_some()),
     },
     Recognizer {
         name: "sql_functions (create_function / create_aggregate)",

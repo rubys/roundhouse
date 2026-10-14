@@ -3407,6 +3407,7 @@ fn ruby_family_runtime_files(
     // gets the block exactly once; this is the ruby family's turn, and
     // the ruby family is the one that can run the lines.
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
+    apply_app_initializers(&mut files, app);
     // Overlay boot replaces the spinel boot wholesale (see comment above
     // on apply_module_mixins), wiping the Date-package inject from
     // `spinel_files`. Re-inject only the shared `date_*` helpers — not
@@ -3420,6 +3421,26 @@ fn ruby_family_runtime_files(
     // already annotated in `spinel_files`.
     apply_pay_demand(&mut files, app)?;
     Ok(files)
+}
+
+/// Run the app's `after_initialize` bodies (`AppInitializers.run`,
+/// generated at ingest from `Rails.application.config.after_initialize`
+/// in `config/initializers/`) at the end of `boot.rb`, once everything
+/// they can name is loaded: the point in Rails boot where the
+/// initializers have run and the callbacks fire.
+fn apply_app_initializers(files: &mut [(String, String)], app: &App) {
+    const MARK: &str = "AppInitializers.run";
+    if !app.runs_after_initialize {
+        return;
+    }
+    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else { return };
+    if boot.contains(MARK) {
+        return;
+    }
+    boot.push_str(&format!(
+        "\n# The app's after_initialize callbacks (see\n\
+         # ingest::app::extract_after_initialize_blocks).\n{MARK}\n"
+    ));
 }
 
 /// The JRuby tree's Gemfile: the committed scaffold Gemfile is MRI-only
@@ -6307,6 +6328,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_models_aggregator(&mut files);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
+    apply_app_initializers(&mut files, app);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,
     // freeing README.md for the generated quick-start `ensure_readme`

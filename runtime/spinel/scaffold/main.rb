@@ -21,6 +21,16 @@
 # require is harmless (the gem-backed shim only opens a DB on
 # `configure`); under spinel the FFI-backed shim only emits when
 # `runtime/sqlite_adapter` is in the require graph.
+# `rails server` defines Rails::Server before the app boots, and an
+# initializer can gate server-only work on it (an after_initialize block
+# that starts a worker after `next unless defined?(Rails::Server)`).
+# This file starts the app's server, so it defines the constant too;
+# the test harness, which boots without it, does not.
+module Rails
+  class Server
+  end
+end
+
 # The whole require chain (see boot.rb). Kept in its own file so
 # `test/test_helper.rb` can load the app without loading this one,
 # which starts a server.
