@@ -3407,6 +3407,7 @@ fn ruby_family_runtime_files(
     // gets the block exactly once; this is the ruby family's turn, and
     // the ruby family is the one that can run the lines.
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
+    apply_database_paths(&mut files, app);
     // Overlay boot replaces the spinel boot wholesale (see comment above
     // on apply_module_mixins), wiping the Date-package inject from
     // `spinel_files`. Re-inject only the shared `date_*` helpers — not
@@ -4561,6 +4562,35 @@ fn mixin_target_keyword(app: &App, target: &str) -> &'static str {
         Some(true) => "module",
         _ => "class",
     }
+}
+
+/// `config/database.yml`'s main database per environment, as
+/// `AppDatabase.path_for(env)` in boot.rb, for `Main.default_db_path`:
+/// with `RAILS_ENV=production` the binary opens the file Rails would,
+/// not `storage/development.sqlite3`. Always defined (nil for an
+/// environment the file does not name), so main.rb can call it as is.
+fn apply_database_paths(files: &mut [(String, String)], app: &App) {
+    const MARK: &str = "# The app's database per environment, from config/database.yml";
+    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else { return };
+    if boot.contains(MARK) {
+        return;
+    }
+    let mut body = String::from("    case env
+");
+    for (env, path) in &app.database_paths {
+        body.push_str(&format!("    when {env:?} then {path:?}
+"));
+    }
+    body.push_str("    end
+");
+    if app.database_paths.is_empty() {
+        body = "    nil
+".to_string();
+    }
+    boot.push_str(&format!(
+        "\n{MARK} (see project.rs::apply_database_paths).\n\
+         module AppDatabase\n  def self.path_for(env)\n{body}  end\nend\n"
+    ));
 }
 
 /// THE FORM DIFFERS BY TARGET, and the reason is spinel's, not ours.
@@ -6307,6 +6337,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_models_aggregator(&mut files);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
+    apply_database_paths(&mut files, app);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,
     // freeing README.md for the generated quick-start `ensure_readme`

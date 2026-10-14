@@ -138,6 +138,12 @@ pub struct App {
     /// which answers `defined?(ActiveStorage)` from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loaded_frameworks: Option<Vec<String>>,
+    /// `config/database.yml`'s main database file per environment, as
+    /// `(environment, path)`: the flat `database:`, or the first entry of
+    /// a multi-database environment (Rails' primary). Environments whose
+    /// path is computed (ERB) are left out ([`crate::ingest::app`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub database_paths: Vec<(String, String)>,
     /// The classes and method headers the locked gems' Tapioca RBIs
     /// declare ([`crate::gem_boundary`]). Declarations only, read at
     /// ingest when the tree (or the real location of its lockfile) has
@@ -826,6 +832,7 @@ impl App {
             rbs_includes: HashMap::new(),
             gem_lock: None,
             loaded_frameworks: None,
+            database_paths: Vec::new(),
             gem_boundary: Default::default(),
             content_helper_allowed_attributes: Vec::new(),
             content_helper_allowed_tags: Vec::new(),

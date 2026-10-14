@@ -159,6 +159,7 @@ fn tiny_blog_round_trips() {
         rbs_signatures: std::collections::HashMap::new(),
         gem_lock: None,
         loaded_frameworks: None,
+        database_paths: Vec::new(),
         gem_boundary: Default::default(),
         content_helper_allowed_attributes: Vec::new(),
         content_helper_allowed_tags: Vec::new(),
