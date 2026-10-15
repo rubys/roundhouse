@@ -312,6 +312,26 @@ fn an_rbi_that_patches_string_does_not_own_the_ruby_core_class() {
 }
 
 #[test]
+fn ruby_core_exemptions_do_not_cover_gem_owned_child_constants() {
+    let app = app(ENGINE_LOCK, REFUSED,
+        Some(("sorbet/rbi/gems/widget-engine@1.0.rbi", "class String::GemWidget\nend\n")),
+        "class Report\n  def self.value\n    ::String::GemWidget.new\n  end\nend\n");
+    for path in ["String", "::String"] {
+        assert!(roundhouse::gems::rails_dependent_owner(&app, path).is_none(), "{path}");
+    }
+    for path in ["String::GemWidget", "::String::GemWidget"] {
+        let owner = roundhouse::gems::rails_dependent_owner(&app, path)
+            .unwrap_or_else(|| panic!("missing gem ownership for {path}"));
+        assert_eq!(owner.gem, "widget-engine");
+    }
+    assert!(diagnose(&app).iter().any(|diagnostic| {
+        diagnostic.severity == Severity::Error && matches!(&diagnostic.kind,
+            DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "gem_requires_rails")
+    }));
+    assert!(project::target_files(&app, Path::new("."), BuildTarget::Ruby).is_err());
+}
+
+#[test]
 fn app_owned_values_take_precedence_over_rbi_ownership() {
     let app = app(ENGINE_LOCK, REFUSED,
         Some(("sorbet/rbi/gems/widget-engine@1.0.rbi", ENGINE_RBI)),

@@ -1013,7 +1013,7 @@ pub fn rails_dependent_owner<'a>(
 
 fn extension_owns_constant(app: &crate::App, gem: &str, path: &str) -> bool {
     let path = path.trim_start_matches("::");
-    if crate::gem_boundary::RUBY_CORE.contains(&path.split("::").next().unwrap_or(path)) {
+    if crate::gem_boundary::RUBY_CORE.contains(&path) {
         return false;
     }
     if app.models.iter().any(|model| model.name.0.as_str() == path)

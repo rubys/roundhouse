@@ -157,6 +157,8 @@ runtime_gems:
   do not load it natively. References to its constants stay errors,
   including constants made known by an RBI. The error includes the gem
   name and the `why` text. App-owned constants keep their own definitions.
+  The Ruby-core exemption applies to exact constants such as `String`,
+  not to all constants inside their namespaces.
 - `runtime_gems`: the `ruby` and `jruby` trees declare the gem in their
   Gemfile when a file under `app/` names the constant or contains one of
   the texts. Git gems keep their source and revision. This setting does
