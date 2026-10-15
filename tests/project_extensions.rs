@@ -309,72 +309,6 @@ fn dormant_concern_attribute_macros_do_not_change_column_types_or_report_declara
 
 // ── Gem facts on the emitted trees ──────────────────────────────────
 
-const WIDGET_LOCK: &str = "GEM\n  remote: https://rubygems.org/\n  specs:\n    widgets (1.2.0)\n\nDEPENDENCIES\n  widgets\n";
-
-const WIDGET_GEMS: &str = "lock_gated_requires:\n  - {require: widgets/all, gem: widgets}\nruntime_gems:\n  - {constant: Widget, gem: widgets}\n  - {any_text: [\"Gadget::Cache.\"], gem: gadget-cache}\n";
-
-/// An app whose `Invoice` model has `body` as a class method's body.
-fn widget_app(lock: Option<&str>, body: &str) -> App {
-    let invoice = format!("class Invoice < ApplicationRecord\n  def self.run\n    {body}\n  end\nend\n");
-    let mut files = vec![
-        ("roundhouse.yml", "extensions: [config/rh]\n"),
-        ("config/rh/gems.yml", WIDGET_GEMS),
-        ("db/schema.rb", INVOICE_SCHEMA),
-        ("app/models/application_record.rb", APPLICATION_RECORD),
-        ("app/models/invoice.rb", &invoice),
-    ];
-    if let Some(lock) = lock {
-        files.push(("Gemfile.lock", lock));
-    }
-    ingest(&files).expect("ingest")
-}
-
-#[test]
-fn runtime_gems_are_declared_when_app_names_them_after_the_compilers_own() {
-    let app = widget_app(None, "[BCrypt::Password.create(\"x\"), Widget.new, Gadget::Cache.fetch(1)]");
-    let files = emitted(&app, BuildTarget::Ruby);
-    let gemfile = file(&files, "Gemfile");
-    let bcrypt = gemfile.find("gem \"bcrypt\"").expect("the compiler's own row");
-    let widgets = gemfile.find("gem \"widgets\"").expect("the extension's constant row");
-    let cache = gemfile.find("gem \"gadget-cache\"").expect("the extension's text row");
-    assert!(bcrypt < widgets && widgets < cache, "{gemfile}");
-
-    let quiet = widget_app(None, "1");
-    let gemfile = file(&emitted(&quiet, BuildTarget::Ruby), "Gemfile").to_string();
-    assert!(!gemfile.contains("widgets") && !gemfile.contains("gadget-cache"), "{gemfile}");
-}
-
-#[test]
-fn lock_gated_requires_load_only_where_the_lock_resolves_the_gem() {
-    let report = "1";
-
-    let app = widget_app(Some(WIDGET_LOCK), report);
-    let files = emitted(&app, BuildTarget::Ruby);
-    let facades = file(&files, "runtime/gem_facades.rb");
-    let compiler = facades.find("\"web-push\"").expect("the compiler's own list");
-    let gated = facades.find("\"widgets/all\"").expect("the extension's require");
-    assert!(compiler < gated, "{facades}");
-    assert!(file(&files, "Gemfile").contains("gem \"widgets\", \"= 1.2.0\""));
-    assert!(!files.iter().any(|(path, _)| path == "Gemfile.lock"));
-
-    for lock in [None, Some("GEM\n  specs:\n    other (1.0.0)\n\nDEPENDENCIES\n  other\n")] {
-        let files = emitted(&widget_app(lock, report), BuildTarget::Ruby);
-        assert!(!file(&files, "runtime/gem_facades.rb").contains("widgets/all"));
-        assert!(!file(&files, "Gemfile").contains("\"widgets\""));
-    }
-
-    // Fail-closed for a git source: a rubygems.org pin would misstate it.
-    let git = "GIT\n  remote: https://example.com/widgets.git\n  revision: 0123456\n  specs:\n    widgets (1.2.0)\n\nDEPENDENCIES\n  widgets!\n";
-    let files = emitted(&widget_app(Some(git), report), BuildTarget::Ruby);
-    assert!(!file(&files, "runtime/gem_facades.rb").contains("widgets/all"));
-    assert!(!file(&files, "Gemfile").contains("gem \"widgets\""));
-
-    // The CRuby tree alone loads natively locked gems.
-    let files = emitted(&app, BuildTarget::Jruby);
-    assert!(!file(&files, "runtime/gem_facades.rb").contains("widgets/all"));
-    assert!(!file(&files, "Gemfile").contains("gem \"widgets\""));
-}
-
 const ENGINE_LOCK: &str = "GEM\n  specs:\n    widget-engine (2.0.0)\n\nDEPENDENCIES\n  widget-engine\n";
 const ENGINE_REPORT: &str = "class Report\n  def self.client\n    WidgetEngine::Client.new\n  end\nend\n";
 
@@ -391,20 +325,6 @@ fn engine_files(rails_dependent: bool) -> Vec<(&'static str, &'static str)> {
     files
 }
 
-#[test]
-fn a_rails_dependent_gem_is_not_carried_from_the_lockfile() {
-    let carried = ingest(&engine_files(false)).unwrap();
-    assert!(roundhouse::gems::locked_external_gem_namespaces(&carried).contains("WidgetEngine"));
-    assert!(file(&emitted(&carried, BuildTarget::Ruby), "Gemfile").contains("gem \"widget-engine\", \"= 2.0.0\""));
-
-    let refused = ingest(&engine_files(true)).unwrap();
-    assert!(roundhouse::gems::locked_external_gem_namespaces(&refused).is_empty());
-    let files = emitted(&refused, BuildTarget::Ruby);
-    assert!(!file(&files, "Gemfile").contains("widget-engine"));
-    assert!(!file(&files, "boot.rb").contains("require \"widget_engine\""));
-    let owner = roundhouse::gems::rails_dependent_owner(&refused, "WidgetEngine::Client").expect("the fact");
-    assert_eq!(owner.why, "requiring it loads 3 Rails framework files");
-}
 
 #[test]
 fn the_ruby_target_refuses_a_rails_dependent_constant_with_the_evidence() {

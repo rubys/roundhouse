@@ -101,20 +101,47 @@ attribute_macros:
   - {name: bag_columns, hash_key: attributes}
 ```
 
-- `lock_gated_requires`: when the app's `Gemfile.lock` resolves the gem
-  from a gem server, the `ruby` tree pins it at the locked version and
-  requires the path at boot. A gem locked from git or a path is skipped.
-- `rails_dependent`: requiring the gem loads Rails, so no tree loads it.
-  The `ruby` tree does not carry it from the lockfile, and its constants
-  stay errors. The error message includes the `why` text.
+- `lock_gated_requires`: when the app's `Gemfile.lock` resolves the gem,
+  the `ruby` and `jruby` trees require the path at boot. Registry gems
+  use the locked version. Git gems keep the locked URL and revision.
+  PATH gems remain source inputs; this setting does not load them natively.
+- `rails_dependent`: requiring the gem loads Rails, so compiled projects
+  do not load it natively. References to its constants stay errors,
+  including constants made known by an RBI. The error includes the gem
+  name and the `why` text. App-owned constants keep their own definitions.
 - `runtime_gems`: the `ruby` and `jruby` trees declare the gem in their
   Gemfile when a file under `app/` names the constant or contains one of
-  the texts. This only declares the gem; it does not require it.
+  the texts. Git gems keep their source and revision. This setting does
+  not require the gem; use an application require or `lock_gated_requires`.
 - `attribute_macros`: the attributes a macro names read and write as
   untyped, either from its leading symbol arguments (`positional`) or
   from the array under a keyword (`hash_key`). No target lowers the
   macro itself, so each call is reported as an error at its declaration.
   This replaces a dispatch error at every place the value object is used.
+
+Extension gem facts also select the locked gems' Tapioca RBIs under
+`sorbet/rbi/gems/`. This includes gems classified as infrastructure or
+standard-library gems. An RBI supplies types and ownership, not executable
+code. A gem in `rails_dependent` stays refused even when its RBI declares
+the referenced class, module, or value. Other targets refuse constants
+that depend on a native extension gem instead of emitting missing classes.
+
+Roundhouse records extension boot loads on each app. A lockfile dependency
+alone does not establish that a gem loads. A `runtime_gems` row does not
+become a boot require.
+
+For Git-backed native gems, run the emitted project's `bundle install`.
+At boot, Roundhouse activates the locked checkouts under
+`<gem home>/bundler/gems/`, including Git-backed dependencies, before the
+guarded requires. It reports an error if source metadata or a checkout
+is missing, or if a published copy is already active. It never replaces
+a locked Git source with a published gem of the same name.
+The Gemfile also preserves Git `glob` and `submodules` settings.
+The runtime uses the locked glob to find each gemspec.
+
+A guarded require stays quiet when the optional feature itself is absent.
+If a present feature fails to load an internal dependency, the runtime
+reports both the requested feature and the load error on standard error.
 
 Configured attribute macros also apply in a concern's `included do`
 block. Roundhouse retains direct statements from `ActiveSupport::Concern`

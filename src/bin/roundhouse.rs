@@ -383,9 +383,12 @@ fn run_transpile(
     // identifies its gem and the defining source has a matching literal
     // top-level require. Keep check's source diagnostic and all strict-target
     // refusals unchanged.
-    if target == BuildTarget::Ruby {
-        let supported_includes = roundhouse::gems::statically_resolved_external_includes(&app);
-        let external_namespaces = roundhouse::gems::locked_external_gem_namespaces(&app);
+    if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        let (external_namespaces, supported_includes) = if target == BuildTarget::Ruby {
+            (roundhouse::gems::locked_external_gem_namespaces(&app), roundhouse::gems::statically_resolved_external_includes(&app))
+        } else {
+            (roundhouse::gems::native_extension_gem_namespaces(&app), Default::default())
+        };
         analyze_diags.retain(|diagnostic| match &diagnostic.kind {
             roundhouse::diagnostic::DiagnosticKind::Unsupported {
                 construct, detail, ..
@@ -399,24 +402,6 @@ fn run_transpile(
                 }),
             _ => true,
         });
-        // A gem a project extension says reaches Rails is not carried, so
-        // its constants stay refused. Say why, with the extension's evidence.
-        for diagnostic in &mut analyze_diags {
-            let roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, detail, .. } =
-                &diagnostic.kind
-            else {
-                continue;
-            };
-            if construct.as_str() != "constant" {
-                continue;
-            }
-            if let Some(row) = roundhouse::gems::rails_dependent_owner(&app, detail) {
-                diagnostic.message.push_str(&format!(
-                    " (a project extension marks gem {} rails_dependent: {})",
-                    row.gem, row.why
-                ));
-            }
-        }
     }
 
     // A residue whose own text says the construct is "unsupported at

@@ -24,20 +24,10 @@ use std::collections::{HashMap, HashSet};
 use crate::app::App;
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
+use crate::gem_boundary::RUBY_CORE;
 
 use super::super::body::ClassInfo;
 
-/// Ruby's own top-level names. An RBI that mentions them is patching or
-/// extending the language, not declaring a gem class.
-const RUBY_CORE: &[&str] = &[
-    "BasicObject", "Object", "Module", "Class", "Kernel", "Comparable", "Enumerable", "Enumerator",
-    "Numeric", "Integer", "Float", "Rational", "Complex", "String", "Symbol", "Array", "Hash",
-    "Range", "Regexp", "MatchData", "Struct", "Proc", "Method", "UnboundMethod", "Time", "Date",
-    "DateTime", "IO", "File", "Dir", "Exception", "StandardError", "RuntimeError", "NilClass",
-    "TrueClass", "FalseClass", "Set", "Random", "Process", "Signal", "Math", "Marshal", "GC",
-    "ObjectSpace", "Thread", "Mutex", "Fiber", "Ractor", "Data", "Encoding", "Binding",
-    "BigDecimal", "Pathname", "StringIO", "URI", "JSON", "Logger", "Singleton", "Forwardable",
-];
 
 /// Mixins that add no callable surface a caller could miss: sorbet's
 /// own `extend T::Sig`, and the ActiveSupport::Concern marker.
@@ -183,6 +173,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>, ap
     let reopened: Vec<&ClassId> = declared
         .keys()
         .filter(|id| !fresh.contains(*id) && !app_owned.contains(*id) && classes.contains_key(*id))
+        .filter(|id| !app.extensions.is_rails_dependent(&declared[*id].gem))
         .filter(|id| {
             let name = id.0.as_str();
             !RUBY_CORE.contains(&name.split("::").next().unwrap_or(name))

@@ -75,6 +75,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // Only validated synthesized Alba serializers, with per-constructor
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));
+    out.extend(crate::gems::extension_gem_refusals(app, None));
     // graphql-ruby object types: their bodies, and each `null: false`
     // field's resolved value.
     out.extend(super::graphql::diagnose(app, diagnose_expr));
@@ -199,6 +200,14 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // ivar channel.
     let (preload_diags, coverage) = preload::missing_preload_report(app);
     out.extend(preload_diags);
+    let refused_gem_sites: std::collections::HashSet<_> = out.iter().filter_map(|diagnostic| {
+        matches!(&diagnostic.kind, DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == "gem_requires_rails").then_some(diagnostic.span)
+    }).collect();
+    out.retain(|diagnostic| !matches!(&diagnostic.kind,
+        DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == "constant" && refused_gem_sites.contains(&diagnostic.span)
+    ));
 
     // Collapse diagnostics that render to the same place with the same
     // text — same start position, same kind, same message. Method chains

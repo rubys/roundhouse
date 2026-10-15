@@ -18,14 +18,14 @@
 //! ```yaml
 //! # gems.yml
 //! #
-//! # (require path, lockfile gem). Where the app's Gemfile.lock resolves the
-//! # gem from a gem server, the CRuby tree pins it at the locked version and
-//! # requires the path at boot, after the compiler's own list.
+//! # (require path, lockfile gem). The Ruby and JRuby trees pin registry
+//! # versions or preserve Git URLs and revisions, then require the path
+//! # at boot after the compiler's own list. PATH gems remain source inputs.
 //! lock_gated_requires:
 //!   - {require: "widgets/all", gem: "widgets"}
-//! # Gems whose load closure reaches Rails, with the evidence. No tree
-//! # requires one natively, so the CRuby tree does not carry it from the
-//! # lockfile and its constants stay refused by name.
+//! # Gems whose load closure reaches Rails, with the evidence. Compiled
+//! # projects do not require them natively. Their constants stay refused
+//! # by owning gem, including constants whose RBIs supply known types.
 //! rails_dependent:
 //!   - {gem: "widget-engine", why: "requiring it loads Rails framework files"}
 //! # (what an app/ body writes, gem that provides it). The emitted Gemfile
@@ -35,6 +35,14 @@
 //!   - {constant: "Widget", gem: "widgets"}
 //!   - {any_text: ["Widget::Cache."], gem: "widget-cache"}
 //! ```
+//!
+//! These facts also select locked gems' RBIs, including infrastructure and
+//! stdlib gems. Boot-load tracking belongs to the app's gem boundary; an
+//! RBI or a dependency entry alone does not establish a runtime load.
+//! Git-backed native gems and their Git dependencies activate from locked
+//! Bundler checkouts. Missing checkouts fail instead of selecting a
+//! published replacement. Guarded requires report internal load failures;
+//! only an absent optional feature remains quiet.
 //!
 //! ```yaml
 //! # macros.yml

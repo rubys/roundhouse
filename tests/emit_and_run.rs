@@ -7181,6 +7181,53 @@ fn a_concerns_unclaimed_attribute_declaration_runs_on_each_includer() {
         .assert_passes();
 }
 
+#[test]
+fn extension_rbi_methods_run_on_the_native_infrastructure_gem() {
+    let lock = roundhouse::gems::Lockfile::parse(
+        &std::fs::read_to_string(roundhouse::fixtures::real_blog().join("Gemfile.lock")).unwrap(),
+    );
+    let version = lock.version_of("rake").expect("the Rails fixture resolves rake");
+    let rbi_path = format!("sorbet/rbi/gems/rake@{version}.rbi");
+    emit_and_run::real_blog()
+        .write("roundhouse.yml", "extensions: [config/rh]\n")
+        .write("config/rh/gems.yml", "lock_gated_requires:\n  - {require: rake, gem: rake}\n")
+        .write(
+            &rbi_path,
+            "module Rake\n  class Task\n    sig { params(task_name: String).returns(T::Boolean) }\n    def self.task_defined?(task_name); end\n  end\nend\n",
+        )
+        .write(
+            "app/models/rake_probe.rb",
+            "class RakeProbe\n  def self.registered?\n    Rake::Task.task_defined?(\"roundhouse_extension_probe_task\")\n  end\nend\n",
+        )
+        .run_ruby(
+            "raise \"unexpected native task\" if RakeProbe.registered?\nRake::Task.define_task(\"roundhouse_extension_probe_task\")\nraise \"the RBI did not reach the native gem\" unless RakeProbe.registered?\n",
+        )
+        .assert_passes();
+}
+
+#[test]
+fn extension_rbi_patches_preserve_runtime_constant_ownership() {
+    let lock = std::fs::read_to_string(
+        roundhouse::fixtures::real_blog().join("Gemfile.lock"),
+    ).unwrap().replacen("  specs:\n", "  specs:\n    widget-engine (1.0)\n", 1);
+    emit_and_run::real_blog()
+        .write("roundhouse.yml", "extensions: [config/rh]\n")
+        .write("config/rh/gems.yml", "rails_dependent:\n  - {gem: widget-engine, why: requires the Rails framework}\n")
+        .write("Gemfile.lock", &lock)
+        .write(
+            "sorbet/rbi/gems/widget-engine@1.0.rbi",
+            "class ActiveRecord::Base\n  def gem_patch; end\nend\n",
+        )
+        .write(
+            "app/models/runtime_probe.rb",
+            "class RuntimeProbe\n  def self.base\n    ActiveRecord::Base\n  end\nend\n",
+        )
+        .run_ruby(
+            "raise \"runtime class ownership changed\" unless RuntimeProbe.base == ActiveRecord::Base\n",
+        )
+        .assert_passes();
+}
+
 /// An action whose whole body is a call to a rendering helper defined
 /// on a PARENT controller. The default response appended to the action
 /// must be guarded by `performed?`, as it is for a helper on the

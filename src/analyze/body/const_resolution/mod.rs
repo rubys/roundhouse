@@ -450,6 +450,23 @@ impl ConstResolver {
             .map(Option::as_ref)
     }
 
+    /// App and runtime sources define this reference; RBI declarations do
+    /// not enter this graph and cannot establish source ownership.
+    pub(crate) fn has_definition(&self, span: Span, path: &[Symbol]) -> bool {
+        self.reference(span, path).is_some_and(|resolved| resolved.is_some())
+    }
+
+    /// Exact resolved source names for declaration edges without expression
+    /// spans. The borrowed identifiers remain owned by this snapshot.
+    pub(crate) fn defined_names(&self) -> HashSet<&str> {
+        self.files.iter().flatten().flat_map(|file| file.references.values()).filter_map(|resolved| {
+            match resolved.as_ref()? {
+                ResolvedConstant::Namespace { class, .. } => Some(class.0.as_str()),
+                ResolvedConstant::Value { name, .. } => Some(name.0.as_str()),
+            }
+        }).collect()
+    }
+
     /// Exact source-resolved namespace, also used by ingest admission gates
     /// that must distinguish lexical namesakes from the activated concern.
     pub(crate) fn namespace(&self, span: Span, path: &[Symbol]) -> Option<&ClassId> {

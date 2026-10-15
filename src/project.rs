@@ -1830,9 +1830,20 @@ pub fn target_files(
     if target == BuildTarget::Futamura {
         return futamura_target_files(app, fixture, None);
     }
-    if target == BuildTarget::Ruby {
-        let namespaces = crate::gems::locked_external_gem_namespaces(app);
-        let includes = crate::gems::statically_resolved_external_includes(app);
+    let refusals = crate::gems::extension_gem_refusals(app, Some(target.as_str()));
+    if !refusals.is_empty() {
+        let message = refusals.iter().map(|diagnostic| diagnostic.message.as_str()).collect::<Vec<_>>().join("\n");
+        for diagnostic in refusals {
+            emit::diagnostics::push(diagnostic);
+        }
+        return Err(message);
+    }
+    if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        let (namespaces, includes) = if target == BuildTarget::Ruby {
+            (crate::gems::locked_external_gem_namespaces(app), crate::gems::statically_resolved_external_includes(app))
+        } else {
+            (crate::gems::native_extension_gem_namespaces(app), Default::default())
+        };
         return crate::emit::ruby::with_external_gem_namespaces(&namespaces, includes, || {
             target_files_inner(app, fixture, target)
         });
@@ -3392,7 +3403,7 @@ fn ruby_family_runtime_files(
                  require_relative \"open_telemetry_facade\"\n\
                  {}{}",
                 markly_require,
-                gem_require_block(&["markly"], &[]),
+                gem_require_block(&["markly"], &lock_gated_requires(app)),
                 WEB_PUSH_STUB_REOPEN
             )
         }
@@ -3449,12 +3460,11 @@ fn ruby_family_runtime_files(
     apply_route_table_root(&mut files, app);
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list_stems(&mut files, &test_stems);
-    apply_runtime_gem_wiring(&mut files, &app.extensions);
-    // Namespaces / feature requires land only on CRuby (`target_files`
-    // wraps `with_external_gem_namespaces` for `BuildTarget::Ruby` alone).
-    // JRuby must not get Gemfile pins + boot requires without that path.
+    apply_runtime_gem_wiring(&mut files, app)?;
+    apply_lock_gated_gem_wiring(&mut files, app)?;
+    // The general unknown-gem fallback remains CRuby-only. Extension facts
+    // above explicitly select native gems for both Ruby-family targets.
     if flavor == RubyFlavor::CRuby {
-        apply_lock_gated_gem_wiring(&mut files, app);
         apply_locked_external_gem_wiring(&mut files, app);
     }
     // AGAIN, on purpose, and this time PERFORMING them. `spinel_files`
@@ -7304,38 +7314,33 @@ fn spinel_sql_functions_file(app: &App) -> Option<String> {
 fn gem_require_block(exclude: &[&str], lock_gated: &[&crate::extensions::LockGatedRequire]) -> String {
     let mut requires: Vec<&str> = GEM_REQUIRES.iter().copied().filter(|g| !exclude.contains(g)).collect();
     for row in lock_gated {
-        if !requires.contains(&row.require.as_str()) {
+        if !exclude.contains(&row.gem.as_str()) && !requires.contains(&row.require.as_str()) {
             requires.push(&row.require);
         }
     }
     let names: Vec<String> = requires.iter().map(|g| format!("{g:?}")).collect();
     let mut out = format!("[{}].each do |gem_name|\n", names.join(", "));
-    out.push_str("  begin\n    require gem_name\n  rescue LoadError\n    nil\n  end\nend\n");
+    out.push_str(
+        "  begin\n    require gem_name\n  rescue LoadError => error\n    \
+         $stderr.puts \"roundhouse: require #{gem_name.inspect} failed: #{error.message}\" unless error.path == gem_name\n    \
+         nil\n  end\nend\n",
+    );
     out
 }
 
-/// The `lock_gated_requires` of the app's extensions (`crate::extensions`)
-/// whose gem its `Gemfile.lock` resolves from a gem server, in extension
-/// order. A gem locked from a git or path source is skipped, fail-closed
-/// as in `apply_locked_external_gem_wiring`: a rubygems.org pin would
-/// misstate a git gem's origin, and a path gem's source is already part of
-/// the tree. The CRuby tree alone loads these.
+/// Extension boot requires whose gems the lock resolves. PATH gems remain
+/// source inputs; registry and Git gems load natively on Ruby and JRuby.
 fn lock_gated_requires(app: &App) -> Vec<&crate::extensions::LockGatedRequire> {
     let Some(lock) = app.gem_lock.as_ref() else { return Vec::new() };
     app.extensions
         .lock_gated_requires
         .iter()
-        .filter(|row| lock.has(&row.gem) && !lock.is_from_git(&row.gem) && !lock.is_in_repo(&row.gem))
+        .filter(|row| lock.has(&row.gem) && !lock.is_in_repo(&row.gem))
         .collect()
 }
 
-/// Pin the gems of [`lock_gated_requires`] in the CRuby tree's Gemfile at
-/// their locked versions, so the guarded requires in `gem_facades.rb` find
-/// them. The source lockfile is the version authority, as for
-/// `apply_locked_external_gem_wiring`, and the scaffold lock goes for the
-/// same reason: Bundler must resolve the new pins.
-fn apply_lock_gated_gem_wiring(files: &mut Vec<(String, String)>, app: &App) {
-    let Some(lock) = app.gem_lock.as_ref() else { return };
+/// Declare extension boot gems with the locked version or Git source.
+fn apply_lock_gated_gem_wiring(files: &mut Vec<(String, String)>, app: &App) -> Result<(), String> {
     let mut gems: Vec<&str> = Vec::new();
     for row in lock_gated_requires(app) {
         if !gems.contains(&row.gem.as_str()) {
@@ -7343,32 +7348,50 @@ fn apply_lock_gated_gem_wiring(files: &mut Vec<(String, String)>, app: &App) {
         }
     }
     if gems.is_empty() {
-        return;
+        return Ok(());
     }
     let Some((_, gemfile)) = files.iter_mut().find(|(path, _)| path == "Gemfile") else {
-        return;
+        return Err("Ruby-family project has no Gemfile for extension boot gems".into());
     };
-    let mut block = String::new();
     for gem in gems {
-        let version = lock.version_of(gem);
-        let pinned = match version {
-            Some(v) => format!("gem {gem:?}, \"= {v}\""),
-            None => format!("gem {gem:?}"),
-        };
-        if gemfile_declares_exact(gemfile, gem, version) || rewrite_gemfile_declaration(gemfile, gem, &pinned) {
-            continue;
-        }
-        block.push_str(&pinned);
-        block.push('\n');
-    }
-    if !block.is_empty() {
-        if !gemfile.ends_with('\n') {
-            gemfile.push('\n');
-        }
-        gemfile.push_str("\n# Required at boot by the project's extensions (roundhouse.yml).\n");
-        gemfile.push_str(&block);
+        let declaration = runtime_gem_declaration(app.gem_lock.as_ref(), gem, true)?;
+        ensure_runtime_gem_declaration(gemfile, gem, &declaration);
     }
     files.retain(|(path, _)| path != "Gemfile.lock");
+    Ok(())
+}
+
+fn runtime_gem_declaration(lock: Option<&crate::gems::Lockfile>, gem: &str, pin_version: bool) -> Result<String, String> {
+    if let Some(source) = lock.and_then(|lock| lock.git_source_of(gem)) {
+        if source.remote.is_empty() || source.revision.is_empty() {
+            return Err(format!("Git source for gem {gem} requires both a remote and a locked revision"));
+        }
+        let mut declaration = format!("gem {gem:?}, git: {:?}, ref: {:?}", source.remote, source.revision);
+        if let Some(glob) = &source.glob {
+            declaration.push_str(&format!(", glob: {glob:?}"));
+        }
+        if source.submodules {
+            declaration.push_str(", submodules: true");
+        }
+        return Ok(declaration);
+    }
+    match lock.and_then(|lock| lock.version_of(gem)).filter(|_| pin_version) {
+        Some(version) => Ok(format!("gem {gem:?}, \"= {version}\"")),
+        None => Ok(format!("gem {gem:?}")),
+    }
+}
+
+fn ensure_runtime_gem_declaration(gemfile: &mut String, gem: &str, declaration: &str) {
+    if gemfile.lines().any(|line| line.trim() == declaration)
+        || rewrite_gemfile_declaration(gemfile, gem, declaration)
+    {
+        return;
+    }
+    if !gemfile.ends_with('\n') {
+        gemfile.push('\n');
+    }
+    gemfile.push_str(declaration);
+    gemfile.push('\n');
 }
 
 /// The RUNTIME twin of `apply_test_gem_wiring`, and it exists because
@@ -7402,7 +7425,7 @@ fn apply_lock_gated_gem_wiring(files: &mut Vec<(String, String)>, app: &App) {
 /// seam — `spin_shape` swaps `runtime/bcrypt_facade.rb` for the real spin
 /// package and adds it to the manifest. This is the CRuby half of that
 /// same decision, which had no half until now.
-fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>, extensions: &crate::extensions::Extensions) {
+fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>, app: &App) -> Result<(), String> {
     // `app/` only. The runtime tree names several of these itself (the
     // façade lists all nine), and a scan that saw those would declare
     // every gem for every app — the same self-fulfilling wiring the
@@ -7422,39 +7445,101 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>, extensions: &crat
     }
     // A project's extension rows, after the compiler's and in extension
     // order (`crate::extensions`).
-    for row in &extensions.runtime_gems {
+    for row in &app.extensions.runtime_gems {
         let demanded = app_body_has(&|c| match &row.demand {
             crate::extensions::Demand::Constant(konst) => names_constant(c, konst),
             crate::extensions::Demand::AnyText(needles) => needles.iter().any(|n| c.contains(n.as_str())),
         });
-        if demanded && !needed.contains(&row.gem.as_str()) {
+        if demanded && !needed.contains(&row.gem.as_str())
+            && !app.gem_lock.as_ref().is_some_and(|lock| lock.is_in_repo(&row.gem))
+        {
             needed.push(&row.gem);
         }
     }
-    if needed.is_empty() {
-        return;
+    let gated = lock_gated_requires(app);
+    if needed.is_empty() && gated.is_empty() {
+        return Ok(());
     }
-    if let Some((_, gemfile)) = files.iter_mut().find(|(p, _)| p == "Gemfile") {
-        let mut block = String::from(
-            "\n# Gems the emitted app reaches at RUNTIME. runtime/gem_facades.rb\n\
-             # guarded-requires these, so a missing one is not a boot failure —\n\
-             # it is an undefined constant on the first request that needs it.\n\
-             # Declared by `project.rs::apply_runtime_gem_wiring` from the\n\
-             # constants app/ actually names.\n",
-        );
+    if let Some((_, gemfile)) = files.iter_mut().find(|(path, _)| path == "Gemfile") {
         for gem in &needed {
-            if gemfile.contains(&format!("gem {gem:?}")) {
-                continue;
+            let declaration = runtime_gem_declaration(app.gem_lock.as_ref(), gem, false)?;
+            if app.gem_lock.as_ref().is_some_and(|lock| lock.is_from_git(gem)) {
+                ensure_runtime_gem_declaration(gemfile, gem, &declaration);
+            } else if !gemfile.contains(&format!("gem {gem:?}")) {
+                ensure_runtime_gem_declaration(gemfile, gem, &declaration);
             }
-            block.push_str(&format!("gem {gem:?}\n"));
-        }
-        if block.contains("gem \"") {
-            if !gemfile.ends_with('\n') {
-                gemfile.push('\n');
-            }
-            gemfile.push_str(&block);
         }
     }
+    for row in gated {
+        if !needed.contains(&row.gem.as_str()) {
+            needed.push(&row.gem);
+        }
+    }
+    apply_git_gem_load_paths(files, &needed, app.gem_lock.as_ref())
+}
+
+/// Activate the locked Git checkouts before any guarded native requires.
+/// Never replace a missing checkout with a published gem of the same name.
+fn apply_git_gem_load_paths(
+    files: &mut Vec<(String, String)>,
+    needed: &[&str],
+    lock: Option<&crate::gems::Lockfile>,
+) -> Result<(), String> {
+    let Some(lock) = lock else { return Ok(()) };
+    let git_gems = lock.git_specs_in_closure(needed);
+    if git_gems.is_empty() {
+        return Ok(());
+    }
+    let mut entries = String::new();
+    for gem in &git_gems {
+        let source = lock.git_source_of(gem).expect("Git closure member");
+        let declaration = runtime_gem_declaration(Some(lock), gem, false)?;
+        let Some((_, gemfile)) = files.iter_mut().find(|(path, _)| path == "Gemfile") else {
+            return Err("Ruby-family project has no Gemfile for Git gems".into());
+        };
+        ensure_runtime_gem_declaration(gemfile, gem, &declaration);
+        entries.push_str(&format!(
+            "  [{gem:?}, {:?}, {:?}, {:?}, {:?}],\n",
+            source.checkout_dir(), source.remote, source.revision,
+            source.glob.as_deref().unwrap_or("{,*,*/*}.gemspec"),
+        ));
+    }
+    let mut body = format!("# frozen_string_literal: true\n# Git sources pinned by the application's Gemfile.lock.\n[\n{entries}");
+    body.push_str(r##"].each do |name, checkout, remote, revision, glob|
+  directory = Gem.path.map { |root| File.join(root, "bundler", "gems", checkout) }.find { |path| File.directory?(path) }
+  unless directory
+    raise LoadError, "roundhouse: git gem #{name} (#{remote} at #{revision}) has no checkout bundler/gems/#{checkout} on Gem.path"
+  end
+  if (loaded = Gem.loaded_specs[name])
+    root = File.expand_path(directory) + File::SEPARATOR
+    unless (File.expand_path(loaded.full_gem_path) + File::SEPARATOR).start_with?(root)
+      raise LoadError, "roundhouse: git gem #{name} (#{remote} at #{revision}) is already loaded from #{loaded.full_gem_path}, not #{directory}"
+    end
+    next
+  end
+  spec = Dir[File.join(directory, glob)].filter_map { |file| Gem::Specification.load(file) }.find { |candidate| candidate.name == name }
+  unless spec
+    raise LoadError, "roundhouse: git gem #{name} (#{remote} at #{revision}) has no gemspec in #{directory}"
+  end
+  spec.full_gem_path = File.dirname(spec.loaded_from)
+  spec.extension_dir = File.join(File.dirname(directory), "extensions", Gem::Platform.local.to_s,
+    Gem.extension_api_version, [checkout, File.basename(spec.full_gem_path)].uniq.join("-"))
+  spec.activate
+  # Framework specs can satisfy dependencies, but their Ruby files must not
+  # replace the framework implementations in this emitted project.
+  if %w[rails railties activesupport activemodel activerecord activejob activestorage actionpack actionview actioncable actionmailer actionmailbox actiontext].include?(name)
+    paths = spec.full_require_paths
+    $LOAD_PATH.reject! { |path| paths.include?(path) }
+  end
+end
+"##);
+    let Some((_, facades)) = files.iter_mut().find(|(path, _)| path == "runtime/gem_facades.rb") else {
+        return Err("Ruby-family project has no gem facade loader for Git gems".into());
+    };
+    facades.insert_str(0, "require_relative \"git_gems\"\n");
+    files.push(("runtime/git_gems.rb".into(), body));
+    files.retain(|(path, _)| path != "Gemfile.lock");
+    Ok(())
 }
 
 /// Carry direct, unmodeled gems that the emitted CRuby app actually names.
