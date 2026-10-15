@@ -51,6 +51,13 @@ a `Rails::Engine` subclass.
 Roundhouse identifies that superclass from the Ruby syntax tree.
 It does not require a folder named `components`, `packs`, or `lib`.
 
+An optional [`roundhouse.yml`](roundhouse-yml.md) at the app root adds
+test folders and lists project extensions. An extension can declare a
+gem's attribute macros, such as `price_column :amount`. The attributes
+then read untyped, and `check` reports one error at the macro rather
+than a `send_dispatch_failed` at every use of the value object. A
+mistake in the file or an extension stops ingest, and `check` exits 2.
+
 Roundhouse rejects paths outside the application and paths with parent-directory references.
 It accepts absolute paths inside the application.
 It excludes symbolic links throughout selected path gem trees.

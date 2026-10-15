@@ -21,6 +21,7 @@ without that shared lowering sequence; see [`src/session.rs`](../../src/session.
 | Shared lowering / pass order | `src/lower/mod.rs::POST_ANALYZE_PASS_ORDER` |
 | Target syntax | `src/emit/` |
 | Project assembly / target dispatch | `src/project.rs::target_files` |
+| Gem requires / Gemfile declarations; project extensions | `src/gems.rs`, `src/extensions.rs` |
 | Framework sources / shared transpile driver | `runtime/ruby/`, `src/runtime_loader.rs` |
 | Hand-written target glue | `runtime/<target>/` |
 

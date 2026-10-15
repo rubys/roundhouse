@@ -32,136 +32,20 @@ roundhouse --target LANG [-o OUT] [INPUT] [--survey] [--allow-unsupported]
   files a previous run left behind are not removed, so regenerate into
   a clean directory when the app has lost files.
 
-## Test folders
+## Configuration
 
-Roundhouse reads every `.rb` file recursively from these folders by default:
+An optional [`roundhouse.yml`](roundhouse-yml.md) at the app root adds
+test folders (`test_paths`) and lists project extensions (`extensions`)
+that describe gems and class-body DSLs Roundhouse does not know.
+`check` and the editor read the same file, so their diagnostics match
+what transpile sees.
 
-- `test/models`
-- `test/controllers`
-- `test/helpers`
-- `test/channels`
-- `test/lib`
-
-The app root can contain a `roundhouse.yml` file that adds folders:
-
-```yaml
-test_paths:
-  - test/unit
-  - quality/specs
-```
-
-`test_paths` adds folders. It does not replace the default folders. Each
-value must name a literal directory relative to the app root. Roundhouse
-does not expand globs, environment variables, or `~`. A configuration
-error stops ingestion.
-Roundhouse rejects a configured path with a symbolic link. It does not
-follow symbolic links below selected folders.
-
-Roundhouse reads `test/test_helper.rb`, `test/test_helpers/`, and
-`test/fixtures/` outside this folder list.
-
-## Project extensions
-
-An app can describe gems and class-body DSLs that Roundhouse does not
-know about. The descriptions live in the app's own tree, so the compiler
-does not have to carry them. List extension directories in
-`roundhouse.yml`:
-
-```yaml
-extensions:
-  - config/roundhouse
-```
-
-Each entry names a literal directory relative to the app root, as with
-`test_paths`. It must not contain `..`, an absolute path, or a symbolic
-link in the directory path. Directories load in the listed order.
-The same directory must not appear twice.
-
-The `gems.yml` and `macros.yml` files are optional. Each file can be a
-symbolic link, including a link to a file outside the app root.
-Roundhouse reports an error if it cannot read a linked file.
-
-Example files:
-
-```yaml
-# gems.yml
-lock_gated_requires:
-  - {require: "widgets/all", gem: "widgets"}
-rails_dependent:
-  - {gem: "widget-engine", why: "requiring it loads Rails framework files"}
-runtime_gems:
-  - {constant: "Widget", gem: "widgets"}
-  - {any_text: ["Widget::Cache."], gem: "widget-cache"}
-```
-
-```yaml
-# macros.yml
-attribute_macros:
-  - {name: price_column, positional: true}
-  - {name: bag_columns, hash_key: attributes}
-```
-
-- `lock_gated_requires`: when the app's `Gemfile.lock` resolves the gem,
-  the `ruby` and `jruby` trees require the path at boot. Registry gems
-  use the locked version. Git gems keep the locked URL and revision.
-  PATH gems remain source inputs; this setting does not load them natively.
-- `rails_dependent`: requiring the gem loads Rails, so compiled projects
-  do not load it natively. References to its constants stay errors,
-  including constants made known by an RBI. The error includes the gem
-  name and the `why` text. App-owned constants keep their own definitions.
-- `runtime_gems`: the `ruby` and `jruby` trees declare the gem in their
-  Gemfile when a file under `app/` names the constant or contains one of
-  the texts. Git gems keep their source and revision. This setting does
-  not require the gem; use an application require or `lock_gated_requires`.
-- `attribute_macros`: the attributes a macro names read and write as
-  untyped, either from its leading symbol arguments (`positional`) or
-  from the array under a keyword (`hash_key`). No target lowers the
-  macro itself, so each call is reported as an error at its declaration.
-  This replaces a dispatch error at every place the value object is used.
-
-Extension gem facts also select the locked gems' Tapioca RBIs under
-`sorbet/rbi/gems/`. This includes gems classified as infrastructure or
-standard-library gems. An RBI supplies types and ownership, not executable
-code. A gem in `rails_dependent` stays refused even when its RBI declares
-the referenced class, module, or value. Other targets refuse constants
-that depend on a native extension gem instead of emitting missing classes.
-
-Roundhouse records extension boot loads on each app. A lockfile dependency
-alone does not establish that a gem loads. A `runtime_gems` row does not
-become a boot require.
-
-For Git-backed native gems, run the emitted project's `bundle install`.
-At boot, Roundhouse activates the locked checkouts under
-`<gem home>/bundler/gems/`, including Git-backed dependencies, before the
-guarded requires. It reports an error if source metadata or a checkout
-is missing, or if a published copy is already active. It never replaces
-a locked Git source with a published gem of the same name.
-The Gemfile also preserves Git `glob` and `submodules` settings.
-The runtime uses the locked glob to find each gemspec.
-
-A guarded require stays quiet when the optional feature itself is absent.
-If a present feature fails to load an internal dependency, the runtime
-reports both the requested feature and the load error on standard error.
-
-Configured attribute macros also apply in a concern's `included do`
-block. Roundhouse retains direct statements from `ActiveSupport::Concern`
-blocks and inserts them into each including model before analysis.
-Each model gets the macro's attribute types and its declaration error.
-A concern that no model includes does not change attribute types or
-produce macro declaration errors. This does not add general class-body
-execution or support for `class_attribute` on models.
-
-Extension rows are added after Roundhouse's own rows and never replace
-them. Unknown keys, malformed rows, a missing directory, and a
-`rails_dependent` gem that another fact loads or that Roundhouse models
-all stop ingestion with an error that names the file. The `types` and
-`overlay` entries are reserved and rejected until they are implemented.
-
-The CLI and browser use the same built-in gem tables to validate
-extensions.
-
-Extension facts belong to the app that lists them. An app that lists no
-extensions behaves as before.
+A [`gems.yml`](roundhouse-yml.md#gemsyml) supplies facts for gem RBI
+selection. It also controls native gem loads in `ruby` and `jruby`
+projects. The facts can pin and require a locked gem at boot or declare
+a gem when `app/` names it. They can also refuse a gem that loads Rails.
+Constants from a refused gem stay errors, including constants known
+through an RBI.
 
 Transpilation is the analysis from [`check.md`](check.md) followed by
 lowering and emit. It requires zero analysis errors and a runtime for
@@ -306,7 +190,7 @@ Emitted code is meant to be read. Method names, file layout and the
 order of things follow the Ruby they came from; the runtime library is
 a few files of ordinary code in the target language, not a framework.
 The emitted tests come from the default test folders and any additional
-folders in `roundhouse.yml`.
+folders in [`roundhouse.yml`](roundhouse-yml.md#test_paths).
 
 ## Regenerating
 

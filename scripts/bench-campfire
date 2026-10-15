@@ -10,7 +10,7 @@
 #
 # Usage:  scripts/bench-campfire [options] [LANE ...]
 #
-#   LANE ∈ { rails | ruby | spinel | rust | go | elixir |
+#   LANE ∈ { rails | ruby | ruby-falcon | spinel | rust | go | elixir |
 #            rails-1p | ruby-1p | spinel-1p |
 #            jruby | truffleruby | rails-truffleruby |
 #            rails-nocache | rails-nocache-1p }
@@ -30,6 +30,18 @@
 #                    RENDERING
 #     ruby           roundhouse emit on CRuby, the same Puma shape and
 #                    the same allocator
+#     ruby-falcon    the SAME emitted tree and config.ru under Falcon
+#                    instead of Puma: `falcon serve --forked`, the same
+#                    worker count, jemalloc, YJIT. Falcon is the server
+#                    tobi's lane runs, and on the box its hello-world
+#                    floor is ~2x Puma's (106k vs 54k req/s, 2026-10-15),
+#                    which is the ceiling the static routes hit. HTTP
+#                    only: the WebSocket phase still drives `ruby` under
+#                    Puma (cable.rb hijacks the socket the Puma way). The
+#                    Falcon gem is not in the emitted Gemfile; this lane
+#                    adds it in a `Gemfile.falcon` beside the emit, at the
+#                    version tobi's lock pins, so the two lanes run the
+#                    same server.
 #     spinel         the roundhouse spinel BINARY, workers autodetected
 #     jruby          the roundhouse emit for the JVM (`--target jruby`:
 #                    the same tree over JDBC), ONE process, one Puma
@@ -328,7 +340,7 @@ while [[ $# -gt 0 ]]; do
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
         -h|--help)     sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
-        rails|rails-nocache|ruby|spinel|tobi|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
+        rails|rails-nocache|ruby|ruby-falcon|spinel|tobi|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -738,6 +750,24 @@ if wants_lane rust && [[ ! -x "$RUST_BIN" ]]; then
     fail "no rust campfire binary at $RUST_BIN — dropping the rust lane"
     drop_lane rust build "once-campfire-rust binary not built (cargo build --release -p campfire)"
 fi
+# The ruby-falcon lane's bundle: the emit's own Gemfile and lock plus
+# falcon, at the version tobi's lock pins (0.57.0 when there is no tobi
+# checkout to read). Resolved again every run — cheap when the gems are
+# already installed — because `prepare` writes a fresh Gemfile.
+if wants_lane ruby-falcon; then
+    FALCON_VERSION="$(sed -n 's/^    falcon (\([^)]*\))$/\1/p' "$TOBI_ROOT/Gemfile.lock" 2>/dev/null | head -1)"
+    FALCON_VERSION="${FALCON_VERSION:-0.57.0}"
+    { cp "$EMIT/Gemfile" "$EMIT/Gemfile.falcon" &&
+      cp "$EMIT/Gemfile.lock" "$EMIT/Gemfile.falcon.lock" &&
+      printf '\n# Added by scripts/bench-campfire for the ruby-falcon lane.\ngem "falcon", "%s"\n' \
+          "$FALCON_VERSION" >> "$EMIT/Gemfile.falcon" &&
+      (cd "$EMIT" && BUNDLE_GEMFILE="$EMIT/Gemfile.falcon" bundle install \
+          > "$LOG_DIR/bundle-ruby-falcon.log" 2>&1 ||
+       BUNDLE_GEMFILE="$EMIT/Gemfile.falcon" bundle check >> "$LOG_DIR/bundle-ruby-falcon.log" 2>&1); } || {
+        fail "the emit's falcon bundle failed (see $LOG_DIR/bundle-ruby-falcon.log) — dropping the ruby-falcon lane"
+        drop_lane ruby-falcon build "the emit's falcon bundle failed" "$LOG_DIR/bundle-ruby-falcon.log"
+    }
+fi
 if wants_lane tobi && ! ( cd "$TOBI_ROOT" 2>/dev/null && bundle check >/dev/null 2>&1 &&
                           [[ -f lib/campfire_vips.so && -f vendor/gems/extralite/lib/extralite_ext.so ]] ); then
     fail "$TOBI_ROOT is not bundled and built — dropping the tobi lane"
@@ -983,6 +1013,21 @@ start_lane() {
                 config.ru ) > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
+        ruby-falcon)
+            # The `ruby` lane's process, env and allocator, with Falcon
+            # forking the workers instead of Puma. Each forked child
+            # loads config.ru itself (no --preload), so each opens its
+            # own SQLite handle — the job puma.rb's before_worker_boot
+            # does for the `ruby` lane.
+            local jem w; jem="$(find_jemalloc || true)"; w="$(deployed_worker_count)"
+            printf 'server=falcon %s --forked\njemalloc=%s\nworkers=%s\n' \
+                "$FALCON_VERSION" "${jem:-ABSENT}" "$w" > "$shape"
+            ( cd "$EMIT" && exec env RAILS_ENV=production RUBY_YJIT_ENABLE=1 \
+                BUNDLE_GEMFILE="$EMIT/Gemfile.falcon" ${jem:+LD_PRELOAD="$jem"} \
+                bundle exec falcon serve --bind "http://127.0.0.1:$port" \
+                --forked --count "$w" -c config.ru ) > "$log" 2>&1 &
+            SERVER_PID=$!
+            ;;
         jruby)
             # One process, a thread per hardware thread, no GVL: the JVM
             # runs Ruby threads in parallel, so the shape Rails reaches
@@ -1175,7 +1220,7 @@ login_cookie() {
             scripts/campfire-oracle login --out "$ORACLE" --port "$port" --jar "$jar" >/dev/null \
                 || { dump_login_failure "sign-in failed"; return 1; }
             ;;
-        ruby|ruby-1p|spinel|spinel-1p|jruby|truffleruby|elixir)
+        ruby|ruby-1p|ruby-falcon|spinel|spinel-1p|jruby|truffleruby|elixir)
             # The emitted tree verifies what the pinned campfire asks
             # for. Since the edbc779 pin that is `protect_from_forgery
             # using: :header_only` with a `token_tag` of "" (e7e5f86b):
@@ -1370,6 +1415,7 @@ for lane in "${LANES[@]}"; do
         rails-nocache-1p)    shape_note="1 worker x $THREADS threads, RENDERING (no fragment cache)" ;;
         rails|rails-nocache) shape_note="campfire's own worker formula x $THREADS threads, thruster, jemalloc, resque-pool" ;;
         ruby)                shape_note="$(deployed_worker_count) worker(s) x $THREADS threads, jemalloc" ;;
+        ruby-falcon)         shape_note="the ruby emit under Falcon $FALCON_VERSION, $(deployed_worker_count) forked workers, jemalloc" ;;
         spinel)              shape_note="one process, workers autodetected" ;;
         spinel-1p)           shape_note="one process, SPINEL_WORKERS=1" ;;
         rust)                shape_note="once-campfire-rust, one process, own front server" ;;
@@ -1830,6 +1876,7 @@ tr_ran      = targets_ran.include?("truffleruby")
 rails_tr_ran = targets_ran.include?("rails-truffleruby")
 one_p_ran   = targets_ran.any? { |t| t.end_with?("-1p") }
 tobi_ran    = targets_ran.include?("tobi")
+falcon_ran  = targets_ran.include?("ruby-falcon")
 
 env["notes"] = [
   ("<code>rails</code> and the emit lanes BOTH serve campfire's message " \
@@ -1863,6 +1910,13 @@ env["notes"] = [
   "<code>spinel</code> needs none of this: " \
   "one process, green threads, one shared registry — which is why it is " \
   "the emit lane the WebSocket tier can measure at its full worker count.",
+  ("<code>ruby-falcon</code> is the SAME emitted tree and " \
+   "<code>config.ru</code> as <code>ruby</code>, served by Falcon " \
+   "(<code>falcon serve --forked</code>, the same worker count and " \
+   "allocator) instead of Puma: the server <code>tobi</code> runs. It " \
+   "isolates what the app server costs. Falcon is added to the emit's " \
+   "bundle by this harness, at the version tobi's lock pins; the emitted " \
+   "Gemfile names only Puma, and the WebSocket phase still runs Puma." if falcon_ran),
   ("The <code>-1p</code> lanes are the diagnostic, and what they pin is " \
   "ONE CPU rather than one process — CRuby needs a process per core " \
   "because of the GVL, while the binary is a single process either way " \
