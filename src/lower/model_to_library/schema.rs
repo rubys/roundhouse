@@ -94,7 +94,7 @@ pub(super) fn push_schema_methods(
         model,
         &table.columns.iter().map(|c| (c.name.clone(), super::ty_of_column_slot(c))).collect(),
     );
-    let mut demanded: Option<std::collections::HashSet<Symbol>> = None;
+    let mut demanded: Option<std::rc::Rc<std::collections::HashSet<Symbol>>> = None;
     for col in &table.columns {
         methods.push(synth_attr_reader(owner, col, model));
         if model.enums.contains_key(&col.name) {
@@ -156,7 +156,7 @@ pub(super) fn push_schema_methods(
             // have to learn (rust's hand-written model impl, go's
             // call-form list), for an answer that is the constant
             // false/nil on those lanes anyway.
-            let demanded = demanded.get_or_insert_with(|| model_body_names(models));
+            let demanded = demanded.get_or_insert_with(|| demanded_names(models));
             for (name, runtime, ret) in pending_change_methods(col) {
                 if demanded.contains(&name)
                     && !super::associations::model_defines_instance_method(model, &name)
@@ -180,7 +180,7 @@ pub(super) fn push_schema_methods(
             continue;
         };
         let Some(col) = table.columns.iter().find(|c| c.name == *foreign_key) else { continue };
-        let demanded = demanded.get_or_insert_with(|| model_body_names(models));
+        let demanded = demanded.get_or_insert_with(|| demanded_names(models));
         let prev = Symbol::from(format!("{}_previously_changed?", name.as_str()));
         if demanded.contains(&prev) && !super::associations::model_defines_instance_method(model, &prev) {
             methods.push(synth_column_dirty_pred(owner, col, prev));
@@ -2156,6 +2156,67 @@ fn pending_change_methods(col: &Column) -> Vec<(Symbol, &'static str, Ty)> {
     ]
 }
 
+#[cfg(test)]
+pub(crate) mod lookup_test_support {
+    use std::cell::Cell;
+    thread_local! {
+        pub(crate) static UNCACHED: Cell<bool> = const { Cell::new(false) };
+        pub(crate) static BUILDS: Cell<usize> = const { Cell::new(0) };
+        pub(crate) static MODEL_VISITS: Cell<usize> = const { Cell::new(0) };
+    }
+}
+
+/// [`model_body_names`] of one models slice, shared by every
+/// [`push_schema_methods`] over that slice while a
+/// [`share_model_body_names`] guard lives. Computed per call, the names
+/// walked every model body once per model with a column: quadratic in
+/// the number of models.
+#[derive(Default)]
+pub(crate) struct ModelBodyNames(std::rc::Rc<std::cell::OnceCell<std::rc::Rc<std::collections::HashSet<Symbol>>>>);
+
+type SharedBodyNames = (usize, usize, std::rc::Rc<std::cell::OnceCell<std::rc::Rc<std::collections::HashSet<Symbol>>>>);
+
+thread_local! {
+    static MODEL_BODY_NAMES: std::cell::RefCell<Option<SharedBodyNames>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Restores the previously shared names when dropped. It borrows the
+/// slice, so the slice cannot change while its names are shared.
+pub(crate) struct ModelBodyNamesGuard<'a>(Option<SharedBodyNames>, std::marker::PhantomData<&'a [Model]>);
+
+impl Drop for ModelBodyNamesGuard<'_> {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        MODEL_BODY_NAMES.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// Share `cache`'s [`model_body_names`] of `models` with every
+/// [`push_schema_methods`] over `models` (the same slice) for the
+/// guard's life.
+pub(crate) fn share_model_body_names<'a>(models: &'a [Model], cache: &ModelBodyNames) -> ModelBodyNamesGuard<'a> {
+    let shared = (models.as_ptr() as usize, models.len(), cache.0.clone());
+    let previous = MODEL_BODY_NAMES.with(|slot| slot.borrow_mut().replace(shared));
+    ModelBodyNamesGuard(previous, std::marker::PhantomData)
+}
+
+/// [`model_body_names`] of `models`: the shared names when `models` is
+/// the shared slice.
+fn demanded_names(models: &[Model]) -> std::rc::Rc<std::collections::HashSet<Symbol>> {
+    #[cfg(test)]
+    if lookup_test_support::UNCACHED.get() { return std::rc::Rc::new(model_body_names(models)); }
+    let shared = MODEL_BODY_NAMES.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .filter(|(ptr, len, _)| *ptr == models.as_ptr() as usize && *len == models.len())
+            .map(|(_, _, cell)| cell.clone())
+    });
+    match shared {
+        Some(cell) => cell.get_or_init(|| std::rc::Rc::new(model_body_names(models))).clone(),
+        None => std::rc::Rc::new(model_body_names(models)),
+    }
+}
+
 /// Every method name a model body SENDS or names as a Symbol (`if:
 /// :will_save_change_to_email?`, `before_save :x, if: …`), across all
 /// the models — the demand set for the pending-change synthesis. The
@@ -2165,6 +2226,8 @@ fn pending_change_methods(col: &Column) -> Vec<(Symbol, &'static str, Ty)> {
 /// `<col>_changed?` is not seen; that is a runtime NoMethodError, the
 /// state every such call was in before this synthesis existed.
 fn model_body_names(models: &[Model]) -> std::collections::HashSet<Symbol> {
+    #[cfg(test)]
+    lookup_test_support::BUILDS.with(|n| n.set(n.get() + 1));
     use crate::dialect::ModelBodyItem;
     fn walk(e: &Expr, out: &mut std::collections::HashSet<Symbol>) {
         match &*e.node {
@@ -2180,6 +2243,8 @@ fn model_body_names(models: &[Model]) -> std::collections::HashSet<Symbol> {
     }
     let mut out = std::collections::HashSet::new();
     for model in models {
+        #[cfg(test)]
+        lookup_test_support::MODEL_VISITS.with(|n| n.set(n.get() + 1));
         for item in &model.body {
             match item {
                 ModelBodyItem::Method { method, .. } => walk(&method.body, &mut out),

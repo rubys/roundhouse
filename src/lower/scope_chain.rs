@@ -2017,15 +2017,14 @@ pub fn mentions_assoc_extension(expr: &Expr, assocs: &AssocRegistry) -> bool {
 pub fn mentions_assoc_class_method(
     expr: &Expr,
     assocs: &AssocRegistry,
-    scopes: &ScopeRegistry,
+    scope_names: &HashSet<Symbol>,
     acm: &AssocClassMethods,
 ) -> bool {
     if acm.is_empty() {
         return false;
     }
-    let names = all_scope_names(scopes);
     let mut demand: HashSet<(Symbol, Symbol)> = HashSet::new();
-    collect_assoc_method_demand(expr, assocs, &names, &mut demand);
+    collect_assoc_method_demand(expr, assocs, scope_names, &mut demand);
     demand
         .iter()
         .any(|(_, m)| acm.values().any(|per_model| per_model.contains_key(m)))

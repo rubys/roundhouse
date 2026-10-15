@@ -28,6 +28,7 @@ pub(crate) fn lower_model_delegates(app: &mut crate::App) {
         return;
     }
 
+    let body_names = crate::lower::model_to_library::schema::share_model_body_names(&app.models, &Default::default());
     let mut params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
     params_specs.mark_file_fields(&app.models);
@@ -98,6 +99,7 @@ pub(crate) fn lower_model_delegates(app: &mut crate::App) {
         })
         .collect();
 
+    drop(body_names);
     for model in &mut app.models {
         let mut unknown_calls: Vec<_> = model
             .body

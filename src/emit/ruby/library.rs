@@ -109,6 +109,7 @@ fn record_return_overridden(app: &App, classes: &HashMap<ClassId, ()>, class: &C
 /// participate in lowering but emit inside their owner's constant declaration,
 /// never as standalone class files.
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
+    let _indexes = install_lookup_indexes(app);
     let mut lcs: Vec<LibraryClass> = app.library_classes.clone();
     // A block-taking tag helper gains a `<name>_into(io, …)` variant
     // that writes around a yield into the caller's buffer; the view
@@ -176,6 +177,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     } else {
         app
     };
+    let _context_indexes = context_indexes(app);
     // A nested class goes in its parent's file, as the source wrote
     // it. Given its own, each part-file re-opened the outer class and
     // CLOSED it again, and `TracePoint(:end)` — how a gem implements
@@ -719,6 +721,12 @@ pub(super) fn apply_extras_facades(files: &mut [(String, String)], app: &App) {
 /// the restored bytes are exactly what the base would have emitted
 /// without the swap.
 pub(super) fn restore_extras_facades(files: &mut [(String, String)], app: &App) {
+    let is_facade = |p: &str| {
+        EXTRAS_FACADES.iter().any(|f| p == format!("{}.rb", f.stem) || p == format!("{}.rbs", f.stem))
+    };
+    if !files.iter().any(|(p, _)| is_facade(p)) {
+        return;
+    }
     for ef in emit_library_class_decls(app) {
         let p = ef.path.to_string_lossy().into_owned();
         if EXTRAS_FACADES
@@ -1801,7 +1809,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     || crate::lower::scope_chain::mentions_assoc_class_method(
                         e,
                         &assocs,
-                        &scopes,
+                        &names,
                         &assoc_class_methods,
                     )
                     || (class_self.is_some()
@@ -7573,8 +7581,7 @@ fn emit_library_class_decl_inner(
 /// method of `lc`, of either side, the hook names. `None` keeps it first.
 fn hooked_include_position(lc: &LibraryClass, inc: &ClassId, app: &App) -> Option<usize> {
     let bare = |c: &ClassId| c.0.as_str().trim_start_matches("::").to_string();
-    let target = bare(inc);
-    let module = app.library_classes.iter().find(|m| m.is_module && bare(&m.name) == target)?;
+    let module = first_module_bare_named(&bare(inc), app)?;
     let hook = module.methods.iter().find(|m| {
         m.receiver == MethodReceiver::Class && m.name.as_str() == "included" && m.params.len() == 1
     })?;
@@ -7651,7 +7658,32 @@ fn constant_readers(
         lc.constants.iter().map(|(n, _)| n.as_str()).collect();
     let mut out: std::collections::HashMap<String, BTreeSet<String>> =
         std::collections::HashMap::new();
+    if let Some(index) = ConstantReaderIndex::current(app) {
+        // The same reads as the walk below, looked up: a qualified
+        // `Own::NAME` from any other class, or a bare `NAME` from a
+        // class nested inside this one.
+        for (cname, _) in &lc.constants {
+            let mut qualified: Vec<String> = own_segs.iter().map(|s| s.to_string()).collect();
+            qualified.push(cname.as_str().to_string());
+            let bare = vec![cname.as_str().to_string()];
+            let qualified_readers = index.get(&qualified).into_iter().flatten().map(|&j| (j, false));
+            let bare_readers = index.get(&bare).into_iter().flatten().map(|&j| (j, true));
+            for (j, needs_nesting) in qualified_readers.chain(bare_readers) {
+                let other_name = app.library_classes[j].name.0.as_str();
+                if other_name == own || (needs_nesting && !other_name.starts_with(&format!("{own}::"))) {
+                    continue;
+                }
+                let other_path: Vec<String> = other_name.split("::").map(str::to_string).collect();
+                if let Some(req) = resolve(&other_path, true) {
+                    out.entry(cname.as_str().to_string()).or_default().insert(req);
+                }
+            }
+        }
+        return out;
+    }
     for other in &app.library_classes {
+        #[cfg(test)]
+        lookup_tests::READER_SCAN_VISITS.with(|n| n.set(n.get() + 1));
         let other_name = other.name.0.as_str();
         if other_name == own {
             continue;
@@ -7682,6 +7714,199 @@ fn constant_readers(
         }
     }
     out
+}
+
+/// Every constant path each library class's load-time code (constant
+/// initializers and class-body calls) names, inverted: path → indices
+/// into `app.library_classes` of the classes naming it. Built once per
+/// `emit_library_class_decls` and dropped when it returns; outside that
+/// scope (or for another `App`) `constant_readers` walks as before.
+struct ConstantReaderIndex;
+
+#[cfg(test)]
+#[path = "lookup_tests.rs"]
+mod lookup_tests;
+
+type ReaderIndex = std::rc::Rc<HashMap<Vec<String>, Vec<usize>>>;
+
+thread_local! {
+    static CONSTANT_READER_INDEX: std::cell::RefCell<Option<(usize, ReaderIndex)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Restores the previous index when the emit that installed this one
+/// returns. Borrows the `App` for its whole life, so the address the
+/// index is keyed by cannot be reused by another `App` meanwhile.
+struct ConstantReaderIndexGuard<'a>(Option<(usize, ReaderIndex)>, std::marker::PhantomData<&'a App>);
+
+impl Drop for ConstantReaderIndexGuard<'_> {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        CONSTANT_READER_INDEX.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+impl ConstantReaderIndex {
+    fn install(app: &App) -> ConstantReaderIndexGuard<'_> {
+        #[cfg(test)]
+        lookup_tests::READER_BUILDS.with(|n| n.set(n.get() + 1));
+        let mut index: HashMap<Vec<String>, Vec<usize>> = HashMap::default();
+        for (j, other) in app.library_classes.iter().enumerate() {
+            #[cfg(test)]
+            lookup_tests::READER_CLASS_VISITS.with(|n| n.set(n.get() + 1));
+            let mut paths: BTreeSet<Vec<String>> = BTreeSet::new();
+            for (_, v) in &other.constants {
+                walk_const_paths(v, &mut paths);
+            }
+            for call in other.unknown_calls.iter().chain(&other.class_ivar_initializers) {
+                walk_const_paths(call, &mut paths);
+            }
+            for path in paths {
+                index.entry(path).or_default().push(j);
+            }
+        }
+        let key = app as *const App as usize;
+        let previous =
+            CONSTANT_READER_INDEX.with(|slot| slot.borrow_mut().replace((key, std::rc::Rc::new(index))));
+        ConstantReaderIndexGuard(previous, std::marker::PhantomData)
+    }
+
+    /// The installed index, when it was built from this `app`.
+    fn current(app: &App) -> Option<ReaderIndex> {
+        #[cfg(test)]
+        if lookup_tests::UNCACHED.get() { return None; }
+        let key = app as *const App as usize;
+        CONSTANT_READER_INDEX
+            .with(|slot| slot.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, index)| index.clone()))
+    }
+}
+
+/// Both per-reference indexes, borrowing the App until this scope ends.
+/// Nested emits restore the enclosing indexes on return.
+pub(crate) struct LookupIndexes<'a> {
+    _readers: ConstantReaderIndexGuard<'a>,
+    _names: NameIndexGuard<'a>,
+}
+
+pub(crate) fn install_lookup_indexes(app: &App) -> LookupIndexes<'_> {
+    LookupIndexes { _readers: ConstantReaderIndex::install(app), _names: NameIndex::install(app) }
+}
+
+fn context_indexes(app: &App) -> Option<LookupIndexes<'_>> {
+    (NameIndex::current(app).is_none()).then(|| install_lookup_indexes(app))
+}
+
+/// The app's class names, for the per-reference lookups: model and
+/// controller names, and each library class name's indices into
+/// `app.library_classes` (a name can repeat: a reopen is its own entry).
+/// Installed and keyed like `ConstantReaderIndex`; without it the
+/// lookups scan as before.
+struct NameIndex {
+    models: std::collections::HashSet<String>,
+    controllers: std::collections::HashSet<String>,
+    library_classes: HashMap<String, Vec<usize>>,
+    first_modules_bare: std::cell::OnceCell<HashMap<String, usize>>,
+    constant_paths: std::cell::OnceCell<std::rc::Rc<std::collections::HashSet<String>>>,
+}
+
+thread_local! {
+    static NAME_INDEX: std::cell::RefCell<Option<(usize, std::rc::Rc<NameIndex>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct NameIndexGuard<'a>(Option<(usize, std::rc::Rc<NameIndex>)>, std::marker::PhantomData<&'a App>);
+
+impl Drop for NameIndexGuard<'_> {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        NAME_INDEX.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+impl NameIndex {
+    fn install(app: &App) -> NameIndexGuard<'_> {
+        #[cfg(test)]
+        lookup_tests::NAME_BUILDS.with(|n| n.set(n.get() + 1));
+        let mut library_classes: HashMap<String, Vec<usize>> = HashMap::new();
+        for (j, lc) in app.library_classes.iter().enumerate() {
+            #[cfg(test)]
+            lookup_tests::NAME_CLASS_VISITS.with(|n| n.set(n.get() + 1));
+            library_classes.entry(lc.name.0.as_str().to_string()).or_default().push(j);
+        }
+        let index = NameIndex {
+            models: app.models.iter().map(|m| m.name.0.as_str().to_string()).collect(),
+            controllers: app.controllers.iter().map(|c| c.name.0.as_str().to_string()).collect(),
+            library_classes,
+            first_modules_bare: std::cell::OnceCell::new(),
+            constant_paths: std::cell::OnceCell::new(),
+        };
+        let key = app as *const App as usize;
+        let previous = NAME_INDEX.with(|slot| slot.borrow_mut().replace((key, std::rc::Rc::new(index))));
+        NameIndexGuard(previous, std::marker::PhantomData)
+    }
+
+    fn current(app: &App) -> Option<std::rc::Rc<NameIndex>> {
+        #[cfg(test)]
+        if lookup_tests::UNCACHED.get() { return None; }
+        let key = app as *const App as usize;
+        NAME_INDEX.with(|slot| slot.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, index)| index.clone()))
+    }
+}
+
+/// Whether `name` is a model of this app.
+fn is_model_named(name: &str, app: &App) -> bool {
+    match NameIndex::current(app) {
+        Some(index) => index.models.contains(name),
+        None => app.models.iter().any(|m| m.name.0.as_str() == name),
+    }
+}
+
+/// Whether `name` is a controller of this app.
+fn is_controller_named(name: &str, app: &App) -> bool {
+    match NameIndex::current(app) {
+        Some(index) => index.controllers.contains(name),
+        None => app.controllers.iter().any(|c| c.name.0.as_str() == name),
+    }
+}
+
+/// The library classes named `name`, in `app.library_classes` order.
+fn library_classes_named<'a>(name: &str, app: &'a App) -> Vec<&'a LibraryClass> {
+    match NameIndex::current(app) {
+        Some(index) => index
+            .library_classes
+            .get(name)
+            .map(|js| js.iter().map(|&j| &app.library_classes[j]).collect())
+            .unwrap_or_default(),
+        None => app.library_classes.iter().filter(|lc| lc.name.0.as_str() == name).collect(),
+    }
+}
+
+/// The first library module whose name, less any leading `::`, is
+/// `target`.
+fn first_module_bare_named<'a>(target: &str, app: &'a App) -> Option<&'a LibraryClass> {
+    let bare = |lc: &'a LibraryClass| lc.name.0.as_str().trim_start_matches("::");
+    match NameIndex::current(app) {
+        Some(index) => {
+            let first = index.first_modules_bare.get_or_init(|| {
+                #[cfg(test)]
+                lookup_tests::BARE_MODULE_BUILDS.with(|n| n.set(n.get() + 1));
+                let mut first: HashMap<String, usize> = HashMap::new();
+                for (j, lc) in app.library_classes.iter().enumerate() {
+                    if lc.is_module {
+                        first.entry(bare(lc).to_string()).or_insert(j);
+                    }
+                }
+                first
+            });
+            first.get(target).map(|&j| &app.library_classes[j])
+        }
+        None => app.library_classes.iter().find(|lc| lc.is_module && bare(lc) == target),
+    }
+}
+
+/// Whether `name` is a model or a library class of this app.
+fn is_model_or_library_class(name: &str, app: &App) -> bool {
+    is_model_named(name, app) || !library_classes_named(name, app).is_empty()
 }
 
 /// Split a class's constants into the ones that can be initialized
@@ -7917,9 +8142,20 @@ fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App) -> Vec<&'a Expr> {
     let app_module = |path: &[Symbol]| -> Option<&LibraryClass> {
         let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
         let nested = format!("{}::{written}", lc.name.0.as_str());
-        app.library_classes.iter().find(|c| {
-            c.is_module && c.origin.is_none() && (c.name.0.as_str() == written || c.name.0.as_str() == nested)
-        })
+        match NameIndex::current(app) {
+            Some(index) => index.library_classes.get(&written).into_iter().flatten()
+                .chain(index.library_classes.get(&nested).into_iter().flatten())
+                .copied()
+                .filter(|&j| {
+                    let c = &app.library_classes[j];
+                    c.is_module && c.origin.is_none()
+                })
+                .min()
+                .map(|j| &app.library_classes[j]),
+            None => app.library_classes.iter().find(|c| {
+                c.is_module && c.origin.is_none() && (c.name.0.as_str() == written || c.name.0.as_str() == nested)
+            }),
+        }
     };
     let mut extended: Vec<&LibraryClass> = Vec::new();
     let mut out = Vec::new();
@@ -8026,8 +8262,8 @@ fn include_is_unresolved(lc: &LibraryClass, inc: &ClassId) -> bool {
 /// `A::B::C` classes belongs in `A::B`'s file, because that is the
 /// body whose end must happen once.
 pub(super) fn file_owner(name: &str, app: &App) -> String {
-    if app.library_classes.iter().any(|class| class.name.0.as_str() == name
-        && matches!(class.origin, Some(LibraryClassOrigin::DataFactory { .. })))
+    if library_classes_named(name, app).iter().any(|class|
+        matches!(class.origin, Some(LibraryClassOrigin::DataFactory { .. })))
     {
         return file_owner(name.rsplit_once("::").unwrap().0, app);
     }
@@ -8051,15 +8287,44 @@ pub(super) fn file_owner(name: &str, app: &App) -> String {
 /// the MODEL `Account` — whose file then referenced a constant nothing
 /// had loaded. Both sides ask this now.
 fn owns_a_file(name: &str, app: &App) -> bool {
-    app.library_classes
-        .iter()
-        .any(|c| c.name.0.as_str() == name && !c.is_module)
+    library_classes_named(name, app).iter().any(|c| !c.is_module)
+}
+
+/// Every constant path the app declares (models, controllers, library
+/// classes and modules, test modules) and each namespace enclosing one.
+fn app_constant_paths(app: &App) -> std::rc::Rc<std::collections::HashSet<String>> {
+    let build = || {
+        #[cfg(test)]
+        lookup_tests::CONSTANT_PATH_BUILDS.with(|n| n.set(n.get() + 1));
+        let mut out: std::collections::HashSet<String> = std::collections::HashSet::default();
+        let names = app.models.iter().map(|m| m.name.0.as_str())
+            .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
+            .chain(app.library_classes.iter().map(|c| c.name.0.as_str()))
+            .chain(app.test_modules.iter().map(|t| t.name.0.as_str()));
+        for name in names {
+            let name = name.trim_start_matches("::");
+            let mut end = 0;
+            while let Some(at) = name[end..].find("::") {
+                out.insert(name[..end + at].to_string());
+                end += at + 2;
+            }
+            out.insert(name.to_string());
+        }
+        std::rc::Rc::new(out)
+    };
+    match NameIndex::current(app) {
+        Some(index) => index.constant_paths.get_or_init(build).clone(),
+        None => build(),
+    }
 }
 
 /// Does the app declare the constant `path`, or a namespace enclosing a
 /// declaration (models, controllers, library classes and modules, test
 /// modules)?
 fn declares_constant_path(path: &str, app: &App) -> bool {
+    if NameIndex::current(app).is_some() {
+        return app_constant_paths(app).contains(path);
+    }
     let names = app.models.iter().map(|m| m.name.0.as_str())
         .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
         .chain(app.library_classes.iter().map(|c| c.name.0.as_str()))
@@ -8097,27 +8362,26 @@ fn lexically_qualified(written: &str, scopes: &[&str], app: &App) -> String {
 }
 
 fn is_app_class(name: &str, app: &App) -> bool {
-    app.models.iter().any(|m| m.name.0.as_str() == name)
-        || app.controllers.iter().any(|c| c.name.0.as_str() == name)
-        || app
-            .library_classes
-            .iter()
-            .any(|c| c.name.0.as_str() == name && !c.is_module)
+    is_model_named(name, app)
+        || is_controller_named(name, app)
+        || library_classes_named(name, app).iter().any(|c| !c.is_module)
 }
 
 /// The declared superclass of an app class named by a namespace
 /// segment, so a nested file can reopen it with the same parent.
 fn outer_class_parent(name: &str, app: &App) -> Option<ClassId> {
-    if let Some(m) = app.models.iter().find(|m| m.name.0.as_str() == name) {
-        return m.parent.clone();
+    if is_model_named(name, app) {
+        if let Some(m) = app.models.iter().find(|m| m.name.0.as_str() == name) {
+            return m.parent.clone();
+        }
     }
-    if let Some(c) = app.controllers.iter().find(|c| c.name.0.as_str() == name) {
-        return c.parent.clone();
+    if is_controller_named(name, app) {
+        if let Some(c) = app.controllers.iter().find(|c| c.name.0.as_str() == name) {
+            return c.parent.clone();
+        }
     }
-    app.library_classes
-        .iter()
-        .find(|c| c.name.0.as_str() == name && !c.is_module)
-        .and_then(|c| c.parent.clone())
+    library_classes_named(name, app).into_iter()
+        .find(|c| !c.is_module).and_then(|c| c.parent.clone())
 }
 
 /// The app class a written superclass names, looked up from the child's
@@ -8138,11 +8402,7 @@ fn lexical_parent(child: &str, parent: &ClassId, app: &App) -> ClassId {
     if written.starts_with("::") {
         return parent.clone();
     }
-    let defined = |candidate: &str| {
-        app.models.iter().any(|m| m.name.0.as_str() == candidate)
-            || app.controllers.iter().any(|c| c.name.0.as_str() == candidate)
-            || app.library_classes.iter().any(|lc| lc.name.0.as_str() == candidate)
-    };
+    let defined = |candidate: &str| is_model_or_library_class(candidate, app) || is_controller_named(candidate, app);
     let mut scope: Vec<&str> = child.split("::").collect();
     scope.pop();
     while !scope.is_empty() {
@@ -8164,10 +8424,7 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
         // itself first, so subclasses see both the framework methods
         // and the app's additions. Without this the reopen dangles:
         // nothing else in the require graph names it.
-        if app
-            .library_classes
-            .iter()
-            .any(|lc| lc.name.0.as_str() == "ActiveRecord::Base")
+        if !library_classes_named("ActiveRecord::Base", app).is_empty()
         {
             return Some("app/models/active_record/base".to_string());
         }
@@ -8196,13 +8453,12 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     if raw == "Logger::Formatter" || raw == "::Logger::Formatter" {
         return Some("runtime/logger".to_string());
     }
-    if app.models.iter().any(|m| m.name.0.as_str() == raw)
-        || app.library_classes.iter().any(|lc| lc.name.0.as_str() == raw)
+    if is_model_or_library_class(raw, app)
     {
         // underscore: namespaced parents nest (see emit_library_class_decls).
         return Some(format!("app/models/{}", crate::naming::underscore(raw)));
     }
-    if app.controllers.iter().any(|c| c.name.0.as_str() == raw) {
+    if is_controller_named(raw, app) {
         return Some(format!("app/controllers/{}", crate::naming::underscore(raw)));
     }
     // A SUPERCLASS that is a gem's class — lobsters' `TimeSeries <
@@ -8317,10 +8573,7 @@ fn require_path_for_body_const(
     // `Sound::Image` lives at app/models/sound/image.rb even though the
     // reference's first segment is `Sound`. Resolve the full path before
     // the self-reference short-circuit below.
-    let defined = |name: &str| {
-        app.models.iter().any(|m| m.name.0.as_str() == name)
-            || app.library_classes.iter().any(|lc| lc.name.0.as_str() == name)
-    };
+    let defined = |name: &str| is_model_or_library_class(name, app);
     // A value constant (`Shop::Types::LABEL`) lives in the file of the
     // longest prefix that is a class or module (`Shop::Types`), which
     // neither the whole path nor its first segment (`Shop`, a bare
@@ -8351,9 +8604,7 @@ fn require_path_for_body_const(
     // the whole app fails to load, so resolve the qualified form before
     // giving up on the bare one.
     let lexical = format!("{self_name}::{joined}");
-    if !self_name.is_empty()
-        && (app.models.iter().any(|m| m.name.0.as_str() == lexical)
-            || app.library_classes.iter().any(|lc| lc.name.0.as_str() == lexical))
+    if !self_name.is_empty() && is_model_or_library_class(&lexical, app)
     {
         let owner = file_owner(&lexical, app);
         if owner == self_name {
@@ -8373,15 +8624,11 @@ fn require_path_for_body_const(
     if is_core_class_name(first) {
         return None;
     }
-    if app.models.iter().any(|m| m.name.0.as_str() == first.as_str())
-        || app
-            .library_classes
-            .iter()
-            .any(|lc| lc.name.0.as_str() == first.as_str())
+    if is_model_or_library_class(first, app)
     {
         return Some(format!("app/models/{}", crate::naming::underscore(first)));
     }
-    if app.controllers.iter().any(|c| c.name.0.as_str() == first.as_str()) {
+    if is_controller_named(first, app) {
         return Some(format!("app/controllers/{}", crate::naming::underscore(first)));
     }
     // Qualified runtime names, resolved on the FULL path — `ActiveSupport`

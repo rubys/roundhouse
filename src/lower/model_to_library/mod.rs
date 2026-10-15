@@ -271,6 +271,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
+    let _body_names = schema::share_model_body_names(models, &Default::default());
     for model in models {
         let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, errors_readers);
         let table = schema.tables.get(&model.table.0);
@@ -1041,6 +1042,7 @@ pub(crate) fn unretained_model_contracts<'a>(
         let mut specs = crate::lower::controller_to_library::params::collect_specs(&app.controllers);
         specs.mark_file_fields(&app.models);
         let mut missing = HashSet::new();
+        let _body_names = schema::share_model_body_names(&app.models, &Default::default());
         for model in &app.models {
             let selected = selected(model);
             if selected.is_empty()

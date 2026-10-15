@@ -189,6 +189,8 @@ pub(crate) struct ConstResolver {
     /// Each source class or module that others are nested in by name,
     /// with those nested ones (`A` to `A::B` and `A::B::C`).
     nested_namespaces: HashMap<Box<str>, Vec<Box<str>>>,
+    /// The names `has_source_namespace` answers yes for, gathered once.
+    source_namespaces: HashSet<Box<str>>,
     /// Includes paths, full text and order because answers use file IDs
     /// and byte offsets. Retain no second copy of the source snapshot.
     source_fingerprint: u64,
@@ -399,7 +401,15 @@ impl ConstResolver {
         declared.sort_unstable();
         declared.dedup();
         let nested_namespaces = nested_namespaces_index(&declared);
-        Self { files, nested_namespaces, source_fingerprint: source_fingerprint(sources) }
+        let class_definitions: HashSet<&str> = declared.into_iter().collect();
+        let mut source_namespaces: HashSet<Box<str>> = files.iter().flatten()
+            .flat_map(|file| file.namespace_definitions.iter().cloned()).collect();
+        for (alias, target) in files.iter().flatten().flat_map(|file| file.runtime_namespace_aliases.iter()) {
+            if class_definitions.contains(alias.as_ref()) {
+                source_namespaces.insert(target.clone());
+            }
+        }
+        Self { files, nested_namespaces, source_namespaces, source_fingerprint: source_fingerprint(sources) }
     }
 
     fn file(&self, file: FileId) -> Option<&FileAnswers> {
@@ -503,13 +513,7 @@ impl ConstResolver {
     }
 
     pub(crate) fn has_source_namespace(&self, name: &str) -> bool {
-        self.files.iter().flatten().any(|file| file.namespace_definitions.contains(name))
-            || self.files.iter().flatten().any(|file| {
-                file.runtime_namespace_aliases.iter().any(|(alias, target)| {
-                    target.as_ref() == name && self.files.iter().flatten()
-                        .any(|source| source.class_definitions.contains(alias.as_ref()))
-                })
-            })
+        self.source_namespaces.contains(name)
     }
 
     pub(crate) fn is_runtime_class(&self, span: Span, path: &[Symbol], name: &str) -> bool {
@@ -866,6 +870,35 @@ fn answer_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_namespace_index_matches_original_file_and_runtime_alias_scan() {
+        for reopen in [false, true] {
+            let mut sources = vec![
+                SourceFile { path: "nested.rb".into(), text: "module Catalog\n class Reader; end\nend\n".into() },
+                SourceFile { path: "alias.rb".into(), text: "DataAlias = Data\nValue = 3\n".into() },
+            ];
+            if reopen {
+                sources.push(SourceFile { path: "reopen.rb".into(), text: "class DataAlias\n def marker; 1; end\nend\n".into() });
+            }
+            let resolver = ConstResolver::from_app_sources(&sources);
+            let mut queries = vec!["Catalog", "Catalog::Reader", "DataAlias", "Data", "Value", "Missing"];
+            queries.extend(resolver.files.iter().flatten().flat_map(|file|
+                file.namespace_definitions.iter().map(|name| name.as_ref())));
+            queries.extend(resolver.files.iter().flatten().flat_map(|file|
+                file.runtime_namespace_aliases.values().map(|name| name.as_ref())));
+            for name in queries {
+                let scanned = resolver.files.iter().flatten().any(|file| file.namespace_definitions.contains(name))
+                    || resolver.files.iter().flatten().any(|file| {
+                        file.runtime_namespace_aliases.iter().any(|(alias, target)| {
+                            target.as_ref() == name && resolver.files.iter().flatten()
+                                .any(|source| source.class_definitions.contains(alias.as_ref()))
+                        })
+                    });
+                assert_eq!(resolver.has_source_namespace(name), scanned, "{name}, reopen={reopen}");
+            }
+        }
+    }
 
     #[test]
     fn prepared_answers_require_the_same_paths_text_and_file_order() {

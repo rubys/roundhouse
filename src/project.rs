@@ -3056,6 +3056,9 @@ fn ruby_family_runtime_files(
     fixture: &Path,
     flavor: RubyFlavor,
 ) -> Result<Vec<(String, String)>, String> {
+    // Keep the original immutable App borrowed across base assembly and overlays.
+    let _indexes = emit::ruby::install_lookup_indexes(app);
+    let _body_names = crate::lower::model_to_library::schema::share_model_body_names(&app.models, &Default::default());
     let (mut files, test_stems) = spinel_files(app, fixture)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb");
