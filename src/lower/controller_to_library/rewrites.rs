@@ -506,6 +506,7 @@ pub(super) fn rewrite_render_to_views(
             // going to exist (CodeRabbit 4277530506).
             let css_qualified = is_css
                 && view_ivars.contains_key(&(render_module.clone(), format!("{}_css", view_method.as_str())));
+            let is_md = render_kwargs_have_format(args, "md");
             // A feed branch (`format.rss { render action: "stories" }`):
             // the format-qualified template (`stories.rss.builder` →
             // `stories_rss`) when there is one, else a format-AGNOSTIC
@@ -528,6 +529,8 @@ pub(super) fn rewrite_render_to_views(
                 format!("{}_css", view_method.as_str())
             } else if is_js {
                 format!("{}_js", view_method.as_str())
+            } else if is_md {
+                format!("{}_md", view_method.as_str())
             } else if is_json {
                 // Same reason the two above are qualified: the contract
                 // is keyed by the FORMAT-QUALIFIED stem. Asking for the
@@ -555,7 +558,7 @@ pub(super) fn rewrite_render_to_views(
             // that is right there. Same trap the `svg` note above
             // describes, entered from the other side.
             let mut json_only = false;
-            if contract.is_none() && !is_json && !is_turbo_stream && !is_svg && !is_css {
+            if contract.is_none() && !is_json && !is_turbo_stream && !is_svg && !is_css && !is_md {
                 let json_stem = format!("{}_json", view_method.as_str());
                 if let Some(c) = view_ivars.get(&(render_module.clone(), json_stem)) {
                     contract = Some(c);
@@ -601,7 +604,7 @@ pub(super) fn rewrite_render_to_views(
             let mut subclass_hook: Option<Symbol> = None;
             if contract.is_none() {
                 let mut stems: Vec<(String, bool)> = vec![(contract_stem.clone(), false)];
-                if !is_json && !is_turbo_stream && !is_svg && !is_css {
+                if !is_json && !is_turbo_stream && !is_svg && !is_css && !is_md {
                     stems.push((format!("{}_json", view_method.as_str()), true));
                 }
                 'stems: for (stem, via_json_only) in stems {
@@ -700,6 +703,11 @@ pub(super) fn rewrite_render_to_views(
                     (
                         Symbol::from(format!("{}_js", view_method.as_str())),
                         Some(crate::lower::controller::body::mime_for_format("js")),
+                    )
+                } else if is_md {
+                    (
+                        Symbol::from(format!("{}_md", view_method.as_str())),
+                        Some(crate::lower::controller::body::mime_for_format("md")),
                     )
                 } else if let Some(f) = feed_fmt {
                     // The feed's MIME either way; the method is the

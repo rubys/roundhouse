@@ -6473,7 +6473,7 @@ fn walk_erb<V: Vfs + ?Sized>(
                     || !stem.contains('.')
                     || matches!(
                         format,
-                        Some("turbo_stream" | "svg" | "text" | "json" | "js" | "pdf" | "csv" | "txt" | "css")
+                        Some("turbo_stream" | "svg" | "text" | "json" | "js" | "pdf" | "csv" | "txt" | "css" | "md")
                     )
                     // Feeds: `.rss.builder` / `.atom.builder` (lobsters'
                     // `home/stories.rss.builder`), lowered as

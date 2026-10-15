@@ -656,6 +656,7 @@ pub(crate) fn mime_for_format(fmt: &str) -> &'static str {
         // Mastodon's `custom_css#show` — Rails' own Mime::Type
         // registration for `:css`, no charset.
         "css" => "text/css",
+        "md" => "text/markdown; charset=utf-8",
         _ => "text/html; charset=utf-8",
     }
 }

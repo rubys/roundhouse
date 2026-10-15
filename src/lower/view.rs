@@ -721,7 +721,7 @@ pub fn renders_through_view_path(format: &str) -> bool {
     matches!(
         format,
         "html" | "turbo_stream" | "svg" | "rss" | "atom" | "xml" | "xls" | "json" | "js" | "pdf"
-            | "csv" | "txt" | "css"
+            | "csv" | "txt" | "css" | "md"
     )
 }
 

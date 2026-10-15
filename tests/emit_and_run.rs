@@ -193,6 +193,71 @@ mod defined_const_fold;
 #[path = "emit_and_run/job_payload.rs"]
 mod job_payload;
 
+#[test]
+fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
+    const TEMPLATE: &str = "---\ntitle: <%= @value %>\n---\n# Report\n<%= @value %>\n<%= @value.html_safe %>\n<em>static</em>\n";
+    emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  layout false\nend\n",
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/markdown\", to: \"reports#show\", format: \"md\"\n  get \"/html\", to: \"reports#show\"\n  get \"/explicit\", to: \"reports#explicit\"\nend\n",
+        )
+        .write(
+            "app/controllers/reports_controller.rb",
+            r#"class ReportsController < ApplicationController
+  def show
+    @value = params[:value].to_s
+  end
+
+  def explicit
+    @value = params[:value].to_s
+    render formats: :md
+  end
+end
+"#,
+        )
+        .write("app/views/reports/show.html.erb", "HTML sibling\n")
+        .write("app/views/reports/show.md.erb", TEMPLATE)
+        .write("app/views/reports/explicit.md.erb", TEMPLATE)
+        .run_ruby(
+            r##"require "uri"
+value = %q(<strong title="x">'A' & B</strong>)
+escaped = "&lt;strong title=&quot;x&quot;&gt;&#39;A&#39; &amp; B&lt;/strong&gt;"
+expected = "---\ntitle: #{escaped}\n---\n# Report\n#{escaped}\n#{value}\n<em>static</em>\n"
+
+["/markdown", "/explicit"].each do |path|
+  status, headers, body = Main.run_rack(
+    "REQUEST_METHOD" => "GET",
+    "PATH_INFO" => path,
+    "QUERY_STRING" => URI.encode_www_form(value: value),
+    "HTTP_HOST" => "localhost",
+    "rack.input" => StringIO.new("")
+  )
+  raise "#{path} status: #{status}" unless status == 200
+  raise "#{path} content type: #{headers.inspect}" unless headers["content-type"].split(";").first == "text/markdown"
+  raise "#{path} body: #{body.inspect}" unless body == [expected]
+end
+
+status, headers, body = Main.run_rack(
+  "REQUEST_METHOD" => "GET",
+  "PATH_INFO" => "/html",
+  "QUERY_STRING" => "",
+  "HTTP_HOST" => "localhost",
+  "rack.input" => StringIO.new("")
+)
+raise "HTML status: #{status}" unless status == 200
+raise "HTML content type: #{headers.inspect}" unless headers["content-type"].split(";").first == "text/html"
+raise "HTML sibling: #{body.inspect}" unless body == ["HTML sibling\n"]
+puts "Markdown template rendering passed"
+"##,
+        )
+        .assert_passes();
+}
+
 /// A generated text column on the real-blog Article model exercises the
 /// schema-to-runtime path together with Rails-style symbol callbacks. The
 /// create callbacks must see the value returned by the database, while an
