@@ -1006,23 +1006,37 @@ module ActiveStorage
   # exception.
   module Current
     def self.url_options
-      @url_options
+      Thread.current.thread_variable_get(:rh_active_storage_current_url_options)
     end
 
     def self.url_options=(options)
-      @url_options = options
+      Thread.current.thread_variable_set(:rh_active_storage_current_url_options, options)
+    end
+
+    # `CurrentAttributes#set` is a request-state scope: the temporary
+    # value is visible only on this thread and is restored on every exit.
+    def self.set(url_options:)
+      previous = url_options()
+      self.url_options = url_options
+      begin
+        yield
+      ensure
+        self.url_options = previous
+      end
     end
 
     # `protocol://host[:port]`, or "" with no options set. `protocol`
     # is taken with or without Rails' trailing `://` (`request.protocol`
     # carries it; a hand-written `protocol: "https"` does not).
     def self.base_url
-      options = @url_options
+      options = url_options()
       return "" if options.nil?
       host = options.fetch(:host, "")
       return "" if host == ""
       protocol = options.fetch(:protocol, "http").sub("://", "")
-      port = options.fetch(:port, "")
+      # Rails hands Integer ports (`port: 3000`); coerce so concat stays
+      # a String even after RBS widened values to `untyped`.
+      port = options.fetch(:port, "").to_s
       port == "" ? protocol + "://" + host : protocol + "://" + host + ":" + port
     end
   end

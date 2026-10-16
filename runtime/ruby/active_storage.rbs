@@ -115,9 +115,9 @@ module ActiveStorage
   end
 
   module Current
-    self.@url_options: Hash[Symbol, String]?
-    def self.url_options: () -> Hash[Symbol, String]?
-    def self.url_options=: (Hash[Symbol, String]? options) -> Hash[Symbol, String]?
+    def self.url_options: () -> Hash[Symbol, untyped]?
+    def self.url_options=: (Hash[Symbol, untyped]? options) -> Hash[Symbol, untyped]?
+    def self.set: (url_options: Hash[Symbol, untyped]) { () -> untyped } -> untyped
     def self.base_url: () -> String
   end
 

@@ -192,6 +192,8 @@ mod action_text_markdown;
 mod ordinalize;
 #[path = "emit_and_run/autoload_once_paths.rs"]
 mod autoload_once_paths;
+#[path = "emit_and_run/active_storage_current.rs"]
+mod active_storage_current;
 #[path = "emit_and_run/defined_const_fold.rs"]
 mod defined_const_fold;
 #[path = "emit_and_run/job_payload.rs"]
