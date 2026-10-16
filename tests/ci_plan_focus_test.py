@@ -191,6 +191,19 @@ class FocusLabels(unittest.TestCase):
         self.assertEqual(ts["smoke"], ["typescript"])
         self.assertIn("browser-smoke-typescript", ts["jobs"])
 
+    def test_ci_roundsnap_is_not_a_focus_lane(self):
+        """Dropped Campfire ISeq smoke must not return via an unknown label."""
+        parsed = ci.parse_coverage_labels(["ci:roundsnap"])
+        self.assertFalse(parsed.full)
+        self.assertFalse(parsed.focus_spinel)
+        self.assertFalse(parsed.focus_jruby)
+        self.assertEqual(parsed.focus_extras, ())
+        self.assertFalse(hasattr(parsed, "focus_roundsnap"))
+        plan = plan_pull_request(["ci:roundsnap"])
+        self.assertEqual(plan["jobs"], ci.BASE)
+        self.assertNotIn("campfire-roundsnap", plan["jobs"])
+        self.assertTrue(set(ci.BASE).issubset(plan["required"]))
+
     def test_pr_events_drive_focus_and_unknown_keeps_focus(self):
         plan = plan_pull_request(
             ["ci:kotlin", "ci:python"],
