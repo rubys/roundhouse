@@ -1,0 +1,148 @@
+# The open problems behind rubys/roundhouse#617, for people and tools that pick work.
+#
+# This file is the single source for each frontier's status, stands, skills, next
+# action, latest facts, check availability, pins and claims. tools/research/sync
+# renders the README's dashboard and each brief's Stands, Skills and Claims lines
+# from it: edit here, then run the script; `sync --check` fails on drift.
+# Briefs own the question, the check's commands and acceptance criteria, and the
+# leads. facts.md owns dated findings; attempts.md links fact IDs instead of
+# repeating their numbers.
+#
+# status:       open | blocked | solved
+# facts:        the latest facts on this frontier, newest first
+# check:        the brief's check; read it there, it is not restated here
+# check_public: public | partial | unavailable
+# pins:         the commits the latest result was measured or validated on
+# claims:       leases taken on #617 (README.md#claiming). status is active,
+#               review, done or released; a lease expires seven days after
+#               `since` unless its owner renews it, which moves `expires`.
+#
+# Quote any value that holds ": " or " #", or that YAML could read as a
+# number, date or boolean; sync rejects it otherwise.
+
+- id: any-order
+  name: Any order
+  brief: frontiers/any-order.md
+  status: open
+  stands: "Integrated current writers give Campfire/Forem/Chatwoot/Mastodon 10/9/10/5 equal tables across four V0A0 schedules, but lose runtime values, including two newly stable Chatwoot rows. Sound general order independence remains open."
+  facts: [F72, F71, F70, F69, F68, F66, F67, F64, F63, F62, F56, F57, F58, F59, F60, F55, F52, F45]
+  skills:
+    - Rust
+    - fixpoint and lattice theory
+    - the analyzer's harvest, dispatch and fold code
+  next: "Check runtime admission beside equality and account for witnessed container mutations."
+  check: frontiers/any-order.md#the-check
+  check_public: public
+  pins:
+    compiler: "integrated-current-writers 991ec4b356a21cf53271737124533c617e01e847 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "7e5e72ae6b125b1a40aafe1c7b71db3966f0a8d6; unsound equality gain, stratified census and upheld light check"
+    runner: "V0A0 quick-test reports, exact census arithmetic and runtime membership at lab 7e5e72ae6b125b1a40aafe1c7b71db3966f0a8d6"
+  claims:
+    - who: eddygarcas
+      scope: "items 3–6 of the claim's join defects on main: consistent `Var` handling, the lost `[]=` write in `widen_hash_ivar_value`, records compared without regard to field order, and the bound applied once per slot after the fold, with generated lattice-law tests."
+      status: done
+      since: "2026-10-09T07:40Z"
+      expires: "2026-10-16T07:40Z"
+      pr: "https://github.com/rubys/roundhouse/pull/705"
+      source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589"
+      note: "Merged on 2026-10-09 as a1d038d8. Emitted output unchanged on all 12 targets; pooled fully typed 68.83% → 68.99% on S3, 69.02% → 69.20% with `PROBE_BASE=1` (https://github.com/rubys/roundhouse/issues/617#issuecomment-6083167837)."
+    - who: eddygarcas
+      scope: "items 1–2 of the claim: one join for parameter slots over the classified arm set, built on #674's rows; not item 7, `decide_harvested_return`. Changes to gradual absorption wait for S2a's tag."
+      status: done
+      since: "2026-10-09T07:40Z"
+      expires: "2026-10-16T07:40Z"
+      pr: "https://github.com/rubys/roundhouse/pull/724"
+      source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6076645589"
+      note: "Merged on 2026-10-09 as 736dff85. Uses option (a): only a non-nil concrete type absorbs `untyped`, so `Nil | untyped` stays. Also bounds each parameter row once after its fold. Emitted output byte-identical on three apps × 12 targets; with #705 on `fixpoint-next`, fully typed 69.01% → 69.45% (S3) and 69.22% → 69.84% (`PROBE_BASE=1`), base verify moved 652 → 475."
+- id: soundness
+  name: Soundness
+  brief: frontiers/soundness.md
+  status: open
+  stands: "The integrated candidate is unsound: 54 new losses among 135 sampled narrowed rows, plus two targeted Chatwoot losses. Six inherited errors are separate. Exact stratified intervals and 6,096 unadjudicated rows limit the claim."
+  facts: [F72, F71, F70, F68, F69, F65, F63, F64, F61, F58, F57, F59, F60, F56, F47, F41]
+  skills:
+    - Ruby and Rails semantics
+    - Runtime tracing on CRuby 4.0.7
+    - Type systems
+  next: "Retain mutation counterexamples and sample boundaries; the saved 300-check regression gate does not certify soundness."
+  check: frontiers/soundness.md#the-check
+  check_public: partial
+  pins:
+    compiler: "integrated-current-writers 991ec4b356a21cf53271737124533c617e01e847 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "7e5e72ae6b125b1a40aafe1c7b71db3966f0a8d6; unsound equality gain, stratified census and upheld light check"
+    adapter: "time-widening-calibration f78c397552cfc2189f393c5fd19bb69ce0fb23c1; exporter base 48c65287"
+  claims:
+    - who: dai199
+      scope: "parameter rows keyed by receiver side, the follow-up named in #551 (the lab's `name_collision`), in one PR against main."
+      status: done
+      since: "2026-10-09T08:52Z"
+      expires: "2026-10-16T08:52Z"
+      pr: "https://github.com/rubys/roundhouse/pull/674"
+      source: "https://github.com/rubys/roundhouse/issues/617#issuecomment-6077674666"
+      note: "Merged on 2026-10-09 as c19524c7, with the owner walk looking on the call's side first (https://github.com/rubys/roundhouse/issues/617#issuecomment-6081357575)."
+- id: precision
+  name: Precision
+  brief: frontiers/precision.md
+  status: open
+  stands: "Chatwoot gains ten equal tables from five and Forem nine from six, but narrowed containers reject real values. Sample rates are row estimates within fixed strata, not a sound precision gain."
+  facts: [F72, F71, F70, F68, F69, F65, F66, F67, F63, F64, F61, F56, F59, F58, F57, F60, F55, F52]
+  skills:
+    - Rust
+    - type inference
+    - "Rails idioms such as guards, memoization and `Array(…)`"
+  next: "Require runtime membership and exact sampling scope beside each narrowing claim."
+  check: frontiers/precision.md#the-check
+  check_public: public
+  pins:
+    compiler: "integrated-current-writers 991ec4b356a21cf53271737124533c617e01e847 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "7e5e72ae6b125b1a40aafe1c7b71db3966f0a8d6; unsound equality gain, stratified census and upheld light check"
+    runner: "V0A0 quick-test reports, exact census arithmetic and runtime membership at lab 7e5e72ae6b125b1a40aafe1c7b71db3966f0a8d6"
+- id: incremental
+  name: Incremental
+  brief: frontiers/incremental.md
+  status: open
+  stands: "Current writers, completion and routing improve schedule equality while omitting sampled array/hash mutation contributions. Zero Pending at settlement does not establish a correct incremental update law or latency result."
+  facts: [F72, F71, F70, F69, F68, F66, F67, F64, F62, F60, F59, F56, F61, F54, F50, F48, F39]
+  skills:
+    - Incremental computation
+    - Rust performance
+    - serialization
+  next: "Keep the current-writer experiment open with mutation witnesses; no tested repair follows from the cause."
+  check: frontiers/incremental.md#the-check
+  check_public: public
+  pins:
+    compiler: "integrated-current-writers 991ec4b356a21cf53271737124533c617e01e847 on public spine v3 e6e974a63707363f725df032ceb8b3500539df84"
+    lab: "7e5e72ae6b125b1a40aafe1c7b71db3966f0a8d6; unsound equality gain, stratified census and upheld light check"
+    runner: "V0A0 quick-test reports, exact census arithmetic and runtime membership at lab 7e5e72ae6b125b1a40aafe1c7b71db3966f0a8d6"
+- id: typed-recursion
+  name: Typed recursion
+  brief: frontiers/typed-recursion.md
+  status: open
+  stands: "The historical Rust `enum` and Crystal `alias` demo covers three of #589's four shapes, behind a flag. F21's separate Spinel probe loses a required recursive-alias signature; alias consumption remains open."
+  facts: [F21, F13]
+  skills:
+    - Code generation
+    - the type systems of Rust, Crystal and the other targets
+  next: "Cover the fourth emitted-code shape, mutual recursion between two class methods; check recursive-alias signature extraction before claiming Spinel alias support."
+  check: frontiers/typed-recursion.md#the-check
+  check_public: public
+  pins:
+    compiler: "main b28b17b6 with the lab's patches"
+    lab: "0cc656a6"
+
+- id: cost
+  name: Cost
+  brief: frontiers/cost.md
+  status: open
+  stands: "The later evening results provide no new compiler benchmark or latency result. Their shared-host timings remain profiles under their recorded conditions. Cached evidence reduction starts zero analyzers and is distinct from compiler work avoided. The incomplete fingerprint cost denominators remain open."
+  facts: [F60, F57, F56, F54, F48, F50, F42, F39]
+  skills:
+    - Rust performance and profiling
+    - hash-consing
+    - data-structure design
+  next: "Complete the registered alternating cost pairs in an exclusive measurement window. Preserve host, observer, queue and whole-command scope alongside every timing comparison."
+  check: frontiers/cost.md#the-check
+  check_public: public
+  pins:
+    compiler: "strict-producer-reasons db7ca922 (recorded 2233e2e7); closure-application-effects 37a076d8 (recorded fdc00ee9); declared-contributor-join ec932bb3 (recorded 12a4b916); schedule-row-attribution a3c3b450 (recorded ea3ec744)"
+    lab: "0730e7f3402b1f37d15c875570b072c760248363; six separate October 15 later evening conditions"
