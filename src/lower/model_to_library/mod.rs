@@ -10,8 +10,9 @@
 //! Rails DSL.
 //!
 //! This module is pure: input is one `Model` plus the app `Schema`, output
-//! is one `LibraryClass`. No side-effects, no per-target choices. Per-Rails-
-//! idiom lowering is a separate function so each can be tested in
+//! is one `LibraryClass`. No side-effects; target capabilities are supplied
+//! by the caller. Per-Rails-idiom lowering is a separate function so each
+//! can be tested in
 //! isolation (skeleton, schema columns, has_many, belongs_to, validates,
 //! callbacks, …).
 //!
@@ -254,7 +255,7 @@ pub(crate) fn lower_models_inner(
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     lower_models_inner_with_ruby_values(
         models, schema, extra_class_infos, params_specs, unfolded, materialization,
-        finder_inputs, false, ErrorsReaders::FieldRead,
+        finder_inputs, false, false, ErrorsReaders::FieldRead,
     )
 }
 
@@ -267,13 +268,14 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     materialization: Materialization<'_>,
     finder_inputs: FinderInputs,
     ruby_read_values: bool,
+    param_binds: bool,
     errors_readers: ErrorsReaders,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
     let _body_names = schema::share_model_body_names(models, &Default::default());
     for model in models {
-        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, errors_readers);
+        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, param_binds, errors_readers);
         let table = schema.tables.get(&model.table.0);
         // Register actual production definitions, even for unselected
         // models and when source overrides hide framework ownership.
@@ -292,7 +294,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                             if matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer")),
                     _ => true,
                 });
-                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, errors_readers);
+                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, param_binds, errors_readers);
                 // Preserve original source inputs for late derivations
                 // (e.g. raw helpers) without treating them as framework
                 // claims. Both kinds traverse the canonical Arel/typer.
@@ -412,6 +414,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                 crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                     &mut method.body, schema, &classes, &[], ruby_read_values,
                     &HashSet::new(),
+                    crate::lower::arel::SqliteVisitor { param_binds },
                 );
             }
             type_method_body(method, &classes, table, Some(model));
@@ -1091,7 +1094,7 @@ pub(crate) fn build_methods(
     schema: &Schema,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<MethodDef> {
-    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, ErrorsReaders::FieldRead)
+    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, false, ErrorsReaders::FieldRead)
 }
 
 /// Return the instance method surface synthesized for a model, for ingest
@@ -1116,6 +1119,7 @@ fn build_methods_with_finder_inputs(
     schema: &Schema,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
     finder_inputs: FinderInputs,
+    param_binds: bool,
     errors_readers: ErrorsReaders,
 ) -> Vec<MethodDef> {
     // No-op outside an emit diagnostics scope, so the many direct
@@ -1151,7 +1155,7 @@ fn build_methods_with_finder_inputs(
             methods.push(adapter_emit::synth_find_primary_key_input(&model.name, table));
             methods.push(adapter_emit::synth_exists_primary_key_input(&model.name, table));
         }
-        push_adapter_methods(&mut methods, model, table, schema);
+        push_adapter_methods(&mut methods, model, table, schema, param_binds);
         // `from_params(p: <Resource>Params)` — typed factory matching the
         // (resource, fields) tuple a controller's `permit(...)` declared.
         // Skipped silently when the model isn't permitted by any
