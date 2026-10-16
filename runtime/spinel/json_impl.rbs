@@ -1,0 +1,5 @@
+module JSON
+  # dump returns its destination (after to_io), or a String without one.
+  def self.dump: (untyped obj, ?untyped anIO, ?untyped limit, ?Hash[Symbol, untyped]? options) -> untyped
+  def self.check_dump_value: (untyped value, Integer limit, Integer depth, bool strict) -> void
+end

@@ -91,6 +91,7 @@ SPINEL_TESTS = [
     "jbuilder_array_value_spinel",
     "active_job_payload",
     "render_json_encoder_spinel",
+    "json_dump",
 ]
 # Seconds each suite took in spinel-framework (full run 38665931779), for
 # balancing its shards; a suite not listed counts as one Spinel build.

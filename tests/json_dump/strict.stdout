@@ -1,0 +1,9 @@
+"{\"a\":[true,null,1,\"s\"]}"
+JSON::GeneratorError:JsonCustomValue not allowed in JSON
+""
+JSON::GeneratorError:Symbol not allowed in JSON
+""
+JSON::GeneratorError:JsonCustomValue not allowed in JSON
+""
+JSON::GeneratorError:Symbol not allowed in JSON
+""

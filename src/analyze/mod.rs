@@ -1112,6 +1112,8 @@ impl Analyzer {
             .chain(app.library_classes.iter()
                 .flat_map(|class| class.methods.iter().map(move |method| (&class.name, method))))
         {
+            classes.entry(id.clone()).or_default().method_visibility
+                .insert((method.receiver, method.name.clone()), method.visibility);
             if method.receiver == crate::dialect::MethodReceiver::Class
                 && method.name.as_str() == "new"
             {

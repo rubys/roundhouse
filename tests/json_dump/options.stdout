@@ -1,0 +1,12 @@
+"{}"
+"[1]"
+"[1]"
+"[1]"
+ArgumentError:unknown keyword: :max_nesting
+ArgumentError:unknown keyword: :max_nesting
+ArgumentError:unknown keyword: :max_nesting
+ArgumentError:unknown keywords: :max_nesting, :allow_nan
+""
+ArgumentError:exceed depth limit
+ArgumentError:exceed depth limit
+ArgumentError

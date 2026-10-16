@@ -230,6 +230,8 @@ pub struct ClassInfo {
     pub block_value_methods: std::collections::HashSet<Symbol>,
     /// Methods callable on an instance: `post.title`, `post.destroy`.
     pub instance_methods: HashMap<Symbol, Ty>,
+    /// Source visibility for public-only protocol checks such as JSON.dump.
+    pub method_visibility: HashMap<(crate::dialect::MethodReceiver, Symbol), crate::dialect::MethodVisibility>,
     /// AccessorKind per method — lets the body-typer flag Method
     /// dispatches so emitters add parens. AttributeReader/Writer
     /// dispatches keep `parenthesized` as ingested. Default `Method`

@@ -882,7 +882,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // report the missing runtime at project emission.
     let string_io = Ty::Class { id: ClassId(Symbol::from("StringIO")), args: vec![].into() };
     register_stdlib_class(classes, "StringIO", &[], &[
-        ("string", Ty::Str), ("<<", string_io),
+        ("string", Ty::Str), ("<<", string_io), ("write", Ty::Int),
     ]);
     // `IO` / `Process` / `Timeout` — Campfire tip names these as Consts
     // in indexed app source (`time_limited_video_previewer`, web-push
