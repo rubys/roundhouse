@@ -1,0 +1,670 @@
+{
+  "Array.[](\"ok\") { JSON.parse(raw) }.first": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "ChildDig.dig(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "ChildDig.new.dig(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "ConstantDig.__send__(:send, :dig, JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "ConstantDig.dig(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "ConstantDig.new.dig(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "ConstantDig.new.public_send(\"dig\", JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "ConstantDig.new.try(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "ConstantDig.send(:dig, JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "ConstantDig.send(:try, JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "ConstantDig.try(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash.[](\"k\", \"ok\") { JSON.parse(raw) }[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash.__send__(:send, :[], {JSON.parse('\"k\"') => \"ok\"})[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash.public_send(\"[]\", [[JSON.parse('\"k\"'), \"ok\"]])[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash.send(:[], JSON.parse('\"k\"'), \"ok\")[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash[\"k\", JSON.parse('\"ok\"')][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash[\"other\", \"ok\", JSON.parse('\"k\"'), \"ok\"][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash[JSON.parse('\"k\"'), \"ok\", \"other\", \"ok\"][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash[JSON.parse('\"k\"'), \"ok\"] { JSON.parse(raw) }[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash[JSON.parse('\"k\"'), \"ok\"][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash[[[\"k\", JSON.parse('\"ok\"')]]][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash[[[\"other\", \"ok\"], [JSON.parse('\"k\"'), \"ok\"]]][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash[[[JSON.parse('\"k\"'), \"ok\"], [\"other\", \"ok\"]]][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash[[[JSON.parse('\"k\"'), \"ok\"]]][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash[{\"k\" => JSON.parse('\"ok\"')}][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Hash[{JSON.parse('\"k\"') => \"ok\"}][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "IncludedDig.new.__send__(:send, :dig, JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "IncludedDig.new.dig(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "JSON.parse(raw).dig(JSON.parse(\"0\"))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "Object.new.class.instance_exec(\"ok\", JSON.parse(raw)) { |value, other| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Object.new.instance_exec(\"ok\", JSON.parse(raw)) { |value, other| other }": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "Object.new.instance_exec(\"ok\", JSON.parse(raw)) { |value, other| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Object.new.instance_exec(JSON.parse(raw), \"ok\") { |other, value| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Object.new.instance_exec(JSON.parse(raw), \"ok\") { |value, other| value }": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "Object.new.instance_exec([\"ok\", JSON.parse(raw)]) { |(value, other)| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Object.new.instance_exec([\"ok\", JSON.parse(raw)]) { |value, *others| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Object.new.instance_exec([\"ok\", JSON.parse(raw)]) { |value, other| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Object.new.instance_exec([JSON.parse(raw), \"ok\"]) { |other, value| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Object.new.instance_variable_get(:@x) { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Object.new.send(:instance_exec, \"ok\", JSON.parse(raw)) { |value, other| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Object.new.send(:instance_exec, [\"ok\", JSON.parse(raw)]) { |value, other| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Probe.__send__(:send, :module_exec, [\"ok\", JSON.parse(raw)]) { |value, other| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Probe.class_eval { |receiver| \"ok\" }": {
+    "forward": "String",
+    "value": "String"
+  },
+  "Probe.class_exec(\"ok\", JSON.parse(raw)) { |value, other| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Probe.class_exec(JSON.parse(raw), \"ok\") { |value, other| value }": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "Probe.class_exec([\"ok\", JSON.parse(raw)]) { |value, other| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Probe.module_eval { |receiver| \"ok\" }": {
+    "forward": "String",
+    "value": "String"
+  },
+  "Probe.module_exec(\"ok\", JSON.parse(raw)) { |value, other| other }": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "Probe.module_exec(\"ok\", JSON.parse(raw)) { |value, other| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Probe.module_exec([\"ok\", JSON.parse(raw)]) { |value, other| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Probe.public_send(:class_exec, [\"ok\", JSON.parse(raw)]) { |value, other| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Time.use_zone(JSON.parse('\"UTC\"')) { |unused| unused }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "Timeout.timeout(JSON.parse(\"1\")) { |seconds| seconds }": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "ValueDig.__send__(:send, :dig, JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "ValueDig.dig(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "ValueDig.new.__send__(:send, :try, JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "ValueDig.new.dig(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "ValueDig.new.public_send(\"dig\", JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "ValueDig.new.try(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "ValueDig.send(:dig, JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "ValueDig.send(:try, JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "ValueDig.try(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[\"ok\", 1].dig(JSON.parse(\"0\"))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"]&.as_json(JSON.parse(\"{}\")) { JSON.parse(raw) }.first": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"]&.dig(JSON.parse(\"0\")) { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].__send__(:send, :as_json, JSON.parse(\"{}\")) { JSON.parse(raw) }.first": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].__send__(:send, :dig, JSON.parse(\"0\")) { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].__send__(:send, :fetch, 0, JSON.parse(raw)) { |index| index }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].as_json { JSON.parse(raw) }.first": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].as_json(JSON.parse(\"{}\")) { JSON.parse(raw) }.first": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].dig(0) { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].dig(JSON.parse(\"0\"))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].drop(JSON.parse(\"0\")).first": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "[\"ok\"].each { JSON.parse(raw) }.first": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "[\"ok\"].fetch(0, JSON.parse(raw)) { |index| index }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].fetch(1, \"unused\") { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[\"ok\"].fetch(JSON.parse(\"0\"))": {
+    "forward": "String",
+    "value": "String"
+  },
+  "[\"ok\"].fetch(JSON.parse(\"0\"), \"fallback\")": {
+    "forward": "String",
+    "value": "String"
+  },
+  "[\"ok\"].fetch(JSON.parse(\"0\"), JSON.parse(raw)) { \"ok\" }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].fetch(JSON.parse(\"2\"), \"unused\") { |index| index }": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[\"ok\"].inject(\"\", JSON.parse('\"+\"')) { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].presence { JSON.parse(raw) }.first": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].public_send(\"fetch\", 0, JSON.parse(raw)) { |index| index }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].reduce(JSON.parse('\"+\"'))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].reduce(JSON.parse(raw), JSON.parse('\"+\"'))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[\"ok\"].reject { JSON.parse(\"false\") }.first": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "[\"ok\"].sample(random: JSON.parse(\"{}\"))": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "[\"ok\"].select { JSON.parse(raw) }.first": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "[\"ok\"].send(:as_json, JSON.parse(\"{}\")) { JSON.parse(raw) }.first": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].send(:dig, JSON.parse(\"0\")) { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].send(:fetch, 0, JSON.parse(raw)) { |index| index }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].send(:fetch, JSON.parse(\"0\"), JSON.parse(raw)) { \"ok\" }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].sort_by { JSON.parse(\"0\") }.first": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "[\"ok\"].take(JSON.parse(\"1\")).first": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "[\"ok\"].tap { JSON.parse(raw) }.first": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "[\"ok\"].try!(:dig, JSON.parse(\"0\")) { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].try(:dig, JSON.parse(\"0\")) { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].try(:fetch, 0, JSON.parse(raw)) { |index| index }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"].try(JSON.parse('\"dig\"'), 0)": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[\"ok\"][JSON.parse(\"0\")]": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "[ConstantDig.new, ValueDig.new].first.dig(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[JSON.parse(raw)]&.dig(0) { \"ok\" }": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[JSON.parse(raw)].as_json(JSON.parse(\"{}\")) { \"ok\" }.first": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[JSON.parse(raw)].dig(0)": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[JSON.parse(raw)].each_with_object(\"ok\") { |x, seed| x }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[JSON.parse(raw)].fetch(JSON.parse(\"0\"))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[JSON.parse(raw)].reduce(JSON.parse('\"+\"'))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[JSON.parse(raw)].send(:dig, 0)": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[ValueDig.new, ConstantDig.new].first.dig(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[ValueDig.new, nil].first&.dig(JSON.parse(raw))": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[[\"ok\"], nil].first&.as_json { JSON.parse(raw) }&.first": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[[\"ok\"], nil].first&.dig(JSON.parse(\"0\"))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[[\"ok\"], {\"k\" => \"ok\"}].first.dig(JSON.parse(\"0\"))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[[{JSON.parse('\"k\"') => \"ok\"}]].as_json.first.first[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[{\"k\" => \"ok\"}, [\"ok\"]].first.dig(JSON.parse('\"k\"'))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[{\"k\" => \"ok\"}].dig(JSON.parse(\"0\"), JSON.parse('\"k\"'))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[{\"k\" => \"ok\"}].pluck(\"k\").first": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "[{\"k\" => JSON.parse('\"ok\"')}].as_json.first[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[{\"k\" => JSON.parse(raw)}].dig(0, \"k\")": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "[{\"k\" => [\"ok\"]}].dig(JSON.parse(\"0\"), JSON.parse('\"k\"'), JSON.parse(\"0\"))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[{JSON.parse('\"k\"') => \"ok\"}].as_json.first[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[{JSON.parse('\"k\"') => \"ok\"}].send(:as_json).first[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[{JSON.parse('[\"k\"]') => \"ok\"}].as_json.first.values.first": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "[{JSON.parse('{\"k\":1}') => \"ok\"}].as_json.first.values.first": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "args = [\"ok\", JSON.parse(raw)]; Object.new.instance_exec(args) { |value, other| value }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "items = [\"ok\"]; index = JSON.parse(\"0\"); items.dig(index)": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "items = [{JSON.parse('\"k\"') => \"ok\"}]; options = JSON.parse(\"{}\"); items.as_json(options) { JSON.parse(raw) }.first[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "items = {\"k\" => \"ok\"}; key = JSON.parse('\"k\"'); items.dig(key)": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "key = JSON.parse('\"k\"'); pairs = [[key, \"ok\"]]; Hash[pairs][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "nil.send(:try!, :dig, JSON.parse(raw)) { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "nil.try { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "nil.try! { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "nil.try(:dig, JSON.parse(raw)) { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "options = JSON.parse(\"{}\"); items = {\"k\" => \"ok\"}; items.as_json(options)[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.as_json { JSON.parse(raw) }[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.as_json(JSON.parse(\"{}\"))[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.as_json(only: JSON.parse('[\"k\"]'))[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.dig(JSON.parse('\"k\"'))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.each_value { JSON.parse(raw) }[\"k\"]": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.except(JSON.parse('\"absent\"'))[\"k\"]": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.fetch(JSON.parse('\"k\"'))": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.fetch(JSON.parse('\"k\"'), \"fallback\")": {
+    "forward": "String",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.fetch_values(JSON.parse('\"k\"')).first": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.public_send(\"as_json\", JSON.parse(\"{}\")) { JSON.parse(raw) }[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.public_send(\"dig\", JSON.parse('\"k\"')) { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.reduce(\"\", JSON.parse('\"+\"')) { JSON.parse(raw) }": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.select { JSON.parse(raw) }[\"k\"]": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.slice(JSON.parse('\"k\"'))[\"k\"]": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.values_at(JSON.parse('\"k\"')).first": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.with_indifferent_access.dig(JSON.parse('\"k\"'))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.with_indifferent_access.slice(JSON.parse('\"k\"'))[\"k\"]": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.with_indifferent_access.values_at(JSON.parse('\"k\"')).first": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}.without(JSON.parse('\"absent\"'))[\"k\"]": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "{\"k\" => \"ok\"}[JSON.parse('\"k\"')]": {
+    "forward": "String?",
+    "value": "String"
+  },
+  "{\"k\" => JSON.parse(raw)}.as_json { \"ok\" }[\"k\"]": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "{\"k\" => JSON.parse(raw)}.dig(\"k\")": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "{\"k\" => JSON.parse(raw)}.public_send(\"as_json\", JSON.parse(\"{}\"))[\"k\"]": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "{\"k\" => JSON.parse(raw)}.slice(JSON.parse('\"k\"'))[\"k\"]": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "{\"k\" => JSON.parse(raw)}.values_at(JSON.parse('\"k\"')).first": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "{\"k\" => [\"ok\"]}.dig(JSON.parse('\"k\"'), JSON.parse(\"0\"))": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"k\" => [JSON.parse(raw)]}.dig(\"k\", 0)": {
+    "forward": "untyped",
+    "value": "Symbol"
+  },
+  "{\"k\" => {JSON.parse('\"nested\"') => \"ok\"}}.dig(\"k\", \"nested\")": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"outer\" => [{JSON.parse('\"k\"') => \"ok\"}]}.as_json[\"outer\"].first[\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"outer\" => {\"k\" => JSON.parse('\"ok\"')}}.as_json[\"outer\"][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"outer\" => {JSON.parse('\"k\"') => \"ok\"}}.as_json[\"outer\"][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{\"outer\" => {JSON.parse('\"k\"') => \"ok\"}}.public_send(\"as_json\")[\"outer\"][\"k\"]": {
+    "forward": "untyped",
+    "value": "String"
+  },
+  "{JSON.parse('\"k\"') => \"ok\"}.dig(\"k\")": {
+    "forward": "untyped",
+    "value": "String"
+  }
+}

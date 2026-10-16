@@ -1040,7 +1040,7 @@ fn rewrite_method(
 fn stamp_attr_hash_params(method: &mut MethodDef, indices: &[usize]) {
     let hash_ty = Ty::Hash {
         key: std::sync::Arc::new(Ty::Sym),
-        value: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::untyped()),
     };
     let (mut params, block, ret, effects) = match method.signature.clone() {
         Some(Ty::Fn {
@@ -1055,12 +1055,12 @@ fn stamp_attr_hash_params(method: &mut MethodDef, indices: &[usize]) {
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped.into(),
+                    ty: Ty::untyped().into(),
                     kind: crate::ty::ParamKind::Required,
                 })
                 .collect(),
             None,
-            std::sync::Arc::new(Ty::Untyped),
+            std::sync::Arc::new(Ty::untyped()),
             method.effects.clone(),
         ),
     };
@@ -1095,12 +1095,12 @@ fn stamp_param_types(method: &mut MethodDef, bound: &[(usize, Symbol, &ParamsSpe
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped.into(),
+                    ty: Ty::untyped().into(),
                     kind: crate::ty::ParamKind::Required,
                 })
                 .collect(),
             None,
-            std::sync::Arc::new(Ty::Untyped),
+            std::sync::Arc::new(Ty::untyped()),
             method.effects.clone(),
         ),
     };

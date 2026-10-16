@@ -2095,7 +2095,7 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
             Span::synthetic(),
             ExprNode::Var { id: VarId(0), name: Symbol::from("params") },
         ),
-        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) },
     );
     let call = |recv: Option<Expr>, m: &str, args: Vec<Expr>, ty: Ty| {
         with_ty(
@@ -2175,7 +2175,7 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
         signature: Some(fn_sig(
             vec![(
                 Symbol::from("params"),
-                Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
+                Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) },
             )],
             Ty::Str,
         )),

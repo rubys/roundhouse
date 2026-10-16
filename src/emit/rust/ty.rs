@@ -87,7 +87,7 @@ pub fn rust_ty(ty: &Ty) -> String {
         // recursive normalize_value semantics. Crystal commits to
         // String fallback; TS to `any`. Rust gets the structured-but-
         // dynamic option.
-        Ty::Untyped => "serde_json::Value".to_string(),
+        Ty::Untyped { .. } => "serde_json::Value".to_string(),
         Ty::Bottom => "!".to_string(),
     }
 }
@@ -111,7 +111,7 @@ fn option_shape(variants: &[Ty]) -> Option<String> {
 /// and `String | Array[untyped]` are Unions, not Untyped.
 pub(crate) fn rust_value_shaped(ty: &Ty) -> bool {
     match ty {
-        Ty::Untyped | Ty::Var { .. } | Ty::Record { .. } => true,
+        Ty::Untyped { .. } | Ty::Var { .. } | Ty::Record { .. } => true,
         Ty::Union { variants } => !ty.is_stringish() && option_shape(variants).is_none(),
         Ty::Class { id, .. } => id.0.as_str() == "Roundhouse::ParamValue",
         _ => false,
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn string_or_array_union_is_value_shaped() {
         let ty = Ty::Union {
-            variants: vec![Ty::Str, Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }].into(),
+            variants: vec![Ty::Str, Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) }].into(),
         };
         assert!(rust_value_shaped(&ty));
         assert_eq!(rust_ty(&ty), "serde_json::Value");

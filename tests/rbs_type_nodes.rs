@@ -30,15 +30,15 @@ fn singleton_is_the_class_it_names_even_for_a_builtin() {
 #[test]
 fn bot_is_bottom_and_top_is_untyped() {
     let (params, ret) = read("(top) -> bot");
-    assert_eq!(params[0], Ty::Untyped);
+    assert_eq!(params[0], Ty::untyped());
     assert_eq!(ret, Ty::Bottom);
 }
 
 #[test]
 fn a_method_type_variable_is_untyped_not_a_class_called_t() {
     let (params, ret) = read("[T] (T) -> T?");
-    assert_eq!(params[0], Ty::Untyped);
-    assert_eq!(ret, Ty::Union { variants: vec![Ty::Untyped, Ty::Nil].into() });
+    assert_eq!(params[0], Ty::untyped());
+    assert_eq!(ret, Ty::Union { variants: vec![Ty::untyped(), Ty::Nil].into() });
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn an_intersection_with_kernel_is_the_other_member() {
     let (params, _) = read("(Enumerable[Integer] & Kernel) -> void");
     assert_eq!(params[0], Ty::Class { id: ClassId(Symbol::new("Enumerable")), args: vec![Ty::Int].into() });
     let (params, _) = read("(Cart & Priced) -> void");
-    assert_eq!(params[0], Ty::Untyped, "two real surfaces: claim neither");
+    assert_eq!(params[0], Ty::untyped(), "two real surfaces: claim neither");
 }
 
 #[test]

@@ -92,7 +92,7 @@ pub fn kotlin_ty(t: &Ty) -> String {
         }
 
         // The soft-strict escape: `Any?`, with no emit diagnostic.
-        Ty::Var { .. } | Ty::Untyped => "Any?".to_string(),
+        Ty::Var { .. } | Ty::Untyped { .. } => "Any?".to_string(),
     }
 }
 
@@ -154,7 +154,7 @@ fn render_union(variants: &[Ty]) -> String {
 /// method signature carries an annotation or leans on Kotlin inference.
 pub fn has_untyped(t: &Ty) -> bool {
     match t {
-        Ty::Untyped => true,
+        Ty::Untyped { .. } => true,
         Ty::Array { elem } => has_untyped(elem),
         Ty::Hash { key, value } => has_untyped(key) || has_untyped(value),
         Ty::Tuple { elems } => elems.iter().any(has_untyped),

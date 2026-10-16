@@ -7,6 +7,18 @@ use crate::App;
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
+pub(super) fn type_rows_match(a: &[Ty], b: &[Ty]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.inference_eq(b))
+}
+
+pub(super) fn type_maps_match<K: Eq + std::hash::Hash, S: std::hash::BuildHasher>(
+    a: &HashMap<K, Ty, S>,
+    b: &HashMap<K, Ty, S>,
+) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .all(|(name, ty)| b.get(name).is_some_and(|b| ty.inference_eq(b)))
+}
 /// Snapshot of inference the fixpoint refines: per-class instance/class
 /// method return types plus `inferred_params`. Used for convergence
 /// checks (`inference_matches`).
@@ -41,7 +53,7 @@ pub(super) fn moved_method_names(
     };
     let mut out: BTreeSet<Symbol> = BTreeSet::new();
     for (name, ty) in now {
-        if before.get(name) != Some(ty) {
+        if !before.get(name).is_some_and(|before| ty.inference_eq(before)) {
             out.insert(name.clone());
         }
     }
@@ -85,7 +97,7 @@ pub(super) fn dirty_classes_for_retype(
         moved_by_class.entry(id.clone()).or_default().extend(names);
     }
     for (key, tys) in inferred_params {
-        if prev.params.get(key) != Some(tys) {
+        if !prev.params.get(key).is_some_and(|before| type_rows_match(tys, before)) {
             dirty.insert(key.0.clone());
         }
     }

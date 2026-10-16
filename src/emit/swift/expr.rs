@@ -932,7 +932,7 @@ fn scan_container_types(e: &Expr, out: &mut HashMap<String, String>) {
                     "Any?".to_string()
                 }
             }
-            Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Var { .. }) | None => {
+            Some(crate::ty::Ty::Untyped { .. }) | Some(crate::ty::Ty::Var { .. }) | None => {
                 "Any?".to_string()
             }
             Some(t) => swift_ty(t),
@@ -1581,7 +1581,7 @@ fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
 /// second-guess it.
 fn is_concrete_elem(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
-    !matches!(ty, Ty::Untyped | Ty::Var { .. } | Ty::Nil | Ty::Bottom)
+    !matches!(ty, Ty::Untyped { .. } | Ty::Var { .. } | Ty::Nil | Ty::Bottom)
 }
 
 fn emit_array(elements: &[Expr], e: &Expr) -> String {
@@ -3256,7 +3256,7 @@ mod equal_identity_tests {
     #[test]
     fn equal_on_a_hash_stays_a_call() {
         let mut recv = var("attrs");
-        recv.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) });
+        recv.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::untyped()) });
         let out = emit_expr(&send(recv, "equal?", var("sentinel")));
         assert!(out.contains("equalPred"), "{out}");
         assert!(!out.contains("==="), "{out}");

@@ -289,7 +289,7 @@ impl Reader<'_> {
                 "attr_reader" | "attr_writer" | "attr_accessor" => {
                     let declared = sig
                         .and_then(|s| read_returns(s, true, aliases))
-                        .unwrap_or(Ty::Untyped);
+                        .unwrap_or(Ty::untyped());
                     for arg in &args {
                         let Some(attr) = symbol_name(arg) else { continue };
                         if name != "attr_writer" {
@@ -368,9 +368,9 @@ impl Reader<'_> {
 
 fn untyped_fn() -> Ty {
     Ty::Fn {
-        params: vec![Param { name: Symbol::new("args"), ty: Ty::Untyped.into(), kind: ParamKind::Rest }].into(),
+        params: vec![Param { name: Symbol::new("args"), ty: Ty::untyped().into(), kind: ParamKind::Rest }].into(),
         block: None,
-        ret: std::sync::Arc::new(Ty::Untyped),
+        ret: std::sync::Arc::new(Ty::untyped()),
         effects: EffectSet::pure(),
     }
 }
@@ -427,13 +427,13 @@ fn lenient_signature(
     aliases: &HashMap<String, Ty>,
 ) -> Ty {
     let mut declared: HashMap<String, Ty> = HashMap::new();
-    let mut ret = Ty::Untyped;
+    let mut ret = Ty::untyped();
     if let Some(sig) = sig {
         for call in sig_chain(sig) {
             match constant_id_str(&call.name()) {
                 "returns" => {
                     if let Some(argument) = call.arguments().and_then(|a| a.arguments().iter().next()) {
-                        ret = sorbet_ty(&argument, self_is_instance, aliases).unwrap_or(Ty::Untyped);
+                        ret = sorbet_ty(&argument, self_is_instance, aliases).unwrap_or(Ty::untyped());
                     }
                 }
                 "params" => {
@@ -444,7 +444,7 @@ fn lenient_signature(
                             let Some(assoc) = element.as_assoc_node() else { continue };
                             let Some(name) = symbol_name(&assoc.key()) else { continue };
                             let ty = sorbet_ty(&assoc.value(), self_is_instance, aliases)
-                                .unwrap_or(Ty::Untyped);
+                                .unwrap_or(Ty::untyped());
                             declared.insert(name, ty);
                         }
                     }
@@ -465,13 +465,13 @@ fn lenient_signature(
         Some(listed) => listed
             .into_iter()
             .map(|(name, kind)| {
-                let ty = declared.remove(&name).unwrap_or(Ty::Untyped);
+                let ty = declared.remove(&name).unwrap_or(Ty::untyped());
                 Param { name: Symbol::new(&name), ty: ty.into(), kind }
             })
             .collect(),
         // A parameter list this reader does not take apart: accept
         // anything rather than assert an arity.
-        None => vec![Param { name: Symbol::new("args"), ty: Ty::Untyped.into(), kind: ParamKind::Rest }],
+        None => vec![Param { name: Symbol::new("args"), ty: Ty::untyped().into(), kind: ParamKind::Rest }],
     };
     Ty::Fn { params: params.into(), block: None, ret: std::sync::Arc::new(ret), effects: EffectSet::pure() }
 }

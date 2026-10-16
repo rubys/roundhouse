@@ -345,5 +345,5 @@ fn recv_is_model(r: &Expr, models: &HashSet<ClassId>) -> bool {
 }
 
 fn recv_ty_is_unknown(r: &Expr) -> bool {
-    matches!(r.ty.as_ref(), None | Some(Ty::Untyped) | Some(Ty::Var { .. }))
+    matches!(r.ty.as_ref(), None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }))
 }

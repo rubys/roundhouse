@@ -50,7 +50,7 @@ fn rewrite(expr: &mut Expr) {
 /// String, is some other value.
 fn is_request_params(e: &Expr) -> bool {
     let typed_as_params = match e.ty.as_ref() {
-        None | Some(Ty::Untyped | Ty::Var { .. } | Ty::Hash { .. }) => true,
+        None | Some(Ty::Untyped { .. } | Ty::Var { .. } | Ty::Hash { .. }) => true,
         Some(Ty::Class { id, .. }) => id.0.as_str() == "ActionController::Parameters",
         _ => false,
     };
@@ -73,7 +73,7 @@ fn is_request_params(e: &Expr) -> bool {
 /// lowering may still type as a params class) can be a record with its
 /// own `as_json`, which `jsonable` does not model, so it is left alone.
 fn is_open_value(e: &Expr) -> bool {
-    if !matches!(e.ty.as_ref(), None | Some(Ty::Untyped | Ty::Var { .. })) {
+    if !matches!(e.ty.as_ref(), None | Some(Ty::Untyped { .. } | Ty::Var { .. })) {
         return false;
     }
     match &*e.node {
@@ -150,16 +150,16 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
                     || is_open_value(r)) =>
         {
             let ty = match r.ty.as_ref() {
-                Some(Ty::Array { .. }) => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
+                Some(Ty::Array { .. }) => Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) },
                 Some(Ty::Hash { .. }) => Ty::Hash {
                     key: std::sync::Arc::new(Ty::Str),
-                    value: std::sync::Arc::new(Ty::Untyped),
+                    value: std::sync::Arc::new(Ty::untyped()),
                 },
                 _ if is_request_params(r) => Ty::Hash {
                     key: std::sync::Arc::new(Ty::Str),
-                    value: std::sync::Arc::new(Ty::Untyped),
+                    value: std::sync::Arc::new(Ty::untyped()),
                 },
-                _ => Ty::Untyped,
+                _ => Ty::untyped(),
             };
             let mut call = Expr::new(
                 expr.span,
@@ -288,7 +288,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
             if method.as_str() == "to_query"
                 && args.is_empty()
-                && matches!(r.ty.as_ref(), None | Some(Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. })) =>
+                && matches!(r.ty.as_ref(), None | Some(Ty::Var { .. } | Ty::Untyped { .. } | Ty::Hash { .. })) =>
         {
             let mut call = active_support_call(expr.span, "to_query", r.clone());
             call.ty = Some(Ty::Str);
@@ -396,8 +396,8 @@ mod as_json_tests {
         };
         for ty in [
             None,
-            Some(Ty::Untyped),
-            Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) }),
+            Some(Ty::untyped()),
+            Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::untyped()) }),
             Some(parameters),
         ] {
             assert!(is_jsonable(&as_json_on_params(ty.clone())), "{ty:?}");

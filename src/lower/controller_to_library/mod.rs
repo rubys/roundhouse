@@ -486,7 +486,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         Symbol::from("params"),
         Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
-            value: std::sync::Arc::new(Ty::Untyped),
+            value: std::sync::Arc::new(Ty::untyped()),
         },
     );
     // `@flash` is also framework-guaranteed: the render-rewrite emits
@@ -2442,7 +2442,7 @@ fn calls_super(body: &Expr) -> bool {
 /// per-arg types lands when a routing-table-aware typer surfaces.
 fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     use crate::lower::typing::fn_sig;
-    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) };
 
     // Terminals — render/redirect/head/render_404 all return Nil.
     // The framework runtime declares these with named keyword params
@@ -2487,13 +2487,13 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     };
     info.instance_methods
         .entry(Symbol::from("render"))
-        .or_insert_with(|| positional_with_kwargs("html", Ty::Untyped));
+        .or_insert_with(|| positional_with_kwargs("html", Ty::untyped()));
     info.instance_methods
         .entry(Symbol::from("redirect_to"))
-        .or_insert_with(|| positional_with_kwargs("location", Ty::Untyped));
+        .or_insert_with(|| positional_with_kwargs("location", Ty::untyped()));
     info.instance_methods
         .entry(Symbol::from("redirect_back_or_to"))
-        .or_insert_with(|| positional_with_kwargs("fallback_location", Ty::Untyped));
+        .or_insert_with(|| positional_with_kwargs("fallback_location", Ty::untyped()));
     info.instance_methods
         .entry(Symbol::from("head"))
         .or_insert_with(|| fn_sig(vec![(Symbol::from("status"), Ty::Sym)], Ty::Nil));
@@ -2870,7 +2870,7 @@ fn action_to_method(
             // mistake the blanket-Nil pin above was (issue #810). Untyped
             // lets the compiler infer from the body instead; campfire's
             // `role_params`, which builds a bare Hash, still infers Hash.
-            Ty::Untyped
+            Ty::untyped()
         }
     } else if is_public {
         // Routed actions terminate in render/redirect → Nil.
@@ -2883,7 +2883,7 @@ fn action_to_method(
         // `@a, @b = get_from_cache(...)` as a nil destructure (and the
         // massign repro matrix showed every honest shape passes).
         // Untyped lets the compiler infer from the body instead.
-        Ty::Untyped
+        Ty::untyped()
     };
     // Private-helper params take the analyzer's call-site-unified type
     // when one landed (campfire's `broadcast_create_room(room)` has one
@@ -2901,13 +2901,13 @@ fn action_to_method(
         .enumerate()
         .map(|(i, p)| {
             let ty = if p.rest {
-                Ty::Untyped
+                Ty::untyped()
             } else {
                 unified
                     .and_then(|v| v.get(i))
                     .filter(|t| !matches!(t, Ty::Var { .. }))
                     .cloned()
-                    .unwrap_or(Ty::Untyped)
+                    .unwrap_or(Ty::untyped())
             };
             // A defaulted param also holds its DEFAULT whenever a caller
             // leaves it out, and the call-site unification only sees the
@@ -2916,10 +2916,10 @@ fn action_to_method(
             // params String, so the slot said `String?` and the two
             // one-argument callers handed spinel `true` for a C string.
             let ty = match &p.default {
-                Some(d) if !p.rest && !matches!(ty, Ty::Untyped) => {
+                Some(d) if !p.rest && !matches!(ty, Ty::Untyped { .. }) => {
                     match default_literal_ty(d) {
                         Some(dt) => union_with(ty, dt),
-                        None => Ty::Untyped,
+                        None => Ty::untyped(),
                     }
                 }
                 _ => ty,

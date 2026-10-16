@@ -603,7 +603,7 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
             // value-typed payload without an E0308. Without widening
             // the field types as `()` and every other path fails.
             None => Ty::Union {
-                variants: vec![Ty::Nil, Ty::Untyped].into(),
+                variants: vec![Ty::Nil, Ty::untyped()].into(),
             },
         }
     } else {
@@ -614,8 +614,8 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
         tys.iter()
             .max_by_key(|t| match t {
                 Ty::Hash { key, value } => {
-                    let k = !matches!(**key, Ty::Untyped);
-                    let v = !matches!(**value, Ty::Untyped);
+                    let k = !matches!(**key, Ty::Untyped { .. });
+                    let v = !matches!(**value, Ty::Untyped { .. });
                     (k as u8) + (v as u8)
                 }
                 // Empty `[]` seeds Array[Untyped]; a later `ivar << s`
@@ -623,7 +623,7 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
                 // the concrete elem so rust emits `Vec<String>` not
                 // `Vec<Value>`.
                 Ty::Array { elem } => {
-                    if matches!(elem.as_ref(), Ty::Untyped) {
+                    if matches!(elem.as_ref(), Ty::Untyped { .. }) {
                         1
                     } else {
                         2
@@ -632,7 +632,7 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
                 _ => 0,
             })
             .cloned()
-            .unwrap_or(Ty::Untyped)
+            .unwrap_or(Ty::untyped())
     }
 }
 
@@ -655,7 +655,7 @@ fn walk_collect_ivars(
     }
     match &*e.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            let ty = value.ty.clone().unwrap_or(Ty::Untyped);
+            let ty = value.ty.clone().unwrap_or(Ty::untyped());
             record(name.as_str(), ty, order, observed);
             walk_collect_ivars(value, order, observed);
         }
@@ -668,7 +668,7 @@ fn walk_collect_ivars(
             target: LValue::Attr { recv, name },
             value,
         } if matches!(&*recv.node, ExprNode::SelfRef) => {
-            let ty = value.ty.clone().unwrap_or(Ty::Untyped);
+            let ty = value.ty.clone().unwrap_or(Ty::untyped());
             record(name.as_str(), ty, order, observed);
             walk_collect_ivars(value, order, observed);
         }
@@ -685,7 +685,7 @@ fn walk_collect_ivars(
             if method.as_str() == "<<" && args.len() == 1 =>
         {
             if let ExprNode::Ivar { name } = &*recv.node {
-                let elem = args[0].ty.clone().unwrap_or(Ty::Untyped);
+                let elem = args[0].ty.clone().unwrap_or(Ty::untyped());
                 record(
                     name.as_str(),
                     Ty::Array {
@@ -708,8 +708,8 @@ fn walk_collect_ivars(
                     .map(|tys| tys.iter().any(|t| matches!(t, Ty::Hash { .. })))
                     .unwrap_or(false);
                 if already_hash {
-                    let k_ty = args[0].ty.clone().unwrap_or(Ty::Untyped);
-                    let v_ty = args[1].ty.clone().unwrap_or(Ty::Untyped);
+                    let k_ty = args[0].ty.clone().unwrap_or(Ty::untyped());
+                    let v_ty = args[1].ty.clone().unwrap_or(Ty::untyped());
                     record(
                         key,
                         Ty::Hash {

@@ -924,7 +924,7 @@ fn bare_new_in_class_method_resolves_to_constructor() {
         signature: Some(Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::from("attrs"),
-                ty: Ty::Untyped.into(),
+                ty: Ty::untyped().into(),
                 kind: ParamKind::Required,
             }].into(),
             block: None,

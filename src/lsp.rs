@@ -872,7 +872,7 @@ fn local_assign_hint(expr: &Expr, text: &str) -> Option<InlayHint> {
 /// A type worth surfacing in a hint — excludes unresolved/gradual types,
 /// which would render as `untyped` and add no information.
 fn is_concrete(ty: &Ty) -> bool {
-    !matches!(ty, Ty::Var { .. } | Ty::Untyped | Ty::Bottom)
+    !matches!(ty, Ty::Var { .. } | Ty::Untyped { .. } | Ty::Bottom)
 }
 
 fn map_severity(sev: Severity) -> DiagnosticSeverity {

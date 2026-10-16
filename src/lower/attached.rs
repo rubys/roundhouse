@@ -1158,7 +1158,7 @@ fn push_writer_and_save(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symb
                 nil_lit(),
             ],
         }),
-        Some(super::model_to_library::fn_sig(vec![(value, Ty::Untyped)], Ty::Nil)),
+        Some(super::model_to_library::fn_sig(vec![(value, Ty::untyped())], Ty::Nil)),
         AccessorKind::Method,
         true,
     );

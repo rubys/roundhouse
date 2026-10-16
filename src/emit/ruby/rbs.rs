@@ -428,7 +428,7 @@ fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
             format!("^({p}) -> {}", rbs(ret))
         }
         Ty::Var { .. } => "untyped".into(),
-        Ty::Untyped => "untyped".into(),
+        Ty::Untyped { .. } => "untyped".into(),
         Ty::Bottom => "bot".into(),
     }
 }
@@ -441,7 +441,7 @@ fn render_union(variants: &[Ty], enclosing: &[&str]) -> String {
     // the fake arm costs speed on top of honesty. Collapse first,
     // before the `T?` sugar, or a `T | untyped | nil` renders the
     // equally-meaningless `untyped?`.
-    if variants.iter().any(|v| matches!(v, Ty::Untyped | Ty::Var { .. })) {
+    if variants.iter().any(|v| matches!(v, Ty::Untyped { .. } | Ty::Var { .. })) {
         return "untyped".into();
     }
     // `T | nil` collapses to `T?` (RBS idiomatic optional form).

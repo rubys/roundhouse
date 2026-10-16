@@ -190,7 +190,7 @@ fn non_nil_classes(ty: &Ty) -> Vec<&crate::ident::ClassId> {
     let mut out = Vec::new();
     for v in variants {
         match v {
-            Ty::Nil | Ty::Var { .. } | Ty::Untyped | Ty::Bottom => {}
+            Ty::Nil | Ty::Var { .. } | Ty::Untyped { .. } | Ty::Bottom => {}
             Ty::Class { id, .. } => out.push(id),
             _ => return Vec::new(),
         }
@@ -327,5 +327,5 @@ fn reached(gql: &crate::dialect::GraphqlObjectType, class: &LibraryClass) -> boo
     };
     variants
         .iter()
-        .any(|v| !matches!(v, Ty::Nil | Ty::Var { .. } | Ty::Untyped | Ty::Bottom))
+        .any(|v| !matches!(v, Ty::Nil | Ty::Var { .. } | Ty::Untyped { .. } | Ty::Bottom))
 }

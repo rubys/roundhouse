@@ -132,7 +132,7 @@ pub(crate) fn synth_default_for_ty(ty: &crate::ty::Ty) -> Option<String> {
         Ty::Int => Some("0_i64".to_string()),
         Ty::Float => Some("0.0_f64".to_string()),
         Ty::Bool => Some("false".to_string()),
-        Ty::Untyped => Some("serde_json::Value::Null".to_string()),
+        Ty::Untyped { .. } => Some("serde_json::Value::Null".to_string()),
         Ty::Nil => Some("None".to_string()),
         // `T | Nil` Union maps to `Option<T>` in the rust emitter
         // (see `ty::rust_ty` Union handling). Missing-arg default is
@@ -167,7 +167,7 @@ pub(crate) fn synth_default_for_ty(ty: &crate::ty::Ty) -> Option<String> {
 /// impl, so we only skip the wrap on the shapes that emit_expr
 /// has already coerced.
 pub(crate) fn arm_body_already_value(body: &Expr) -> bool {
-    matches!(body.ty.as_ref(), Some(crate::ty::Ty::Untyped))
+    matches!(body.ty.as_ref(), Some(crate::ty::Ty::Untyped { .. }))
         || matches!(
             &*body.node,
             ExprNode::Lit { value: Literal::Nil }
@@ -179,7 +179,7 @@ pub(crate) fn arm_body_already_value(body: &Expr) -> bool {
 pub(crate) fn ty_contains_untyped(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
     match ty {
-        Ty::Untyped => true,
+        Ty::Untyped { .. } => true,
         Ty::Union { variants } => variants.iter().any(ty_contains_untyped),
         _ => false,
     }
@@ -242,7 +242,7 @@ pub(crate) fn coerce_to_value(value: &Expr, rhs: &str) -> String {
     use crate::ty::Ty;
     let already_value = matches!(
         value.ty.as_ref(),
-        Some(Ty::Untyped)
+        Some(Ty::Untyped { .. })
             | Some(Ty::Var { .. })
             | Some(Ty::Record { .. })
             | Some(Ty::Hash { .. })

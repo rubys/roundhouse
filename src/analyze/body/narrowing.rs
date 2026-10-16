@@ -303,10 +303,10 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
         // tells us "this is a Hash of *some* shape," and downstream
         // dispatch should propagate that gradualness rather than
         // leave block params as Var.
-        "Array" if core => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
+        "Array" if core => Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) },
         "Hash" if core => Ty::Hash {
-            key: std::sync::Arc::new(Ty::Untyped),
-            value: std::sync::Arc::new(Ty::Untyped),
+            key: std::sync::Arc::new(Ty::untyped()),
+            value: std::sync::Arc::new(Ty::untyped()),
         },
         _ => Ty::Class {
             id: ClassId(Symbol::from(
@@ -484,7 +484,7 @@ fn intersect_variant(current: &Ty, narrower: &Ty) -> Option<Ty> {
         (Ty::Class { id, .. }, Ty::Hash { .. }) if id.0.as_str() == super::send::PARAM_VALUE => {
             Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(super::send::param_value_ty()) })
         }
-        (Ty::Untyped | Ty::Var { .. }, Ty::Array { .. } | Ty::Hash { .. }) => {
+        (Ty::Untyped { .. } | Ty::Var { .. }, Ty::Array { .. } | Ty::Hash { .. }) => {
             Some(narrower.clone())
         }
         _ if ty_compatible(current, narrower) => Some(current.clone()),

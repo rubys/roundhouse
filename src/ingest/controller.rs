@@ -576,7 +576,7 @@ fn ingest_controller_body_item(
                 if let Some(rp) = req.as_required_parameter_node() {
                     params
                         .fields
-                        .insert(Symbol::from(constant_id_str(&rp.name())), Ty::Untyped);
+                        .insert(Symbol::from(constant_id_str(&rp.name())), Ty::untyped());
                 }
             }
             // Optional positionals (`opts = {}`) — keep the name + default

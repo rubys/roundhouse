@@ -1271,7 +1271,7 @@ fn coerce_nullable_finder(
             let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
             matches!(non_nil.as_slice(), [Ty::Class { .. }])
         }
-        None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => {
+        None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => {
             let ExprNode::Const { path } = &*r.node else { return rendered };
             let cls = type_name(&path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"));
             CLASS_HIERARCHY.with(|h| h.borrow().contains_key(&cls))
@@ -2124,8 +2124,8 @@ fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
 fn nilable_prop_conversion(base: &str, value: &Expr) -> Option<String> {
     use crate::ty::Ty;
     let rhs_untyped = match value.ty.as_ref() {
-        None | Some(Ty::Untyped) => true,
-        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Untyped)),
+        None | Some(Ty::Untyped { .. }) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Untyped { .. })),
         _ => false,
     };
     if !rhs_untyped {

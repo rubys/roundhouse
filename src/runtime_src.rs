@@ -326,8 +326,8 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
         let first = hash.elements().iter().next();
         let Some(first) = first else {
             return Some(Ty::Hash {
-                key: std::sync::Arc::new(Ty::Untyped),
-                value: std::sync::Arc::new(Ty::Untyped),
+                key: std::sync::Arc::new(Ty::untyped()),
+                value: std::sync::Arc::new(Ty::untyped()),
             });
         };
         let assoc = first.as_assoc_node()?;
@@ -341,7 +341,7 @@ fn type_of_const_literal(node: &Node<'_>) -> Option<Ty> {
     if let Some(array) = node.as_array_node() {
         let first = array.elements().iter().next();
         let Some(first) = first else {
-            return Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+            return Some(Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) });
         };
         // Literal elements first; a `Klass.new(…)` element falls through
         // to the constructed-instance rule above, which is how a table
@@ -699,7 +699,7 @@ fn seed_well_known_classes(
 
     let row_ty = Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),
-        value: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::untyped()),
     };
     let nilable_row = Ty::Union {
         variants: vec![row_ty.clone(), Ty::Nil].into(),

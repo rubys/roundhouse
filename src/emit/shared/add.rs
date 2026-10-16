@@ -275,14 +275,14 @@ mod tests {
     fn untyped_operand_is_unknown_not_incompatible() {
         // `untyped + 1` is the gradual escape — must fall through to
         // native infix, not refuse with a runtime raise.
-        let l = var_with("a", Ty::Untyped);
+        let l = var_with("a", Ty::untyped());
         let r = int_lit(2);
         assert!(matches!(classify_add(&l, &r), AddCase::Unknown));
         // A union with a gradual arm collapses the same way.
         let u = var_with(
             "a",
             Ty::Union {
-                variants: vec![Ty::Float, Ty::Untyped].into(),
+                variants: vec![Ty::Float, Ty::untyped()].into(),
             },
         );
         let s = var_with("b", Ty::Str);

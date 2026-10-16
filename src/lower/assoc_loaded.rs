@@ -294,7 +294,7 @@ pub(crate) fn rewrite_node(
         elem: std::sync::Arc::new(inner.ty.as_ref().and_then(|t| match t {
             Ty::Array { elem } => Some((**elem).clone()),
             _ => None,
-        }).unwrap_or(Ty::Untyped)),
+        }).unwrap_or(Ty::untyped())),
     });
     // Explicit `message.boosts.loaded?` keeps `message` as receiver.
     // Implicit-self `boosts.loaded?` collapses to `self.boosts_loaded?`

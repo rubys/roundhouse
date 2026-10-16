@@ -749,7 +749,7 @@ fn default_value_for_ty(ty: &Ty) -> String {
         Ty::Nil => "()".to_string(),
         Ty::Array { .. } => "Vec::new()".to_string(),
         Ty::Hash { .. } => "std::collections::HashMap::new()".to_string(),
-        Ty::Untyped => "serde_json::Value::Null".to_string(),
+        Ty::Untyped { .. } => "serde_json::Value::Null".to_string(),
         Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)) => {
             "None".to_string()
         }
@@ -820,7 +820,7 @@ fn find_yield_signature(body: &crate::expr::Expr) -> Option<Vec<Ty>> {
     use crate::expr::ExprNode;
     match &*body.node {
         ExprNode::Yield { args } => {
-            Some(args.iter().map(|a| a.ty.clone().unwrap_or(Ty::Untyped)).collect())
+            Some(args.iter().map(|a| a.ty.clone().unwrap_or(Ty::untyped())).collect())
         }
         ExprNode::Seq { exprs } => exprs.iter().find_map(find_yield_signature),
         ExprNode::If { cond, then_branch, else_branch } => find_yield_signature(cond)

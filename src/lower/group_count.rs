@@ -154,7 +154,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         // schema read declined).
         if !matches!(expr.ty, Some(Ty::Hash { .. })) {
             expr.ty = Some(Ty::Hash {
-                key: std::sync::Arc::new(Ty::Untyped),
+                key: std::sync::Arc::new(Ty::untyped()),
                 value: std::sync::Arc::new(Ty::Int),
             });
         }

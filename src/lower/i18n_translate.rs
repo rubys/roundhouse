@@ -784,7 +784,7 @@ fn runtime_call(span: Span, args: &[Expr], catalog: &Catalog, site: Site<'_>) ->
             opts
         }
         None => Expr {
-            ty: Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }),
+            ty: Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) }),
             ..Expr::new(span, ExprNode::Hash { entries: Vec::new(), kwargs: false })
         },
     };
@@ -1082,7 +1082,7 @@ fn with_locale(e: &Expr) -> Option<Expr> {
                 block: None,
                 parenthesized: false,
             });
-            call.ty = Some(Ty::Untyped);
+            call.ty = Some(Ty::untyped());
             call
         }
         _ => return None,

@@ -481,7 +481,7 @@ fn qualified_runtime_signatures_seed_contexts_and_results() {
     let classes = ingest_runtime_classes();
     let row = Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),
-        value: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::untyped()),
     };
     let rows = Ty::Array { elem: std::sync::Arc::new(row) };
     for (class, method, name, expected) in [
@@ -518,7 +518,7 @@ fn qualified_runtime_signatures_seed_contexts_and_results() {
         // the constructor above still takes the row hashes.
         assert_eq!(
             probes[0].methods[0].body.ty,
-            Some(Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }) }),
+            Some(Ty::Array { elem: std::sync::Arc::new(Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) }) }),
             "{class}"
         );
     }

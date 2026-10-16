@@ -57,7 +57,7 @@ fn accessor_field_ty(m: &MethodDef) -> Ty {
         (AccessorKind::AttributeWriter, Some(Ty::Fn { params, .. })) if !params.is_empty() => {
             (*params[0].ty).clone()
         }
-        _ => m.body.ty.clone().unwrap_or(Ty::Untyped),
+        _ => m.body.ty.clone().unwrap_or(Ty::untyped()),
     }
 }
 
@@ -103,7 +103,7 @@ fn params_and_ret(m: &MethodDef) -> (Vec<String>, Ty) {
         }
         _ => (
             m.params.iter().map(|p| super::shared::py_ident(p.as_str())).collect(),
-            Ty::Untyped,
+            Ty::untyped(),
         ),
     }
 }

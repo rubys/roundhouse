@@ -82,6 +82,11 @@ pub const SELF_BINDING_CLASS_OBJECT: u64 = 1 << 15;
 /// The `defaults.merge(hash)` ingest wrote for `hash.reverse_merge(defaults)`.
 pub const REVERSE_MERGE: u64 = 1 << 16;
 
+/// An opaque source `&expr` block argument (excluding the modeled symbol
+/// adapter). Lambda shape alone does not prove the
+/// directly attached block ABI (strict arity/nonlocal returns may differ).
+pub const FORWARDED_BLOCK: u64 = 1 << 17;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

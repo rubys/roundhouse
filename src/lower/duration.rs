@@ -520,7 +520,7 @@ pub(crate) fn rewrite_durations(expr: &mut Expr) {
             parenthesized: true,
         };
         if matches!(expr.ty, None | Some(Ty::Var { .. })) {
-            expr.ty = Some(Ty::Untyped);
+            expr.ty = Some(Ty::untyped());
         }
     }
 }

@@ -80,7 +80,7 @@ pub fn crystal_ty(t: &Ty) -> String {
                 .collect();
             format!("NamedTuple({})", parts.join(", "))
         }
-        Ty::Untyped | Ty::Var { .. } | Ty::Fn { .. } => "String".to_string(),
+        Ty::Untyped { .. } | Ty::Var { .. } | Ty::Fn { .. } => "String".to_string(),
     }
 }
 
@@ -108,7 +108,7 @@ fn render_union(variants: &[Ty]) -> String {
 /// type annotations or left bare for Crystal inference.
 pub fn has_untyped(t: &Ty) -> bool {
     match t {
-        Ty::Untyped => true,
+        Ty::Untyped { .. } => true,
         Ty::Array { elem } => has_untyped(elem),
         Ty::Hash { key, value } => has_untyped(key) || has_untyped(value),
         Ty::Tuple { elems } => elems.iter().any(has_untyped),

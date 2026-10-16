@@ -309,7 +309,7 @@ fn method_registered_on(
 pub fn unknown_receiver_sends(app: &App, classes: &HashMap<ClassId, ClassInfo>) -> Vec<UnknownReceiverSend> {
     fn visit(expr: &Expr, classes: &HashMap<ClassId, ClassInfo>, out: &mut Vec<UnknownReceiverSend>) {
         if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
-            let gradual = matches!(r.ty, Some(Ty::Untyped));
+            let gradual = matches!(r.ty, Some(Ty::Untyped { .. }));
             let unknown = is_unknown_ty(r.ty.as_ref())
                 || matches!(&r.ty, Some(Ty::Class { id, .. }) if !classes.contains_key(id));
             // Dispatch evidence, not return shape: a known method that
@@ -469,7 +469,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // A `Seq` has its tail's type; the tail reports itself. ForwardArgs is
     // an argument-packet marker, not a value escaping the type system.
     if value_used
-        && matches!(expr.ty.as_ref(), Some(Ty::Untyped))
+        && matches!(expr.ty.as_ref(), Some(Ty::Untyped { .. }))
         && !matches!(
             &*expr.node,
             ExprNode::Seq { .. } | ExprNode::ForwardArgs | ExprNode::ForwardKeywords

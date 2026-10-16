@@ -69,14 +69,14 @@ pub fn of(value: Ty) -> Ty {
 
 pub fn value_of(ty: &Ty) -> Option<&Ty> {
     match ty {
-        Ty::Class { id, args } if id.0.as_str() == CLASS => Some(args.first().unwrap_or(&Ty::Untyped)),
+        Ty::Class { id, args } if id.0.as_str() == CLASS => Some(args.first().unwrap_or(&Ty::Untyped { why: crate::ty::Why::INFERRED })),
         _ => None,
     }
 }
 
 fn indifferent_keys(key: &Ty) -> bool {
     match key {
-        Ty::Str | Ty::Sym | Ty::Untyped | Ty::Var { .. } => true,
+        Ty::Str | Ty::Sym | Ty::Untyped { .. } | Ty::Var { .. } => true,
         Ty::Union { variants } => variants.iter().all(indifferent_keys),
         _ => false,
     }
@@ -96,7 +96,7 @@ pub fn plain(ty: &Ty) -> Ty {
     match ty {
         Ty::Class { id, args } if id.0.as_str() == CLASS => Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
-            value: std::sync::Arc::new(plain(args.first().unwrap_or(&Ty::Untyped))),
+            value: std::sync::Arc::new(plain(args.first().unwrap_or(&Ty::untyped()))),
         },
         Ty::Hash { key, value } => Ty::Hash { key: std::sync::Arc::new(plain(key)), value: std::sync::Arc::new(plain(value)) },
         Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(plain(elem)) },
@@ -120,7 +120,7 @@ pub fn mentions(ty: &Ty) -> bool {
 
 pub fn from(ty: &Ty) -> Option<Ty> {
     match ty {
-        Ty::Untyped | Ty::Nil => Some(of(Ty::Untyped)),
+        Ty::Untyped { .. } | Ty::Nil => Some(of(Ty::untyped())),
         Ty::Hash { key, value } if indifferent_keys(key) => Some(of(converted(value))),
         Ty::Class { .. } => value_of(ty).map(|v| of(v.clone())),
         Ty::Union { variants } => {
@@ -133,7 +133,7 @@ pub fn from(ty: &Ty) -> Option<Ty> {
                 values.push(value_of(&t)?.clone());
             }
             match values.len() {
-                0 => Some(of(Ty::Untyped)),
+                0 => Some(of(Ty::untyped())),
                 1 => Some(of(values.pop().unwrap())),
                 _ => Some(of(Ty::Union { variants: values.into() })),
             }
@@ -157,9 +157,9 @@ pub fn from_gradual(ty: &Ty) -> Option<Ty> {
     }
     let mut all = Vec::new();
     leaves(ty, &mut all);
-    (all.iter().any(|v| **v == Ty::Untyped)
-        && all.iter().all(|v| matches!(v, Ty::Untyped | Ty::Nil | Ty::Hash { .. })))
-    .then(|| of(Ty::Untyped))
+    (all.iter().any(|v| **v == Ty::untyped())
+        && all.iter().all(|v| matches!(v, Ty::Untyped { .. } | Ty::Nil | Ty::Hash { .. })))
+    .then(|| of(Ty::untyped()))
 }
 
 fn merged_value(other: &Ty) -> Option<Ty> {
@@ -203,7 +203,7 @@ pub fn method_ty(
             "freeze" | "deep_dup" | "select" | "filter" | "reject" | "select!" | "filter!" | "reject!" | "keep_if"
             | "delete_if" | "clear" | "each" | "each_pair" | "each_key" | "each_value" => same(),
             "compact" => of(without_nil(value)),
-            "transform_values" => of(block_ret.cloned().unwrap_or(Ty::Untyped)),
+            "transform_values" => of(block_ret.cloned().unwrap_or(Ty::untyped())),
             _ => hash_answer(method),
         },
     };

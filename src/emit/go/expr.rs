@@ -401,7 +401,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 // router away from the `map[string]string` its declared
                 // return needs.
                 let value_informative = !value.is_open()
-                    && !matches!(&**value, Ty::Untyped);
+                    && !matches!(&**value, Ty::Untyped { .. });
                 if k_raw != "interface{}" || v_ty != "interface{}" || value_informative {
                     // An open key with an informative value is the
                     // refined-accumulator shape: the analyzer widens the
@@ -811,7 +811,7 @@ pub(super) fn emit_send(
                         let mut widened = a.clone();
                         widened.ty = Some(Ty::Hash {
                             key: std::sync::Arc::new(Ty::Str),
-                            value: std::sync::Arc::new(Ty::Untyped),
+                            value: std::sync::Arc::new(Ty::untyped()),
                         });
                         return emit_expr(ctx, &widened);
                     }
@@ -2336,7 +2336,7 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
         }
     }
     if let Ty::Hash { value: tv, .. } = target_ty {
-        if matches!(tv.as_ref(), Ty::Untyped) {
+        if matches!(tv.as_ref(), Ty::Untyped { .. }) {
             let tgt = super::ty::go_ty_stub(Some(target_ty));
             let src = super::ty::go_ty_stub(value.ty.as_ref());
             if src != tgt {

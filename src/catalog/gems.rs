@@ -46,6 +46,9 @@ pub enum GemTy {
     /// Gradual escape: the gem returns an object we don't model
     /// structurally. Dispatch resolves and the choice propagates.
     Untyped,
+    /// An opaque callback summary, rather than an external data contract.
+    /// The block may determine the answer; no gradual source is established.
+    BlockResult,
     /// An instance of the named (dotted-path) class, so a *factory*
     /// method can return another cataloged gem type and chains
     /// resolve. (`.new` is already universal, so this is only for
@@ -61,7 +64,8 @@ impl GemTy {
             GemTy::Bool => Ty::Bool,
             GemTy::Float => Ty::Float,
             GemTy::Sym => Ty::Sym,
-            GemTy::Untyped => Ty::Untyped,
+            GemTy::Untyped => Ty::gradual_untyped(),
+            GemTy::BlockResult => Ty::untyped(),
             GemTy::Instance(path) => Ty::Class {
                 id: ClassId(Symbol::from(path)),
                 args: vec![].into(),
@@ -139,7 +143,7 @@ pub const GEM_CATALOG: &[GemClass] = &[
             ("locale", GemTy::Sym),
             ("default_locale", GemTy::Sym),
             // `with_locale` returns its block's value — opaque here.
-            ("with_locale", GemTy::Untyped),
+            ("with_locale", GemTy::BlockResult),
             ("available_locales", GemTy::Untyped),
             ("exists?", GemTy::Bool),
         ],
@@ -253,8 +257,8 @@ pub const GEM_CATALOG: &[GemClass] = &[
             ("insert_after", GemTy::Untyped),
             ("append_child", GemTy::Untyped),
             ("delete", GemTy::Untyped),
-            ("walk", GemTy::Untyped),
-            ("each", GemTy::Untyped),
+            ("walk", GemTy::BlockResult),
+            ("each", GemTy::BlockResult),
         ],
     },
     // RQRCode — QR-code rendering; the `as_*` methods serialize to a
@@ -420,3 +424,33 @@ pub const GEM_CATALOG: &[GemClass] = &[
         instance_methods: &[],
     },
 ];
+
+#[cfg(test)]
+mod reason_tests {
+    use super::*;
+
+    #[test]
+    fn callback_summaries_do_not_admit_external_data() {
+        let mut callbacks = Vec::new();
+        for class in GEM_CATALOG {
+            for (side, methods) in [("class", class.class_methods), ("instance", class.instance_methods)] {
+                for (name, kind) in methods {
+                    let ty = kind.to_ty();
+                    match kind {
+                        GemTy::BlockResult => {
+                            assert!(ty.inference_eq(&Ty::untyped()), "{}.{name}", class.name);
+                            callbacks.push((class.name, side, *name));
+                        }
+                        GemTy::Untyped => assert!(ty.inference_eq(&Ty::gradual_untyped()), "{}.{name}", class.name),
+                        _ => assert!(ty.inference_eq(&ty.computed()), "{}.{name}", class.name),
+                    }
+                }
+            }
+        }
+        assert_eq!(callbacks, [
+            ("I18n", "class", "with_locale"),
+            ("Commonmarker::Node", "instance", "walk"),
+            ("Commonmarker::Node", "instance", "each"),
+        ]);
+    }
+}

@@ -235,7 +235,7 @@ fn count_gradual(e: &Expr) -> usize {
 }
 
 fn count_gradual_recurse(e: &Expr, total: &mut usize) {
-    if matches!(&e.ty, Some(Ty::Untyped)) {
+    if matches!(&e.ty, Some(Ty::Untyped { .. })) {
         *total += 1;
     }
     use ExprNode as N;
@@ -885,7 +885,7 @@ fn every_runtime_method_body_concretely_typed() {
     }
 
     eprintln!(
-        "framework runtime Bar B residual (Ty::Untyped sites): {total_gradual} \
+        "framework runtime Bar B residual (Ty::untyped() sites): {total_gradual} \
          across {} files",
         by_file.len(),
     );
@@ -1082,7 +1082,7 @@ fn every_runtime_method_body_concretely_typed() {
     const CEILING: usize = 776;
     assert!(
         total_gradual <= CEILING,
-        "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
+        "{total_gradual} Ty::untyped() sites exceeds ceiling of {CEILING}",
     );
 }
 
@@ -1110,7 +1110,7 @@ fn active_support_inflector_slice_adds_no_bar_b_sites() {
         assert_eq!(
             count_gradual(&method.body),
             0,
-            "ActiveSupport::Inflector.{name} introduces no Ty::Untyped Bar B sites",
+            "ActiveSupport::Inflector.{name} introduces no Ty::untyped() Bar B sites",
         );
     }
 }
@@ -1140,8 +1140,8 @@ fn empty_html_opts_emits_string_keyed_maps_on_csharp_and_kotlin() {
         ExprNode::Hash { entries: vec![], kwargs: false },
     );
     arg.ty = Some(Ty::Hash {
-        key: std::sync::Arc::new(Ty::Untyped),
-        value: std::sync::Arc::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::untyped()),
+        value: std::sync::Arc::new(Ty::untyped()),
     });
     let emitted = roundhouse::emit::kotlin::emit_expr_for_runtime(&arg);
     assert_eq!(

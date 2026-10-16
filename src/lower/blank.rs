@@ -388,7 +388,7 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
                 OwnDispatch | Skip(_) => unreachable!("own-predicate unions returned above"),
             }
         }
-        Ty::Untyped | Ty::Var { .. } => Runtime,
+        Ty::Untyped { .. } | Ty::Var { .. } => Runtime,
         _ => Runtime,
     }
 }
@@ -490,12 +490,12 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
                 LValue::Var { id, name } => Some(mk(
                     r.span,
                     ExprNode::Var { id: *id, name: name.clone() },
-                    r.ty.clone().unwrap_or(Ty::Untyped),
+                    r.ty.clone().unwrap_or(Ty::untyped()),
                 )),
                 LValue::Ivar { name } => Some(mk(
                     r.span,
                     ExprNode::Ivar { name: name.clone() },
-                    r.ty.clone().unwrap_or(Ty::Untyped),
+                    r.ty.clone().unwrap_or(Ty::untyped()),
                 )),
                 _ => None,
             },
@@ -731,7 +731,7 @@ fn try_rewrite_compact_blank(
             body: cond_body,
             block_style: Default::default(),
         },
-        Ty::Untyped,
+        Ty::untyped(),
     );
     *expr = mk(
         span,
@@ -787,7 +787,7 @@ fn non_nil(t: &Ty) -> Ty {
             let mut kept: Vec<Ty> =
                 variants.iter().filter(|v| !matches!(v, Ty::Nil)).cloned().collect();
             match kept.len() {
-                0 => Ty::Untyped,
+                0 => Ty::untyped(),
                 1 => kept.remove(0),
                 _ => Ty::Union { variants: kept.into() },
             }
@@ -898,7 +898,7 @@ fn runtime_predicate(span: crate::span::Span, r: Expr, pred: Pred, ret: Ty) -> E
     let recv = mk(
         span,
         ExprNode::Const { path: vec![Symbol::new("ActiveSupport")] },
-        Ty::Untyped,
+        Ty::untyped(),
     );
     mk(
         span,
@@ -1046,7 +1046,7 @@ fn non_nil_ty(r: &Expr) -> Ty {
             }
         }
         Some(t) => t.clone(),
-        None => Ty::Untyped,
+        None => Ty::untyped(),
     }
 }
 
@@ -1055,7 +1055,7 @@ fn nullable(t: Ty) -> Ty {
 }
 
 fn unlowered(expr: &Expr, recv_ty: Option<&Ty>, method: &str, reason: &str) -> Diagnostic {
-    let recv_ty = recv_ty.cloned().unwrap_or(Ty::Untyped);
+    let recv_ty = recv_ty.cloned().unwrap_or(Ty::untyped());
     let kind = DiagnosticKind::BlankUnlowered {
         method: Symbol::new(method),
         recv_ty: recv_ty.clone(),

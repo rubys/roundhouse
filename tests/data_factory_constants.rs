@@ -51,7 +51,7 @@ fn literal_data_declarations_register_exact_members_without_writers() {
         for member in members {
             assert_eq!(
                 class.instance_methods.get(&Symbol::from(member)),
-                Some(&Ty::Untyped)
+                Some(&Ty::untyped())
             );
             assert!(
                 !class
@@ -838,7 +838,7 @@ fn a_top_level_data_factory_file_registers_its_class() {
             Some(&Ty::Class { id: id.clone(), args: vec![].into() })
         );
         for member in ["name", "path"] {
-            assert_eq!(class.instance_methods.get(&Symbol::from(member)), Some(&Ty::Untyped));
+            assert_eq!(class.instance_methods.get(&Symbol::from(member)), Some(&Ty::untyped()));
             assert!(!class.instance_methods.contains_key(&Symbol::from(format!("{member}="))));
         }
     }

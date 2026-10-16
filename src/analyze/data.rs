@@ -143,7 +143,7 @@ fn add_data_methods(info: &mut ClassInfo, id: &ClassId, members: impl IntoIterat
     // Data has no generated writers. A block method of the same name
     // overrides the reader, as it does in Ruby.
     for member in members {
-        info.instance_methods.entry(member).or_insert(Ty::Untyped);
+        info.instance_methods.entry(member).or_insert(Ty::untyped());
     }
     info.instance_methods.entry(Symbol::from("with")).or_insert(instance.clone());
     instance

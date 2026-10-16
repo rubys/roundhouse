@@ -484,7 +484,7 @@ pub(super) fn emit_send(
             // params for Str cols are typed Str, matching the row
             // accessor's return Ty. For non-Str args the coerce
             // function returns the bare emit.
-            args[0].ty.as_ref().unwrap_or(&crate::ty::Ty::Untyped),
+            args[0].ty.as_ref().unwrap_or(&crate::ty::Ty::untyped()),
         );
         out.push(coerced);
         out

@@ -876,7 +876,14 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 None => None,
             };
             let block = match c.block() {
-                Some(block_node) => ingest_call_block(&block_node, file, &method)?,
+                Some(block_node) => {
+                    let mut block = ingest_call_block(&block_node, file, &method)?;
+                    if block_node.as_block_argument_node().is_some_and(|arg|
+                        !arg.expression().is_some_and(|expr| expr.as_symbol_node().is_some())) {
+                        if let Some(block) = block.as_mut() { block.decisions |= crate::expr::FORWARDED_BLOCK; }
+                    }
+                    block
+                },
                 None => None,
             };
             // Two shapes a paren-less call can't hold once lowered, both

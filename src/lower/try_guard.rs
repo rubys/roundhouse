@@ -147,7 +147,7 @@ pub(crate) fn rewrite_node(
     // blob partial's `blob.try(:caption)` turned into a transpile error
     // on an app `check` had passed clean. A gradual `try` stays
     // untyped, so the ledger still counts it.
-    let try_ty = expr.ty.clone().filter(|t| !matches!(t, Ty::Untyped));
+    let try_ty = expr.ty.clone().filter(|t| !matches!(t, Ty::Untyped { .. }));
     let mut call = Expr::new(
         span,
         ExprNode::Send {

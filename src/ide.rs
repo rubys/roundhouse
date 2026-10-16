@@ -398,7 +398,7 @@ pub fn can_be_nil(ty: &Ty) -> bool {
 pub fn nil_verdict(ty: Option<&Ty>) -> Option<bool> {
     fn unknown_arm(ty: &Ty) -> bool {
         match ty {
-            Ty::Untyped | Ty::Var { .. } => true,
+            Ty::Untyped { .. } | Ty::Var { .. } => true,
             Ty::Union { variants } => variants.iter().any(unknown_arm),
             _ => false,
         }
@@ -1130,7 +1130,7 @@ pub fn render_ty(ty: &Ty) -> String {
         // An unresolved inference variable reads as "untyped" to a
         // consumer — same bucket the diagnostics walker treats as unknown.
         Ty::Var { .. } => "untyped".to_string(),
-        Ty::Untyped => "untyped".to_string(),
+        Ty::Untyped { .. } => "untyped".to_string(),
         Ty::Bottom => "bot".to_string(),
     }
 }
@@ -3066,7 +3066,7 @@ pub fn candidate_signature(
         .enumerate()
         .map(|(i, name)| crate::ty::Param {
             name: name.clone(),
-            ty: inferred.and_then(|ts| ts.get(i)).cloned().unwrap_or(Ty::Untyped).into(),
+            ty: inferred.and_then(|ts| ts.get(i)).cloned().unwrap_or(Ty::untyped()).into(),
             kind: crate::ty::ParamKind::Required,
         })
         .collect();
@@ -3542,7 +3542,7 @@ mod tests {
     #[test]
     fn unresolved_variable_renders_untyped() {
         assert_eq!(render_ty(&Ty::Var { var: TyVar(7) }), "untyped");
-        assert_eq!(render_ty(&Ty::Untyped), "untyped");
+        assert_eq!(render_ty(&Ty::untyped()), "untyped");
     }
 
     #[test]
@@ -3551,7 +3551,7 @@ mod tests {
         assert!(can_be_nil(&Ty::Union { variants: vec![class("Article"), Ty::Nil].into() }));
         assert!(!can_be_nil(&class("Article")));
         assert!(!can_be_nil(&Ty::Var { var: TyVar(0) }));
-        assert!(!can_be_nil(&Ty::Untyped));
+        assert!(!can_be_nil(&Ty::untyped()));
     }
 
     #[test]
@@ -3680,16 +3680,16 @@ mod tests {
         assert_eq!(nil_verdict(Some(&Ty::Int)), Some(false));
         // Can't tell: untyped, unresolved var, unions carrying either,
         // and positions the analyzer never typed at all.
-        assert_eq!(nil_verdict(Some(&Ty::Untyped)), None);
+        assert_eq!(nil_verdict(Some(&Ty::untyped())), None);
         assert_eq!(nil_verdict(Some(&Ty::Var { var: TyVar(0) })), None);
         assert_eq!(
-            nil_verdict(Some(&Ty::Union { variants: vec![Ty::Untyped, Ty::Str].into() })),
+            nil_verdict(Some(&Ty::Union { variants: vec![Ty::untyped(), Ty::Str].into() })),
             None
         );
         assert_eq!(nil_verdict(None), None);
         // An unknown arm doesn't retract a proven nil arm.
         assert_eq!(
-            nil_verdict(Some(&Ty::Union { variants: vec![Ty::Untyped, Ty::Nil].into() })),
+            nil_verdict(Some(&Ty::Union { variants: vec![Ty::untyped(), Ty::Nil].into() })),
             Some(true)
         );
     }
