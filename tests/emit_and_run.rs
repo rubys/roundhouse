@@ -2902,6 +2902,101 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct clock contract passed"));
 }
 
+/// Oj under `Oj.mimic_JSON` + `Oj.optimize_rails` (the initializer a Rails
+/// app writes): dump as `to_json`, generate as `JSON.generate`, load as
+/// `JSON.parse` (nil and a non-String as given, `symbol_keys:`), and a
+/// parse failure a `JSON::ParserError` that `Oj::ParseError` does not
+/// catch. Checked against oj 3.17 with ActiveSupport.
+#[test]
+fn oj_under_mimic_json_runs_as_json() {
+    let run = oj_overlay(emit_and_run::real_blog()).run_ruby(OJ_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("oj passed"));
+}
+
+/// Without `Oj.mimic_JSON` Oj is in its `:object` mode, not modeled: its
+/// uses stay errors.
+#[test]
+fn oj_without_mimic_json_stays_unsupported() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("lib/payload.rb", OJ_LIB)
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("Oj")), "{errors:#?}");
+}
+
+/// An Oj method or option the lowering does not read refuses it, ledgered.
+#[test]
+fn oj_unmodeled_options_are_refused() {
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+        ("config/initializers/oj.rb", "Oj.mimic_JSON\n"),
+        ("lib/pretty.rb", "class Pretty\n  def self.show(v)\n    Oj.dump(v, indent: 2)\n  end\nend\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    assert!(roundhouse::ingest::ingest_app_from_tree(tree.clone()).is_err(), "strict ingest passed a refusal");
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+    let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+    assert!(ledger.iter().any(|e| e.contains("Oj not lowered: `Oj.dump` option `indent: 2`")), "{ledger:#?}");
+    assert!(app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Oj"));
+}
+
+const OJ_LIB: &str = r##"class Payload
+  def self.encode(value)
+    Oj.dump(value)
+  end
+
+  def self.encode_compat(value)
+    Oj.dump(value, mode: :compat)
+  end
+
+  def self.encode_braceless(value)
+    Oj.dump(response: value)
+  end
+
+  def self.generated(value)
+    Oj.generate(value)
+  end
+
+  def self.decode(text)
+    Oj.load(text)
+  end
+
+  def self.decode_symbols(text)
+    Oj.load(text, symbol_keys: true)
+  end
+
+  def self.guarded(text)
+    Oj.load(text)
+  rescue Oj::ParseError
+    :oj_rescued
+  rescue JSON::ParserError
+    :json_rescued
+  end
+end
+"##;
+
+const OJ_ASSERTIONS: &str = r##"raise "dump" unless Payload.encode({a: 1, "b" => :c, d: nil, e: [1, "x", 1.5, true]}) == %({"a":1,"b":"c","d":null,"e":[1,"x",1.5,true]})
+raise "dump compat" unless Payload.encode_compat({a: {b: :c}}) == %({"a":{"b":"c"}})
+raise "dump braceless" unless Payload.encode_braceless(5) == %({"response":5})
+raise "dump nil" unless Payload.encode(nil) == "null"
+raise "generate" unless Payload.generated({a: :b}) == %({"a":"b"})
+raise "load" unless Payload.decode(%({"a":[1,2.5,null,true],"b":{"c":"d"}})) == {"a" => [1, 2.5, nil, true], "b" => {"c" => "d"}}
+raise "load nil" unless Payload.decode(nil).nil?
+raise "load integer" unless Payload.decode(5) == 5
+raise "load symbols" unless Payload.decode_symbols(%({"a":{"b":1}})) == {a: {b: 1}}
+raise "parse error" unless Payload.guarded("{x") == :json_rescued
+puts "oj passed"
+"##;
+
+fn oj_overlay(overlay: emit_and_run::Overlay) -> emit_and_run::Overlay {
+    overlay
+        .write("config/initializers/oj.rb", "# frozen_string_literal: true\n\nOj.mimic_JSON\nOj.optimize_rails\n")
+        .write("lib/payload.rb", OJ_LIB)
+}
+
 #[test]
 fn dry_monads_results_run_lowered() {
     let run = dry_monads::overlay().run_ruby(&dry_monads::assertions());

@@ -560,3 +560,59 @@ fn dry_monads_results_run_lowered_natively() {
     run.assert_passes();
     assert!(run.stdout.contains("dry-monads contract passed"));
 }
+
+/// The native half of `emit_and_run::oj_under_mimic_json_runs_as_json`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn oj_under_mimic_json_runs_as_json_natively() {
+    let run = emit_and_run::real_blog()
+        .write("config/initializers/oj.rb", "# frozen_string_literal: true\n\nOj.mimic_JSON\nOj.optimize_rails\n")
+        .write("lib/payload.rb", r##"class Payload
+  def self.encode(value)
+    Oj.dump(value)
+  end
+
+  def self.encode_compat(value)
+    Oj.dump(value, mode: :compat)
+  end
+
+  def self.encode_braceless(value)
+    Oj.dump(response: value)
+  end
+
+  def self.generated(value)
+    Oj.generate(value)
+  end
+
+  def self.decode(text)
+    Oj.load(text)
+  end
+
+  def self.decode_symbols(text)
+    Oj.load(text, symbol_keys: true)
+  end
+
+  def self.guarded(text)
+    Oj.load(text)
+  rescue Oj::ParseError
+    :oj_rescued
+  rescue JSON::ParserError
+    :json_rescued
+  end
+end
+"##)
+        .run_spinel(r##"raise "dump" unless Payload.encode({a: 1, "b" => :c, d: nil, e: [1, "x", 1.5, true]}) == %({"a":1,"b":"c","d":null,"e":[1,"x",1.5,true]})
+raise "dump compat" unless Payload.encode_compat({a: {b: :c}}) == %({"a":{"b":"c"}})
+raise "dump braceless" unless Payload.encode_braceless(5) == %({"response":5})
+raise "dump nil" unless Payload.encode(nil) == "null"
+raise "generate" unless Payload.generated({a: :b}) == %({"a":"b"})
+raise "load" unless Payload.decode(%({"a":[1,2.5,null,true],"b":{"c":"d"}})) == {"a" => [1, 2.5, nil, true], "b" => {"c" => "d"}}
+raise "load nil" unless Payload.decode(nil).nil?
+raise "load integer" unless Payload.decode(5) == 5
+raise "load symbols" unless Payload.decode_symbols(%({"a":{"b":1}})) == {a: {b: 1}}
+raise "parse error" unless Payload.guarded("{x") == :json_rescued
+puts "oj passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("oj passed"));
+}

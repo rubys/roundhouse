@@ -2121,6 +2121,19 @@ end
     })?;
     // After it: a contract result's `to_monad` is a Result.
     super::dry_monads::lower_dry_monads(&mut app, &sources)?;
+    // Oj reads its mode from the initializers (`Oj.mimic_JSON`).
+    {
+        let init_dir = dir.join("config/initializers");
+        let mut initializers = Vec::new();
+        if vfs.is_dir(&init_dir) {
+            for entry in read_rb_files(vfs, &init_dir)? {
+                if let Ok(text) = vfs.read_to_string(&entry) {
+                    initializers.push(text);
+                }
+            }
+        }
+        super::oj::lower_oj(&mut app, &sources, &initializers)?;
+    }
     super::dry_initializer::drop_type_constants(&mut app, &sources);
     // graphql-ruby object types: analyzer-only field methods, so
     // inference carries each type's record class down the schema.

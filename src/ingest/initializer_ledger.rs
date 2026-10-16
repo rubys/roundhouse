@@ -353,6 +353,17 @@ const RECOGNIZERS: &[Recognizer] = &[
         levels: ANY,
         reads: |p| code_lines(p.text).any(|l| raise_on_missing_line(l).is_some()),
     },
+    Recognizer {
+        name: "oj (Oj.mimic_JSON / Oj.optimize_rails: ingest/oj reads the mode)",
+        origins: INIT,
+        levels: ANY,
+        reads: |p| {
+            code_lines(p.text).any(|l| {
+                let l = l.trim_start_matches("::");
+                l == "Oj.mimic_JSON" || l.starts_with("Oj.mimic_JSON(") || l == "Oj.optimize_rails"
+            })
+        },
+    },
 ];
 
 /// Names of every recognizer the ledger consults, for the docs and tests.
