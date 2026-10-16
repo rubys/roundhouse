@@ -940,6 +940,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods,
             nullable_columns: Vec::new(),
             origin: None,
@@ -1033,6 +1034,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: out,
             nullable_columns: Vec::new(),
             origin: None,
@@ -1058,7 +1060,7 @@ mod tests {
 
         // `def self.first(table); table.length; end` with `table: Array`.
         let mut table = vr("table");
-        table.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        table.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
         let body = seq(vec![binop_call(table, "length")]);
         let m = method("len", MethodReceiver::Class, &["table"], body);
         let class = LibraryClass {
@@ -1067,6 +1069,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![m],
             nullable_columns: Vec::new(),
             origin: None,
@@ -1109,6 +1112,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![m],
             nullable_columns: Vec::new(),
             origin: None,
@@ -1164,6 +1168,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![method("each", MethodReceiver::Instance, &[], body)],
             nullable_columns: Vec::new(),
             origin: None,
@@ -1243,6 +1248,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![initialize, key_q, del],
             nullable_columns: Vec::new(),
             origin: None,
@@ -1358,6 +1364,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: out,
             nullable_columns: Vec::new(),
             origin: None,

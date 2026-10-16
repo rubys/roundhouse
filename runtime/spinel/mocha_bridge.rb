@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The mocha bridge — the strict-target half.
 #
 # `lower::mocha` serves the stub shapes its table knows with typed slots

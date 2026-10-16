@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Minitest-shaped, CRuby-only, same quarantine as broadcasts_test.rb
 # (`project.rs::spin_shape` keys on the `Minitest::Test` parent).
 #

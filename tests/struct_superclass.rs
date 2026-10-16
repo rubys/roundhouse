@@ -96,3 +96,39 @@ end
     assert!(!image.contains("ImageStruct"), "{image}");
     assert!(files.iter().all(|(p, _)| !p.ends_with("image_struct.rb")), "{files:?}");
 }
+
+fn diagnostics(files: &[(&str, &str)]) -> Vec<String> {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(
+        PathBuf::from("db/schema.rb"),
+        b"ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"body\", null: false\n  end\nend\n".to_vec(),
+    );
+    for (path, src) in files {
+        tree.insert(PathBuf::from(path), src.as_bytes().to_vec());
+    }
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    roundhouse::analyze::diagnose(&app)
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::diagnostic::Severity::Error)
+        .map(|d| d.message)
+        .collect()
+}
+
+/// Since Ruby 3.2 a positional Struct also takes `new(x: 1, y: 2)`, which
+/// the synthesized positional constructor would bind whole to `x`. That
+/// call reports; positional and braced-Hash calls do not, and neither
+/// does a subclass whose own `initialize` takes keywords.
+#[test]
+fn keyword_construction_of_a_positional_struct_reports() {
+    let errors = diagnostics(&[
+        ("app/models/point.rb", "class Point < Struct.new(:x, :y)\n  def sum\n    x + y\n  end\nend\n"),
+        ("app/models/sound.rb", SOUND),
+        (
+            "app/models/maker.rb",
+            "class Maker\n  def self.points\n    [Point.new(1, 2), Point.new({ x: 1, y: 2 }), Sound::Image.new(name: \"a\", width: 1, height: 2)]\n  end\n\n  def self.keyword_point\n    Point.new(x: 1, y: 2)\n  end\nend\n",
+        ),
+    ]);
+    let keyword: Vec<_> = errors.iter().filter(|m| m.contains("Struct keyword construction")).collect();
+    assert_eq!(keyword.len(), 1, "{errors:#?}");
+}

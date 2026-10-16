@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Bounded pool of N opaque database-connection handles. Mirrors
 # Rails AR's `ActiveRecord::ConnectionAdapters::ConnectionPool` shape
 # (checkout / checkin / with_connection) and Tep's `PG::Pool` parking

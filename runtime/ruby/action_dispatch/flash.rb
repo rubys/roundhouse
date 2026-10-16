@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module ActionDispatch
   # Per-app flash store. Typed-field replacement for HashWithIndifferent-
   # Access in `@flash`. The field set (`notice`, `alert`) is the closed

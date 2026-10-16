@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # FlaggedCommenters façade — lobsters' flag-statistics model computes
 # its aggregates with MySQL-only SQL (stddev(), if()) under
 # Rails.cache.fetch blocks; the lobsters-bench capture itself disables

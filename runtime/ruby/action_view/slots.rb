@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Per-request store for `content_for` / `yield` slot values.
 #
 # Each HTTP request gets its own `Slots` instance threaded through the

@@ -29,9 +29,12 @@ fn bin_rh_targets_match_build_targets() {
     // `roda` is deliberately absent from bin/rh: it is the
     // experimental Roda+Sequel lane (issue #67), reachable via
     // `roundhouse --target roda`, with no scaffold/fetch/site
-    // packaging yet. Everything else in TRANSPILE must be offered by
-    // bin/rh, and bin/rh must offer nothing the compiler lacks.
-    const NOT_IN_BIN_RH: &[&str] = &["roda"];
+    // packaging yet. `futamura` is absent for the same reason: stage 0
+    // is the identity, and its gate is the app's own Rails suite
+    // (`tests/futamura.rs`), not a toolchain bin/rh drives. Everything
+    // else in TRANSPILE must be offered by bin/rh, and bin/rh must
+    // offer nothing the compiler lacks.
+    const NOT_IN_BIN_RH: &[&str] = &["roda", "futamura"];
 
     let rh: Vec<String> = bin_rh_targets();
     let transpile: Vec<&str> = BuildTarget::TRANSPILE

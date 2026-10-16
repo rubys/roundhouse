@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Seed / harvest apt download archives for GitHub Actions cache.
+#
+# Usage:
+#   scripts/ci-apt-archives prepare <dir>   # keep .debs; copy dir → apt archives
+#   scripts/ci-apt-archives harvest <dir>   # copy apt archives → dir
+#
+# Host Campfire/Spinel jobs pull ~150 packages for libvips-dev. Caching the
+# .deb files (not dpkg state) lets apt-get install stay authoritative while
+# skipping the Azure download on a warm hit. Pair with actions/cache around
+# <dir>; always run scripts/ci-apt-install afterward / in between.
+#
+# Overrides (tests):
+#   CI_APT_ARCHIVES_DIR   default /var/cache/apt/archives
+#   CI_APT_KEEP_CONF      default /etc/apt/apt.conf.d/99-roundhouse-keep-debs
+set -euo pipefail
+
+if [ "$#" -ne 2 ]; then
+  echo "usage: $0 prepare|harvest <dir>" >&2
+  exit 2
+fi
+
+cmd=$1
+dir=$2
+archives=${CI_APT_ARCHIVES_DIR:-/var/cache/apt/archives}
+keep_conf=${CI_APT_KEEP_CONF:-/etc/apt/apt.conf.d/99-roundhouse-keep-debs}
+
+case "$cmd" in
+  prepare)
+    mkdir -p "$dir"
+    # Image defaults often discard .debs after install; keep them for harvest.
+    sudo tee "$keep_conf" >/dev/null <<'CONF'
+APT::Keep-Downloaded-Packages "true";
+Binary::apt::APT::Keep-Downloaded-Packages "true";
+CONF
+    # hosted/ubuntu and some container images ship a Post-Invoke cleaner.
+    # Only touch the real apt tree when we are writing the real archives dir.
+    if [ "$archives" = /var/cache/apt/archives ] \
+      && [ -e /etc/apt/apt.conf.d/docker-clean ]; then
+      sudo rm -f /etc/apt/apt.conf.d/docker-clean
+    fi
+    sudo mkdir -p "$archives/partial"
+    shopt -s nullglob
+    debs=("$dir"/*.deb)
+    if [ "${#debs[@]}" -eq 0 ]; then
+      echo "ci-apt-archives: prepare: no .deb files to seed"
+      exit 0
+    fi
+    sudo cp -f "${debs[@]}" "$archives/"
+    echo "ci-apt-archives: prepare: seeded ${#debs[@]} .deb file(s)"
+    ;;
+  harvest)
+    mkdir -p "$dir"
+    shopt -s nullglob
+    debs=("$archives"/*.deb)
+    if [ "${#debs[@]}" -eq 0 ]; then
+      echo "ci-apt-archives: harvest: no .deb files in $archives"
+      exit 0
+    fi
+    # Prefer reading via sudo when the archives dir is root-only.
+    if [ -r "${debs[0]}" ]; then
+      cp -f "${debs[@]}" "$dir/"
+    else
+      sudo cp -f "${debs[@]}" "$dir/"
+      sudo chown "$(id -u):$(id -g)" "$dir"/*.deb
+    fi
+    echo "ci-apt-archives: harvest: stored ${#debs[@]} .deb file(s) in $dir"
+    ;;
+  *)
+    echo "usage: $0 prepare|harvest <dir>" >&2
+    exit 2
+    ;;
+esac

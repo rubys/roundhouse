@@ -1,0 +1,57 @@
+module I18n
+  class InvalidLocale < ArgumentError
+  end
+
+  def self.default_locale: () -> Symbol
+  def self.available_locales: () -> Array[Symbol]
+  def self.thread_locale_name: () -> String
+  def self.locale: () -> Symbol
+  def self.locale=: (String | Symbol | nil value) -> String
+  def self.checked_locale: (String | Symbol | nil value) -> Symbol
+  def self.locale_name: (String | Symbol | nil value) -> String
+  def self.enter_locale: (String | Symbol | nil value) -> String?
+  def self.leave_locale: (String? previous) -> nil
+  def self.running_in?: (String envs) -> bool
+  def self.app_default_locale: () -> Symbol
+  def self.app_available_locales: () -> Array[Symbol]
+
+  class MissingTranslationData < ArgumentError
+  end
+
+  def self.normalize_key: (String key) -> String
+  def self.subtree_translation: (String key) -> String
+  def self.missing_raises: (bool raises, String flipped) -> bool
+  def self.missing_translation: (String key, bool raises) -> String
+  def self.missing_translation_among: (String key, String rest, bool raises) -> String
+  def self.missing_translation_tag: (String key, String details, bool raises) -> String
+  class MissingInterpolationArgument < ArgumentError
+  end
+
+  class InvalidPluralizationData < ArgumentError
+  end
+
+  def self.translate_runtime: (untyped key, Hash[Symbol, untyped] options, String lazy_scope, bool in_view, bool raises) -> String
+  def self.scope_text: (untyped scope) -> String
+  def self.html_safe_key?: (String key) -> bool
+  def self.runtime_lookup: (String loc, String full, untyped count) -> String?
+  def self.plural_form: (Hash[String, String] leaves, String loc, String node, untyped count) -> String
+  def self.plural_rule: (String loc) -> Array[String]?
+  def self.plural_category: (Array[String] rule, untyped count) -> String
+  def self.plural_key: (Array[String] rule, Hash[String, Float] ops) -> String
+  def self.plural_bool: (Array[String] rule, Hash[String, Float] ops) -> bool
+  def self.plural_num: (Array[String] rule, Hash[String, Float] ops) -> Float
+  def self.plural_step: () -> Integer
+  def self.runtime_rules: () -> Hash[String, Array[String]]
+  def self.runtime_chain: (String loc) -> Array[String]
+  def self.interpolate_runtime: (String text, Hash[Symbol, untyped] options, bool html) -> String
+  def self.runtime_leaves: () -> Hash[String, String]
+  def self.runtime_nodes: () -> Hash[String, bool]
+  def self.runtime_chains: () -> Hash[String, Array[String]]
+  def self.translate_site: (String id, String loc, String key, (Integer | Float)? count, Array[String] names, Array[String] values, String details, bool raises, bool in_view, bool escape_plain) -> String
+  def self.site_entry: (String id, String loc, String key) -> Array[String]
+  def self.site_entry_in: (String id, String loc, String key) -> Integer?
+  def self.render_template: (String template, (Integer | Float)? count, Array[String] names, Array[String] values, bool html) -> String
+  def self.translation_table: () -> Hash[String, Integer]
+  def self.translation_entries: () -> Array[Array[String]]
+  def self.load_translation_table: () -> nil
+end

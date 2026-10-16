@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Nokogiri façade — its own file, so the spin-shaped spinel tree can swap
 # the FILE for `require "nokogiri"` (the spinel-nokogiri spin package:
 # libxml2 2.13.9 with Nokogiri's patches, carried) when the app names
@@ -66,6 +67,11 @@ module Nokogiri
       GemFacade.fail!("Nokogiri::Element#replace")
       nil
     end
+
+    def to_html
+      GemFacade.fail!("Nokogiri::Element#to_html")
+      ""
+    end
   end
 
   class NodeSet
@@ -103,6 +109,39 @@ module Nokogiri
     def create_element(_name)
       GemFacade.fail!("Nokogiri::Document#create_element")
       Element.new
+    end
+  end
+
+  # `Nokogiri::HTML5.fragment(html)` — campfire's `auto_link_text` walks a
+  # sanitized message body's text nodes (`xpath(".//text()…")`), swaps
+  # each linkable one for a parsed fragment, and writes the whole back
+  # out with `to_html(preserve_newline: true)`.
+  module HTML5
+    class DocumentFragment
+      def xpath(_path)
+        GemFacade.fail!("Nokogiri::HTML5::DocumentFragment#xpath")
+        NodeSet.new
+      end
+
+      def css(_selector)
+        GemFacade.fail!("Nokogiri::HTML5::DocumentFragment#css")
+        NodeSet.new
+      end
+
+      def at_css(_selector)
+        GemFacade.fail!("Nokogiri::HTML5::DocumentFragment#at_css")
+        Element.new
+      end
+
+      def to_html(preserve_newline: false)
+        GemFacade.fail!("Nokogiri::HTML5::DocumentFragment#to_html")
+        ""
+      end
+    end
+
+    def self.fragment(_html)
+      GemFacade.fail!("Nokogiri::HTML5.fragment")
+      DocumentFragment.new
     end
   end
 end

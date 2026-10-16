@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Requires the two runtime files directly rather than `test_helper`:
 # this module needs nothing from the app tree (no DB, no schema, no
 # fixtures), and the pair is exactly what `runtime/schematized_json.rb`

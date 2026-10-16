@@ -13,8 +13,9 @@ Peak disk is reduced because only one integration batch is resident at a time.
 Compile-everything-before-any-execute is intentionally not preserved: a later
 batch can fail to compile after earlier batches have already run.
 
-Optional --shard-index/--shard-count stride sorted integration targets across
-jobs. Coverage is checked on the global metadata set first. Shard 0 also runs
+Optional --shard-index/--shard-count spread integration targets across jobs by
+the seconds each took (scripts/ci-unit-weights.json; an unlisted target counts
+one second). Coverage is checked on the global metadata set first. Shard 0 also runs
 library and binary unit tests; every integration target still executes exactly
 once across the shards.
 """
@@ -94,8 +95,36 @@ def validate_shard(index: int, count: int) -> None:
         raise SystemExit("--shard-index must satisfy 0 <= index < --shard-count")
 
 
-def select_shard(names: list[str], index: int, count: int) -> list[str]:
-    return names[index::count]
+# Targets too long for one shard: every shard runs its share of their tests.
+SPLIT_TARGETS = ("emit_and_run",)
+WEIGHTS = Path(__file__).with_name("ci-unit-weights.json")
+# Seconds shard 0 spends on library and binary unit tests before any target.
+LIB_BINS_SECONDS = 100
+
+
+def load_weights() -> dict[str, float]:
+    try:
+        return json.loads(WEIGHTS.read_text())
+    except FileNotFoundError:
+        return {}
+
+
+def select_shard(
+    names: list[str],
+    index: int,
+    count: int,
+    weights: dict[str, float] | None = None,
+    first_shard_seconds: float = 0,
+) -> list[str]:
+    """Heaviest target first onto the lightest shard; unweighted names interleave."""
+    weights = weights or {}
+    loads = [first_shard_seconds] + [0.0] * (count - 1)
+    owner: dict[str, int] = {}
+    for name in sorted(names, key=lambda n: -weights.get(n, 1)):
+        shard = loads.index(min(loads))
+        owner[name] = shard
+        loads[shard] += weights.get(name, 1)
+    return [name for name in names if owner[name] == index]
 
 
 def verify_coverage(names: list[str]) -> None:
@@ -221,6 +250,32 @@ def build_and_run_integration_batch(
     return 0
 
 
+def split_share(tests: list[str], index: int, count: int) -> list[str]:
+    return sorted(tests)[index::count]
+
+
+def build_and_run_split_target(name: str, index: int, count: int, deps: Path) -> int:
+    print(f"== unit split {name}: share {index} of {count} ==", flush=True)
+    listing = subprocess.run(
+        [cargo_bin(), "test", "--locked", "--test", name, "--", "--list", "--format", "terse"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if listing.returncode != 0:
+        sys.stderr.write(listing.stderr)
+        return listing.returncode
+    tests = [line[: -len(": test")] for line in listing.stdout.splitlines() if line.endswith(": test")]
+    share = split_share(tests, index, count)
+    if share:
+        status = run_cargo(["test", "--locked", "--test", name, "--", "--exact", *share])
+        if status != 0:
+            return status
+    freed = free_integration_targets(deps, [name])
+    print(f"== unit split {name}: {len(share)} of {len(tests)} tests; freed {freed} bytes ==", flush=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -258,7 +313,14 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     names, target_root = package_plan(cargo_metadata())
     verify_coverage(names)
-    selected = select_shard(names, args.shard_index, args.shard_count)
+    split = [name for name in SPLIT_TARGETS if name in names]
+    selected = select_shard(
+        [name for name in names if name not in split],
+        args.shard_index,
+        args.shard_count,
+        load_weights(),
+        LIB_BINS_SECONDS,
+    )
     batches = chunks(selected, args.batch_size)
     shard_note = (
         f"shard {args.shard_index} of {args.shard_count}: "
@@ -296,6 +358,11 @@ def main(argv: list[str] | None = None) -> int:
             deps=deps,
             timings=args.timings,
         )
+        if status != 0:
+            return status
+
+    for name in split:
+        status = build_and_run_split_target(name, args.shard_index, args.shard_count, deps)
         if status != 0:
             return status
 

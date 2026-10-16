@@ -51,7 +51,7 @@ Db.with_connection do
   failed = false
   begin
     Db.step?(replay)
-  rescue RuntimeError => error
+  rescue ActiveRecord::StatementInvalid => error
     raise error if !error.message.include?("integer overflow")
     failed = true
   ensure

@@ -74,7 +74,7 @@ fn single_array_block_signature_binds_elements_without_mutating_the_registry() {
         &consume.body,
         "items",
         Ty::Array {
-            elem: Box::new(Ty::Int),
+            elem: std::sync::Arc::new(Ty::Int),
         },
     );
     assert_local_type(&consume.body, "item", Ty::Int);
@@ -123,7 +123,7 @@ end
         &consume.body,
         "items",
         Ty::Array {
-            elem: Box::new(Ty::Int),
+            elem: std::sync::Arc::new(Ty::Int),
         },
     );
     assert_local_type(&consume.body, "item", Ty::Int);
@@ -287,15 +287,16 @@ end
     batch.instance_methods.insert(
         Symbol::from("rows"),
         Ty::Fn {
-            params: vec![],
-            ret: Box::new(Ty::Nil),
-            block: Some(Box::new(Ty::Fn {
+            params: vec![].into(),
+            ret: std::sync::Arc::new(Ty::Nil),
+            block: Some(std::sync::Arc::new(Ty::Fn {
                 params: vec![roundhouse::ty::Param {
                     name: Symbol::from("s"),
-                    ty: Ty::Str,
+                    ty: Ty::Str.into(),
                     kind: roundhouse::ty::ParamKind::Required,
-                }],
-                ret: Box::new(Ty::Nil),
+                }]
+                .into(),
+                ret: std::sync::Arc::new(Ty::Nil),
                 block: None,
                 effects: roundhouse::effect::EffectSet::default(),
             })),

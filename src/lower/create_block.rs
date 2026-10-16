@@ -63,7 +63,7 @@ fn rewrite_create_block(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     let matches = matches!(
         &*expr.node,
         ExprNode::Send { block: Some(b), .. }
-            if matches!(&*b.node, ExprNode::Lambda { params, .. } if params.len() == 1)
+            if matches!(&*b.node, ExprNode::Lambda { params, extra_params, .. } if params.len() == 1 && extra_params.is_empty())
     );
     if !matches {
         diags.push(residue(expr, "block is not a single-param lambda"));
@@ -74,7 +74,10 @@ fn rewrite_create_block(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     let ExprNode::Send { recv, method, args, block: Some(block), .. } = node else {
         unreachable!()
     };
-    let ExprNode::Lambda { params, body, .. } = *block.node else { unreachable!() };
+    let ExprNode::Lambda { extra_params, params, body, .. } = *block.node else { unreachable!() };
+    if !extra_params.is_empty() {
+        unreachable!()
+    }
     let name = params.into_iter().next().expect("single param checked");
     // Reuse the block body's own VarId for the binding so the body's
     // reads reference the local we assign.

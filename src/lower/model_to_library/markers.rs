@@ -37,7 +37,16 @@ pub(super) fn push_dom_prefix_method(methods: &mut Vec<MethodDef>, model: &Model
     if is_primary_abstract_class(model) {
         return;
     }
-    let prefix = crate::naming::snake_case(model.name.0.as_str());
+    // Rails' `param_key` for a namespaced model joins the segments with
+    // `_` (`Admin::Widget` -> `admin_widget`), never `admin::widget`.
+    let prefix = model
+        .name
+        .0
+        .as_str()
+        .split("::")
+        .map(crate::naming::snake_case)
+        .collect::<Vec<_>>()
+        .join("_");
     // An STI base's rows belong to subclasses, and Rails' dom_class
     // answers the SUBCLASS (`Rooms::Open` rows are `rooms_open`, on
     // the page and in every broadcast target). Hydration here is
@@ -1195,11 +1204,15 @@ fn push_belongs_to_touches(methods: &mut Vec<MethodDef>, model: &Model) {
                 },
             ));
         }
+        // A stamped column has to reach the row with the timestamp, so
+        // that form finishes with the whole-row `touch_written`; the bare
+        // form's `touch` writes `updated_at` alone, as Rails' does.
+        let finish = if matches!(touch, Touch::Column(_)) { "touch_written" } else { "touch" };
         guarded.push(Expr::new(
             span,
             ExprNode::Send {
                 recv: Some(read_local()),
-                method: Symbol::from("touch"),
+                method: Symbol::from(finish),
                 args: vec![],
                 block: None,
                 parenthesized: false,
@@ -1236,9 +1249,9 @@ fn push_belongs_to_touches(methods: &mut Vec<MethodDef>, model: &Model) {
 /// adds beyond the raw `after_commit` hook in `CallbackHook`, plus
 /// `after_initialize` (fires on construction AND hydration — the
 /// runtime hook call is appended by `synth_initialize` / the
-/// hydration factories when a model declares it). `pub(crate)`: the
-/// concern-items ingest keeps block-form callbacks by this list.
-pub(crate) const BLOCK_CALLBACK_HOOKS: &[&str] = &[
+/// hydration factories when a model declares it). The concern-items
+/// ingest asks `block_callback_shape`, which reads this list.
+pub(super) const BLOCK_CALLBACK_HOOKS: &[&str] = &[
     "after_initialize",
     "before_validation",
     "after_validation",
@@ -1466,55 +1479,274 @@ fn block_callback_on(arg: &Expr) -> Option<crate::dialect::CallbackOn> {
 /// passes the record as an ARGUMENT to the other and leaves `self` as
 /// the declaring context. Two different bindings, and only one of them
 /// is the shape this splices into a hook method body.
+/// Can a block callback's extra parameters be bound from their defaults
+/// alone? True for a block without them, and for one whose parameters are
+/// all optional (`|key: 7|`, `|x = 1|`): `Proc#arity` is 0, so Rails'
+/// `ActiveSupport::Callbacks` `instance_exec`s it with no argument and
+/// every default applies. A keyword rest, or a required parameter beside
+/// them, changes the arity or the binding and is declined.
+pub(super) fn block_defaults_bindable(block: &Expr) -> bool {
+    match &*block.node {
+        ExprNode::Lambda { params, rest_param, extra_params, .. } => {
+            if !params.is_empty() || rest_param.is_some() {
+                return false;
+            }
+            if extra_params.is_empty() {
+                return true;
+            }
+            // A default may read an earlier parameter (`|a: 1, b: a|`),
+            // which the hook binds first; a local of the enclosing
+            // scope (`|key: prefix|`) has no binding inside the hook.
+            let mut bound: Vec<&Symbol> = Vec::new();
+            extra_params.iter().all(|p| {
+                let ok = !p.rest
+                    && p.default.as_ref().is_some_and(|d| reads_only(d, &bound));
+                bound.push(&p.name);
+                ok
+            })
+        }
+        _ => false,
+    }
+}
+
+/// The block-form / lambda-argument callback `push_block_callback`
+/// lowers, as (callback lambda, hook name, `on:` restriction), or `None`
+/// when it declines the shape. `model_to_library`'s unlowered-DSL report
+/// claims a callback exactly when this answers `Some`, so the two cannot
+/// disagree about which callbacks become hooks.
+pub(crate) fn block_callback_shape(
+    expr: &Expr,
+) -> Option<(&Expr, &str, Option<crate::dialect::CallbackOn>)> {
+    let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
+        return None;
+    };
+    // The callback body is a BLOCK or a LAMBDA ARGUMENT (see the
+    // doc comment). Either way what follows it is the option hash,
+    // so both spellings share one `on:` parse below.
+    let (callback, opt_args): (&Expr, &[Expr]) = match (block.as_ref(), &args[..]) {
+        // A block declaring optional/keyword parameters binds names
+        // the spliced hook body has none for, unless every one has a
+        // default: Rails runs an arity-0 block with `instance_exec`
+        // and no argument, so `before_save { |key: 7| … }` sees
+        // `key == 7` (bound below). Anything else stays dynamic.
+        (Some(b), _) if !block_defaults_bindable(b) => return None,
+        (Some(b), rest) => (b, rest),
+        (None, [first, rest @ ..]) if matches!(
+            &*first.node,
+            ExprNode::Lambda { params, rest_param, extra_params, .. }
+                if params.is_empty() && rest_param.is_none() && extra_params.is_empty()
+        ) => {
+            (first, rest)
+        }
+        _ => return None,
+    };
+    // `before_validation on: :create do … end` — the block form
+    // carries its restriction as an option hash where the symbol
+    // form carries it as a keyword. Anything else in that hash
+    // (`if:`/`unless:`) drops the callback, matching ingest's
+    // rejection for the symbol form.
+    let on = match opt_args {
+        [] => None,
+        [opts] => Some(block_callback_on(opts)?),
+        _ => return None,
+    };
+    let hook = method.as_str();
+    if !BLOCK_CALLBACK_HOOKS.contains(&hook) {
+        return None;
+    }
+    // Same structural lowering as the symbol form: after_commit
+    // retargets the per-lifecycle hook, validation hooks keep
+    // their name and gain a `new_record?` guard below. Rails
+    // doesn't accept `on:` on the remaining hooks.
+    let hook_name = match (hook, on) {
+        (_, None) => hook,
+        ("after_commit", Some(crate::dialect::CallbackOn::Create)) => "after_create_commit",
+        ("after_commit", Some(crate::dialect::CallbackOn::Update)) => "after_update_commit",
+        ("after_commit", Some(crate::dialect::CallbackOn::Destroy)) => "after_destroy_commit",
+        ("before_validation" | "after_validation", Some(_)) => hook,
+        _ => return None,
+    };
+    Some((callback, hook_name, on))
+}
+
+/// Does `expr` read no local but those in `bound`? (A nested lambda's
+/// own parameters are locals it binds itself.)
+fn reads_only(expr: &Expr, bound: &[&Symbol]) -> bool {
+    match &*expr.node {
+        ExprNode::Var { name, .. } => bound.contains(&name),
+        ExprNode::Lambda { .. } => false,
+        _ => {
+            let mut ok = true;
+            expr.node.for_each_child(&mut |c| ok = ok && reads_only(c, bound));
+            ok
+        }
+    }
+}
+
+fn collect_local_names(expr: &Expr, names: &mut std::collections::HashSet<Symbol>) {
+    match &*expr.node {
+        ExprNode::Var { name, .. } => {
+            names.insert(name.clone());
+        }
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
+            names.insert(name.clone());
+        }
+        ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => {
+            names.insert(name.clone());
+        }
+        ExprNode::MultiAssign { targets, .. } => {
+            names.extend(targets.iter().filter_map(|target| match target {
+                LValue::Var { name, .. } => Some(name.clone()),
+                _ => None,
+            }));
+        }
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, .. } => {
+            names.extend(params.iter().cloned());
+            names.extend(rest_param.iter().cloned());
+            names.extend(extra_params.iter().map(|p| p.name.clone()));
+            names.extend(block_param.iter().cloned());
+        }
+        _ => {}
+    }
+    expr.node.for_each_child(&mut |child| collect_local_names(child, names));
+}
+
+fn fresh_callback_local(
+    span: Span,
+    index: usize,
+    occupied: &mut std::collections::HashSet<Symbol>,
+) -> Symbol {
+    let base = format!("__roundhouse_callback_{}_{}", span.start, index);
+    let mut suffix = 0;
+    loop {
+        let name = Symbol::from(format!("{base}_{suffix}"));
+        if occupied.insert(name.clone()) {
+            return name;
+        }
+        suffix += 1;
+    }
+}
+
+/// Rename callback-local references while respecting nested lambda bindings.
+/// Unshadowed nested lambdas deliberately follow the renamed outer binding so
+/// each folded callback closure retains its own value.
+fn rename_callback_locals(expr: &mut Expr, renames: &std::collections::HashMap<Symbol, Symbol>) {
+    match &mut *expr.node {
+        ExprNode::Var { name, .. } => {
+            if let Some(replacement) = renames.get(name) {
+                *name = replacement.clone();
+            }
+        }
+        ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } => {
+            if let LValue::Var { name, .. } = target {
+                if let Some(replacement) = renames.get(name) {
+                    *name = replacement.clone();
+                }
+            }
+            expr.node.for_each_child_mut(&mut |child| rename_callback_locals(child, renames));
+        }
+        ExprNode::MultiAssign { targets, .. } => {
+            for target in targets {
+                if let LValue::Var { name, .. } = target {
+                    if let Some(replacement) = renames.get(name) {
+                        *name = replacement.clone();
+                    }
+                }
+            }
+            expr.node.for_each_child_mut(&mut |child| rename_callback_locals(child, renames));
+        }
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
+            let visible: std::collections::HashMap<Symbol, Symbol> = renames
+                .iter()
+                .filter(|(name, _)| {
+                    !params.contains(name)
+                        && rest_param.as_ref() != Some(name)
+                        && !extra_params.iter().any(|p| &p.name == *name)
+                        && block_param.as_ref() != Some(name)
+                })
+                .map(|(name, replacement)| (name.clone(), replacement.clone()))
+                .collect();
+            for param in extra_params {
+                if let Some(default) = &mut param.default {
+                    rename_callback_locals(default, &visible);
+                }
+            }
+            rename_callback_locals(body, &visible);
+        }
+        _ => expr.node.for_each_child_mut(&mut |child| rename_callback_locals(child, renames)),
+    }
+}
+
 fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr) {
     {
-        let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
+        let Some((callback, hook_name, on)) = block_callback_shape(expr) else {
             return;
         };
-        // The callback body is a BLOCK or a LAMBDA ARGUMENT (see the
-        // doc comment). Either way what follows it is the option hash,
-        // so both spellings share one `on:` parse below.
-        let (callback, opt_args): (&Expr, &[Expr]) = match (block.as_ref(), &args[..]) {
-            (Some(b), rest) => (b, rest),
-            (None, [first, rest @ ..])
-                if matches!(&*first.node, ExprNode::Lambda { params, .. } if params.is_empty()) =>
-            {
-                (first, rest)
+        let hook = match &*expr.node {
+            ExprNode::Send { method, .. } => method.as_str(),
+            _ => return,
+        };
+        let ExprNode::Lambda { body: lambda_body, extra_params, .. } = &*callback.node else {
+            return;
+        };
+        // `|key: 7, x = 1|` (see `block_defaults_bindable`): bind each
+        // default as a local ahead of the body.
+        let lambda_body = if extra_params.is_empty() {
+            lambda_body.clone()
+        } else {
+            let mut occupied = std::collections::HashSet::new();
+            for method in methods.iter() {
+                occupied.extend(method.params.iter().map(|p| p.name.clone()));
+                if let Some(param) = &method.block_param {
+                    occupied.insert(param.name.clone());
+                }
+                collect_local_names(&method.body, &mut occupied);
             }
-            _ => return,
+            collect_local_names(lambda_body, &mut occupied);
+            for param in extra_params {
+                occupied.insert(param.name.clone());
+                if let Some(default) = &param.default {
+                    collect_local_names(default, &mut occupied);
+                }
+            }
+            let renames: std::collections::HashMap<Symbol, Symbol> = extra_params
+                .iter()
+                .enumerate()
+                .map(|(index, param)| {
+                    (
+                        param.name.clone(),
+                        fresh_callback_local(expr.span, index, &mut occupied),
+                    )
+                })
+                .collect();
+            let mut body = lambda_body.clone();
+            rename_callback_locals(&mut body, &renames);
+            let mut stmts: Vec<Expr> = extra_params
+                .iter()
+                .filter_map(|p| {
+                    p.default.as_ref().map(|d| {
+                        let mut default = d.clone();
+                        rename_callback_locals(&mut default, &renames);
+                        Expr::new(
+                            d.span,
+                            ExprNode::Assign {
+                                target: LValue::Var {
+                                    id: VarId(0),
+                                    name: renames[&p.name].clone(),
+                                },
+                                value: default,
+                            },
+                        )
+                    })
+                })
+                .collect();
+            match &*body.node {
+                ExprNode::Seq { exprs } => stmts.extend(exprs.iter().cloned()),
+                _ => stmts.push(body),
+            }
+            seq(stmts)
         };
-        // `before_validation on: :create do … end` — the block form
-        // carries its restriction as an option hash where the symbol
-        // form carries it as a keyword. Anything else in that hash
-        // (`if:`/`unless:`) drops the callback, matching ingest's
-        // rejection for the symbol form.
-        let on = match opt_args {
-            [] => None,
-            [opts] => match block_callback_on(opts) {
-                Some(on) => Some(on),
-                None => return,
-            },
-            _ => return,
-        };
-        let hook = method.as_str();
-        if !BLOCK_CALLBACK_HOOKS.contains(&hook) {
-            return;
-        }
-        // Same structural lowering as the symbol form: after_commit
-        // retargets the per-lifecycle hook, validation hooks keep
-        // their name and gain a `new_record?` guard below. Rails
-        // doesn't accept `on:` on the remaining hooks.
-        let hook_name = match (hook, on) {
-            (_, None) => hook,
-            ("after_commit", Some(crate::dialect::CallbackOn::Create)) => "after_create_commit",
-            ("after_commit", Some(crate::dialect::CallbackOn::Update)) => "after_update_commit",
-            ("after_commit", Some(crate::dialect::CallbackOn::Destroy)) => "after_destroy_commit",
-            ("before_validation" | "after_validation", Some(_)) => hook,
-            _ => return,
-        };
-        let ExprNode::Lambda { body: lambda_body, .. } = &*callback.node else {
-            return;
-        };
+        let lambda_body = &lambda_body;
 
         // Translate Rails-API broadcast calls (`assoc.broadcast_replace_to(...)`
         // etc.) inside the block body to spinel-shape `Broadcasts.<action>(...)`

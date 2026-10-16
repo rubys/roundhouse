@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Inflector reopen — ruby-family surface only (connection.rb pattern):
 # shipped to the scaffold trees via the project.rs stems list and
 # required from inflector.rb, but NOT in the runtime_loader tables, so

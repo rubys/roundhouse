@@ -15,14 +15,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use roundhouse::analyze::Analyzer;
 use roundhouse::emit::go;
 use roundhouse::ingest::ingest_app;
 
 #[test]
 fn real_blog_runtime_calls_use_qualified_class_names() {
     let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    roundhouse::session::analyze_and_lower(&mut app);
     let files = go::emit(&app);
     for (path, calls) in [
         ("app/v2/flash.go", vec!["NewActionDispatchFlashNow(self)", "NewActionDispatchFlash()"]),
@@ -54,7 +53,7 @@ fn generate_project(fixture_path: &Path, out: &Path) {
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    roundhouse::session::analyze_and_lower(&mut app);
     let files = go::emit(&app);
 
     for file in &files {
@@ -125,11 +124,10 @@ fn tiny_blog_go_vet_passes() {
 #[test]
 #[ignore]
 fn real_blog_go_test_passes() {
-    // Phase 2 forcing function (now Phase 6 step 2 — 2026-05-24):
-    // emit real-blog, run `go test` against the v2/ overlay (which
-    // is now the default emit; the legacy `app/` package goes away
-    // in Phase 6 step 3). Asserts zero failures across 21 fixture
-    // + model + controller tests.
+    // Phase 2 forcing function: emit real-blog and run `go test ./...`,
+    // the same discovery the emitted README documents. Asserts zero
+    // failures across the fixture, model, and controller tests.
+    // `./app/v2/` alone would stay green if a later package grew tests.
     let fixture = roundhouse::fixtures::real_blog();
     let scratch = scratch_dir("real-blog-test");
     generate_project(fixture, &scratch);
@@ -137,7 +135,7 @@ fn real_blog_go_test_passes() {
 
     let output = Command::new("go")
         .arg("test")
-        .arg("./app/v2/")
+        .arg("./...")
         .current_dir(&scratch)
         .output()
         .expect("run go test");

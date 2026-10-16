@@ -68,9 +68,10 @@ pub fn scope<T>(f: impl FnOnce() -> T) -> (T, Vec<Diagnostic>) {
     (result, collected)
 }
 
-/// Push a parse diagnostic into the active buffer. A no-op outside a
-/// [`scope`].
-fn push(d: Diagnostic) {
+/// Push a diagnostic into the active buffer. A no-op outside a
+/// [`scope`]. The buffer is the ingest phase's diagnostic channel: syntax
+/// errors, and the warnings ingest itself raises (the initializer ledger).
+pub(super) fn push(d: Diagnostic) {
     PARSE_DIAGS.with(|c| {
         if let Some(buf) = c.borrow_mut().as_mut() {
             buf.push(d);
@@ -154,7 +155,10 @@ mod tests {
         });
         assert!(diags.is_empty());
         let ExprNode::Send { block: Some(block), .. } = &*expr.node else { panic!("missing map block") };
-        let ExprNode::Lambda { params, body, .. } = &*block.node else { panic!("missing lambda") };
+        let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { panic!("missing lambda") };
+        if !extra_params.is_empty() {
+            panic!("missing lambda")
+        }
         assert_eq!(params[0].as_str(), "__mw_24");
         let ExprNode::Seq { exprs } = &*body.node else { panic!("missing block body") };
         let ExprNode::Seq { exprs } = &*exprs[0].node else { panic!("missing multi-write") };

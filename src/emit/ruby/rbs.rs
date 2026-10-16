@@ -6,20 +6,55 @@
 //! layout, but Steep / TypeProf auto-discover `sig/` by convention —
 //! so this layout costs zero extra config for either consumer.
 
+use std::cell::Cell;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use super::super::EmittedFile;
-use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
+use crate::dialect::{
+    AccessorKind, LibraryClass, LibraryClassOrigin, MethodDef, MethodReceiver, MethodVisibility,
+};
 use crate::expr::{Expr, ExprNode, Literal, RESOLVED_DATA_FACTORY};
 use crate::ty::{Param, ParamKind, Ty};
+
+thread_local! {
+    /// True while rendering a class-side `def self.x` signature. See the
+    /// `Ty::SelfInstance` arm of `ty_to_rbs_in`.
+    static CLASS_SIDE_SIG: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Sets [`CLASS_SIDE_SIG`] for its scope and restores the previous value
+/// on drop, so an early return cannot leak the flag.
+struct ClassSideGuard(bool);
+
+impl ClassSideGuard {
+    fn enter(class_side: bool) -> Self {
+        ClassSideGuard(CLASS_SIDE_SIG.with(|c| c.replace(class_side)))
+    }
+}
+
+impl Drop for ClassSideGuard {
+    fn drop(&mut self) {
+        CLASS_SIDE_SIG.with(|c| c.set(self.0));
+    }
+}
 
 /// Emit an `.rbs` sidecar for a single `LibraryClass`. The output
 /// path mirrors `rb_path` under a top-level `sig/` tree with the
 /// extension swapped to `.rbs`.
 pub(super) fn emit_library_class_rbs(lc: &LibraryClass, rb_path: &Path) -> EmittedFile {
+    emit_library_class_rbs_with_factories(lc, rb_path, &[])
+}
+
+/// Emit the `sig/` sidecar for an owner and its Data factory constants. `classes`
+/// supplies lifted custom methods, matched to declarations by their source spans.
+pub(super) fn emit_library_class_rbs_with_factories(
+    lc: &LibraryClass,
+    rb_path: &Path,
+    classes: &[LibraryClass],
+) -> EmittedFile {
     let path = sig_path_for(rb_path);
-    let content = render_class(lc);
+    let content = render_class(lc, classes);
     EmittedFile { path, content }
 }
 
@@ -36,7 +71,9 @@ fn sig_path_for(rb_path: &Path) -> PathBuf {
     }
 }
 
-fn render_class(lc: &LibraryClass) -> String {
+/// Render a library class or module with enclosing namespaces, includes, method
+/// signatures, and admitted Data factories nested under their constant owner.
+fn render_class(lc: &LibraryClass, classes: &[LibraryClass]) -> String {
     let mut s = String::new();
     let name = lc.name.0.as_str();
     let segments: Vec<&str> = name.split("::").collect();
@@ -54,11 +91,24 @@ fn render_class(lc: &LibraryClass) -> String {
         let pad = "  ".repeat(depth - 1);
         match lc.parent.as_ref() {
             Some(p) => writeln!(s, "{pad}class {last} < {}", p.0.as_str()).unwrap(),
+            None if lc.data_define().is_some() => writeln!(s, "{pad}class {last} < ::Data").unwrap(),
             None => writeln!(s, "{pad}class {last}").unwrap(),
         }
     }
 
     let body_pad = "  ".repeat(depth);
+
+    if let Some((members, _)) = lc.data_define() {
+        writeln!(s, "{body_pad}def self.new: (*untyped, **untyped) -> instance").unwrap();
+        // A `def` in the `Data.define` block replaces the reader, and RBS
+        // rejects a second declaration of one method.
+        let defined = |member: &crate::ident::Symbol| {
+            lc.methods.iter().any(|m| m.receiver == MethodReceiver::Instance && m.name == *member)
+        };
+        for member in members.iter().filter(|member| !defined(member)) {
+            writeln!(s, "{body_pad}def `{}`: () -> untyped", member.as_str()).unwrap();
+        }
+    }
 
     for inc in &lc.includes {
         writeln!(s, "{body_pad}include {}", inc.0.as_str()).unwrap();
@@ -68,7 +118,11 @@ fn render_class(lc: &LibraryClass) -> String {
     }
 
     for (name, value) in &lc.constants {
-        render_data_factory(&mut s, lc, name.as_str(), value, &body_pad);
+        let factory = classes.iter().find(|class| {
+            matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span })
+                if declaration_span == value.span)
+        });
+        render_data_factory(&mut s, lc, name.as_str(), value, &body_pad, factory);
     }
 
     for m in &lc.methods {
@@ -83,7 +137,10 @@ fn render_class(lc: &LibraryClass) -> String {
     s
 }
 
-fn render_data_factory(s: &mut String, owner: &LibraryClass, name: &str, value: &Expr, pad: &str) {
+/// Render an admitted factory as a nested Data subclass; leave unrelated or
+/// unresolved constants alone. Keep generated constructor/readers untyped and
+/// omit a generated reader when the custom block supplies that method.
+fn render_data_factory(s: &mut String, owner: &LibraryClass, name: &str, value: &Expr, pad: &str, factory: Option<&LibraryClass>) {
     if value.decisions & RESOLVED_DATA_FACTORY == 0 {
         return;
     }
@@ -99,7 +156,31 @@ fn render_data_factory(s: &mut String, owner: &LibraryClass, name: &str, value: 
     writeln!(s, "{pad}class {name} < ::Data").unwrap();
     writeln!(s, "{pad}  def self.new: (*untyped, **untyped) -> instance").unwrap();
     for member in members {
+        if factory.is_some_and(|class| {
+            class.methods.iter().any(|method| {
+                method.receiver == MethodReceiver::Instance && method.name.as_str() == member
+            })
+        }) {
+            continue;
+        }
         writeln!(s, "{pad}  def `{member}`: () -> untyped").unwrap();
+    }
+    if let Some(factory) = factory {
+        let enclosing: Vec<_> = factory.name.0.as_str().split("::").collect();
+        for method in &factory.methods {
+            // RBS has no protected visibility; private is the conservative
+            // representation for both non-public Ruby instance visibilities.
+            let visibility = match method.visibility {
+                MethodVisibility::Public => "",
+                MethodVisibility::Protected | MethodVisibility::Private => "private ",
+            };
+            writeln!(
+                s,
+                "{pad}  {visibility}{}",
+                render_method(method, &enclosing)
+            )
+            .unwrap();
+        }
     }
     writeln!(s, "{pad}end").unwrap();
 }
@@ -148,6 +229,8 @@ fn render_def(m: &MethodDef, enclosing: &[&str]) -> String {
         MethodReceiver::Instance => "",
         MethodReceiver::Class => "self.",
     };
+    let class_side = matches!(m.receiver, MethodReceiver::Class);
+    let _side = ClassSideGuard::enter(class_side);
     // A full forwarder has no named rest binding. Neither its keywords
     // nor its block can be inferred from the synthetic signature slot.
     let sig = match &m.signature {
@@ -204,7 +287,7 @@ fn render_typed_params(params: &[Param], enclosing: &[&str]) -> String {
         let name = p.name.as_str();
         // IR keyword-rest params name the collected Hash, while RBS
         // **T names the type of each keyword value (see rbs ingestion).
-        let param_ty = match (&p.kind, &p.ty) {
+        let param_ty = match (&p.kind, &*p.ty) {
             (ParamKind::KeywordRest, Ty::Hash { value, .. }) => &**value,
             _ => &p.ty,
         };
@@ -282,6 +365,11 @@ fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
         // here is a signature that was read and never dispatched.
         // Printing `instance` back out would make that defect
         // invisible precisely because the output stays valid.
+        // The exception is a class-side signature: `def self.make; new;
+        // end` keeps `SelfInstance` on purpose so that `Child.make`
+        // answers Child at dispatch (`analyze::body`), and RBS
+        // `instance` in a singleton method means exactly that.
+        Ty::SelfInstance if CLASS_SIDE_SIG.with(Cell::get) => "instance".into(),
         Ty::SelfInstance => {
             crate::emit::diagnostics::unsupported_self_instance_ty("rbs")
         }
@@ -413,10 +501,10 @@ mod tests {
 
     #[test]
     fn keyword_rest_renders_values_not_a_nested_hash() {
-        let hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) };
+        let hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) };
         let params = [
-            Param { name: Symbol::from("mapping"), ty: hash.clone(), kind: ParamKind::Required },
-            Param { name: Symbol::from("opts"), ty: hash, kind: ParamKind::KeywordRest },
+            Param { name: Symbol::from("mapping"), ty: hash.clone().into(), kind: ParamKind::Required },
+            Param { name: Symbol::from("opts"), ty: hash.into(), kind: ParamKind::KeywordRest },
         ];
         assert_eq!(render_typed_params(&params, &[]), "Hash[Symbol, String] mapping, **String opts");
     }

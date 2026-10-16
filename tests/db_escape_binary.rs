@@ -69,6 +69,7 @@ src = File.read("runtime/spinel/db_jruby.rb")
 defn = src[/^  def self\.bind_text\(stmt, idx, value\)\n.*?^  end\n/m] or abort "no bind_text"
 module Db; end
 Db.module_eval(defn)
+def Db.statement_failed(_stmt, _operation, error); raise error; end
 class String
   def to_java_bytes; bytes; end
 end
@@ -77,7 +78,7 @@ class JdbcBindRecorder
   def set_bytes(index, value); @call = [:blob, index, value]; end
   def set_string(index, value); @call = [:text, index, value.bytes]; end
 end
-Handle = Struct.new(:pstmt)
+Handle = Struct.new(:pstmt, :executed)
 cases = [
   ["a\0b", :blob],
   ["a\0b".b, :blob],
@@ -95,7 +96,12 @@ cases.each do |value, storage|
   expected = [storage, 3, value.bytes]
   abort "#{value.inspect}: #{recorder.call.inspect} != #{expected.inspect}" if recorder.call != expected
 end
-Db.bind_text(Handle.new(nil), 1, "unused")
+begin
+  Db.bind_text(Handle.new(nil, false), 1, "unused")
+  abort "released statement accepted a bind"
+rescue RuntimeError => error
+  raise unless error.message == "statement is not bindable"
+end
 print "OK"
 "##;
     let out = Command::new("ruby")

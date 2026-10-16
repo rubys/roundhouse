@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Minitest-shaped, like request_forgery_protection_test.rb: a CRuby-only
 # framework test of the ruby family's signed session and flash cookies
 # (runtime/signed_cookies.rb over the shared MessageVerifier). Each

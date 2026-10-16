@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Active Storage — what a `has_one_attached` reader hands back, the
 # blob it points at, and the identity "variant" of that blob.
 #
@@ -78,6 +79,19 @@ module ActiveStorage
 
   def self.variable_content_type?(content_type)
     variable_content_types.include?(content_type)
+  end
+
+  # Rails' `ActiveStorage.paths` — executable locations for previewers /
+  # analyzers (`:ffmpeg`, `:ffprobe`, `:mutool`). Default `{}` means
+  # PATH lookup. Tests and config assign `paths[:ffmpeg] = "/bin/…"`.
+  def self.paths
+    @paths = {} if @paths.nil?
+    @paths
+  end
+
+  def self.paths=(value)
+    @paths = value
+    value
   end
 
   # Rails' `config.active_storage.video_preview_arguments` — the ffmpeg
@@ -293,7 +307,14 @@ module ActiveStorage
     # (and `config.active_storage.previewers` identity checks against
     # that constant) resolve. Poster drawing on this runtime goes
     # through `Previewer.poster`, not the Rails instance `capture` path.
+    #
+    # Override `preview_timeout` to cap the class-side poster (seconds),
+    # or define `TIME_LIMIT` on the subclass — the spinel poster reads
+    # either (campfire's TimeLimitedVideoPreviewer + suite stub_const).
     class VideoPreviewer < Previewer
+      def self.preview_timeout
+        nil
+      end
     end
   end
 
@@ -335,8 +356,12 @@ module ActiveStorage
       image.attached?
     end
 
+    # Rails: the frame, then the variant of it this preview names
+    # (`variant.processed if variant?`) — the poster campfire serves is
+    # that variant, and its presentation shows one only once it exists.
     def processed
       process
+      variant.processed unless @variation.nil?
       self
     end
 
@@ -488,6 +513,14 @@ module ActiveStorage
 
     def height
       @height
+    end
+
+    # `Hash#values_at`, the other read the corpus spells
+    # (`width, height = attachment.metadata.values_at(:width, :height)`).
+    def values_at(*keys)
+      out = []
+      keys.each { |key| out << self[key] }
+      out
     end
 
     # The JSON Rails writes, so a database this tree and a Rails process
@@ -783,6 +816,17 @@ module ActiveStorage
       nil
     end
 
+    # Rails' `blob.variant(transformations)`: the blob under a
+    # Variation (`lower::attached` builds one from an inline hash).
+    def variant(variation)
+      VariantWithRecord.new(self, variation)
+    end
+
+    # Rails' `purge_later`: the purge as an `ActiveStorage::PurgeJob`.
+    def purge_later
+      PurgeJob.perform_later(self)
+    end
+
     def video?
       @content_type.start_with?("video/")
     end
@@ -814,7 +858,37 @@ module ActiveStorage
     # The blob's own route: `rails_blob_path(blob)`. A `disposition` of
     # "attachment" rides as the query Rails puts it in.
     def redirect_url(disposition)
-      base = "/rails/active_storage/blobs/redirect/" + signed_id + "/" +
+      service_route("redirect", disposition)
+    end
+
+    # `rails_storage_proxy_path(blob)`: the engine's other blob route,
+    # whose controller answers with the bytes instead of a redirect.
+    def proxy_url(disposition)
+      service_route("proxy", disposition)
+    end
+
+    # Rails' `Blob::Servable`, with activestorage 8.1.4's default
+    # lists: an uploaded type a browser would RUN (HTML, SVG, XML, ...)
+    # is served as `application/octet-stream`, and any type outside the
+    # inline list is an attachment whatever the URL asks. The content
+    # type is the uploader's word, so serving it inline as declared lets
+    # an upload script the app's origin.
+    def content_type_for_serving
+      ActiveStorage.content_types_to_serve_as_binary.include?(@content_type) ? "application/octet-stream" : @content_type
+    end
+
+    # "attachment" when Rails forces it, "" when the caller's
+    # disposition stands.
+    def forced_disposition_for_serving
+      if ActiveStorage.content_types_to_serve_as_binary.include?(@content_type) || !ActiveStorage.content_types_allowed_inline.include?(@content_type)
+        "attachment"
+      else
+        ""
+      end
+    end
+
+    def service_route(kind, disposition)
+      base = "/rails/active_storage/blobs/" + kind + "/" + signed_id + "/" +
              ActiveStorage.url_filename(@filename)
       disposition == "" ? base : base + "?disposition=" + disposition
     end
@@ -875,9 +949,12 @@ module ActiveStorage
       [parts[0].to_s, parts[1].to_s]
     end
 
+    # Rails' `Blob#url` signs `forced_disposition_for_serving ||
+    # disposition`, so a forced attachment holds on the disk route too.
     def self.disk_url(blob, disposition)
+      forced = blob.forced_disposition_for_serving
       ActiveStorage::Current.base_url + "/rails/active_storage/disk/" +
-        encode(blob.key, disposition) + "/" + ActiveStorage.url_filename(blob.filename.to_s)
+        encode(blob.key, forced == "" ? disposition : forced) + "/" + ActiveStorage.url_filename(blob.filename.to_s)
     end
 
     # The token a direct upload's PUT carries (Rails' `DiskService#
@@ -954,6 +1031,21 @@ module ActiveStorage
   # the last path segment (`*filename`, cosmetic — the key is in the
   # signed id). URI-component encoded so a name with a space or a
   # slash cannot break the path.
+  # activestorage 8.1.4's `content_types_to_serve_as_binary` and
+  # `content_types_allowed_inline` defaults (engine.rb), read by
+  # `Blob#content_type_for_serving` / `#forced_disposition_for_serving`.
+  def self.content_types_to_serve_as_binary
+    ["text/html", "image/svg+xml", "application/postscript",
+     "application/x-shockwave-flash", "text/xml", "application/xml",
+     "application/xhtml+xml", "application/mathml+xml", "text/cache-manifest"]
+  end
+
+  def self.content_types_allowed_inline
+    ["image/webp", "image/avif", "image/png", "image/gif", "image/jpeg",
+     "image/tiff", "image/bmp", "image/vnd.adobe.photoshop",
+     "image/vnd.microsoft.icon", "application/pdf"]
+  end
+
   def self.url_filename(filename)
     ActionView::ViewHelpers.url_encode_component(filename)
   end
@@ -1029,23 +1121,32 @@ module ActiveStorage
       nil
     end
 
+    # Rails: the variant record exists. Looks it up and does not make
+    # it — campfire's presentation shows a thumbnail only when posting
+    # made one, rather than making it on view.
+    def processed?
+      return true if @record_id != 0
+      b = @blob
+      v = @variation
+      return false if b.nil? || v.nil?
+      rows = ActiveRecord.adapter.select_rows(
+        VariantWithRecord.record_select(
+          "vr.blob_id = " + ActiveRecord.adapter.escape_value(b.id) +
+          " AND vr.variation_digest = " + ActiveRecord.adapter.escape_value(v.digest) + " LIMIT 1"
+        )
+      )
+      return false if rows.length == 0
+      @record_id = rows[0]["variant_record_id"].to_i
+      @image_blob = Blob.from_row(rows[0])
+      true
+    end
+
     def process
-      return nil if @record_id != 0
+      return nil if processed?
       b = @blob
       v = @variation
       return nil if b.nil? || v.nil?
       digest = v.digest
-      rows = ActiveRecord.adapter.select_rows(
-        VariantWithRecord.record_select(
-          "vr.blob_id = " + ActiveRecord.adapter.escape_value(b.id) +
-          " AND vr.variation_digest = " + ActiveRecord.adapter.escape_value(digest) + " LIMIT 1"
-        )
-      )
-      if rows.length > 0
-        @record_id = rows[0]["variant_record_id"].to_i
-        @image_blob = Blob.from_row(rows[0])
-        return nil
-      end
       data = Processor.transform(Blob.service.download(b.key), b.content_type, v)
       image = Blob.create_and_upload!(
         data,
@@ -1069,11 +1170,13 @@ module ActiveStorage
     end
 
     # Rails: the variant record's `image` attachment — an `Attached`
-    # proxy over the transformed blob, or nil before there is a record
-    # (the identity variant, or nothing attached).
+    # proxy over the transformed blob, or nil while there is no record
+    # (the identity variant, nothing attached, or not made yet). A
+    # lookup, as Rails' `record&.image` is: it makes nothing, so asking
+    # it of a file that cannot be decoded answers nil instead of raising
+    # the decode error again (campfire keeps such an image unpreviewed).
     def image
-      process
-      @record_id == 0 ? nil : Attached.new("ActiveStorage::VariantRecord", @record_id, "image", [])
+      processed? ? Attached.new("ActiveStorage::VariantRecord", @record_id, "image", []) : nil
     end
 
     # The transformed blob, once processed; the original for the
@@ -1292,6 +1395,7 @@ module ActiveStorage
     # unboxed only while every use is one the unboxed array supports,
     # and `each` from a block is not on that list.
     def find_variation(transformations)
+      return transformations if transformations.is_a?(Variation)
       return nil unless transformations.is_a?(Symbol)
       name = transformations.to_s
       i = 0
@@ -1310,8 +1414,11 @@ module ActiveStorage
     # call site — or nil for the poster as drawn. On a blob that is not
     # previewable the previewer itself refuses (ffmpeg has no poster
     # for an image), which is where Rails' `UnpreviewableError` lands.
+    # A declared NAME resolves here, as `variant(:thumb)` does:
+    # campfire's `preview(:poster)` names a variant of its
+    # `has_one_attached` block, which the poster is then served under.
     def preview(transformations)
-      Preview.new(blob, transformations)
+      Preview.new(blob, find_variation(transformations))
     end
 
     # `url_for(attachment)` / `polymorphic_url(attachment)`: the blob's
@@ -1358,20 +1465,34 @@ module ActiveStorage
     # Detach and delete: the attachment row, the blob row, and the
     # bytes — see `attach_blob` on why the blob goes too.
     def purge
+      detach_each.each { |blob| blob.purge }
+      nil
+    end
+
+    # Rails' default on the owner's destroy (`dependent: :purge_later`):
+    # the join row goes now, the blob in an `ActiveStorage::PurgeJob`.
+    def purge_later
+      detach_each.each { |blob| blob.purge_later }
+      nil
+    end
+
+    # Delete the join row(s) and answer the blobs they held.
+    def detach_each
       sql = "SELECT a.id AS attachment_id, " + Blob.columns("b") +
             " FROM active_storage_attachments a " +
             "JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = " +
             ActiveRecord.adapter.escape_value(@record_type) +
             " AND a.record_id = " + ActiveRecord.adapter.escape_value(@record_id) +
             " AND a.name = " + ActiveRecord.adapter.escape_value(@name)
+      blobs = []
       ActiveRecord.adapter.select_rows(sql).each do |row|
         ActiveRecord.adapter.delete("active_storage_attachments", row["attachment_id"].to_i)
-        Blob.from_row(row).purge
+        blobs.push(Blob.from_row(row))
       end
       @row_loaded = false
       @attachment_id = 0
       @blob = nil
-      nil
+      blobs
     end
 
     # `account.logo.destroy` — Rails' `Attached::One` has no `destroy`
@@ -1428,6 +1549,8 @@ module ActiveStorage
       @record_type = record_type
       @record_id = record_id
       @name = name
+      @rows = []
+      @rows_loaded = false
     end
 
     def attached?
@@ -1437,7 +1560,12 @@ module ActiveStorage
     # Every join row for this name on this record — Rails'
     # `Attached::Many#attachments`. Raw SQL (not Relation over the
     # synthesized Attachment MODEL) so the body stays fully typed.
+    #
+    # A preloaded proxy (`with_attached_<attr>`, or the rich-text
+    # `_and_embeds` scope) answers the rows its batch installed through
+    # `_preload_rows` without a query; any write below drops them.
     def attachments
+      return @rows if @rows_loaded
       sql = "SELECT a.id AS attachment_id, " + Blob.columns("b") +
             " FROM active_storage_attachments a " +
             "JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = " +
@@ -1445,15 +1573,94 @@ module ActiveStorage
             " AND a.record_id = " + ActiveRecord.adapter.escape_value(@record_id) +
             " AND a.name = " + ActiveRecord.adapter.escape_value(@name)
       out = []
-      ActiveRecord.adapter.select_rows(sql).each do |row|
+      ActiveRecord.adapter.select_rows(sql + " ORDER BY a.id").each do |row|
         out.push(ManyAttachment.new(row["attachment_id"].to_i, Blob.from_row(row)))
       end
       out
     end
 
+    # Rails' `Attached::Many` delegates the collection reads to its
+    # attachments: `message.body.embeds.first.blob`.
+    def first
+      attachments.first
+    end
+
+    # The batch loader's setter: the rows one `IN` query found for this
+    # record, in attachment order.
+    def _preload_rows(rows)
+      @rows = rows
+      @rows_loaded = true
+      nil
+    end
+
+    # Rails' `Attached::Many` hands every Enumerable call to
+    # `attachments` (`delegate_missing_to`); `each` is the one the
+    # corpus makes — campfire's `message.body.embeds.each(&:filename)`.
+    def each
+      rows = attachments
+      i = 0
+      n = rows.length
+      while i < n
+        yield rows[i]
+        i += 1
+      end
+      rows
+    end
+
+    # More of the same delegation: a jbuilder `json.pictures(record
+    # .pictures) do |picture| … end` maps the proxy, and `size` /
+    # `empty?` are the reads a view guards it with.
+    def map
+      out = []
+      rows = attachments
+      i = 0
+      n = rows.length
+      while i < n
+        out.push(yield rows[i])
+        i += 1
+      end
+      out
+    end
+
+    def size
+      attachments.length
+    end
+
+    def empty?
+      attachments.length == 0
+    end
+
+    # `self.embeds = blobs` for blob ids, in order: Rails' replace on
+    # assign to a `has_many_attached`. A row whose blob is not listed
+    # is detached; a listed blob not yet attached is attached once; an
+    # id naming no blob (a stale reference in stored markup) is
+    # skipped. Detaching leaves the blob, where Rails would
+    # `purge_later` it once nothing else references it.
+    def _sync_blob_ids(blob_ids)
+      @rows_loaded = false
+      kept = []
+      attachments.each do |att|
+        b = att.blob
+        bid = b.nil? ? 0 : b.id
+        if blob_ids.include?(bid) && !kept.include?(bid)
+          kept.push(bid)
+        else
+          ActiveRecord.adapter.delete("active_storage_attachments", att.id)
+        end
+      end
+      blob_ids.each do |bid|
+        next if kept.include?(bid)
+        kept.push(bid)
+        blob = Blob.find(bid)
+        attach_blob(blob) unless blob.nil?
+      end
+      nil
+    end
+
     # APPEND — prior attachments under `@name` stay. One's `attach_blob`
     # purges first; Many must not.
     def attach_blob(blob)
+      @rows_loaded = false
       ActiveRecord.adapter.insert("active_storage_attachments", {
         "name" => @name,
         "record_type" => @record_type,
@@ -1471,16 +1678,60 @@ module ActiveStorage
     end
 
     def purge
+      detach_each.each { |blob| blob.purge }
+      nil
+    end
+
+    def purge_later
+      detach_each.each { |blob| blob.purge_later }
+      nil
+    end
+
+    def detach_each
+      blobs = []
       attachments.each do |att|
         blob = att.blob
         ActiveRecord.adapter.delete("active_storage_attachments", att.id)
-        blob.purge unless blob.nil?
+        blobs.push(blob) unless blob.nil?
       end
-      nil
+      @rows_loaded = false
+      blobs
     end
 
     def destroy
       purge
+    end
+  end
+
+  # Rails' `ActiveStorage::VariantRecord`, the model behind
+  # `active_storage_variant_records`, as far as a test reads it:
+  # campfire asserts that serving a poster made when the message was
+  # posted makes no further variant (`assert_no_difference ->
+  # { ActiveStorage::VariantRecord.count }`).
+  class VariantRecord
+    def self.count
+      rows = ActiveRecord.adapter.select_rows("SELECT count(*) AS n FROM active_storage_variant_records")
+      rows.length == 0 ? 0 : rows[0]["n"].to_i
+    end
+  end
+
+  # Rails' `ActiveStorage::PurgeJob`, in the shape a lowered app job's
+  # `perform_later` takes: recorded by name (`assert_enqueued_jobs
+  # only: ActiveStorage::PurgeJob`), run inline, queued behind the
+  # request, or held for the test adapter.
+  class PurgeJob
+    def self.perform_later(blob)
+      ActiveJob.record_performed("ActiveStorage::PurgeJob")
+      if !ActiveJob.enqueue_only
+        if ActiveJob.drain_registered
+          ActiveJob.enqueue(-> { blob.purge })
+        else
+          blob.purge
+        end
+      else
+        ActiveJob.hold("ActiveStorage::PurgeJob", -> { blob.purge })
+      end
+      nil
     end
   end
 end
@@ -1496,6 +1747,7 @@ end
 # controllers), which is why the URL shapes here are Rails' own:
 #
 #   /rails/active_storage/blobs/redirect/:signed_id/*filename
+#   /rails/active_storage/blobs/proxy/:signed_id/*filename
 #   /rails/active_storage/representations/redirect/:signed_blob_id/:variation_key/*filename
 #   /rails/active_storage/disk/:encoded_key/*filename
 #   /rails/active_storage/direct_uploads              (POST)
@@ -1522,6 +1774,33 @@ module RouteHelpers
 
   def self.rails_blob_url(attachment, disposition: nil, only_path: nil)
     rails_blob_path(attachment, disposition: disposition, only_path: only_path)
+  end
+
+  # The engine's two `direct` routes over a blob. `rails_storage_redirect`
+  # is the route `rails_blob` resolves to under Rails' default
+  # `resolve_model_to_route`; `rails_storage_proxy` names the proxy
+  # route, which serves the bytes through the app. Rails' blocks take
+  # whatever answers `signed_id`: the Blob itself or its attachment.
+  def self.rails_storage_proxy_path(model, disposition: nil, only_path: nil)
+    b = storage_blob(model)
+    b.nil? ? "" : b.proxy_url(disposition.to_s)
+  end
+
+  def self.rails_storage_proxy_url(model, disposition: nil, only_path: nil)
+    rails_storage_proxy_path(model, disposition: disposition, only_path: only_path)
+  end
+
+  def self.rails_storage_redirect_path(model, disposition: nil, only_path: nil)
+    b = storage_blob(model)
+    b.nil? ? "" : b.redirect_url(disposition.to_s)
+  end
+
+  def self.rails_storage_redirect_url(model, disposition: nil, only_path: nil)
+    rails_storage_redirect_path(model, disposition: disposition, only_path: only_path)
+  end
+
+  def self.storage_blob(model)
+    model.is_a?(ActiveStorage::Blob) ? model : model.blob
   end
 
   def self.rails_representation_path(variant, only_path: nil)

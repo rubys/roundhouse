@@ -68,6 +68,6 @@ validation, and styles. [`tests/browser_smoke/`](../../tests/browser_smoke/)
 exercises SharedWorker and browser compiler surfaces.
 
 `scripts/campfire-suite` runs the pinned app's own tests and reports a worklist;
-CI owns its conformance floors. Inventory-only corpus gates, such as
-[Writebook](../writebook.md), do not run the app and must not be described as
-compilation, runtime, or UI conformance.
+CI owns its conformance floors. The [Writebook inventory](../writebook.md) is a
+manually run corpus survey, not a CI gate; it does not run the app and must not
+be described as compilation, runtime, or UI conformance.

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Nokogiri, reopened for spinel: the READ path the façade in
 # `runtime/gem_facades.rb` declines, for the one document shape an app
 # in the corpus reads — campfire's `Opengraph::Document`, which asks a

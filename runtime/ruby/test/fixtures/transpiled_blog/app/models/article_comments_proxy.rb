@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Generated proxy for Article#comments (specialized form of has_many).
 #
 # Specialization expansion (replaces ActiveRecord::CollectionProxy[T]):

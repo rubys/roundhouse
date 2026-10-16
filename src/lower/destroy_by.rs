@@ -1,5 +1,5 @@
 //! `Model.destroy_by(col: value)` → `Model.where(col: value).destroy_all`,
-//! and `delete_by` → `delete_all` beside it.
+//! `delete_by` → `delete_all` beside it, and `find_sole_by` → `sole`.
 //!
 //! That rewrite is Rails' own definition of the method, which is a
 //! one-liner over `where`; nothing about it is specific to a target.
@@ -23,6 +23,16 @@
 //! gives them, and so does the association-receiver form
 //! (`room.memberships.destroy_by user: users`) — an association read is
 //! Array-typed, not Relation-typed, so it never reaches this pass.
+//!
+//! `find_sole_by` (Rails 7.0) is the same one-liner over `where`, with
+//! the raising `sole` as its terminal. Split here it reaches every pass
+//! that already reads `where`'s condition hash (enum symbols,
+//! `normalizes`, ranges) and the relation-receiver handling `sole` gets
+//! in the arel pass, rather than adding one more spelling to each of
+//! their lists. The shapes this guard declines keep the call as
+//! written: an association read is claimed by the scope-chain pass like
+//! `find_by!`, and anything else reaches the runtime's
+//! `Relation#find_sole_by` / `Base.find_sole_by`.
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode};
@@ -48,6 +58,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     let terminal = match method.as_str() {
         "destroy_by" => "destroy_all",
         "delete_by" => "delete_all",
+        "find_sole_by" => "sole",
         _ => return,
     };
     if args.len() != 1 {
@@ -69,14 +80,16 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         Some(Ty::Relation { of }) => Ty::Relation { of: of.clone() },
         _ => return,
     };
-    // Rails hands back the destroyed records from `destroy_all` and the
-    // affected-row count from `delete_all`; the two `Relation` catalog
-    // entries say exactly that (`ArrayOfSelf` / `Int`), and the stamps
-    // below repeat them rather than inventing a third answer.
+    // Rails hands back the destroyed records from `destroy_all`, the
+    // affected-row count from `delete_all` and the one record from
+    // `sole`; the `Relation` catalog entries say exactly that
+    // (`ArrayOfSelf` / `Int` / `SelfType`), and the stamps below repeat
+    // them rather than inventing another answer.
     let result_ty = match (terminal, &relation_ty) {
         ("destroy_all", Ty::Relation { of }) => Ty::Array {
-            elem: Box::new(Ty::Class { id: of.clone(), args: vec![] }),
+            elem: std::sync::Arc::new(Ty::Class { id: of.clone(), args: vec![].into() }),
         },
+        ("sole", Ty::Relation { of }) => Ty::Class { id: of.clone(), args: vec![].into() },
         _ => Ty::Int,
     };
 

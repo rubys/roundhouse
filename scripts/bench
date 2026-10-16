@@ -222,7 +222,10 @@ mkdir -p "$OUT_DIR"
     --command     "scripts/bench ${ORIG_ARGS[*]}" \
     > "$OUT_DIR/env.json" || true
 
+# Lane logs are request logs and grow by gigabytes; the exit trap trims
+# them to their tails (scripts/lib/trim-logs.sh says why).
 LOG_DIR="$(mktemp -d -t rh-bench-logs.XXXXXX)"
+. "$REPO_ROOT/scripts/lib/trim-logs.sh"
 
 # Every lane the run asked for and could not measure, one JSON line each:
 # {"target","stage","reason","log_tail"}. Written empty up front so a run
@@ -398,6 +401,9 @@ cleanup() {
         kill_tree "$TARGET_PID"
         sleep 0.3
         wait 2>/dev/null || true
+        # Not under --keep: the server still writing its log would keep
+        # writing to the unlinked original.
+        trim_logs "${LOG_DIR:-}"
     else
         if [[ -n "$TARGET_PID" ]]; then
             echo

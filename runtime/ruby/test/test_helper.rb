@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Framework-level test bootstrap. Loads the framework Ruby (under
 # `runtime/ruby/`). Runs under stock CRuby — no spinel, no transpile,
 # no app fixture. Tests check framework-source correctness; transpile-
@@ -23,6 +24,7 @@
 # TS: better-sqlite3 / libsql; Rust: rusqlite; Go: modernc.org/sqlite).
 
 require "minitest/autorun"
+require "i18n"
 
 # Base64 / JSON are CRuby stdlib here (the framework tests run under
 # stock CRuby with no transpile step). Required up-front so
@@ -60,6 +62,7 @@ $LOAD_PATH.unshift(File.expand_path("..", FRAMEWORK_RUBY))
 end
 
 require "active_record"
+require "active_support_number_helper"
 require "action_view/slots"
 require "action_view/view_helpers"
 # The ruby-family ViewHelpers reopen (date_helper_test.rb). Same
@@ -68,11 +71,18 @@ require "action_view/view_helpers"
 # reopen here cannot leak into them.
 require "action_view/view_helpers_ext"
 require "action_dispatch/router"
+# `Vary: Accept` (mime_negotiation_test.rb). Its aggregator is
+# `action_dispatch.rb`, which this helper does not load.
+require "action_dispatch/mime_negotiation"
 # The shared Request (request_test.rb). Its aggregator is the scaffold's
 # boot.rb, not `action_dispatch.rb`, so this helper names it directly —
 # the same "a second list of the same thing" the CookieJar note below
 # describes.
 require "action_dispatch/request"
+# X-Request-Id / X-Runtime (request_id_test.rb). Its aggregator is
+# `action_dispatch.rb`, which this helper does not load.
+require "securerandom"
+require "action_dispatch/request_id"
 require "action_controller/base"
 # The keyed digest before anything that calls `MessageDigest.secure_compare`.
 begin
@@ -89,6 +99,16 @@ require "action_controller/authenticity_token"
 # strict tables. Required from the helper rather than inline in the test
 # because the test-file emit drops inline requires.
 require "action_controller/cookies"
+# `response.cache_control`'s Hash-like surface (cache_control_test.rb).
+# Same reasoning as the CookieJar require above: a reopen outside the
+# strict-target tables, read by the ruby-family lanes alone, required
+# from the helper rather than inline in the test.
+require "action_controller/cache_control"
+# Rack::ETag / Rack::ConditionalGet over the buffered response
+# (conditional_get_test.rb), for the same reason: ruby-family only. Its
+# body digest is stdlib `digest`, which the emitted trees require for it.
+require "digest"
+require "action_controller/conditional_get"
 # What `cookies.signed` signs WITH. cookies.rb names it but does not
 # require it — the production aggregator (runtime/ruby/action_controller
 # .rb) supplies it, and this helper is a second list of the same thing.

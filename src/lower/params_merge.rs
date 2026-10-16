@@ -101,7 +101,9 @@ pub fn apply_params_merge_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut writers: HashMap<Symbol, WriterSet> = HashMap::new();
     let mut resource_of: HashMap<Symbol, Symbol> = HashMap::new();
     for m in &app.models {
-        let Some(table) = app.schema.tables.get(&m.table.0) else { continue };
+        let Some(table) = app.schema.tables.get(&m.table.0) else {
+            continue;
+        };
         writers.insert(
             m.name.0.clone(),
             super::model_to_library::writable_field_set(m, table),
@@ -115,7 +117,12 @@ pub fn apply_params_merge_lowering(app: &mut App) -> Vec<Diagnostic> {
     // `app.models` is mutably borrowed — settle the per-key question now.
     let models: Vec<Model> = app.models.clone();
 
-    let ctx = Ctx { specs: &specs, writers: &writers, resource_of: &resource_of, models: &models };
+    let ctx = Ctx {
+        specs: &specs,
+        writers: &writers,
+        resource_of: &resource_of,
+        models: &models,
+    };
     let mut diags = Vec::new();
 
     // Attribute-hash sites first: the CALL SIDE of a `Binding::Attrs`,
@@ -191,10 +198,10 @@ enum Binding {
 struct SiteShapes {
     /// Params lists passed here, by their class.
     specs: std::collections::BTreeSet<ClassId>,
-    /// A literal hash — `create_with_attachment!(attachment: a)`.
+    /// A literal or definitely Hash-valued local passed as the argument.
     saw_hash: bool,
-    /// Anything else: a local, a call, a literal. One of these and the
-    /// parameter is not uniformly anything.
+    /// Anything else: an unresolved local, a call, or a non-Hash literal.
+    /// These shapes veto binding rather than being assumed Hashes.
     saw_other: bool,
 }
 
@@ -215,15 +222,24 @@ impl SiteShapes {
     /// `attributes.delete(:webhook_url)`, exactly as its class-side
     /// sibling `create_bot!` does, and only the sibling was converted.
     /// `body_needs_hash` — does the callee's OWN BODY use this parameter
-    /// in a way only a Hash answers? The census above says what is
-    /// PASSED; it cannot say what the body NEEDS, and where they
-    /// disagree the body wins. See [`hash_only_params`].
+    /// in a way only a Hash answers? That resolves helper-only sites; an
+    /// unresolved non-Hash site still vetoes the inference. See
+    /// [`hash_only_params`].
     fn conclude(&self, user_written: bool, body_needs_hash: bool) -> Option<Binding> {
-        if self.saw_other || self.specs.len() != 1 {
+        if self.specs.len() != 1 {
             return None;
         }
         let spec = self.specs.iter().next()?.clone();
-        if self.saw_hash || body_needs_hash {
+        if self.saw_other {
+            return None;
+        }
+        // The body can resolve helper-only sites, and literal/known local
+        // Hash sites are already recorded separately above. Unknown caller
+        // shapes still veto rewriting rather than being assumed Hashes.
+        if body_needs_hash && user_written {
+            return Some(Binding::Attrs(spec));
+        }
+        if self.saw_hash {
             return user_written.then_some(Binding::Attrs(spec));
         }
         Some(Binding::Spec(spec))
@@ -237,9 +253,8 @@ impl SiteShapes {
 /// `callee_class`, which answers the OWNER's name.
 fn user_declared_methods(app: &App) -> std::collections::HashSet<(Symbol, Symbol)> {
     let mut out = std::collections::HashSet::new();
-    let unqualified = |id: &ClassId| {
-        Symbol::from(id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()))
-    };
+    let unqualified =
+        |id: &ClassId| Symbol::from(id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()));
     for model in &app.models {
         for item in &model.body {
             if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
@@ -277,31 +292,56 @@ fn including_models(app: &App) -> HashMap<ClassId, Vec<Symbol>> {
     let mut out: HashMap<ClassId, Vec<Symbol>> = HashMap::new();
     for model in &app.models {
         let owner = Symbol::from(
-            model.name.0.as_str().rsplit("::").next().unwrap_or(model.name.0.as_str()),
+            model
+                .name
+                .0
+                .as_str()
+                .rsplit("::")
+                .next()
+                .unwrap_or(model.name.0.as_str()),
         );
         for item in &model.body {
-            let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
-            let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+            let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else {
+                continue;
+            };
+            let ExprNode::Send {
+                recv: None,
+                method,
+                args,
+                ..
+            } = &*expr.node
+            else {
+                continue;
+            };
             if method.as_str() != "include" {
                 continue;
             }
             for arg in args {
-                let ExprNode::Const { path } = &*arg.node else { continue };
-                let joined =
-                    path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::");
-                out.entry(ClassId(Symbol::from(joined))).or_default().push(owner.clone());
+                let ExprNode::Const { path } = &*arg.node else {
+                    continue;
+                };
+                let joined = path
+                    .iter()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                out.entry(ClassId(Symbol::from(joined)))
+                    .or_default()
+                    .push(owner.clone());
             }
         }
     }
     out
 }
 
-
 fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, Binding> {
     let mut seen: HashMap<BindKey, SiteShapes> = HashMap::new();
     let models = crate::lower::scope_chain::model_set(&app.models);
     let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
-    let assoc = AssocCtx { models: &models, assocs: &assocs };
+    let assoc = AssocCtx {
+        models: &models,
+        assocs: &assocs,
+    };
 
     // EVERY call site has to be seen, not just the ones that could bind
     // — a site passing a plain Hash is exactly what proves the parameter
@@ -394,15 +434,22 @@ fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, Binding> {
 /// The body was the evidence in both cases; one just had a second
 /// witness.
 ///
-/// `delete` and `[]=` only. `merge` is deliberately absent:
-/// `convert_attributes_in` already rewrites a params receiver's `merge`
-/// to `to_attrs.merge` at the site, so a body calling it proves nothing.
+/// Hash-only body uses: receiver `delete`/`[]=`/`[]=`-assign, or a
+/// class method on an Active Record model passing the parameter to its
+/// own known attribute-hash API. Non-model library classes' `new` is
+/// not evidence of an attribute hash.
+/// `merge` is deliberately absent: `convert_attributes_in` already
+/// rewrites a params receiver's `merge` to `to_attrs.merge` at the
+/// site, so a body calling it proves nothing.
 fn hash_only_params(app: &App) -> std::collections::HashSet<BindKey> {
     let mut out = std::collections::HashSet::new();
-    let unqualified = |id: &ClassId| Symbol::from(id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()));
-    let mut visit = |owner: Symbol, method: &MethodDef| {
+    let unqualified =
+        |id: &ClassId| Symbol::from(id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()));
+    let mut visit = |owner: Symbol, method: &MethodDef, model_class: bool| {
         for (i, p) in method.params.iter().enumerate() {
-            if uses_as_hash(&method.body, &p.name) {
+            let ar_hash_api =
+                model_class && method.receiver == crate::dialect::MethodReceiver::Class;
+            if uses_as_hash(&method.body, &p.name, ar_hash_api) {
                 out.insert((owner.clone(), method.name.clone(), i));
             }
         }
@@ -410,45 +457,106 @@ fn hash_only_params(app: &App) -> std::collections::HashSet<BindKey> {
     for model in &app.models {
         for item in &model.body {
             if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
-                visit(unqualified(&model.name), method);
+                visit(unqualified(&model.name), method, true);
             }
         }
     }
     let included = including_models(app);
     for lc in &app.library_classes {
         for method in &lc.methods {
-            visit(unqualified(&lc.name), method);
             for owner in included.get(&lc.name).map(Vec::as_slice).unwrap_or(&[]) {
-                visit(owner.clone(), method);
+                // Concern class methods are spliced onto model classes;
+                // only those copies inherit the Active Record contract.
+                visit(
+                    owner.clone(),
+                    method,
+                    method.receiver == crate::dialect::MethodReceiver::Class,
+                );
             }
         }
     }
     out
 }
 
-/// Is `name` the receiver of a hash-only mutation anywhere in `body`?
-fn uses_as_hash(body: &Expr, name: &Symbol) -> bool {
+/// Active Record class methods whose first argument is an attribute hash.
+const SELF_ATTR_HASH_METHODS: &[&str] = &[
+    "create!",
+    "create",
+    "new",
+    "update!",
+    "update",
+    "assign_attributes",
+    "attributes=",
+];
+
+/// Receiver is the method's own self (implicit or explicit).
+fn hash_ctor_recv_is_self(recv: &Option<Expr>) -> bool {
+    match recv {
+        None => true,
+        Some(r) => matches!(&*r.node, ExprNode::SelfRef),
+    }
+}
+
+/// Is `name` used in a way only a Hash answers anywhere in `body`?
+fn uses_as_hash(body: &Expr, name: &Symbol, ar_hash_api: bool) -> bool {
     let mut found = false;
-    walk(body, &mut |e| {
+    walk_without_shadowed_lambda_params(body, name, &mut |e| {
         if found {
             return;
         }
-        let reads_name = |x: &Expr| {
-            matches!(&*x.node, ExprNode::Var { name: n, .. } if n == name)
-        };
+        let reads_name = |x: &Expr| matches!(&*x.node, ExprNode::Var { name: n, .. } if n == name);
         match &*e.node {
-            ExprNode::Send { recv: Some(r), method, .. }
-                if matches!(method.as_str(), "delete" | "[]=") && reads_name(r) =>
+            // Only model class methods have the Active Record contract;
+            // a PORO's implicit `new(attributes)` may accept any object.
+            ExprNode::Send {
+                recv, method, args, ..
+            } if ar_hash_api
+                && args.len() == 1
+                && reads_name(&args[0])
+                && SELF_ATTR_HASH_METHODS.contains(&method.as_str())
+                && hash_ctor_recv_is_self(recv) =>
             {
                 found = true;
             }
-            ExprNode::Assign { target: LValue::Index { recv, .. }, .. } if reads_name(recv) => {
-                found = true
+            ExprNode::Send {
+                recv: Some(r),
+                method,
+                ..
+            } if matches!(method.as_str(), "delete" | "[]=") && reads_name(r) => {
+                found = true;
             }
+            ExprNode::Assign {
+                target: LValue::Index { recv, .. },
+                ..
+            } if reads_name(recv) => found = true,
             _ => {}
         }
     });
     found
+}
+
+/// Walk expressions while excluding lambda bodies that bind `name` as a
+/// parameter. The IR does not give method parameters and lambda parameters
+/// a shared lexical binding identity, so name-shadowing must be handled
+/// before comparing variable reads.
+fn walk_without_shadowed_lambda_params(e: &Expr, name: &Symbol, f: &mut dyn FnMut(&Expr)) {
+    f(e);
+    if let ExprNode::Lambda {
+        params,
+        rest_param,
+        block_param,
+        ..
+    } = &*e.node
+    {
+        if params.iter().any(|p| p == name)
+            || rest_param.as_ref().is_some_and(|p| p == name)
+            || block_param.as_ref().is_some_and(|p| p == name)
+        {
+            return;
+        }
+    }
+    e.node
+        .for_each_child(&mut |child| walk_without_shadowed_lambda_params(child, name, f));
 }
 
 /// The class a call site's receiver names, for keying a binding.
@@ -470,12 +578,21 @@ fn callee_class(recv: &Expr, assoc: &AssocCtx<'_>) -> Option<Symbol> {
     if let ExprNode::Const { path } = &*recv.node {
         return path.last().cloned();
     }
-    if let ExprNode::Send { recv: Some(owner), method: aname, args, block: None, .. } = &*recv.node
+    if let ExprNode::Send {
+        recv: Some(owner),
+        method: aname,
+        args,
+        block: None,
+        ..
+    } = &*recv.node
     {
         if args.is_empty() {
-            if let Some((_, target, _)) =
-                crate::lower::scope_chain::assoc_read_target(owner, aname, assoc.models, assoc.assocs)
-            {
+            if let Some((_, target, _)) = crate::lower::scope_chain::assoc_read_target(
+                owner,
+                aname,
+                assoc.models,
+                assoc.assocs,
+            ) {
                 return Some(unqualified(target.0.as_str()));
             }
         }
@@ -513,7 +630,14 @@ struct AssocCtx<'a> {
 /// The params list an argument expression names, if it is a bare
 /// `<x>_params` helper call of the enclosing controller.
 fn arg_spec(arg: &Expr, helpers: &BTreeMap<Symbol, &ParamsSpec>) -> Option<ClassId> {
-    let ExprNode::Send { recv: None, method: h, args, block: None, .. } = &*arg.node else {
+    let ExprNode::Send {
+        recv: None,
+        method: h,
+        args,
+        block: None,
+        ..
+    } = &*arg.node
+    else {
         return None;
     };
     if !args.is_empty() {
@@ -529,21 +653,122 @@ fn scan_body(
     seen: &mut HashMap<BindKey, SiteShapes>,
 ) {
     walk(body, &mut |e| {
-        let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
+        let ExprNode::Send {
+            recv: Some(recv),
+            method,
+            args,
+            ..
+        } = &*e.node
+        else {
             return;
         };
-        let Some(class) = callee_class(recv, assoc) else { return };
+        let Some(class) = callee_class(recv, assoc) else {
+            return;
+        };
         for (i, arg) in args.iter().enumerate() {
             let shapes = seen.entry((class.clone(), method.clone(), i)).or_default();
             match arg_spec(arg, helpers) {
                 Some(class_id) => {
                     shapes.specs.insert(class_id);
                 }
-                None if matches!(&*arg.node, ExprNode::Hash { .. }) => shapes.saw_hash = true,
+                None if matches!(&*arg.node, ExprNode::Hash { .. })
+                    || matches!(&*arg.node, ExprNode::Var { name, .. } if definitely_hash_local(body, name)) =>
+                {
+                    shapes.saw_hash = true
+                }
                 None => shapes.saw_other = true,
             }
         }
     });
+}
+
+/// Whether `name` is assigned only Hash literals, on every path that reaches
+/// its use. The IR does not preserve lexical binding identity across lambdas,
+/// so name matching excludes lambdas that shadow the candidate local.
+fn definitely_hash_local(body: &Expr, name: &Symbol) -> bool {
+    let mut assigned = false;
+    let mut only_hashes = true;
+    walk_without_shadowed_lambda_params(body, name, &mut |e| {
+        match &*e.node {
+            ExprNode::OpAssign {
+                target: LValue::Var {
+                    name: assigned_name,
+                    ..
+                },
+                ..
+            } if assigned_name == name => {
+                assigned = true;
+                only_hashes = false;
+                return;
+            }
+            ExprNode::MultiAssign { targets, .. }
+                if targets.iter().any(|target| {
+                    matches!(target, LValue::Var { name: assigned_name, .. } if assigned_name == name)
+                }) =>
+            {
+                assigned = true;
+                only_hashes = false;
+                return;
+            }
+            ExprNode::BeginRescue { rescues, .. }
+                if rescues
+                    .iter()
+                    .any(|rescue| rescue.binding.as_ref() == Some(name)) =>
+            {
+                assigned = true;
+                only_hashes = false;
+                return;
+            }
+            _ => {}
+        }
+
+        let ExprNode::Assign {
+            target:
+                LValue::Var {
+                    name: assigned_name,
+                    ..
+                },
+            value,
+        } = &*e.node
+        else {
+            return;
+        };
+        if assigned_name != name {
+            return;
+        }
+        let is_hash = matches!(&*value.node, ExprNode::Hash { .. });
+        assigned = true;
+        only_hashes &= is_hash;
+    });
+    assigned && only_hashes && hash_assignment_covers_all_paths(body, name)
+}
+
+/// Whether a Hash assignment to `name` is guaranteed by this expression.
+/// Sequences can establish the value before or after a conditional; an `if`
+/// only establishes it when both branches do.
+fn hash_assignment_covers_all_paths(expr: &Expr, name: &Symbol) -> bool {
+    match &*expr.node {
+        ExprNode::Assign {
+            target:
+                LValue::Var {
+                    name: assigned_name,
+                    ..
+                },
+            value,
+        } => assigned_name == name && matches!(&*value.node, ExprNode::Hash { .. }),
+        ExprNode::Seq { exprs } => exprs
+            .iter()
+            .any(|statement| hash_assignment_covers_all_paths(statement, name)),
+        ExprNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            hash_assignment_covers_all_paths(then_branch, name)
+                && hash_assignment_covers_all_paths(else_branch, name)
+        }
+        _ => false,
+    }
 }
 
 /// Runtime slots that take the Symbol-keyed hash a params object has to
@@ -573,8 +798,14 @@ fn scan_body(
 /// is deliberately absent: its first argument is just as often a SQL
 /// FRAGMENT, and a params object never reaches that spelling in this
 /// corpus — adding it would be a rule with no site to keep it honest.
-const RUNTIME_ATTRS_SLOTS: &[&str] =
-    &["attributes=", "find_by", "find_by!", "destroy_by", "delete_by", "exists?"];
+const RUNTIME_ATTRS_SLOTS: &[&str] = &[
+    "attributes=",
+    "find_by",
+    "find_by!",
+    "destroy_by",
+    "delete_by",
+    "exists?",
+];
 
 fn convert_attributes_assignments(app: &mut App, specs: &ParamsSpecs) {
     for controller in &mut app.controllers {
@@ -584,7 +815,9 @@ fn convert_attributes_assignments(app: &mut App, specs: &ParamsSpecs) {
             .map(|(name, spec)| (name, spec.class_id.clone()))
             .collect();
         for item in &mut controller.body {
-            let crate::dialect::ControllerBodyItem::Action { action, .. } = item else { continue };
+            let crate::dialect::ControllerBodyItem::Action { action, .. } = item else {
+                continue;
+            };
             convert_attributes_in(&mut action.body, &helpers, specs);
         }
     }
@@ -624,18 +857,15 @@ fn to_attrs_send(recv: Expr, span: crate::span::Span) -> Expr {
     e
 }
 
-fn convert_attributes_in(
-    e: &mut Expr,
-    helpers: &BTreeMap<Symbol, ClassId>,
-    specs: &ParamsSpecs,
-) {
+fn convert_attributes_in(e: &mut Expr, helpers: &BTreeMap<Symbol, ClassId>, specs: &ParamsSpecs) {
     // `<params>.merge(k: v)` — the params object is the RECEIVER here,
     // not an argument, so it needs its own shape. Rails answers `merge`
     // because Parameters is hash-like; ours is a typed struct, and the
     // hash it stands for is `to_attrs`. Converting there rather than
     // synthesizing a `merge` on every params class keeps the result a
     // plain Symbol-keyed Hash, which is what the constructor on the
-    // other end of it wants.
+    // other end of it wants. `merge!` converts the same way: `to_attrs`
+    // is a fresh Hash, and the call site uses only the merged result.
     //
     // Controller actions only, like everything else in this walk. The
     // model-side spelling (`User.new(user_params.merge(role: …))` in
@@ -643,8 +873,13 @@ fn convert_attributes_in(
     // rewrite and must not be short-circuited into a hash here — that
     // one becomes a typed factory plus an assignment, so the merged key
     // never has to reach a permit list.
-    if let ExprNode::Send { recv: Some(recv), method, .. } = &mut *e.node {
-        if method.as_str() == "merge" && params_source_class(recv, helpers, specs).is_some() {
+    if let ExprNode::Send {
+        recv: Some(recv),
+        method,
+        ..
+    } = &mut *e.node
+    {
+        if matches!(method.as_str(), "merge" | "merge!") && params_source_class(recv, helpers, specs).is_some() {
             let span = recv.span;
             let inner = recv.clone();
             *recv = to_attrs_send(inner, span);
@@ -663,7 +898,8 @@ fn convert_attributes_in(
             }
         }
     }
-    e.node.for_each_child_mut(&mut |c| convert_attributes_in(c, helpers, specs));
+    e.node
+        .for_each_child_mut(&mut |c| convert_attributes_in(c, helpers, specs));
 }
 
 /// Rewrite `<helper>` to `<helper>.to_attrs` at every call site whose
@@ -683,7 +919,10 @@ fn convert_attrs_call_sites(
     }
     let models = crate::lower::scope_chain::model_set(&app.models);
     let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
-    let assoc = AssocCtx { models: &models, assocs: &assocs };
+    let assoc = AssocCtx {
+        models: &models,
+        assocs: &assocs,
+    };
     for controller in &mut app.controllers {
         let actions: Vec<crate::dialect::Action> = controller.actions().cloned().collect();
         let helpers: BTreeMap<Symbol, ClassId> = helper_spec_map(&actions, specs)
@@ -694,7 +933,9 @@ fn convert_attrs_call_sites(
         // at the call site names no helper, and it is a params object
         // just the same (`params_source_class`).
         for item in &mut controller.body {
-            let crate::dialect::ControllerBodyItem::Action { action, .. } = item else { continue };
+            let crate::dialect::ControllerBodyItem::Action { action, .. } = item else {
+                continue;
+            };
             convert_in(&mut action.body, &helpers, specs, &assoc, bindings);
         }
     }
@@ -707,11 +948,16 @@ fn convert_in(
     assoc: &AssocCtx<'_>,
     bindings: &HashMap<BindKey, Binding>,
 ) {
-    if let ExprNode::Send { recv: Some(recv), method, args, .. } = &mut *e.node {
+    if let ExprNode::Send {
+        recv: Some(recv),
+        method,
+        args,
+        ..
+    } = &mut *e.node
+    {
         if let Some(class) = callee_class(recv, assoc) {
             for (i, arg) in args.iter_mut().enumerate() {
-                let Some(Binding::Attrs(want)) =
-                    bindings.get(&(class.clone(), method.clone(), i))
+                let Some(Binding::Attrs(want)) = bindings.get(&(class.clone(), method.clone(), i))
                 else {
                     continue;
                 };
@@ -729,7 +975,8 @@ fn convert_in(
             }
         }
     }
-    e.node.for_each_child_mut(&mut |c| convert_in(c, helpers, specs, assoc, bindings));
+    e.node
+        .for_each_child_mut(&mut |c| convert_in(c, helpers, specs, assoc, bindings));
 }
 
 fn rewrite_method(
@@ -791,30 +1038,43 @@ fn rewrite_method(
 /// decline (`assoc_class_method_scope` residue) because merging into
 /// something that may not be a Hash is a guess.
 fn stamp_attr_hash_params(method: &mut MethodDef, indices: &[usize]) {
-    let hash_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash {
+        key: std::sync::Arc::new(Ty::Sym),
+        value: std::sync::Arc::new(Ty::Untyped),
+    };
     let (mut params, block, ret, effects) = match method.signature.clone() {
-        Some(Ty::Fn { params, block, ret, effects }) => (params, block, ret, effects),
+        Some(Ty::Fn {
+            params,
+            block,
+            ret,
+            effects,
+        }) => (params, block, ret, effects),
         _ => (
             method
                 .params
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped,
+                    ty: Ty::Untyped.into(),
                     kind: crate::ty::ParamKind::Required,
                 })
                 .collect(),
             None,
-            Box::new(Ty::Untyped),
+            std::sync::Arc::new(Ty::Untyped),
             method.effects.clone(),
         ),
     };
     for i in indices {
         if let Some(p) = params.get_mut(*i) {
-            p.ty = hash_ty.clone();
+            p.ty = hash_ty.clone().into();
         }
     }
-    method.signature = Some(Ty::Fn { params, block, ret, effects });
+    method.signature = Some(Ty::Fn {
+        params,
+        block,
+        ret,
+        effects,
+    });
 }
 
 fn stamp_param_types(method: &mut MethodDef, bound: &[(usize, Symbol, &ParamsSpec)]) {
@@ -823,28 +1083,41 @@ fn stamp_param_types(method: &mut MethodDef, bound: &[(usize, Symbol, &ParamsSpe
     // rather than declining — the whole point is that this parameter's
     // type is now known.
     let (mut params, block, ret, effects) = match method.signature.clone() {
-        Some(Ty::Fn { params, block, ret, effects }) => (params, block, ret, effects),
+        Some(Ty::Fn {
+            params,
+            block,
+            ret,
+            effects,
+        }) => (params, block, ret, effects),
         _ => (
             method
                 .params
                 .iter()
                 .map(|p| crate::ty::Param {
                     name: p.name.clone(),
-                    ty: Ty::Untyped,
+                    ty: Ty::Untyped.into(),
                     kind: crate::ty::ParamKind::Required,
                 })
                 .collect(),
             None,
-            Box::new(Ty::Untyped),
+            std::sync::Arc::new(Ty::Untyped),
             method.effects.clone(),
         ),
     };
     for (i, _name, spec) in bound {
         if let Some(p) = params.get_mut(*i) {
-            p.ty = Ty::Class { id: spec.class_id.clone(), args: vec![] };
+            p.ty = Ty::Class {
+                id: spec.class_id.clone(),
+                args: vec![].into(),
+            }.into();
         }
     }
-    method.signature = Some(Ty::Fn { params, block, ret, effects });
+    method.signature = Some(Ty::Fn {
+        params,
+        block,
+        ret,
+        effects,
+    });
 }
 
 /// Offer each STATEMENT in `body` to `f`, which may rewrite it and push
@@ -870,8 +1143,10 @@ fn hoist_in_statements(body: &mut Expr, f: &mut impl FnMut(&mut Expr, &mut Vec<E
     }
     // A bare (non-Seq) body is itself the whole statement list.
     let mut out = Vec::new();
-    let mut stmt =
-        std::mem::replace(body, Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }));
+    let mut stmt = std::mem::replace(
+        body,
+        Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+    );
     visit_statement(&mut stmt, f, &mut out);
     *body = if out.len() == 1 {
         out.pop().expect("checked")
@@ -901,11 +1176,19 @@ fn visit_statement(
 /// The sub-expressions of `stmt` that are themselves statement lists.
 fn nested_statement_lists(stmt: &mut Expr) -> Vec<&mut Expr> {
     match &mut *stmt.node {
-        ExprNode::If { then_branch, else_branch, .. } => vec![then_branch, else_branch],
+        ExprNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } => vec![then_branch, else_branch],
         ExprNode::Case { arms, .. } => arms.iter_mut().map(|a| &mut a.body).collect(),
         ExprNode::Lambda { body, .. } => vec![body],
-        ExprNode::Send { block: Some(block), .. } => vec![block],
-        ExprNode::Apply { block: Some(block), .. } => vec![block],
+        ExprNode::Send {
+            block: Some(block), ..
+        } => vec![block],
+        ExprNode::Apply {
+            block: Some(block), ..
+        } => vec![block],
         ExprNode::RescueModifier { expr, fallback } => vec![expr, fallback],
         _ => Vec::new(),
     }
@@ -922,22 +1205,37 @@ fn rewrite_stmt(
     diags: &mut Vec<Diagnostic>,
 ) {
     replace_in(stmt, &mut |e| {
-        let Some(site) = match_new_with_merge(e, bound) else { return None };
+        let Some(site) = match_new_with_merge(e, bound) else {
+            return None;
+        };
         match plan(&site, ctx) {
             Ok(plan) => {
                 let tmp = Symbol::from(format!("_pm{n}"));
                 *n += 1;
-                let read = |sp| Expr::new(sp, ExprNode::Var { id: VarId(0), name: tmp.clone() });
+                let read = |sp| {
+                    Expr::new(
+                        sp,
+                        ExprNode::Var {
+                            id: VarId(0),
+                            name: tmp.clone(),
+                        },
+                    )
+                };
                 prelude.push(Expr::new(
                     e.span,
                     ExprNode::Assign {
-                        target: LValue::Var { id: VarId(0), name: tmp.clone() },
+                        target: LValue::Var {
+                            id: VarId(0),
+                            name: tmp.clone(),
+                        },
                         value: Expr::new(
                             e.span,
                             ExprNode::Send {
                                 recv: Some(Expr::new(
                                     e.span,
-                                    ExprNode::Const { path: vec![site.model.clone()] },
+                                    ExprNode::Const {
+                                        path: vec![site.model.clone()],
+                                    },
                                 )),
                                 method: plan.factory,
                                 args: vec![site.params_read.clone()],
@@ -951,7 +1249,10 @@ fn rewrite_stmt(
                     prelude.push(Expr::new(
                         e.span,
                         ExprNode::Assign {
-                            target: LValue::Attr { recv: read(e.span), name: key.clone() },
+                            target: LValue::Attr {
+                                recv: read(e.span),
+                                name: key.clone(),
+                            },
                             value: value.clone(),
                         },
                     ));
@@ -996,35 +1297,64 @@ fn match_new_with_merge<'a>(
     e: &Expr,
     bound: &[(usize, Symbol, &'a ParamsSpec)],
 ) -> Option<Site<'a>> {
-    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*e.node else {
+    let ExprNode::Send {
+        recv: Some(recv),
+        method,
+        args,
+        block: None,
+        ..
+    } = &*e.node
+    else {
         return None;
     };
     if method.as_str() != "new" || args.len() != 1 {
         return None;
     }
-    let ExprNode::Const { path } = &*recv.node else { return None };
+    let ExprNode::Const { path } = &*recv.node else {
+        return None;
+    };
     let model = path.last()?.clone();
 
-    let ExprNode::Send { recv: Some(inner), method: m, args: margs, block: None, .. } =
-        &*args[0].node
+    let ExprNode::Send {
+        recv: Some(inner),
+        method: m,
+        args: margs,
+        block: None,
+        ..
+    } = &*args[0].node
     else {
         return None;
     };
     if m.as_str() != "merge" || margs.len() != 1 {
         return None;
     }
-    let ExprNode::Var { name, .. } = &*inner.node else { return None };
-    let spec = bound.iter().find(|(_, p, _)| p == name).map(|(_, _, s)| *s)?;
+    let ExprNode::Var { name, .. } = &*inner.node else {
+        return None;
+    };
+    let spec = bound
+        .iter()
+        .find(|(_, p, _)| p == name)
+        .map(|(_, _, s)| *s)?;
 
-    let ExprNode::Hash { entries, .. } = &*margs[0].node else { return None };
+    let ExprNode::Hash { entries, .. } = &*margs[0].node else {
+        return None;
+    };
     let mut merged = Vec::with_capacity(entries.len());
     for (k, v) in entries {
-        let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else {
+        let ExprNode::Lit {
+            value: Literal::Sym { value },
+        } = &*k.node
+        else {
             return None;
         };
         merged.push((value.clone(), v.clone()));
     }
-    Some(Site { model, params_read: inner.clone(), spec, merged })
+    Some(Site {
+        model,
+        params_read: inner.clone(),
+        spec,
+        merged,
+    })
 }
 
 fn plan(site: &Site<'_>, ctx: &Ctx<'_>) -> Result<Plan, &'static str> {
@@ -1036,10 +1366,16 @@ fn plan(site: &Site<'_>, ctx: &Ctx<'_>) -> Result<Plan, &'static str> {
         Some(_) => return Err("the model is not the one this permit list names"),
         None => return Err("receiver is not an app model"),
     }
-    if site.merged.iter().any(|(k, _)| !ctx.can_assign(&site.model, k)) {
+    if site
+        .merged
+        .iter()
+        .any(|(k, _)| !ctx.can_assign(&site.model, k))
+    {
         return Err("a merged key has no writer on the model");
     }
-    Ok(Plan { factory: model_from_params_name(site.spec) })
+    Ok(Plan {
+        factory: model_from_params_name(site.spec),
+    })
 }
 
 /// Post-order in-place replacement — `map_expr`'s mutating twin, kept

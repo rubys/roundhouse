@@ -542,6 +542,14 @@ fn visit_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         | ExprNode::ForwardKeywords
         | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                f(key);
+                visit_subexprs(key, f);
+                f(value);
+                visit_subexprs(value, f);
+            }
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
             f(cond); visit_subexprs(cond, f);
             f(then_branch); visit_subexprs(then_branch, f);

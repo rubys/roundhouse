@@ -70,6 +70,13 @@
 //! ONLY `pluck`. `ids` has the same shape and no failing call site;
 //! adding it would be a second untested arm, and the pass that grows one
 //! for a case nothing exercises is the pass that acquires its next bug.
+//!
+//! TEST BODIES too. campfire's `RoomsControllerTest` plucks member ids
+//! before `destroy` so it can assert the enqueued job's args — same
+//! `room.memberships.pluck(:user_id)` shape. That surface lives only on
+//! the fused test walk (`fused::apply_fused_context_rewrites` →
+//! [`rewrite_node`]); this standalone entry covers hook bodies for
+//! direct callers. Do not re-add a second `for_each_test_body` here.
 
 use crate::app::App;
 use crate::expr::{BlockStyle, Expr, ExprNode, Literal};
@@ -77,6 +84,8 @@ use crate::ident::Symbol;
 
 pub fn apply_assoc_pluck_lowering(app: &mut App) {
     let materialized = materialized_assoc_names(app);
+    // Hooks only — test bodies are single-sourced through the fused
+    // context walk so surfaces cannot drift.
     super::for_each_hook_body(app, &mut |e| rewrite(e, &materialized));
 }
 
@@ -208,20 +217,34 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
 
     let span = expr.span;
     let var = Symbol::from("__pluck");
+    // The row a block sees is the receiver's element; one column's
+    // value is the element of what `pluck` answered.
+    let row_ty = match &recv.ty {
+        Some(crate::ty::Ty::Array { elem }) => Some((**elem).clone()),
+        _ => None,
+    };
+    let col_ty = match (&expr.ty, cols.len()) {
+        (Some(crate::ty::Ty::Array { elem }), 1) => Some((**elem).clone()),
+        _ => None,
+    };
     let read = |col: &Symbol| {
-        Expr::new(
+        let mut row = Expr::new(
+            span,
+            ExprNode::Var { id: crate::ident::VarId(0), name: var.clone() },
+        );
+        row.ty = row_ty.clone();
+        let mut send = Expr::new(
             span,
             ExprNode::Send {
-                recv: Some(Expr::new(
-                    span,
-                    ExprNode::Var { id: crate::ident::VarId(0), name: var.clone() },
-                )),
+                recv: Some(row),
                 method: col.clone(),
                 args: vec![],
                 block: None,
                 parenthesized: false,
             },
-        )
+        );
+        send.ty = col_ty.clone();
+        send
     };
     // Rails answers an Array of VALUES for one column and an Array of
     // Arrays for several, and a caller that indexes the result is
@@ -242,7 +265,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
 
     let block = Expr::new(
         span,
-        ExprNode::Lambda {
+        ExprNode::Lambda { extra_params: Vec::new(),
             params: vec![var],
             rest_param: None,
             block_param: None,
@@ -251,6 +274,10 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
         },
     );
     let recv = recv.clone();
+    // The projection answers what `pluck` answered, and the analyzer
+    // already typed that: keep it, or a typed receiver (`comments` in
+    // the model that declares it) leaves an untyped `map` behind.
+    let ty = expr.ty.clone();
     *expr = Expr::new(
         span,
         ExprNode::Send {
@@ -261,6 +288,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
             parenthesized: false,
         },
     );
+    expr.ty = ty;
 }
 
 /// Does this chain bottom out at a model constant?

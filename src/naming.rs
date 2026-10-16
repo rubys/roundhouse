@@ -116,6 +116,13 @@ pub fn is_reserved_local(name: &str) -> bool {
     RESERVED_LOCALS.contains(&name) && !matches!(name, "self" | "nil" | "true" | "false")
 }
 
+/// A numbered block parameter (`_1` … `_9`). Ruby reads it only in the
+/// block that declares none: it cannot be assigned, and a nested block
+/// with ordinary parameters cannot read it.
+pub fn is_numbered_param(name: &str) -> bool {
+    matches!(name.as_bytes(), [b'_', d] if (b'1'..=b'9').contains(d))
+}
+
 /// Base (final) segment of a `/`-separated view-dir path or a
 /// `::`-namespaced module name — the piece bare record/arg identifiers
 /// derive from (`mod/activities` → `activities`, `Mod::Activities` →

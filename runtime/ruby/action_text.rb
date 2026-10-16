@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Action Text's value layer: the HTML fragment a `has_rich_text`
 # attribute holds, and the attachment nodes embedded in it.
 #
@@ -376,9 +377,27 @@ module ActionText
 
     # Rails delegates this to the blob, whose `filename` is an
     # `ActiveStorage::Filename` (extension, base, …); the node carries
-    # the same name as text, so wrap it the same way.
+    # the same name as text, so wrap it the same way. A node that names
+    # its blob only by sgid (campfire's helper tests embed one so) reads
+    # the blob's own.
     def filename
-      ActiveStorage::Filename.new(self["filename"])
+      text = self["filename"]
+      return ActiveStorage::Filename.new(text) unless text == ""
+      b = blob
+      b.nil? ? ActiveStorage::Filename.new("") : b.filename
+    end
+
+    # Delegated to the blob too, as `active_storage/blobs/_blob` reads it
+    # for the file's size; the node's `filesize` without one.
+    def byte_size
+      b = blob
+      b.nil? ? self["filesize"].to_i : b.byte_size
+    end
+
+    # The blob the sgid names, when it names one.
+    def blob
+      return nil unless resolved_model_name == "ActiveStorage::Blob"
+      ActiveStorage::Blob.find(resolved_id)
     end
 
     def url
@@ -421,24 +440,41 @@ module ActionText
   # / `#at_css` — the names Nokogiri gives the same reads — bind the
   # node to the fragment that answered it, so a write lands in that
   # fragment's source too, which is what an `update` block reaches
-  # for. One write per bound node per fragment: offsets are taken
-  # when the node is found, not tracked afterwards.
+  # for. Bound nodes track fragment edits by revision; replacing an
+  # ancestor's inner HTML detaches previously captured descendants.
   class Node
     def initialize(name, attributes, open_tag, inner, close_tag)
       @name = name
-      @attributes = attributes
+      # A node's writers mutate its attribute map; keep that ownership
+      # separate from the parser's typed hash passed into the constructor.
+      @attributes = attributes.dup
       @open_tag = open_tag
       @inner = inner
       @close_tag = close_tag
       @owner = nil
       @at = 0
+      @source_length = 0
+      @revision = 0
     end
 
     # Ties this node to the fragment that found it, at `at` (the open
     # tag's offset in that fragment's source), for write-through.
-    def bind(owner, at)
+    def bind(owner, at, source_length, revision)
       @owner = owner
       @at = at
+      @source_length = source_length
+      @revision = revision
+    end
+
+    def detach
+      @owner = nil
+    end
+
+    def refresh(owner, at, source_length, revision, open_tag, inner)
+      bind(owner, at, source_length, revision)
+      @open_tag = open_tag
+      @inner = inner
+      @attributes = Content.parse_attributes(open_tag[1, open_tag.length - 2].to_s)
     end
 
     def name
@@ -446,6 +482,7 @@ module ActionText
     end
 
     def [](key)
+      refresh_from_owner
       @attributes.fetch(key, nil)
     end
 
@@ -453,18 +490,25 @@ module ActionText
     # attribute is spelled in the open tag, appended before the `>`
     # when it is not.
     def []=(key, value)
-      before = to_s
       @attributes[key] = value
       raw = @open_tag[1, @open_tag.length - 2].to_s
       @open_tag = "<" + Fragment.set_attribute(raw, key, value) + ">"
-      write_through(before)
+      owner = @owner
+      owner.write_attribute(self, @at, @source_length, @revision, @close_tag.length, key, value) unless owner.nil?
     end
 
     def attributes
+      refresh_from_owner
       @attributes
     end
 
+    def refresh_from_owner
+      owner = @owner
+      owner.read_inner_html(self, @at, @source_length, @revision, @close_tag.length) unless owner.nil?
+    end
+
     def inner_html
+      refresh_from_owner
       @inner
     end
 
@@ -475,7 +519,7 @@ module ActionText
     # `RemoveSoloUnfurledLinkText#remove_link_paragraphs` (the Lexxy
     # merge) keeps a `<p>` when `node.at_css("action-text-attachment")`.
     def at_css(selector)
-      found = Fragment.new(@inner).find_all(selector)
+      found = Fragment.new(inner_html).find_all(selector)
       found.empty? ? nil : found[0]
     end
 
@@ -484,12 +528,23 @@ module ActionText
     # put it, so, as Nokogiri does, nothing happens.
     def inner_html=(markup)
       return if @close_tag == ""
-      before = to_s
       @inner = markup.to_s
-      write_through(before)
+      owner = @owner
+      owner.write_inner_html(self, @at, @source_length, @revision, @close_tag.length, @inner) unless owner.nil?
+    end
+
+    # Nokogiri's `Node#remove`: detach this element, including all of its
+    # descendants, from the fragment that yielded it. Detached nodes have
+    # no owner and therefore need no write-through.
+    def remove
+      owner = @owner
+      owner.remove_node(self, @at, @source_length, @revision) unless owner.nil?
+      @owner = nil
+      self
     end
 
     def to_s
+      refresh_from_owner
       @open_tag + @inner + @close_tag
     end
 
@@ -497,10 +552,6 @@ module ActionText
       to_s
     end
 
-    def write_through(before)
-      owner = @owner
-      owner.splice(@at, before.length, to_s) unless owner.nil?
-    end
   end
 
   # A parsed [`Fragment`] selector — see `Fragment.parse_selector`.
@@ -564,8 +615,39 @@ module ActionText
   #                                          of them — how an allow-list
   #                                          sanitizer spells itself
   class Fragment
+    class Change
+      def initialize(at, length, delta, preserves_descendants)
+        @at = at
+        @length = length
+        @delta = delta
+        @preserves_descendants = preserves_descendants
+      end
+
+      def at
+        @at
+      end
+
+      def length
+        @length
+      end
+
+      def delta
+        @delta
+      end
+
+      def preserves_descendants
+        @preserves_descendants
+      end
+    end
+
     def initialize(html)
       @html = html.to_s
+      @changes = []
+      @pending_removals = []
+      @last_pending_start = nil
+      @last_pending_finish = nil
+      @plain_text = nil
+      @plain_text_for = nil
     end
 
     # Rails' `ActionText::Fragment.wrap` — a Fragment passes through, a
@@ -577,15 +659,35 @@ module ActionText
     end
 
     def to_s
+      flush_pending_removals
       @html
     end
 
     def to_html
-      @html
+      to_s
     end
 
     def source
-      @html
+      to_s
+    end
+
+    # Campfire asks the attachment-free fragment for the same plain-text
+    # conversion ActionText::Content uses. Keep conversion in Content's
+    # shared parser so entities, block boundaries, and Action Text nodes
+    # have the same behavior instead of maintaining a second HTML scanner.
+    #
+    # Memoized against the markup it was taken from: campfire asks a
+    # message for its plain text twice per render (its tag's data and
+    # its `/play` check), and the conversion walks every character. A
+    # write through `css`/`at_css` changes `@html`, which misses.
+    def to_plain_text
+      flush_pending_removals
+      cached = @plain_text
+      return cached if !cached.nil? && @plain_text_for == @html
+      text = Content.new(@html, canonicalize: false).convert_html_to_plain_text
+      @plain_text_for = @html.dup
+      @plain_text = text
+      text
     end
 
     # Elements matching `selector`, in document order — detached nodes,
@@ -610,24 +712,215 @@ module ActionText
     # block to write on through `at_css` / `css`, and answered. The
     # receiver is unchanged, as Rails' is (it dups the source first).
     def update
-      copy = Fragment.new(@html)
+      copy = Fragment.new(to_s)
       yield copy
+      copy.to_s
       copy
     end
 
-    # Replaces `length` characters at `at` with `text` — a bound node's
-    # write landing in its fragment's source.
-    def splice(at, length, text)
-      @html = @html[0, at].to_s + text + @html[at + length, @html.length - at - length].to_s
+    # Replaces only the live inner HTML so earlier descendant removals or
+    # edits cannot be restored from a captured Node's stale @inner string.
+    def write_inner_html(node, at, length, revision, close_length, markup)
+      flush_pending_removals
+      range = current_range(at, length, revision)
+      if range.nil?
+        node.detach
+        return
+      end
+      current_at = range[0]
+      current_length = range[1]
+      tag_finish = Fragment.tag_end(@html, current_at)
+      open_length = tag_finish - current_at + 1
+      inner_length = current_length - open_length - close_length
+      inner_at = current_at + open_length
+      open_tag = @html[current_at, open_length].to_s
+      delta = apply_edit(inner_at, inner_length, markup, false)
+      node.refresh(self, current_at, current_length + delta, @changes.length, open_tag, markup)
     end
+
+    # Read from the live fragment rather than a previously captured inner
+    # string; an earlier remove in the same update block must be observable.
+    def read_inner_html(node, at, length, revision, close_length)
+      flush_pending_removals
+      range = current_range(at, length, revision)
+      if range.nil?
+        node.detach
+        return node.inner_html
+      end
+      current_at = range[0]
+      current_length = range[1]
+      tag_finish = Fragment.tag_end(@html, current_at)
+      open_length = tag_finish - current_at + 1
+      inner = @html[current_at + open_length, current_length - open_length - close_length].to_s
+      open_tag = @html[current_at, open_length].to_s
+      node.refresh(self, current_at, current_length, @changes.length, open_tag, inner)
+      inner
+    end
+
+    # Update only the current open tag so a stale Node#inner cannot restore
+    # descendants that an earlier remove or write has already changed.
+    def write_attribute(node, at, length, revision, close_length, key, value)
+      flush_pending_removals
+      range = current_range(at, length, revision)
+      if range.nil?
+        node.detach
+        return
+      end
+      current_at = range[0]
+      current_length = range[1]
+      tag_finish = Fragment.tag_end(@html, current_at)
+      old_open_length = tag_finish - current_at + 1
+      raw = @html[current_at + 1, old_open_length - 2].to_s
+      open_tag = "<" + Fragment.set_attribute(raw, key, value) + ">"
+      delta = apply_edit(current_at, old_open_length, open_tag, true)
+      inner_length = current_length - old_open_length - close_length
+      inner = @html[current_at + open_tag.length, inner_length].to_s
+      node.refresh(self, current_at, current_length + delta, @changes.length, open_tag, inner)
+    end
+
+    # Keep source replacement and revision bookkeeping in one operation; all
+    # bound-node writers must publish the same range-change semantics.
+    def apply_edit(at, length, text, preserves_descendants)
+      delta = text.length - length
+      @html = @html[0, at].to_s + text + @html[at + length, @html.length - at - length].to_s
+      @changes << Change.new(at, length, delta, preserves_descendants)
+      delta
+    end
+
+    # Remove a bound node. Uninterrupted document-order removals are batched;
+    # nodes inside an already removed pending range are already absent.
+    def remove_node(node, at, length, revision)
+      range = current_range(at, length, revision)
+      range = current_node_range(node.name, at, revision) if range.nil?
+      return if range.nil?
+      current_at = range[0]
+      current_finish = current_at + range[1]
+      last_start = @last_pending_start
+      last_finish = @last_pending_finish
+      if !last_start.nil? && !last_finish.nil?
+        return if last_start <= current_at && last_finish >= current_finish
+      end
+      if @changes.empty?
+        @pending_removals << [current_at, current_finish]
+        insertion_index = @pending_removals.length - 1
+        while insertion_index > 0 && @pending_removals[insertion_index - 1][0] > current_at
+          @pending_removals[insertion_index] = @pending_removals[insertion_index - 1]
+          insertion_index = insertion_index - 1
+        end
+        @pending_removals[insertion_index] = [current_at, current_finish]
+        @last_pending_start = current_at
+        @last_pending_finish = current_finish
+      else
+        flush_pending_removals
+        range = current_range(at, length, revision)
+        range = current_node_range(node.name, at, revision) if range.nil?
+        return if range.nil?
+        @pending_removals << [range[0], range[0] + range[1]]
+        flush_pending_removals
+      end
+    end
+
+    private
+
+    # Apply document-order removals as one linear rewrite. Fragment#update
+    # flushes after its block; reads and writes flush early so their results
+    # still observe prior `remove` calls.
+    def flush_pending_removals
+      return if @pending_removals.empty?
+      removals = []
+      i = 0
+      while i < @pending_removals.length
+        range = @pending_removals[i]
+        at = range[0]
+        finish = range[1]
+        previous = removals.empty? ? nil : removals[removals.length - 1]
+        if !previous.nil? && at <= previous[1]
+          previous[1] = finish if finish > previous[1]
+        else
+          removals << [at, finish]
+        end
+        i = i + 1
+      end
+      parts = []
+      cursor = 0
+      shift = 0
+      i = 0
+      while i < removals.length
+        range = removals[i]
+        at = range[0]
+        finish = range[1]
+        parts << @html[cursor, at - cursor].to_s if at > cursor
+        cursor = finish if finish > cursor
+        current_at = at + shift
+        @changes << Change.new(current_at, finish - at, at - finish, false)
+        shift = shift + at - finish
+        i = i + 1
+      end
+      parts << @html[cursor, @html.length - cursor].to_s if cursor < @html.length
+      @html = parts.join
+      @pending_removals = []
+      @last_pending_start = nil
+      @last_pending_finish = nil
+    end
+
+    def current_range(at, length, revision)
+      finish = at + length
+      i = revision
+      while i < @changes.length
+        change = @changes[i]
+        change_at = change.at
+        change_finish = change_at + change.length
+        if change_finish <= at
+          at = at + change.delta
+          finish = finish + change.delta
+        elsif change_at < at && change_finish > at
+          return nil unless change.preserves_descendants
+          at = at + change.delta
+          finish = finish + change.delta
+        elsif change_at == at
+          return nil unless change.preserves_descendants
+          finish = finish + change.delta
+        elsif change_at < finish
+          return nil if change_finish > finish
+          finish = finish + change.delta
+        end
+        i = i + 1
+      end
+      [at, finish - at]
+    end
+
+    # A destructive edit can cross a bound node's old end while leaving
+    # its opening tag in the live fragment. In that case its old extent
+    # is no longer mappable, so recover the live element boundary from
+    # that still-bound opening tag rather than leaving it behind.
+    def current_node_range(name, original_at, revision)
+      position = current_range(original_at, 0, revision)
+      return nil if position.nil?
+      at = position[0]
+      return nil if at < 0 || at >= @html.length
+      return nil unless @html[at, 1].to_s == "<"
+      tag_end = Fragment.tag_end(@html, at)
+      raw = @html[at + 1, tag_end - at - 1].to_s
+      return nil unless Content.tag_name_of(raw) == name
+      finish = Fragment.element_end(@html, at, tag_end, name, raw)
+      [at, finish - at]
+    end
+
+    public
 
     # `scan_elements`, not `scan`: `scan` is a builtin-owned name on
     # spinel (String#scan), and a class method of that name conflicts
     # with the prelude's declaration at the C level — the same family
     # as `replace` (matz/spinel#4240).
     def scan_elements(selector, bound)
+      flush_pending_removals
       out = []
       matcher = Fragment.parse_selector(selector)
+      # A named element whose tag never opens in the markup matches
+      # nothing; answer that without walking every element (campfire
+      # asks each message for its `action-text-attachment`s to learn it
+      # has none). Tag names compare downcased, as `tag_name_of` reads them.
+      return out if matcher.kind == "name" && !@html.downcase.include?("<" + matcher.name)
       i = 0
       n = @html.length
       while i < n
@@ -642,7 +935,9 @@ module ActionText
           stop = Fragment.element_end(@html, open_at, tag_end, name, raw)
           if Fragment.matches?(name, attrs, matcher)
             node = node_at(name, attrs, open_at, tag_end, stop)
-            node.bind(self, open_at) if bound
+            if bound
+              node.bind(self, open_at, stop - open_at, @changes.length)
+            end
             out << node
           end
           # Into the children either way: a match's descendants are
@@ -677,6 +972,7 @@ module ActionText
     # `css(...).each { |n| n.replace(…) }` produces for these selectors,
     # without a second parser.
     def replace(selector)
+      flush_pending_removals
       matcher = Fragment.parse_selector(selector)
       out = +""
       i = 0
@@ -886,6 +1182,7 @@ module ActionText
     # `keys`, `values` and `ops` are each `Array[String]`.
     def self.parse_selector(selector)
       text = selector.to_s.strip
+      return Selector.new("all", "", [], [], [], []) if text == "*"
       return Selector.new("not", "", not_names(text), [], [], []) if text.start_with?(":not(")
       head = text.split("[")[0].to_s
       # A plain element NAME, refused otherwise. Combinators, classes
@@ -948,6 +1245,7 @@ module ActionText
     end
 
     def self.matches?(name, attrs, matcher)
+      return true if matcher.kind == "all"
       return !matcher.excluded.include?(name) if matcher.kind == "not"
       return false if matcher.name != name
       keys = matcher.keys
@@ -983,13 +1281,21 @@ module ActionText
       @html = html.to_s
       @canonicalize = canonicalize
       @plain_text = nil
+      @fragment = nil
     end
 
     # `ActionText::Content#fragment` — the element view a
     # `Content::Filter` works through (campfire's filter base is
     # `delegate :fragment, to: :content`).
+    #
+    # One per Content, as Rails' is: a Content's markup never changes, and
+    # a fresh Fragment per call threw away the plain text it had taken.
     def fragment
-      ActionText::Fragment.new(@html)
+      found = @fragment
+      return found unless found.nil?
+      made = ActionText::Fragment.new(@html)
+      @fragment = made
+      made
     end
 
     # The stored markup, unchanged — `to_html` is the FRAGMENT, which
@@ -1028,9 +1334,22 @@ module ActionText
 
     # >>> generated: content-layout
     def rendered_html
-      "<div class=\"trix-content\">\n  " + render_attachments + "\n</div>\n"
+      "<div class=\"trix-content\">\n  " + render_action_text_content + "\n</div>\n"
     end
     # <<< generated: content-layout
+
+    # What the content partial yields: `render_action_text_content`,
+    # which in Rails is `sanitize_action_text_content(
+    # render_action_text_attachments(content))`. The SANITIZE is the
+    # security boundary — the stored markup is whatever the form posted,
+    # and the layout's `<%= yield %>` splices this unescaped — so a
+    # `<script>` or an `onerror` in a rich text body is stripped here,
+    # after the attachment partials are in, exactly where Rails strips
+    # it. Both layouts (the generated per-app one and the default
+    # above) call this rather than `render_attachments`.
+    def render_action_text_content
+      ContentHelper.sanitize_action_text_content(render_attachments)
+    end
 
     # Rails' `render_action_text_attachments`: every
     # `<action-text-attachment>` node gets its attachable's partial as
@@ -1165,33 +1484,30 @@ module ActionText
       @html
     end
 
-    # Empty / whitespace-only markup is blank without scanning. Non-empty
-    # shells (`<div></div>`, `<div><br></div>`) still need to_plain_text —
-    # empty blockquotes become curly quotes and are not blank.
+    # Rails' `Content#blank?`, which is `to_html.blank?`
+    # (actiontext 8.1, `delegate :blank?, … to: :to_html`): the MARKUP is
+    # blank only when it is empty or whitespace. A body that is nothing
+    # but an attachment — campfire's unfurled link preview — is present,
+    # and `has_rich_text` saves it. This used to answer from
+    # `to_plain_text`, which an attachment-only body renders as "", so the
+    # body was never stored (campfire's rooms link-preview tests; they had
+    # passed only while the test env served the POST-time render from the
+    # fragment cache).
     def blank?
       html = @html
       return true if html.nil?
       n = html.length
-      return true if n == 0
       i = 0
       while i < n
         c = html[i, 1].to_s
-        unless c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f"
-          # Entity-decoded plain text (`&nbsp;` → " ") is blank when
-          # whitespace-only. Scan here: ActionText::Content must not
-          # resolve `ActiveSupport` through this class (emitted tests
-          # do not load the ActiveSupport module in this namespace).
-          text = to_plain_text
-          j = 0
-          m = text.length
-          while j < m
-            d = text[j, 1].to_s
-            unless d == " " || d == "\t" || d == "\n" || d == "\r" || d == "\f"
-              return false
-            end
-            j = j + 1
-          end
-          return true
+        unless c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f" ||
+            c == "\u000b" || c == "\u0085" ||
+            c == "\u00a0" || c == "\u1680" || c == "\u2000" || c == "\u2001" ||
+            c == "\u2002" || c == "\u2003" || c == "\u2004" || c == "\u2005" ||
+            c == "\u2006" || c == "\u2007" || c == "\u2008" || c == "\u2009" ||
+            c == "\u200a" || c == "\u2028" || c == "\u2029" || c == "\u202f" ||
+            c == "\u205f" || c == "\u3000"
+          return false
         end
         i = i + 1
       end
@@ -1825,6 +2141,25 @@ module ActionText
     def self.sanitizer
       SafeListSanitizer.new
     end
+
+    # `sanitizer_allowed_tags`' fallback, actiontext 8.1.4
+    # `content_helper.rb`: the sanitizer's own tags plus the attachment
+    # element and the two a gallery renders into.
+    def self.allowed_tags
+      SafeListSanitizer.allowed_tags + [Attachment.tag_name, "figure", "figcaption"] + app_allowed_tags
+    end
+
+    # >>> generated: content-helper-tags
+    def self.app_allowed_tags
+      []
+    end
+    # <<< generated: content-helper-tags
+
+    # `sanitize_action_text_content`: the rendered fragment through the
+    # safe-list sanitizer under Action Text's two allow-lists.
+    def self.sanitize_action_text_content(html)
+      sanitizer.sanitize(html, tags: allowed_tags, attributes: allowed_attributes)
+    end
   end
 
   # What `ContentHelper.sanitizer` answers, and what `.class.new` on it
@@ -1843,6 +2178,12 @@ module ActionText
         "abbr", "alt", "cite", "class", "datetime", "height", "href",
         "lang", "name", "src", "title", "width", "xml:lang"
       ]
+    end
+
+    # rails-html-sanitizer 1.7.1's default tags — the same table
+    # `ActionView::ViewHelpers.sanitize` uses, so it is read from there.
+    def self.allowed_tags
+      ActionView::ViewHelpers.sanitize_default_tags
     end
 
     def sanitize(html, tags:, attributes:)

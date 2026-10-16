@@ -158,10 +158,14 @@ pub(super) fn try_recv_typed_method(
             // through `.get(...).unwrap_or(...)` instead — nullable
             // columns dropped the default and hit the panicking index.
             if map_holds_json_value(recv_ty) {
+                // A `Value` narrowed by `is_a?(Hash)` reads as a `serde_json::Map`, whose `get` borrows its String key.
+                let narrowed_object = matches!(&*r.node, ExprNode::Var { name, .. }
+                    if matches!(super::super::var_decl_ty(name.as_str()), Some(crate::ty::Ty::Untyped)));
+                let key = emit_expr(&args[0]);
+                let key = if narrowed_object { format!("&*{key}") } else { key };
                 return Some(format!(
-                    "{}.get({}).cloned().unwrap_or(serde_json::Value::Null)",
+                    "{}.get({key}).cloned().unwrap_or(serde_json::Value::Null)",
                     emit_expr(r),
-                    emit_expr(&args[0])
                 ));
             }
             if matches!(&*r.node, ExprNode::Const { .. }) {
@@ -293,7 +297,7 @@ pub(super) fn try_recv_typed_method(
                     // RBS `[]=: (String, String?)` — rust emits
                     // `set_index(&str, Option<String>)`, not Value.
                     let opt_str = crate::ty::Ty::Union {
-                        variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil],
+                        variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil].into(),
                     };
                     let wrapped = super::coerce::coerce_arg_for_param_ty(&args[1], &opt_str);
                     return Some(format!(
@@ -587,25 +591,13 @@ pub(super) fn try_recv_typed_method(
             let repl_s = emit_expr(&args[1]);
             return Some(format!("{recv_s}.replace({needle_s}, {repl_s})"));
         }
-        // `arr.length` / `str.length` — Ruby returns Integer.
-        // Rust's `.len()` returns `usize`, but Ruby Integers lower
-        // to `i64` everywhere else (`while i < arr.length`, `if
-        // arr.length == 0`). Emit as `recv.len() as i64` on sized
-        // receivers so downstream i64 arithmetic / comparison
-        // compiles without a per-call-site widen. The `as` cast is
-        // non-primary; decide pass stamps `NEEDS_PARENS` for
-        // chained-recv use, so render wraps only where needed.
-        // Untyped receivers fall through to the generic `.length
-        // -> .len()` bridge (their value-shape may not even
-        // support `.len()`).
+        // Collection lengths count entries; strings use the character-aware
+        // dispatch below. Ruby Integers lower to i64.
         if method == "length"
             && args.is_empty()
             && matches!(
                 r.ty.as_ref(),
-                Some(crate::ty::Ty::Array { .. })
-                    | Some(crate::ty::Ty::Hash { .. })
-                    | Some(crate::ty::Ty::Str)
-                    | Some(crate::ty::Ty::Sym)
+                Some(crate::ty::Ty::Array { .. }) | Some(crate::ty::Ty::Hash { .. })
             )
         {
             return Some(format!("{}.len() as i64", super::super::emit_send_recv(r)));

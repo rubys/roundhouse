@@ -1,0 +1,2 @@
+class ConstantPerson < ApplicationRecord
+end

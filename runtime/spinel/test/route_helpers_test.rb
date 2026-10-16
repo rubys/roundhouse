@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Minitest-shaped: this is a CRuby-only framework test, quarantined
 # out of the spin shape by `project.rs::spin_shape` (it is not a spin
 # test program and gets no snapshot). It therefore loads its own
@@ -5,7 +6,7 @@
 # tests inherit `TestBase` and carry their own driver shim.
 require "minitest/autorun"
 require_relative "test_helper"
-require "action_view"
+require_relative "../runtime/action_view"
 
 class RouteHelpersTest < Minitest::Test
   def test_articles_path

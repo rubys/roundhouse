@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Boot chain — every `require_relative` the app needs, in the order it
 # needs them, and NOTHING that starts anything.
 #
@@ -48,6 +49,11 @@ require_relative "runtime/db"
 # the stdlib equivalents with semantically-identical implementations
 # for the surface framework Ruby actually uses.
 require_relative "runtime/base64"
+# stdlib Shellwords, including String#shellescape. The Spinel port is
+# runtime/shellwords_spinel.rb and must not be named shellwords.rb:
+# runtime/ is on $LOAD_PATH, so the library's own name would answer a
+# bare require and hide the method Nokogiri calls.
+require "shellwords"
 require_relative "runtime/json_impl"
 # JsonBuilder — the JSON encoding primitives the Jbuilder lowerer
 # emits calls to (`Views::Articles.article_json` etc.). Separate from
@@ -58,6 +64,9 @@ require_relative "runtime/json_builder"
 # entry points need it: the CRuby target uses this overlay, and patching
 # only the spinel one leaves `<Resource>Params.from_raw` reaching an
 # undefined constant on every request that carries params.
+# Mime - `Params.wrap` asks the registry whether a request body is JSON
+# (Rails' own synonyms and parameters included).
+require_relative "runtime/mime"
 require_relative "runtime/params"
 # ActionText::Content — see the spinel scaffold's main.rb. Both entry
 # points need it: a `has_rich_text` model's `body` reader constructs
@@ -66,6 +75,9 @@ require_relative "runtime/params"
 require_relative "runtime/action_text"
 require_relative "runtime/importmap"
 require_relative "runtime/rails"
+# `ActiveSupport::Cache::MemoryStore` (a `Rails::Cache`) and
+# `ActiveSupport::Cache.expand_cache_key`.
+require_relative "runtime/active_support_cache"
 # `GlobalID::Locator` — the READ side of the gid `runtime/rails.rb` mints
 # one line up. A channel authorizing a subscribe turns the stream name
 # back into a record through it; the two halves live apart because only
@@ -98,6 +110,9 @@ require_relative "runtime/action_view_number_helper"
 require_relative "runtime/action_view_form_builder_extras"
 require_relative "runtime/active_record"
 require_relative "runtime/active_record_bang"
+# `ActiveRecord::Base.connection_db_config`, `connection_pool` and
+# `transaction_open?` over the Db shim loaded above.
+require_relative "runtime/active_record_db_config"
 require_relative "runtime/active_record_serialization"
 require_relative "runtime/active_record_relation_ext"
 require_relative "config/schema"
@@ -207,6 +222,11 @@ require_relative "runtime/broadcasts"
 # An app with no jobs has no `ActiveJob::Base` subclass to load this
 # file, and `test/test_helper.rb` calls `ActiveJob` at load time.
 require_relative "runtime/active_job"
+# ActiveJob payload codecs: after the module and its DeserializationError,
+# and after global_id_locator, whose URI parser the record reader uses.
+require_relative "runtime/active_job_serialization"
+# The app's payload jobs (generated), and the drain's payload arm.
+require_relative "runtime/job_registry"
 # Per-request state per THREAD -- reopens Current, the view slots, the
 # broadcast log, the job queue and the store memo (see the file).
 require_relative "runtime/thread_state"
@@ -267,18 +287,30 @@ end
 # as it did — the comment was believed and the order was not measured.
 # The spinel scaffold's boot.rb had it right; only this one was wrong.
 require_relative "runtime/active_storage_processor"
-# Pin the process zone to the app's config.time_zone (ingest
+# The app's config.time_zone becomes the runtime's default zone (ingest
 # synthesizes `config_time_zone` from the one config-DSL line the
 # render layer must honor; absent → "UTC", Rails' default). Rails
 # presents every AR temporal value in this zone REGARDLESS of the
-# host's zone — parse_db_time hydrates UTC then `.getlocal` lands
-# here, so strftime/iso8601/pubDate offsets match Rails on any host.
+# host's zone - parse_db_time hydrates UTC then `ActiveSupport.present`
+# lands it here, so strftime/iso8601/pubDate offsets match Rails on any
+# host - and leaves the process zone alone, so `Time.now` stays the
+# host's local time, as in Rails.
 tz_name = if Rails.application.respond_to?(:config_time_zone)
   Rails.application.config_time_zone
 else
   "UTC"
 end
-ENV["TZ"] = ActiveSupport::RAILS_TZ_TO_IANA.fetch(tz_name, tz_name)
+ActiveSupport.set_default_zone(tz_name)
+# Rails' fragment caching through the controller: reopens
+# `ActionView::ViewHelpers.fragment_read/_write`, so after every file that
+# defines them.
+require_relative "runtime/action_controller_fragment_caching"
+# Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
+# feature; strict non-Ruby targets keep the bounded shared implementation.
+require_relative "runtime/action_controller_head"
+# Rails 8.1.4 `send_data(filename:)`: the Content-Disposition escaping
+# works over UTF-8 bytes, so it is a Ruby-family reopen as well.
+require_relative "runtime/action_controller_send_data"
 # The app/models.rb aggregator (generated — see apply_models_aggregator)
 # loads every model/support class. Model files only require their own
 # LOAD-time deps (superclass, class-body consts); method-body references

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Zlib.crc32 — the one entry point the corpus reaches, computed here
 # rather than bound to a C library.
 #

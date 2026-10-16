@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Stub slot for `lower::mocha` over spinel's `securerandom` package —
 # `SecureRandom.stubs(:alphanumeric).returns(v)` becomes
 # `SecureRandom.stub_alphanumeric(v)`, and the app's own

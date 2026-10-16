@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::BroadcastSubscription -- one entry in the Tep::Broadcast
 # subscriber registry. Pairs a topic name with an output: the
 # connection's Tep::WebSocket::Driver for framed delivery, or a bare
@@ -35,13 +36,17 @@ module Tep
     # Modes 1 and 2 route through Tep::WebSocket::Driver.send_frame,
     # so payloads land as proper WS frames the peer will accept.
     # Apps register mode-1 subscriptions via subscribe_ws.
-    attr_reader :mode
+    #
+    # Named `delivery_mode` (not `mode`) so a poly read cannot meet
+    # File#mode: under matz/spinel ea683750+ that collision types the
+    # answer as sp_oint and `== 0` fails C compilation.
+    attr_reader :delivery_mode    # Integer
     attr_reader :ws      # Tep::WebSocket::Driver; the writer for modes 1 and 2
 
-    def initialize(topic, fd, mode, ws)
+    def initialize(topic, fd, delivery_mode, ws)
       @topic = topic
       @fd    = fd
-      @mode  = mode
+      @delivery_mode = delivery_mode
       @ws    = ws
     end
   end

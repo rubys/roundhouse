@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActiveRecord::SignedId — the tokens `record.signed_id(purpose:)` mints
 # and `Model.find_signed(id, purpose:)` reads back.
 #

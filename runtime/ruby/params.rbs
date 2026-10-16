@@ -1,7 +1,11 @@
 module Params
+  def self.wrap: (Hash[String, Roundhouse::ParamValue], ActionDispatch::Request?, String, bool, Array[String], Array[String]) -> Hash[String, Roundhouse::ParamValue]
   def self.sub: (Hash[String, Roundhouse::ParamValue], String) -> Hash[String, Roundhouse::ParamValue]
   def self.str: (Hash[String, Roundhouse::ParamValue], String, String) -> String
   def self.provided: (Hash[String, Roundhouse::ParamValue], String) -> bool
   def self.permitted: (Hash[Symbol, String], Hash[String, Roundhouse::ParamValue], String, Symbol) -> Hash[Symbol, String]
   def self.require_key: (Hash[String, Roundhouse::ParamValue], String) -> Roundhouse::ParamValue
+  def self.expect_present: (Hash[String, Roundhouse::ParamValue], String, Array[String], Array[String], Array[String], Array[String]) -> Hash[String, Roundhouse::ParamValue]
+  def self.scalars_only: (Array[Roundhouse::ParamValue]) -> bool
+  def self.require_present: (Hash[String, Roundhouse::ParamValue], String) -> Hash[String, Roundhouse::ParamValue]
 end

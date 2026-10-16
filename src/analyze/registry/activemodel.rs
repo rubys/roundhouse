@@ -20,7 +20,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     {
         let errors_ty = Ty::Class {
             id: ClassId(Symbol::from("ActiveModel::Errors")),
-            args: vec![],
+            args: vec![].into(),
         };
         let mut validations = ClassInfo::default();
         for (m, ty) in [
@@ -54,15 +54,15 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Supports count/[]/any?/each and flows a Error instance to blocks.
     let error_ty = Ty::Class {
         id: ClassId(Symbol::from("ActiveModel::Error")),
-        args: vec![],
+        args: vec![].into(),
     };
     // The collection self-type, returned by the mutating/chaining methods
     // (`<<`/`add`/`clear`) so a validate-method chain stays typed.
     let errors_ty = Ty::Class {
         id: ClassId(Symbol::from("ActiveModel::Errors")),
-        args: vec![],
+        args: vec![].into(),
     };
-    let str_arr = || Ty::Array { elem: Box::new(Ty::Str) };
+    let str_arr = || Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
     let mut errors_cls = ClassInfo::default();
     for (m, ty) in [
         ("count", Ty::Int),
@@ -71,12 +71,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("none?", Ty::Bool),
         ("empty?", Ty::Bool),
         ("include?", Ty::Bool),
+        ("key?", Ty::Bool),
+        ("has_key?", Ty::Bool),
+        ("attribute_names", Ty::Array { elem: std::sync::Arc::new(Ty::Sym) }),
         ("full_messages", str_arr()),
         // `errors[:title]` returns an Array<String> of messages for that attribute.
         ("[]", str_arr()),
         ("messages_for", str_arr()),
-        // Not `details`: the accumulator keeps no error type, so only the message projection `lower::errors_index` can ground types.
-        ("messages", Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(str_arr()) }),
+        ("details", crate::lower::errors_index::details_ty()),
+        ("messages", Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(str_arr()) }),
+        ("to_hash", Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(str_arr()) }),
         // `.each` yields an Error — registered via block_params_for below.
         ("each", error_ty.clone()),
         // `errors << "message"` is the transpiled-shape idiom for adding
@@ -101,7 +105,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("full_message", Ty::Str),
         ("message", Ty::Str),
         ("attribute", Ty::Sym),
-        ("type", Ty::Sym),
+        ("type", Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() }),
     ] {
         error_cls.instance_methods.insert(Symbol::from(m), ty);
     }
@@ -109,4 +113,6 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ClassId(Symbol::from("ActiveModel::Error")),
         error_cls,
     );
+    // Not a Hash: only its `[:error]` is grounded, which analyze types where it is asked.
+    classes.insert(ClassId(Symbol::from(crate::lower::errors_index::DETAILS_ENTRY)), ClassInfo::default());
 }

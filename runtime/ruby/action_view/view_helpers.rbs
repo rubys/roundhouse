@@ -45,12 +45,27 @@ module ActionView
   def self.h: (untyped value) -> String
     # Percent-encoding for a query-string value; ASCII-only (see the .rb).
     def self.url_encode: (String s) -> String
+    def self.erb_url_encode: (String s) -> String
+    def self.erb_url_byte: (Array[Integer] bytes, Integer i) -> Integer
     # `Hash#to_query`: one string per value, `&`-joined. Scalar values
     # in insertion order here; runtime/spinel/hash_to_query.rb reopens
     # both with the nested bracket grammar and Rails' per-level sort.
+    def self.fragment_read: (String key) -> String?
+    def self.fragment_write: (String key, String value, Integer ttl) -> String
+    def self.collection_caching?: () -> bool
+    def self.collection_fragment_key: (String partial, untyped key) -> String
+    def self.collection_fragment_read: (String name) -> String?
+    def self.collection_fragment_write: (String name, String value) -> String
+    def self.collection_fragment_read_multi: (Array[String] names) -> Array[String?]
+    def self.collection_rendered: (String identifier, Array[String?] hits) -> nil
+    def self.jbuilder_caching?: () -> bool
+    def self.jbuilder_cache_key: (String template, untyped key) -> String
+    def self.jbuilder_fragment_read: (String key) -> String?
+    def self.jbuilder_fragment_write: (String key, String value) -> String
     def self.to_query: (Hash[Symbol, untyped] params) -> String
     def self.to_query_pairs: (Hash[Symbol, untyped] params, String namespace) -> String
     def self.to_query_value: (String name, untyped value) -> String
+    def self.url_for_path: (String path) -> String
     def self.url_encode_component: (String s) -> String
     def self.url_encode_mailto_address: (String s) -> String
     def self.needs_url_escape?: (String s) -> bool
@@ -60,7 +75,66 @@ module ActionView
     # nil/non-String coercion explicitly. Real-blog's only caller
     # passes `article.body` (typed String per the model RBS) so the
     # contraction lands without source churn.
-    def self.truncate: (String s, ?length: Integer, ?omission: String) -> String
+    def self.truncate: (String s, ?length: Integer, ?omission: String, ?separator: String?) -> String
+    def self.rindex_at_or_before: (String s, String sub, Integer pos) -> Integer
+    def self.word_wrap: (
+      String text,
+      ?line_width: Integer,
+      ?break_sequence: String
+    ) -> String
+    def self.word_wrap_finish: (String out, String break_sequence) -> String
+    def self.word_wrap_scan: (
+      String text,
+      Integer line_width,
+      String break_sequence,
+      String out,
+      Integer i,
+      Integer n
+    ) -> String
+    def self.word_wrap_find_break: (
+      String text,
+      Integer line_width,
+      String break_sequence,
+      String out,
+      Integer i,
+      Integer n,
+      Integer j,
+      Integer max_end,
+      Integer best_j,
+      Integer best_next
+    ) -> String
+    def self.word_wrap_skip_nl: (String text, Integer r, Integer n) -> Integer
+    def self.word_wrap_skip_ws: (String text, Integer k, Integer n) -> Integer
+    def self.word_wrap_ws_next: (String text, Integer k, Integer n) -> Integer
+    def self.word_wrap_after_ws: (String text, Integer k2, Integer n) -> Integer
+    def self.word_wrap_word_end: (String text, Integer j, Integer n) -> Integer
+    def self.word_wrap_hard: (
+      String text,
+      Integer line_width,
+      String break_sequence,
+      String out,
+      Integer i,
+      Integer n
+    ) -> String
+    def self.word_wrap_hard_end: (String text, Integer i, Integer n) -> Integer
+    def self.word_wrap_hard_at: (
+      String text,
+      Integer line_width,
+      String break_sequence,
+      String out,
+      Integer i,
+      Integer n,
+      Integer j
+    ) -> String
+    def self.word_wrap_hard_cont: (
+      String text,
+      Integer line_width,
+      String break_sequence,
+      String out2,
+      Integer j,
+      Integer n,
+      String w
+    ) -> String
   
     # ── DOM helpers ─────────────────────────────────────────────────
     # Monomorphic record-shape: dom_id takes an ActiveRecord::Base
@@ -76,6 +150,7 @@ module ActionView
     # previous `record_dom_prefix(record)` helper that called
     # `record.class.name.downcase` (runtime introspection).
     def self.dom_id: (ActiveRecord::Base record, ?Symbol? suffix) -> String
+    def self.dom_class: (ActiveRecord::Base record, ?(Symbol | String)? prefix) -> String
   
     # ── HTML element helpers ────────────────────────────────────────
     # `text` is the link/button label — typed String (was untyped).
@@ -103,6 +178,7 @@ module ActionView
   
     def self.csrf_meta_tags: () -> String
     def self.form_authenticity_token: () -> String
+    def self.token_fields_omitted?: () -> bool
     def self.csp_meta_tag: () -> String
   
     # `name` is the asset stem (e.g., "application" → /assets/application.css).
@@ -178,6 +254,7 @@ module ActionView
     # Crystal's already-Symbol-keyed callers finally match the param.
     def self.render_attrs: (Hash[Symbol, untyped] attrs) -> String
     def self.attr_value_text: (String name, untyped v) -> String
+    def self.haml_class: (String static_classes, untyped value) -> String
 
     # Rails' BOOLEAN_ATTRIBUTES membership — presence-is-the-value
     # attributes render `name="name"` when truthy and vanish when

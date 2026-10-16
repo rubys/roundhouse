@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "../test_helper"
 
 # Direct unit tests for `runtime/ruby/active_record/registry.rb`.

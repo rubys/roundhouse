@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # View helpers — module functions invoked from Views::* render methods.
 #
 # Surface tracks what real-blog actually uses (cf. fixtures/real-blog/
@@ -211,6 +212,38 @@ module ActionView
 
     URL_ESCAPE_PATTERN = /[\x00\r\n !"\#$%&'()*+,\/:;<=>?@\[\\\]^`{|}]/.freeze
 
+    # ERB::Util.url_encode, a view's `u(x)`: every byte but the unreserved
+    # ones (A-Z a-z 0-9 _ . ~ -) as `%XX`, uppercase, so a space is `%20`
+    # and a multibyte character is its UTF-8 bytes. Not `url_encode`
+    # below, which is CGI.escape (`+` for a space) for query strings.
+    # Concat, not `<<`, as in render_attrs: `out << s` lowers as `.add` /
+    # write-into-`&str` on Kotlin/C#/Rust/Python/Elixir.
+    def self.erb_url_encode(s)
+      # Not `b.chr` / `format("%%%02X", b)`, nor a constant table, `bytes.each` or `str[i]`: no strict target answers the first two, Rust reads a constant through a lock, a block's byte as `&mut` and indexes no `str` by an Integer.
+      hex = "0123456789ABCDEF"
+      printable = " !\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+      bytes = s.bytes
+      out = ""
+      i = 0
+      while i < bytes.length
+        b = erb_url_byte(bytes, i)
+        if (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) ||
+           b == 45 || b == 46 || b == 95 || b == 126
+          out = out + printable[b - 32, 1].to_s
+        else
+          out = out + "%" + hex[b / 16, 1].to_s + hex[b % 16, 1].to_s
+        end
+        i += 1
+      end
+      out
+    end
+
+    # Not `bytes[i]` inline, nor `bytes[i] || 0`: the inline read types as Integer | nil, which Elixir refuses arithmetic on, and Rust's Vec<i64> has no `unwrap_or`.
+    def self.erb_url_byte(bytes, i)
+      raise ArgumentError, "erb_url_byte: index outside the bytes" if i < 0 || i >= bytes.length
+      bytes[i]
+    end
+
     # Same include? probe as html_escape (no portable match? emit).
     def self.url_encode(s)
       return s unless needs_url_escape?(s)
@@ -234,6 +267,82 @@ module ActionView
     # for the two lanes that can use it. A poly walk over untyped values
     # and an `Array#sort` are not shapes every strict target's emit
     # answers, and this seam keeps them off those trees.
+    # A view's `<% cache key do %>` reads and writes its fragment through
+    # these two (`lower::view_to_library::walker`, `emit_cached_fragment`):
+    # `nil` from the read is a miss, and the write answers what it stored.
+    # The non-Ruby targets have no shared cache runtime, so this fallback
+    # always misses and lets the rendered fragment recompute. The ruby
+    # family and spinel reopen both (runtime/spinel/action_controller_fragment_caching.rb)
+    # to go through the controller as Rails' CacheHelper does —
+    # `perform_caching`, `combined_fragment_cache_key`, `cache_store`.
+    def self.fragment_read(_key)
+      nil
+    end
+
+    def self.fragment_write(_key, value, _ttl)
+      value
+    end
+
+    # A `render collection:, cached: ->(item) { key }` reads and writes
+    # each element's fragment through these four
+    # (`lower::view_to_library::partial`, `wrap_keyed_cached_collection`).
+    # Here caching is off, so the lowering takes its uncached branch;
+    # the ruby family and spinel reopen them with the controller's
+    # `perform_caching`, `combined_fragment_cache_key` and `cache_store`.
+    def self.collection_caching?
+      false
+    end
+
+    def self.collection_fragment_key(partial, _key)
+      partial
+    end
+
+    def self.collection_fragment_read(_name)
+      nil
+    end
+
+    def self.collection_fragment_write(_name, value)
+      value
+    end
+
+    # Every element's fragment in one lookup, as Rails' collection
+    # renderer asks its `collection_cache.read_multi`: the hits in the
+    # order of `names`, `nil` for a miss.
+    def self.collection_fragment_read_multi(names)
+      names.map { |name| ActionView::ViewHelpers.collection_fragment_read(name) }
+    end
+
+    # Told once a cached collection has rendered: the partial's template
+    # (`app/views/messages/_message.html.erb`) and what the store
+    # answered for each element. Rails reports the same facts as its
+    # `render_collection.action_view` event; nothing listens here, and
+    # the ruby family's test support reports them.
+    def self.collection_rendered(_identifier, _hits)
+      nil
+    end
+
+    # A jbuilder template wrapped in `json.cache! key do … end` reads and
+    # writes its JSON through these (`lower::jbuilder_to_library`,
+    # `walk_cached_template`). Caching is off here, so the lowering
+    # renders the block; the ruby family and spinel reopen them with the
+    # controller and Jbuilder's own `_read_fragment_cache` /
+    # `_write_fragment_cache`.
+    def self.jbuilder_caching?
+      false
+    end
+
+    def self.jbuilder_cache_key(template, _key)
+      template
+    end
+
+    def self.jbuilder_fragment_read(_key)
+      nil
+    end
+
+    def self.jbuilder_fragment_write(_key, value)
+      value
+    end
+
     def self.to_query(params)
       to_query_pairs(params, "")
     end
@@ -288,6 +397,20 @@ module ActionView
     # `"+".Replace(x, …)`, which compiles nowhere).
     MAILTO_ESCAPE_PATTERN = /[ !"\#$%&'()*+,\/:;<=>?\[\\\]^`{|}]/.freeze
 
+    # The URL a view's `<x>_url` route helper answers, given its path.
+    # Rails answers it absolute, on the request's scheme and host
+    # (`http://www.example.com/articles/1.json`). This universal body
+    # answers the PATH: a strict target's view has no request in scope
+    # (neither `ActionController::Current` nor `Rails.application`
+    # reaches those runtimes), and a path is what a client resolves
+    # against the page it came from. The ruby family reopens it in
+    # `view_helpers_ext.rb` over the request, so the lanes that know the
+    # host render what Rails renders. jbuilder's `json.url
+    # article_url(…)` is the caller (`jbuilder_to_library`).
+    def self.url_for_path(path)
+      path
+    end
+
     # Monomorphic, like `url_encode`.
     def self.url_encode_component(s)
       return s unless needs_url_escape?(s)
@@ -323,13 +446,204 @@ module ActionView
         s.include?("}")
     end
 
-    def self.truncate(s, length: 30, omission: "...")
+    # `separator:` cuts at the last occurrence of `separator` at or
+    # before the omission-adjusted cutoff, so a truncated string doesn't
+    # split mid-word — ActiveSupport's `String#truncate`
+    # (active_support/core_ext/string/filters.rb) algorithm, read off
+    # the installed gem and confirmed against Rails 8.1.4's own output
+    # (rubys/roundhouse#812). `omission:` alone (no separator) is
+    # unchanged from before.
+    def self.truncate(s, length: 30, omission: "...", separator: nil)
       return s if s.length <= length
       cutoff = length - omission.length
-      cutoff = 0 if cutoff < 0
+      return omission if cutoff <= 0
+      unless separator.nil?
+        found = rindex_at_or_before(s, separator, cutoff)
+        cutoff = found if found >= 0
+      end
       "#{s[0, cutoff]}#{omission}"
     end
-  
+
+    # Not `s.rindex(sub, pos)`, which no strict target's runtime answers, and -1 rather than nil, which Go and C# do not narrow from a local.
+    def self.rindex_at_or_before(s, sub, pos)
+      i = s.length - sub.length
+      i = pos if pos < i
+      while i >= 0
+        return i if s[i, sub.length] == sub
+        i -= 1
+      end
+      -1
+    end
+
+    # Rails 8.1.4's ActionView::TextHelper#word_wrap for positive widths.
+    # Wraps at whitespace/newline boundaries and leaves an unbroken word
+    # longer than `line_width` intact. Rails' zero/negative-width behavior
+    # is inconsistent (RegexpError or nil), so reject those values rather
+    # than weakening this helper's String return contract.
+    #
+    # Portable subset for strict-target emit: no Regexp, no `break`/`next`
+    # (TS), no nested `while` (Elixir while→recursion is single-loop only),
+    # character access via `s[i, 1]` / `s[i, n]` (Rust), concat with `+`
+    # (owned String). Outer scan and break search are explicit recursion.
+    def self.word_wrap(text, line_width: 80, break_sequence: "\n")
+      raise ArgumentError, "line_width must be positive" if line_width <= 0
+      return "" if text.empty?
+      word_wrap_finish(
+        word_wrap_scan(text, line_width, break_sequence, "", 0, text.length),
+        break_sequence
+      )
+    end
+
+    def self.word_wrap_finish(out, break_sequence)
+      bl = break_sequence.length
+      if bl > 0 && out.length >= bl && out[out.length - bl, bl] == break_sequence
+        out[0, out.length - bl]
+      else
+        out
+      end
+    end
+
+    def self.word_wrap_scan(text, line_width, break_sequence, out, i, n)
+      return out if i >= n
+      if text[i, 1] == "\n"
+        word_wrap_scan(text, line_width, break_sequence, out + break_sequence, i + 1, n)
+      else
+        max_end = i + line_width
+        max_end = n if max_end > n
+        word_wrap_find_break(text, line_width, break_sequence, out, i, n, i + 1, max_end, -1, -1)
+      end
+    end
+
+    # Break search: Integer indices stay method params (Elixir `-` / TS
+    # scoping). A newline ends the window immediately — Rails'
+    # `.{1,N}` never crosses `\n`, so a later space must not replace it.
+    def self.word_wrap_find_break(text, line_width, break_sequence, out, i, n, j, max_end, best_j, best_next)
+      if j > max_end
+        if best_j < 0
+          word_wrap_hard(text, line_width, break_sequence, out, i, n)
+        else
+          word_wrap_scan(
+            text,
+            line_width,
+            break_sequence,
+            out + text[i, best_j - i] + break_sequence,
+            best_next,
+            n
+          )
+        end
+      else
+        if j >= n
+          word_wrap_find_break(text, line_width, break_sequence, out, i, n, j + 1, max_end, j, n)
+        else
+          if text[j, 1] == "\n"
+            # No temps: TS emit only hoists some assigned locals. Advance
+            # one newline; scan re-enters for further `\n`s.
+            word_wrap_scan(
+              text,
+              line_width,
+              break_sequence,
+              out + text[i, j - i] + break_sequence,
+              j + 1,
+              n
+            )
+          else
+            if text[j, 1] == " " || text[j, 1] == "\t" || text[j, 1] == "\r" || text[j, 1] == "\f" || text[j, 1] == "\v"
+              word_wrap_find_break(
+                text,
+                line_width,
+                break_sequence,
+                out,
+                i,
+                n,
+                j + 1,
+                max_end,
+                j,
+                word_wrap_ws_next(text, j, n)
+              )
+            else
+              word_wrap_find_break(text, line_width, break_sequence, out, i, n, j + 1, max_end, best_j, best_next)
+            end
+          end
+        end
+      end
+    end
+
+    def self.word_wrap_skip_nl(text, r, n)
+      return r if r >= n
+      return r if text[r, 1] != "\n"
+      word_wrap_skip_nl(text, r + 1, n)
+    end
+
+    def self.word_wrap_skip_ws(text, k, n)
+      return k if k >= n
+      w = text[k, 1]
+      return k unless w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+      word_wrap_skip_ws(text, k + 1, n)
+    end
+
+    # Index after whitespace at `k`, consuming one trailing newline.
+    def self.word_wrap_ws_next(text, k, n)
+      word_wrap_after_ws(text, word_wrap_skip_ws(text, k, n), n)
+    end
+
+    def self.word_wrap_after_ws(text, k2, n)
+      return k2 + 1 if k2 < n && text[k2, 1] == "\n"
+      k2
+    end
+
+    def self.word_wrap_word_end(text, j, n)
+      return j if j >= n
+      w = text[j, 1]
+      return j if w == "\n" || w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+      word_wrap_word_end(text, j + 1, n)
+    end
+
+    def self.word_wrap_hard(text, line_width, break_sequence, out, i, n)
+      word_wrap_hard_at(
+        text,
+        line_width,
+        break_sequence,
+        out,
+        i,
+        n,
+        word_wrap_hard_end(text, i, n)
+      )
+    end
+
+    def self.word_wrap_hard_end(text, i, n)
+      j = word_wrap_word_end(text, i, n)
+      return i + 1 if j == i
+      j
+    end
+
+    def self.word_wrap_hard_at(text, line_width, break_sequence, out, i, n, j)
+      out2 = out + text[i, j - i]
+      if j < n
+        word_wrap_hard_cont(text, line_width, break_sequence, out2, j, n, text[j, 1])
+      else
+        word_wrap_scan(text, line_width, break_sequence, out2, j, n)
+      end
+    end
+
+    def self.word_wrap_hard_cont(text, line_width, break_sequence, out2, j, n, w)
+      if w == " " || w == "\t" || w == "\r" || w == "\f" || w == "\v"
+        word_wrap_scan(
+          text,
+          line_width,
+          break_sequence,
+          out2 + break_sequence,
+          word_wrap_ws_next(text, j, n),
+          n
+        )
+      else
+        if w == "\n"
+          word_wrap_scan(text, line_width, break_sequence, out2 + break_sequence, j + 1, n)
+        else
+          word_wrap_scan(text, line_width, break_sequence, out2, j, n)
+        end
+      end
+    end
+
     # ── DOM helpers ──────────────────────────────────────────────────
 
     # Monomorphic: param typed `ActiveRecord::Base`. Was previously a
@@ -394,6 +708,17 @@ module ActionView
       end
     end
   
+    # Rails' `dom_class(record, prefix = nil)`: the model's singular
+    # (`dom_prefix()`), with the prefix joined ahead of it by `_`. The same
+    # `dom_prefix()` that `dom_id` composes from, so the two cannot drift.
+    def self.dom_class(record, prefix = nil)
+      if prefix.nil?
+        record.dom_prefix()
+      else
+        "#{prefix}_#{record.dom_prefix()}"
+      end
+    end
+
     # ── HTML element helpers ─────────────────────────────────────────
 
     # Frozen empty default so no-opts helpers do not allocate a Hash.
@@ -571,6 +896,7 @@ module ActionView
     # `authenticity_token` value is the form-field name; the token value
     # is empty here because spinel-blog doesn't sign sessions.
     def self.csrf_meta_tags
+      return "" if ActionController.forgery_switched_off
       %(<meta name="csrf-param" content="authenticity_token" />\n<meta name="csrf-token" content="#{html_escape(form_authenticity_token)}" />)
     end
 
@@ -849,7 +1175,15 @@ module ActionView
       # on that lane). The explicit comparison is false for every
       # target's unset shape and for `false` alike.
       return "" if @broadcast_rendering == true
+      return "" if ActionController.forgery_switched_off
+      return "" if token_fields_omitted?
       %(<input type="hidden" name="authenticity_token" value="#{html_escape(form_authenticity_token)}">)
+    end
+
+    # Strict non-Ruby targets do not emit Rails::Application. The Ruby
+    # family and Spinel override this with the app-specific test setting.
+    def self.token_fields_omitted?
+      false
     end
 
     # Bracket a broadcast partial render (the lowered
@@ -1096,6 +1430,34 @@ module ActionView
     # same split `to_query_value` makes for `Hash#to_query`.
     def self.attr_value_text(name, v)
       v.to_s
+    end
+
+    # The HAML compiler's shortcut-class merge (`src/haml.rs`'s
+    # `element`): `.g{ class: k }` folds the `.g` shortcut and the hash
+    # `class:` value together, matching Haml 7.5.1's own runtime
+    # semantics rather than dropping one side. `static_classes` is the
+    # folded `.class` shortcuts, already space-joined, in source order;
+    # `value` is the hash `class:`'s own (scalar) value — an Array
+    # LITERAL `class:` value is chained one element at a time by the
+    # compiler instead (each element is its own `haml_class` call), so
+    # this method only ever sees a scalar.
+    #
+    # Semantics (MEASURED against Haml 7.5.1): nil, false and ""
+    # leave `static_classes` alone — Haml never renders a bare
+    # `class=""` when a shortcut class is present. Otherwise the value
+    # is stringified and split on whitespace, and each token is
+    # appended unless already present (first occurrence wins — a
+    # shortcut class a dynamic value repeats does not duplicate).
+    # Escaping stays in `render_attrs`/`attr_value_text`, which already
+    # escapes the merged String exactly once.
+    def self.haml_class(static_classes, value)
+      text = value.to_s
+      return static_classes if value.nil? || text == "false" || text == ""
+      tokens = static_classes.split(" ")
+      text.split(" ").each do |tok|
+        tokens << tok unless tokens.include?(tok)
+      end
+      tokens.join(" ")
     end
 
     # Rails ActionView's `BOOLEAN_ATTRIBUTES`, verbatim — the attributes

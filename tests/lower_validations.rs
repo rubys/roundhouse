@@ -50,11 +50,17 @@ fn length_rule_fans_out_into_min_and_max_checks() {
         class_attr_defaults: Default::default(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        i18n: Default::default(),
         span: roundhouse::span::Span::synthetic(),
         body: vec![ModelBodyItem::Validation {
             validation: Validation {
                 attribute: Symbol::from("body"),
-                rules: vec![ValidationRule::Length { min: Some(5), max: Some(100), message: None }],
+                rules: vec![ValidationRule::Length {
+                    min: Some(5),
+                    max: Some(100),
+                    message: None,
+                    allow_nil: None,
+                }],
             },
             leading_comments: vec![],
             leading_blank_line: false,
@@ -85,13 +91,14 @@ fn multiple_rules_on_one_attribute_stay_grouped() {
         class_attr_defaults: Default::default(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        i18n: Default::default(),
         span: roundhouse::span::Span::synthetic(),
         body: vec![ModelBodyItem::Validation {
             validation: Validation {
                 attribute: Symbol::from("title"),
                 rules: vec![
                     ValidationRule::Presence,
-                    ValidationRule::Length { min: Some(3), max: None, message: None },
+                    ValidationRule::Length { min: Some(3), max: None, message: None, allow_nil: None },
                 ],
             },
             leading_comments: vec![],

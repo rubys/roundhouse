@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby-only ActiveRecord::Relation extensions: enumerable terminals
 # and record-valued IN lists.
 #

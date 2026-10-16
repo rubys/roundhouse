@@ -217,19 +217,34 @@ fn impersonates_registers_true_user_for_views() {
         app.view_visible_controller_methods.contains(&true_user),
         "true_user must be view-visible after impersonates lower"
     );
+    // `true_user` reads the session (pretender's impersonation key), so
+    // it is not pure over its arguments: no class-side clone, which would
+    // read `session` off the class. The view reaches it the way Rails'
+    // helper proxy does, on the request's controller.
     assert!(
-        app.helper_method_index.contains_key(&true_user),
-        "ivar-free true_user must enter helper_method_index: {:?}",
+        !app.helper_method_index.contains_key(&true_user),
+        "a session-reading true_user must not get a class-side clone: {:?}",
         app.helper_method_index.keys().map(|s| s.as_str()).collect::<Vec<_>>()
     );
     roundhouse::session::analyze_and_lower(&mut app);
-    let src = ruby::emit_spinel(&app)
+    let files = ruby::emit_spinel(&app);
+    let src = files
         .iter()
         .find(|f| f.path.ends_with("app/controllers/application_controller.rb"))
         .expect("application_controller")
         .content
         .clone();
     assert!(src.contains("def true_user"), "true_user:\n{src}");
+    let view = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().contains("views/users/show"))
+        .expect("users/show view")
+        .content
+        .clone();
+    assert!(
+        view.contains("ActionController::Current.controller.true_user"),
+        "the view calls true_user on the request's controller:\n{view}"
+    );
 }
 
 #[test]

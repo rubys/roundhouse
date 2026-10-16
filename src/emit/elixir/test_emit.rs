@@ -51,7 +51,7 @@ pub(super) fn emit_test_files(app: &App) -> Vec<EmittedFile> {
         let lowered = crate::lower::lower_fixtures(app);
         out.push(emit_fixtures_helper(&lowered, app));
         for f in &lowered.fixtures {
-            out.push(emit_fixture(f));
+            out.push(emit_fixture(f, &crate::lower::fixture_to_library::temporal_columns(app, &f.class)));
         }
     }
 
@@ -85,7 +85,7 @@ fn known_models(app: &App) -> Vec<Symbol> {
 /// `*` and the model's dual-return `save` (`{record, _} = …`); the
 /// saved record carries its assigned id, so `register` uses `record.id`
 /// rather than `Roundhouse.Db.last_insert_rowid()`.
-fn emit_fixture(lowered: &crate::lower::LoweredFixture) -> EmittedFile {
+fn emit_fixture(lowered: &crate::lower::LoweredFixture, temporal: &std::collections::HashMap<Symbol, bool>) -> EmittedFile {
     let fixture_name = lowered.name.as_str();
     let class_name = lowered.class.0.as_str();
     let ns = camelize(fixture_name);
@@ -99,8 +99,15 @@ fn emit_fixture(lowered: &crate::lower::LoweredFixture) -> EmittedFile {
         let label = record.label.as_str();
         let mut field_lines: Vec<String> = Vec::new();
         for field in &record.fields {
-            let col = field.column.as_str();
+            let mut col = field.column.to_string();
             let val = match &field.value {
+                // Not `<col>:`: the struct keeps a date or datetime as its stored text, under `<col>_raw`.
+                crate::lower::LoweredFixtureValue::Literal { raw, .. }
+                    if crate::lower::fixture_to_library::is_stored_temporal(temporal, &field.column, raw) =>
+                {
+                    col.push_str("_raw");
+                    format!("{raw:?}")
+                }
                 crate::lower::LoweredFixtureValue::Literal { ty, raw } => ex_literal_for(raw, ty),
                 crate::lower::LoweredFixtureValue::FkLookup {
                     target_fixture,
@@ -262,7 +269,7 @@ fn emit_controller_test(tm: &TestModule, app: &App) -> EmittedFile {
     for test in &tm.tests {
         writeln!(s).unwrap();
         writeln!(s, "  test {:?} do", test.name).unwrap();
-        let body = emit_controller_test_body(test, app, ctx);
+        let body = emit_controller_test_body(test, tm.setup.as_ref(), app, ctx);
         if body.trim().is_empty() {
             writeln!(s, "    :ok").unwrap();
         } else {
@@ -285,12 +292,16 @@ fn emit_controller_test(tm: &TestModule, app: &App) -> EmittedFile {
     }
 }
 
-fn emit_controller_test_body(test: &Test, app: &App, ctx: ExTestCtx) -> String {
+fn emit_controller_test_body(test: &Test, setup: Option<&Expr>, app: &App, ctx: ExTestCtx) -> String {
     let mut out = String::new();
     // Prime ivars read without assignment: `@article` → `article =
     // Fixtures.Articles.one()`.
     let walked = crate::lower::walk_controller_ivars(&test.body);
     for ivar in walked.ivars_read_without_assign() {
+        if let Some((fixture, label)) = setup.and_then(|s| setup_fixture(s, &ivar, ctx)) {
+            out.push_str(&format!("{} = Fixtures.{}.{}()\n", ivar.as_str(), camelize(fixture.as_str()), label));
+            continue;
+        }
         let plural = pluralize_snake(ivar.as_str());
         if ctx.fixture_names.iter().any(|s| s.as_str() == plural) {
             let ns = camelize(&plural);
@@ -303,6 +314,18 @@ fn emit_controller_test_body(test: &Test, app: &App, ctx: ExTestCtx) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The `@<ivar> = <fixture>(:<label>)` a setup assigns, as (fixture, label).
+fn setup_fixture(setup: &Expr, ivar: &Symbol, ctx: ExTestCtx) -> Option<(Symbol, String)> {
+    let value = crate::lower::test_body_stmts(setup).into_iter().rev().find_map(|stmt| match &*stmt.node {
+        ExprNode::Assign { target: LValue::Ivar { name }, value } if name == ivar => Some(value),
+        _ => None,
+    })?;
+    let ExprNode::Send { recv: None, method, args, .. } = &*value.node else { return None };
+    let [arg] = args.as_slice() else { return None };
+    let ExprNode::Lit { value: Literal::Sym { value: label } } = &*arg.node else { return None };
+    ctx.fixture_names.contains(method).then(|| (method.clone(), label.to_string()))
 }
 
 fn emit_ctrl_test_stmt(stmt: &Expr, app: &App, ctx: ExTestCtx) -> String {
@@ -520,6 +543,10 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App, ctx: ExTestCtx) -> String {
             if method.as_str().ends_with("_url") || method.as_str().ends_with("_path") {
                 return emit_url_expr(expr, app, ctx);
             }
+            // Not a call: each request binds what it answers to `resp`.
+            if method.as_str() == "response" && args.is_empty() {
+                return "resp".to_string();
+            }
             let args_s: Vec<String> =
                 args.iter().map(|a| emit_ctrl_test_expr(a, app, ctx)).collect();
             if args_s.is_empty() {
@@ -545,6 +572,21 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App, ctx: ExTestCtx) -> String {
                 .collect();
             format!("%{{{}}}", parts.join(", "))
         }
+        ExprNode::StringInterp { parts } => crate::emit::shared::interp::render(
+            parts,
+            &crate::emit::shared::interp::InterpDelims {
+                open_quote: "\"",
+                close_quote: "\"",
+                expr_open: "#{",
+                expr_close: "}",
+            },
+            |e| emit_ctrl_test_expr(e, app, ctx),
+            |value| {
+                let mut out = String::new();
+                super::expr::push_escaped(&mut out, value);
+                out
+            },
+        ),
         _ => "nil # TODO expr".to_string(),
     }
 }

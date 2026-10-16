@@ -51,7 +51,7 @@ end
 #[test]
 fn in_lowers_to_include_with_the_operands_swapped() {
     let src = emitted(&[]);
-    assert!(src.contains("ALLOWED.include?(kind)"), "{src}");
+    assert!(src.contains("ALLOWED.include?(self.kind)"), "{src}");
     assert!(!src.contains(".in?("), "no in? may survive:\n{src}");
 }
 

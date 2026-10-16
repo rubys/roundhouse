@@ -119,13 +119,7 @@ fn param_names(params: &[crate::dialect::Param]) -> Vec<Symbol> {
 }
 
 fn action_param_names(action: &crate::dialect::Action) -> Vec<Symbol> {
-    let mut names: Vec<Symbol> = action.params.fields.keys().cloned().collect();
-    names.extend(action.opt_params.iter().map(|(n, _)| n.clone()));
-    names.extend(action.kw_params.iter().map(|(n, _)| n.clone()));
-    if let Some(rest) = &action.kwrest_param {
-        names.push(rest.clone());
-    }
-    names
+    param_names(&action.formal_params())
 }
 
 fn rewrite_method(body: &mut Expr, params: Vec<Symbol>) {
@@ -305,12 +299,13 @@ fn rewrite(
         ExprNode::Lambda {
             params: lp,
             rest_param,
+            extra_params,
             block_param,
             body,
             ..
         } => {
             let mut inner = rebound.clone();
-            for p in lp.iter() {
+            for p in lp.iter().chain(extra_params.iter().map(|p| &p.name)) {
                 inner.remove(p);
             }
             if let Some(r) = rest_param.as_ref() {
@@ -318,6 +313,13 @@ fn rewrite(
             }
             if let Some(b) = block_param.as_ref() {
                 inner.remove(b);
+            }
+            // Defaults read the enclosing method's (rebound) parameters
+            // too, unless one of the lambda's own parameters shadows them.
+            for p in extra_params.iter_mut() {
+                if let Some(d) = p.default.as_mut() {
+                    rewrite(d, params, &mut inner.clone(), used);
+                }
             }
             rewrite(body, params, &mut inner, used);
         }
@@ -552,10 +554,12 @@ fn collect_names(expr: &Expr, out: &mut HashSet<Symbol>) {
         ExprNode::Lambda {
             params,
             rest_param,
+            extra_params,
             block_param,
             ..
         } => {
             out.extend(params.iter().cloned());
+            out.extend(extra_params.iter().map(|p| p.name.clone()));
             if let Some(r) = rest_param {
                 out.insert(r.clone());
             }

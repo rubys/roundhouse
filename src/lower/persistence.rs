@@ -30,9 +30,11 @@ pub struct LoweredPersistence {
     /// is included; emitters use this list when building the SELECT
     /// projection so the struct hydrates in field order.
     pub columns: Vec<Symbol>,
-    /// Columns excluding `id` — the ones INSERT writes and UPDATE sets.
+    /// Writable columns excluding `id` — generated columns remain in
+    /// `columns` for hydration but are omitted from INSERT and UPDATE.
     pub non_id_columns: Vec<Symbol>,
     pub insert_sql: String,
+    /// Empty when the model has no writable non-key columns.
     pub update_sql: String,
     pub delete_sql: String,
     pub count_sql: String,
@@ -74,9 +76,22 @@ pub struct DependentChild {
 
 pub fn lower_persistence(model: &Model, app: &App) -> LoweredPersistence {
     let columns: Vec<Symbol> = model.attributes.fields.keys().cloned().collect();
+    let generated_columns: std::collections::HashSet<Symbol> = app
+        .schema
+        .tables
+        .get(&model.table.0)
+        .map(|table| {
+            table
+                .columns
+                .iter()
+                .filter(|column| column.generated.is_some())
+                .map(|column| column.name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     let non_id_columns: Vec<Symbol> = columns
         .iter()
-        .filter(|c| c.as_str() != "id")
+        .filter(|c| c.as_str() != "id" && !generated_columns.contains(*c))
         .cloned()
         .collect();
 
@@ -92,9 +107,15 @@ pub fn lower_persistence(model: &Model, app: &App) -> LoweredPersistence {
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let insert_sql = format!(
-        "INSERT INTO {table_name} ({insert_cols_list}) VALUES ({insert_placeholders})"
-    );
+    let insert_sql = if non_id_columns.is_empty() {
+        // SQLite's explicit empty-write form lets the database supply its
+        // primary key and any generated/default values itself.
+        format!("INSERT INTO {table_name} DEFAULT VALUES")
+    } else {
+        format!(
+            "INSERT INTO {table_name} ({insert_cols_list}) VALUES ({insert_placeholders})"
+        )
+    };
 
     let update_assigns = non_id_columns
         .iter()
@@ -103,9 +124,15 @@ pub fn lower_persistence(model: &Model, app: &App) -> LoweredPersistence {
         .collect::<Vec<_>>()
         .join(", ");
     let update_id_placeholder = non_id_columns.len() + 1;
-    let update_sql = format!(
-        "UPDATE {table_name} SET {update_assigns} WHERE id = ?{update_id_placeholder}"
-    );
+    // Empty means no UPDATE statement is needed. In particular, a model
+    // containing only its key and generated columns has no writable fields.
+    let update_sql = if non_id_columns.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "UPDATE {table_name} SET {update_assigns} WHERE id = ?{update_id_placeholder}"
+        )
+    };
 
     let delete_sql = format!("DELETE FROM {table_name} WHERE id = ?1");
     let count_sql = format!("SELECT COUNT(*) FROM {table_name}");

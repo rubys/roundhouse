@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Rails record equality, for the compiled family: same class + same
 # persisted id (AR core's `==`). Two hydrations of the same row are
 # equal; a new record equals only itself.

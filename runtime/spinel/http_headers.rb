@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # One copy of Puma's illegal-header predicates for every Spinel HTTP/1.1
 # writer (Tep servers and CGI). A key or value that cannot be one line is
 # dropped, not rewritten.

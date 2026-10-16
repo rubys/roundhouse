@@ -1,0 +1,15 @@
+# Typing for runtime/spinel/pg_errors.rb.
+module PgErrors
+  UNIQUE_VIOLATION: String
+  STRING_DATA_RIGHT_TRUNCATION: String
+  NUMERIC_VALUE_OUT_OF_RANGE: String
+  NOT_NULL_VIOLATION: String
+  FOREIGN_KEY_VIOLATION: String
+  CHECK_VIOLATION: String
+  EXCLUSION_VIOLATION: String
+  SERIALIZATION_FAILURE: String
+  DEADLOCK_DETECTED: String
+  LOCK_NOT_AVAILABLE: String
+  QUERY_CANCELED: String
+  def self.raise_mapped: (String sqlstate, String message) -> nil
+end

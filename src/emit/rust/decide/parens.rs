@@ -26,7 +26,7 @@
 //! surface in larger fixtures.
 
 use crate::dialect::LibraryClass;
-use crate::expr::{Expr, ExprNode, InterpPart, LValue, Pattern};
+use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal, Pattern};
 use crate::ty::Ty;
 
 use super::bits::NEEDS_PARENS;
@@ -232,6 +232,12 @@ fn walk_children(e: &mut Expr) {
             }
         }
         ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::Defined { .. } => {}
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                walk(key, false);
+                walk(value, false);
+            }
+        }
     }
 }
 
@@ -298,6 +304,22 @@ fn is_non_primary_emit(e: &Expr) -> bool {
         // the IR shape keeps the predicate sound for fixtures we'll
         // add later.
         ExprNode::Cast { .. } => true,
+        // A negative literal is unary minus applied to a number, and
+        // Rust binds `.` tighter: `-5_i64.abs()` is `-(5_i64.abs())`,
+        // which answers -5 for Ruby's `(-5).abs`.
+        ExprNode::Lit { value: Literal::Int { value } } => *value < 0,
+        ExprNode::Lit { value: Literal::Float { value } } => value.is_sign_negative(),
+        // An infix operator (`ops.rs::try_binop`) as a receiver:
+        // `(a - 10).abs` must not become `a - 10_i64.abs()`.
+        ExprNode::Send { recv: Some(_), method, args, .. }
+            if args.len() == 1
+                && matches!(
+                    method.as_str(),
+                    "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*" | "/"
+                ) =>
+        {
+            true
+        }
         _ => false,
     }
 }

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `GlobalID::Locator.locate` — the READ side of the `gid://<app>/<Model>/<id>`
 # identifier `GlobalID.param` mints in runtime/ruby/rails.rb.
 #

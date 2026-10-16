@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # typed_store gem subset (CRuby overlay) — YAML-serialized virtual
 # attributes backed by a TEXT column. Lobsters' User declares
 # `typed_store :settings do |s| s.string :totp_secret … end`; the Ruby

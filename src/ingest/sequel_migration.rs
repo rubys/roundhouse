@@ -187,6 +187,9 @@ fn ingest_column_stmt(
                 nullable: false,
                 default: None,
                 primary_key: true,
+                generated: None,
+                generated_text_compatible: None,
+                generated_int4_compatible: None,
             });
         }
         "foreign_key" => {
@@ -209,6 +212,9 @@ fn ingest_column_stmt(
                 nullable: opt_bool("null").unwrap_or(true),
                 default: None,
                 primary_key: false,
+                generated: None,
+                generated_text_compatible: None,
+                generated_int4_compatible: None,
             });
             table.foreign_keys.push(ForeignKey {
                 from_column: Symbol::from(name.as_str()),
@@ -251,6 +257,7 @@ fn ingest_column_stmt(
                 name: Symbol::from(name),
                 columns,
                 unique: opt_bool("unique").unwrap_or(false),
+                using: None,
                 predicate: None,
             });
         }
@@ -281,6 +288,9 @@ fn ingest_column_stmt(
                 nullable: opt_bool("null").unwrap_or(true),
                 default: None,
                 primary_key: false,
+                generated: None,
+                generated_text_compatible: None,
+                generated_int4_compatible: None,
             });
         }
     }

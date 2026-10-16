@@ -31,6 +31,9 @@ unified parameter over 512 type nodes is cut to the deepest container
 nesting that fits, and none nests more than 16 containers; a cut
 position reads `untyped`. This lattice has no recursive types, so past
 the bound the position is gradual rather than a deeper copy each round.
+Gradual is a warning; the Rust output for these walks is an open gap,
+recorded in that module's doc. `Analyzer::fixpoint_rounds` reports
+whether each loop stopped on a fixed point or on its cap.
 A companion fixpoint (`Analyzer::build_constant_registry`) types
 app-level constants — see below. After convergence,
 `stamp_inferred_library_signatures` writes what inference discovered
@@ -128,10 +131,9 @@ type system has three special variants:
   these.
 - **`Ty::Untyped`** — gradual escape. RBS-declared `untyped`, or
   unwrapped propagation through gradual dispatch. Author-signed
-  opt-out from checking. Counts as a Warning. Per-target rendering:
-  TS `any`, Python `Any`, Rust `()` (fallback; strict targets are
-  expected to elevate to Error at emit time), Crystal `_`, Go
-  `interface{}`.
+  opt-out from checking. Counts as a Warning, and no emitter elevates
+  it. Per-target rendering: TS `any`, Python `Any`, Rust
+  `serde_json::Value`, Crystal `String`, Go `interface{}`.
 - **`Ty::Bottom`** — divergent expression (`raise`, `return`,
   `next`). Subtype of every other type; filtered out in
   `union_of` / `union_many` so `if cond then raise else x end`
@@ -218,7 +220,7 @@ variant):
 | `IvarUnresolved` | Error | `@ivar` read with no binding in scope |
 | `SendDispatchFailed` | Error | `Send` on a typed receiver where the method doesn't resolve |
 | `IncompatibleBinop` | Error | `a OP b` where Ruby would raise at runtime (`Int + Str`, `Hash + Hash`, `1 < "x"`) — annotated by the body-typer at the Send |
-| `GradualUntyped` | Warning | An expression resolved to `Ty::Untyped` (RBS gradual escape). Strict-target emitters (Rust, Go) are expected to elevate to Error at emit time |
+| `GradualUntyped` | Warning | An expression resolved to `Ty::Untyped` (RBS gradual escape). No emitter elevates it to Error |
 
 Two more variants worth knowing: `UnresolvedType` (Warning) is the
 silent residue — a `Ty::Var` or never-stamped node at a leaf position

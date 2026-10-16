@@ -32,12 +32,33 @@
 
 use std::collections::HashSet;
 
-use crate::schema::{Column, ColumnType, ForeignKey, Index, ReferentialAction, Schema, Table};
+use crate::schema::generated::GeneratedExpressionDialect;
+use crate::schema::{
+    Column, ColumnType, ForeignKey, GeneratedColumn, GeneratedColumnStorage, Index,
+    ReferentialAction, Schema, Table,
+};
 use crate::{Symbol, TableRef};
 
 use super::{IngestError, IngestResult};
 
+/// Ingest a structure dump with the Portable generated-expression grammar.
+/// PostgreSQL-only casts require the explicit DDL-dialect entry point.
 pub fn ingest_structure_sql(source: &[u8], file: &str) -> IngestResult<Schema> {
+    ingest_structure_sql_with_generated_expression_dialect(
+        source,
+        file,
+        GeneratedExpressionDialect::Portable,
+    )
+}
+
+/// Ingest a PostgreSQL structure dump with an explicit generated-expression
+/// grammar. The default [`ingest_structure_sql`] remains Portable for app
+/// analysis and current target emission.
+pub fn ingest_structure_sql_with_generated_expression_dialect(
+    source: &[u8],
+    file: &str,
+    dialect: GeneratedExpressionDialect,
+) -> IngestResult<Schema> {
     let text = String::from_utf8_lossy(source).into_owned();
     super::sources::register(file, &text);
 
@@ -57,7 +78,15 @@ pub fn ingest_structure_sql(source: &[u8], file: &str) -> IngestResult<Schema> {
         if stmt.is_empty() {
             continue;
         }
-        dispatch_statement(stmt, file, &mut schema, &mut enum_types, &mut gaps, &mut seen_heads);
+        dispatch_statement(
+            stmt,
+            file,
+            &mut schema,
+            &mut enum_types,
+            &mut gaps,
+            &mut seen_heads,
+            dialect,
+        );
     }
 
     if !gaps.is_empty() {
@@ -76,6 +105,7 @@ pub fn ingest_structure_sql(source: &[u8], file: &str) -> IngestResult<Schema> {
 // Statement dispatch
 // ---------------------------------------------------------------------
 
+/// Dispatch one top-level dump statement to its schema handler.
 fn dispatch_statement(
     stmt: &str,
     file: &str,
@@ -83,6 +113,7 @@ fn dispatch_statement(
     enum_types: &mut HashSet<String>,
     gaps: &mut Vec<IngestError>,
     seen_heads: &mut HashSet<String>,
+    dialect: GeneratedExpressionDialect,
 ) {
     // A child partition attached via `ALTER TABLE … ATTACH PARTITION
     // …` rather than declared `PARTITION OF` up front (the shape this
@@ -104,7 +135,7 @@ fn dispatch_statement(
     }
 
     if starts_with_ci(stmt, "CREATE TABLE") {
-        handle_create_table(stmt, file, schema, enum_types, gaps);
+        handle_create_table(stmt, file, schema, enum_types, gaps, dialect);
         return;
     }
     if starts_with_ci(stmt, "CREATE MATERIALIZED VIEW")
@@ -119,7 +150,7 @@ fn dispatch_statement(
         return;
     }
     if starts_with_ci(stmt, "CREATE UNIQUE INDEX") || starts_with_ci(stmt, "CREATE INDEX") {
-        handle_create_index(stmt, schema);
+        handle_create_index(stmt, file, schema, gaps);
         return;
     }
     if starts_with_ci(stmt, "ALTER TABLE") {
@@ -196,12 +227,14 @@ fn record_unmodeled(gaps: &mut Vec<IngestError>, seen_heads: &mut HashSet<String
 // CREATE TABLE
 // ---------------------------------------------------------------------
 
+/// Parse one `CREATE TABLE` and validate generated expressions under `dialect`.
 fn handle_create_table(
     stmt: &str,
     file: &str,
     schema: &mut Schema,
     enum_types: &HashSet<String>,
     gaps: &mut Vec<IngestError>,
+    dialect: GeneratedExpressionDialect,
 ) {
     // `CREATE TABLE child PARTITION OF parent FOR VALUES …` — the
     // parent's own CREATE TABLE already carries the columns, and this
@@ -255,23 +288,39 @@ fn handle_create_table(
     // (…)`, `WITH (…)` storage params) is intentionally never
     // inspected — none of it changes the column list, and schema.rb
     // has no equivalent to round-trip it into anyway.
-    schema.tables.insert(
-        Symbol::from(table_name.clone()),
-        Table {
-            name: Symbol::from(table_name),
-            columns,
-            indexes: Vec::new(),
-            foreign_keys: Vec::new(),
-            virtual_module: None,
-        },
-    );
+    let mut table = Table {
+        name: Symbol::from(table_name.as_str()),
+        columns,
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        virtual_module: None,
+    };
+    let invalid_generated = crate::schema::generated::validate_table_with_dialect(&table, dialect);
+    for (column, reason) in &invalid_generated {
+        gaps.push(IngestError::Unsupported {
+            file: file.into(),
+            message: format!("generated column dropped: {table_name}.{column}: {reason}"),
+        });
+    }
+    if !invalid_generated.is_empty() {
+        table.columns.retain(|col| {
+            !invalid_generated.iter().any(|(name, _)| name == col.name.as_str())
+        });
+    }
+    schema.tables.insert(Symbol::from(table_name), table);
 }
 
 /// A comma-separated entry inside `CREATE TABLE (...)` that is a
-/// table-level constraint rather than a column definition.
+/// table-level constraint rather than a column definition. The keyword
+/// is a whole word: Postgres dumps column names unquoted, and columns
+/// named `checkout_id`, `unique_id` or `excluded_flag` were read as
+/// `CHECK`/`UNIQUE`/`EXCLUDE` constraints and dropped.
 fn is_table_level_constraint(seg: &str) -> bool {
     const KW: &[&str] = &["CONSTRAINT", "PRIMARY KEY", "UNIQUE", "CHECK", "EXCLUDE", "FOREIGN KEY"];
-    KW.iter().any(|k| starts_with_ci(seg, k))
+    KW.iter().any(|k| {
+        starts_with_ci(seg, k)
+            && !seg[k.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+    })
 }
 
 /// `[CONSTRAINT name] PRIMARY KEY (cols)` inside the column-list parens
@@ -335,11 +384,96 @@ fn parse_column_def(
         return Ok(None);
     }
 
+    let generated = parse_generated_modifier(modifiers).map_err(|message| IngestError::Unsupported {
+        file: file.into(),
+        message: format!("generated column dropped: {table}.{col_name}: {message}"),
+    })?;
     let (nullable, default) = parse_modifiers(modifiers);
+    if generated.is_some() && default.is_some() {
+        return Err(unsupported_col(file, table, &col_name, "generated column also has DEFAULT"));
+    }
     let col_type = resolve_column_type(type_phrase, enum_types)
         .ok_or_else(|| unsupported_col(file, table, &col_name, type_phrase))?;
+    let generated_text_compatible = has_nonportable_text_source_type(type_phrase, enum_types)
+        .then_some(false);
+    let generated_int4_compatible =
+        has_nonportable_int4_source_type(type_phrase).then_some(false);
 
-    Ok(Some(Column { name: Symbol::from(col_name), col_type, nullable, default, primary_key: false }))
+    Ok(Some(Column {
+        name: Symbol::from(col_name),
+        col_type,
+        nullable,
+        default,
+        primary_key: false,
+        generated,
+        generated_text_compatible,
+        generated_int4_compatible,
+    }))
+}
+
+/// Keep only the negative type provenance that `ColumnType` cannot
+/// express. Ordinary app typing deliberately strips schema qualifiers,
+/// so a custom qualified domain named `text`, `varchar`, `json`, or
+/// `jsonb` can normalize to a built-in-looking `ColumnType`. Generated
+/// expressions admit only bare built-ins or the real `pg_catalog` names
+/// `text`, `varchar`, `json`, and `jsonb`; in particular,
+/// `pg_catalog.character varying` is not a qualified built-in spelling.
+/// Quoted qualified names are also rejected because type normalization
+/// lowercases their contents without preserving SQL identifier case.
+/// Other aliases (`inet`, `interval`, enums, `citext`, and fixed
+/// `character`) also normalize to text-like types without portable text
+/// semantics. A text typmod is marked because this IR does not retain it.
+fn has_nonportable_text_source_type(
+    type_phrase: &str,
+    enum_types: &HashSet<String>,
+) -> bool {
+    let (base, first_type_modifier, _) = strip_parens_capture_nums(type_phrase);
+    let (qualifier, base_name) = base
+        .rsplit_once('.')
+        .map(|(schema, name)| (Some(schema), name))
+        .unwrap_or((None, base.as_str()));
+    let text_or_json_alias = matches!(
+        base_name,
+        "text" | "varchar" | "character varying" | "character" | "char" | "bpchar"
+            | "citext" | "json" | "jsonb" | "inet" | "cidr" | "macaddr"
+            | "macaddr8" | "interval"
+    );
+    let qualified_non_builtin = qualifier.is_some_and(|schema| {
+        !schema.eq_ignore_ascii_case("pg_catalog")
+            || !matches!(base_name, "text" | "varchar" | "json" | "jsonb")
+    });
+    matches!(
+        base_name,
+        "inet" | "cidr" | "macaddr" | "macaddr8" | "interval" | "character" | "char" | "bpchar" | "citext"
+    ) || enum_types.contains(base_name)
+        || (base_name == "text" && first_type_modifier.is_some())
+        || (text_or_json_alias && qualified_non_builtin)
+}
+
+/// Preserve the negative integer-width evidence that `ColumnType::Integer`
+/// cannot express. PostgreSQL `smallint`/`int2`, sequence-backed `serial`
+/// aliases, and integer typmods are not exact int4 results. Unqualified
+/// `integer`/`int`/`int4` spellings are accepted by the SQL grammar,
+/// but only `pg_catalog.int4` is a valid qualified catalog spelling.
+fn has_nonportable_int4_source_type(type_phrase: &str) -> bool {
+    let (source_type, _, _) = strip_parens_capture_nums(type_phrase);
+    let (qualifier, base) = match source_type.rsplit_once('.') {
+        Some((schema, name)) => (Some(schema), name),
+        None => (None, source_type.as_str()),
+    };
+    if matches!(base, "smallint" | "int2" | "serial" | "serial4") {
+        return true;
+    }
+    if matches!(base, "integer" | "int") {
+        // PostgreSQL has no qualified type names for these SQL grammar
+        // aliases, including under pg_catalog.
+        return qualifier.is_some() || type_phrase.contains('(');
+    }
+    if base == "int4" {
+        return type_phrase.contains('(')
+            || qualifier.is_some_and(|schema| !schema.eq_ignore_ascii_case("pg_catalog"));
+    }
+    false
 }
 
 fn unsupported_col(file: &str, table: &str, col: &str, type_name: &str) -> IngestError {
@@ -396,7 +530,8 @@ fn resolve_column_type(type_phrase: &str, enum_types: &HashSet<String>) -> Optio
         "numeric" | "decimal" => ColumnType::Decimal { precision: None, scale: None },
         "double precision" | "real" | "float4" | "float8" | "float" => ColumnType::Float,
         "bytea" => ColumnType::Binary,
-        "json" | "jsonb" => ColumnType::Json,
+        "json" => ColumnType::Json,
+        "jsonb" => ColumnType::Jsonb,
         "uuid" => ColumnType::Uuid,
         "inet" | "cidr" | "macaddr" | "macaddr8" => ColumnType::String { limit: None },
         "interval" => ColumnType::String { limit: None },
@@ -457,7 +592,7 @@ fn maybe_register_enum(stmt: &str, enum_types: &mut HashSet<String>) {
 /// survey report with a purely-cosmetic gap (this dump alone has
 /// several thousand plain indexes and only a handful of expression
 /// ones).
-fn handle_create_index(stmt: &str, schema: &mut Schema) {
+fn handle_create_index(stmt: &str, file: &str, schema: &mut Schema, gaps: &mut Vec<IngestError>) {
     let Some(mut rest) = strip_prefix_ci(stmt, "CREATE") else { return };
     rest = rest.trim_start();
     let unique = if let Some(r2) = strip_prefix_ci(rest, "UNIQUE") {
@@ -483,6 +618,39 @@ fn handle_create_index(stmt: &str, schema: &mut Schema) {
     let after_table = &rest[consumed2..];
 
     let Some(open) = find_first_open_paren(after_table, 0) else { return };
+    let access_clause = &after_table[..open];
+    let access_start = skip_sql_trivia(access_clause, 0);
+    let using = if access_start == access_clause.len() {
+        None
+    } else {
+        let Some(method_start) = consume_sql_keyword_ci(access_clause, access_start, "USING")
+        else {
+            gaps.push(IngestError::Unsupported {
+                file: file.into(),
+                message: "CREATE INDEX clause before the column list is not modeled".into(),
+            });
+            return;
+        };
+        let method_start = skip_sql_trivia(access_clause, method_start);
+        let method = &access_clause[method_start..];
+        let quoted = method.starts_with('"');
+        match read_index_access_method(method) {
+            Some((name, consumed))
+                if !name.is_empty()
+                    && skip_sql_trivia(access_clause, method_start + consumed)
+                        == access_clause.len() =>
+            {
+                Some(if quoted { name } else { name.to_ascii_lowercase() })
+            }
+            _ => {
+                gaps.push(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "CREATE INDEX access method is not a SQL identifier".into(),
+                });
+                return;
+            }
+        }
+    };
     let Some(close) = matching_close_paren(after_table, open) else { return };
     let body = &after_table[open + 1..close];
 
@@ -517,6 +685,7 @@ fn handle_create_index(stmt: &str, schema: &mut Schema) {
                 name: Symbol::from(index_name),
                 columns: cols,
                 unique,
+                using,
                 predicate,
             });
         }
@@ -1042,6 +1211,85 @@ fn read_ident(s: &str, start: usize) -> Option<(String, usize)> {
     }
 }
 
+/// Read exactly one PostgreSQL index access method identifier. Unlike
+/// [`read_ident`], schema qualifiers are not stripped: `USING public.gin`
+/// is not the same identifier as `USING gin` and must not be normalized.
+fn read_index_access_method(s: &str) -> Option<(String, usize)> {
+    let bytes = s.as_bytes();
+    if bytes.first() == Some(&b'"') {
+        let mut i = 1;
+        let mut name = String::new();
+        while i < bytes.len() {
+            if bytes[i] == b'\0' {
+                return None;
+            }
+            if bytes[i] == b'"' {
+                if bytes.get(i + 1) == Some(&b'"') {
+                    name.push('"');
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                return (!name.is_empty() && name.len() <= 63).then_some((name, i));
+            }
+            let char_len = utf8_char_len(bytes[i]).min(bytes.len() - i);
+            name.push_str(&s[i..i + char_len]);
+            i += char_len;
+        }
+        return None;
+    }
+
+    let first = *bytes.first()?;
+    if !first.is_ascii_alphabetic() && first != b'_' {
+        return None;
+    }
+    let mut end = 1;
+    while end < bytes.len()
+        && (bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'_' | b'$'))
+    {
+        end += 1;
+    }
+    (end <= 63).then_some((s[..end].to_string(), end))
+}
+
+/// Skip SQL whitespace and comments but leave quoted identifiers and
+/// literals untouched. PostgreSQL accepts comments wherever whitespace
+/// can separate tokens, including around `USING` and its method name.
+fn skip_sql_trivia(s: &str, start: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = start;
+    loop {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if bytes.get(i..i + 2) == Some(&b"--"[..])
+            || bytes.get(i..i + 2) == Some(&b"/*"[..])
+        {
+            i = skip_quoted_or_comment(bytes, i).unwrap_or(bytes.len());
+        } else {
+            return i;
+        }
+    }
+}
+
+/// Consume one case-insensitive keyword at a known token boundary and
+/// return the byte immediately after it. Identifier-continuation bytes
+/// (including non-ASCII UTF-8 bytes) keep the text in the same token, so
+/// malformed `USINGgin` cannot be mistaken for `USING gin`. Whitespace,
+/// SQL comments, and quoted identifiers are valid token separators.
+fn consume_sql_keyword_ci(s: &str, start: usize, keyword: &str) -> Option<usize> {
+    let end = start.checked_add(keyword.len())?;
+    if !s.get(start..end)?.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    if let Some(next) = s.as_bytes().get(end) {
+        if next.is_ascii_alphanumeric() || *next == b'_' || *next == b'$' || *next >= 0x80 {
+            return None;
+        }
+    }
+    Some(end)
+}
+
 /// Tokenize `s` into its depth-0 (outside any parens), non-quoted
 /// words, each paired with its byte offset in `s`. Every keyword
 /// search in this module (`PRIMARY KEY`, `REFERENCES`, `ON DELETE`, a
@@ -1138,6 +1386,81 @@ fn find_modifier_start(rest: &str) -> usize {
         }
     }
     rest.len()
+}
+
+/// Parse the supported PostgreSQL generated-column modifier. Any other
+/// form containing `GENERATED` fails explicitly so it cannot become an
+/// ordinary writable column after its expression is discarded.
+fn parse_generated_modifier(modifiers: &str) -> Result<Option<GeneratedColumn>, String> {
+    let words = top_level_words(modifiers);
+    let generated_positions: Vec<usize> =
+        words.iter().filter(|(_, word)| word == "GENERATED").map(|(pos, _)| *pos).collect();
+    let Some(&generated_pos) = generated_positions.first() else { return Ok(None) };
+    if generated_positions.len() != 1 {
+        return Err("multiple GENERATED clauses are unsupported".into());
+    }
+
+    if !only_optional_nullability(&modifiers[..generated_pos]) {
+        return Err("only NULL or NOT NULL may precede GENERATED ALWAYS".into());
+    }
+
+    let after_generated = consume_sql_keyword_ci(modifiers, generated_pos, "GENERATED")
+        .ok_or_else(|| "expected GENERATED ALWAYS AS".to_string())?;
+    let after_always = consume_sql_keyword_ci(
+        modifiers,
+        skip_sql_trivia(modifiers, after_generated),
+        "ALWAYS",
+    )
+    .ok_or_else(|| "expected GENERATED ALWAYS AS".to_string())?;
+    let after_as = consume_sql_keyword_ci(
+        modifiers,
+        skip_sql_trivia(modifiers, after_always),
+        "AS",
+    )
+    .ok_or_else(|| "expected GENERATED ALWAYS AS".to_string())?;
+    let open = skip_sql_trivia(modifiers, after_as);
+    if modifiers.as_bytes().get(open) != Some(&b'(') {
+        return Err("generated expression must be parenthesized".into());
+    }
+    let close = matching_close_paren(modifiers, open)
+        .ok_or_else(|| "generated expression has an unclosed parenthesis".to_string())?;
+    let expression = modifiers[open + 1..close].to_string();
+    if expression.trim().is_empty() {
+        return Err("generated expression is empty".into());
+    }
+
+    let storage_start = skip_sql_trivia(modifiers, close + 1);
+    let (storage, storage_end) = if let Some(end) = consume_sql_keyword_ci(modifiers, storage_start, "STORED") {
+        (GeneratedColumnStorage::Stored, end)
+    } else if let Some(end) = consume_sql_keyword_ci(modifiers, storage_start, "VIRTUAL") {
+        (GeneratedColumnStorage::Virtual, end)
+    } else {
+        return Err("generated expression must end in STORED or VIRTUAL".into());
+    };
+
+    if !only_optional_nullability(&modifiers[storage_end..]) {
+        return Err("only NULL or NOT NULL may follow the generated storage mode".into());
+    }
+
+    Ok(Some(GeneratedColumn { expression, storage }))
+}
+
+/// Consume only an optional `NULL` or `NOT NULL` clause plus SQL trivia.
+/// Checking the full suffix prevents punctuation, string literals, or
+/// other modifiers from being silently ignored.
+fn only_optional_nullability(s: &str) -> bool {
+    let start = skip_sql_trivia(s, 0);
+    if start == s.len() {
+        return true;
+    }
+    if let Some(end) = consume_sql_keyword_ci(s, start, "NULL") {
+        return skip_sql_trivia(s, end) == s.len();
+    }
+    let Some(after_not) = consume_sql_keyword_ci(s, start, "NOT") else { return false };
+    let Some(after_null) = consume_sql_keyword_ci(s, skip_sql_trivia(s, after_not), "NULL") else {
+        return false;
+    };
+    skip_sql_trivia(s, after_null) == s.len()
 }
 
 /// From a column definition's modifier tail: whether the column is
@@ -1240,6 +1563,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_column_named_like_a_constraint_keyword_is_a_column() {
+        assert!(!is_table_level_constraint("checkout_id bigint"));
+        assert!(!is_table_level_constraint("unique_id character varying(255) NOT NULL"));
+        assert!(!is_table_level_constraint("excluded_flag boolean"));
+        assert!(!is_table_level_constraint("constraints jsonb"));
+        assert!(is_table_level_constraint("CHECK ((amount > 0))"));
+        assert!(is_table_level_constraint("CHECK(amount > 0)"));
+        assert!(is_table_level_constraint("UNIQUE (shop_id, code)"));
+        assert!(is_table_level_constraint("CONSTRAINT x_pkey PRIMARY KEY (id)"));
+    }
+
+    #[test]
     fn top_level_split_respects_dollar_quoted_function_body() {
         let sql = "CREATE FUNCTION f() LANGUAGE plpgsql AS $$ BEGIN INSERT INTO x; END; $$; SELECT 1;";
         let parts = top_level_split(sql, b';');
@@ -1275,6 +1610,28 @@ mod tests {
     }
 
     #[test]
+    fn structure_sql_index_methods_are_single_identifiers() {
+        let quoted = r#""Odd""Method""#;
+        let (name, consumed) = read_index_access_method(quoted).unwrap();
+        assert_eq!(name, "Odd\"Method");
+        assert_eq!(consumed, quoted.len());
+
+        let qualified = "public.gin";
+        let (_, consumed) = read_index_access_method(qualified).unwrap();
+        assert!(!qualified[consumed..].is_empty(), "qualifier must not be discarded");
+        assert!(read_index_access_method("\"gin").is_none(), "unterminated quote");
+        assert!(read_index_access_method("\"\"").is_none(), "empty quoted name");
+    }
+
+    #[test]
+    fn structure_sql_rejects_a_schema_qualified_index_method() {
+        let sql = br#"CREATE TABLE widgets (payload jsonb);
+CREATE INDEX widgets_payload_idx ON widgets USING public.gin (payload);"#;
+        let error = ingest_structure_sql(sql, "db/structure.sql").unwrap_err();
+        assert!(error.to_string().contains("CREATE INDEX access method is not a SQL identifier"), "{error}");
+    }
+
+    #[test]
     fn strip_parens_capture_nums_extracts_precision_and_scale() {
         let (base, n1, n2) = strip_parens_capture_nums("numeric(20,2)");
         assert_eq!(base, "numeric");
@@ -1298,7 +1655,8 @@ mod tests {
             Some(ColumnType::String { limit: Some(255) })
         ));
         assert!(matches!(resolve_column_type("bigint", &enums), Some(ColumnType::BigInt)));
-        assert!(matches!(resolve_column_type("jsonb", &enums), Some(ColumnType::Json)));
+        assert!(matches!(resolve_column_type("json", &enums), Some(ColumnType::Json)));
+        assert!(matches!(resolve_column_type("jsonb", &enums), Some(ColumnType::Jsonb)));
         assert!(matches!(resolve_column_type("uuid", &enums), Some(ColumnType::Uuid)));
         assert!(matches!(
             resolve_column_type("numeric(10,2)", &enums),

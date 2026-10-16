@@ -291,6 +291,9 @@ pub fn scope_variant_name(name: &Symbol, k: usize, subset: &[&Param]) -> Symbol 
 pub struct UserMethodReturns {
     pub instance: HashMap<Symbol, Option<ClassId>>,
     pub class: HashMap<(ClassId, Symbol), ClassId>,
+    /// Scopes whose body answers something OTHER than a relation (see
+    /// [`non_relation_scopes`]). A call to one ends the chain's model.
+    pub non_relation_scopes: HashSet<(ClassId, Symbol)>,
 }
 
 impl UserMethodReturns {
@@ -326,7 +329,80 @@ pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
                 .or_insert(Some(target));
         }
     }
+    reg.non_relation_scopes = non_relation_scopes(models, &model_ids);
     reg
+}
+
+/// Scopes that answer a non-relation VALUE — campfire's `scope
+/// :last_page, -> { last_page_of(PAGE_SIZE) }`, whose class method ends
+/// in `Page.load(…)`, an Array subclass. Rails returns a scope body's
+/// value as-is when it is not nil, so such a call is not a relation and
+/// `page.first(2)` on it is `Array#first`, not the counted terminal.
+///
+/// Proved, not guessed: the body's tail — followed through same-model
+/// bare calls to scopes and class methods — must end in a call on a
+/// constant that names no model. Anything else stays a relation, as
+/// before.
+fn non_relation_scopes(models: &[Model], model_ids: &HashSet<ClassId>) -> HashSet<(ClassId, Symbol)> {
+    let mut out = HashSet::new();
+    for m in models {
+        let mut bodies: HashMap<&Symbol, &Expr> = HashMap::new();
+        for item in &m.body {
+            match item {
+                ModelBodyItem::Scope { scope, .. } => {
+                    bodies.insert(&scope.name, &scope.body);
+                }
+                ModelBodyItem::Method { method, .. }
+                    if method.receiver == crate::dialect::MethodReceiver::Class =>
+                {
+                    bodies.entry(&method.name).or_insert(&method.body);
+                }
+                _ => {}
+            }
+        }
+        for item in &m.body {
+            let ModelBodyItem::Scope { scope, .. } = item else { continue };
+            if tail_is_foreign_const_call(&scope.body, &bodies, model_ids, 0) {
+                out.insert((m.name.clone(), scope.name.clone()));
+            }
+        }
+    }
+    out
+}
+
+fn tail_is_foreign_const_call(
+    body: &Expr,
+    bodies: &HashMap<&Symbol, &Expr>,
+    model_ids: &HashSet<ClassId>,
+    depth: usize,
+) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let tail = match &*body.node {
+        ExprNode::Seq { exprs } => match exprs.last() {
+            Some(e) => e,
+            None => return false,
+        },
+        _ => body,
+    };
+    let ExprNode::Send { recv, method, .. } = &*tail.node else {
+        return false;
+    };
+    match recv.as_ref().map(|r| &*r.node) {
+        Some(ExprNode::Const { path }) => {
+            let name = path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::");
+            let last = path.last().map(|p| p.as_str()).unwrap_or("");
+            !model_ids.iter().any(|id| {
+                id.0.as_str() == name || id.0.as_str().rsplit("::").next() == Some(last)
+            })
+        }
+        // A bare/self call, or a scope reached on a relation chain
+        // (`before(m).last_page`): follow the named sibling's body.
+        _ => bodies
+            .get(method)
+            .is_some_and(|b| tail_is_foreign_const_call(b, bodies, model_ids, depth + 1)),
+    }
 }
 
 // ---- class methods reached THROUGH an association ------------------
@@ -479,7 +555,7 @@ fn assoc_scope_shape(
     let hash_params: HashSet<Symbol> = match &method_def.signature {
         Some(crate::ty::Ty::Fn { params, .. }) => params
             .iter()
-            .filter(|p| matches!(p.ty, crate::ty::Ty::Hash { .. }))
+            .filter(|p| matches!(*p.ty, crate::ty::Ty::Hash { .. }))
             .map(|p| p.name.clone())
             .collect(),
         _ => HashSet::new(),
@@ -1076,6 +1152,9 @@ pub struct AssocRegistry {
     /// (model, belongs_to name) -> foreign-key column, for
     /// `where(user: user)` -> `where(user_id: user && user.id)`.
     belongs_to_fk: HashMap<(ClassId, Symbol), Symbol>,
+    /// (model, belongs_to name) pairs declared `polymorphic: true`: their
+    /// condition also constrains `<name>_type` (see `lower_relation_args`).
+    polymorphic_belongs_to: HashMap<(ClassId, Symbol), (Symbol, Vec<ClassId>)>,
     /// (model, association name) -> the association target's CLASS.
     /// A NESTED join (`joins(user: :memberships)`) resolves its second
     /// hop against the first hop's target, and only a ClassId can be
@@ -1150,6 +1229,14 @@ pub struct AssocRegistry {
     /// Declining leaves the pre-existing NoMethodError-on-Array, which is
     /// loud and locatable. Wrong rows are neither.
     has_many_unseedable: std::collections::HashSet<(ClassId, Symbol)>,
+    /// `(model, has_many name)` -> the OWNER column the foreign key
+    /// matches, for every has_many declaring `primary_key:` (absent
+    /// means `id`). The seed's `where(fk => owner.<key>)` and the
+    /// constructors' preset foreign key read it, so a has_many keyed on
+    /// a non-id column seeds the rows Rails would. The by-NAME rung has
+    /// no owner to ask, so a name that is keyed anywhere is declined
+    /// there (`is_unseedable`).
+    has_many_owner_key: HashMap<(ClassId, Symbol), Symbol>,
     /// `(association name, extension method)` for every `has_many :x do
     /// def m … end end` in the app. The model lowerer FLATTENS those onto
     /// the owner as `<assoc>_<method>` instance methods
@@ -1185,6 +1272,11 @@ impl AssocRegistry {
     fn belongs_to_fk(&self, model: &ClassId, assoc: &Symbol) -> Option<&Symbol> {
         self.belongs_to_fk.get(&(model.clone(), assoc.clone()))
     }
+    /// `(type column, resolved implementor classes)` of a polymorphic
+    /// belongs_to; the set is empty when no `as:` inverse resolved it.
+    fn polymorphic_belongs_to(&self, model: &ClassId, assoc: &Symbol) -> Option<&(Symbol, Vec<ClassId>)> {
+        self.polymorphic_belongs_to.get(&(model.clone(), assoc.clone()))
+    }
     fn assoc_table(&self, model: &ClassId, assoc: &Symbol) -> Option<&Symbol> {
         self.assoc_table.get(&(model.clone(), assoc.clone()))
     }
@@ -1219,8 +1311,19 @@ impl AssocRegistry {
     fn is_unseedable(&self, owner: Option<&ClassId>, assoc: &Symbol) -> bool {
         match owner {
             Some(m) => self.has_many_unseedable.contains(&(m.clone(), assoc.clone())),
-            None => self.has_many_unseedable.iter().any(|(_, a)| a == assoc),
+            None => {
+                self.has_many_unseedable.iter().any(|(_, a)| a == assoc)
+                    || self.has_many_owner_key.keys().any(|(_, a)| a == assoc)
+            }
         }
+    }
+    /// The owner column `model.<assoc>`'s foreign key matches
+    /// (`primary_key:`), `id` when undeclared.
+    fn has_many_owner_key(&self, model: Option<&ClassId>, assoc: &Symbol) -> Symbol {
+        model
+            .and_then(|m| self.has_many_owner_key.get(&(m.clone(), assoc.clone())))
+            .cloned()
+            .unwrap_or_else(|| Symbol::from("id"))
     }
 }
 
@@ -1270,7 +1373,7 @@ fn self_qualified_assoc_read(r: Expr, ctx: &Ctx) -> Expr {
 /// `order`, which decides what `.first`/`.last` mean) is treated as
 /// row-changing: the list is an allowlist so an unrecognized method
 /// declines rather than being assumed harmless.
-fn scope_is_row_preserving(scope: &Expr) -> bool {
+pub(crate) fn scope_is_row_preserving(scope: &Expr) -> bool {
     fn walk(e: &Expr) -> bool {
         match &*e.node {
             ExprNode::Send { recv, method, .. } => {
@@ -1285,6 +1388,19 @@ fn scope_is_row_preserving(scope: &Expr) -> bool {
     walk(scope)
 }
 
+/// Rails' `association_primary_key` for a `belongs_to`: the declaration's
+/// `primary_key:`, else the target model's own primary key, else `id`.
+pub(crate) fn association_primary_key(
+    models: &[Model],
+    target: &ClassId,
+    declared: Option<&Symbol>,
+) -> Symbol {
+    declared
+        .cloned()
+        .or_else(|| models.iter().find(|o| &o.name == target).and_then(|o| o.primary_key.clone()))
+        .unwrap_or_else(|| Symbol::from("id"))
+}
+
 /// Build the association registry. Table names use the same
 /// `pluralize_snake` the synthesized `table_name` methods use, so the
 /// generated SQL and the runtime agree by construction.
@@ -1297,11 +1413,26 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
         let own = reg.table_for(&m.name);
         for a in m.associations() {
             match a {
-                Association::BelongsTo { name, target, foreign_key, .. } => {
+                Association::BelongsTo {
+                    name, target, foreign_key, primary_key, polymorphic, polymorphic_targets, foreign_type, ..
+                } => {
+                    if *polymorphic {
+                        let type_col = foreign_type
+                            .clone()
+                            .unwrap_or_else(|| Symbol::from(format!("{}_type", name.as_str())));
+                        reg.polymorphic_belongs_to
+                            .insert((m.name.clone(), name.clone()), (type_col, polymorphic_targets.clone()));
+                    }
                     let t = reg.table_for(target);
+                    // Rails' `association_primary_key`: the declaration's
+                    // `primary_key:`, else the target's own primary key.
+                    // A `belongs_to :product, foreign_key:
+                    // "product_uuid", primary_key: "uuid"` joined on
+                    // `products.id` (a uuid) against a varchar fk.
+                    let pk = association_primary_key(models, target, primary_key.as_ref());
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
-                        format!("{t} ON {t}.id = {own}.{foreign_key}"),
+                        format!("{t} ON {t}.{pk} = {own}.{foreign_key}"),
                     );
                     reg.belongs_to_fk
                         .insert((m.name.clone(), name.clone()), foreign_key.clone());
@@ -1312,7 +1443,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     if name.as_str() != t {
                         reg.aliased_join_tails.insert(
                             (m.name.clone(), name.clone()),
-                            format!("{t} {name} ON {name}.id = {own}.{foreign_key}"),
+                            format!("{t} {name} ON {name}.{pk} = {own}.{foreign_key}"),
                         );
                     }
                 }
@@ -1329,6 +1460,11 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     for x in extension {
                         reg.assoc_extension.insert((name.clone(), x.name.clone()));
                     }
+                    let owner_key = a.owner_key();
+                    if owner_key.as_str() != "id" {
+                        reg.has_many_owner_key
+                            .insert((m.name.clone(), name.clone()), owner_key.clone());
+                    }
                     if as_interface.is_some()
                         || scope.as_ref().is_some_and(|s| !scope_is_row_preserving(s))
                     {
@@ -1337,7 +1473,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     let t = reg.table_for(target);
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
-                        format!("{t} ON {t}.{foreign_key} = {own}.id"),
+                        format!("{t} ON {t}.{foreign_key} = {own}.{owner_key}"),
                     );
                     reg.has_many_fk.insert(
                         (m.name.clone(), name.clone()),
@@ -1350,7 +1486,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     if name.as_str() != t {
                         reg.aliased_join_tails.insert(
                             (m.name.clone(), name.clone()),
-                            format!("{t} {name} ON {name}.{foreign_key} = {own}.id"),
+                            format!("{t} {name} ON {name}.{foreign_key} = {own}.{owner_key}"),
                         );
                     }
                     let entry = (target.clone(), foreign_key.clone());
@@ -1364,10 +1500,11 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                         .or_insert(Some(entry));
                 }
                 Association::HasOne { name, target, foreign_key, .. } => {
+                    let owner_key = a.owner_key();
                     let t = reg.table_for(target);
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
-                        format!("{t} ON {t}.{foreign_key} = {own}.id"),
+                        format!("{t} ON {t}.{foreign_key} = {own}.{owner_key}"),
                     );
                     reg.assoc_table
                         .insert((m.name.clone(), name.clone()), Symbol::from(t.as_str()));
@@ -1376,7 +1513,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     if name.as_str() != t {
                         reg.aliased_join_tails.insert(
                             (m.name.clone(), name.clone()),
-                            format!("{t} {name} ON {name}.{foreign_key} = {own}.id"),
+                            format!("{t} {name} ON {name}.{foreign_key} = {own}.{owner_key}"),
                         );
                     }
                 }
@@ -1384,10 +1521,15 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                 // (`Tag.joins(:stories)` → JOIN taggings ON tag_id, JOIN
                 // stories ON story_id). Same fk resolution as the
                 // through-reader lowering: the through association names
-                // the join model; its `belongs_to` matching the assoc's
-                // target class supplies the source fk (survives `source:`
-                // renames, which ingest folds into `target`).
+                // the join model; its source association, found by name
+                // (`Model::through_source`), supplies the source fk when
+                // it is a `belongs_to`.
                 Association::HasMany { name, target, through: Some(thr_name), .. } => {
+                    // A keyed hop is refused at synthesis; no join tail
+                    // is better than one that joins on `id`.
+                    if super::assoc_primary_key::unsupported_reason(m, models, a).is_some() {
+                        continue;
+                    }
                     let Some(Association::HasMany { target: thr_target, foreign_key: thr_fk, .. }) =
                         m.associations().find(|a| {
                             matches!(a, Association::HasMany { name, .. } if name == thr_name)
@@ -1398,20 +1540,20 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     let Some(thr_model) = models.iter().find(|tm| &tm.name == thr_target) else {
                         continue;
                     };
-                    let Some(Association::BelongsTo { foreign_key: src_fk, .. }) =
-                        thr_model.associations().find(|a| {
-                            matches!(a, Association::BelongsTo { target: t, .. } if t == target)
-                        })
+                    let Some(Association::BelongsTo {
+                        foreign_key: src_fk, primary_key: src_pk, polymorphic: false, ..
+                    }) = thr_model.through_source(a)
                     else {
                         continue;
                     };
                     let thr_table = reg.table_for(thr_target);
                     let target_table = reg.table_for(target);
+                    let src_pk = association_primary_key(models, target, src_pk.as_ref());
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
                         format!(
                             "{thr_table} ON {thr_table}.{thr_fk} = {own}.id \
-                             INNER JOIN {target_table} ON {target_table}.id = {thr_table}.{src_fk}"
+                             INNER JOIN {target_table} ON {target_table}.{src_pk} = {thr_table}.{src_fk}"
                         ),
                     );
                     reg.assoc_table
@@ -1796,7 +1938,7 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
                         method.as_str(),
                         "offset" | "limit" | "order" | "reorder" | "joins" | "left_outer_joins"
                             | "left_joins" | "includes" | "preload" | "eager_load" | "references" | "group"
-                            | "having" | "merge"
+                            | "having" | "merge" | "unscope"
                     ));
             if is_where
                 || is_relation_terminal(method.as_str(), args, block.as_ref())
@@ -1805,11 +1947,19 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
                         "find"
                             | "find_by"
                             | "find_by!"
+                            | "find_sole_by"
                             | "destroy_by"
                             | "delete_by"
                             | "destroy_all"
                             | "delete_all"
                             | "update_all"
+                            | "find_each"
+                            | "find_in_batches"
+                            | "touch_all"
+                            | "to_sql"
+                            | "in_batches"
+                            | "maximum"
+                            | "minimum"
                     )
             {
                 if let ExprNode::Send { method: aname, args: aargs, block: None, .. } = &*r.node {
@@ -1867,15 +2017,14 @@ pub fn mentions_assoc_extension(expr: &Expr, assocs: &AssocRegistry) -> bool {
 pub fn mentions_assoc_class_method(
     expr: &Expr,
     assocs: &AssocRegistry,
-    scopes: &ScopeRegistry,
+    scope_names: &HashSet<Symbol>,
     acm: &AssocClassMethods,
 ) -> bool {
     if acm.is_empty() {
         return false;
     }
-    let names = all_scope_names(scopes);
     let mut demand: HashSet<(Symbol, Symbol)> = HashSet::new();
-    collect_assoc_method_demand(expr, assocs, &names, &mut demand);
+    collect_assoc_method_demand(expr, assocs, scope_names, &mut demand);
     demand
         .iter()
         .any(|(_, m)| acm.values().any(|per_model| per_model.contains_key(m)))
@@ -1889,16 +2038,18 @@ pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> boo
         if *found {
             return;
         }
-        if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+        if let ExprNode::Send { recv: Some(r), method, args, block, .. } = &*e.node {
             // Chain methods and `all` open a chain; so do the terminals
             // that need a seeded Relation at a Const root. Leaving the
             // latter out is a gate that closes over the very shape
             // `CLASS_ROOT_TERMINALS` exists to rewrite — a body whose
             // ONLY relation surface is `Push::Subscription.destroy_by(…)`
-            // never reached the rewriter at all.
+            // never reached the rewriter at all. Likewise the counted
+            // `Developer.first(2)` / `.last(2)`.
             if (is_relation_chain_method(method.as_str())
                 || method.as_str() == "all"
-                || CLASS_ROOT_TERMINALS.contains(&method.as_str()))
+                || CLASS_ROOT_TERMINALS.contains(&method.as_str())
+                || counted_terminal(method, args, block.as_ref()).is_some())
                 && const_model(r, models).is_some()
             {
                 *found = true;
@@ -1911,7 +2062,7 @@ pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> boo
     found
 }
 
-/// True when `expr` calls `<Model>.insert_all(rows)`. Gate for the
+/// True when `expr` calls `<Model>.insert_all(rows)` (or `insert_all!`). Gate for the
 /// call-site expansion in `rewrite_send`.
 pub fn mentions_model_insert_all(expr: &Expr, models: &HashSet<ClassId>) -> bool {
     let mut found = false;
@@ -1920,8 +2071,8 @@ pub fn mentions_model_insert_all(expr: &Expr, models: &HashSet<ClassId>) -> bool
             return;
         }
         if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node {
-            if method.as_str() == "insert_all"
-                && args.len() == 1
+            if ((method.as_str() == "insert_all" && args.len() == 1)
+                || (method.as_str() == "insert_all!" && (1..=2).contains(&args.len())))
                 && const_model(r, models).is_some()
             {
                 *found = true;
@@ -1945,13 +2096,15 @@ pub fn mentions_bare_chain_start(expr: &Expr) -> bool {
         if *found {
             return;
         }
-        if let ExprNode::Send { recv, method, .. } = &*e.node {
+        if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
             let self_rooted = match recv {
                 None => true,
                 Some(r) => matches!(&*r.node, ExprNode::SelfRef),
             };
             if self_rooted
-                && (is_relation_chain_method(method.as_str()) || method.as_str() == "all")
+                && (is_relation_chain_method(method.as_str())
+                    || method.as_str() == "all"
+                    || (recv.is_none() && counted_terminal(method, args, block.as_ref()).is_some()))
             {
                 *found = true;
                 return;
@@ -1972,6 +2125,8 @@ fn is_relation_chain_method(name: &str) -> bool {
         name,
         "where"
             | "not"
+            | "order_sql"
+            | "reorder_sql"
             | "order"
             | "limit"
             | "offset"
@@ -2019,6 +2174,10 @@ fn is_relation_chain_method(name: &str) -> bool {
             // without it here that body never rooted on `__rel` and the
             // search paged every message in the table.
             | "reorder"
+            // `unscope(where: :col)` drops the conditions on a column
+            // (`Discard::Model`'s `with_discarded` is exactly that). An
+            // Array has no `unscope`, so the site can only mean Relation.
+            | "unscope"
     )
 }
 
@@ -2108,6 +2267,15 @@ pub struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// Does a call to scope `method` on `model` keep the relation? False
+    /// for a scope proved to answer some other value
+    /// ([`UserMethodReturns::non_relation_scopes`]).
+    fn scope_keeps_relation(&self, model: &ClassId, method: &Symbol) -> bool {
+        !self
+            .user_returns
+            .non_relation_scopes
+            .contains(&(model.clone(), method.clone()))
+    }
     fn scope_of(&self, model: &ClassId, method: &Symbol) -> bool {
         self.scopes.get(model).is_some_and(|s| s.contains_key(method))
     }
@@ -2183,21 +2351,33 @@ fn syn(span: crate::span::Span, node: ExprNode) -> Expr {
 /// the relation, so `hottest` → `Story.hottest(nil, nil, __rel)` not
 /// `Story.hottest(__rel)`. `leading` is the scope's user params (no `__rel`).
 fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span: crate::span::Span) -> Vec<Expr> {
+    // A callee with a REST param (`*tags`) cannot take `__rel` as a
+    // trailing optional positional — an optional positional can't
+    // follow a splat, which is why `insert_rel_param` makes `__rel` a
+    // keyword param instead for exactly this shape. Thread it the same
+    // way here: no positional padding (there is no fixed slot to pad
+    // toward — Ruby fills a bare call's REST with nothing, not a
+    // specific param), and pass the relation as `__rel: rel`, a keyword
+    // argument.
+    let has_rest = leading.is_some_and(|ps| ps.iter().any(|p| p.rest && !p.keyword));
+
     // A trailing kwargs hash (`base(user, unmerged: unmerged)`) binds
     // the scope's KEYWORD params; the relation is a positional and must
     // land before it. Split it off, pad, thread, re-append.
     //
-    // ONLY when the callee declares keywords. Ruby hands `f(a: 1)` to a
-    // `def f(h)` as the POSITIONAL hash `h` — which is how campfire's
-    // `messages.create_with_attachment!(creator:, attachment:)` reaches
-    // its one `attributes` param, and how a `**opts` param (ingested as
-    // a positional defaulting to `{}`) is fed. Splitting it off there
-    // padded that param with `nil` and pushed the hash PAST `__rel`,
-    // handing three positionals to a method taking one or two. Left in
-    // place it is an ordinary argument, so it counts toward the padding
-    // below — and its `kwargs` flag has to go, or the emitter renders it
-    // bare and Ruby reads keywords ahead of the `__rel` positional.
-    let takes_keywords = leading.map_or(true, |ps| ps.iter().any(|p| p.keyword));
+    // ONLY when the callee declares keywords (or, now, has a rest param
+    // — its `__rel` is itself a keyword, so the same split applies).
+    // Ruby hands `f(a: 1)` to a `def f(h)` as the POSITIONAL hash `h` —
+    // which is how campfire's `messages.create_with_attachment!(creator:,
+    // attachment:)` reaches its one `attributes` param, and how a
+    // `**opts` param (ingested as a positional defaulting to `{}`) is
+    // fed. Splitting it off there padded that param with `nil` and
+    // pushed the hash PAST `__rel`, handing three positionals to a
+    // method taking one or two. Left in place it is an ordinary
+    // argument, so it counts toward the padding below — and its
+    // `kwargs` flag has to go, or the emitter renders it bare and Ruby
+    // reads keywords ahead of the `__rel` positional.
+    let takes_keywords = has_rest || leading.map_or(true, |ps| ps.iter().any(|p| p.keyword));
     let kwargs_tail = match args.last() {
         Some(e) if matches!(&*e.node, ExprNode::Hash { kwargs: true, .. }) => {
             if takes_keywords {
@@ -2211,6 +2391,31 @@ fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span
         }
         _ => None,
     };
+
+    if has_rest {
+        // No padding: the pad loop below doesn't exclude a rest param
+        // itself (it only filters out `p.keyword`), so a bare chained
+        // call to a rest callee — `widget.active.those_tagged` — used
+        // to pad a spurious positional `nil` into `*tags` before
+        // appending the relation. Skipping padding entirely for a rest
+        // callee fixes that latent bug along with the syntax error:
+        // `Widget.those_tagged(__rel: Widget.active)`, not
+        // `Widget.those_tagged(nil, __rel: Widget.active)`.
+        let rel_key = syn(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from("__rel") } });
+        let mut entries: Vec<(Expr, Expr)> = match kwargs_tail {
+            Some(tail) => {
+                let ExprNode::Hash { entries, .. } = *tail.node else {
+                    unreachable!("kwargs_tail is always a kwargs Hash")
+                };
+                entries
+            }
+            None => Vec::new(),
+        };
+        entries.push((rel_key, rel));
+        args.push(syn(span, ExprNode::Hash { entries, kwargs: true }));
+        return args;
+    }
+
     if let Some(params) = leading {
         // Only positional params pad — keywords are bound by name via
         // the kwargs tail (or their own defaults).
@@ -2244,7 +2449,10 @@ fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span
 /// `Push::Subscription.destroy_by(endpoint:, user_id:)` reached nothing
 /// at all, with the analyzer saying so (`send_dispatch_failed: no known
 /// method `destroy_by` on Class { Push::Subscription }`).
-const CLASS_ROOT_TERMINALS: &[&str] = &["pluck", "ids", "destroy_by", "delete_by"];
+///
+/// `maximum` / `minimum` likewise: `Base` defines neither, and the arel
+/// pass leaves them to `Relation`'s SQL extrema.
+const CLASS_ROOT_TERMINALS: &[&str] = &["pluck", "ids", "destroy_by", "delete_by", "maximum", "minimum"];
 
 /// Relation TERMINALS our runtime implements — a seeded association
 /// chain may end in one (`@story.merged_stories.ids`). Deliberately
@@ -2260,13 +2468,17 @@ const CLASS_ROOT_TERMINALS: &[&str] = &["pluck", "ids", "destroy_by", "delete_by
 fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool {
     match name {
         "find" => args.len() == 1 && block.is_none(),
-        "find_by" | "find_by!" => block.is_none(),
+        "find_by" | "find_by!" | "find_sole_by" => block.is_none(),
         // Bulk WRITES are terminals too — they end the chain and answer
         // a count / an Array of destroyed records, never a relation.
         // `Array` answers none of them, so an association-read receiver
         // is a NoMethodError today and a scoped statement after
         // (campfire's `memberships.destroy_by user: users`).
         "destroy_by" | "delete_by" => block.is_none(),
+        // Batch iteration: a query Rails runs against the association's
+        // relation (`room.messages.find_each(&:destroy)`), where the
+        // association read alone is an Array with no `find_each`.
+        "find_each" | "find_in_batches" => true,
         _ => matches!(
             name,
             "ids" | "pluck" | "count" | "first" | "last" | "exists?" | "any?" | "empty?" | "size"
@@ -2274,6 +2486,11 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
                 | "destroy_all"
                 | "delete_all"
                 | "update_all"
+                | "touch_all"
+                | "to_sql"
+                | "in_batches"
+                | "maximum"
+                | "minimum"
                 // Reads the relation and, on a miss, WRITES through it —
                 // so it is a terminal on both counts. Listing it here is
                 // what lets `assoc_scope_shape` see a class method whose
@@ -2395,7 +2612,7 @@ pub fn assoc_read_target(
 /// (`Current.user`, `@message.creator`, `user.account`) qualifies; a
 /// send taking arguments, a block, or a deeper chain does not — those
 /// keep their source shape rather than being duplicated into a query.
-fn owner_reads_once(owner: &Expr) -> bool {
+pub(crate) fn owner_reads_once(owner: &Expr) -> bool {
     let ExprNode::Send { recv, args, block: None, .. } = &*owner.node else { return false };
     if !args.is_empty() {
         return false;
@@ -2465,12 +2682,12 @@ fn assoc_owner_seed(
     // and is checked against every declarer.
     assoc_read_target(owner, aname, ctx.models, ctx.assocs)
         .filter(|(owner_model, _, _)| !ctx.assocs.is_unseedable(owner_model.as_ref(), aname))
-        .map(|(_, target, fk)| {
+        .map(|(owner_model, target, fk)| {
             let owner_id = syn(
                 span,
                 ExprNode::Send {
                     recv: Some(owner.clone()),
-                    method: Symbol::from("id"),
+                    method: ctx.assocs.has_many_owner_key(owner_model.as_ref(), aname),
                     args: vec![],
                     block: None,
                     parenthesized: false,
@@ -2795,6 +3012,10 @@ fn join_spec_sql(model: &ClassId, spec: &Expr, kind: &str, ctx: &Ctx) -> Option<
     }
 }
 
+/// The `<name>_type` value a polymorphic condition uses for a record that is
+/// none of the association's implementors: matches no stored row.
+const POLYMORPHIC_NO_TYPE: &str = "<not a polymorphic type>";
+
 fn lower_relation_args(
     model: &ClassId,
     method: &Symbol,
@@ -2817,7 +3038,8 @@ fn lower_relation_args(
         // are `find_by`'s — a list that names some of them renames
         // `user:` to `user_id:` on one spelling and emits the
         // nonexistent `memberships.user` column on the next.
-        "where" | "not" | "find_by" | "find_by!" | "destroy_by" | "delete_by" | "exists?" => {
+        "where" | "not" | "find_by" | "find_by!" | "find_sole_by" | "destroy_by" | "delete_by"
+        | "exists?" => {
             // `where(connected_at: TTL.ago..)` — a RANGE value. Rails
             // renders `>=` / `<=` / `<` / BETWEEN; the runtime's
             // `column_predicate` has no Range arm and falls through to
@@ -2844,10 +3066,71 @@ fn lower_relation_args(
             for a in args.iter_mut() {
                 let span = a.span;
                 let ExprNode::Hash { entries, .. } = &mut *a.node else { continue };
+                let mut type_conditions: Vec<(Expr, Expr)> = Vec::new();
+                // (value, type column) of each polymorphic condition whose
+                // value may be nil at run time; see the guard after the loop.
+                let mut nil_guards: Vec<(Expr, Symbol)> = Vec::new();
                 for (k, v) in entries.iter_mut() {
                     let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
                         continue;
                     };
+                    // A POLYMORPHIC belongs_to also constrains its type
+                    // column: `where(voter: user)` is `voter_id = u.id AND
+                    // voter_type = 'User'`. The type value is the SAME
+                    // `case value when Target then "Target"` switch the
+                    // polymorphic writer stores with (shared
+                    // `polymorphic_type_switch`), so read and write cannot
+                    // disagree: an STI subclass lands in its implementor's
+                    // arm. A literal nil is IS NULL on both columns, as the
+                    // plain `where(user: nil)` path. The value is read more
+                    // than once, so only an effect-free read qualifies. Where
+                    // the type half cannot be built (no resolved implementors
+                    // — framework models such as ActionText::RichText#record
+                    // — or a non-simple value) the key falls through to the
+                    // plain rename to `<name>_id` below: the type stays
+                    // unconstrained, exactly as before this lowering existed,
+                    // never a reference to a column that does not exist.
+                    if let Some((type_col, targets)) = ctx.assocs.polymorphic_belongs_to(model, key) {
+                        let simple = match &*v.node {
+                            ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef => true,
+                            ExprNode::Send { recv: None, args, block: None, .. } => args.is_empty(),
+                            _ => false,
+                        };
+                        if let Some(fk) = ctx.assocs.belongs_to_fk(model, key) {
+                            if matches!(&*v.node, ExprNode::Lit { value: Literal::Nil }) {
+                                // Rails: `where(voter: nil)` is `voter_id IS NULL`
+                                // alone — no type condition (verified against
+                                // Rails 8.1), so only the key is renamed.
+                                *k.node = ExprNode::Lit { value: Literal::Sym { value: fk.clone() } };
+                                continue;
+                            }
+                            if simple && !targets.is_empty() {
+                                let type_value = crate::lower::model_to_library::polymorphic_type_switch(
+                                    v.clone(),
+                                    targets,
+                                    |t| syn(span, ExprNode::Lit { value: Literal::Str { value: t.0.as_str().to_string() } }),
+                                    // A value that is none of the implementors can
+                                    // match no row (Rails compares to its
+                                    // `polymorphic_name`, which no stored row has).
+                                    // The writer stores a class name, or `""` for
+                                    // nil; this sentinel is neither — `<` and a
+                                    // space cannot appear in a constant name — so
+                                    // it can collide with nothing, and it is not
+                                    // nil, so it is not `IS NULL` either.
+                                    Some(syn(span, ExprNode::Lit {
+                                        value: Literal::Str { value: POLYMORPHIC_NO_TYPE.to_string() },
+                                    })),
+                                );
+                                type_conditions.push((
+                                    syn(span, ExprNode::Lit { value: Literal::Sym { value: type_col.clone() } }),
+                                    type_value,
+                                ));
+                                nil_guards.push((v.clone(), type_col.clone()));
+                                *k.node = ExprNode::Lit { value: Literal::Sym { value: fk.clone() } };
+                                continue;
+                            }
+                        }
+                    }
                     // Nested-hash value: the key names conditions on the
                     // JOINED table (`Comment.joins(:story).where(story:
                     // {merged_story_id: id})`), not on this model's
@@ -2912,7 +3195,7 @@ fn lower_relation_args(
                         );
                         let block = syn(
                             span,
-                            ExprNode::Lambda { rest_param: None,
+                            ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                                 params: vec![x],
                                 block_param: None,
                                 body: id_read,
@@ -2930,6 +3213,41 @@ fn lower_relation_args(
                             },
                         );
                     }
+                }
+                entries.extend(type_conditions);
+                // A value that is nil at run time must behave as the literal
+                // `nil` does (Rails: `voter_id IS NULL`, no type condition),
+                // not fall into the no-type sentinel. The type half cannot be
+                // omitted from a hash conditionally, so the whole condition
+                // hash is chosen by `v.nil?`; only one branch is evaluated, so
+                // the other entries are not read twice. One guarded
+                // polymorphic key per hash; a second is left on the switch.
+                if let [(guard_value, type_col)] = nil_guards.as_slice() {
+                    let without_type: Vec<(Expr, Expr)> = entries
+                        .iter()
+                        .filter(|(k, _)| {
+                            !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value == type_col)
+                        })
+                        .cloned()
+                        .collect();
+                    let guarded = syn(span, ExprNode::Send {
+                        recv: Some(guard_value.clone()),
+                        method: Symbol::from("nil?"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    });
+                    // Braced: a brace-less (keyword) hash is not an expression
+                    // inside an `if`.
+                    let mut with_type = std::mem::replace(&mut *a.node, ExprNode::Lit { value: Literal::Nil });
+                    if let ExprNode::Hash { kwargs, .. } = &mut with_type {
+                        *kwargs = false;
+                    }
+                    *a.node = ExprNode::If {
+                        cond: guarded,
+                        then_branch: syn(span, ExprNode::Hash { entries: without_type, kwargs: false }),
+                        else_branch: syn(span, with_type),
+                    };
                 }
             }
         }
@@ -3177,9 +3495,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 }
                 if ctx.scope_of(self_model, &method) {
                     let leading = ctx.scope_params(self_model, &method);
+                    let keeps = ctx.scope_keeps_relation(self_model, &method);
                     let new_args = thread_rel(args, var_expr(span, rel), leading, span);
                     *expr = put(span, Some(const_expr(span, self_model)), method, new_args, block, true);
-                    return Some(self_model.clone());
+                    return keeps.then(|| self_model.clone());
                 }
                 // One of the model's own class methods that takes the
                 // relation (`last_page_of(PAGE_SIZE)` in campfire's
@@ -3222,15 +3541,23 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     return Some(self_model);
                 }
                 if ctx.scope_of(&self_model, &method) {
+                    let keeps = ctx.scope_keeps_relation(&self_model, &method);
                     *expr =
                         put(span, Some(const_expr(span, &self_model)), method, args, block, true);
-                    return Some(self_model);
+                    return keeps.then_some(self_model);
                 }
                 if is_relation_chain_method(method.as_str()) {
                     let _ = lower_relation_args(&self_model, &method, &mut args, ctx);
                     let seed = relation_new(span, &self_model);
                     *expr = put(span, Some(seed), method, args, block, parenthesized);
                     return Some(self_model);
+                }
+                // A bare `first(n)` / `last(n)` there: the same counted
+                // terminal as `Model.first(n)` below.
+                if let Some(counted) = counted_terminal(&method, &args, block.as_ref()) {
+                    let seed = relation_new(span, &self_model);
+                    *expr = put(span, Some(seed), counted, args, block, parenthesized);
+                    return None;
                 }
             }
             *expr = put(span, None, method, args, block, parenthesized);
@@ -3293,11 +3620,15 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             parenthesized: true,
                         },
                     );
+                    // `_insert_row`: Rails' bulk insert runs neither
+                    // validations nor callbacks (it is one INSERT), and
+                    // neither does this. Timestamps fill, as Rails'
+                    // `record_timestamps` default does.
                     let save = syn(
                         span,
                         ExprNode::Send {
                             recv: Some(build),
-                            method: Symbol::from("save_after_validation"),
+                            method: Symbol::from("_insert_row"),
                             args: vec![],
                             block: None,
                             parenthesized: true,
@@ -3313,7 +3644,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             args: vec![],
                             block: Some(syn(
                                 span,
-                                ExprNode::Lambda { rest_param: None,
+                                ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                                     params: vec![attrs],
                                     block_param: None,
                                     body: save,
@@ -3325,9 +3656,137 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     );
                     return None;
                 }
+                // `<Model>.insert_all!(rows, returning: %w[id])` — the
+                // raising twin: no conflict guard (a duplicate raises,
+                // as `insert_all!` does), and its value is Rails'
+                // `ActiveRecord::Result` of the RETURNING columns, one
+                // row per insert (the primary key when `returning:` is
+                // left out, SQLite's default). campfire's search test
+                // reads the new ids with `.rows.flatten`.
+                //
+                //   ActiveRecord::Result.new(rows.map { |__attrs|
+                //     __rec = Message.new(__attrs)
+                //     __rec._insert_row
+                //     { "id" => __rec.id } })
+                //
+                // Only a literal column list (Strings or Symbols) lowers;
+                // anything else declines.
+                if method.as_str() == "insert_all!" && !args.is_empty() && args.len() <= 2 && block.is_none() {
+                    let returning: Option<Vec<String>> = match args.get(1).map(|a| &*a.node) {
+                        None => Some(vec!["id".to_string()]),
+                        Some(ExprNode::Hash { entries, .. }) if entries.len() == 1 => {
+                            let (k, v) = &entries[0];
+                            let key_ok = matches!(&*k.node,
+                                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "returning");
+                            match (&*v.node, key_ok) {
+                                (ExprNode::Array { elements, .. }, true) => elements
+                                    .iter()
+                                    .map(|e| match &*e.node {
+                                        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+                                        _ => None,
+                                    })
+                                    .collect(),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(columns) = returning {
+                        let attrs = Symbol::from("__attrs");
+                        let rec = Symbol::from("__rec");
+                        let build = syn(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(const_expr(span, &m)),
+                                method: Symbol::from("new"),
+                                args: vec![var_expr(span, &attrs)],
+                                block: None,
+                                parenthesized: true,
+                            },
+                        );
+                        let bind = syn(
+                            span,
+                            ExprNode::Assign {
+                                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: rec.clone() },
+                                value: build,
+                            },
+                        );
+                        let insert = syn(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(var_expr(span, &rec)),
+                                method: Symbol::from("_insert_row"),
+                                args: vec![],
+                                block: None,
+                                parenthesized: true,
+                            },
+                        );
+                        let row = syn(
+                            span,
+                            ExprNode::Hash {
+                                entries: columns
+                                    .iter()
+                                    .map(|c| {
+                                        (
+                                            syn(span, ExprNode::Lit { value: Literal::Str { value: c.clone() } }),
+                                            syn(
+                                                span,
+                                                ExprNode::Send {
+                                                    recv: Some(var_expr(span, &rec)),
+                                                    method: Symbol::from(c.as_str()),
+                                                    args: vec![],
+                                                    block: None,
+                                                    parenthesized: false,
+                                                },
+                                            ),
+                                        )
+                                    })
+                                    .collect(),
+                                kwargs: false,
+                            },
+                        );
+                        let mut args = args;
+                        let rows = syn(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(args.remove(0)),
+                                method: Symbol::from("map"),
+                                args: vec![],
+                                block: Some(syn(
+                                    span,
+                                    ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
+                                        params: vec![attrs],
+                                        block_param: None,
+                                        body: syn(span, ExprNode::Seq { exprs: vec![bind, insert, row] }),
+                                        block_style: BlockStyle::Brace,
+                                    },
+                                )),
+                                parenthesized: false,
+                            },
+                        );
+                        *expr = syn(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(syn(
+                                    span,
+                                    ExprNode::Const {
+                                        path: vec![Symbol::from("ActiveRecord"), Symbol::from("Result")],
+                                    },
+                                )),
+                                method: Symbol::from("new"),
+                                args: vec![rows],
+                                block: None,
+                                parenthesized: true,
+                            },
+                        );
+                        return None;
+                    }
+                }
                 if ctx.scope_of(&m, &method) {
+                    let keeps = ctx.scope_keeps_relation(&m, &method);
                     *expr = put(span, Some(r), method, args, block, parenthesized);
-                    return Some(m);
+                    return keeps.then_some(m);
                 }
                 if is_relation_chain_method(method.as_str())
                     || method.as_str() == "all"
@@ -3341,6 +3800,16 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         *expr = put(span, Some(seed), method, args, block, parenthesized);
                     }
                     return Some(m);
+                }
+                // `Developer.first(2)` / `.last(2)`: the counted forms are
+                // Relation terminals (`first_n` / `last_n`). The runtime's
+                // class-side `first` takes no count, and Rails' class
+                // method delegates to `all`, so the count rides a fresh
+                // relation, as the chain methods above do. Answers an
+                // Array, not a relation: no model to thread.
+                if let Some(counted) = counted_terminal(&method, &args, block.as_ref()) {
+                    *expr = put(span, Some(relation_new(span, &m)), counted, args, block, parenthesized);
+                    return None;
                 }
                 let returns = ctx.user_returns.class.get(&(m.clone(), method.clone())).cloned();
                 *expr = put(span, Some(r), method, args, block, parenthesized);
@@ -3441,7 +3910,8 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             }
                             ctx.assocs.has_many_fk(&self_model, aname).cloned().map(
                                 |(target, fk)| {
-                                    (target, fk, syn(span, ExprNode::Ivar { name: Symbol::from("id") }))
+                                    let key = ctx.assocs.has_many_owner_key(Some(&self_model), aname);
+                                    (target, fk, syn(span, ExprNode::Ivar { name: key }))
                                 },
                             )
                         }),
@@ -3582,6 +4052,18 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         // the foreign key as `scope_attributes` too.
                         let assoc_cm = ctx.assoc_class_method_params(&target, &method);
                         if is_scope || is_chain || is_term || assoc_cm.is_some() {
+                            // An owner key other than `id` can be NULL, and
+                            // `where(fk: nil)` would match the child rows
+                            // whose fk is NULL. Rails never matches a nil
+                            // owner key, so the seed excludes them.
+                            let keyed_guard = !matches!(
+                                &*owner_id.node,
+                                ExprNode::Ivar { name } if name.as_str() == "id"
+                            ) && !matches!(
+                                &*owner_id.node,
+                                ExprNode::Send { method, .. } if method.as_str() == "id"
+                            );
+                            let guard_sql = format!("{} IS NOT NULL", fk.as_str());
                             let fk_hash = syn(
                                 span,
                                 ExprNode::Hash {
@@ -3607,6 +4089,23 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                                     parenthesized: true,
                                 },
                             );
+                            if keyed_guard {
+                                seed = syn(
+                                    span,
+                                    ExprNode::Send {
+                                        recv: Some(seed),
+                                        method: Symbol::from("where"),
+                                        args: vec![syn(
+                                            span,
+                                            ExprNode::Lit {
+                                                value: Literal::Str { value: guard_sql },
+                                            },
+                                        )],
+                                        block: None,
+                                        parenthesized: true,
+                                    },
+                                );
+                            }
                             // The seed REPLACES `<owner>.<assoc>`, and with
                             // it the reader's eager-load cache: a scope
                             // reached through a preloaded association
@@ -3665,6 +4164,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             }
                             if is_scope {
                                 let leading = ctx.scope_params(&target, &method);
+                                let keeps = ctx.scope_keeps_relation(&target, &method);
                                 let new_args = thread_rel(args, seed, leading, span);
                                 *expr = put(
                                     span,
@@ -3674,7 +4174,54 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                                     block,
                                     true,
                                 );
-                                return Some(target);
+                                return keeps.then_some(target);
+                            }
+                            // `find_sole_by` on a seeded association —
+                            // `gadget.widgets.find_sole_by(created_at:
+                            // a..b)` — is routed through `where(...).sole`
+                            // rather than kept on its own spelling, so its
+                            // single condition hash takes the ordinary
+                            // `where` path: `lower_relation_args` only
+                            // converts a Range VALUE ("where(connected_at:
+                            // TTL.ago..)", above) for "where"/"not"/
+                            // "find_by"/"find_by!", so a Range reaching it
+                            // as "find_sole_by"'s own argument passed
+                            // through unconverted and compiled to `col =
+                            // <the range object>` — matches nothing, same
+                            // failure the comment above describes. Only
+                            // the single-hash shape `find_sole_by` is
+                            // actually called with is rewritten; anything
+                            // else falls through to the general lowering
+                            // below unchanged.
+                            if method.as_str() == "find_sole_by" && args.len() == 1 {
+                                let mut where_args = args;
+                                let _ = lower_relation_args(
+                                    &target,
+                                    &Symbol::from("where"),
+                                    &mut where_args,
+                                    ctx,
+                                );
+                                let where_call = syn(
+                                    span,
+                                    ExprNode::Send {
+                                        recv: Some(seed),
+                                        method: Symbol::from("where"),
+                                        args: where_args,
+                                        block: None,
+                                        parenthesized: true,
+                                    },
+                                );
+                                *expr = syn(
+                                    span,
+                                    ExprNode::Send {
+                                        recv: Some(where_call),
+                                        method: Symbol::from("sole"),
+                                        args: vec![],
+                                        block: None,
+                                        parenthesized: false,
+                                    },
+                                );
+                                return None;
                             }
                             // Chain method or terminal: stays on the seeded
                             // receiver. Chains keep the model; terminals end it.
@@ -3791,9 +4338,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 }
                 if ctx.scope_of(&mr, &method) {
                     let leading = ctx.scope_params(&mr, &method);
+                    let keeps = ctx.scope_keeps_relation(&mr, &method);
                     let new_args = thread_rel(args, r, leading, span);
                     *expr = put(span, Some(const_expr(span, &mr)), method, new_args, block, true);
-                    return Some(mr);
+                    return keeps.then_some(mr);
                 }
                 // A registered association-scoped class method takes the
                 // relation the same way a scope does — the relation is
@@ -3837,8 +4385,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             // `Array#first(n)` (lobsters' `split.first(words * 2)`),
             // which is the hazard `counted_terminal`'s own note names.
             if let Some(counted) = counted_terminal(&method, &args, block.as_ref()) {
+                // A scope proved to answer something else (a `Page`)
+                // names no relation, wherever it sits.
                 let names_a_scope = matches!(&*r.node, ExprNode::Send { method: rname, .. }
-                    if ctx.sole_scope_owner(rname).is_some());
+                    if ctx.sole_scope_owner(rname).is_some_and(|owner| ctx.scope_keeps_relation(owner, rname)));
                 if names_a_scope {
                     *expr = put(span, Some(r), counted, args, block, parenthesized);
                     return None;
@@ -4082,6 +4632,76 @@ mod tests {
         assert!(is_rel(&out[0]));
     }
 
+    /// A trailing kwargs-Hash arg's entries, panicking with a readable
+    /// message if `e` isn't one.
+    fn kwargs_entries(e: &Expr) -> &[(Expr, Expr)] {
+        match &*e.node {
+            ExprNode::Hash { entries, kwargs: true } => entries,
+            other => panic!("not a kwargs Hash: {other:?}"),
+        }
+    }
+
+    /// `(key, value)` names `__rel` and the value is the threaded marker.
+    fn is_rel_kwarg(entry: &(Expr, Expr)) -> bool {
+        matches!(&*entry.0.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "__rel")
+            && is_rel(&entry.1)
+    }
+
+    #[test]
+    fn thread_rel_rest_callee_zero_args_threads_as_a_keyword_with_no_nil_pad() {
+        // `def those_tagged(*tags)` called bare (`Widget.active.those_tagged`)
+        // — the LATENT bug: the old pad loop didn't exclude a rest param
+        // from `filter(|p| !p.keyword)`, so it padded a positional `nil`
+        // into `*tags` before appending the relation. Fixed shape: no
+        // padding at all, and the relation threads as a keyword —
+        // `Widget.those_tagged(__rel: Widget.active)`, not
+        // `Widget.those_tagged(nil, __rel: Widget.active)` and not
+        // `Widget.those_tagged(__rel: Widget.active)` as a POSITIONAL
+        // (which would be a syntax error on the def side).
+        let leading = vec![Param::rest(Symbol::from("tags"))];
+        let out = thread_rel(vec![], rel_marker(), Some(&leading), span());
+        assert_eq!(out.len(), 1, "no nil padding, no separate positional: {out:?}");
+        let entries = kwargs_entries(&out[0]);
+        assert_eq!(entries.len(), 1, "just __rel:, nothing else: {entries:?}");
+        assert!(is_rel_kwarg(&entries[0]), "a single __rel: kwarg: {entries:?}");
+    }
+
+    #[test]
+    fn thread_rel_rest_callee_with_supplied_args_appends_the_keyword() {
+        // `Widget.active.those_tagged(:a)` → the splat-fed positional
+        // stays exactly as the caller wrote it; `__rel:` is appended.
+        let leading = vec![Param::rest(Symbol::from("tags"))];
+        let a = Expr::new(span(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from("a") } });
+        let out = thread_rel(vec![a], rel_marker(), Some(&leading), span());
+        assert_eq!(out.len(), 2);
+        assert!(matches!(&*out[0].node, ExprNode::Lit { value: Literal::Sym { .. } }));
+        let entries = kwargs_entries(&out[1]);
+        assert_eq!(entries.len(), 1);
+        assert!(is_rel_kwarg(&entries[0]));
+    }
+
+    #[test]
+    fn thread_rel_rest_callee_merges_into_an_existing_kwargs_tail() {
+        // `def those_tagged(*tags, limit: 10)` called as
+        // `those_tagged(:a, limit: 5)` — the existing `limit:` kwarg and
+        // the new `__rel:` kwarg land in ONE trailing Hash, not two.
+        let leading = vec![
+            Param::rest(Symbol::from("tags")),
+            Param::keyword(Symbol::from("limit"), Some(int_lit(10))),
+        ];
+        let a = Expr::new(span(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from("a") } });
+        let limit_key = Expr::new(span(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from("limit") } });
+        let kw = Expr::new(
+            span(),
+            ExprNode::Hash { entries: vec![(limit_key, int_lit(5))], kwargs: true },
+        );
+        let out = thread_rel(vec![a, kw], rel_marker(), Some(&leading), span());
+        assert_eq!(out.len(), 2, "one positional, ONE merged kwargs hash: {out:?}");
+        let entries = kwargs_entries(&out[1]);
+        assert_eq!(entries.len(), 2, "limit: AND __rel: in the same hash: {entries:?}");
+        assert!(entries.iter().any(is_rel_kwarg), "entries {entries:?}");
+    }
+
     // ---- lower_relation_args ----------------------------------------
 
     fn story() -> ClassId {
@@ -4210,6 +4830,88 @@ mod tests {
     /// off the story and then users off the HIDDEN STORY. The second hop
     /// is resolved against the first's target class, which is the fact
     /// `assoc_target` exists to answer.
+
+    fn polymorphic_fixture(targets: Vec<ClassId>) -> AssocRegistry {
+        let mut reg = AssocRegistry::default();
+        let owner = ClassId(Symbol::from("ActionText::RichText"));
+        reg.belongs_to_fk.insert((owner.clone(), Symbol::from("record")), Symbol::from("record_id"));
+        reg.polymorphic_belongs_to
+            .insert((owner, Symbol::from("record")), (Symbol::from("record_type"), targets));
+        reg
+    }
+
+    fn where_record(value: Expr, reg: &AssocRegistry) -> Vec<(String, String)> {
+        let (scopes, models) = (ScopeRegistry::new(), HashSet::new());
+        let ctx = ctx_with(&scopes, &models, reg);
+        let mut args = vec![hash_arg(vec![(sym_lit("record"), value)])];
+        lower_relation_args(&ClassId(Symbol::from("ActionText::RichText")), &Symbol::from("where"), &mut args, &ctx);
+        let hash = match &*args[0].node {
+            ExprNode::If { else_branch, .. } => else_branch,
+            _ => &args[0],
+        };
+        let ExprNode::Hash { entries, .. } = &*hash.node else { panic!("hash") };
+        entries
+            .iter()
+            .map(|(k, v)| {
+                let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else { panic!("key") };
+                (value.as_str().to_string(), format!("{:?}", v.node).chars().take(12).collect())
+            })
+            .collect()
+    }
+
+    fn var(name: &str) -> Expr {
+        Expr::new(span(), ExprNode::Var { id: VarId(0), name: Symbol::from(name) })
+    }
+
+    #[test]
+    fn polymorphic_without_resolved_targets_renames_to_id_only() {
+        // ActionText::RichText#record / ActiveStorage::Attachment#record:
+        // framework polymorphics whose implementors are not resolved keep
+        // the pre-existing `record_id` rename, never an unknown `record`.
+        let keys: Vec<String> =
+            where_record(var("message"), &polymorphic_fixture(vec![])).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["record_id"]);
+    }
+
+    #[test]
+    fn polymorphic_with_targets_adds_the_type_switch() {
+        let reg = polymorphic_fixture(vec![ClassId(Symbol::from("Message"))]);
+        let keys: Vec<String> = where_record(var("message"), &reg).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["record_id", "record_type"]);
+        // The type switch has an otherwise-arm no stored row can match, so a
+        // value that is none of the implementors finds nothing (not `IS NULL`).
+        let (scopes, models) = (ScopeRegistry::new(), HashSet::new());
+        let ctx = ctx_with(&scopes, &models, &reg);
+        let mut args = vec![hash_arg(vec![(sym_lit("record"), var("message"))])];
+        lower_relation_args(&ClassId(Symbol::from("ActionText::RichText")), &Symbol::from("where"), &mut args, &ctx);
+        // A possibly-nil variable chooses the hash by `v.nil?`: the nil branch
+        // is `record_id` alone (Rails), the other carries the type switch.
+        let ExprNode::If { then_branch, else_branch, .. } = &*args[0].node else { panic!("nil guard") };
+        let ExprNode::Hash { entries: nil_entries, .. } = &*then_branch.node else { panic!("hash") };
+        assert_eq!(nil_entries.len(), 1);
+        let ExprNode::Hash { entries, .. } = &*else_branch.node else { panic!("hash") };
+        let ExprNode::Case { arms, .. } = &*entries[1].1.node else { panic!("case") };
+        assert_eq!(arms.len(), 2);
+        assert!(matches!(arms[1].pattern, crate::expr::Pattern::Wildcard));
+        assert!(matches!(
+            &*arms[1].body.node,
+            ExprNode::Lit { value: Literal::Str { value } } if value == POLYMORPHIC_NO_TYPE
+        ));
+        // A non-simple value cannot be read twice: id-only, as before.
+        let call = Expr::new(
+            span(),
+            ExprNode::Send {
+                recv: Some(var("x")),
+                method: Symbol::from("message"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let keys: Vec<String> = where_record(call, &reg).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["record_id"]);
+    }
+
     #[test]
     fn joins_nested_hash_expands_both_hops() {
         let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
@@ -4314,7 +5016,7 @@ mod tests {
         let mut comments_var =
             Expr::new(span(), ExprNode::Var { id: VarId(1), name: Symbol::from("comments") });
         comments_var.ty = Some(crate::ty::Ty::Array {
-            elem: Box::new(crate::ty::Ty::Untyped),
+            elem: std::sync::Arc::new(crate::ty::Ty::Untyped),
         });
         let mut args = vec![Expr::new(
             span(),
@@ -4817,6 +5519,29 @@ mod tests {
                    INNER JOIN stories ON stories.id = taggings.story_id"
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn registry_belongs_to_join_uses_declared_primary_key() {
+        // `belongs_to :product, foreign_key: "product_uuid",
+        // primary_key: "uuid"` — Rails joins on `products.uuid`; the
+        // `products.id` join compared a PG uuid with a varchar fk.
+        let price = ingest(
+            "class Price < ApplicationRecord\n  belongs_to :product, foreign_key: \"product_uuid\", primary_key: \"uuid\"\nend\n",
+            "app/models/price.rb",
+        );
+        let product = ingest("class Product < ApplicationRecord\nend\n", "app/models/product.rb");
+        let reg = build_assoc_registry(&[price, product]);
+        let price = ClassId(Symbol::from("Price"));
+        let product = Symbol::from("product");
+        assert_eq!(
+            reg.join_tail(&price, &product),
+            Some(&"products ON products.uuid = prices.product_uuid".to_string())
+        );
+        assert_eq!(
+            reg.aliased_join_tail(&price, &product),
+            Some(&"products product ON product.uuid = prices.product_uuid".to_string())
         );
     }
 

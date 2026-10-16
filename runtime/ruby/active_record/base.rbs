@@ -40,6 +40,8 @@ module ActiveRecord
     def changes: () -> Integer
     %a{abstract}
     def escape_value: (untyped value) -> String
+    %a{abstract}
+    def quote_column_name: (String | Symbol name) -> String
   end
 
   # The global adapter slot. Set once during boot; read everywhere
@@ -62,11 +64,43 @@ module ActiveRecord
   # search) — the `includes(:assoc)` distribute's run lookup; see `base.rb`.
   def self.lower_bound: (Array[Integer] sorted, Integer value) -> Integer
 
+  module Reflection
+    class AssociationReflection
+      def initialize: (Symbol name, untyped counter_cache_column) -> void
+      def name: () -> Symbol
+      def counter_cache_column: () -> untyped
+      def klass: () -> untyped
+      def macro: () -> untyped
+    end
+  end
+
   # Base class for all models. Spinel-friendly shape: zero
   # metaprogramming. Per-model subclasses define their own column
   # accessors, attributes hash, and `[]/[]=` indexers; Base supplies
   # the shared CRUD + lifecycle protocol.
+  class ErrorDetail
+    @attribute: String
+    @kind: String
+    @message: String
+    @full_message: String
+    @symbolic: bool
+    @optionless: bool
+    def attribute: () -> String
+    def kind: () -> String
+    def message: () -> String
+    def full_message: () -> String
+    def symbolic: () -> bool
+    def optionless: () -> bool
+    def initialize: (String attribute, String kind, String message, String full_message, bool symbolic, bool optionless) -> void
+  end
+
   class Base
+    def self.sanitize_sql_like: (String value, ?String escape_character) -> String
+    def self.like_escapes_doubled: (String value, String escape_character) -> String
+    def self.like_wildcards_marked: (String source, String escape_character) -> String
+    def self.like_replacement: (String source, Integer index, String escape_character) -> String
+    def self.like_group_reference: (String escape_character, Integer start) -> void
+
     EMPTY_ATTRS: Hash[Symbol, untyped]
     HYDRATE_ATTRS: Hash[Symbol, untyped]
 
@@ -100,6 +134,10 @@ module ActiveRecord
     # it as a pointer and the message is swept while the array holds it.
     @errors: Array[String]
     def errors: () -> Array[String]
+    @error_details: Array[ErrorDetail]
+    def error_details: () -> Array[ErrorDetail]
+    def error_messages_for: (String attribute) -> Array[String]
+    def errors_json: () -> Hash[String, Array[String]]
 
     def initialize: (?Hash[Symbol, untyped] attrs) -> void
 
@@ -111,11 +149,18 @@ module ActiveRecord
     def self.table_name: () -> String
     def self._table_sql: () -> String
     def self.primary_key: () -> String
+    def self._association_names: () -> Array[Symbol]
+    def self.reflect_on_association: (Symbol | String name) -> ActiveRecord::Reflection::AssociationReflection?
+    def self.reflect_on_association_at: (String needle, Integer i) -> ActiveRecord::Reflection::AssociationReflection?
     def self._cast_primary_key: (Integer | String id) -> (Integer | String | nil)
     def self._string_primary_key: () -> bool
+    def self._friendly_slug_column: () -> String
+    def self._friendly_history: () -> bool
     def self.schema_columns: () -> Array[Symbol]
     def self.schema_time_columns: () -> Array[Symbol]
     def self.schema_date_columns: () -> Array[Symbol]
+    def self.schema_boolean_columns: () -> Array[Symbol]
+    def self.schema_decimal_columns: () -> Array[Symbol]
     def self.instantiate: (Hash[String, untyped] _row) -> Base
 
     # Eager-load hook consumed by `Relation#to_a`; the Ruby emit path
@@ -137,6 +182,8 @@ module ActiveRecord
     def saved_change_to_attribute: (Symbol name) -> untyped
     def changes_to_save: () -> Hash[String, untyped]
     def attribute_changed?: (String name) -> bool
+    def changed?: () -> bool
+    def has_changes_to_save?: () -> bool
     def attribute_was: (String name) -> untyped
     def id_previously_changed?: () -> bool
     def previously_new_record?: () -> bool
@@ -202,6 +249,7 @@ module ActiveRecord
     def self._hydrate_all: (String sql) -> Array[Base]
     def _adapter_insert: () -> Integer
     def _adapter_update: () -> void
+    def _adapter_touch: () -> void
     def _adapter_delete: () -> void
     def self._adapter_count: () -> Integer
     def self._adapter_any?: () -> bool
@@ -215,7 +263,7 @@ module ActiveRecord
     def self.exists?: (Integer id) -> bool
     def self.none?: () -> bool
     def self.any?: () -> bool
-    def self.delete_all: () -> nil
+    def self.delete_all: () -> Integer
     def self.destroy_all: () -> Array[Base]
     def self.create: (Hash[Symbol, untyped] attrs) -> Base
     def self.create!: (Hash[Symbol, untyped] attrs) -> Base
@@ -226,12 +274,21 @@ module ActiveRecord
     # self either way (idempotent on already-destroyed records).
     def save: () -> bool
     def save_after_validation: () -> bool
+    def _insert_row: () -> bool
     def save!: () -> Base
     def destroy: () -> Base
     def destroy!: () -> Base
-    def reload: () -> Base
+    def reload: (?untyped options) -> Base
+    # `lock!` reloads (see the note on the body); `with_lock` (connection.rbs) runs the
+    # block in a transaction and answers its value, same gradual
+    # `untyped` escape as `self.transaction` in connection.rbs. The
+    # `lock` argument is Rails' own union — `true` for the default
+    # clause or a String for a database-specific one (`"FOR UPDATE
+    # NOWAIT"`); both are accepted and ignored under SQLite.
+    def lock!: (?(bool | String)? lock) -> Base
     # `touch` is no-arg on purpose; see the note on the body.
     def touch: () -> bool
+    def touch_written: () -> bool
 
     # Lifecycle hooks — no-op defaults. Subclasses override.
     def after_initialize: () -> void

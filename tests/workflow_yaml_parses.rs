@@ -187,6 +187,13 @@ fn campfire_docker_recipe_avoids_a_frontend_pull_and_ships_executable_boot() {
             & 0o777,
         0o755
     );
+    // Published `-p` only reaches non-loopback; #865's development default
+    // is localhost, so the image must pin BINDING (campfire-smoke-docker
+    // went red on every tip after 4f9c0410 until this landed).
+    assert!(
+        dockerfile.contains("ENV BINDING=0.0.0.0\n"),
+        "Dockerfile must publish on 0.0.0.0:\n{dockerfile}"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -264,6 +271,12 @@ fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
         "HTTP checks must always run"
     );
     assert!(
+        script.contains("seq 1 90")
+            && script.contains("did not become ready")
+            && script.contains("http_code"),
+        "readiness must wait longer than 30s and retry status curls (curl exit 56 flake)"
+    );
+    assert!(
         !script.contains("sccache") && !script.contains("CCACHE"),
         "do not hide the pack compile behind a compiler cache"
     );
@@ -283,6 +296,93 @@ fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
             !uses.contains("setup-buildx") && !uses.contains("build-push-action"),
             "local BuildKit cache under actions/cache; no build-push-action GHA backend"
         );
+    }
+}
+
+#[test]
+fn host_libvips_dev_jobs_share_cached_apt_deb_install() {
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let action: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+        &fs::read_to_string(".github/actions/ci-apt-install-cached/action.yml").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(action["runs"]["using"].as_str(), Some("composite"));
+    let action_steps = action["runs"]["steps"].as_sequence().unwrap();
+    let restore = action_steps
+        .iter()
+        .find(|step| step["uses"].as_str() == Some("actions/cache/restore@v6"))
+        .expect("restore apt .deb archives");
+    assert_eq!(restore["continue-on-error"].as_bool(), Some(true));
+    let restore_keys = match &restore["with"]["restore-keys"] {
+        serde_yaml_ng::Value::String(s) => s.clone(),
+        serde_yaml_ng::Value::Sequence(items) => items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => panic!("restore-keys shape: {other:?}"),
+    };
+    assert!(
+        restore_keys.contains("steps.key.outputs.prefix"),
+        "{restore_keys}"
+    );
+    let save = action_steps
+        .iter()
+        .find(|step| step["uses"].as_str() == Some("actions/cache/save@v6"))
+        .expect("save apt .deb archives");
+    assert_eq!(save["continue-on-error"].as_bool(), Some(true));
+    assert_eq!(
+        save["if"].as_str(),
+        Some(
+            "steps.cache.outputs.cache-hit != 'true' && steps.install.outputs.harvested == 'true'"
+        )
+    );
+    let install = action_steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Install apt packages"))
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    assert!(install.contains("ci-apt-archives") && install.contains("ci-apt-install"));
+
+    let shared = "libvips-dev libsqlite3-dev libjemalloc-dev sqlite3";
+    for (job_name, step_name) in [
+        (
+            "campfire-spinel-build",
+            "System libvips + libsqlite3-dev + libjemalloc-dev",
+        ),
+        (
+            "campfire-spinel-compare",
+            "System libvips + libsqlite3-dev + libjemalloc-dev",
+        ),
+        (
+            "campfire-spinel-db",
+            "System libvips + libsqlite3-dev + libjemalloc-dev",
+        ),
+        (
+            "campfire-smoke",
+            "Install libsqlite3-dev + libjemalloc-dev + libvips-dev",
+        ),
+    ] {
+        let steps = workflow["jobs"][job_name]["steps"].as_sequence().unwrap();
+        let step = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some(step_name))
+            .unwrap_or_else(|| panic!("{job_name}: missing {step_name}"));
+        assert_eq!(
+            step["uses"].as_str(),
+            Some("./.github/actions/ci-apt-install-cached"),
+            "{job_name}"
+        );
+        assert_eq!(step["timeout-minutes"].as_u64(), Some(20), "{job_name}");
+        assert_eq!(
+            step["with"]["packages"].as_str(),
+            Some(shared),
+            "{job_name}: shared package set for one cache key"
+        );
+        // Still a .deb cache around ci-apt-install — never a dpkg-state restore.
+        assert!(step.get("run").is_none(), "{job_name}");
     }
 }
 
@@ -451,6 +551,17 @@ fn pr_archives_remain_tested_without_pages_publication_work() {
             Some(format!("steps.{id}.outputs.{output} == 'present'").as_str())
         );
     }
+    let build_archives = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Build selected archives or the complete site"))
+        .unwrap()["run"]
+        .as_str()
+        .unwrap();
+    assert!(
+        build_archives.contains(r#"[ -n "$TARGETS" ]"#)
+            && build_archives.contains("No browse archives selected"),
+        "empty plan archives must not invoke --archives ''"
+    );
     let archives = steps
         .iter()
         .find(|step| step["name"].as_str() == Some("Upload browse archives"))
@@ -695,7 +806,10 @@ echo fake-ok
     let helper = repo.join("scripts/lib/roundhouse-bin.sh");
 
     // Direct helper: ROUNDHOUSE_BIN is consumed; cargo is not.
-    // Drive via a small script file (no bash -c interpolation).
+    // Drive via a small script file (no bash -c interpolation), run as
+    // `bash <file>` rather than exec'd: a fork on another test thread can
+    // still hold the descriptor that just wrote the file, and exec of it
+    // then fails with ETXTBSY ("Text file busy").
     let probe = root.join("probe-helper.sh");
     let probe_app = root.join("probe-app");
     let probe_out = root.join("probe-out");
@@ -705,11 +819,9 @@ echo fake-ok
         "#!/bin/bash\nset -euo pipefail\n. \"$HELPER\"\nroundhouse_run --target ruby \"$PROBE_APP\" -o \"$PROBE_OUT\"\n",
     )
     .unwrap();
-    let mut perms = fs::metadata(&probe).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&probe, perms).unwrap();
     let _ = fs::remove_file(&marker);
-    let output = Command::new(&probe)
+    let output = Command::new("bash")
+        .arg(&probe)
         .env("HELPER", &helper)
         .env("REPO_ROOT", &repo)
         .env("ROUNDHOUSE_BIN", &fake)
@@ -751,10 +863,8 @@ echo fake-ok
         "#!/bin/bash\nset -euo pipefail\n. \"$HELPER\"\nroundhouse_run --version\n",
     )
     .unwrap();
-    let mut perms = fs::metadata(&fail_probe).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&fail_probe, perms).unwrap();
-    let failed = Command::new(&fail_probe)
+    let failed = Command::new("bash")
+        .arg(&fail_probe)
         .env("HELPER", &helper)
         .env("REPO_ROOT", &repo)
         .env("ROUNDHOUSE_BIN", &missing)
@@ -890,8 +1000,11 @@ fn campfire_failure_capture_keeps_the_original_exit_and_actual_c() {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("campfire-ci {}-{unique}", std::process::id()));
+        // Canonical: macOS's temp dir is a symlink, and the script reports the real path.
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("campfire-ci {}-{unique}", std::process::id()));
         let source = root.join("build/campfire-compare-spinel");
         fs::create_dir_all(source.join("app/models")).unwrap();
         fs::create_dir_all(source.join("sig")).unwrap();
@@ -1122,11 +1235,6 @@ fn pr_reuse_never_masks_validation_failures_or_changes_the_job_graph() {
                 assert_eq!(job["needs"][1].as_str(), Some("plan"));
                 &["build", "check"]
             }
-            "writebook-inventory" => {
-                assert!(job.get("continue-on-error").is_none());
-                assert_eq!(job["needs"].as_str(), Some("plan"));
-                &["inventory", "report"]
-            }
             "browser-smoke-typescript" => {
                 assert!(job.get("continue-on-error").is_none());
                 assert_eq!(job["needs"][0].as_str(), Some("generate-fixture"));
@@ -1183,8 +1291,7 @@ fn pr_reuse_never_masks_validation_failures_or_changes_the_job_graph() {
             "browser-smoke-typescript",
             "smoke",
             "smoke-extra",
-            "store-check",
-            "writebook-inventory"
+            "store-check"
         ]
     );
     assert!(ci["on"].get("pull_request_target").is_none());
@@ -1301,7 +1408,7 @@ fn pr_reuse_receipts_are_checked_against_adversarial_inputs() {
 fn reused_checks_keep_cargo_dependencies_locked_and_upload_only_execution_receipts() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    for (name, expected_cargo_commands) in [("store-check", 1), ("writebook-inventory", 1)] {
+    for (name, expected_cargo_commands) in [("store-check", 1)] {
         let steps = ci["jobs"][name]["steps"].as_sequence().unwrap();
         let commands: Vec<_> = steps
             .iter()

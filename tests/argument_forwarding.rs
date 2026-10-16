@@ -387,6 +387,68 @@ fn forwarding_declaration_and_call_round_trip_as_a_contract() {
 }
 
 #[test]
+fn mixed_anonymous_keyword_pairs_round_trip_as_an_ordered_group() {
+    use roundhouse::diagnostic::DiagnosticKind;
+    use roundhouse::expr::ExprNode;
+
+    let source = "class Probe\n  def relay(path, **)\n    target(kind: :get, path: path, **)\n  end\n  def target(kind:, path:, **)\n    [kind, path]\n  end\nend\n";
+    let group_names = |app: &roundhouse::App| {
+        let class = app
+            .library_classes
+            .iter()
+            .find(|c| c.name.0.as_str() == "Probe")
+            .expect("Probe class");
+        let relay = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == "relay")
+            .expect("relay method");
+        let ExprNode::Send { args, .. } = &*relay.body.node else {
+            panic!("expected forwarded call, got {:?}", relay.body.node);
+        };
+        assert_eq!(args.len(), 1, "the keyword group is one call argument");
+        let ExprNode::ForwardKeywordsWithPairs { entries } = &*args[0].node else {
+            panic!("expected ordered anonymous keyword group, got {:?}", args[0].node);
+        };
+        entries
+            .iter()
+            .map(|(key, _)| match &*key.node {
+                ExprNode::Lit { value: roundhouse::expr::Literal::Sym { value } } => value.as_str().to_string(),
+                other => panic!("expected static symbol key, got {other:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let emit = |app: &roundhouse::App| {
+        let class = app
+            .library_classes
+            .iter()
+            .find(|c| c.name.0.as_str() == "Probe")
+            .expect("Probe class");
+        format!(
+            "class Probe\n{}end\n",
+            class.methods.iter().map(roundhouse::emit::ruby::emit_method).collect::<String>()
+        )
+    };
+    let app = analyzed(source);
+    assert_eq!(group_names(&app), vec![String::from("kind"), String::from("path")]);
+    let errors = diagnose(&app);
+    assert!(
+        !errors.iter().any(|d| matches!(
+            &d.kind,
+            DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "full argument forwarding"
+        )),
+        "anonymous keyword forwarding must not be diagnosed as full `...` forwarding: {errors:?}"
+    );
+    let first = emit(&app);
+    let again = analyzed(&first);
+    assert_eq!(group_names(&again), group_names(&app), "re-ingest must preserve the explicit pair group and its order");
+    let second = emit(&again);
+    assert_eq!(first, second, "mixed anonymous keyword forwarding must reach a Ruby IR fixed point");
+    assert!(first.contains("target(kind: :get, path: path, **)"), "{first}");
+}
+
+#[test]
 fn flattened_and_unknown_contracts_remain_errors_through_lowering() {
     for source in [
         "class Probe\n def call(...)\n target(...)\n end\n def target(a, b, factor: 2)\n (a-b)*factor\n end\nend",
@@ -502,13 +564,18 @@ fn declaration_only_forwarders_are_gated_on_unverified_targets() {
     }
 }
 
+/// A controller method keeps its `...` / `**` (`Action::anonymous_formal`);
+/// a test entrypoint, which nothing calls with arguments, still refuses.
 #[test]
-fn unpreserved_controller_and_test_entry_declarations_are_rejected() {
-    for formal in ["...", "**"] {
+fn controller_declarations_are_kept_and_test_entry_declarations_are_rejected() {
+    use roundhouse::dialect::AnonymousFormal;
+    for (formal, kept) in [("...", AnonymousFormal::Forwarding), ("**", AnonymousFormal::KeywordRest)] {
         let source = format!("class ProbeController < ApplicationController\n def call({formal})\n 11\n end\nend");
         let controller = roundhouse::ingest::ingest_controller(source.as_bytes(), "probe_controller.rb")
-            .expect_err("controller forwarding is outside this slice");
-        assert!(controller.to_string().contains("forwarding declaration"));
+            .expect("a controller method keeps its anonymous formal")
+            .expect("one controller");
+        let call = controller.actions().find(|a| a.name.as_str() == "call").expect("call");
+        assert_eq!(call.anonymous_formal, Some(kept), "{formal}");
         for name in ["setup", "test_forwarding"] {
             let source = format!("class ProbeTest < ActiveSupport::TestCase\n def {name}({formal})\n 11\n end\nend");
             let err = roundhouse::ingest::ingest_test_file(source.as_bytes(), "probe_test.rb")
@@ -536,11 +603,6 @@ fn anonymous_keyword_forwarding_refuses_unverified_keyword_abis() {
 #[test]
 fn unrepresented_formals_never_admit_a_forwarding_contract() {
     for (source, call, expected) in [
-        (
-            "class Probe; def target(*); 7; end; def call(...); target(...); end; end",
-            "Probe.new.call(1)",
-            "7",
-        ),
         (
             "class Probe; def target((a,b)); 7; end; def call(...); target(...); end; end",
             "Probe.new.call([11,4])",
@@ -581,6 +643,67 @@ fn unrepresented_formals_never_admit_a_forwarding_contract() {
             "{source}: {errors:?}"
         );
     }
+}
+
+/// An unforwarded anonymous `*` binds to a generated name (see
+/// `ingest::forwarding`), so it is a represented formal: a `...` caller
+/// forwards into it and the emitted program answers what Ruby answers.
+#[test]
+fn an_unforwarded_anonymous_rest_is_a_represented_formal() {
+    let source = "class Probe; def target(*); 7; end; def call(...); target(...); end; end";
+    let script = "puts Probe.new.call(1); puts Probe.new.target; puts Probe.new.target(1, 2, 3)";
+    let native = Command::new("ruby")
+        .args(["-e", &format!("{source}; {script}")])
+        .output()
+        .unwrap();
+    assert!(native.status.success());
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "7\n7\n7\n");
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", source)
+        .run_ruby(script);
+    run.assert_passes();
+    assert_eq!(run.stdout, "7\n7\n7\n");
+}
+
+/// A nested `def` binds its own parameters, so a bare `*` inside it
+/// forwards its own rest and does not make the outer `*` forwarded.
+#[test]
+fn a_nested_def_forwarding_its_own_rest_leaves_the_outer_rest_represented() {
+    let source = "class Probe; def target(*); def nested(*) = inner(*); 7; end; def inner(*a) = a.size; end";
+    let script = "puts Probe.new.target; puts Probe.new.target(1, 2, 3)";
+    let native = Command::new("ruby")
+        .args(["-e", &format!("{source}; {script}")])
+        .output()
+        .unwrap();
+    assert!(native.status.success());
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "7\n7\n");
+    let errors: Vec<_> = diagnose(&analyzed(source))
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", source)
+        .run_ruby(script);
+    run.assert_passes();
+    assert_eq!(run.stdout, "7\n7\n");
+}
+
+/// A body that forwards the anonymous rest (`g(*)`) keeps the recorded
+/// fact: the bare splat would ingest as `*nil`, and forwarding it is not
+/// modeled yet.
+#[test]
+fn a_forwarded_anonymous_rest_stays_unsupported() {
+    let source = "class Probe; def target(*); inner(*); end; def inner(*a); a.size; end; end";
+    let app = analyzed(source);
+    let errors: Vec<_> = diagnose(&app)
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors.iter().any(|d| d.message.contains("anonymous positional rest")),
+        "{errors:?}"
+    );
 }
 
 #[test]

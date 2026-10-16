@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby-only ActionView::MissingTemplate.
 #
 # Lobsters renders templates that don't exist in the source tree

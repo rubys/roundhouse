@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The `typeid` port, against the gem's own answers.
 #
 # A FRAMEWORK test (`tests/runtime_ruby_unit.rs` runs every file under

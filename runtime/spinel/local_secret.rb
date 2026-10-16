@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The key every signed message derives from, when the deployment names
 # none: signed and flash cookies, `cookies.signed`, signed ids (campfire's
 # sign-in transfer links), signed GlobalIDs, Active Storage ids and Turbo

@@ -156,7 +156,10 @@ fn emitted(files: &[roundhouse::emit::EmittedFile], suffix: &str) -> String {
         .unwrap_or_else(|| {
             panic!(
                 "no emitted file ending in {suffix}; got: {:?}",
-                files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>(),
+                files
+                    .iter()
+                    .map(|f| f.path.display().to_string())
+                    .collect::<Vec<_>>(),
             )
         })
 }
@@ -230,19 +233,20 @@ fn the_callee_takes_the_scope_because_its_parameter_is_a_hash() {
     );
 }
 
-/// A method reached with ONLY a params helper keeps the params object —
-/// nothing converts, because nothing proved the parameter is a hash.
+/// A body that is just `create!(attributes)` needs a Hash even when every
+/// call site passes a params helper — `create!` does not take a params
+/// object. The call site converts; the association scope can merge.
 #[test]
-fn a_single_shape_callee_is_left_alone() {
+fn create_bang_body_forces_attribute_hash_binding() {
     let create = controller();
     assert!(
-        !create.contains("note_params.to_attrs"),
-        "a callee nobody passes a hash to is untouched:\n{create}"
+        create.contains("note_params.to_attrs"),
+        "create!(attributes) body converts the helper at the call site:\n{create}"
     );
     let note = model("app/models/note.rb");
     assert!(
-        !note.contains("scope_attributes"),
-        "and it takes no scope — its `create!` argument is not provably a hash:\n{note}"
+        note.contains("scope_attributes"),
+        "and the assoc scope merges once the argument is a hash:\n{note}"
     );
 }
 
@@ -267,14 +271,389 @@ fn a_body_that_needs_a_hash_binds_one_however_its_call_sites_look() {
     );
 }
 
-/// `to_attrs` is synthesized only where a call site asks for it: the
-/// demand is read back off the rewritten controller body, the same way
-/// `wants_create` is read off `<Model>.create(<helper>)`.
+/// `to_attrs` is synthesized where a call site asks for it — including a
+/// `create!(attributes)` body that forced Attrs from a helper-only census.
 #[test]
-fn to_attrs_is_demand_gated() {
+fn to_attrs_follows_attribute_hash_demand() {
     let params = params_class("note_params.rb");
     assert!(
-        !params.contains("def to_attrs"),
-        "a list nobody converts carries no to_attrs:\n{params}"
+        params.contains("def to_attrs"),
+        "NoteParams grows to_attrs once file! binds Attrs:\n{params}"
+    );
+}
+
+/// Foreign `new(attributes)` must not count as Hash-only: the ctor list
+/// is method-name based, so a non-self receiver (e.g. envelope) keeps
+/// the dynamic path even when a helper site also calls the method.
+#[test]
+fn foreign_new_receiver_does_not_force_attrs() {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/note.rb",
+            r#"class Note < ApplicationRecord
+  def self.wrap!(attributes)
+    RequestEnvelope.new(attributes)
+  end
+end
+"#,
+        ),
+        (
+            "app/models/request_envelope.rb",
+            r#"class RequestEnvelope
+  def self.new(attributes)
+    attributes
+  end
+end
+"#,
+        ),
+        (
+            "app/models/webhook.rb",
+            r#"class Webhook
+  def self.deliver(note)
+    bag = build_bag
+    note.class.wrap!(bag)
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/messages_controller.rb",
+            r#"class MessagesController < ApplicationController
+  def create
+    @room = Room.find(params[:room_id])
+    Note.wrap!(note_params)
+  end
+
+  private
+    def note_params
+      params.require(:note).permit(:text)
+    end
+end
+"#,
+        ),
+        (
+            "app/models/room.rb",
+            r#"class Room < ApplicationRecord
+  has_many :notes
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let ctrl = emitted(
+        &ruby::emit_lowered_controllers(&app),
+        "app/controllers/messages_controller.rb",
+    );
+    assert!(
+        !ctrl.contains("note_params.to_attrs"),
+        "foreign new(attributes) must not force Attrs:\n{ctrl}"
+    );
+}
+
+/// A PORO's own `new(attributes)` is not an Active Record hash consumer.
+/// The implicit receiver must not be enough to classify a helper-only
+/// argument as `Attrs`.
+#[test]
+fn implicit_new_on_plain_library_class_does_not_force_attrs() {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/note.rb",
+            "class Note < ApplicationRecord\nend\n",
+        ),
+        (
+            "app/models/request_envelope.rb",
+            r#"class RequestEnvelope
+  def self.wrap!(attributes)
+    new(attributes)
+  end
+
+  def self.new(attributes)
+    attributes
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/notes_controller.rb",
+            r#"class NotesController < ApplicationController
+  def create
+    RequestEnvelope.wrap!(note_params)
+  end
+
+  private
+    def note_params
+      params.require(:note).permit(:text)
+    end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let ctrl = emitted(
+        &ruby::emit_lowered_controllers(&app),
+        "app/controllers/notes_controller.rb",
+    );
+    assert!(
+        !ctrl.contains("note_params.to_attrs"),
+        "a plain class's implicit new must preserve the params helper:\n{ctrl}"
+    );
+}
+
+/// The `attributes` referenced inside this lambda belongs to the lambda,
+/// not the enclosing method's parameter. Do not let that nested `create!`
+/// cause the outer method's helper site to convert.
+#[test]
+fn shadowing_lambda_parameter_does_not_force_attrs() {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/note.rb",
+            r#"class Note < ApplicationRecord
+  def self.wrap!(attributes)
+    callback = ->(attributes) { create!(attributes) }
+    attributes
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/notes_controller.rb",
+            r#"class NotesController < ApplicationController
+  def create
+    Note.wrap!(note_params)
+  end
+
+  private
+    def note_params
+      params.require(:note).permit(:text)
+    end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let ctrl = emitted(
+        &ruby::emit_lowered_controllers(&app),
+        "app/controllers/notes_controller.rb",
+    );
+    assert!(
+        !ctrl.contains("note_params.to_attrs"),
+        "a shadowed lambda parameter must not force Attrs:\n{ctrl}"
+    );
+}
+
+/// An opaque non-Hash caller still vetoes conversion, even if another
+/// caller passes a params helper and the body calls `create!`.
+#[test]
+fn compound_parallel_and_rescue_writes_veto_hash_local_inference() {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/note.rb",
+            r#"class Note < ApplicationRecord
+  def self.compound!(attributes)
+    create!(attributes)
+  end
+
+  def self.parallel!(attributes)
+    create!(attributes)
+  end
+
+  def self.rescued!(attributes)
+    create!(attributes)
+  end
+end
+"#,
+        ),
+        (
+            "app/models/webhook.rb",
+            r#"class Webhook
+  def self.compound
+    attributes = { text: "initial" }
+    attributes ||= "not a hash"
+    Note.compound!(attributes)
+  end
+
+  def self.parallel
+    attributes = { text: "initial" }
+    attributes, other = ["not a hash", nil]
+    Note.parallel!(attributes)
+  end
+
+  def self.rescued
+    attributes = { text: "initial" }
+    begin
+      raise "failure"
+    rescue => attributes
+      Note.rescued!(attributes)
+    end
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/notes_controller.rb",
+            r#"class NotesController < ApplicationController
+  def create
+    Note.compound!(note_params)
+    Note.parallel!(note_params)
+    Note.rescued!(note_params)
+  end
+
+  private
+    def note_params
+      params.require(:note).permit(:text)
+    end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let ctrl = emitted(
+        &ruby::emit_lowered_controllers(&app),
+        "app/controllers/notes_controller.rb",
+    );
+    assert!(
+        !ctrl.contains("note_params.to_attrs"),
+        "non-Hash compound, parallel, and rescue writes must veto Attrs conversion:\n{ctrl}"
+    );
+}
+
+#[test]
+fn conditional_hash_local_requires_assignment_on_every_path() {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/note.rb",
+            r#"class Note < ApplicationRecord
+  def self.branch_only!(attributes)
+    create!(attributes)
+  end
+
+  def self.all_paths!(attributes)
+    create!(attributes)
+  end
+end
+"#,
+        ),
+        (
+            "app/models/webhook.rb",
+            r#"class Webhook
+  def self.branch_only(flag)
+    attributes = { text: "initial" } if flag
+    Note.branch_only!(attributes)
+  end
+
+  def self.all_paths(flag)
+    if flag
+      attributes = { text: "first" }
+    else
+      attributes = { text: "second" }
+    end
+    Note.all_paths!(attributes)
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/notes_controller.rb",
+            r#"class NotesController < ApplicationController
+  def create
+    Note.branch_only!(note_params)
+    Note.all_paths!(note_params)
+  end
+
+  private
+    def note_params
+      params.require(:note).permit(:text)
+    end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let ctrl = emitted(
+        &ruby::emit_lowered_controllers(&app),
+        "app/controllers/notes_controller.rb",
+    );
+    let branch_only = ctrl
+        .lines()
+        .find(|line| line.contains("Note.branch_only!"))
+        .expect("branch-only call is emitted");
+    assert!(
+        !branch_only.contains(".to_attrs"),
+        "a conditional-only Hash assignment does not prove the local is a Hash:\n{ctrl}"
+    );
+    let all_paths = ctrl
+        .lines()
+        .find(|line| line.contains("Note.all_paths!"))
+        .expect("all-paths call is emitted");
+    assert!(
+        all_paths.contains(".to_attrs"),
+        "Hash assignments on both branches should still permit Attrs conversion:\n{ctrl}"
+    );
+}
+
+#[test]
+fn opaque_non_hash_caller_blocks_hash_body_conversion() {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/note.rb",
+            r#"class Note < ApplicationRecord
+  def self.echo!(attributes)
+    create!(attributes)
+  end
+end
+"#,
+        ),
+        (
+            "app/models/webhook.rb",
+            r#"class Webhook
+  def self.deliver
+    Note.echo!("not a hash")
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/messages_controller.rb",
+            r#"class MessagesController < ApplicationController
+  def create
+    @room = Room.find(params[:room_id])
+    Note.echo!(note_params)
+  end
+
+  private
+    def note_params
+      params.require(:note).permit(:text)
+    end
+end
+"#,
+        ),
+        (
+            "app/models/room.rb",
+            r#"class Room < ApplicationRecord
+  has_many :notes
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let ctrl = emitted(
+        &ruby::emit_lowered_controllers(&app),
+        "app/controllers/messages_controller.rb",
+    );
+    assert!(
+        !ctrl.contains("note_params.to_attrs"),
+        "an opaque non-Hash caller vetoes conversion:\n{ctrl}"
     );
 }

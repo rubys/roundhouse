@@ -1,0 +1,149 @@
+# Typing for runtime/spinel/db_pg.rb, the Db shim over spinel-pg.
+# The Db contract itself is runtime/ruby/db.rbs; this file adds the
+# shim's own classes and the module functions outside the contract.
+# PgResult and PgClientCore are spinel-pg's.
+
+class PgConfig
+  @host: String
+  @port: Integer
+  @user: String
+  @password: String
+  @database: String
+  def initialize: (String url) -> void
+  def host: () -> String
+  def port: () -> Integer
+  def user: () -> String
+  def password: () -> String
+  def database: () -> String
+  def parse: (String url) -> nil
+end
+
+module PgUrl
+  def self.env: (String name, String fallback) -> String
+  def self.decode: (String s) -> String
+  def self.hex: (Integer b) -> Integer
+end
+
+class PgStmt
+  @handle: Integer
+  @sql: String
+  @cached: bool
+  @vals: Array[String]
+  @nulls: Array[Integer]
+  @result: PgResult?
+  @ran: bool
+  @row: Integer
+  @alive: bool
+  def initialize: (Integer handle, String sql, bool cached) -> void
+  def handle: () -> Integer
+  def alive: () -> bool
+  def kill: () -> nil
+  def sql: () -> String
+  def cached: () -> bool
+  def ran: () -> bool
+  def bind: (Integer idx, String? value) -> nil
+  def params: () -> Array[String?]
+  def finish: (PgResult result) -> nil
+  def result: () -> PgResult
+  def advance: () -> bool
+  def value: (Integer i) -> String?
+end
+
+class PgNamed
+  @sql: String
+  @name: String
+  def initialize: (String sql, String name) -> void
+  def sql: () -> String
+  def name: () -> String
+end
+
+class PgConn
+  @config: PgConfig
+  @client: PgClientCore?
+  SLOT_BITS: Integer
+  SLOT_MASK: Integer
+  @stmts: Array[PgStmt]
+  @free_slots: Array[Integer]
+  @serial: Integer
+  @changes: Integer
+  @last_tag: String
+  @named: Array[PgNamed]
+  @name_serial: Integer
+  @last_insert_table: String
+  def initialize: (PgConfig config) -> void
+  def client: () -> PgClientCore
+  def changes: () -> Integer
+  def last_tag: () -> String
+  def open_stmt: (String sql, bool cached) -> Integer
+  def slot_of: (Integer h) -> Integer
+  def stmt: (Integer h) -> PgStmt
+  def close_stmt: (Integer h) -> nil
+  def release_all: () -> nil
+  def open_count: () -> Integer
+  def run: (PgStmt st) -> nil
+  def named_count: () -> Integer
+  def named?: (String sql) -> bool
+  def named_index: (String sql) -> Integer
+  def named_for: (String sql) -> String
+  def evict_over: (Integer cap) -> nil
+  def forget_named: (String sql) -> nil
+  def run_named: (PgStmt st) -> PgResult
+  def exec: (String sql) -> nil
+  def simple: (String sql) -> PgResult
+  def returning: (String sql) -> Integer
+  def status: () -> Integer
+  def reset_for_reuse: () -> nil
+  def drop: () -> nil
+  def last_insert_table: () -> String
+  def inserted_key: (String table) -> Integer
+  def close: () -> nil
+end
+
+class PgPool
+  @conns: Array[PgConn]
+  @free: Array[Integer]
+  def initialize: (PgConfig config, Integer n) -> void
+  def lease: () -> Integer
+  def release: (Integer idx) -> nil
+  def conn: (Integer idx) -> PgConn
+  def first: () -> PgConn
+  def close_all: () -> nil
+end
+
+module Db
+  def self.pool: () -> PgPool
+  def self.statement_cache_cap: () -> Integer
+  def self.statement_cache_cap=: (Integer n) -> Integer
+  def self.shard_count: () -> Integer
+  def self.pool_for_thread: () -> PgPool
+  def self.current_conn: () -> PgConn
+  def self.database_path: () -> String
+  def self.adapter_name: () -> String
+  def self.transaction_open?: () -> bool
+  def self.in_lease?: () -> bool
+  def self.pin_transaction: (PgConn conn) -> nil
+  def self.with_connection: [T] () { () -> T } -> T
+  def self.without_foreign_keys: [T] () { () -> T } -> T
+  def self.check_foreign_keys!: () -> nil
+  def self.read_snapshot_begin: () -> bool
+  def self.read_snapshot_end: () -> bool
+  def self.checkpoint_in_background!: () -> nil
+  def self.query_cache_begin: () -> nil
+  def self.query_cache_end: () -> nil
+  def self.query_cache_enabled?: () -> bool
+  def self.seed_from_file: (String src_path) -> bot
+  def self.ran_stmt: (Integer stmt) -> PgStmt
+  def self.column_count: (Integer stmt) -> Integer
+  def self.column_name: (Integer stmt, Integer i) -> String
+  def self.cell: (Integer stmt, Integer i) -> String?
+  def self.column_bool: (Integer stmt, Integer i) -> bool
+  def self.column_value: (Integer stmt, Integer i) -> (Integer | Float | String | nil)
+  def self.int_value: (String v) -> Integer
+  def self.bool_value: (String v) -> bool
+  def self.tag_count: (String tag) -> Integer
+  def self.insert_target: (String sql) -> String
+  def self.identifier_end: (String sql, Integer i) -> Integer
+  def self.space_byte?: (Integer b) -> bool
+  def self.sql_trace?: () -> bool
+  def self.escape_bool: (bool b) -> String
+end

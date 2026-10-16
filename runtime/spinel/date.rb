@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # A deliberately small, program-defined Date for the Spinel target.
 # This is not Ruby's stdlib `date` package. The supported API is the
 # surface analyzed for Rails date columns; unsupported formats fail

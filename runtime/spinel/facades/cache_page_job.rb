@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CachePageJob façade — lobsters warms its full-page cache by replaying a
 # request through `ActionDispatch::Integration::Session` inside a job and
 # writing the body where `caches_page` would. Neither half is modeled:

@@ -601,6 +601,9 @@ fn walk_expr<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool {
         ExprNode::Hash { entries, .. } => entries
             .iter()
             .any(|(k, v)| walk_expr(k, pred) || walk_expr(v, pred)),
+        ExprNode::ForwardKeywordsWithPairs { entries } => entries
+            .iter()
+            .any(|(k, v)| walk_expr(k, pred) || walk_expr(v, pred)),
         ExprNode::Array { elements, .. } => elements.iter().any(|e| walk_expr(e, pred)),
         ExprNode::StringInterp { parts } => parts.iter().any(|p| match p {
             InterpPart::Text { .. } => false,
@@ -747,6 +750,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: Vec::new(),
+            include_spans: Vec::new(),
             methods,
             nullable_columns: Vec::new(),
             origin: None,
@@ -965,7 +969,7 @@ mod tests {
         );
         let block = Expr::new(
             Span::synthetic(),
-            ExprNode::Lambda { rest_param: None,
+            ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                 params: vec![Symbol::from("x")],
                 block_param: None,
                 body: block_body,

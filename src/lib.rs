@@ -10,12 +10,17 @@ pub mod app;
 pub mod builder;
 pub mod bytecode;
 pub mod catalog;
+/// Machine-readable `roundhouse check` inventory + ranked hotspot report.
+pub mod check_report;
 pub mod diagnostic;
 pub mod dialect;
 pub mod effect;
 pub mod emit;
 pub mod erb;
 pub mod expr;
+/// Project extensions: gem and DSL facts an app lists in `roundhouse.yml`
+/// and keeps in its own tree, carried on [`App::extensions`].
+pub mod extensions;
 pub mod facades;
 /// The generated Rails fixtures (`fixtures/real-blog`, `fixtures/store`)
 /// the test suites read, resolved with the generating command in the
@@ -30,6 +35,7 @@ pub mod gems;
 pub mod haml;
 pub mod slim;
 pub mod ide;
+pub mod i18n;
 pub mod ident;
 pub mod ingest;
 pub mod lower;
@@ -96,3 +102,5 @@ pub use ide::{Position, Reference, TypeAt};
 pub use schema::{Column, ColumnType, ForeignKey, Index, ReferentialAction, Schema, Table};
 pub use span::{FileId, Span};
 pub use ty::{Param, ParamKind, Row, Ty};
+
+pub mod shared;

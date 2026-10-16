@@ -242,6 +242,12 @@ fn collect_var_reads(
             }
         }
         ExprNode::Cast { value, .. } => collect_var_reads(value, seq, out),
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                collect_var_reads(key, seq, out);
+                collect_var_reads(value, seq, out);
+            }
+        }
         ExprNode::Lit { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
@@ -461,6 +467,12 @@ fn stamp_var_reads(
             }
         }
         ExprNode::Cast { value, .. } => stamp_var_reads(value, seq, counts, last_seq),
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                stamp_var_reads(key, seq, counts, last_seq);
+                stamp_var_reads(value, seq, counts, last_seq);
+            }
+        }
         ExprNode::Lit { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }

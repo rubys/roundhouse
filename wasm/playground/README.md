@@ -57,8 +57,11 @@ cd playground && node verify-playground.mjs
   pass leaves the editor responsive — and a hang/trap restarts the worker
   instead of freezing the tab.
 - Edit → 250 ms debounce → `transpile(target, srcMap)` → output tree + code.
-- Target dropdown over the six wasm-wired backends
-  (`typescript|go|rust|python|elixir|crystal`); switching re-transpiles live.
+- Target dropdown over every wasm-wired backend (`TARGETS` in
+  `playground.js`), including `roda` (Rails → Roda + Sequel) and `futamura`
+  (the app's own tree, still on Rails, with static query chains specialized
+  in place plus a generated `config/initializers/futamura.rb`); switching
+  re-transpiles live.
 - Monaco loads from a CDN; offline / headless / strict-CSP falls back to a
   `<textarea>` (the loop is identical through both — see `editor.js`).
 - **Inference overlay (Phase 3):**

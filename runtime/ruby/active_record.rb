@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "active_record/errors"
 require_relative "active_record/connection_not_established"
 require_relative "active_record/connection_pool"
@@ -14,5 +15,8 @@ require_relative "active_record/connection"
 require_relative "active_record/signed_id"
 # has_secure_password's reset token — same tier as signed_id.
 require_relative "active_record/token_for"
+# friendly_id's finder rule (Relation#friendly_find).
+require_relative "active_record/friendly_id"
 require_relative "active_record/arel"
 require_relative "active_record/relation"
+require_relative "active_record/preloading"

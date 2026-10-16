@@ -111,7 +111,12 @@ fn installer() -> String {
     let files = roundhouse::project::target_files(&app, &dir, BuildTarget::Ruby).expect("files");
     std::fs::remove_dir_all(&dir).expect("clean up fixture");
     let db = files.iter().find(|(p, _)| p == "runtime/db.rb").expect("db.rb");
-    assert!(db.1.starts_with("require_relative \"sql_functions\""), "db.rb loads it");
+    // First thing after the magic comment: above it, the require would
+    // switch the file's `frozen_string_literal` off.
+    assert!(
+        db.1.starts_with("# frozen_string_literal: true\nrequire_relative \"sql_functions\""),
+        "db.rb loads it, below its magic comment"
+    );
     files
         .into_iter()
         .find(|(p, _)| p == "runtime/sql_functions.rb")

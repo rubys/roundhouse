@@ -34,20 +34,20 @@ end
 #[test]
 fn time_parse_grounds_to_the_runtime_parser() {
     let out = emit("Time.parse(starts_on)");
-    assert!(out.contains("ActiveSupport.parse_time(starts_on)"), "{out}");
+    assert!(out.contains("ActiveSupport.parse_time(self.starts_on)"), "{out}");
     assert!(!out.contains("Time.parse"), "{out}");
 }
 
 #[test]
 fn time_zone_parse_grounds_to_the_zone_parser() {
     let out = emit("Time.zone.parse(starts_on)");
-    assert!(out.contains("ActiveSupport.zone_parse(starts_on)"), "{out}");
+    assert!(out.contains("ActiveSupport.zone_parse(self.starts_on)"), "{out}");
     assert!(!out.contains("Time.zone"), "{out}");
 }
 
 #[test]
 fn the_two_argument_form_is_left_alone() {
     let out = emit("Time.zone.parse(starts_on, Time.now)");
-    assert!(out.contains("Time.zone.parse(starts_on, Time.now)"), "{out}");
+    assert!(out.contains("Time.zone.parse(self.starts_on, Time.now)"), "{out}");
     assert!(!out.contains("zone_parse"), "{out}");
 }

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # TcpSocketStub — the expectation table `TCPSocket.expects(:open)` lowers
 # to (`lower::mocha`'s row for it), and the seam the client consults
 # before it connects.

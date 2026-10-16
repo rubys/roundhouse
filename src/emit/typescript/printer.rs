@@ -886,6 +886,9 @@ fn bin_prec(op: &str) -> u8 {
 
 fn expr_prec(e: &JsExpr) -> u8 {
     match e {
+        // A negative literal is unary minus applied to a number, so as a
+        // receiver it needs parens: `(-5).toString()`, not `-5.toString()`.
+        JsExpr::Num(text) if text.starts_with('-') => Prec::UNARY,
         JsExpr::Ident(_)
         | JsExpr::Num(_)
         | JsExpr::Str(_)
@@ -985,6 +988,17 @@ mod tests {
 
     fn num(s: &str) -> Js {
         Js::synth(JsExpr::Num(s.into()))
+    }
+
+    #[test]
+    fn negative_literal_receiver_is_parenthesized() {
+        // `(-5).abs` in Ruby; bare, `-5.abs` does not parse in JS.
+        let member = |n: &str| Js::synth(JsExpr::Member { obj: num(n), prop: "abs".into() });
+        assert_eq!(print_expr(&member("-5")), "(-5).abs");
+        assert_eq!(print_expr(&member("x")), "x.abs");
+        // As an operand it still prints bare.
+        let e = Js::synth(JsExpr::Binary { op: "*", left: ident("a"), right: num("-1") });
+        assert_eq!(print_expr(&e), "a * -1");
     }
 
     #[test]

@@ -198,6 +198,15 @@ public static class Db
         return Convert.ToInt64(cmd.ExecuteScalar());
     }
 
+    // Rows affected by the most recent `Exec` — what Rails'
+    // `Model.delete_all` returns.
+    public static long Changes()
+    {
+        using var cmd = WriteConn().CreateCommand();
+        cmd.CommandText = "SELECT changes()";
+        return Convert.ToInt64(cmd.ExecuteScalar());
+    }
+
     // SQL-literal escaping for the inline-VALUES INSERT/UPDATE the lowered
     // `_adapter*` methods build.
     public static string EscapeString(string? value) =>

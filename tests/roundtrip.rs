@@ -16,6 +16,7 @@ fn sp() -> Span {
     Span::synthetic()
 }
 
+/// Verifies that a representative blog app survives an IR serialization round-trip.
 #[test]
 fn tiny_blog_round_trips() {
     let mut tables = IndexMap::new();
@@ -30,6 +31,9 @@ fn tiny_blog_round_trips() {
                     nullable: false,
                     default: None,
                     primary_key: true,
+                    generated: None,
+                    generated_text_compatible: None,
+                    generated_int4_compatible: None,
                 },
                 Column {
                     name: Symbol::from("title"),
@@ -37,6 +41,9 @@ fn tiny_blog_round_trips() {
                     nullable: false,
                     default: None,
                     primary_key: false,
+                    generated: None,
+                    generated_text_compatible: None,
+                    generated_int4_compatible: None,
                 },
             ],
             indexes: vec![],
@@ -56,13 +63,14 @@ fn tiny_blog_round_trips() {
         parent_span: Default::default(),
         table: TableRef(Symbol::from("posts")),
         primary_key: None,
-        attributes: Row { fields: attrs, rest: None },
+        attributes: Row { fields: attrs.into(), rest: None },
         body: vec![],
         enums: Default::default(),
         enum_defaults: Default::default(),
         class_attr_defaults: Default::default(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        i18n: Default::default(),
         span: Span::synthetic(),
     };
 
@@ -86,6 +94,8 @@ fn tiny_blog_round_trips() {
         opt_params: vec![],
         kw_params: vec![],
         kwrest_param: None,
+        rest_param: None,
+        anonymous_formal: None,
         block_param: None,
         body: action_body,
         renders: RenderTarget::Inferred,
@@ -128,12 +138,19 @@ fn tiny_blog_round_trips() {
         // Passthrough-only and `serde(skip)` — it never round-trips, so
         // the roundtrip fixture has nothing to say about it.
         binary_assets: Vec::new(),
+        i18n: Default::default(),
+        i18n_table: Default::default(),
+        i18n_runtime_sites: Default::default(),
+        i18n_table_sites: Default::default(),
         inferred_method_params: Default::default(),
         models: vec![post_model],
         library_classes: vec![],
         current_attribute_classes: vec![],
         initializer_filters: Vec::new(),
+        collection_cache_store: None,
+        app_requires: Vec::new(),
         sql_functions: Vec::new(),
+        database_pragmas: Vec::new(),
         rbs_includes: Default::default(),
         controllers: vec![posts_controller],
         routes,
@@ -142,15 +159,21 @@ fn tiny_blog_round_trips() {
         fixtures: vec![],
         seeds: None,
         importmap: None,
+        inertia: None,
+        vite_manifest: None,
         stylesheets: vec![],
         rbs_signatures: std::collections::HashMap::new(),
         gem_lock: None,
+        loaded_frameworks: None,
         gem_boundary: Default::default(),
+        extensions: Default::default(),
         content_helper_allowed_attributes: Vec::new(),
+        content_helper_allowed_tags: Vec::new(),
         helper_method_index: std::collections::HashMap::new(),
         view_visible_controller_methods: std::collections::BTreeSet::new(),
         global_id_locate_models: std::collections::BTreeSet::new(),
         global_id_locate_signed_models: std::collections::BTreeSet::new(),
+        job_plans: Vec::new(),
         attachable_unsigned_models: Vec::new(),
         pending_attachment_on_load: Vec::new(),
         load_hook_class_macros: Vec::new(),
@@ -167,10 +190,13 @@ fn tiny_blog_round_trips() {
         concern_spliced_actions: std::collections::HashMap::new(),
         concern_spliced_class_methods: std::collections::HashMap::new(),
         concern_model_items: std::collections::HashMap::new(),
+        concern_guarded_items: std::collections::HashMap::new(),
+        concern_included_redefs: std::collections::HashMap::new(),
         render_edges: std::collections::HashMap::new(),
         view_feeders: std::collections::HashMap::new(),
         controller_resolutions: std::collections::HashMap::new(),
         sources: vec![],
+        wrap_parameters_by_default: false,
         // Derived from `sources` and `serde(skip)`, like `binary_assets`.
         const_resolver: Default::default(),
         source_index_required: false,

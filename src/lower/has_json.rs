@@ -487,7 +487,7 @@ pub(crate) fn column_hash_read(model: &Model, column: &Symbol) -> Option<Expr> {
         .collect();
     Some(super::typing::with_ty(
         sp(ExprNode::Hash { entries, kwargs: false }),
-        Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) },
     ))
 }
 
@@ -513,7 +513,7 @@ pub(crate) fn column_assign(model: &Model, column: &Symbol, raw: Expr, slot: Ty)
         .collect();
     let schema = super::typing::with_ty(
         sp(ExprNode::Hash { entries: schema, kwargs: false }),
-        Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) },
     );
     Some(super::typing::with_ty(
         schematized_json(

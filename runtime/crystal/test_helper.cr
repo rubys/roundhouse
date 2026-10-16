@@ -85,6 +85,12 @@ abstract class RoundhouseTest
   @__session : ::ActionDispatch::Session = ::ActionDispatch::Session.new
   @__flash : ::ActionDispatch::Flash = ::ActionDispatch::Flash.new
 
+  record TestResponse, body : String, status : Int64
+
+  def response : TestResponse
+    TestResponse.new(@__body, @__status)
+  end
+
   def get(path : String, params = nil) : Nil
     _ = params
     dispatch("GET", path, {} of String => Roundhouse::ParamValue)

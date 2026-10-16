@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `Relation#find` raises, and `ActionResponse#parsed_body` decodes.
 #
 # Minitest-shaped: a CRuby-only framework test, quarantined out of the

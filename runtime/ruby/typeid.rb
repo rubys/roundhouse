@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `typeid` 0.2.2 (with the `uuid7` 0.2.0 generator it requires), ported:
 # `TypeID.new(prefix)`, the one call the corpus makes. lobsters' Token
 # concern mints every record's public token with it —

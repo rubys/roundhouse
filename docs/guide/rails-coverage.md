@@ -169,12 +169,47 @@ not add generic class-object/Relation support to strict targets.
 
 | | Blog tier | Campfire tier |
 |---|---|---|
-| Actions | The seven RESTful actions and any other; implicit render | + `head`, `send_file`, `rescue_from`, `rate_limit` (`to:`/`within:`/`by:`/`with:`/`only:`/`except:`, counted in the app's cache as in Rails), `invisible_captcha` (`only:`/`except:`/`prepend:` → honeypot `spam?` on `subtitle` only; rotated/custom names unmodeled), pretender `impersonates :scope` when the controller defines a local `current_<scope>` (wraps it as `true_<scope>`, adds `impersonate_` / `stop_impersonating_`; inherited-only Devise helpers stay unsupported) |
+| Actions | The seven RESTful actions and any other; implicit render | + Rails 8.1.4 `head(status, options = nil)` on Ruby + Spinel (see below), `send_file`, `rescue_from`, `rate_limit` (`to:`/`within:`/`by:`/`with:`/`only:`/`except:`, counted in the app's cache as in Rails), `invisible_captcha` (`only:`/`except:`/`prepend:` → honeypot `spam?` on `subtitle` only; rotated/custom names unmodeled), pretender `impersonates :scope` when the controller defines a local `current_<scope>` (wraps it as `true_<scope>`, adds `impersonate_` / `stop_impersonating_`; inherited-only Devise helpers stay unsupported) |
 | Filters | `before_action` with `only:`/`except:`, ivar flow into views | + `around_action`, `after_action`, `if:`/`unless:` guards (symbol and lambda), `skip_before_action`, filters from concerns |
-| Params | `params.expect`, `params.require(...).permit(...)`, `params[:id]`; typed by the schema they're assigned to | + nested permits, arrays, `params.merge`, indifferent access |
+| Params | `params.expect`, `params.require(...).permit(...)`, `params[:id]`; typed by the schema they're assigned to | + nested permits, arrays, `params.merge`, indifferent access; a missing resource answers 400; JSON bodies wrapped under the model name (`wrap_parameters`, on by default since `load_defaults 7.0`) |
 | Responses | `render` (template, partial, `json:`, `status:`), `redirect_to` (record, path, `status:`), `respond_to` with `format.html`/`format.json`, `flash` and `flash.now` | + `expires_in`, `stale?`/`fresh_when` (answered as always fresh — a deliberate divergence), `cookies` and `cookies.signed`/`.permanent`, `session`, `helper_method`, `layout` |
 | Concerns | `include`d modules with `included do` filter blocks | + `class_methods`, concern-defined actions and helpers |
-| Auth | — | `Current` attributes, `authenticate_by`, signed/global ids, `has_secure_password` sessions |
+| Auth and request | — | `Current` attributes, `authenticate_by`, signed/global ids, `has_secure_password` sessions; `request.headers` (`[]`, `fetch`, `key?`, case-insensitive HTTP and Rack names), `request.authorization` (including Rack and legacy authorization env keys), route-only `request.path_parameters`, and HTTP Token/Bearer and Basic auth helpers |
+
+The Spinel dispatcher forwards incoming request headers into the request's
+Rack env (`HTTP_*`, plus unprefixed `CONTENT_TYPE` and `CONTENT_LENGTH`).
+Token and Bearer schemes are matched case-insensitively. This covers the
+request/authentication surface, not application-specific authorization
+policy or unsupported route behavior.
+
+`ActionController::Head#head` takes a positional status and optional
+options hash. Roundhouse supports registered status symbols, integer
+statuses, and `nil` (defaulting to 200); a Hash passed as the status and
+unknown status symbols raise. The special symbol keys `:location` and
+`:content_type` are removed from the options. Content-type symbols resolve
+through Roundhouse's built-in MIME registry (`:json` → `application/json`);
+string content types retain their media type with charset removed. Without
+an explicit type, negotiated formats also resolve through that registry
+(`.xml` → `application/xml`). The registry is fixed; app-specific
+`Mime.register` extensions are not supported. Other String/Symbol header
+names are normalized and their values stringified. A path-string location
+is resolved through `url_for` and stripped of header-injection controls,
+while a record in `location:` is lowered through its conventional singular
+route helper (`@article` → `article_path(@article.id)`);
+custom polymorphic routing, nested record routes, and custom `to_param`
+are not implied by this support claim. The response body is empty, and
+the runtime omits Content-Type for 1xx, 204, 205 and 304 statuses. Direct
+runtime tests cover 100, 199, 204, 205 and 304; emitted Rack and native
+HTTP probes verify the wire headers and empty body for 204, 205 and 304.
+Calling `head` after a render or redirect raises
+`AbstractController::DoubleRenderError`; the initial empty body alone
+does not count as a performed response.
+
+These claims are verified for the Ruby output on CRuby and for the Spinel
+output by running the emitted app over native HTTP. They do not claim
+ActionController::Head parity on the other emit targets. Rails 8.1.4's
+implementation returns `true`; that is source behavior, not a return-value
+promise in the API prose.
 
 ## Action View
 
@@ -189,15 +224,15 @@ not add generic class-object/Relation support to strict targets.
 
 | Component | Status |
 |---|---|
-| Action Cable | Every server target: `/cable`, `turbo_stream_from` subscriptions, model broadcasts. Campfire tier adds application channels with `subscribed`/`unsubscribed`, `stream_for`, and presence. |
-| Active Job | Campfire tier: `perform_later` runs on an in-process queue in the app; `ActiveJob::TestHelper` assertions in the tests. No external queue adapter. |
+| Action Cable | Every server target: `/cable`, `turbo_stream_from` subscriptions, model broadcasts. Campfire tier adds application channels with `subscribed`/`unsubscribed`, `stream_for`, and presence, and client actions (`subscription.perform(action, data)`) with Rails' rules for which methods are actions and which receive `data`. |
+| Active Job | Campfire tier: `perform_later` runs on an in-process queue in the app; `ActiveJob::TestHelper` assertions in the tests. On the Ruby-family lanes a job is queued as a serialized ActiveJob payload (GlobalID records, primitives, Symbols, Times and Arrays of them), honoring `queue_as`, `discard_on ActiveJob::DeserializationError` and `enqueue_after_transaction_commit`; a job with other argument types keeps a closure, with a warning. No external queue adapter. |
 | Active Storage | Campfire tier: blobs and attachments, the disk service, the engine's routes (redirect and representation), variants via libvips on Spinel. No cloud services. |
 | Action Text | Campfire tier: `has_rich_text`, the safe-list sanitizer, attachment rendering. |
 | Action Mailer | Ruby tier: mailer classes, `mail(...)`, `deliver_now`/`deliver_later` — delivery appends to `ActionMailer::Base.deliveries` (Rails' `:test` method, which the emitted tests assert against). No SMTP. |
-| Routing | `resources`/`resource` (nested, `only:`/`except:`, `member`/`collection`), `namespace`/`scope`, `root`, `get`/`post`/…, `constraints`, format suffixes, Active Storage's mounted engine, Devise's `devise_for` (static default four: session/registration/password/confirmation + `controllers:` overrides for those mappings only — not model-module-driven), `authenticated`/`unauthenticated`/`devise_scope` as passthrough wrappers (auth not enforced). Not: `concern`, `direct` (a custom URL helper with an arbitrary body — dropped), `mount` of any other engine, Doorkeeper's DSL, Devise OmniAuth callback routes, Devise `skip:`/`only:`/`path:` options, model-driven module narrowing. |
+| Routing | `resources`/`resource` (nested, `only:`/`except:`, `member`/`collection`), `namespace`/`scope`, `root`, `get`/`post`/…, `constraints`, format suffixes, Active Storage's mounted engine, Devise's `devise_for` (static default four: session/registration/password/confirmation + `controllers:` overrides for those mappings only — not model-module-driven), `devise_scope` as a path-transparent wrapper, and `with_options` (its options deep-merged into each block-free route call inside, the call's own keys winning; a child with its own block, a block parameter, or two hash values under one key is declined). Not: Devise `authenticate`/`authenticated`/`unauthenticated` route guards (unsupported because Warden constraints are not enforced; strict ingest fails, while survey mode records a gap and omits their route blocks), `concern`, `direct` (a custom URL helper with an arbitrary body — dropped), `mount` of any other engine, Doorkeeper's DSL, Devise OmniAuth callback routes, Devise `skip:`/`only:`/`path:` options, model-driven module narrowing. |
 | Configuration | `config.x.*`, initializers that define constants or mix modules into models, `Rails.application.config` reads, the app's inflections. Not: `Rails.application.credentials`. |
 | Caching | Fragment caching (`cache` in views, keyed by record) and `Rails.cache.fetch`, in-process. |
-| Gems | The census names what is modeled. Modeled today: bcrypt, devise (route helpers + `devise_for` / visibility wrappers), image_processing/ruby-vips (Spinel), invisible_captcha, pretender, rqrcode, useragent, web-push, net-http-persistent, concurrent-ruby's thread pool, importmap-rails, turbo-rails, stimulus-rails, tailwindcss-rails, jbuilder, propshaft. Everything else in a Gemfile is either infrastructure (never enters the analysis) or unknown. |
+| Gems | The census names what is modeled. Modeled today: bcrypt, devise (route helpers + static `devise_for`; no Warden route guards), image_processing/ruby-vips (Spinel), inertia_rails (`render inertia:` with a literal component and props, `inertia_share`, optional and deferred props written inline as `InertiaRails.optional { }` or `InertiaRails.defer { }`, partial reloads, the version check, `inertia: { errors: }` redirects; no SSR, no merge/scroll/once props, no dot-path partial keys, no optional or deferred wrapper returned from a helper method), invisible_captcha, pretender, representable (`Representable::Decorator` with `include Representable::JSON`: `property` / `collection`, rendered as JSON; Roar is not), rqrcode, useragent, web-push, net-http-persistent, concurrent-ruby's thread pool, importmap-rails, turbo-rails, stimulus-rails, tailwindcss-rails, jbuilder, propshaft. Everything else in a Gemfile is either infrastructure (never enters the analysis) or unknown. |
 
 ## What is not lowered, anywhere
 
@@ -294,14 +329,20 @@ What differs from Rails, and why:
   handler.** Those strategies are recognized as forgery filters but are
   not modeled as empty-session / wipe pass-throughs. `prepend:` and a
   custom `store:` remain unmodeled.
-- **Action Cable's Origin check uses Rails' defaults only.** On the
-  ruby family, a `/cable` handshake must carry an `Origin` naming the
-  request's own host (compared by host, as above), or in development
-  any `localhost` port. Otherwise the answer is Rails' 404 and the app's
-  `connect` never runs; a handshake with no `Origin` is refused, as in
-  Rails. An app's own `config.action_cable.allowed_request_origins` and
-  `disable_request_forgery_protection` are not read. The strict
-  targets' sockets check no Origin.
+- **Action Cable's Origin check follows the app's `config.action_cable`.**
+  On the ruby family, a `/cable` handshake passes Rails'
+  `allow_request_origin?`: everything when
+  `disable_request_forgery_protection` is set; else an `Origin` naming
+  the request's own scheme and `Host` (unless `allow_same_origin_as_host`
+  is false), or one `===` an entry of `allowed_request_origins` (in
+  development, any `localhost` port unless the app lists its own).
+  Otherwise the answer is Rails' 404 and the app's `connect` never runs;
+  a handshake with no `Origin` is refused, as in Rails. The settings are
+  read per environment from `config/application.rb`,
+  `config/environments/*.rb` and initializers; a list that is not a
+  literal or an Array literal (it might be an Array at run time) is
+  refused at build time. Listed values are evaluated per handshake, not
+  once at boot. The strict targets' sockets check no Origin.
 
 The strict targets issue no token (`form_authenticity_token` is empty
 there) and check none: an app emitted for them is not protected

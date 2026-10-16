@@ -81,6 +81,7 @@ fn synthesize_module_lc(funcs: &[LibraryFunction]) -> LibraryClass {
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: None,
@@ -273,7 +274,7 @@ fn render_class(lc: &LibraryClass) -> String {
     // Crystal's "instance variable already declared" error. Same set
     // TS uses (typescript.rs::INHERITED_FIELD_NAMES) — kept aligned
     // because both targets share the same ActiveRecord::Base shape.
-    const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "persisted", "destroyed"];
+    const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "error_details", "persisted", "destroyed"];
     let extends_active_record_base = matches!(lc.parent.as_ref(), Some(p) if {
         let raw = p.0.as_str();
         // Either explicitly `ActiveRecord::Base` OR an
@@ -873,7 +874,7 @@ fn collect_ivar_assignments(
                     if let Some(crate::ty::Ty::Hash { key: k, value: existing }) = out.get(&key) {
                         let widened = crate::ty::Ty::Hash {
                             key: k.clone(),
-                            value: Box::new(union_widen(existing, v_ty)),
+                            value: std::sync::Arc::new(union_widen(existing, v_ty)),
                         };
                         out.insert(key, widened);
                     } else if !out.contains_key(&key) {
@@ -881,8 +882,8 @@ fn collect_ivar_assignments(
                         out.insert(
                             key,
                             crate::ty::Ty::Hash {
-                                key: Box::new(crate::ty::Ty::Str),
-                                value: Box::new(v_ty.clone()),
+                                key: std::sync::Arc::new(crate::ty::Ty::Str),
+                                value: std::sync::Arc::new(v_ty.clone()),
                             },
                         );
                     }
@@ -1008,11 +1009,11 @@ fn union_widen(existing: &crate::ty::Ty, incoming: &crate::ty::Ty) -> crate::ty:
         return existing.clone();
     }
     let mut variants: Vec<Ty> = match existing {
-        Ty::Union { variants } => variants.clone(),
+        Ty::Union { variants } => variants.to_vec(),
         other => vec![other.clone()],
     };
     let incoming_variants: Vec<Ty> = match incoming {
-        Ty::Union { variants } => variants.clone(),
+        Ty::Union { variants } => variants.to_vec(),
         other => vec![other.clone()],
     };
     for v in incoming_variants {
@@ -1023,7 +1024,7 @@ fn union_widen(existing: &crate::ty::Ty, incoming: &crate::ty::Ty) -> crate::ty:
     if variants.len() == 1 {
         variants.into_iter().next().unwrap()
     } else {
-        Ty::Union { variants }
+        Ty::Union { variants: variants.into() }
     }
 }
 

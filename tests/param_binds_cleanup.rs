@@ -84,11 +84,14 @@ end
     inject(&path, "  def self.from_stmt(stmt)", "hydrate");
     inject(&dir.join("runtime/active_support_time_parsing.rb"), "  def self.format_db_time(value)", "serialize");
     let native = target == BuildTarget::Spinel;
-    inject(&dir.join("runtime/db.rb"), if native { "  def self.bind_text(stmt, idx, value)" } else { "  def self.bind_text(handle, idx, value)" }, "bind");
-    inject(&dir.join("runtime/db.rb"), if native { "  def self.step?(stmt)" } else { "  def self.step?(handle)\n    entry = handle" }, "step");
-    inject(&dir.join("runtime/db.rb"), if native { "  def self.column_int(stmt, i)" } else { "  def self.column_int(handle, i)" }, "reload");
+    let jdbc = target == BuildTarget::Jruby;
+    inject(&dir.join("runtime/db.rb"), if native || jdbc { "  def self.bind_text(stmt, idx, value)" } else { "  def self.bind_text(handle, idx, value)" }, "bind");
+    inject(&dir.join("runtime/db.rb"), if native || jdbc { "  def self.step?(stmt)" } else { "  def self.step?(handle)\n    entry = handle" }, "step");
+    inject(&dir.join("runtime/db.rb"), if native || jdbc { "  def self.column_int(stmt, i)" } else { "  def self.column_int(handle, i)" }, "reload");
     let probe = if native {
         "class DbConn\n  def cleanup_owned_count\n    @open.length\n  end\nend\nmodule Db\n  def self.cleanup_owned_count\n    current_conn.cleanup_owned_count\n  end\nend\n"
+    } else if jdbc {
+        "module Db\n  def self.cleanup_owned_count\n    current_dbh.open_statements.size\n  end\nend\n"
     } else {
         "module Db\n  def self.cleanup_owned_count\n    open_statements(current_dbh).size\n  end\nend\n"
     };
@@ -99,6 +102,8 @@ end
         success(Command::new(std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into()))
             .args(["cleanup_gate.rb", "-o", "cleanup_gate"]).current_dir(&*dir));
         success(Command::new(dir.join("cleanup_gate")).current_dir(&*dir));
+    } else if jdbc {
+        success(Command::new("jruby").arg("cleanup_gate.rb").current_dir(&*dir));
     } else {
         success(emit_and_run::ruby().arg("cleanup_gate.rb").current_dir(&*dir));
     }
@@ -113,6 +118,12 @@ fn generated_cleanup_ruby() {
 #[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
 fn generated_cleanup_spinel() {
     emitted("generated_cleanup_spinel", BuildTarget::Spinel);
+}
+
+#[test]
+#[ignore = "requires JRuby 10+ and jdbc-sqlite3"]
+fn generated_cleanup_jruby() {
+    emitted("generated_cleanup_jruby", BuildTarget::Jruby);
 }
 
 #[test]

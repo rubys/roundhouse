@@ -53,9 +53,9 @@ pub(in crate::analyze) fn register(
     // gradual; the chain methods keep the receiver's class.
     {
         let params_id = ClassId(Symbol::from("ActionController::Parameters"));
-        let params_ty = Ty::Class { id: params_id.clone(), args: vec![] };
+        let params_ty = Ty::Class { id: params_id.clone(), args: vec![].into() };
         let mut p = ClassInfo::default();
-        let hash_str_untyped = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
+        let hash_str_untyped = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
         for m in [
             // strong parameters
             "permit", "permit!", "except", "slice", "merge", "merge!", "reverse_merge",
@@ -89,7 +89,7 @@ pub(in crate::analyze) fn register(
         }
         p.instance_methods.insert(
             Symbol::from("keys"),
-            Ty::Array { elem: Box::new(Ty::Str) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         );
         for m in ["to_query", "to_param", "to_s", "inspect", "to_json"] {
             p.instance_methods.insert(Symbol::from(m), Ty::Str);
@@ -118,11 +118,11 @@ pub(in crate::analyze) fn register(
         p.class_methods.insert(Symbol::from("new"), params_ty.clone());
         p.class_methods.insert(
             Symbol::from("always_permitted_parameters"),
-            Ty::Array { elem: Box::new(Ty::Str) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         );
         p.class_methods.insert(
             Symbol::from("always_permitted_parameters="),
-            Ty::Array { elem: Box::new(Ty::Str) },
+            Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         );
         p.class_methods.insert(Symbol::from("permit_all_parameters"), Ty::Bool);
         p.class_methods.insert(Symbol::from("permit_all_parameters="), Ty::Bool);
@@ -148,7 +148,7 @@ pub(in crate::analyze) fn register(
         for m in ["[]", "delete"] {
             session.instance_methods.insert(
                 Symbol::from(m),
-                Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+                Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
             );
         }
         for m in ["fetch", "dig"] {
@@ -160,22 +160,27 @@ pub(in crate::analyze) fn register(
         for m in ["key?", "has_key?", "include?", "empty?", "loaded?", "exists?"] {
             session.instance_methods.insert(Symbol::from(m), Ty::Bool);
         }
-        session.instance_methods.insert(Symbol::from("id"), Ty::Union { variants: vec![Ty::Str, Ty::Nil] });
-        session.instance_methods.insert(Symbol::from("keys"), Ty::Array { elem: Box::new(Ty::Str) });
+        session.instance_methods.insert(Symbol::from("id"), Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
+        session.instance_methods.insert(Symbol::from("keys"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         session.instance_methods.insert(
             Symbol::from("options"),
-            Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+            Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
         );
         for m in ["to_hash", "to_h"] {
             session.instance_methods.insert(
                 Symbol::from(m),
-                Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+                Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) },
             );
         }
         classes.insert(session_id.clone(), session);
-        app_ctrl.class_methods.insert(Symbol::from("session"), Ty::Class { id: session_id, args: vec![] });
+        app_ctrl.class_methods.insert(Symbol::from("session"), Ty::Class { id: session_id, args: vec![].into() });
     }
     app_ctrl.class_methods.insert(Symbol::from("render"), Ty::Nil);
+    // Rails answers the rendered String and writes no response; the
+    // lowerer turns the call into the bare `Views::…` call, which is
+    // that String. Typing it lets the ivar an action stores it in reach
+    // a template (campfire's `@message_html`).
+    app_ctrl.class_methods.insert(Symbol::from("render_to_string"), Ty::Str);
     app_ctrl.class_methods.insert(Symbol::from("redirect_to"), Ty::Nil);
     app_ctrl.class_methods.insert(Symbol::from("redirect_back_or_to"), Ty::Nil);
     app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
@@ -230,13 +235,51 @@ pub(in crate::analyze) fn register(
         }
         classes.insert(ClassId(Symbol::from("ActionController::Page")), page);
     }
+
+    // The pagy gem (runtime/ruby/action_controller/pagy.rb). `pagy` is on
+    // every controller of an app whose Gemfile.lock carries the gem, as
+    // `pagy` is for geared_pagination's method; its RESULT depends on the
+    // collection argument (`[Pagy, <the scope's type>]`), so the call is
+    // typed in `analyze::body` (`pagy_call_ty`) and this entry only makes
+    // the name resolve. The `Pagy` surface below is `pagy.rbs` verbatim;
+    // a method that is not listed (`page_url`, `in`, `options`, the `_js`
+    // helpers, ...) is "no known method on Pagy" -- the refusal.
+    if app.gem_lock.as_ref().is_some_and(|lock| lock.has("pagy")) {
+        app_ctrl.class_methods.insert(Symbol::from("pagy"), Ty::Untyped);
+        let nullable_int = Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() };
+        let mut pagy = ClassInfo::default();
+        for (m, ty) in [
+            ("page", Ty::Int),
+            ("limit", Ty::Int),
+            ("count", Ty::Int),
+            ("offset", Ty::Int),
+            ("last", Ty::Int),
+            ("pages", Ty::Int),
+            ("from", Ty::Int),
+            ("to", Ty::Int),
+            ("previous", nullable_int.clone()),
+            ("next", nullable_int),
+            ("series_nav", Ty::Str),
+            ("info_tag", Ty::Str),
+        ] {
+            pagy.instance_methods.insert(Symbol::from(m), ty);
+        }
+        classes.insert(ClassId(Symbol::from("Pagy")), pagy);
+        // `include Pagy::Method` resolves; the method itself is on Base.
+        let mut method = ClassInfo::default();
+        method.is_module = true;
+        classes.insert(ClassId(Symbol::from("Pagy::Method")), method);
+        let mut option_error = ClassInfo::default();
+        option_error.parent = Some(ClassId(Symbol::from("ArgumentError")));
+        classes.insert(ClassId(Symbol::from("Pagy::OptionError")), option_error);
+    }
     // `flash` (FlashHash) and the current action/controller names are
     // available on the controller via implicit self, same as in views.
     app_ctrl.class_methods.insert(
         Symbol::from("flash"),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Flash::FlashHash")),
-            args: vec![],
+            args: vec![].into(),
         },
     );
     for m in ["action_name", "controller_name", "controller_path"] {
@@ -257,7 +300,7 @@ pub(in crate::analyze) fn register(
         super::block_fn(
             &Ty::Class {
                 id: ClassId(Symbol::from("ActionController::MimeResponds::Collector")),
-                args: vec![],
+                args: vec![].into(),
             },
             Ty::Nil,
         ),
@@ -271,7 +314,7 @@ pub(in crate::analyze) fn register(
     {
         let request_id = ClassId(Symbol::from("ActionDispatch::Request"));
         let mut request = ClassInfo::default();
-        let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
         for m in [
             "user_agent", "remote_ip", "ip", "url", "original_url", "fullpath", "path",
             "host", "host_with_port", "domain", "protocol", "scheme", "port_string",
@@ -298,18 +341,23 @@ pub(in crate::analyze) fn register(
         }
         for m in [
             "get?", "post?", "put?", "patch?", "delete?", "head?", "options?", "xhr?",
-            "xml_http_request?", "ssl?", "local?", "form_data?",
+            "xml_http_request?", "ssl?", "local?", "form_data?", "inertia?",
         ] {
             request.instance_methods.insert(Symbol::from(m), Ty::Bool);
         }
         request.instance_methods.insert(Symbol::from("port"), Ty::Int);
+        // nil at the scheme's standard port (campfire's default_url_options).
+        request.instance_methods.insert(
+            Symbol::from("optional_port"),
+            Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
+        );
         // Rack env accessors and the parameter/header views Rails exposes on every
         // request. `POST`/`GET` are the raw form/query hashes; the header
         // readers are Rack env lookups.
         for m in ["POST", "GET", "session_options"] {
             request.instance_methods.insert(
                 Symbol::from(m),
-                Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) },
+                Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) },
             );
         }
         for m in ["get_header", "set_header", "delete_header", "cookies"] {
@@ -319,16 +367,33 @@ pub(in crate::analyze) fn register(
         request.instance_methods.insert(Symbol::from("request_method_symbol"), Ty::Sym);
         request.instance_methods.insert(Symbol::from("route_uri_pattern"), str_or_nil());
         request.instance_methods.insert(Symbol::from("content_length"), Ty::Int);
-        for m in ["headers", "env", "cookie_jar", "session", "params", "query_parameters",
-                  "request_parameters", "path_parameters", "format", "body", "variant",
+        for m in ["headers", "env", "cookie_jar", "session", "params",
+                  "path_parameters", "format", "body", "variant",
                   "flash", "subdomains", "accepts", "mime_type", "authorization",
                   // The app's key generator, and the controller CLASS the
                   // request routed to (`Request#controller_class`).
                   "key_generator", "controller_class"] {
             request.instance_methods.insert(Symbol::from(m), Ty::Untyped);
         }
+        // The two readers the runtime backs with a parsed, bracket-nested
+        // `Hash[String, Roundhouse::ParamValue]` (`Request#query_parameters`
+        // / `#request_parameters`, runtime/ruby/action_dispatch/request.rbs):
+        // typed as that, not `Untyped`, so `deep_dup` / `except` / `delete`
+        // / `keys` / `to_query` resolve against a Hash.
+        for m in ["query_parameters", "request_parameters"] {
+            request.instance_methods.insert(
+                Symbol::from(m),
+                Ty::Hash {
+                    key: std::sync::Arc::new(Ty::Str),
+                    value: std::sync::Arc::new(Ty::Class {
+                        id: ClassId(Symbol::from("Roundhouse::ParamValue")),
+                        args: vec![].into(),
+                    }),
+                },
+            );
+        }
         classes.insert(request_id.clone(), request);
-        let request_ty = Ty::Class { id: request_id, args: vec![] };
+        let request_ty = Ty::Class { id: request_id, args: vec![].into() };
         // A template reads `request` too — Rails' view context
         // delegates it, and a layout reaching for
         // `request.content_security_policy_nonce` is the shape that
@@ -343,6 +408,7 @@ pub(in crate::analyze) fn register(
         }
         app_ctrl.class_methods.insert(Symbol::from("request"), request_ty);
     }
+    register_inertia(classes, &mut app_ctrl);
     // HTTP Basic and Token auth (runtime/spinel/http_authentication.rb):
     // each yields the credentials the client sent and answers what the
     // block decided; the `or_request` forms render the 401 challenge
@@ -351,25 +417,25 @@ pub(in crate::analyze) fn register(
     // that names one leaves the second bound to nothing and everything
     // compared against it untyped.
     let yields_two = |first: (&str, Ty), second: (&str, Ty), verdict: Ty| Ty::Fn {
-        params: Vec::new(),
-        block: Some(Box::new(Ty::Fn {
+        params: Vec::new().into(),
+        block: Some(std::sync::Arc::new(Ty::Fn {
             params: [first, second]
                 .into_iter()
                 .map(|(name, ty)| crate::ty::Param {
                     name: Symbol::from(name),
-                    ty,
+                    ty: ty.into(),
                     kind: crate::ty::ParamKind::Required,
                 })
                 .collect(),
             block: None,
-            ret: Box::new(verdict),
+            ret: std::sync::Arc::new(verdict),
             effects: crate::effect::EffectSet::default(),
         })),
         // The block's verdict, or nil once the challenge is rendered.
-        ret: Box::new(Ty::Untyped),
+        ret: std::sync::Arc::new(Ty::Untyped),
         effects: crate::effect::EffectSet::default(),
     };
-    let str_hash = || Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    let str_hash = || Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
     for m in ["authenticate_or_request_with_http_basic", "authenticate_with_http_basic"] {
         app_ctrl.class_methods.insert(
             Symbol::from(m),
@@ -387,6 +453,12 @@ pub(in crate::analyze) fn register(
         app_ctrl.class_methods.insert(Symbol::from(m), Ty::Nil);
     }
     app_ctrl.class_methods.insert(Symbol::from("response"), Ty::Untyped);
+    // The response surface the shared runtime's Base defines on the
+    // controller itself: `self.response_body = body` (campfire's
+    // MessagesController / CachedResponses) and `media_type`.
+    for m in ["response_body", "response_body=", "media_type"] {
+        app_ctrl.class_methods.insert(Symbol::from(m), Ty::Str);
+    }
     app_ctrl.class_methods.insert(Symbol::from("logger"), Ty::Untyped);
     // `cookies` is the cookie jar: string values in and out,
     // `signed`/`permanent`/`encrypted` are the same jar with a codec
@@ -394,9 +466,9 @@ pub(in crate::analyze) fn register(
     // `delete` answers the removed value.
     {
         let jar_id = ClassId(Symbol::from("ActionDispatch::Cookies::CookieJar"));
-        let jar_ty = Ty::Class { id: jar_id.clone(), args: vec![] };
+        let jar_ty = Ty::Class { id: jar_id.clone(), args: vec![].into() };
         let mut jar = ClassInfo::default();
-        let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
         for m in ["[]", "delete", "fetch"] {
             jar.instance_methods.insert(Symbol::from(m), str_or_nil());
         }
@@ -409,7 +481,7 @@ pub(in crate::analyze) fn register(
         for m in ["key?", "has_key?", "include?"] {
             jar.instance_methods.insert(Symbol::from(m), Ty::Bool);
         }
-        jar.instance_methods.insert(Symbol::from("to_h"), Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) });
+        jar.instance_methods.insert(Symbol::from("to_h"), Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) });
         jar.instance_methods.insert(Symbol::from("clear"), Ty::Nil);
         classes.insert(jar_id, jar);
         app_ctrl.class_methods.insert(Symbol::from("cookies"), jar_ty);
@@ -437,10 +509,10 @@ pub(in crate::analyze) fn register(
         let scope = crate::naming::snake_case(
             model.name.0.as_str().rsplit("::").next().unwrap_or(""),
         );
-        let model_ty = Ty::Class { id: model.name.clone(), args: vec![] };
+        let model_ty = Ty::Class { id: model.name.clone(), args: vec![].into() };
         app_ctrl.class_methods.insert(
             Symbol::from(format!("current_{scope}").as_str()),
-            Ty::Union { variants: vec![model_ty.clone(), Ty::Nil] },
+            Ty::Union { variants: vec![model_ty.clone(), Ty::Nil].into() },
         );
         app_ctrl.class_methods.insert(
             Symbol::from(format!("{scope}_signed_in?").as_str()),
@@ -468,7 +540,7 @@ pub(in crate::analyze) fn register(
         {
             view_cls.instance_methods.insert(
                 Symbol::from(format!("current_{scope}").as_str()),
-                Ty::Union { variants: vec![model_ty, Ty::Nil] },
+                Ty::Union { variants: vec![model_ty, Ty::Nil].into() },
             );
             view_cls.instance_methods.insert(
                 Symbol::from(format!("{scope}_signed_in?").as_str()),
@@ -524,12 +596,68 @@ pub(in crate::analyze) fn register(
 pub(crate) fn param_value_ty(nilable: bool) -> Ty {
     let mut variants = vec![
         Ty::Str,
-        Ty::Array { elem: Box::new(Ty::Untyped) },
-        Ty::Class { id: ClassId(Symbol::from("ActionController::Parameters")), args: vec![] },
-        Ty::Class { id: ClassId(Symbol::from("ActionDispatch::Http::UploadedFile")), args: vec![] },
+        Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
+        Ty::Class { id: ClassId(Symbol::from("ActionController::Parameters")), args: vec![].into() },
+        Ty::Class { id: ClassId(Symbol::from("ActionDispatch::Http::UploadedFile")), args: vec![].into() },
     ];
     if nilable {
         variants.push(Ty::Nil);
     }
-    Ty::Union { variants }
+    Ty::Union { variants: variants.into() }
+}
+
+/// `prop` and `inertia_errors` are typed here and have no runtime method:
+/// the controller lowering replaces them with their `_json` variants. A
+/// runtime `prop(String, untyped)` was rejected because the strict targets
+/// cannot compile an untyped parameter.
+fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut ClassInfo) {
+    const RBS: &str = include_str!("../../../runtime/ruby/action_controller/inertia.rbs");
+    let parsed = crate::rbs::parse_app_signatures(RBS)
+        .expect("ActionController::InertiaPage RBS must parse");
+    let page_id = ClassId(Symbol::from("ActionController::InertiaPage"));
+    let page = classes.entry(page_id.clone()).or_default();
+    if let Some(methods) = parsed.get(&page_id) {
+        for (name, ty) in methods {
+            page.instance_methods.insert(name.clone(), ty.clone());
+        }
+    }
+    // Phantom until controller_to_library rewrites to `prop_json`.
+    page.instance_methods.insert(
+        Symbol::from("prop"),
+        Ty::Fn {
+            params: vec![
+                crate::ty::Param {
+                    name: Symbol::from("key"),
+                    ty: Ty::Str.into(),
+                    kind: crate::ty::ParamKind::Required,
+                },
+                crate::ty::Param {
+                    name: Symbol::from("value"),
+                    ty: Ty::Untyped.into(),
+                    kind: crate::ty::ParamKind::Required,
+                },
+            ].into(),
+            block: None,
+            ret: std::sync::Arc::new(Ty::Nil),
+            effects: crate::effect::EffectSet::default(),
+        },
+    );
+    if let Some(methods) = parsed.get(&ClassId(Symbol::from("ActionController::Base"))) {
+        for (name, ty) in methods {
+            app_ctrl.class_methods.insert(name.clone(), ty.clone());
+        }
+    }
+    app_ctrl.class_methods.insert(
+        Symbol::from("inertia_errors"),
+        Ty::Fn {
+            params: vec![crate::ty::Param {
+                name: Symbol::from("errors"),
+                ty: Ty::Untyped.into(),
+                kind: crate::ty::ParamKind::Required,
+            }].into(),
+            block: None,
+            ret: std::sync::Arc::new(Ty::Nil),
+            effects: crate::effect::EffectSet::default(),
+        },
+    );
 }

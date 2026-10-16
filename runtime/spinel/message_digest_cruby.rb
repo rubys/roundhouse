@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Keyed-digest primitives for the CRuby/JRuby trees — the OpenSSL half
 # of the two-layer split. `runtime/message_digest.rb` in the spinel tree
 # is the same surface over sp_crypto's FFI; `ruby_runtime_files` swaps

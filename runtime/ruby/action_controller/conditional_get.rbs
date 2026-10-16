@@ -1,0 +1,16 @@
+# Typing contract for conditional_get.rb beside this file: Rack::ETag
+# and Rack::ConditionalGet over the controller's buffered response.
+module ActionController
+  DEFAULT_CACHE_CONTROL: String
+
+  class Base
+    # Re-declared here (already on Base in base.rbs): this file is
+    # typed per-file and reads the ivars `initialize` (base.rb) sets.
+    @headers: ActionController::HeaderStore
+    @status: Integer
+    @body: String
+    @content_type: String
+    def self.body_sha256_hex: (String body) -> String
+    def commit_conditional_get!: (String request_method, String if_none_match) -> nil
+  end
+end

@@ -1,0 +1,3 @@
+module ActiveSupport
+  def self.deep_merge: (Hash[Object, Object] left, Hash[Object, Object] other_hash) -> Hash[Object, Object]
+end

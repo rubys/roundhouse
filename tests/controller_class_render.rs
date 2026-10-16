@@ -96,3 +96,40 @@ fn an_unread_option_declines() {
     );
     assert!(ir.contains("Symbol(\"render\")"), "left alone: {ir}");
 }
+
+/// Rails' class-side renderer renders through a controller of its own,
+/// with no request behind it: the call is bracketed the way a broadcast
+/// render is, so `controller` inside it is the detached controller.
+#[test]
+fn a_class_side_render_takes_the_renderer_bracket() {
+    let ir = test_ir(
+        "<span><%= user.name %></span>\n",
+        "ApplicationController.render partial: \"users/mention\", locals: { user: User.first }",
+    );
+    assert!(ir.contains("Symbol(\"begin_broadcast_render\")"), "{ir}");
+    assert!(ir.contains("Symbol(\"broadcast_render\")"), "{ir}");
+}
+
+/// `collection:` renders the partial once per element, bound to its
+/// record local, concatenated. A literal `cached:` is the renderer
+/// controller's to answer, and the detached one caches nothing.
+#[test]
+fn a_collection_render_maps_the_partial_over_its_elements() {
+    let ir = test_ir(
+        "<span><%= user.name %></span>\n",
+        "ApplicationController.render partial: \"users/mention\", collection: [ User.first ], cached: true",
+    );
+    assert!(ir.contains("Symbol(\"map\")") && ir.contains("Symbol(\"join\")"), "{ir}");
+    assert!(ir.contains("Symbol(\"mention\")"), "{ir}");
+    assert!(!ir.contains("Symbol(\"render\")"), "no class-side render may survive: {ir}");
+}
+
+/// A computed `cached:` is a key this does not read: left alone.
+#[test]
+fn a_computed_collection_cache_key_declines() {
+    let ir = test_ir(
+        "<span><%= user.name %></span>\n",
+        "ApplicationController.render partial: \"users/mention\", collection: [ User.first ], cached: ->(u) { u }",
+    );
+    assert!(ir.contains("Symbol(\"render\")"), "left alone: {ir}");
+}

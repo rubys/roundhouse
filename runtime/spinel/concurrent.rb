@@ -1,4 +1,5 @@
-# concurrent-ruby's thread pools and barrier, over spinel's own threads.
+# frozen_string_literal: true
+# concurrent-ruby's thread pools, barrier and Map, over spinel's own threads.
 #
 # THE RUBY FAMILY NEVER LOADS THIS FILE. `project::ruby_runtime_files`
 # swaps it for a bare `require "concurrent"`: over there the real gem
@@ -19,10 +20,12 @@
 # ONLY THE SURFACE THE APP AND ITS SUITE REACH IS PORTED — `post`,
 # `shutdown`, `kill`, `wait_for_termination`, `completed_task_count`
 # and the size readers — plus `CyclicBarrier#wait` for the
-# race-condition test. The gem's tuning knobs (`idletime`, the
-# fallback policies other than `:abort`, `min_threads` pre-spawn) are
-# accepted where a caller passes them and do nothing: a worker here is
-# a green thread parked on a Queue, which costs nothing to keep.
+# race-condition test, and `Map`'s `[]` / `[]=` / `compute_if_absent` /
+# `clear` (Mutex+Hash; not the gem's lock-free table). The gem's tuning
+# knobs (`idletime`, the fallback policies other than `:abort`,
+# `min_threads` pre-spawn) are accepted where a caller passes them and
+# do nothing: a worker here is a green thread parked on a Queue, which
+# costs nothing to keep.
 #
 # Semantics kept from the gem, because the suite observes them:
 # * A task posted when no worker is idle and the pool is under
@@ -180,6 +183,40 @@ module Concurrent
   class FixedThreadPool < ThreadPoolExecutor
     def initialize(num_threads, max_queue: 0)
       super(min_threads: num_threads, max_threads: num_threads, max_queue: max_queue)
+    end
+  end
+
+  # Not the gem's lock-free table: one Mutex around a Hash makes each
+  # call atomic, and `compute_if_absent` runs its block under that lock,
+  # as the gem's MRI backend does.
+  class Map
+    def initialize
+      @hash = {}
+      @lock = Mutex.new
+    end
+
+    def [](key)
+      value = nil
+      @lock.synchronize { value = @hash[key] }
+      value
+    end
+
+    def []=(key, value)
+      @lock.synchronize { @hash[key] = value }
+      value
+    end
+
+    def compute_if_absent(key)
+      value = nil
+      @lock.synchronize do
+        value = @hash.key?(key) ? @hash[key] : (@hash[key] = yield)
+      end
+      value
+    end
+
+    def clear
+      @lock.synchronize { @hash.clear }
+      self
     end
   end
 

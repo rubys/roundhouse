@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Minitest-shaped: this is a CRuby-only framework test, quarantined
 # out of the spin shape by `project.rs::spin_shape` (it is not a spin
 # test program and gets no snapshot). It therefore loads its own
@@ -115,11 +116,12 @@ class ViewsArticlesTest < Minitest::Test
     html = Views::Articles.index([@article])
     assert_includes html, %(<turbo-cable-stream-source)
     # base64(JSON("articles")), signed the way Rails signs it
-    # (`Turbo::Streams::StreamName.signed`, keyed off the harness's
-    # empty `secret_key_base`). Both lanes derive the same key and the
-    # same HMAC, so the digest is pinned whole; a lane whose verifier
-    # drifted from Rails' would fail here before the compare did.
-    assert_includes html, %(signed-stream-name="ImFydGljbGVzIg==--12c6b97f1ee5ef2f5a891bc23a2be37ddfaea83fc269c55b4677e86225e66dd7")
+    # (`Turbo::Streams::StreamName.signed`). The harness pins
+    # SECRET_KEY_BASE to "roundhouse-test-secret" before boot
+    # (test_helper.rb); an unpinned key is random and this digest
+    # would move every run. Both lanes derive the same key and the
+    # same HMAC, so the digest is pinned whole.
+    assert_includes html, %(signed-stream-name="ImFydGljbGVzIg==--163c427c6c880441ddaaedadc8c2ba182c7a6701fb9b8eb0a43d30993c49d734")
   end
 
   # ── show.rb ─────────────────────────────────────────────────────
@@ -152,8 +154,9 @@ class ViewsArticlesTest < Minitest::Test
     fixture_article = ArticlesFixtures.one
     html = Views::Articles.show(fixture_article)
     # base64(JSON("article_1_comments")) → ImFydGljbGVfMV9jb21tZW50cyI=,
-    # signed as in `test_index_subscribes_to_articles_stream`.
-    assert_includes html, %(signed-stream-name="ImFydGljbGVfMV9jb21tZW50cyI=--21986ce1c948225d25f5be71fcd498633c89f10e2bad709fdec6b0c09030d11f")
+    # signed as in `test_index_subscribes_to_articles_stream`
+    # (SECRET_KEY_BASE=roundhouse-test-secret).
+    assert_includes html, %(signed-stream-name="ImFydGljbGVfMV9jb21tZW50cyI=--93308469faddb4c58f0ef6788f5c80f3285a698d3c16b3fe8927be50d2dd78d6")
   end
 
   def test_show_renders_comments
@@ -174,7 +177,7 @@ class ViewsArticlesTest < Minitest::Test
 
   def test_new_renders_form_with_post_action
     article = Article.new
-    html = Views::Articles.new(article)
+    html = Views::Articles._new(article)
     assert_includes html, ">New article</h1>"
     assert_includes html, %(action="/articles")
     assert_includes html, %(method="post")
@@ -182,7 +185,7 @@ class ViewsArticlesTest < Minitest::Test
   end
 
   def test_new_links_back_to_index
-    html = Views::Articles.new(Article.new)
+    html = Views::Articles._new(Article.new)
     assert_includes html, %(href="/articles")
     assert_includes html, ">Back to articles</a>"
   end
@@ -208,9 +211,9 @@ class ViewsArticlesTest < Minitest::Test
     refute bad.save  # populates errors
     html = Views::Articles.form(bad)
     assert_includes html, %(id="error_explanation")
-    # html_escape converts the apostrophe to &#39; — assert on the
-    # escaped form (the browser un-escapes it for display).
-    assert_includes html, "title can&#39;t be blank"
+    # Rails' full message humanizes the attribute: "Title can't be blank".
+    # html_escape converts the apostrophe to &#39;.
+    assert_includes html, "Title can&#39;t be blank"
   end
 
   def test_form_omits_error_section_when_no_errors
@@ -242,9 +245,11 @@ class ViewsArticlesTest < Minitest::Test
     assert_includes html, "<title>Real Blog</title>"
   end
 
-  def test_layout_includes_csrf_and_stylesheet
+  def test_layout_omits_csrf_meta_in_test_and_includes_stylesheet
     html = Views::Layouts.application("body")
-    assert_includes html, %(name="csrf-token")
+    # The rendered helper sets allow_forgery_protection = false, Rails'
+    # config/environments/test.rb. csrf_meta_tags is empty then.
+    refute_includes html, %(name="csrf-token")
     assert_includes html, %(rel="stylesheet")
   end
 end

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Surfguard — the SSRF address policy campfire's `RestrictedHTTP` used to
 # carry inline and now takes from a gem (basecamp/surfguard, MIT).
 #

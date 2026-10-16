@@ -26,9 +26,9 @@ fn dispatch_failures(action: &str) -> Vec<String> {
 #[test]
 fn unimplemented_errors_operations_are_refused() {
     let diags = dispatch_failures(
-        "    errors.added?(:base, :blank)\n    errors.import(other.errors.first)\n    errors.merge!(other.errors)\n    errors.delete(:base)\n    errors.where(:base).any?\n    errors.details[:base]\n    errors.map(&:type).include?(:x)\n    errors.errors[0].options[:code]\n    errors.attribute_names\n    errors.messages",
+        "    errors.added?(:base, :blank, count: 1)\n    errors.import(other.errors.first)\n    errors.merge!(other.errors)\n    errors.delete(:base, :blank)\n    errors.where(:base, :blank, count: 1).any?\n    errors.details[:base].first[:count]\n    errors.map(&:type).include?(:x)\n    errors.errors[0].options[:code]\n    errors.messages",
     );
-    for name in ["added?", "import", "merge!", "delete", "where", "details", "attribute_names"] {
+    for name in ["added?", "import", "merge!", "delete", "where", "`[]`"] {
         assert!(diags.iter().any(|d| d.contains(name)), "missing {name}: {diags:?}");
     }
 }

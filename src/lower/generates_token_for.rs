@@ -200,8 +200,8 @@ fn parse_decls(body: &[ModelBodyItem]) -> Vec<Result<TokenForDecl, Option<Symbol
         let value = match block {
             None => None,
             Some(b) => match &*b.node {
-                ExprNode::Lambda { params, rest_param, block_param, body, .. }
-                    if params.is_empty() && rest_param.is_none() && block_param.is_none() =>
+                ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. }
+                    if params.is_empty() && rest_param.is_none() && extra_params.is_empty() && block_param.is_none() =>
                 {
                     Some(body.clone())
                 }
@@ -247,9 +247,9 @@ pub(crate) fn push_token_for_methods(methods: &mut Vec<MethodDef>, model: &Model
             return;
         }
     };
-    let record = Ty::Class { id: model.name.clone(), args: vec![] };
-    let nilable_record = Ty::Union { variants: vec![record.clone(), Ty::Nil] };
-    let meta_ty = Ty::Array { elem: Box::new(Ty::Untyped) };
+    let record = Ty::Class { id: model.name.clone(), args: vec![].into() };
+    let nilable_record = Ty::Union { variants: vec![record.clone(), Ty::Nil].into() };
+    let meta_ty = Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) };
     for mut m in synthesized {
         // Declared signatures, so the sidecar the strict targets compile
         // from says what the registry already says (`register_generates_

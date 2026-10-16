@@ -91,50 +91,44 @@ pub fn apply_config_reader_lowering(app: &mut App) {
             .collect(),
         None => Vec::new(),
     };
-    let lifted = (!lifted.is_empty()).then_some(lifted);
     // Cable, credentials, and lifted config reads used to be three
     // hook+view walks. They match disjoint chains, so one walk is
     // equivalent: config peels outermost-first (longest chain wins),
     // then cable/credentials apply post-order on the way back. Tests
     // only ever saw the config rewrite.
-    super::for_each_hook_body(app, &mut |e| rewrite_fused(e, lifted.as_deref(), true));
-    if let Some(lifted) = lifted.as_deref() {
-        super::for_each_test_body(app, &mut |e| rewrite(e, lifted));
-    }
+    super::for_each_hook_body(app, &mut |e| rewrite_fused(e, &lifted, true));
+    super::for_each_test_body(app, &mut |e| rewrite(e, &lifted));
     for view in &mut app.views {
-        rewrite_fused(&mut view.body, lifted.as_deref(), true);
+        rewrite_fused(&mut view.body, &lifted, true);
     }
 }
 
-/// Combined cable + credentials + (optional) config rewrite. `config`
-/// is outermost-first; cable/credentials are post-order. Surfaces that
-/// never ran config pass `lifted = None`.
+/// Combined cable + credentials + config rewrite. `config` is
+/// outermost-first; cable/credentials are post-order. An empty lifted
+/// list still rewrites framework defaults that are known without app readers.
 fn rewrite_fused(
     expr: &mut Expr,
-    lifted: Option<&[(crate::ident::Symbol, Option<crate::ty::Ty>)]>,
+    lifted: &[(crate::ident::Symbol, Option<crate::ty::Ty>)],
     cable_and_credentials: bool,
 ) {
-    if let Some(lifted) = lifted {
-        unwrap_config_tap(expr);
-        if rewrite_write_here(expr, lifted) {
-            super::symbolize_keys::rewrite_node(expr);
-            // rewrite_write_here only config-rewrites the value. Cable,
-            // credentials, and nested symbolize_keys used to reach it
-            // on their own walks; apply them to the new arguments.
-            if let ExprNode::Send { args, .. } = &mut *expr.node {
-                for arg in args {
-                    rewrite_fused(arg, Some(lifted), cable_and_credentials);
-                }
+    unwrap_config_tap(expr);
+    if rewrite_write_here(expr, lifted) {
+        super::symbolize_keys::rewrite_node(expr);
+        // rewrite_write_here only config-rewrites the value. Cable,
+        // credentials, and nested symbolize_keys used to reach it
+        // on their own walks; apply them to the new arguments.
+        if let ExprNode::Send { args, .. } = &mut *expr.node {
+            for arg in args {
+                rewrite_fused(arg, lifted, cable_and_credentials);
             }
-            return;
         }
-        if rewrite_here(expr, lifted) {
-            super::symbolize_keys::rewrite_node(expr);
-            return;
-        }
+        return;
     }
-    expr.node
-        .for_each_child_mut(&mut |c| rewrite_fused(c, lifted, cable_and_credentials));
+    if rewrite_here(expr, lifted) {
+        super::symbolize_keys::rewrite_node(expr);
+        return;
+    }
+    expr.node.for_each_child_mut(&mut |c| rewrite_fused(c, lifted, cable_and_credentials));
     if cable_and_credentials {
         rewrite_cable_node(expr);
         rewrite_credentials_node(expr);
@@ -287,9 +281,12 @@ fn unwrap_config_tap(expr: &mut Expr) {
     if method.as_str() != "tap" || !args.is_empty() || !is_config_root(r) {
         return;
     }
-    let ExprNode::Lambda { params, body, rest_param: None, block_param: None, .. } = &*b.node else {
+    let ExprNode::Lambda { extra_params, params, body, rest_param: None, block_param: None, .. } = &*b.node else {
         return;
     };
+    if !extra_params.is_empty() {
+        return;
+    }
     let [param] = params.as_slice() else { return };
     let receiver = r.clone();
     let mut body = body.clone();
@@ -393,6 +390,14 @@ fn rewrite_write_here(
 
 /// Rewrite this node if it is a lifted config read; `false` when it is
 /// not, and the caller then descends.
+/// `Rails.application.config.<key>` for framework keys whose default
+/// Rails defines as a constant, read when no `config.<key> = …` was
+/// lifted. `content_security_policy_nonce_generator` is nil unless an app
+/// configures one; campfire's `CachedResponses` reuses a page only then.
+const UNASSIGNED_FRAMEWORK_DEFAULTS: &[(&str, fn() -> Literal)] = &[
+    ("content_security_policy_nonce_generator", || Literal::Nil),
+];
+
 fn rewrite_here(
     expr: &mut Expr,
     lifted: &[(crate::ident::Symbol, Option<crate::ty::Ty>)],
@@ -402,6 +407,17 @@ fn rewrite_here(
     };
     let key = crate::ident::Symbol::from(segments.join("_"));
     let Some((_, reader_ty)) = lifted.iter().find(|(name, _)| name == &key) else {
+        // A framework key the app never assigns reads Rails' own default,
+        // when that default is a constant (`UNASSIGNED_FRAMEWORK_DEFAULTS`).
+        // Anything else stays the unmodelled chain it was.
+        if let [only] = segments.as_slice()
+            && let Some((_, value)) = UNASSIGNED_FRAMEWORK_DEFAULTS.iter().find(|(k, _)| k == only)
+        {
+            let span = expr.span;
+            *expr = Expr::new(span, ExprNode::Lit { value: value() });
+            expr.ty = Some(crate::ty::Ty::Nil);
+            return true;
+        }
         return false;
     };
     let span = expr.span;
@@ -483,4 +499,36 @@ fn peel_config_chain(expr: &Expr) -> Option<(Expr, Vec<String>)> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod framework_default_tests {
+    use super::*;
+
+    fn send(recv: Expr, method: &str) -> Expr {
+        Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: crate::ident::Symbol::from(method),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+
+    #[test]
+    fn known_framework_default_is_rewritten_without_lifted_readers() {
+        let rails = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Const { path: vec![crate::ident::Symbol::from("Rails")] },
+        );
+        let config = send(send(rails, "application"), "config");
+        let mut read = send(config, "content_security_policy_nonce_generator");
+
+        rewrite_fused(&mut read, &[], false);
+
+        assert!(matches!(&*read.node, ExprNode::Lit { value: Literal::Nil }));
+    }
 }

@@ -61,13 +61,13 @@ if cap_env.empty?
       describe(*r)
     )
 
-    # Empty is NOT malformed by Puma's rule (no non-digit in it) and reads
-    # as zero there, so it serves here too.
+    # An explicitly empty Content-Length is invalid (RFC 9112, 6.3
+    # rule 5); Puma 8.0.2 refuses it too. Absence still means no body.
     r = serve(s, post("", ""))
     status, _recvs, bodies, raised = r
     check(
-      "#{s}: an empty Content-Length reads as zero, as Puma reads it",
-      raised.nil? && status == 200 && bodies == [""],
+      "#{s}: an empty Content-Length is a 400",
+      raised.nil? && status == 400 && bodies.empty?,
       describe(*r)
     )
 

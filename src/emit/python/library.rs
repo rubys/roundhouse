@@ -55,7 +55,7 @@ fn accessor_field_ty(m: &MethodDef) -> Ty {
     match (&m.kind, &m.signature) {
         (AccessorKind::AttributeReader, Some(Ty::Fn { ret, .. })) => (**ret).clone(),
         (AccessorKind::AttributeWriter, Some(Ty::Fn { params, .. })) if !params.is_empty() => {
-            params[0].ty.clone()
+            (*params[0].ty).clone()
         }
         _ => m.body.ty.clone().unwrap_or(Ty::Untyped),
     }

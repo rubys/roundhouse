@@ -116,6 +116,7 @@ class Db:
     _statements: dict[int, dict[str, Any]] = {}
     _next_id: int = 0
     _last_rowid: int = 0
+    _changes: int = 0
 
     @classmethod
     def exec(cls, query: str) -> None:
@@ -123,6 +124,7 @@ class Db:
         last insert rowid for a following `last_insert_rowid` call."""
         cur = conn().execute(query)
         cls._last_rowid = cur.lastrowid or 0
+        cls._changes = max(cur.rowcount, 0)
         cur.close()
 
     @classmethod
@@ -227,6 +229,12 @@ class Db:
     def last_insert_rowid(cls) -> int:
         """Rowid from the most recent `exec`."""
         return cls._last_rowid
+
+    @classmethod
+    def changes(cls) -> int:
+        """Rows affected by the most recent `exec` (Rails' `delete_all`
+        return value)."""
+        return cls._changes
 
     @staticmethod
     def escape_string(s: str) -> str:

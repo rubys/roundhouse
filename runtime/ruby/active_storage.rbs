@@ -7,6 +7,10 @@ module ActiveStorage
   def self.default_variable_content_types: () -> Array[String]
   def self.variable_content_types: () -> Array[String]
   def self.variable_content_type?: (String content_type) -> bool
+  # Executable locations (`:ffmpeg`, `:ffprobe`, …). Values are path strings.
+  self.@paths: Hash[Symbol, String]?
+  def self.paths: () -> Hash[Symbol, String]
+  def self.paths=: (Hash[Symbol, String] value) -> Hash[Symbol, String]
   def self.video_preview_arguments: () -> String
   def self.video_preview_vf_filter: () -> String
   def self.previewers: () -> Array[untyped]
@@ -31,6 +35,7 @@ module ActiveStorage
     def []: (Symbol key) -> Integer?
     def width: () -> Integer
     def height: () -> Integer
+    def values_at: (*Symbol keys) -> Array[Integer?]
     def to_json: () -> String
     def self.int_field: (String json, String name) -> Integer
     def self.parse: (String json) -> ActiveStorage::BlobMetadata
@@ -80,6 +85,8 @@ module ActiveStorage
     def self.from_attachable: (untyped value) -> ActiveStorage::Blob?
     def download: () -> String
     def purge: () -> nil
+    def purge_later: () -> nil
+    def variant: (ActiveStorage::Variation variation) -> ActiveStorage::VariantWithRecord
     def video?: () -> bool
     def previewable?: () -> bool
     def preview_image: () -> ActiveStorage::Attached
@@ -87,8 +94,15 @@ module ActiveStorage
     def audio?: () -> bool
     def variable?: () -> bool
     def redirect_url: (String disposition) -> String
+    def proxy_url: (String disposition) -> String
+    def service_route: (String kind, String disposition) -> String
+    def content_type_for_serving: () -> String
+    def forced_disposition_for_serving: () -> String
     def url: (?String disposition) -> String
   end
+
+  def self.content_types_to_serve_as_binary: () -> Array[String]
+  def self.content_types_allowed_inline: () -> Array[String]
 
   module DiskKey
     def self.expiry: () -> String
@@ -121,6 +135,7 @@ module ActiveStorage
     def self.poster: (String path) -> String
 
     class VideoPreviewer < ActiveStorage::Previewer
+      def self.preview_timeout: () -> (Integer | Float | nil)
     end
   end
 
@@ -168,6 +183,7 @@ module ActiveStorage
     def initialize: (ActiveStorage::Blob? blob, ActiveStorage::Variation? variation) -> void
     def blob: () -> ActiveStorage::Blob?
     def variation: () -> ActiveStorage::Variation?
+    def processed?: () -> bool
     def processed: () -> ActiveStorage::VariantWithRecord
     def self.record_select: (String where) -> String
     def self.purge_records_of: (Integer blob_id) -> nil
@@ -209,14 +225,16 @@ module ActiveStorage
     def analyze: () -> nil
     # The named variant (`:thumb`) — a declared variation — or an
     # inline transformation hash, which is the identity variant.
-    def variant: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::VariantWithRecord
+    def variant: (Symbol | Hash[Symbol, untyped] | ActiveStorage::Variation transformations) -> ActiveStorage::VariantWithRecord
     def representation: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::VariantWithRecord
-    def find_variation: (Symbol | Hash[Symbol, untyped] transformations) -> ActiveStorage::Variation?
-    def preview: (ActiveStorage::Variation? transformations) -> ActiveStorage::Preview
+    def find_variation: (Symbol | Hash[Symbol, untyped] | ActiveStorage::Variation | nil transformations) -> ActiveStorage::Variation?
+    def preview: (Symbol | ActiveStorage::Variation | nil transformations) -> ActiveStorage::Preview
     def url: () -> String
     def attach_blob: (ActiveStorage::Blob blob) -> nil
     def attach: (String data, String filename, String content_type) -> nil
     def purge: () -> nil
+    def purge_later: () -> nil
+    def detach_each: () -> Array[ActiveStorage::Blob]
     # `Attached::One#destroy` — see the .rb: purge under Rails' name.
     def destroy: () -> nil
   end
@@ -239,13 +257,32 @@ module ActiveStorage
     @record_type: String
     @record_id: Integer
     @name: String
+    @rows: Array[ActiveStorage::ManyAttachment]
+    @rows_loaded: bool
     def initialize: (String record_type, Integer record_id, String name) -> void
     def attached?: () -> bool
     def attachments: () -> Array[ActiveStorage::ManyAttachment]
+    def first: () -> ActiveStorage::ManyAttachment?
+    def _preload_rows: (Array[ActiveStorage::ManyAttachment] rows) -> nil
+    def each: () { (ActiveStorage::ManyAttachment) -> untyped } -> Array[ActiveStorage::ManyAttachment]
+    def map: () { (ActiveStorage::ManyAttachment) -> untyped } -> Array[untyped]
+    def size: () -> Integer
+    def empty?: () -> bool
+    def _sync_blob_ids: (Array[Integer] blob_ids) -> nil
     def attach_blob: (ActiveStorage::Blob blob) -> nil
     def attach: (String data, String filename, String content_type) -> nil
     def purge: () -> nil
+    def purge_later: () -> nil
+    def detach_each: () -> Array[ActiveStorage::Blob]
     def destroy: () -> nil
+  end
+
+  class PurgeJob
+    def self.perform_later: (ActiveStorage::Blob blob) -> nil
+  end
+
+  class VariantRecord
+    def self.count: () -> Integer
   end
 end
 
@@ -255,6 +292,11 @@ end
 module RouteHelpers
   def self.rails_blob_path: (ActiveStorage::Attached attachment, ?disposition: String?, ?only_path: bool?) -> String
   def self.rails_blob_url: (ActiveStorage::Attached attachment, ?disposition: String?, ?only_path: bool?) -> String
+  def self.rails_storage_proxy_path: (ActiveStorage::Attached | ActiveStorage::Blob model, ?disposition: String?, ?only_path: bool?) -> String
+  def self.rails_storage_proxy_url: (ActiveStorage::Attached | ActiveStorage::Blob model, ?disposition: String?, ?only_path: bool?) -> String
+  def self.rails_storage_redirect_path: (ActiveStorage::Attached | ActiveStorage::Blob model, ?disposition: String?, ?only_path: bool?) -> String
+  def self.rails_storage_redirect_url: (ActiveStorage::Attached | ActiveStorage::Blob model, ?disposition: String?, ?only_path: bool?) -> String
+  def self.storage_blob: (ActiveStorage::Attached | ActiveStorage::Blob model) -> ActiveStorage::Blob?
   def self.rails_representation_path: (ActiveStorage::VariantWithRecord variant, ?only_path: bool?) -> String
   def self.rails_representation_url: (ActiveStorage::VariantWithRecord variant, ?only_path: bool?) -> String
   def self.rails_direct_uploads_path: () -> String

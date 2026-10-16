@@ -26,11 +26,18 @@
 //! alone would bind the wrong module (or nothing) the first time one
 //! does. Rails' answer is the union; this is the union.
 //!
-//! WHAT IT DOES NOT REWRITE: a `view` call whose name no helper module
-//! defines. That is `render`, `assigns`, `output_buffer` and the rest of
-//! `ActionView::Base`'s own surface — a real gap rather than a
-//! resolution failure, so it is reported and left as written, and the
-//! test fails naming the method it wanted.
+//! `view.controller` is the one Base surface campfire's helper tests
+//! need: they stub `perform_caching` on it so presentation caching
+//! can be asserted. The harness already installs an
+//! `ActionController::Base` as `ActionController::Current.controller`
+//! (see `runtime/*/test/test_helper.rb`), and helpers lower their own
+//! `controller` reads through that same slot — so `view.controller`
+//! rewrites to `ActionController::Current.controller` and a mocha stub
+//! lands on the object the helper will read.
+//!
+//! WHAT IT DOES NOT REWRITE: any other `view` call whose name no helper
+//! module defines (`render`, `assigns`, `output_buffer`, …). Those stay
+//! reported gaps.
 
 use crate::app::App;
 use crate::diagnostic::{Diagnostic, Severity};
@@ -91,11 +98,43 @@ pub fn apply_view_test_case_lowering(app: &mut App) -> Vec<Diagnostic> {
 fn rewrite(e: &mut Expr, index: &HashMap<Symbol, ClassId>, diags: &mut Vec<Diagnostic>) {
     e.node.for_each_child_mut(&mut |c| rewrite(c, index, diags));
     let span = e.span;
-    let ExprNode::Send { recv, method, .. } = &mut *e.node else { return };
+    let ExprNode::Send { recv, method, args, .. } = &mut *e.node else { return };
     if !recv.as_ref().is_some_and(is_view) {
         return;
     }
-    let Some(module) = index.get(method) else {
+    // `view.send(:auto_link_text, html)` reaches a PRIVATE helper the
+    // way Ruby does; the name is the literal symbol, so it binds through
+    // the same index and keeps its `send` (the module function stays
+    // private_class_method).
+    let named = match (method.as_str(), args.first().map(|a| &*a.node)) {
+        ("send" | "__send__", Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } })) => value.clone(),
+        _ => method.clone(),
+    };
+    // `view.controller` → the harness's current controller (see module
+    // docs). Must run before the helper-index miss path, or the site
+    // stays a warning and the mocha stub never reaches the helper.
+    if method.as_str() == "controller" {
+        *e = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Const {
+                        path: vec![
+                            Symbol::from("ActionController"),
+                            Symbol::from("Current"),
+                        ],
+                    },
+                )),
+                method: Symbol::from("controller"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        return;
+    }
+    let Some(module) = index.get(&named) else {
         let mut d = Diagnostic::unsupported(
             span,
             None,
@@ -224,6 +263,18 @@ mod tests {
         assert!(out.contains("c = unrelated(m)"), "not mixed in, so not bound:\n{out}");
     }
 
+    /// `view.send(:name, …)` names a (private) helper by literal symbol:
+    /// bound to its module, the `send` kept.
+    #[test]
+    fn a_view_send_binds_the_module_its_symbol_names() {
+        let tm = test_module(VIEW_TEST_CASE, "a = view.send(:auto_link_text, html)");
+        let mut app = app_with(tm, &[("auto_link_text", "MessagesHelper")]);
+        let diags = apply_view_test_case_lowering(&mut app);
+        assert!(diags.is_empty(), "{diags:?}");
+        let out = lowered(&app);
+        assert!(out.contains("MessagesHelper.send(:auto_link_text, html)"), "{out}");
+    }
+
     /// `ActionView::Base`'s own surface is a gap, reported and left.
     #[test]
     fn a_view_call_no_helper_defines_is_reported_and_left() {
@@ -232,6 +283,25 @@ mod tests {
         let diags = apply_view_test_case_lowering(&mut app);
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert!(lowered(&app).contains("view.render"), "{}", lowered(&app));
+    }
+
+    /// campfire stubs `perform_caching` on `view.controller` — that is
+    /// the harness's `ActionController::Current.controller`.
+    #[test]
+    fn view_controller_is_the_harness_current_controller() {
+        let tm = test_module(
+            VIEW_TEST_CASE,
+            "view.controller.stubs(:perform_caching).returns(true)",
+        );
+        let mut app = app_with(tm, &[("message_presentation", "MessagesHelper")]);
+        let diags = apply_view_test_case_lowering(&mut app);
+        assert!(diags.is_empty(), "{diags:?}");
+        let out = lowered(&app);
+        assert!(
+            out.contains("ActionController::Current.controller.stubs"),
+            "{out}"
+        );
+        assert!(!out.contains("view.controller"), "{out}");
     }
 
     /// Only under the view parent: a model test with a local named

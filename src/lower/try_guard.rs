@@ -168,6 +168,11 @@ pub(crate) fn rewrite_node(
         // pipeline follows for a send with no receiver to dispatch on.
         Some(arms) if arms.is_empty() => Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
         Some(arms) => {
+            // Under a one-class test the call's receiver IS that class:
+            // the narrowing is the guard that makes the call resolve.
+            if let ([klass], ExprNode::Send { recv: Some(r), .. }) = (arms.as_slice(), &mut *call.node) {
+                r.ty = Some(Ty::Class { id: crate::ident::ClassId(klass.clone()), args: Vec::new().into() });
+            }
             let test = arms
                 .into_iter()
                 .map(|klass| is_a(span, &recv, &klass))
@@ -251,19 +256,35 @@ fn narrowing(
         let base = highest_safe_ancestor(klass, set, parents);
         if !cover.contains(&base) {
             cover.push(base);
+            // The cover only grows, so once it is past the bound the
+            // answer is already "keep the nil guard"; stopping here keeps
+            // the climb from costing |set|^2 per site.
+            if cover.len() > MAX_ARMS {
+                return None;
+            }
         }
-    }
-    if cover.len() > MAX_ARMS {
-        return None;
     }
     // Deterministic emit: a HashSet's iteration order is not.
     cover.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     Some(cover)
 }
 
-/// The furthest ancestor of `klass` that is still SAFE to test — every
-/// class in the tree descending from it defines the name too. Falls back
-/// to `klass` itself, which is always safe.
+/// The furthest ancestor of `klass` that is still SAFE to test: every
+/// class in the tree descending from it ANSWERS the name, by defining
+/// it or by inheriting it from something that does. Falls back to
+/// `klass` itself, which is always safe.
+///
+/// RESPONDS, not DEFINES, and the distinction is the whole of STI.
+/// `to_gid_param` is synthesized on `Room` and not on `Rooms::Open`,
+/// which inherits it; asking about definition alone made
+/// `ApplicationRecord` look unsafe, nothing climbed, and a set that
+/// covers in three tests came out as fifteen.
+///
+/// An ancestor that itself DEFINES the name (is in `set`) is therefore
+/// always safe: it is on the ancestry of each of its descendants, so
+/// each one inherits the method from it. Being in `set` is the whole
+/// test. Re-checking "every descendant answers" for each such ancestor
+/// could only say yes, at |set| * |classes| * depth^2 per `try` site.
 fn highest_safe_ancestor(
     klass: &Symbol,
     set: &HashSet<Symbol>,
@@ -271,7 +292,7 @@ fn highest_safe_ancestor(
 ) -> Symbol {
     let mut best = klass.clone();
     for ancestor in ancestry(klass, parents) {
-        if set.contains(&ancestor) && descendants_all_define(&ancestor, set, parents) {
+        if set.contains(&ancestor) {
             best = ancestor;
         }
     }
@@ -296,28 +317,9 @@ fn ancestry(name: &Symbol, parents: &HashMap<Symbol, Symbol>) -> Vec<Symbol> {
     out
 }
 
-/// Does every class under `base` ANSWER the name — by defining it or by
-/// inheriting it from something that does?
-///
-/// RESPONDS, not DEFINES, and the distinction is the whole of STI.
-/// `to_gid_param` is synthesized on `Room` and not on `Rooms::Open`,
-/// which inherits it; asking about definition alone made
-/// `ApplicationRecord` look unsafe, nothing climbed, and a set that
-/// covers in three tests came out as fifteen.
-fn descendants_all_define(
-    base: &Symbol,
-    set: &HashSet<Symbol>,
-    parents: &HashMap<Symbol, Symbol>,
-) -> bool {
-    parents
-        .keys()
-        .filter(|k| ancestry(k, parents).contains(base))
-        .all(|k| k == base || ancestry(k, parents).iter().any(|a| set.contains(a)))
-}
-
 fn is_a(span: crate::span::Span, recv: &Expr, klass: &Symbol) -> Expr {
     let path: Vec<Symbol> = klass.as_str().split("::").map(Symbol::from).collect();
-    Expr::new(
+    let mut test = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(recv.clone()),
@@ -326,7 +328,13 @@ fn is_a(span: crate::span::Span, recv: &Expr, klass: &Symbol) -> Expr {
             block: None,
             parenthesized: true,
         },
-    )
+    );
+    // Typed here because no analysis pass runs after this one: an
+    // untyped Send over a typed (often nullable) receiver reads, at the
+    // post-lowering diagnose, as a dispatch that failed. `is_a?` answers
+    // a Bool on every receiver, nil included.
+    test.ty = Some(Ty::Bool);
+    test
 }
 
 /// Methods the pipeline SYNTHESIZES onto every model, which this pass
@@ -346,18 +354,39 @@ fn is_a(span: crate::span::Span, recv: &Expr, klass: &Symbol) -> Expr {
 const SYNTHESIZED_ON_EVERY_MODEL: [&str; 1] = ["to_gid_param"];
 
 /// method name -> the app classes defining it as an INSTANCE method.
+///
+/// A model answers more than its `def`s: Rails generates a reader for
+/// every column, every `attr_*`, and every association. Leaving those out
+/// made `@user.try(:username)` in lobsters' layout narrow to the one class
+/// that spelled the name as a method (`ModNote`, through a `delegate`),
+/// so a logged-in `User` rendered `data-username=''`.
 pub(crate) fn collect_definers(app: &App) -> HashMap<Symbol, HashSet<Symbol>> {
     let mut out: HashMap<Symbol, HashSet<Symbol>> = HashMap::new();
     for m in &app.models {
         let owner = m.name.0.clone();
+        let mut define = |name: &Symbol| {
+            out.entry(name.clone()).or_default().insert(owner.clone());
+        };
         for name in SYNTHESIZED_ON_EVERY_MODEL {
-            out.entry(Symbol::from(name)).or_default().insert(owner.clone());
+            define(&Symbol::from(name));
+        }
+        for name in m.attributes.fields.keys() {
+            define(name);
+        }
+        if let Some(table) = app.schema.tables.get(&m.table.0) {
+            for column in &table.columns {
+                define(&column.name);
+            }
         }
         for item in &m.body {
-            if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
-                if matches!(method.receiver, MethodReceiver::Instance) {
-                    out.entry(method.name.clone()).or_default().insert(owner.clone());
+            match item {
+                crate::dialect::ModelBodyItem::Method { method, .. }
+                    if matches!(method.receiver, MethodReceiver::Instance) =>
+                {
+                    define(&method.name);
                 }
+                crate::dialect::ModelBodyItem::Association { assoc, .. } => define(assoc.name()),
+                _ => {}
             }
         }
     }

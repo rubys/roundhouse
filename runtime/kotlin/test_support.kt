@@ -9,6 +9,10 @@ open class RoundhouseTestCase {
     var __flash = Flash()
     var __session = Session()
 
+    data class TestResponse(val body: String, val status: Long)
+
+    fun response(): TestResponse = TestResponse(__body, __status)
+
     @org.junit.jupiter.api.BeforeEach
     fun __rhSetUp() {
         if (RoundhouseTestSetup.schemaSql.isNotEmpty()) {

@@ -510,3 +510,313 @@ end
         "check-shaped analyze must type message.boosts.loaded?: {loaded:?}"
     );
 }
+
+#[test]
+fn association_loaded_rewrites_shared_name_in_test_body() {
+    // Campfire: Message and Membership both `belongs_to :room`. Unique-name
+    // fails, but every matching model exposes `room_loaded?` — test bodies
+    // with an untyped `message` local must still flatten.
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.integer "room_id"
+  end
+  create_table "memberships", force: :cascade do |t|
+    t.integer "room_id"
+  end
+  create_table "rooms", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  belongs_to :room
+end
+"#,
+        ),
+        (
+            "app/models/membership.rb",
+            r#"class Membership < ApplicationRecord
+  belongs_to :room
+end
+"#,
+        ),
+        (
+            "app/models/room.rb",
+            r#"class Room < ApplicationRecord
+end
+"#,
+        ),
+        (
+            "test/models/message_room_loaded_test.rb",
+            r#"require "test_helper"
+
+class MessageRoomLoadedTest < ActiveSupport::TestCase
+  test "room starts unloaded" do
+    message = Message.new
+    assert_not message.association(:room).loaded?
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    // Full spinel emit reaches `app.test_modules` (models-only does not).
+    let files = ruby::emit_spinel(&app);
+    let src = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().contains("message_room_loaded"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    assert!(
+        src.contains("room_loaded?"),
+        "shared :room must flatten association(:room).loaded? in tests:\n{src}"
+    );
+    assert!(
+        !src.contains("association(:room)"),
+        "association(:room).loaded? must not survive test emit:\n{src}"
+    );
+}
+
+#[test]
+fn association_loaded_rewrites_after_reload_typed_as_base() {
+    // Campfire mentionee: `message = ….create!(…).reload` then
+    // `message.association(:room).loaded?`. `reload` types as Base, which
+    // does not declare `:room` — must still flatten in test bodies.
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.integer "room_id"
+  end
+  create_table "memberships", force: :cascade do |t|
+    t.integer "room_id"
+  end
+  create_table "rooms", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  belongs_to :room
+end
+"#,
+        ),
+        (
+            "app/models/membership.rb",
+            r#"class Membership < ApplicationRecord
+  belongs_to :room
+end
+"#,
+        ),
+        (
+            "app/models/room.rb",
+            r#"class Room < ApplicationRecord
+  has_many :messages
+end
+"#,
+        ),
+        (
+            "test/models/message_room_loaded_test.rb",
+            r#"require "test_helper"
+
+class MessageRoomLoadedTest < ActiveSupport::TestCase
+  test "room starts unloaded after reload" do
+    message = Message.create!(room_id: 1).reload
+    assert_not message.association(:room).loaded?
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_spinel(&app);
+    let src = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().contains("message_room_loaded"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    assert!(
+        src.contains("room_loaded?"),
+        "Base-typed reload receiver must still flatten association(:room).loaded?:\n{src}"
+    );
+    assert!(
+        !src.contains("association(:room)"),
+        "association(:room).loaded? must not survive after reload:\n{src}"
+    );
+}
+
+#[test]
+fn association_loaded_keeps_poly_receiver_when_sibling_declares_name() {
+    // Message has polymorphic `:room` (no flat `room_loaded?`); Membership
+    // has a supported `belongs_to :room`. The any-model gate must not rewrite
+    // a Message-typed receiver onto a predicate it does not own.
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.integer "room_id"
+    t.string "room_type"
+  end
+  create_table "memberships", force: :cascade do |t|
+    t.integer "room_id"
+  end
+  create_table "rooms", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  belongs_to :room, polymorphic: true
+end
+"#,
+        ),
+        (
+            "app/models/membership.rb",
+            r#"class Membership < ApplicationRecord
+  belongs_to :room
+end
+"#,
+        ),
+        (
+            "app/models/room.rb",
+            r#"class Room < ApplicationRecord
+end
+"#,
+        ),
+        (
+            "test/models/message_poly_room_loaded_test.rb",
+            r#"require "test_helper"
+
+class MessagePolyRoomLoadedTest < ActiveSupport::TestCase
+  test "poly room stays on association.loaded?" do
+    message = Message.new
+    assert_not message.association(:room).loaded?
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_spinel(&app);
+    let src = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().contains("message_poly_room_loaded"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    assert!(
+        src.contains("association(:room)"),
+        "polymorphic Message must keep association(:room).loaded?:\n{src}"
+    );
+    assert!(
+        !src.contains("room_loaded?"),
+        "must not flatten onto Membership's room_loaded? for a Message recv:\n{src}"
+    );
+}
+
+#[test]
+fn association_loaded_over_a_symbol_list_unrolls_onto_the_flat_predicates() {
+    // Campfire's `message_fragment_cache_key`: the names are a literal
+    // list and `association` is handed the block local, which nothing can
+    // resolve. Unrolled, each term flattens like a literal-name call, and
+    // `has_one_attached :attachment` answers `attachment_attachment`.
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.integer "room_id"
+  end
+  create_table "boosts", force: :cascade do |t|
+    t.integer "message_id"
+  end
+  create_table "rooms", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  belongs_to :room
+  has_many :boosts
+  has_one_attached :attachment
+
+  def presentation_loaded?
+    %i[room boosts attachment_attachment].all? { |name| association(name).loaded? }
+  end
+end
+"#,
+        ),
+        ("app/models/boost.rb", "class Boost < ApplicationRecord\n  belongs_to :message\nend\n"),
+        ("app/models/room.rb", "class Room < ApplicationRecord\n  has_many :messages\nend\n"),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_spinel(&app);
+    let model = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("models/message.rb"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    let body: String = model
+        .lines()
+        .skip_while(|l| !l.contains("def presentation_loaded?"))
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        body.contains("room_loaded? && ")
+            && body.contains("boosts_loaded? && ")
+            && body.contains("attachment_attachment_loaded?"),
+        "the symbol list unrolls onto the flat predicates:\n{body}"
+    );
+    assert!(!body.contains("association("), "no dynamic association call survives:\n{body}");
+    assert!(model.contains("def attachment_attachment_loaded?"), "{model}");
+}

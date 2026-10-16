@@ -112,6 +112,20 @@ pub fn apply_html_safe_lowering(app: &mut App) {
             rewrite(&mut m.body);
         }
     }
+    // A TEST's mark builds an argument (campfire's
+    // `view.send(:auto_link_text, "<pre>…".html_safe)`); no view walker
+    // or `render html:` answers it there, so it is erased as a model's.
+    for tm in &mut app.test_modules {
+        if let Some(setup) = &mut tm.setup {
+            rewrite(setup);
+        }
+        for t in &mut tm.tests {
+            rewrite(&mut t.body);
+        }
+        for m in &mut tm.helpers {
+            rewrite(&mut m.body);
+        }
+    }
 }
 
 /// Can this body return a marked value? Every tail position is a

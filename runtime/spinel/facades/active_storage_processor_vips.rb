@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The image processor, over ruby-vips: `require "vips"` is the
 # spinel-ruby-vips spin package on the spinel tree (a subset of the gem
 # over the system libvips, headerless carried C) and the gem itself on

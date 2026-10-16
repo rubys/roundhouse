@@ -54,7 +54,7 @@ fn normalize_predicate(predicate: &mut Predicate, schema: &Schema) {
 /// must stay a String. Explicit numeric conversion preserves nil; an IR
 /// narrowing Cast can be elided after later typing and is not serialization.
 fn serialized_value_expr(expr: &Expr, column: &ColumnType, nullable: bool) -> Expr {
-    let text_ty = if nullable { Ty::Union { variants: vec![Ty::Str, Ty::Nil] } } else { Ty::Str };
+    let text_ty = if nullable { Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() } } else { Ty::Str };
     let converted = match column {
         ColumnType::Float | ColumnType::Decimal { .. } => {
             let text = Expr::new(expr.span, ExprNode::Send {
@@ -94,7 +94,10 @@ fn serialized_value_expr(expr: &Expr, column: &ColumnType, nullable: bool) -> Ex
         }
         ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. }
         | ColumnType::Boolean | ColumnType::String { .. } | ColumnType::Text
-        | ColumnType::Binary | ColumnType::Json | ColumnType::Uuid => return expr.clone(),
+        | ColumnType::Binary
+        | ColumnType::Json
+        | ColumnType::Jsonb
+        | ColumnType::Uuid => return expr.clone(),
     };
     crate::lower::typing::with_ty(converted, text_ty)
 }

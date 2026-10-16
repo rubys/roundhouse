@@ -164,7 +164,7 @@ fn the_json_arm_serves_each_records_writer() {
     let src = file(ruby::emit_lowered_controllers(&app), "stories_controller");
     assert!(src.contains("request_format == :json"), "the json arm was dropped:\n{src}");
     assert!(
-        src.contains(r#""[" + @stories.map { |record| record.as_json_str }.join(",") + "]""#),
+        src.contains(r#""[" + @stories.map { |item| item.as_json_str }.join(",") + "]""#),
         "{src}"
     );
     assert!(src.contains(r#"content_type: "application/json""#), "{src}");
@@ -216,11 +216,10 @@ fn an_unencodable_value_keeps_the_runtime_encoder() {
 }
 
 /// A table-backed record with NO `as_json` serializes its columns in
-/// Rails. The declared-readers writer (for a tableless class) answers
-/// something else, so a record keeps the runtime encoder — here `Tag`,
-/// whose `attr_accessor` would otherwise have been its whole payload.
+/// Rails, not the declared readers a tableless class's writer reads —
+/// here `Tag`, whose `attr_accessor` is no part of its payload.
 #[test]
-fn a_record_without_its_own_as_json_keeps_the_runtime_encoder() {
+fn a_record_without_its_own_as_json_writes_its_columns() {
     let tag = "class Tag < ApplicationRecord\n  belongs_to :story\n  attr_accessor :filtered_count\nend\n";
     let controller = r#"class StoriesController < ApplicationController
   def index
@@ -241,7 +240,10 @@ end
     let mut app = ingest_app_from_tree(tree).expect("ingest");
     roundhouse::session::analyze_and_lower(&mut app);
     let models = file(ruby::emit_lowered_models(&app), "models/tag.rb");
-    assert!(!models.contains("as_json_str"), "{models}");
+    let writer = &models[models.find("def as_json_str").unwrap_or_else(|| panic!("{models}"))..];
+    let writer = &writer[..writer.find("\n  end\n").unwrap_or(writer.len())];
+    assert!(writer.contains(r#"\"id\":"#) && writer.contains(r#",\"tag\":"#) && writer.contains(r#",\"story_id\":"#), "{writer}");
+    assert!(!writer.contains("filtered_count"), "{writer}");
     let src = file(ruby::emit_lowered_controllers_with_layout(&app), "stories_controller");
-    assert!(src.contains("ActionController::JsonRender.encode(@tags)"), "{src}");
+    assert!(src.contains("as_json_str") && !src.contains("JsonRender"), "{src}");
 }

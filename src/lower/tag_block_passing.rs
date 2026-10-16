@@ -245,15 +245,15 @@ fn half_variant(m: &MethodDef, half: &str, parts: Vec<InterpPart>) -> MethodDef 
     };
     let mut out = vec![crate::ty::Param {
         name: Symbol::from(ACC),
-        ty: Ty::Str,
+        ty: Ty::Str.into(),
         kind: ParamKind::Required,
     }];
     out.extend(names.into_iter().map(|name| crate::ty::Param {
         name,
-        ty: Ty::Untyped,
+        ty: Ty::Untyped.into(),
         kind: ParamKind::Required,
     }));
-    let signature = Some(Ty::Fn { params: out, block, ret: Box::new(Ty::Nil), effects });
+    let signature = Some(Ty::Fn { params: out.into(), block, ret: std::sync::Arc::new(Ty::Nil), effects });
     let mut v = m.clone();
     v.name = Symbol::from(half_name(m.name.as_str(), half).as_str());
     v.params = params;
@@ -364,9 +364,12 @@ fn try_rewrite(e: &mut Expr, acc: &str, variants: &HashMap<(String, String), Var
     if cargs.len() != variant.arity {
         return false;
     }
-    let ExprNode::Lambda { params: bparams, rest_param, block_param, body, .. } = &*blk.node else {
+    let ExprNode::Lambda { extra_params, params: bparams, rest_param, block_param, body, .. } = &*blk.node else {
         return false;
     };
+    if !extra_params.is_empty() {
+        return false;
+    }
     if !bparams.is_empty() || rest_param.is_some() || block_param.is_some() {
         return false;
     }

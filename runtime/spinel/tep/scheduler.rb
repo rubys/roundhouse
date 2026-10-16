@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::Scheduler -- a tiny fiber-based cooperative scheduler.
 #
 # Spinel ships Fiber today (ucontext-based, GC-aware, ivars persist
@@ -45,13 +46,45 @@ module Tep
     READ  = 1
     WRITE = 2
 
+    # A new fiber takes the first dead slot, or a fresh one at the end.
+    # tick reclaims dead slots from the tail only (see there), and the
+    # Scheduled server spawns one fiber per connection from the accept
+    # fiber -- so every connection that closed while a newer one was
+    # still open left its slot behind that one, never at the tail. Under
+    # connection churn the parallel arrays grew by one per accepted
+    # connection, each dead slot pinning its fiber's stack, and every
+    # poll_round and tick walked all of them. Reusing a dead slot keeps
+    # every live fiber's index stable, which captures of sched_current
+    # held across Fiber.yield rely on.
     def self.spawn_fiber(f)
-      Tep::APP.sched_fibers.push(Tep::FiberSlot.new(f))
-      Tep::APP.sched_wake_at.push(-1)
-      Tep::APP.sched_io_fd.push(-1)
-      Tep::APP.sched_io_mode.push(0)
-      Tep::APP.sched_io_ready.push(0)
+      idx = Scheduler.free_slot
+      if idx < 0
+        Tep::APP.sched_fibers.push(Tep::FiberSlot.new(f))
+        Tep::APP.sched_wake_at.push(-1)
+        Tep::APP.sched_io_fd.push(-1)
+        Tep::APP.sched_io_mode.push(0)
+        Tep::APP.sched_io_ready.push(0)
+      else
+        Tep::APP.sched_fibers[idx].f = f
+        Tep::APP.sched_wake_at[idx]  = -1
+        Tep::APP.sched_io_fd[idx]    = -1
+        Tep::APP.sched_io_mode[idx]  = 0
+        Tep::APP.sched_io_ready[idx] = 0
+      end
       f
+    end
+
+    # Index of the first slot whose fiber has finished, or -1.
+    def self.free_slot
+      i = 0
+      n = Tep::APP.sched_fibers.length
+      while i < n
+        if !Tep::APP.sched_fibers[i].f.alive?
+          return i
+        end
+        i += 1
+      end
+      -1
     end
 
     # One scheduler pass. If any fibers are parked on I/O, build a
@@ -69,15 +102,12 @@ module Tep
     # each "hand off to the freshly-spawned fiber" step costs a full
     # poll-timeout's worth of latency.
     def self.tick(poll_timeout_ms)
-      # Reclaim trailing dead slots. Without this, the parallel
-      # arrays grow once per accepted connection and never shrink --
-      # a slow leak and per-tick iteration tax in a long-running
-      # Scheduled server. Tail-only (stop at first alive) is
-      # deliberate: it keeps every surviving slot's index stable,
-      # so external captures of sched_current held across Fiber.yield
-      # (e.g. pg.rb's PG::Pool @waiter_idxs) stay valid. Middle
-      # dead slots aren't reclaimed until the tail catches up; for
-      # FIFO request lifecycles that's the common case.
+      # Reclaim trailing dead slots, so the arrays shrink back when the
+      # server goes idle. Tail-only (stop at first alive) is deliberate:
+      # it keeps every surviving slot's index stable, so external
+      # captures of sched_current held across Fiber.yield (e.g. pg.rb's
+      # PG::Pool @waiter_idxs) stay valid. A dead slot behind a live one
+      # is not deleted; spawn_fiber reuses it for the next fiber.
       i = Tep::APP.sched_fibers.length - 1
       while i >= 0 && !Tep::APP.sched_fibers[i].f.alive?
         Tep::APP.sched_fibers.delete_at(i)

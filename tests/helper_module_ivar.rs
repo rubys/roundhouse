@@ -106,6 +106,18 @@ fn the_base_controller_grows_the_reader_it_dispatches_to() {
     );
 }
 
+#[test]
+fn a_helper_controller_read_routes_through_the_live_controller() {
+    let app = app(
+        "module RoomsHelper\n  def caching_enabled\n    controller.perform_caching\n  end\nend\n",
+    );
+    let src = emitted(&app, "rooms_helper.rb");
+    assert!(
+        src.contains("ActionController::Current.controller.perform_caching"),
+        "`controller` in a helper module must resolve to the current controller:\n{src}"
+    );
+}
+
 /// A name the app already defines as a controller ACTION is left alone:
 /// the synthesized reader would collide with it, and the app's own
 /// method is the one that should win.

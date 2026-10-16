@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby-only ActiveRecord::Base extensions: `find_by!` + record equality.
 #
 # Lives on the CRuby overlay, not shared runtime/ruby/active_record/base.rb:
@@ -10,7 +11,7 @@ module ActiveRecord
   class Base
     def self.find_by!(conditions)
       result = find_by(conditions)
-      raise RecordNotFound, "Couldn't find #{name}" if result.nil?
+      raise RecordNotFound.new("Couldn't find #{name}", name, primary_key) if result.nil?
       result
     end
 

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # IPAddr — the slice of Ruby's stdlib class the corpus reaches, ported
 # rather than derived.
 #

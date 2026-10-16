@@ -166,6 +166,10 @@ pub enum ReturnKind {
     /// another Hash shape enters the catalog, generalize to a
     /// `HashOf(PrimKind, PrimKind)` variant.
     HashSymStr,
+    /// Returns `Hash<Str, untyped>`. Example:
+    /// `#attributes_before_type_cast` — each column's raw stored value,
+    /// String-keyed as Rails keys it.
+    HashStrUntyped,
     /// Returns `Array<Sym>`. Example: `.schema_column_names` on
     /// an ActiveRecord class — the schema column list the lowerer
     /// will emit per-model once `Base`'s `attr_accessor` override
@@ -179,7 +183,7 @@ pub enum ReturnKind {
     Str,
     /// Reference to a concrete class by dotted-name path
     /// (e.g. `"ActiveModel::Errors"`). Analyzer instantiates as
-    /// `Ty::Class { id: ClassId(<path>), args: vec![] }`.
+    /// `Ty::Class { id: ClassId(<path>), args: vec![].into() }`.
     /// Used by `#errors` to reference the ActiveModel::Errors
     /// class without needing it to be a user-defined model.
     ClassRef(&'static str),
@@ -286,6 +290,22 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Terminal,
         // `find_by!` raises rather than returning nil, so the result is the
         // record itself (not `Self | Nil` like `find_by`).
+        return_kind: Some(ReturnKind::SelfType),
+    },
+    // `sole` / `find_sole_by` (Rails 7.0) raise unless exactly one row
+    // matches, so they answer the record itself, like `find_by!`.
+    CatalogedMethod {
+        name: "sole",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::SelfType),
+    },
+    CatalogedMethod {
+        name: "find_sole_by",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
         return_kind: Some(ReturnKind::SelfType),
     },
     // `find_or_initialize_by` reads, and on a miss builds an unsaved
@@ -702,7 +722,7 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::Int),
     },
     CatalogedMethod {
         name: "insert",
@@ -728,19 +748,31 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::ArrayOfUntyped),
     },
+    // The raising twin, inlined beside it to `ActiveRecord::Result
+    // .new(rows.map { … })` — Rails answers the same class.
+    CatalogedMethod {
+        name: "insert_all!",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Result")),
+    },
+    // The runtime's `upsert_all` answers the affected-row count, not
+    // Rails' `ActiveRecord::Result` (ledgered in docs/pipeline/runtime.md
+    // beside `insert_all`'s); typed as what the emitted code returns.
     CatalogedMethod {
         name: "upsert",
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::Int),
     },
     CatalogedMethod {
         name: "upsert_all",
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::Int),
     },
     CatalogedMethod {
         name: "touch_all",
@@ -850,6 +882,34 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Base")),
     },
+    // `#lock!` (`ActiveRecord::Locking::Pessimistic`) reloads with a
+    // row lock and answers the reloaded record — on sqlite (single
+    // writer, no `SELECT … FOR UPDATE` support) the runtime
+    // implements it as a plain `reload`, so it shares `reload`'s
+    // classification exactly: DbRead effect, `() -> Base` per the
+    // shared-runtime-method sidecar convention (see `save!` above;
+    // `lock!` is `Base#lock!`, not monomorphized per model).
+    CatalogedMethod {
+        name: "lock!",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Base")),
+    },
+    // `#with_lock` runs `lock!` then yields inside a transaction,
+    // answering the block's value — same gradual escape as
+    // `ActiveRecord::Base.transaction` (`analyze/registry/ar.rs`):
+    // the return type isn't statically tracked, so `Untyped`. Its
+    // own direct effect (before the block's statements are visited
+    // and classified independently) is the `lock!` read; any writes
+    // the block performs attach to their own Send nodes.
+    CatalogedMethod {
+        name: "with_lock",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Untyped),
+    },
     // ---- Instance-method state predicates ----
     // Pure — query in-memory flags the record already carries.
     // `#persisted?` / `#new_record?` check loaded state;
@@ -909,6 +969,13 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         effect: EffectClass::Pure,
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::HashSymStr),
+    },
+    CatalogedMethod {
+        name: "attributes_before_type_cast",
+        receiver: ReceiverContext::Instance,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::HashStrUntyped),
     },
     CatalogedMethod {
         name: "errors",
@@ -1150,6 +1217,22 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
     },
     CatalogedMethod {
         name: "reorder",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
+    },
+    // `order(Arel.sql(…))` / `reorder(Arel.sql(…))`, renamed by
+    // `lower::arel_sql_order` so the fragment skips the column check.
+    CatalogedMethod {
+        name: "order_sql",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
+    },
+    CatalogedMethod {
+        name: "reorder_sql",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,
         chain: ChainKind::Builder,
@@ -1456,6 +1539,13 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         return_kind: Some(ReturnKind::SelfType),
     },
     CatalogedMethod {
+        name: "find_sole_by",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::SelfType),
+    },
+    CatalogedMethod {
         name: "first!",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,
@@ -1497,10 +1587,10 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Terminal,
         return_kind: Some(ReturnKind::Int),
     },
-    // sum/average/minimum/maximum approximate as Int — the same
-    // deliberate approximation the send.rs arm makes (float
-    // sums/averages are rare in controller code). The Class-context
-    // entries leave these None; here the arm is the spec.
+    // sum/average approximate as Int — the same deliberate approximation
+    // the send.rs arm makes (float sums/averages are rare in controller
+    // code). Extrema are schema-indexed at the call site; a catalog-wide
+    // Int would mis-type Date, Time, String, and grouped results.
     CatalogedMethod {
         name: "sum",
         receiver: ReceiverContext::Relation,
@@ -1520,14 +1610,14 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,
         chain: ChainKind::Terminal,
-        return_kind: Some(ReturnKind::Int),
+        return_kind: None,
     },
     CatalogedMethod {
         name: "maximum",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,
         chain: ChainKind::Terminal,
-        return_kind: Some(ReturnKind::Int),
+        return_kind: None,
     },
     CatalogedMethod {
         name: "exists?",
@@ -1553,6 +1643,13 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         effect: EffectClass::DbRead,
         chain: ChainKind::Terminal,
         return_kind: Some(ReturnKind::ArrayOfInt),
+    },
+    CatalogedMethod {
+        name: "to_sql",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::Pure,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::Str),
     },
     CatalogedMethod {
         name: "pluck",
@@ -1595,8 +1692,8 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         name: "in_batches",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,
-        chain: ChainKind::Terminal,
-        return_kind: Some(ReturnKind::ArrayOfSelf),
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
     },
     // Constructors / first-or-X — return an element instance.
     CatalogedMethod {
@@ -1665,6 +1762,13 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
     // Writes through the relation.
     CatalogedMethod {
         name: "update_all",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Int),
+    },
+    CatalogedMethod {
+        name: "touch_all",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
@@ -1839,7 +1943,7 @@ mod tests {
         // SqliteAdapter classified as Read must still be in the
         // catalog as DbRead under at least one receiver context.
         for m in [
-            "all", "find", "find_by", "find_by!", "first", "last",
+            "all", "find", "find_by", "find_by!", "sole", "find_sole_by", "first", "last",
             "where", "limit", "offset", "order", "group", "having",
             "joins", "includes", "preload", "select", "distinct",
             "count", "exists?", "pluck", "pick", "take",
@@ -1897,7 +2001,7 @@ mod tests {
     #[test]
     fn terminal_reads_are_classified() {
         for m in [
-            "all", "find", "find_by", "find_by!", "first", "last",
+            "all", "find", "find_by", "find_by!", "sole", "find_sole_by", "first", "last",
             "take", "count", "exists?", "pluck", "pick",
             "sum", "average", "maximum", "minimum",
         ] {
@@ -1988,6 +2092,11 @@ mod tests {
             let entry = lookup(m, ReceiverContext::Relation)
                 .unwrap_or_else(|| panic!("no Relation entry for `{m}`"));
             assert_eq!(entry.return_kind, Some(kind), "wrong return_kind for `{m}`");
+        }
+        for method in ["minimum", "maximum"] {
+            let entry = lookup(method, ReceiverContext::Relation)
+                .unwrap_or_else(|| panic!("no Relation entry for `{method}`"));
+            assert_eq!(entry.return_kind, None, "`{method}` is schema-indexed at its call site");
         }
     }
 

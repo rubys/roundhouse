@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # JSON — resolved by each tree's own stack. The scaffold boot.rb's
 # `require_relative "runtime/json_impl"` lands here uniformly; this file
 # just claims the real implementation:

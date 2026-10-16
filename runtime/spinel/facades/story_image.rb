@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # StoryImage façade — lobsters builds a story's social-card image by
 # fetching the linked page (through Sponge, itself a raising façade on
 # this tree), finding its og:image, and compositing the site logo onto

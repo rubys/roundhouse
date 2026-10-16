@@ -78,6 +78,32 @@ end
     app
 }
 
+fn sti_room_app() -> roundhouse::App {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "rooms", force: :cascade do |t|
+    t.string "type"
+    t.string "name", null: false
+  end
+end
+"#,
+        ),
+        (
+            "app/models/room.rb",
+            "class Room < ApplicationRecord\nend\n",
+        ),
+        (
+            "app/models/rooms/open.rb",
+            "class Rooms::Open < Room\nend\n",
+        ),
+    ]))
+    .expect("ingest STI room app");
+    roundhouse::session::analyze_and_lower(&mut app);
+    app
+}
+
 fn find(files: &[roundhouse::emit::EmittedFile], name: &str) -> String {
     files
         .iter()
@@ -92,12 +118,77 @@ fn append_lowers_to_a_broadcasts_call_with_the_records_own_partial() {
     let src = find(&lowered(), "broadcasts.rb");
     assert!(
         src.contains(
-            "Broadcasts.append(stream: \"#{GlobalID.param(\"Room\", bc_owner.id)}:messages\", \
+            "Broadcasts.append(stream: \"#{bc_owner.to_gid_param}:messages\", \
              target: \"messages_#{bc_owner.dom_prefix}_#{bc_owner.dom_record_key}\", \
              html: ActionView::ViewHelpers.broadcast_render(ActionView::ViewHelpers.begin_broadcast_render, Views::Messages.message(self)))"
         ),
         "{src}",
     );
+}
+
+/// Rails mints an STI row's GlobalID with the row's own class. Rows
+/// hydrate base-classed here, so the base's `to_gid_param` reads the
+/// `type` column (as `dom_prefix` does): `Room.find` and `becomes!`
+/// then mint the same stream name.
+#[test]
+fn sti_global_ids_name_the_row_class_from_the_type_column() {
+    let mut app = sti_room_app();
+    assert!(
+        roundhouse::analyze::diagnose(&app).is_empty(),
+        "the synthesized GlobalID method must remain fully typed"
+    );
+    app.global_id_locate_models.insert(roundhouse::ident::Symbol::from("Room"));
+    app.global_id_locate_signed_models.insert(roundhouse::ident::Symbol::from("Room"));
+    let files = ruby::emit_library(&app)
+        .into_iter()
+        .chain(ruby::emit_lowered_models(&app))
+        .collect::<Vec<_>>();
+    let src = find(&files, "room.rb");
+    let mint = src
+        .split("def to_gid_param")
+        .nth(1)
+        .and_then(|rest| rest.split("\n  end").next())
+        .unwrap_or_else(|| panic!("no to_gid_param in room.rb:\n{src}"));
+    assert!(mint.contains("case @type"), "dispatch on the type column:\n{mint}");
+    assert!(mint.contains("when \"Rooms::Open\""), "{mint}");
+    assert!(mint.contains("\"Room\""), "unknown types keep the base name:\n{mint}");
+    assert!(!mint.contains("self.class"), "hydration is base-classed:\n{mint}");
+
+    let files = roundhouse::project::spinel_base_files(&app, roundhouse::fixtures::real_blog())
+        .expect("Spinel base files");
+    let locator = files
+        .iter()
+        .find(|(path, _)| path.ends_with("global_id_locator.rb"))
+        .map(|(_, content)| content.clone())
+        .expect("global_id_locator.rb");
+    for entry in ["def self.locate_room(", "def self.locate_signed_room("] {
+        let body = locator
+            .split(entry)
+            .nth(1)
+            .and_then(|rest| rest.split("\n    end").next())
+            .unwrap_or_else(|| panic!("no {entry} in:\n{locator}"));
+        assert!(
+            body.contains("return nil unless parts[1] == \"Room\" || parts[1] == \"Rooms::Open\""),
+            "the closed set of names, nothing constantized from the wire:\n{body}"
+        );
+        assert!(
+            body.contains("return nil unless record.to_gid_param == GlobalID.param(parts[1], record.id)"),
+            "a subclass name must match the row it finds:\n{body}"
+        );
+    }
+}
+
+/// A model with no STI subclasses keeps the literal name and the plain
+/// finder.
+#[test]
+fn plain_models_keep_the_literal_global_id_name() {
+    let app = lowered_app();
+    let files = ruby::emit_library(&app)
+        .into_iter()
+        .chain(ruby::emit_lowered_models(&app))
+        .collect::<Vec<_>>();
+    let src = find(&files, "room.rb");
+    assert!(src.contains("GlobalID.param(\"Room\", self.id)"), "{src}");
 }
 
 /// The association is read ONCE. The stream name and the DOM target both
@@ -119,7 +210,7 @@ fn remove_defaults_its_target_to_the_record_and_carries_no_html() {
     let src = find(&lowered(), "broadcasts.rb");
     assert!(
         src.contains(
-            "Broadcasts.remove(stream: \"#{GlobalID.param(\"Room\", bc_owner.id)}:messages\", target: \"#{dom_prefix}_#{dom_record_key}\")"
+            "Broadcasts.remove(stream: \"#{bc_owner.to_gid_param}:messages\", target: \"#{dom_prefix}_#{dom_record_key}\")"
         ),
         "{src}",
     );
@@ -173,20 +264,17 @@ fn the_stream_name_matches_what_a_view_subscribes_to() {
     use roundhouse::expr::{Expr, ExprNode, InterpPart, Literal};
     use roundhouse::lower::broadcasts::{stream_name, Streamable};
 
-    let id = Expr::new(
-        roundhouse::span::Span::synthetic(),
-        ExprNode::Lit { value: Literal::Int { value: 1 } },
-    );
+    let record = Expr::new(roundhouse::span::Span::synthetic(), ExprNode::SelfRef);
     let name = stream_name(&[
-        Streamable::Record { singular: "room".into(), id },
+        Streamable::Record { record },
         Streamable::Literal("messages".into()),
     ]);
     let ExprNode::StringInterp { parts } = &*name.node else {
         panic!("expected an interpolation, got {name:?}");
     };
-    // A record contributes its GLOBALID PARAM, minted at request time
-    // because it carries the id — `GlobalID.param("Room", <id>)` — and
-    // the literal follows after the `:` join. Two parts, not three: a
+    // A record contributes its own GlobalID parameter, preserving its
+    // runtime class identity for STI, and the literal follows after the
+    // `:` join. Two parts, not three: a
     // record in first position has no leading text before it.
     //
     // turbo-rails 2.0.16 spells this `s.try(:to_gid_param) || s.to_param`,
@@ -201,16 +289,14 @@ fn the_stream_name_matches_what_a_view_subscribes_to() {
     let ExprNode::Send { recv, method, args, .. } = &*expr.node else {
         panic!("expected the gid mint, got {expr:?}");
     };
-    assert_eq!(method.as_str(), "param");
+    assert_eq!(method.as_str(), "to_gid_param");
     assert!(
-        matches!(recv.as_ref().map(|r| &*r.node),
-                 Some(ExprNode::Const { path }) if path[0].as_str() == "GlobalID"),
+        matches!(recv.as_ref().map(|r| &*r.node), Some(ExprNode::SelfRef)),
         "{recv:?}",
     );
     assert!(
-        matches!(&*args[0].node,
-                 ExprNode::Lit { value: Literal::Str { value } } if value == "Room"),
-        "the model name is camelized from the streamable singular: {args:?}",
+        args.is_empty(),
+        "the record supplies its GlobalID: {args:?}"
     );
 
     // An all-literal name stays a plain String — the blog's

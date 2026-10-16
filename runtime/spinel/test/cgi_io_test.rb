@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Minitest-shaped: this is a CRuby-only framework test, quarantined
 # out of the spin shape by `project.rs::spin_shape` (it is not a spin
 # test program and gets no snapshot). It therefore loads its own
@@ -140,7 +141,8 @@ class CgiIoTest < Minitest::Test
 
   # A JSON body — `@rails/request.js` with `contentType:
   # "application/json"`, campfire's link unfurl — is params too, nested
-  # and typed as Rails parses it. Malformed JSON leaves the params alone.
+  # and typed as Rails parses it. Malformed JSON leaves the params alone
+  # and flags the request for Rails' 400.
   def test_parse_request_reads_a_json_body
     body = '{"url":"https://a.example/","blob":{"filename":"a.png","byte_size":12}}'
     env = { "REQUEST_METHOD" => "POST", "PATH_INFO" => "/unfurl_link", "QUERY_STRING" => "q=1",
@@ -151,11 +153,29 @@ class CgiIoTest < Minitest::Test
     assert_equal "1", req[:params]["q"]
   end
 
-  def test_parse_request_ignores_a_malformed_json_body
+  def test_parse_request_flags_a_malformed_json_body
     body = "{not json"
     env = { "REQUEST_METHOD" => "POST", "PATH_INFO" => "/unfurl_link",
             "CONTENT_TYPE" => "application/json", "CONTENT_LENGTH" => body.bytesize.to_s }
     req = CgiIo.parse_request(env, StringIO.new(body))
     assert_equal({}, req[:params])
+    assert_equal true, req[:bad_request]
+  end
+
+  # Rails' JSON params parser: a body that is not an object lands under
+  # "_json", and deep_munge drops the nils inside arrays at any depth
+  # while a nil under a key stays.
+  def test_parse_request_wraps_and_munges_a_json_body
+    body = '{"a":[1,null,{"b":[null]}],"c":null}'
+    env = { "REQUEST_METHOD" => "POST", "PATH_INFO" => "/echo",
+            "CONTENT_TYPE" => "application/json", "CONTENT_LENGTH" => body.bytesize.to_s }
+    req = CgiIo.parse_request(env, StringIO.new(body))
+    assert_equal({ "a" => [1, { "b" => [] }], "c" => nil }, req[:body_params])
+    assert_equal false, req[:bad_request]
+
+    body = '["x",null,"y"]'
+    env["CONTENT_LENGTH"] = body.bytesize.to_s
+    req = CgiIo.parse_request(env, StringIO.new(body))
+    assert_equal({ "_json" => ["x", "y"] }, req[:body_params])
   end
 end

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActionController::API — the base `rails new --api` gives
 # ApplicationController. Rails builds it as Base without the browser
 # modules (cookies, flash, request forgery protection, views and

@@ -88,6 +88,12 @@ cargo test --locked                 # default suite before commit
 cargo test --locked --all-targets   # milestones
 ```
 
+CI repeats the CRuby gates (`framework_tests_ruby`, `uuid_key_ruby`,
+`tiny_api cruby_gate_`) on the next MRI line, `env.MRI_RUBY_NEXT`, in
+`compare-ruby-next`. To reproduce that locally, put that Ruby first on `PATH`
+and install the scaffold bundle for it too (`bundle` resolves `ruby` from
+`PATH`), then run the same commands.
+
 Focused checks do not replace the default-suite commit bar. Native toolchain
 and framework integrations are generally ignored so local default tests do not
 require every SDK. They are not all separate GitHub jobs; see [CI](../ci/README.md).

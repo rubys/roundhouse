@@ -14,6 +14,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use roundhouse::analyze::ClassInfo;
 use roundhouse::dialect::MethodDef;
@@ -81,6 +82,95 @@ fn inflector_pluralize_lives_in_runtime_python() {
 fn inflector_pluralize_lives_in_runtime_rust() {
     let emitted = roundhouse::emit::rust::emit_method(&pluralize_method());
     assert_emitted_lives_in(&emitted, "runtime/rust/view_helpers.rs");
+}
+
+#[test]
+fn active_support_squish_bang_emits_for_rust() {
+    let methods = load_typed("active_support_ext");
+    let method = methods
+        .into_iter()
+        .find(|m| m.name.as_str() == "squish!")
+        .expect("active_support_ext.rb defines squish!");
+    let emitted = roundhouse::emit::rust::emit_method(&method);
+    assert!(
+        emitted.starts_with("pub fn squish_bang(text: &mut String) -> &mut String"),
+        "ActiveSupport.squish! must emit a mutating Rust function:\n{emitted}"
+    );
+
+    let scratch = std::env::temp_dir().join(format!(
+        "roundhouse-runtime-rust-squish-bang-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&scratch).expect("create generated Rust scratch directory");
+    let source = format!(
+        r#"{emitted}
+#[test]
+fn squish_bang_mutates_and_returns_the_receiver() {{
+    let mut value = "  foo\tbar \n baz  ".to_string();
+    let receiver = &value as *const String;
+    let result = squish_bang(&mut value);
+    assert_eq!(result, "foo bar baz");
+    assert_eq!(result as *const String, receiver);
+    assert_eq!(value, "foo bar baz");
+}}
+
+#[test]
+fn squish_bang_handles_unicode_and_noop_values() {{
+    let mut unicode = "\u{{00a0}}foo\u{{2003}}bar\u{{2028}}".to_string();
+    let receiver = &unicode as *const String;
+    let result = squish_bang(&mut unicode);
+    assert_eq!(result, "foo bar");
+    assert_eq!(result as *const String, receiver);
+    assert_eq!(unicode, "foo bar");
+    let mut unchanged = "already squished".to_string();
+    let receiver = &unchanged as *const String;
+    let result = squish_bang(&mut unchanged);
+    assert_eq!(result, "already squished");
+    assert_eq!(result as *const String, receiver);
+    assert_eq!(unchanged, "already squished");
+}}
+
+#[test]
+fn squish_bang_strips_rails_nul_boundaries() {{
+    let mut trailing_nul = "foo\0".to_string();
+    let receiver = &trailing_nul as *const String;
+    let result = squish_bang(&mut trailing_nul);
+    assert_eq!(result, "foo");
+    assert_eq!(result as *const String, receiver);
+    assert_eq!(trailing_nul, "foo");
+
+    let mut space_then_nul = "foo \0".to_string();
+    let receiver = &space_then_nul as *const String;
+    let result = squish_bang(&mut space_then_nul);
+    assert_eq!(result, "foo");
+    assert_eq!(result as *const String, receiver);
+    assert_eq!(space_then_nul, "foo");
+}}
+"#
+    );
+    let source_path = scratch.join("squish_bang.rs");
+    let binary_path = scratch.join("squish_bang");
+    fs::write(&source_path, source).expect("write emitted Rust test");
+    let compile = Command::new("rustc")
+        .args(["--test"])
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&binary_path)
+        .output()
+        .expect("compile emitted Rust test");
+    assert!(
+        compile.status.success(),
+        "emitted ActiveSupport.squish! did not compile:\n{}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&binary_path)
+        .output()
+        .expect("run emitted Rust test");
+    assert!(
+        run.status.success(),
+        "emitted ActiveSupport.squish! behavior failed:\n{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
 }
 
 // Phase D3 (2026-06-05) retired runtime/elixir/view_helpers.ex — the v2
@@ -160,6 +250,12 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
         | N::ForwardKeywords
         | N::Defined { .. }
         | N::SelfRef => {}
+        N::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                count_gradual_recurse(key, total);
+                count_gradual_recurse(value, total);
+            }
+        }
         N::If { cond, then_branch, else_branch } => {
             count_gradual_recurse(cond, total);
             count_gradual_recurse(then_branch, total);
@@ -277,6 +373,12 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         | ExprNode::ForwardKeywords
         | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                collect_untyped(key, path, out);
+                collect_untyped(value, path, out);
+            }
+        }
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped(cond, &format!("{path}/if.cond"), out);
             collect_untyped(then_branch, &format!("{path}/if.then"), out);
@@ -530,7 +632,7 @@ fn every_runtime_method_body_is_fully_typed() {
                 .into_iter()
                 .map(|(name, ty)| {
                     let ret_ty = match ty {
-                        Ty::Fn { ret, .. } => *ret,
+                        Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
                         other => other,
                     };
                     (name, ret_ty)
@@ -730,7 +832,7 @@ fn every_runtime_method_body_concretely_typed() {
             let entry = class_registry.entry(short_id(&class_id)).or_default();
             for (name, ty) in methods {
                 let ret_ty = match ty {
-                    Ty::Fn { ret, .. } => *ret,
+                    Ty::Fn { ret, .. } => std::sync::Arc::unwrap_or_clone(ret),
                     other => other,
                 };
                 entry.instance_methods.insert(name, ret_ty);
@@ -804,11 +906,206 @@ fn every_runtime_method_body_concretely_typed() {
     // block/return gradual after `sec: Integer | Float` — polymorphic yield.
     // `AttachedMany#attachments` stays typed via raw SQL + ManyAttachment
     // (not Relation over the synthesized Attachment MODEL).
-    const CEILING: usize = 304;
+    // `ActiveRecord::Base#with_lock` (#644) adds 1: its block's return
+    // value is gradual, same `untyped` escape as `self.transaction`'s
+    // block value (`lock!` itself stays concretely typed — it's a
+    // plain `reload`).
+    // `with_lock`'s Rails 8.1 options split (#671) adds 5: the trailing
+    // transaction-options Hash this runtime doesn't carry
+    // `extract_options!` for is read by hand (`transaction_opts[:iso
+    // lation]`, `[:requires_new]`, `.key?(:joinable) ? [:joinable] :
+    // true`), and each `Hash[Symbol, untyped]` value read is gradual —
+    // same shape `connection.rb`'s other `opts`-style Hash call sites
+    // already carry.
+    // `ActiveRecord::RecordNotFound#initialize` (model/primary_key/id)
+    // adds 1, MEASURED on the runtime after #671: the `@id = id` store
+    // of the id Rails passes through, whose RBS type is the flat
+    // `String | Integer | Float | Array | nil` union (Float added after
+    // #689 review; MEASURED, no change).
+    // Campfire's repin past 2393f01 adds 5, MEASURED, each from a value
+    // Rails itself leaves dynamic: `Connection#select_value` (one SQL cell, as
+    // `select_rows`' rows are), `Base.uncached`'s block value (the
+    // `Timeout.timeout` shape), and `Relation#to_h`'s yielded pairs.
+    // `ActiveStorage::AttachedMany#each` (Rails' `delegate_missing_to
+    // :attachments`, for campfire's `body.embeds.each`) adds 1,
+    // MEASURED: the value of its `yield`, the same block-return escape
+    // `Relation#each` carries.
+    // `in_batches` adds 2, MEASURED: the `yield self` in
+    // `Relation#in_batches` and in the class-side fallback in
+    // connection.rb, whose value is the block's — gradual, as
+    // `find_in_batches`' `yield records` already is.
+    // `Relation#minimum` / `#maximum` add 2, MEASURED: the two indexed
+    // reads of the SQL aggregate's column-dependent scalar. The adapter
+    // contract intentionally keeps raw SQL result values `untyped`;
+    // coercing them would break Rails' column-dependent return type.
+    // MEASURED 2026-10-09 (against origin/main a28539b6): `haml_class`
+    // (the HAML shortcut-class + hash `class:` merge) adds 2 on top of
+    // the above — its `value` param is `untyped` (a scalar the HAML
+    // compiler could not narrow further: String, Symbol, nil, or a
+    // conditional/ternary result), and the body reads it twice
+    // (`value.nil?`, `value.to_s`).
+    // Rebased onto main after `in_batches`: MEASURED 317 with haml_class, under main's 318.
+    // `self.transaction`'s `ensure`-based depth/commit restore on a
+    // non-local exit (spinel-txn-pin #693, CodeRabbit): the nested
+    // branch's `ensure` (a second `Db._txn_depth = depth`, alongside the
+    // `rescue`'s own copy, now folded into the `begin`'s value position)
+    // adds 1; the outer branch's `ensure` adds 3 — its `if rolled_back
+    // then nil else … end` has to unify `nil` against `Db.exec("COMMIT")`'s
+    // declared `void` return, the same kind of escape this file's other
+    // `opts`-style branches already carry. Rebased onto main's
+    // `in_batches` (#713): re-measured fresh on this tree rather than
+    // summed from either side's base, since unrelated main changes
+    // shift base.rb/connection.rb's own counts independently
+    // (spinel-txn-pin #693) — 321, MEASURED after rebasing past #705/#709.
+    // `Relation#minimum` / `#maximum` add 2, MEASURED: the two indexed
+    // reads of the SQL aggregate's column-dependent scalar. The adapter
+    // contract intentionally keeps raw SQL result values `untyped`;
+    // coercing them would break Rails' column-dependent return type. The
+    // merged tree measures 323 after the transaction-runtime change above.
+    // Schema-driven extrema deserialization adds 9 measured gradual sites
+    // in Relation: aggregate values and group keys cross the raw SQL boundary
+    // as column-dependent Boolean/Date/Time values. The concrete method-body
+    // gate still requires every call and body to resolve.
+    // Decimal extrema normalization adds 2 measured gradual sites: the raw
+    // adapter value is column-dependent, and its `to_f` conversion is the
+    // schema-selected Ruby boundary that matches the model's Float contract.
+    // The emitted regression covers scalar and grouped decimal extrema.
+    // Canonical main 99dd482b measures 374 sites. The ActionText fragment
+    // mutation runtime adds 47 measured sites on that baseline (45 range/edit
+    // and 2 pending-index writes); the merged tree measures 421. Bar A still
+    // requires zero untyped method bodies.
+    // Rails' raised exception classes add 5 MEASURED sites (errors.rb 7 -> 10,
+    // parameter_missing.rb 4 -> 6): each new class's `super(message)` into
+    // StandardError, and RecordNotSaved's `@record` write, as the classes
+    // beside them already count.
+    // The date-column cast hook adds 2 measured sites: its raw adapter value
+    // is as column-dependent as `cast_schema_value`'s; the merged tree measures 428.
+    // Canonical main ae7bf6cf measures 334 sites; #720's Ruby runtime
+    // additions contribute 39 more, primarily from generic JSON, deep_dup,
+    // session and request-environment values. Keep those intentional dynamic
+    // boundaries visible in the measured combined ceiling.
+    // `transaction(requires_new: true)` savepoints add 3 in
+    // `self.transaction`, MEASURED 373 -> 376 on main 9d577c24: the
+    // `requires_new` option is `untyped` (as `with_lock` forwards it), and
+    // the nested block's value is now read back after its RELEASE.
+    // MEASURED 2026-10-09, measured on top of #644/#671's 310 before #689: the typed
+    // `ActionController::CacheControlStore` (rubys/roundhouse#679,
+    // `action_controller/base.rb`) alone costs NOTHING here — every
+    // field is bool/Integer/Array[String], and measured back-to-back
+    // against this same base it leaves the residual at exactly 310
+    // (unlike against the pre-#644/#671 base, where it happened to
+    // drop the count by 2 — whatever those two sites were, they no
+    // longer net out the same way here). `action_controller/
+    // cache_control.rb`'s Hash-like `[]`/`[]=`/`delete`/`merge!`/
+    // `replace` surface over that store adds 24 — a `Symbol key`
+    // dispatch over `untyped value` is what a Hash-subscript API costs;
+    // ruby-family only (see the file's own header), never reaches a
+    // strict target. 310 + 24 = 334.
+    // Rebased onto main's 316 (after #704): MEASURED 341 after the latest rebase (was 337); the store surface adds 21–24 depending on
+    // which of its sites main already counts.
+    // Rebased onto main's 376 (after #736's Head and the savepoint fix):
+    // MEASURED 398 on 2026-10-10 at this commit (the store surface adds 22).
+    // MEASURED 2026-10-09 (rubys/roundhouse#694 review fix, on top of
+    // this same 341): `commit_cache_control!`'s merge with a directly-
+    // written `Cache-Control` header (`action_controller/
+    // cache_control.rb`) adds 14 — `parse_cache_control_header`'s
+    // comma-split/Symbol-dispatch parse of an arbitrary header String
+    // and `cache_control_as_hash`'s per-key Hash snapshot are both
+    // `Hash[Symbol, untyped]`-shaped, the same tax the Hash-like `[]`/
+    // `[]=` surface already pays; ruby-family only, never reaches a
+    // strict target. 341 + 14 = 355.
+    // Rebased onto main's 376 (after #736's Head and the savepoint fix):
+    // MEASURED 459 on 2026-10-10 against main's 423 (445 at the Hash-surface commit + 14).
+    // Rebased onto main's 428 (after the exception classes and the date-column hook):
+    // MEASURED 466 on 2026-10-10, main 9249df4d (452 at the Hash-surface commit + 14).
+    // MEASURED 489 on 2026-10-11: the indifferent hash's conversions
+    // (`ActiveSupport.indifferent*`, active_support_ext.rb) walk an untyped
+    // Hash/Array value the way `deep_dup` does (+23).
+    // MEASURED 491 on 2026-10-11 (#818): AssociationReflection `#klass` /
+    // `#macro` presence stubs answer nil until synthesized (+2).
+    // MEASURED 496 on 2026-10-11 (#802/#833): portable `word_wrap` helpers
+    // (`word_wrap_ws_next` / `word_wrap_hard_*`) add String-index sites
+    // typed gradually (+5 in action_view/view_helpers.rb).
+    // MEASURED 697 on 2026-10-11 (#834): `active_support_reporters.rb`
+    // (EventReporter, ErrorReporter, ParameterFilter, ExecutionContext)
+    // adds 201. What they hold is caller-defined: the subscriber a
+    // reporter calls, an event payload and its filter, an error context
+    // (`deep_dup` walks it the way the indifferent hash's conversions do),
+    // and the value a `handle` / `record` block answers.
+    // MEASURED 701 on 2026-10-12 (rebased onto main's 697):
+    // `ActionDispatch::Http::Headers#each` / `#map` yield the env's untyped
+    // values and collect the block's untyped answers, as Rails' Enumerable
+    // Headers does (+4 in action_dispatch/headers.rb; their blockless
+    // Enumerator answers add none).
+    // MEASURED 717 on 2026-10-13 (#829): NullRelation `@where_null` /
+    // borrowed-condition walks and quote-aware If-None-Match members
+    // add gradual sites in `active_record/relation.rb` and
+    // `action_controller/base.rb` (+16).
+    // `ActiveStorage::AttachedMany#map` (the proxy's Enumerable reads for a
+    // jbuilder block over `record.pictures`) adds 1, MEASURED: the value
+    // of its `yield`, the same block-return escape `#each` carries.
+    // MEASURED 734 on 2026-10-14: ActiveRecord's statement-error hierarchy
+    // (`ActiveRecordError`, `StatementInvalid` and the fourteen below them)
+    // adds one gradual site per class, its `super(message)` into the
+    // exception initializer, as the existing exception classes carry (+16
+    // in active_record/errors.rb).
+    // `JsonBuilder.encode_value`'s Array branch (`json.tags([a, nil])` as
+    // a JSON array) adds 2, MEASURED: the `map` over the untyped value
+    // and its untyped element handed back to `encode_value`, the same
+    // gradual input every other branch of that method reads.
+    // Its Hash branch (a Hash element as a JSON object) adds 3, MEASURED:
+    // the `keys` of the untyped Hash, a key's `to_s` and its value read
+    // back into `encode_value`.
+    // MEASURED 754 on 2026-10-15: `I18n.translate_runtime` (a `t` whose
+    // key, scope, default or options are known only when it runs) reads
+    // the caller's options Hash as the gem does: its `:scope`, `:default`,
+    // `:count`, `:locale` and each interpolation value are whatever the
+    // caller passed (+15 in i18n_locale.rb).
+    // MEASURED 770 on 2026-10-16: a locale's own plural rule reads the
+    // count the caller passed, an Integer, a Float or whatever else, as
+    // rails-i18n's and CLDR's rules do (+16 in i18n_locale.rb).
+    // MEASURED 771 on 2026-10-15: `Request#filtered_parameters` copies
+    // the request's params, whose values are whatever the request sent,
+    // into the Hash it filters (+1 in action_dispatch/request.rb).
+    // MEASURED 773 on 2026-10-16: `ActiveSupport.to_query` takes any
+    // Hash key, as Rails' `Hash#to_query` does (a Symbol-keyed literal
+    // reached it and Spinel refused the `Hash[String, _]` declaration);
+    // the key's `to_s` in `query_pairs` is read twice (+2 in
+    // active_support_ext.rb).
+    const CEILING: usize = 773;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
     );
+}
+
+#[test]
+fn active_support_inflector_slice_adds_no_bar_b_sites() {
+    let methods = load_typed("active_support_inflections");
+    for name in [
+        "camelize",
+        "deconstantize",
+        "foreign_key",
+        "upcase_first",
+        "downcase_first",
+        "ordinalize",
+    ] {
+        let method = methods
+            .iter()
+            .find(|method| {
+                method.name.as_str() == name
+                    && method
+                        .enclosing_class
+                        .as_ref()
+                        .is_some_and(|class| class.as_str() == "Inflector")
+            })
+            .unwrap_or_else(|| panic!("ActiveSupport::Inflector.{name} exists in runtime source"));
+        assert_eq!(
+            count_gradual(&method.body),
+            0,
+            "ActiveSupport::Inflector.{name} introduces no Ty::Untyped Bar B sites",
+        );
+    }
 }
 
 #[test]
@@ -836,8 +1133,8 @@ fn empty_html_opts_emits_string_keyed_maps_on_csharp_and_kotlin() {
         ExprNode::Hash { entries: vec![], kwargs: false },
     );
     arg.ty = Some(Ty::Hash {
-        key: Box::new(Ty::Untyped),
-        value: Box::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::Untyped),
+        value: std::sync::Arc::new(Ty::Untyped),
     });
     let emitted = roundhouse::emit::kotlin::emit_expr_for_runtime(&arg);
     assert_eq!(

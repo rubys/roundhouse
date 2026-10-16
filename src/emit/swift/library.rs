@@ -310,7 +310,7 @@ fn class_accessor_props(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
                 if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
                     if let Some(p) = params.first() {
                         let base = m.name.as_str().trim_end_matches('=');
-                        props.entry(camel(base)).or_insert_with(|| p.ty.clone());
+                        props.entry(camel(base)).or_insert_with(|| (*p.ty).clone());
                     }
                 }
             }
@@ -398,8 +398,8 @@ pub fn register_classes(lcs: &[LibraryClass]) {
             .iter()
             .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize")
         {
-            let (decl, fwd, sig) = render_params(init);
-            super::expr::register_class_init(cls.clone(), decl, fwd, sig);
+            let (_, fwd, sig) = render_params(init);
+            super::expr::register_class_init(cls.clone(), bare_param_decl(init), fwd, sig);
         }
         // Throws registration to a FIXPOINT: a method calling a sibling
         // that throws (processAction → create) becomes throwing itself.
@@ -521,7 +521,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
                 if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
                     if let Some(p) = params.first() {
                         // writer name is `foo=`; strip the `=`.
-                        prop_types.entry(camel(base)).or_insert_with(|| p.ty.clone());
+                        prop_types.entry(camel(base)).or_insert_with(|| (*p.ty).clone());
                     }
                 }
             }
@@ -601,6 +601,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // with no initializer — Swift's definite-initialization accepts
     // that when every `init` assigns it (the ctor-param-backed accessor
     // shape).
+    let mut undefaulted_prop = false;
     for (n, ty) in &prop_types {
         if super::expr::ancestor_has_prop(&class_name, n) {
             continue;
@@ -610,6 +611,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
                 out.push_str(&format!("    var {n}: {} = {d}\n", swift_ty(ty)));
             }
             None => {
+                undefaulted_prop = true;
                 out.push_str(&format!("    var {n}: {}\n", swift_ty(ty)));
             }
         }
@@ -657,7 +659,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // passes above.)
     for m in &temporal_readers {
         let name = camel(m.name.as_str());
-        let ret = m_sig_ret(m).unwrap_or(Ty::Union { variants: vec![Ty::Time, Ty::Nil] });
+        let ret = m_sig_ret(m).unwrap_or(Ty::Union { variants: vec![Ty::Time, Ty::Nil].into() });
         let ret_str = swift_ty(&ret);
         super::expr::begin_method(&m.body, true);
         let mut inner = String::new();
@@ -725,7 +727,12 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     {
         if let Some((anc_decl, anc_fwd, anc_sig)) = super::expr::ancestor_init_sig(&class_name) {
             let (_, _, own_sig) = render_params(own_init);
-            if own_sig != anc_sig {
+            if own_sig != anc_sig && undefaulted_prop {
+                // Not forwarded: a property with no default has no value here, and a Ruby call reaches the class's own `initialize`, never this shape.
+                out.push_str(&format!(
+                    "    required init({anc_decl}) {{\n        fatalError(\"{class_name} is built by its own initialize\")\n    }}\n"
+                ));
+            } else if own_sig != anc_sig {
                 out.push_str(&format!(
                     "    required init({anc_decl}) {{\n        super.init({anc_fwd})\n    }}\n"
                 ));
@@ -953,6 +960,52 @@ fn instance_prop_names(lc: &LibraryClass) -> std::collections::HashSet<String> {
 /// the init-shim registry. The signature KEY is types-only: Swift
 /// overload identity ignores internal param names and defaults
 /// (`init(_ _attrs:)` and `init(_ attrs:)` are both `init(_:)`).
+/// Not `render_params`' decl: a subclass's shim of this init keeps no default, or a bare `Sub()` would reach the ancestor's init instead of the subclass's own `initialize`.
+fn bare_param_decl(m: &MethodDef) -> String {
+    let (_, fwd, sig) = render_params(m);
+    let names: Vec<&str> = if fwd.is_empty() { vec![] } else { fwd.split(", ").collect() };
+    let types = split_types(&sig);
+    names.iter().zip(types.iter()).map(|(n, t)| format!("_ {n}: {t}")).collect::<Vec<_>>().join(", ")
+}
+
+/// The `", "`-joined types of `render_params`, split at top level only (a tuple or generic type holds commas of its own).
+fn split_types(sig: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    let mut chars = sig.chars().peekable();
+    let mut prev = ' ';
+    while let Some(c) = chars.next() {
+        match c {
+            '(' | '[' | '<' => depth += 1,
+            // Not a closing bracket: the `>` of a function type's `->`.
+            '>' if prev == '-' => {}
+            ')' | ']' | '>' => depth -= 1,
+            ',' if depth == 0 && chars.peek() == Some(&' ') => {
+                chars.next();
+                out.push(std::mem::take(&mut cur));
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+        prev = c;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn split_types_keeps_a_function_type_whole() {
+        assert_eq!(super::split_types("(Int) -> Int, String"), vec!["(Int) -> Int", "String"]);
+        assert_eq!(super::split_types("[String: Any], Int?"), vec!["[String: Any]", "Int?"]);
+    }
+}
+
 fn render_params(m: &MethodDef) -> (String, String, String) {
     let sig_params = match m.signature.as_ref() {
         Some(Ty::Fn { params, .. }) => Some(params),
@@ -1060,7 +1113,7 @@ fn emit_method_impl(m: &MethodDef, is_static: bool, ctx: Option<&ClassCtx>) -> S
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let ty = sig_params.and_then(|sp| sp.get(i)).map(|sp| sp.ty.clone());
+                let ty = sig_params.and_then(|sp| sp.get(i)).map(|sp| (*sp.ty).clone());
                 (camel(p.name.as_str()), ty)
             })
             .collect(),
@@ -1179,6 +1232,8 @@ fn default_return(ret_ty: Option<&Ty>) -> String {
         {
             "return nil".to_string()
         }
+        // An untyped return is `Any?`, so Ruby's bare `nil` answers as itself
+        Some(Ty::Untyped | Ty::Var { .. }) => "return nil".to_string(),
         _ => "fatalError(\"unimplemented\")".to_string(),
     }
 }

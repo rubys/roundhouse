@@ -232,14 +232,31 @@ pub(crate) fn rewrite_node(
             _ => None,
         })
     };
-    // Only `partial:` + `locals:`. Any other option is one this does
-    // not read, and dropping it silently is how a render turns into
-    // the wrong markup.
+    // Only `partial:` + `locals:`, or `partial:` + `collection:` (with
+    // an optional literal `cached:`). Any other option is one this does
+    // not read, and dropping it silently is how a render turns into the
+    // wrong markup.
     if !entries.iter().all(|(k, _)| {
         matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
-            if matches!(value.as_str(), "partial" | "locals"))
+            if matches!(value.as_str(), "partial" | "locals" | "collection" | "cached"))
     }) {
         return;
+    }
+    let collection = opt("collection").cloned();
+    if collection.is_some() && opt("locals").is_some() {
+        return;
+    }
+    // `cached: true` asks the RENDERER's controller to cache, and the
+    // renderer here is the detached controller, which caches nothing
+    // (runtime/action_controller_fragment_caching.rb) -- the same answer
+    // the lowered collection gives under it. Anything but a literal
+    // boolean is a key this does not read.
+    if let Some(cached) = opt("cached") {
+        if collection.is_none()
+            || !matches!(&*cached.node, ExprNode::Lit { value: Literal::Bool { .. } })
+        {
+            return;
+        }
     }
     if let Some(attachment) = attachments_own_partial(opt("partial"), opt("locals"), attachment_locals) {
         let span = expr.span;
@@ -281,36 +298,113 @@ pub(crate) fn rewrite_node(
     {
         return;
     }
-    let locals = match opt("locals").map(|l| &*l.node) {
-        Some(ExprNode::Hash { entries, .. }) => entries.clone(),
-        Some(_) => return,
-        None => Vec::new(),
-    };
-    let record = locals.iter().find_map(|(k, v)| match &*k.node {
-        ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == contract.record => {
-            Some(v.clone())
-        }
-        _ => None,
-    });
-    // Exactly the record, nothing else — an unbound extra local is a
-    // value the partial would never see.
-    if locals.len() != record.iter().len() {
-        return;
-    }
     let span = expr.span;
+    let views_call = |args: Vec<Expr>| {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Const {
+                        path: std::iter::once(Symbol::from("Views"))
+                            .chain(module.split("::").map(Symbol::from))
+                            .collect(),
+                    },
+                )),
+                method: Symbol::from(stem),
+                args,
+                block: None,
+                parenthesized: true,
+            },
+        )
+    };
+    let rendered = if let Some(collection) = collection {
+        // `collection: c` becomes `c.map { |<record>| Views::X.stem(<record>) }.join`:
+        // each element bound to the partial's record local, as Rails
+        // binds it, and the renders concatenated with no spacer.
+        let item = Symbol::from(contract.record.as_str());
+        let each = views_call(vec![Expr::new(
+            span,
+            ExprNode::Var { id: crate::ident::VarId(0), name: item.clone() },
+        )]);
+        let mapped = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(collection),
+                method: Symbol::from("map"),
+                args: Vec::new(),
+                block: Some(Expr::new(
+                    span,
+                    ExprNode::Lambda {
+                        extra_params: Vec::new(),
+                        rest_param: None,
+                        params: vec![item],
+                        block_param: None,
+                        body: each,
+                        block_style: crate::expr::BlockStyle::Brace,
+                    },
+                )),
+                parenthesized: false,
+            },
+        );
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(mapped),
+                method: Symbol::from("join"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        )
+    } else {
+        let locals = match opt("locals").map(|l| &*l.node) {
+            Some(ExprNode::Hash { entries, .. }) => entries.clone(),
+            Some(_) => return,
+            None => Vec::new(),
+        };
+        let record = locals.iter().find_map(|(k, v)| match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == contract.record => {
+                Some(v.clone())
+            }
+            _ => None,
+        });
+        // Exactly the record, nothing else — an unbound extra local is a
+        // value the partial would never see.
+        if locals.len() != record.iter().len() {
+            return;
+        }
+        views_call(record.into_iter().collect())
+    };
+    // Rendered as Rails' class-side renderer renders: through a
+    // controller of its own, with no request behind it. That is the
+    // bracket a broadcast render takes (`ViewHelpers.begin_broadcast_render`),
+    // and for the same reason, since a Turbo broadcast IS
+    // `ApplicationController.render`. Inside it `controller` is the
+    // detached controller, which reads and writes no fragment and
+    // writes no authenticity token.
+    let helpers = || {
+        Expr::new(
+            span,
+            ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] },
+        )
+    };
+    let begin = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(helpers()),
+            method: Symbol::from("begin_broadcast_render"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
     *expr = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(Expr::new(
-                span,
-                ExprNode::Const {
-                    path: std::iter::once(Symbol::from("Views"))
-                        .chain(module.split("::").map(Symbol::from))
-                        .collect(),
-                },
-            )),
-            method: Symbol::from(stem),
-            args: record.into_iter().collect(),
+            recv: Some(helpers()),
+            method: Symbol::from("broadcast_render"),
+            args: vec![begin, rendered],
             block: None,
             parenthesized: true,
         },

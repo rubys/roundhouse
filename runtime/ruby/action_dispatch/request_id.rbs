@@ -1,0 +1,14 @@
+# Typing contract for request_id.rb beside this file.
+module ActionDispatch
+  module RequestId
+    HEADER: String
+    def self.make: (String value) -> String
+    def self.blank?: (String value) -> bool
+  end
+
+  module Runtime
+    HEADER: String
+    def self.clock_time: () -> Float
+    def self.header_value: (Float started) -> String
+  end
+end

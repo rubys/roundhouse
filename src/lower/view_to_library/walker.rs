@@ -119,7 +119,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // local — which is what happened until now — left the write
         // going nowhere and campfire titled every page "Campfire".
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            let local = Symbol::from(crate::naming::safe_local(name.as_str()));
+            let local = Symbol::from(ctx.ivar_local(name.as_str()));
             let rewritten = rewrite_predicates(
                 value,
                 &ctx.nullable_locals,
@@ -200,14 +200,16 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             )]
         }
         // `<% cache <key> do %> … <% end %>` — Rails fragment caching,
-        // served from `Rails.cache` when the key can be built and
-        // rendered transparently when it cannot:
+        // served through `ActionView::ViewHelpers.fragment_read/_write`
+        // (the runtime's store, or on the ruby family and spinel the
+        // controller's) when the key can be built, and rendered
+        // transparently when it cannot:
         //
-        //   __cache_hit_1 = Rails.cache.read_str("views/messages/_message/…")
+        //   __cache_hit_1 = ActionView::ViewHelpers.fragment_read("views/messages/_message/…")
         //   if __cache_hit_1.nil?
         //     __cache_io_1 = String.new
         //     … body …
-        //     io << Rails.cache.write_str(<same key>, __cache_io_1, 0)
+        //     io << ActionView::ViewHelpers.fragment_write(<same key>, __cache_io_1, 0)
         //   else
         //     io << __cache_hit_1
         //   end
@@ -381,7 +383,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             block: Some(block),
             ..
         } if method.as_str() == "each" && args.is_empty() => {
-            let ExprNode::Lambda { params, rest_param, body, block_style, .. } = &*block.node else {
+            let ExprNode::Lambda { params, rest_param, extra_params, body, block_style, .. } = &*block.node else {
                 return vec![todo_io_append("each block shape", stmt.span)];
             };
             let var_name = params
@@ -406,7 +408,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             };
             let block_lambda = Expr::new(
                 Span::synthetic(),
-                ExprNode::Lambda { rest_param: rest_param.clone(),
+                ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
                     params: params.clone(),
                     block_param: None,
                     body: inner_body,
@@ -883,13 +885,15 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             // one nested expression: the walker arms already return a
             // statement list, and a `Seq` in argument position renders as
             // newline-joined statements on the ruby family.
-            if let (1, Some(ExprNode::Lambda { params, body, .. })) =
+            if let (1, Some(ExprNode::Lambda { params, extra_params, body, .. })) =
                 (sa.len(), block.as_ref().map(|b| &*b.node))
             {
                 let cap = "_ts_cap";
                 let cap_ctx = ViewCtx {
                     accumulator: cap.to_string(),
-                    ..ctx.with_locals(params.iter().map(|p| p.as_str().to_string()))
+                    ..ctx.with_locals(
+                        params.iter().chain(extra_params.iter().map(|p| &p.name)).map(|p| p.as_str().to_string()),
+                    )
                 };
                 let mut out = vec![assign_accumulator_string_new(cap)];
                 out.extend(walk_body(body, &cap_ctx));
@@ -1126,7 +1130,7 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     // unrewritten it stayed an ivar on a module
                     // function — nil — and every field died on
                     // `[]` for nil.
-                    let spliced = super::rewrite_ivars_to_locals(&spliced);
+                    let spliced = super::rewrite_ivars_to_locals(&spliced, &ctx.ivar_locals);
                     return emit_io_append(&spliced, ctx);
                 }
             }
@@ -1148,8 +1152,8 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     } = &*inner.node
     {
         if matches!(method.as_str(), "button_to" | "link_to") && !ctx.is_local(method.as_str()) {
-            if let ExprNode::Lambda { params, body, .. } = &*block.node {
-                if block_body_is_template(body) {
+            if let ExprNode::Lambda { params, extra_params, body, .. } = &*block.node {
+                if block_body_is_template(body) && extra_params.is_empty() {
                     if let Some(stmts) =
                         emit_inline_helper_block(method.as_str(), sa, body, params, ctx)
                     {
@@ -1176,7 +1180,7 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         parenthesized,
     } = &*inner.node
     {
-        if let ExprNode::Lambda { rest_param, params, block_param, body, block_style } = &*block.node {
+        if let ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } = &*block.node {
             if block_body_is_template(body) {
                 // NESTED CAPTURES NEED DISTINCT NAMES. A block-with-block
                 // helper (campfire's rooms/show wraps `messages_tag` inside
@@ -1198,16 +1202,21 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 // that no app in the corpus nested one. campfire does.
                 let cap_owned = next_capture_name(&ctx.accumulator);
                 let cap = cap_owned.as_str();
+                // Every parameter the block binds is a local in its body, the
+                // optional and keyword ones too: a read of one is not a
+                // helper call.
                 let cap_ctx = ViewCtx {
                     accumulator: cap.to_string(),
-                    ..ctx.with_locals(params.iter().map(|p| p.as_str().to_string()))
+                    ..ctx.with_locals(
+                        params.iter().chain(extra_params.iter().map(|p| &p.name)).map(|p| p.as_str().to_string()),
+                    )
                 };
                 let mut cap_stmts = vec![assign_accumulator_string_new(cap)];
                 cap_stmts.extend(walk_body(body, &cap_ctx));
                 cap_stmts.push(accumulator_result_ref(cap));
                 let new_block = Expr::new(
                     block.span,
-                    ExprNode::Lambda { rest_param: rest_param.clone(),
+                    ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
                         params: params.clone(),
                         block_param: block_param.clone(),
                         body: seq(cap_stmts),
@@ -1347,7 +1356,7 @@ fn turbo_stream_collection_fragment(
         Vec::new(),
         Some(Expr::new(
             Span::synthetic(),
-            ExprNode::Lambda {
+            ExprNode::Lambda { extra_params: Vec::new(),
                 rest_param: None,
                 params: vec![var],
                 block_param: None,
@@ -1401,8 +1410,10 @@ fn emit_turbo_frame_tag(args: &[Expr], block: Option<&Expr>, ctx: &ViewCtx) -> O
         super::attr_parts::string_interp(parts),
         ctx,
     )];
-    if let Some(ExprNode::Lambda { params, body, .. }) = block.map(|b| &*b.node) {
-        let inner_ctx = ctx.with_locals(params.iter().map(|p| p.as_str().to_string()));
+    if let Some(ExprNode::Lambda { params, extra_params, body, .. }) = block.map(|b| &*b.node) {
+        let inner_ctx = ctx.with_locals(
+            params.iter().chain(extra_params.iter().map(|p| &p.name)).map(|p| p.as_str().to_string()),
+        );
         out.extend(walk_body(body, &inner_ctx));
     }
     out.push(accumulator_append_call(
@@ -1481,6 +1492,33 @@ fn coerce_to_s(expr: Expr) -> Expr {
 /// before the html_escape wrap, matching the convention every
 /// emitter would otherwise have to repeat.
 pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
+    // `x.presence` in a view's output (`<%= r[:title].presence || t(...) %>`):
+    // ActiveSupport's Object#presence, which only the CRuby overlay can
+    // reopen onto every value. `lower::blank` grounds it in app bodies but
+    // does not walk views (their conditions have their own predicate
+    // rewrite), so an output site stayed a dynamic call that the spinel
+    // binary answered with NoMethodError. It becomes the runtime predicate
+    // `lower::blank` uses for a receiver it cannot type:
+    // `ActiveSupport.presence(x)`.
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node {
+        if method.as_str() == "presence" && args.is_empty() {
+            let mut call = Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        e.span,
+                        ExprNode::Const { path: vec![crate::ident::Symbol::from("ActiveSupport")] },
+                    )),
+                    method: crate::ident::Symbol::from("presence"),
+                    args: vec![rewrite_helpers_in_expr(r, ctx)],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            call.ty = e.ty.clone();
+            return call;
+        }
+    }
     let new_node = match &*e.node {
         ExprNode::Send {
             recv: None,
@@ -1495,6 +1533,19 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
                     return call;
                 }
             }
+            // ERB can interpolate a route `_url` directly, not only as
+            // the URL argument to link_to/button_to. Ground it at the
+            // shared seam here so Ruby-family views use the request
+            // origin while strict targets keep the path-only runtime
+            // implementation. Leave unknown route helpers untouched.
+            if let Some(stem) = method.as_str().strip_suffix("_url") {
+                let path_helper = format!("{stem}_path");
+                if ctx.route_helper_names.contains(&path_helper) {
+                    let mut call = super::absolute_url_interp(stem, args.clone());
+                    call.inherit_span(e.span);
+                    return call;
+                }
+            }
             // ERB's `h` alias, in a nested/statement position: an explicit
             // escape call. (Nested `h` inside an escaped interpolation
             // double-escapes — as it does in Rails, where interpolating a
@@ -1505,6 +1556,18 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
             if method.as_str() == "h" && args.len() == 1 {
                 let mut call = view_helpers_call(
                     "html_escape",
+                    vec![coerce_to_s(rewrite_helpers_in_expr(&args[0], ctx))],
+                );
+                call.inherit_span(e.span);
+                return call;
+            }
+            // `u(x)` / `url_encode(x)`: ERB::Util.url_encode, which a
+            // view reaches through ERB::Util (Rails includes it in every
+            // view). Percent-encoding with `%20` for a space, not
+            // `CGI.escape`'s `+` that the runtime's `url_encode` is.
+            if matches!(method.as_str(), "u" | "url_encode") && args.len() == 1 {
+                let mut call = view_helpers_call(
+                    "erb_url_encode",
                     vec![coerce_to_s(rewrite_helpers_in_expr(&args[0], ctx))],
                 );
                 call.inherit_span(e.span);
@@ -1565,6 +1628,22 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
         ExprNode::Array { elements, style } => ExprNode::Array {
             elements: elements.iter().map(|el| rewrite_helpers_in_expr(el, ctx)).collect(),
             style: *style,
+        },
+        // A Hash literal's VALUES can carry a helper call the same way an
+        // Array element can — the HAML compiler's shortcut-class merge
+        // emits `render_attrs({ class: haml_class("g", k), … })`, where
+        // `render_attrs`'s own classify+emit (`RenderAttrs` in
+        // `helpers.rs`) clones its `attrs` Hash whole rather than
+        // threading each entry back through this walk, so a nested
+        // helper reaches emit here or not at all. Keys are threaded too,
+        // for the same reason Array elements all are, though a literal
+        // Hash key never carries one in practice.
+        ExprNode::Hash { entries, kwargs } => ExprNode::Hash {
+            entries: entries
+                .iter()
+                .map(|(k, v)| (rewrite_helpers_in_expr(k, ctx), rewrite_helpers_in_expr(v, ctx)))
+                .collect(),
+            kwargs: *kwargs,
         },
         // Statement compounds: a form-builder map lambda hoisted into a
         // select-options loop is a `Seq` of local Assigns building the
@@ -1694,10 +1773,12 @@ mod tests {
             bool_readers: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
+            i18n: Default::default(),
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
             stylesheets: Vec::new(),
             lexxy: false,
+            lexxy_editor_adapter: false,
             partial_ivars: Default::default(),
             multipart_partials: Default::default(),
             dyn_pools: Default::default(),
@@ -1705,6 +1786,8 @@ mod tests {
             strict_locals: Default::default(),
             view_name: "messages/_message".to_string(),
             ivar_models: Default::default(),
+            str_ivars: Default::default(),
+            ivar_locals: Default::default(),
         }
     }
 
@@ -1737,7 +1820,7 @@ mod tests {
                 args,
                 block: Some(Expr::new(
                     Span::default(),
-                    ExprNode::Lambda {
+                    ExprNode::Lambda { extra_params: Vec::new(),
                         rest_param: None,
                         params: Vec::new(),
                         block_param: None,
@@ -1770,8 +1853,8 @@ mod tests {
         );
         let emitted = cache_emit(vec![key]);
 
-        assert!(emitted.contains("Rails.cache.read_str("), "the read leads:\n{emitted}");
-        assert!(emitted.contains("Rails.cache.write_str("), "the miss arm writes:\n{emitted}");
+        assert!(emitted.contains("ActionView::ViewHelpers.fragment_read("), "the read leads:\n{emitted}");
+        assert!(emitted.contains("ActionView::ViewHelpers.fragment_write("), "the miss arm writes:\n{emitted}");
         assert!(
             emitted.contains("message.cache_key_with_version"),
             "the record contributes its versioned key:\n{emitted}"
@@ -1827,7 +1910,7 @@ mod tests {
             ExprNode::Array { elements: vec![var("ma")], style: Default::default() },
         );
         let emitted = cache_emit(vec![key]);
-        assert!(!emitted.contains("read_str"), "no cache:\n{emitted}");
+        assert!(!emitted.contains("fragment_read"), "no cache:\n{emitted}");
         assert!(
             emitted.contains("inner"),
             "but the body still renders — transparent, never DROPPED:\n{emitted}"
@@ -1844,7 +1927,7 @@ mod tests {
         );
         let emitted = cache_emit(vec![key]);
         assert!(
-            !emitted.contains("read_str"),
+            !emitted.contains("fragment_read"),
             "`room` is a model singular but not one of THIS view's locals:\n{emitted}"
         );
     }
@@ -1981,7 +2064,7 @@ mod tests {
     fn block_helper_call_with(method: &str, args: Vec<Expr>) -> Expr {
         let inner = Expr::new(
             Span::default(),
-            ExprNode::Lambda { rest_param: None,
+            ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                 params: Vec::new(),
                 block_param: None,
                 body: buf_append(str_lit("inner")),
@@ -2544,13 +2627,13 @@ fn emit_cached_fragment(
     let cap = format!("__cache_io_{uniq}");
 
     let key = || Expr::new(span, ExprNode::StringInterp { parts: parts.to_vec() });
+    // `ActionView::ViewHelpers.fragment_read/fragment_write`: the
+    // runtime's store on every target, reopened on the ruby family and
+    // spinel to ask the controller as Rails' CacheHelper does.
     let store = || {
-        send(
-            Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Rails")] })),
-            "cache",
-            Vec::new(),
-            None,
-            false,
+        Expr::new(
+            span,
+            ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] },
         )
     };
     let hit_ref = || Expr::new(span, ExprNode::Var { id: VarId(0), name: hit.clone() });
@@ -2559,7 +2642,7 @@ fn emit_cached_fragment(
         span,
         ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: hit.clone() },
-            value: send(Some(store()), "read_str", vec![key()], None, true),
+            value: send(Some(store()), "fragment_read", vec![key()], None, true),
         },
     );
 
@@ -2571,7 +2654,7 @@ fn emit_cached_fragment(
     miss.push(accumulator_append_call(
         send(
             Some(store()),
-            "write_str",
+            "fragment_write",
             vec![key(), accumulator_result_ref(&cap), ttl],
             None,
             true,

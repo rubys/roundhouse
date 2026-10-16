@@ -34,6 +34,60 @@ pub const GENERATED_CONST_REF: u64 = 1 << 4;
 /// An admitted library-class Data factory with its exact declaration identity.
 pub const RESOLVED_DATA_FACTORY: u64 = 1 << 3;
 
+/// A `permit` Send that the source wrote as `params.expect(r: [...])`.
+/// `rewrite_params` respells `expect` as `require(:r).permit(...)`, and
+/// the two refuse a malformed request differently in Rails, so the
+/// strong-params lowering reads this to know which refusal to apply.
+pub const FROM_PARAMS_EXPECT: u64 = 1 << 8;
+
+/// A statement whose value the enclosing sequence discards (not its tail).
+pub const DISCARDED_VALUE: u64 = 1 << 9;
+
+/// A `Preloader.new(records:, associations:).call` the analyzer admitted:
+/// discarded, over one model's records. Only this one lowers.
+pub const ADMITTED_PRELOADER_CALL: u64 = 1 << 10;
+
+/// A written constant inside a body Rubydex does not index (the
+/// `class << Rails.application` settings block): the file is in the
+/// snapshot, but no reference was recorded at this span, so the absence
+/// is not evidence of an indexing defect.
+pub const UNINDEXED_SCOPE_CONST_REF: u64 = 1 << 11;
+
+/// A source `**value` call argument that the shared keyword lowering made
+/// positional (`lower::forwarding`, legacy policy) for targets without
+/// keyword arguments. The Ruby emitter writes the splat back: in Ruby 3 a
+/// positional Hash does not bind keyword parameters.
+pub const ERASED_KEYWORD_SPLAT: u64 = 1 << 12;
+
+/// This string literal is the source file's own location (`__FILE__`,
+/// or the directory `__dir__` names), written relative to the app root.
+/// Ruby gives the absolute path of the loaded file there, whatever the
+/// process's cwd. A target that relocates the file (the Ruby family
+/// emits `lib/x.rb` as `app/models/x.rb`) uses this bit to anchor the
+/// path on the emitted file's own directory. Then `File.expand_path("../..",
+/// __FILE__)` still names the app root, and the same relative walk
+/// reaches the files carried there. Other targets emit the literal.
+pub const SOURCE_FILE_PATH: u64 = 1 << 13;
+
+/// A source `T.bind(self, T)` / `#: self as T`: a `Cast` of `self` whose
+/// target is the type `self` has for the rest of the enclosing body. As a
+/// statement it only informs the typer; its value is `self`.
+pub const SELF_BINDING: u64 = 1 << 14;
+
+/// A [`SELF_BINDING`] to a class object (`T.bind(self, T.class_of(X))`,
+/// `#: self as singleton(X)`): `self` is then the class side of its type,
+/// which `Ty` alone does not tell apart from an instance.
+pub const SELF_BINDING_CLASS_OBJECT: u64 = 1 << 15;
+
+/// The `defaults.merge(hash)` ingest wrote for `hash.reverse_merge(defaults)`.
+pub const REVERSE_MERGE: u64 = 1 << 16;
+
+/// Whether `expr` is a [`SELF_BINDING`] cast.
+pub fn is_self_binding(expr: &Expr) -> bool {
+    expr.decisions & SELF_BINDING != 0
+        && matches!(&*expr.node, ExprNode::Cast { value, .. } if matches!(&*value.node, ExprNode::SelfRef))
+}
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by
@@ -323,6 +377,16 @@ pub enum ExprNode {
         /// local variable or method 'args'`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rest_param: Option<Symbol>,
+        /// The parameters `params` and `rest_param` do not hold, in
+        /// source order: optional positionals (`size = 18`, with
+        /// `default`), keywords (`key:` / `limit: 10`, `keyword`) and a
+        /// keyword rest (`**opts`, `keyword` and `rest`; empty name for
+        /// an anonymous `**`). Kept for the same reason as `rest_param`:
+        /// the body reads these names, and a signature without them
+        /// raises `NameError`. Optionals come after `params` and before
+        /// `rest_param`; keywords after it, as Ruby orders them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extra_params: Vec<crate::dialect::Param>,
         block_param: Option<Symbol>,
         body: Expr,
         /// Surface form when this Lambda represents a block attached to
@@ -462,6 +526,13 @@ pub enum ExprNode {
     /// This is an opaque packet sourced from the enclosing anonymous
     /// keyword-rest formal, not a value or a synthetic local binding.
     ForwardKeywords,
+    /// Ordered literal keyword pairs followed by anonymous keyword
+    /// forwarding (`key: value, **`) in call argument position. The
+    /// forwarded packet merges after the explicit pairs, so it may
+    /// override them; each pair expression still evaluates once and in
+    /// source order. The pair values are children for typing/effects,
+    /// while the opaque forwarded packet is not a capturable value.
+    ForwardKeywordsWithPairs { entries: Vec<(Expr, Expr)> },
     /// Native Ruby syntax query. The operand is syntax, not a value child:
     /// generic typing/lowering must not resolve or rewrite it. Reachability
     /// may inspect it to retain methods whose existence is being queried.
@@ -569,6 +640,7 @@ impl ExprNode {
             ExprNode::Splat { .. } => "Splat",
             ExprNode::ForwardArgs => "ForwardArgs",
             ExprNode::ForwardKeywords => "ForwardKeywords",
+            ExprNode::ForwardKeywordsWithPairs { .. } => "ForwardKeywordsWithPairs",
             ExprNode::Defined { .. } => "Defined",
             ExprNode::KeywordSplat { .. } => "KeywordSplat",
             ExprNode::MultiAssign { .. } => "MultiAssign",
@@ -621,6 +693,12 @@ impl ExprNode {
             | ExprNode::ForwardKeywords
             | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
+            ExprNode::ForwardKeywordsWithPairs { entries } => {
+                for (k, v) in entries {
+                    f(k);
+                    f(v);
+                }
+            }
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
                     f(k);
@@ -647,7 +725,14 @@ impl ExprNode {
                 f(value);
                 f(body);
             }
-            ExprNode::Lambda { body, .. } => f(body),
+            ExprNode::Lambda { extra_params, body, .. } => {
+                // Defaults are evaluated where the lambda is called, before
+                // the body runs; walk them first.
+                for p in extra_params.iter_mut() {
+                    if let Some(d) = &mut p.default { f(d); }
+                }
+                f(body)
+            }
             ExprNode::MethodRef { recv, .. } => {
                 if let Some(r) = recv {
                     f(r);
@@ -827,6 +912,12 @@ impl ExprNode {
             | ExprNode::ForwardKeywords
             | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
+            ExprNode::ForwardKeywordsWithPairs { entries } => {
+                for (k, v) in entries {
+                    f(k);
+                    f(v);
+                }
+            }
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
                     f(k);
@@ -853,7 +944,12 @@ impl ExprNode {
                 f(value);
                 f(body);
             }
-            ExprNode::Lambda { body, .. } => f(body),
+            ExprNode::Lambda { extra_params, body, .. } => {
+                for p in extra_params.iter() {
+                    if let Some(d) = &p.default { f(d); }
+                }
+                f(body)
+            }
             ExprNode::MethodRef { recv, .. } => {
                 if let Some(r) = recv {
                     f(r);

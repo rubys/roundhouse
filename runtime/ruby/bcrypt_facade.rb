@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # BCrypt — password hashing. `has_secure_password`'s `authenticate` does
 # `BCrypt::Password.new(digest) == password`, and the login controller
 # reads `Engine::DEFAULT_COST`. LOGIN IS ON THE BENCHMARK PATH (the

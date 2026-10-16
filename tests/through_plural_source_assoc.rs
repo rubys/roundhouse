@@ -132,10 +132,12 @@ fn a_has_many_source_joins_from_the_target_side() {
         "the has_many source hop must join from the target table:\n{src}"
     );
     assert!(src.contains("memberships.user_id = ?"), "{src}");
-    // The silently-wrong direct-fk fallback (messages has no user_id).
+    // The silently-wrong direct-fk fallback (messages has no user_id), in the reader itself: `dependent: :delete_all` on `memberships` rightly queries `user_id`.
+    let start = src.find("def reachable_messages").expect("reachable_messages reader");
+    let reader = &src[start..src[start + 1..].find("\n  def ").map_or(src.len(), |i| start + 1 + i)];
     assert!(
-        !src.contains("where({ user_id: @id })"),
-        "shared direct-fk reader must be replaced:\n{src}"
+        !reader.contains("where({ user_id: @id })"),
+        "shared direct-fk reader must be replaced:\n{reader}"
     );
 }
 

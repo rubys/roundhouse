@@ -303,7 +303,9 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                     }
                     return format!("{ls_cast} / {rs_cast}");
                 }
-                DivPowCase::Numeric => {
+                // IntFloor: Go still truncates (floor form is a ledger
+                // gap); Int ** Int and Float / Float share this arm.
+                DivPowCase::IntFloor | DivPowCase::Numeric => {
                     if method == "**" {
                         // Go's math.Pow takes float64 only.
                         return format!("math.Pow(float64({ls}), float64({rs}))");
@@ -334,7 +336,8 @@ fn rt_emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                     };
                     return format!("math.Mod({ls_cast}, {rs_cast})");
                 }
-                ModuloCase::Numeric => {
+                // IntFloor: truncating native `%` (floor form ledgered).
+                ModuloCase::IntFloor | ModuloCase::Numeric => {
                     // Float%Float needs math.Mod; Int%Int uses native.
                     if matches!(r.ty.as_ref(), Some(Ty::Float)) {
                         return format!("math.Mod({ls}, {rs})");

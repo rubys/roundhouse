@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::WebSocket::Connection -- per-connection recv loop.
 #
 # Runs on the connection's green thread (Tep::Server::Threaded) after

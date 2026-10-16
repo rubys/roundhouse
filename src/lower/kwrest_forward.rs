@@ -175,6 +175,14 @@ fn rewrite(e: &mut Expr, sigs: &HashMap<Symbol, Vec<Param>>, diags: &mut Vec<Dia
     let bundle_slot = filled - 1;
 
     let Some(bundle) = args.last() else { return };
+    // Source-preserved anonymous packets are already true keywords in the
+    // Ruby-family ABI; this repair only targets erased named hash reads.
+    if matches!(
+        &*bundle.node,
+        ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. }
+    ) {
+        return;
+    }
     // A literal keyword list renders correctly as-is and belongs to
     // `helper_kwargs`.
     if matches!(&*bundle.node, ExprNode::Hash { kwargs: true, .. }) {

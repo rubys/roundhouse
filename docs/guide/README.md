@@ -52,6 +52,9 @@ interpreter, a SQLite file beside it by default.
   source when they don't fit.
 - [`../../RELEASES.md`](../../RELEASES.md) — what each dated snapshot
   contains.
+- [`roundhouse-yml.md`](roundhouse-yml.md) — the optional app
+  configuration file: extra test folders, and project extensions for
+  gems and class-body DSLs Roundhouse does not know.
 
 ## Elsewhere
 

@@ -66,6 +66,39 @@ fn the_store_fixture_checks_clean() {
     );
 }
 
+#[test]
+fn continue_writes_inventory_json_and_prints_hotspots() {
+    let root = std::env::temp_dir().join(format!(
+        "roundhouse-inventory-{}",
+        std::process::id()
+    ));
+    for (path, source) in [
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("app/models/article.rb", "class Article < ApplicationRecord\nend\n"),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+        ("app/controllers/articles_controller.rb", "class ArticlesController < ApplicationController\n  def show\n    @missing_thing\n  end\nend\n"),
+        ("db/schema.rb", "ActiveRecord::Schema[8.1].define do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :articles, only: :show\nend\n"),
+    ] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, source).unwrap();
+    }
+    let inventory = root.join("inventory.json");
+    let app = root.to_str().unwrap();
+    let inv = inventory.to_str().unwrap();
+    let (code, err) = check(&["--continue", "--inventory", inv, app]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("── Hotspots:"), "expected hotspot report: {err}");
+    assert!(err.contains("ivar"), "{err}");
+    let json = std::fs::read_to_string(&inventory).expect("inventory written");
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(parsed["schema"], 1);
+    assert!(parsed["summary"]["errors"].as_u64().unwrap() >= 1);
+    assert!(parsed["hotspots"].as_array().unwrap().len() >= 1);
+    std::fs::remove_dir_all(root).ok();
+}
+
 /// #207's original nullable ActiveRecord source-property repro must remain
 /// unsupported, but survey mode must ledger the declaration and its provider.
 #[test]

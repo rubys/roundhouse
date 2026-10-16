@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Loads all view files into the Views::* namespace. Files are loaded
 # in dependency-friendly order (partials before the templates that use
 # them), but each file's `require_relative` already pulls its own

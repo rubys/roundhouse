@@ -16,6 +16,8 @@ use super::util::method_name_for_action;
 /// method defined on this controller or an ancestor (`authenticate_user`
 /// on ApplicationController firing for every subclass action); `Block`
 /// inlines a block-form filter's body (`before_action { @page = page }`).
+/// `Lead` is not a filter: an always-on head of `process_action`
+/// (ParamsWrapper) that Rails runs outside the callback chain.
 /// `halt_check` appends `return if performed?` after the statement —
 /// Rails' halting semantics: a filter that renders or redirects skips
 /// the action. It's set only when the filter body can respond, so
@@ -37,6 +39,8 @@ pub(super) enum PreambleStmt {
         unless_cond_expr: Option<Expr>,
         halt_check: bool,
     },
+    /// Always-on head of `process_action` — not a before_action.
+    Lead { body: Expr },
 }
 
 /// Build the `process_action(action_name)` dispatcher:
@@ -105,6 +109,7 @@ pub(super) fn dispatcher_bodies<'a>(
                 out.push(body);
                 out.extend([if_cond_expr, unless_cond_expr].into_iter().flatten());
             }
+            PreambleStmt::Lead { body } => out.push(body),
         }
     }
     out.extend(wraps.around.iter().flat_map(filter_guards));
@@ -121,6 +126,7 @@ pub(super) fn synthesize_process_action(
     rescues: &[RescueHandler],
     wraps: &WrapFilters,
     reads_action_name: bool,
+    missing: &[Symbol],
 ) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
 
@@ -145,6 +151,42 @@ pub(super) fn synthesize_process_action(
             parenthesized: true,
         }));
     }
+
+    // A route naming an action this controller does not define (no
+    // method here or on an ancestor, no template) is Rails'
+    // `AbstractController::ActionNotFound`, raised by `process` BEFORE
+    // the callback chain and outside `rescue_from`;
+    // `ActionDispatch::ExceptionWrapper` answers 404. Without this the
+    // `case` below falls through and the request answers 200 with an
+    // empty body. Only controllers with such a route get the guard;
+    // every other dispatcher is unchanged.
+    let not_found_guard = (!missing.is_empty()).then(|| {
+        let raise = syn(ExprNode::Send {
+            recv: None,
+            method: Symbol::from("raise"),
+            args: vec![
+                syn(ExprNode::Const {
+                    path: vec![Symbol::from("AbstractController"), Symbol::from("ActionNotFound")],
+                }),
+                syn(ExprNode::StringInterp {
+                    parts: vec![
+                        crate::expr::InterpPart::Text { value: "The action '".to_string() },
+                        crate::expr::InterpPart::Expr { expr: var_ref(param) },
+                        crate::expr::InterpPart::Text {
+                            value: format!("' could not be found for {}", enclosing_class.as_str()),
+                        },
+                    ],
+                }),
+            ],
+            block: None,
+            parenthesized: false,
+        });
+        syn(ExprNode::If {
+            cond: include_check(missing, &[], param),
+            then_branch: raise,
+            else_branch: empty_seq(),
+        })
+    });
 
     for p in preamble {
         let (stmt, halt_check) = match p {
@@ -179,6 +221,7 @@ pub(super) fn synthesize_process_action(
                 };
                 (stmt, *halt_check)
             }
+            PreambleStmt::Lead { body } => (body.clone(), false),
         };
         stmts.push(stmt);
         if halt_check {
@@ -199,7 +242,7 @@ pub(super) fn synthesize_process_action(
                 recv: None,
                 method: f.target.clone(),
                 args: vec![],
-                block: Some(syn(ExprNode::Lambda {
+                block: Some(syn(ExprNode::Lambda { extra_params: Vec::new(),
                     params: vec![],
                     rest_param: None,
                     block_param: None,
@@ -244,6 +287,8 @@ pub(super) fn synthesize_process_action(
                     }),
                     None => body.clone(),
                 },
+                // `Lead` is preamble-only; after filters never carry one.
+                PreambleStmt::Lead { body } => body.clone(),
             });
         }
     }
@@ -262,21 +307,27 @@ pub(super) fn synthesize_process_action(
     // source order, so the clauses are emitted reversed.
     if !rescues.is_empty() {
         let exc = Symbol::from("__rescued");
+        let mut clauses: Vec<RescueClause> = rescues
+            .iter()
+            .rev()
+            .map(|h| RescueClause {
+                classes: h.classes.clone(),
+                binding: Some(exc.clone()),
+                body: h.body.clone(),
+            })
+            .collect();
+        clauses.extend(cause_fallback_clause(rescues, &exc));
         body = syn(ExprNode::BeginRescue {
             body,
-            rescues: rescues
-                .iter()
-                .rev()
-                .map(|h| RescueClause {
-                    classes: h.classes.clone(),
-                    binding: Some(exc.clone()),
-                    body: h.body.clone(),
-                })
-                .collect(),
+            rescues: clauses,
             else_branch: None,
             ensure: None,
             implicit: false,
         });
+    }
+
+    if let Some(guard) = not_found_guard {
+        body = syn(ExprNode::Seq { exprs: vec![guard, body] });
     }
 
     // Whole-cloth synthesis — attribute the dispatcher scaffolding to
@@ -321,6 +372,97 @@ pub(super) fn synthesize_process_action(
         mutates_self: reads_action_name,
         block_param: None,
     }
+}
+
+/// Rails' `rescue_with_handler` falls back to the exception's `cause`
+/// (then the cause's cause) when no handler names the exception
+/// itself, and calls the handler it finds with that cause. An error
+/// raised inside a `rescue` gets the rescued one as its cause, so a
+/// handler for the original error still answers:
+///
+/// ```ruby
+/// rescue StandardError => __unhandled
+///   __rescued = __unhandled.cause
+///   until __rescued.nil? || __rescued.is_a?(A) || __rescued.is_a?(B)
+///     __rescued = __rescued.cause
+///   end
+///   if __rescued.is_a?(B) then <B's handler>   # last declared wins
+///   elsif __rescued.is_a?(A) then <A's handler>
+///   else raise __unhandled
+///   end
+/// ```
+///
+/// After the per-class clauses, so an exception a handler names is
+/// still caught by its own clause first. `StandardError`, not Rails'
+/// `Exception`: what an app wraps and re-raises is an application
+/// error. No clause when a handler already covers every
+/// `StandardError` (the fallback could never run).
+fn cause_fallback_clause(rescues: &[RescueHandler], exc: &Symbol) -> Option<RescueClause> {
+    let catch_all = rescues.iter().flat_map(|h| h.classes.iter()).any(|c| {
+        matches!(&*c.node, ExprNode::Const { path }
+            if path.len() == 1 && matches!(path[0].as_str(), "StandardError" | "Exception"))
+    });
+    if catch_all {
+        return None;
+    }
+    let unhandled = "__unhandled";
+    let rescued = || var_ref(exc.as_str());
+    let cause_of = |recv: Expr| {
+        syn(ExprNode::Send { recv: Some(recv), method: Symbol::from("cause"), args: vec![], block: None, parenthesized: false })
+    };
+    let assign_rescued = |value: Expr| {
+        syn(ExprNode::Assign {
+            target: crate::expr::LValue::Var { id: VarId(0), name: exc.clone() },
+            value,
+        })
+    };
+    let is_a = |class: &Expr| {
+        syn(ExprNode::Send {
+            recv: Some(rescued()),
+            method: Symbol::from("is_a?"),
+            args: vec![class.clone()],
+            block: None,
+            parenthesized: true,
+        })
+    };
+    let or = |left: Expr, right: Expr| {
+        syn(ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, surface: Default::default(), left, right })
+    };
+    let matches_any = |classes: &[Expr]| {
+        let mut tests = classes.iter().map(is_a);
+        let first = tests.next().expect("a rescue_from names at least one class");
+        tests.fold(first, or)
+    };
+    let all_classes: Vec<Expr> = rescues.iter().flat_map(|h| h.classes.iter().cloned()).collect();
+    let nil_check = syn(ExprNode::Send {
+        recv: Some(rescued()),
+        method: Symbol::from("nil?"),
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    });
+    let walk = syn(ExprNode::While {
+        cond: or(nil_check, matches_any(&all_classes)),
+        body: assign_rescued(cause_of(rescued())),
+        until_form: true,
+    });
+    let reraise = syn(ExprNode::Send {
+        recv: None,
+        method: Symbol::from("raise"),
+        args: vec![var_ref(unhandled)],
+        block: None,
+        parenthesized: false,
+    });
+    let dispatch = rescues.iter().fold(reraise, |else_branch, h| {
+        syn(ExprNode::If { cond: matches_any(&h.classes), then_branch: h.body.clone(), else_branch })
+    });
+    Some(RescueClause {
+        classes: vec![syn(ExprNode::Const { path: vec![Symbol::from("StandardError")] })],
+        binding: Some(Symbol::from(unhandled)),
+        body: syn(ExprNode::Seq {
+            exprs: vec![assign_rescued(cause_of(var_ref(unhandled))), walk, dispatch],
+        }),
+    })
 }
 
 /// `return if performed?` — the halting check after a filter that can

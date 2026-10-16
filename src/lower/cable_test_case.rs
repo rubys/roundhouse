@@ -275,6 +275,7 @@ mod tests {
                 parent: Some(ClassId(Symbol::from("ApplicationCable::Channel"))),
                 parent_span: Default::default(),
                 includes: Vec::new(),
+                include_spans: Vec::new(),
                 methods: Vec::new(),
                 nullable_columns: Vec::new(),
                 origin: None,

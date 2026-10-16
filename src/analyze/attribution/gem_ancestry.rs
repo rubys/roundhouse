@@ -409,6 +409,12 @@ impl GemAncestry {
                     };
                     pending.push(target);
                 }
+                // Not ended at a parentless app declaration: it may reopen the gem's class.
+                if !edges.iter().any(|edge| edge.parent)
+                    && let Some(gem) = crate::gems::gem_defining_constant(census, id.0.as_str())
+                {
+                    candidates.entry(gem).or_insert_with(|| id.0.as_str().to_string());
+                }
             } else {
                 for gem in gems_owning_constant_with(census, id.0.as_str(), declares) {
                     candidates

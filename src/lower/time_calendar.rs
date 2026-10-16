@@ -21,6 +21,19 @@ fn rewrite(expr: &mut Expr) {
 }
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {
+    // Not `TimeZone[name]`: a class-side index is an operator on the strict targets; the runtime port answers it as `lookup`.
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node {
+        if method.as_str() == "[]" && args.len() == 1 && is_time_zone_class(r) {
+            *method = Symbol::from("lookup");
+            return;
+        }
+        if method.as_str() == "formatted_offset" && args.is_empty() && matches!(r.ty, Some(Ty::Time)) {
+            let time = r.clone();
+            *expr.node = active_support_call("formatted_offset", vec![time]);
+            expr.ty = Some(Ty::Str);
+            return;
+        }
+    }
     if let ExprNode::Send { recv: Some(r), method, .. } = &mut *expr.node {
         if is_time_const(r) && method.as_str() == "use_zone" {
             *r = Expr::new(r.span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
@@ -70,7 +83,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     if is_int_value(r) && method.as_str() == "in_time_zone" && args.len() <= 1 {
         let epoch = time_expr(active_support_call("time_at_epoch", vec![r.clone()]));
         let grounded = match args.first() {
-            Some(zone) => active_support_call("in_time_zone", vec![epoch, zone.clone()]),
+            Some(zone) => active_support_call("in_time_zone", vec![epoch, zone_name_arg(zone)]),
             None => active_support_call("present", vec![epoch]),
         };
         *expr.node = grounded;
@@ -89,7 +102,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     }
     if method.as_str() == "in_time_zone" && args.len() <= 1 {
         let grounded = match args.first() {
-            Some(zone) => active_support_call("in_time_zone", vec![r.clone(), zone.clone()]),
+            Some(zone) => active_support_call("in_time_zone", vec![r.clone(), zone_name_arg(zone)]),
             None => active_support_call("present", vec![r.clone()]),
         };
         *expr.node = grounded;
@@ -130,8 +143,8 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         }
         "end_of_day" | "at_end_of_day" => ("end_of_day", 0),
         "noon" | "at_noon" | "middle_of_day" | "at_middle_of_day" => ("noon", 0),
-        "beginning_of_week" | "at_beginning_of_week" => ("beginning_of_week", 0),
-        "end_of_week" | "at_end_of_week" => ("end_of_week", 0),
+        "beginning_of_week" | "at_beginning_of_week" => ("beginning_of_week", 1),
+        "end_of_week" | "at_end_of_week" => ("end_of_week", 1),
         "beginning_of_month" | "at_beginning_of_month" => ("beginning_of_month", 0),
         "end_of_month" | "at_end_of_month" => ("end_of_month", 0),
         "beginning_of_year" | "at_beginning_of_year" => ("beginning_of_year", 0),
@@ -162,8 +175,9 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     if args.len() > max_args {
         return;
     }
+    let Some(args) = calendar_args(target, args) else { return };
     let mut call_args = vec![r.clone()];
-    call_args.extend(args.iter().cloned());
+    call_args.extend(args);
     if matches!(
         target,
         "today?" | "yesterday?" | "tomorrow?" | "past?" | "future?"
@@ -177,7 +191,7 @@ fn rewrite_date_value(expr: &mut Expr, r: &Expr, method: &str, args: &[Expr]) {
     if method == "in_time_zone" && args.len() <= 1 {
         let midnight = time_expr(active_support_call("date_at_midnight", vec![r.clone()]));
         let grounded = match args.first() {
-            Some(zone) => active_support_call("in_time_zone", vec![midnight, zone.clone()]),
+            Some(zone) => active_support_call("in_time_zone", vec![midnight, zone_name_arg(zone)]),
             None => active_support_call("present", vec![midnight]),
         };
         *expr.node = grounded;
@@ -294,8 +308,8 @@ fn rewrite_date_value(expr: &mut Expr, r: &Expr, method: &str, args: &[Expr]) {
         return;
     }
     let (target, max_args) = match method {
-        "beginning_of_week" | "at_beginning_of_week" => ("date_beginning_of_week", 0),
-        "end_of_week" | "at_end_of_week" => ("date_end_of_week", 0),
+        "beginning_of_week" | "at_beginning_of_week" => ("date_beginning_of_week", 1),
+        "end_of_week" | "at_end_of_week" => ("date_end_of_week", 1),
         "beginning_of_month" | "at_beginning_of_month" => ("date_beginning_of_month", 0),
         "end_of_month" | "at_end_of_month" => ("date_end_of_month", 0),
         "beginning_of_year" | "at_beginning_of_year" => ("date_beginning_of_year", 0),
@@ -319,10 +333,35 @@ fn rewrite_date_value(expr: &mut Expr, r: &Expr, method: &str, args: &[Expr]) {
     if args.len() > max_args {
         return;
     }
+    let Some(args) = calendar_args(target, args) else { return };
     let mut call_args = vec![r.clone()];
-    call_args.extend(args.iter().cloned());
+    call_args.extend(args);
     *expr.node = active_support_call(target, call_args);
     expr.ty = Some(Ty::Date);
+}
+
+pub(crate) fn week_start_wday(arg: &Expr) -> Option<i64> {
+    // Not `Date.beginning_of_week` (the configured default): only a literal names a day the lowering can fix.
+    let ExprNode::Lit { value: Literal::Sym { value } } = &*arg.node else { return None };
+    ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+        .iter()
+        .position(|day| *day == value.as_str())
+        .map(|wday| wday as i64)
+}
+
+fn calendar_args(target: &str, args: &[Expr]) -> Option<Vec<Expr>> {
+    if !target.ends_with("_of_week") {
+        return Some(args.to_vec());
+    }
+    args.iter()
+        .map(|arg| {
+            week_start_wday(arg).map(|wday| {
+                let mut lit = Expr::new(arg.span, ExprNode::Lit { value: Literal::Int { value: wday } });
+                lit.ty = Some(Ty::Int);
+                lit
+            })
+        })
+        .collect()
 }
 
 // Not a runtime Range: spinel's Range holds Integer endpoints only, so `where` has to meet the literal and render it as SQL.
@@ -334,6 +373,24 @@ fn all_range_unit(method: &str) -> Option<&'static str> {
         "all_year" => Some("year"),
         _ => None,
     }
+}
+
+// Not a zone object passed through: `ActiveSupport.in_time_zone` keeps one parameter type, `String?`, so Spinel needs no union for it.
+fn zone_name_arg(zone: &Expr) -> Expr {
+    let is_zone = |t: &Ty| matches!(t, Ty::Class { id, .. } if id.0.as_str() == "ActiveSupport::TimeZone");
+    let zone_object = match &zone.ty {
+        Some(Ty::Union { variants }) => {
+            variants.iter().any(is_zone) && variants.iter().all(|v| is_zone(v) || matches!(v, Ty::Nil))
+        }
+        Some(t) => is_zone(t),
+        None => false,
+    };
+    if !zone_object {
+        return zone.clone();
+    }
+    let mut name = Expr::new(Span::synthetic(), active_support_call("zone_name", vec![zone.clone()]));
+    name.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
+    name
 }
 
 fn time_expr(node: ExprNode) -> Expr {
@@ -352,6 +409,12 @@ fn now() -> Expr {
     time_expr(active_support_call("now", vec![]))
 }
 
+fn is_time_zone_class(expr: &Expr) -> bool {
+    matches!(&*expr.node, ExprNode::Const { path }
+        if matches!(path.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice(),
+            ["ActiveSupport", "TimeZone"] | ["", "ActiveSupport", "TimeZone"]))
+}
+
 fn active_support_call(method: &str, args: Vec<Expr>) -> ExprNode {
     let mut recv = Expr::new(
         Span::synthetic(),
@@ -361,7 +424,7 @@ fn active_support_call(method: &str, args: Vec<Expr>) -> ExprNode {
     );
     recv.ty = Some(Ty::Class {
         id: ClassId(Symbol::from("ActiveSupport")),
-        args: vec![],
+        args: vec![].into(),
     });
     ExprNode::Send {
         recv: Some(recv),

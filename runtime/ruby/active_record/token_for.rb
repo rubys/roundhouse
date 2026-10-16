@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActiveRecord::TokenFor — the tokens `generates_token_for` mints, here
 # for the one declaration every Rails 8 app carries without writing it:
 # `has_secure_password`'s password-reset token (`reset_token: true` is

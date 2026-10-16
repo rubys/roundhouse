@@ -1,0 +1,16 @@
+module Pay
+  class Error < StandardError
+  end
+
+  class ActionRequired < Error
+  end
+
+  class Charge
+  end
+
+  class Subscription
+  end
+
+  class Customer
+  end
+end

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `ActionView::RecordIdentifier` — where Rails actually DEFINES `dom_id`.
 #
 # `ActionView::ViewHelpers.dom_id` is our home for it; Rails' is this

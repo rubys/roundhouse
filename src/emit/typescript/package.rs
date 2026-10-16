@@ -28,7 +28,7 @@ pub(super) fn emit_package_json() -> EmittedFile {
         )
     };
     let content = format!(
-        "{{\n  \"name\": \"app\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"start\": \"tsx main.ts\",\n    \"test\": \"tsx --test test/*.test.ts\"\n  }},\n  \"dependencies\": {{\n{db_dep}\n    \"linkedom\": \"^0.18.0\",\n    \"ws\": \"^8.18.0\"\n  }},\n  \"devDependencies\": {{\n    \"@types/node\": \"^24\",\n{db_types_dep}    \"@types/ws\": \"^8.5.0\",\n    \"typescript\": \"5.7.3\",\n    \"tsx\": \"4.19.2\"\n  }}\n}}\n",
+        "{{\n  \"name\": \"app\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"start\": \"tsx main.ts\",\n    \"test\": \"find test -name '*.test.ts' | grep -q . || {{ echo 'no *.test.ts discovered under test/' >&2; exit 1; }}; find test -name '*.test.ts' -print0 | xargs -0 tsx --test\"\n  }},\n  \"dependencies\": {{\n{db_dep}\n    \"linkedom\": \"^0.18.0\",\n    \"ws\": \"^8.18.0\"\n  }},\n  \"devDependencies\": {{\n    \"@types/node\": \"^24\",\n{db_types_dep}    \"@types/ws\": \"^8.5.0\",\n    \"typescript\": \"5.7.3\",\n    \"tsx\": \"4.19.2\"\n  }}\n}}\n",
     );
     EmittedFile {
         path: PathBuf::from("package.json"),

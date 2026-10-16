@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The key signed messages derive from when SECRET_KEY_BASE is unset
 # (runtime/local_secret.rb): generated once, kept owner-only in storage/,
 # read back on the next boot, and never the empty string.

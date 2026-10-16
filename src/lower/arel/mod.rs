@@ -86,7 +86,7 @@ pub(crate) fn rewrite_arel_in_expr_with_ruby_values(
     // Moderation.all...`). Materializing the assigned chain here would
     // hand those refiners an Array — leave such statements on the
     // runtime Relation path.
-    let mut refined = std::collections::HashSet::new();
+    let mut refined = RefinedNames::default();
     collect_relation_refined_names(expr, scopes, &mut refined);
     let mut changed = rewrite_arel_inner(expr, schema, registry, assocs, &refined, ruby_read_values, scopes);
     // Both call sites hand us a METHOD BODY, and a body that is a
@@ -130,12 +130,24 @@ const RELATION_REFINERS: &[&str] = &[
 /// A finder terminates a relation but still needs that relation as its
 /// receiver. If the whole call cannot lift, hydrating only its receiver
 /// would strand `find_by`/`find_by!` on an Array, just as for a refiner.
+/// `sole`/`find_sole_by` likewise: unlike `first`, Array answers neither.
 /// Rails' per-column dynamic finders (`find_by_id`, `find_by_email!`, …)
 /// are the same shape as `find_by` and need the same treatment (#558).
 fn requires_relation_receiver(method: &str) -> bool {
     RELATION_REFINERS.contains(&method)
-        || matches!(method, "find_by" | "find_by!")
+        || matches!(method, "find_by" | "find_by!" | "sole" | "find_sole_by")
+        // Not a lifted SELECT: Array answers none of the bulk writes, so the hydrated rows would raise NoMethodError.
+        || matches!(method, "delete_all" | "update_all" | "destroy_all" | "touch_all")
         || is_dynamic_finder(method)
+}
+
+/// `find(id)` / `find(ids)`, the primary-key finder, is a finder in the
+/// same sense: when `Model.includes(:x).find(id)` cannot lift, hydrating
+/// only the receiver leaves `Array#find(ifnone)`, which ignores the id
+/// and answers an Enumerator. Block-form `find { … }` is Enumerable and
+/// stays out; callers check `block` themselves.
+fn is_id_finder(method: &str, args: &[Expr]) -> bool {
+    method == "find" && !args.is_empty()
 }
 
 /// `find_by_<attr>` / `find_by_<attr>!` — Rails synthesizes one of these
@@ -314,15 +326,16 @@ fn self_call_name(e: &Expr) -> Option<crate::ident::Symbol> {
 fn collect_relation_refined_names(
     expr: &Expr,
     scopes: &std::collections::HashSet<crate::ident::Symbol>,
-    out: &mut std::collections::HashSet<crate::ident::Symbol>,
+    out: &mut RefinedNames,
 ) {
-    if let ExprNode::Send { recv: Some(r), method, .. } = expr.node.as_ref() {
-        if requires_relation_receiver_or_scope(method, scopes) {
-            match r.node.as_ref() {
-                ExprNode::Ivar { name } | ExprNode::Var { name, .. } => {
-                    out.insert(name.clone());
-                }
-                _ => {}
+    if let ExprNode::Send { recv: Some(r), method, args, block, .. } = expr.node.as_ref() {
+        if let ExprNode::Ivar { name } | ExprNode::Var { name, .. } = r.node.as_ref() {
+            if requires_relation_receiver(method.as_str())
+                || (block.is_none() && is_id_finder(method.as_str(), args))
+            {
+                out.always.insert(name.clone());
+            } else if scopes.contains(method) {
+                out.by_scope.entry(name.clone()).or_default().push(method.clone());
             }
         }
     }
@@ -330,22 +343,77 @@ fn collect_relation_refined_names(
         .for_each_child(&mut |c| collect_relation_refined_names(c, scopes, out));
 }
 
+/// The ivars/locals a body later refines with a relation method, so
+/// their assignments must stay on the runtime Relation path.
+///
+/// A builtin refiner or finder (`where`, `find_by`, `find(id)`) refines
+/// whatever the name holds. An app scope does not: `scopes` holds every
+/// model's scope NAMES, so `@widget.gadget` (a belongs_to reader) next
+/// to some other model's `scope :gadget` marked `@widget` refined and
+/// left `@widget = Widget.all.find { … }` on the runtime Relation, whose
+/// `find` takes an id (#569). A scope call refines one ASSIGNMENT, the
+/// one whose chain is rooted at a model declaring that scope; an
+/// assignment whose root is not a known model keeps the name-only
+/// reading.
+#[derive(Default)]
+struct RefinedNames {
+    always: std::collections::HashSet<Symbol>,
+    by_scope: HashMap<Symbol, Vec<Symbol>>,
+}
+
+impl RefinedNames {
+    fn keeps_relation(&self, name: &Symbol, value: &Expr, registry: &HashMap<ClassId, ClassInfo>) -> bool {
+        if self.always.contains(name) {
+            return true;
+        }
+        let Some(scope_calls) = self.by_scope.get(name) else { return false };
+        match chain_root_class(value, registry) {
+            None => true,
+            Some(model) => scope_calls.iter().any(|m| model_declares_scope(registry, &model, m)),
+        }
+    }
+}
+
+/// Whether `model` or one of its ancestors declares `method` as a
+/// relation-returning class method.
+fn model_declares_scope(registry: &HashMap<ClassId, ClassInfo>, model: &ClassId, method: &Symbol) -> bool {
+    let mut current = Some(model.clone());
+    for _ in 0..32 {
+        let Some(ci) = current.and_then(|id| registry.get(&id)) else { return false };
+        if ci.class_methods.get(method).is_some_and(returns_relation) {
+            return true;
+        }
+        current = ci.parent.clone();
+    }
+    false
+}
+
+/// A relation-returning class method's type: a `Relation`, or a method
+/// answering one.
+pub(crate) fn returns_relation(ty: &Ty) -> bool {
+    match ty {
+        Ty::Relation { .. } => true,
+        Ty::Fn { ret, .. } => returns_relation(ret),
+        _ => false,
+    }
+}
+
 fn rewrite_arel_inner(
     expr: &mut Expr,
     schema: &Schema,
     registry: &HashMap<ClassId, ClassInfo>,
     assocs: &[crate::lower::model_associations::AssociationEdge],
-    refined: &std::collections::HashSet<crate::ident::Symbol>,
+    refined: &RefinedNames,
     ruby_read_values: bool,
     scopes: &std::collections::HashSet<crate::ident::Symbol>,
 ) -> bool {
-    if let ExprNode::Assign { target, .. } = expr.node.as_ref() {
+    if let ExprNode::Assign { target, value } = expr.node.as_ref() {
         let name = match target {
             crate::expr::LValue::Ivar { name } => Some(name),
             crate::expr::LValue::Var { name, .. } => Some(name),
             _ => None,
         };
-        if name.is_some_and(|n| refined.contains(n)) {
+        if name.is_some_and(|n| refined.keeps_relation(n, value, registry)) {
             return false;
         }
     }
@@ -383,8 +451,9 @@ fn rewrite_arel_inner(
     // materialized rows, not a chain link — the claim stays.
     let unlifted_relation_consumer = matches!(
         expr.node.as_ref(),
-        ExprNode::Send { recv: Some(_), block: None, method, .. }
+        ExprNode::Send { recv: Some(_), block: None, method, args, .. }
             if requires_relation_receiver_or_scope(method, scopes)
+                || is_id_finder(method.as_str(), args)
     );
     if unlifted_relation_consumer {
         let mut changed = normalize_dynamic_finder_send(expr, registry);
@@ -430,7 +499,7 @@ fn rewrite_arel_spine_args(
     schema: &Schema,
     registry: &HashMap<ClassId, ClassInfo>,
     assocs: &[crate::lower::model_associations::AssociationEdge],
-    refined: &std::collections::HashSet<crate::ident::Symbol>,
+    refined: &RefinedNames,
     ruby_read_values: bool,
     scopes: &std::collections::HashSet<crate::ident::Symbol>,
 ) -> bool {
@@ -577,6 +646,12 @@ pub(crate) fn walk_subexprs_mut(expr: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
         | ExprNode::ForwardKeywords
         | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                f(key);
+                f(value);
+            }
+        }
         ExprNode::Hash { entries, .. } => {
             for (k, v) in entries {
                 f(k);

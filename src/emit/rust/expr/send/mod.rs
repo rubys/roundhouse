@@ -166,7 +166,15 @@ pub(super) fn emit_send(
     } else {
         method.to_string()
     };
-    let rewritten_method = rewrite_method_name(&effective_method);
+    // `self.empty?` names the class's own method (`empty_pred`), not
+    // the collection builtin the bridge table maps `empty?` to.
+    let rewritten_method = if matches!(recv, Some(r) if matches!(&*r.node, ExprNode::SelfRef))
+        && effective_method == "empty?"
+    {
+        super::util::sanitize_ident(&effective_method)
+    } else {
+        rewrite_method_name(&effective_method)
+    };
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
     // Free functions / module functions (Inflector.pluralize → bare
     // pluralize() in the inflector module). Implicit-self bare calls
@@ -256,9 +264,19 @@ pub(super) fn emit_send(
                 .as_ref()
                 .map(super::util::is_option_ty)
                 .unwrap_or(false),
-            // Locals are NOT trustworthy: rust can render a local with
-            // a nilable body-typer Ty as a plain `&str` (the router's
-            // path segments), where `.map()` doesn't compile.
+            // A declared parameter is authoritative: its RBS type is
+            // the emitted Rust type (`value: Option<String>`).
+            // Skipped once the read is narrowed to a non-Option type
+            // (the Var arm then emits an unwrapped value).
+            ExprNode::Var { name, .. } => {
+                super::param_ty(name.as_str())
+                    .map(|t| super::util::is_option_ty(&t))
+                    .unwrap_or(false)
+                    && r.ty.as_ref().map_or(true, super::util::is_option_ty)
+            }
+            // Other locals are NOT trustworthy: rust can render a local
+            // with a nilable body-typer Ty as a plain `&str` (the
+            // router's path segments), where `.map()` doesn't compile.
             _ => false,
         };
         if recv_is_option {
@@ -355,22 +373,32 @@ pub(super) fn emit_send(
                 }
             }
         }
+        // Sibling instance methods with omitted trailing defaults —
+        // e.g. Base#lock! → `self.reload()` after #730 made
+        // `reload(options = nil)`. Class-method SelfRef already pads
+        // via `current_class_method_param_tys` above; instance SelfRef
+        // previously only padded controller shims, so lock!'s bare
+        // reload call emitted zero-arg against a one-arg rust sig
+        // (Full-val compare(rust) E0061).
+        if let Some(param_tys) = current_class_method_param_tys(&effective_method) {
+            for i in out.len()..param_tys.len() {
+                match param_tys.get(i).and_then(synth_default_for_ty) {
+                    Some(d) => out.push(d),
+                    None => break,
+                }
+            }
+        }
         out
     } else if let ExprNode::Const { path } = &*r.node {
         let class = path.last().map(|s| s.as_str()).unwrap_or("");
-        // Try the hand-written runtime sigs first (Db, Broadcasts),
-        // then a cross-LC global lookup keyed by (ClassName, method) —
-        // covers `Comment::new(...)` called from inside any other
-        // class. `current_class_method_param_tys` is the last-resort
-        // fallback: it's keyed by method name only and ignores the
-        // Const path, so a same-named method in the current class
-        // (e.g. a view module's `new` action partial) would otherwise
-        // shadow the cross-class param list and pad with the wrong
-        // defaults. Trying global first inverts the precedence so the
-        // explicit class qualifier wins when both tables list `new`.
+        // Hand-written runtime sigs first (Db, Broadcasts), then the
+        // cross-LC global registry keyed by (ClassName, method). No
+        // current-class fallback: that table ignores the Const path, so
+        // `AssociationReflection::new` inside Base would inherit
+        // Base#initialize's arity and emit `None` for a Value param
+        // (#832). Same-class Const calls resolve via the global registry.
         let param_tys = external_class_method_param_tys(class, method)
-            .or_else(|| super::global_class_method_param_tys(class, method))
-            .or_else(|| current_class_method_param_tys(method));
+            .or_else(|| super::global_class_method_param_tys(class, method));
         // Kwargs-unpack pre-pass: when the callee declares keyword
         // params and the trailing arg is a kwargs Hash literal, expand
         // the Hash entries into positional slots by name. Without this,

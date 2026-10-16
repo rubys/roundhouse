@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActiveModel::SchematizedJson subset (CRuby/JRuby overlay) — the twin
 # of `runtime/spinel/schematized_json.rb`, kept byte-identical: this
 # parser needs nothing from either stack, so the two copies exist only

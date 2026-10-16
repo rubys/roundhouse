@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "../test_helper"
 
 # Direct unit tests for the ruby-family ViewHelpers extensions
@@ -106,6 +107,27 @@ class ViewHelpersExtTest < Minitest::Test
                  ViewHelpers.sanitize_allowing(
                    "<div>hello <strong>bold</strong><br>next</div>",
                    ViewHelpers.sanitize_default_tags, ViewHelpers.sanitize_default_attributes)
+  end
+
+  # The one newline the parser drops after a <pre>/<listing> start tag
+  # (LF, CR or CRLF; kept tag or stripped), and only that one.
+  def test_sanitize_allowing_drops_the_newline_after_a_pre_start_tag
+    t = ["pre", "div", "listing"]
+    assert_equal "<pre>\n\nfirst</pre>", ViewHelpers.sanitize_allowing("<pre>\n\n\nfirst</pre>", t, [])
+    assert_equal "<pre>x</pre>", ViewHelpers.sanitize_allowing("<PRE class=a>\nx</PRE>", t, [])
+    assert_equal "<pre>\nx</pre>", ViewHelpers.sanitize_allowing("<pre>\r\n\nx</pre>", t, [])
+    assert_equal "<pre>x</pre>", ViewHelpers.sanitize_allowing("<pre>\rx</pre>", t, [])
+    assert_equal "<pre> \nx</pre>", ViewHelpers.sanitize_allowing("<pre> \nx</pre>", t, [])
+    assert_equal "<listing>l</listing>", ViewHelpers.sanitize_allowing("<listing>\nl</listing>", t, [])
+    assert_equal "x", ViewHelpers.sanitize_allowing("<pre>\nx</pre>", [], [])
+    assert_equal "<p>\nx</p>", ViewHelpers.sanitize_allowing("<p>\nx</p>", ["p"], [])
+  end
+
+  # `sanitize(html, tags:, attributes:)` lowers to `sanitize_with`: the
+  # caller's lists, the same engine.
+  def test_sanitize_with_uses_the_callers_lists
+    assert_equal %(<a href="/x">x</a> y),
+                 ViewHelpers.sanitize_with(%(<a href="/x" onclick="e()">x</a> <em>y</em>), ["a"], ["href"])
   end
 
   # Attribute scrub: allowed names stay in source order, the rest go,

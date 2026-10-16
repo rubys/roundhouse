@@ -1,6 +1,13 @@
+# frozen_string_literal: true
 require_relative "../action_dispatch/flash"
 require_relative "../action_dispatch/session"
 require_relative "../action_view"
+require_relative "../mime"
+
+module AbstractController
+  class DoubleRenderError < StandardError
+  end
+end
 
 module ActionController
   # One-slot array so class-level CSRF state is a store every target
@@ -20,6 +27,23 @@ module ActionController
 
   def self.set_forgery_flag(value)
     FORGERY_SLOT[0] = value
+  end
+
+  # Whether an app turned forgery protection OFF, as Rails' generated
+  # config/environments/test.rb does (`allow_forgery_protection =
+  # false`). Rails' views then write no token: `form_with`, `button_to`
+  # and `csrf_meta_tags` all ask `protect_against_forgery?`. Its own
+  # slot, not `FORGERY_SLOT`'s false, because that false is also the
+  # default on a target with no token generator, whose forms keep the
+  # input as Rails' production forms do.
+  FORGERY_OFF_SLOT = [false]
+
+  def self.forgery_switched_off
+    FORGERY_OFF_SLOT[0] == true
+  end
+
+  def self.set_forgery_switched_off(value)
+    FORGERY_OFF_SLOT[0] = value
   end
 
   # Empty until `authenticity_token.rb` reopens these: strict-target
@@ -56,10 +80,14 @@ module ActionController
     i = 0
     while i < n
       byte = bytes[i]
-      return false if byte <= 32 || byte == 34 || byte == 58 || byte == 127
+      return false unless header_key_byte_ok?(byte)
       i += 1
     end
     true
+  end
+
+  def self.header_key_byte_ok?(byte)
+    byte > 32 && byte != 34 && byte != 58 && byte != 127
   end
 
   def self.header_value_ok?(v)
@@ -181,19 +209,84 @@ module ActionController
     -1
   end
 
+  # The absolute URL a controller's `<x>_url` route helper answers:
+  # `protocol`, `host`, `:port` unless it is the scheme's standard one,
+  # then `path` — `ActionDispatch::Http::URL.build_host_url` with the
+  # options `ActionController::UrlFor#url_options` already merged.
+  #
+  # `protocol` is taken as Rails' `normalize_protocol` takes it: with or
+  # without the `://` (`"https"`, `"https:"`, `"https://"`), and `//` is
+  # protocol-relative. `host` may still carry a `scheme://` prefix and a
+  # `:port` suffix, which Rails' HOST_REGEXP splits off: the scheme only
+  # counts when no protocol was given, and the port never does here,
+  # because the merged options always name a `port:` (the request's
+  # `optional_port`, or the app's), and Rails reads the host's own port
+  # only when they do not.
+  def self.build_host_url(protocol, host, port, path)
+    h = host
+    proto = protocol
+    scheme_at = find_substr(h, "://")
+    if scheme_at >= 0
+      proto = h[0, scheme_at + 3].to_s if proto == ""
+      h = h[scheme_at + 3, h.length].to_s
+    end
+    h = url_host_without_port(h)
+    proto = normalize_url_protocol(proto)
+    standard = proto == "https://" ? "443" : "80"
+    if port == "" || (proto != "//" && port == standard)
+      proto + h + path
+    else
+      proto + h + ":" + port + path
+    end
+  end
+
+  def self.normalize_url_protocol(protocol)
+    return "http://" if protocol == ""
+    return "//" if protocol == "//"
+    p = protocol
+    p = p[0, p.length - 2].to_s if p.end_with?("//")
+    p = p[0, p.length - 1].to_s if p.end_with?(":")
+    p + "://"
+  end
+
+  # `host:port` → `host`. A bracketed IPv6 literal keeps its colons;
+  # only a run of digits after the last one is a port.
+  def self.url_host_without_port(hostport)
+    port = url_port_of(hostport)
+    return hostport if port == ""
+    hostport[0, hostport.length - port.length - 1].to_s
+  end
+
+  # The digits after `host:`, or "" when there are none.
+  def self.url_port_of(hostport)
+    return "" if hostport.end_with?("]")
+    sep = find_last(hostport, ":")
+    return "" if sep < 0
+    digits = hostport[sep + 1, hostport.length].to_s
+    return "" if digits == ""
+    i = 0
+    while i < digits.length
+      return "" unless "0123456789".include?(digits[i, 1].to_s)
+      i += 1
+    end
+    digits
+  end
+
+  # `response.headers` — Rack 3's `Rack::Headers`: names match without
+  # regard to case (`headers["ETag"]` and `headers["etag"]` are one
+  # header), as HTTP says they do. The first spelling written is the one
+  # the wire carries; `@lower` holds each name downcased for matching.
   class HeaderStore
     def initialize
       @keys = []
+      @lower = []
       @vals = []
     end
 
     def [](key)
-      i = 0
-      while i < @keys.length
-        return @vals[i] if @keys[i] == key
-        i += 1
-      end
-      nil
+      i = index_of(key)
+      return nil if i < 0
+      val_at(i)
     end
 
     # Void: a writer that returns the stored value would leak a
@@ -201,20 +294,65 @@ module ActionController
     # `()` not `Option`.
     def []=(key, value)
       if ActionController.header_key_ok?(key) && ActionController.header_value_ok?(value)
-        i = 0
-        found = false
-        while i < @keys.length
-          if @keys[i] == key
-            @vals[i] = value
-            found = true
-          end
-          i += 1
-        end
-        unless found
-          @keys << key
-          @vals << value
-        end
+        store_value(key, value)
       end
+    end
+
+    def store_value(key, value)
+      i = index_of(key)
+      if i < 0
+        @keys << key
+        @lower << key.downcase
+        @vals << value.to_s
+      else
+        @vals[i] = value.to_s
+      end
+    end
+
+    # The named headers that are set, keyed by their downcased names —
+    # Rack::Headers stores them that way, so `slice` hands them back so.
+    def slice(*names)
+      out = {}
+      name_index = 0
+      while name_index < names.length
+        name = names[name_index]
+        found = index_of(name)
+        out[@lower[found].to_s] = @vals[found].to_s if found >= 0
+        name_index += 1
+      end
+      out
+    end
+
+    def merge!(other)
+      keys = other.keys
+      values = other.values
+      i = 0
+      while i < keys.length
+        key = keys[i].to_s
+        value = values[i]
+        if ActionController.header_key_ok?(key) && ActionController.header_value_ok?(value)
+          store_value(key, value)
+        end
+        i += 1
+      end
+      self
+    end
+
+    def delete(key)
+      i = index_of(key)
+      return nil if i < 0
+      value = val_at(i)
+      j = i
+      while j + 1 < @keys.length
+        @keys[j] = @keys[j + 1]
+        @lower[j] = @lower[j + 1]
+        @vals[j] = @vals[j + 1]
+        j += 1
+      end
+      @keys.pop()
+      @lower.pop()
+      @vals.pop()
+      value
     end
 
     def size
@@ -227,6 +365,238 @@ module ActionController
 
     def val_at(i)
       @vals[i].to_s
+    end
+
+    def index_of(key)
+      down = key.downcase
+      i = 0
+      while i < @lower.length
+        return i if @lower[i] == down
+        i += 1
+      end
+      -1
+    end
+  end
+
+  # `response.cache_control` — a typed store standing in for Rails'
+  # one mixed Hash (`{public: true, max_age: 31556952}`, an Integer
+  # and a boolean sharing one container: the type bag every strict
+  # target pays for). Every field below is its own bool/Integer, so
+  # no strict target carries an `untyped` cache_control.
+  #
+  # `max_age` / `stale_while_revalidate` / `stale_if_error` each keep
+  # a presence bool alongside the Integer rather than a nilable one —
+  # a present key counts even when its value is 0 (`expires_in 0,
+  # public: false` is a STATED max-age of zero, not "unset"), and a
+  # nilable Integer field is the same gradual-escape tax
+  # `cache_control_max_age` existed to dodge before this class (see
+  # its callers on Base).
+  #
+  # The Hash-like `[]` / `[]=` / `delete` / `merge!` / `replace`
+  # surface app code actually writes (`response.cache_control.replace
+  # (private: true, no_store: true)`) is a RUBY-FAMILY reopen —
+  # `action_controller/cache_control.rb`, beside `cookies.rb` — so
+  # this class stays plain typed getters/setters here, usable by
+  # `expires_in` below on every target.
+  #
+  # `to_header` follows Rails 8.1.4's
+  # `ActionDispatch::Http::Cache::Response#cache_control_header`
+  # exactly — branch selection and field order both — pinned against
+  # the gem in `cache_control_test.rb`:
+  #   empty store                → no header at all ("")
+  #   no_store                   → private?, must-understand?, "no-store"
+  #   no_cache (no_store unset)  → public?, "no-cache", extras
+  #   otherwise                  → max-age=N?, public-or-private,
+  #                                 must-revalidate?,
+  #                                 stale-while-revalidate=N?,
+  #                                 stale-if-error=N?, immutable?, extras
+  class CacheControlStore
+    # The fields are assigned here rather than through `clear`: a
+    # Rust constructor has no `self` to call a method on yet.
+    def initialize
+      @public = false
+      @private = false
+      @no_store = false
+      @no_cache = false
+      @must_revalidate = false
+      @must_understand = false
+      @immutable = false
+      @max_age = 0
+      @has_max_age = false
+      @stale_while_revalidate = 0
+      @has_stale_while_revalidate = false
+      @stale_if_error = 0
+      @has_stale_if_error = false
+      @extras = []
+    end
+
+    def public?
+      @public
+    end
+
+    def public=(value)
+      @public = value ? true : false
+    end
+
+    def private?
+      @private
+    end
+
+    def private=(value)
+      @private = value ? true : false
+    end
+
+    def no_store?
+      @no_store
+    end
+
+    def no_store=(value)
+      @no_store = value ? true : false
+    end
+
+    def no_cache?
+      @no_cache
+    end
+
+    def no_cache=(value)
+      @no_cache = value ? true : false
+    end
+
+    def must_revalidate?
+      @must_revalidate
+    end
+
+    def must_revalidate=(value)
+      @must_revalidate = value ? true : false
+    end
+
+    def must_understand?
+      @must_understand
+    end
+
+    def must_understand=(value)
+      @must_understand = value ? true : false
+    end
+
+    def immutable?
+      @immutable
+    end
+
+    def immutable=(value)
+      @immutable = value ? true : false
+    end
+
+    def max_age
+      @max_age
+    end
+
+    def max_age?
+      @has_max_age
+    end
+
+    def max_age=(value)
+      @max_age = value
+      @has_max_age = true
+    end
+
+    # A stated Integer field is cleared back to "not stated" rather
+    # than assigned a sentinel — the counterpart to `max_age=` for
+    # `expires_in`'s "an option not passed overwrites" semantics (an
+    # omitted keyword clears whatever a prior call stated) and for
+    # the Hash surface's `store[:max_age] = nil`.
+    def clear_max_age
+      @max_age = 0
+      @has_max_age = false
+    end
+
+    def stale_while_revalidate
+      @stale_while_revalidate
+    end
+
+    def stale_while_revalidate?
+      @has_stale_while_revalidate
+    end
+
+    def stale_while_revalidate=(value)
+      @stale_while_revalidate = value
+      @has_stale_while_revalidate = true
+    end
+
+    def clear_stale_while_revalidate
+      @stale_while_revalidate = 0
+      @has_stale_while_revalidate = false
+    end
+
+    def stale_if_error
+      @stale_if_error
+    end
+
+    def stale_if_error?
+      @has_stale_if_error
+    end
+
+    def stale_if_error=(value)
+      @stale_if_error = value
+      @has_stale_if_error = true
+    end
+
+    def clear_stale_if_error
+      @stale_if_error = 0
+      @has_stale_if_error = false
+    end
+
+    def extras
+      @extras
+    end
+
+    def extras=(value)
+      @extras = value
+    end
+
+    def clear
+      @public = false
+      @private = false
+      @no_store = false
+      @no_cache = false
+      @must_revalidate = false
+      @must_understand = false
+      @immutable = false
+      @max_age = 0
+      @has_max_age = false
+      @stale_while_revalidate = 0
+      @has_stale_while_revalidate = false
+      @stale_if_error = 0
+      @has_stale_if_error = false
+      @extras = []
+    end
+
+    def empty?
+      !@public && !@private && !@no_store && !@no_cache && !@must_revalidate &&
+        !@must_understand && !@immutable && !@has_max_age &&
+        !@has_stale_while_revalidate && !@has_stale_if_error && @extras.empty?
+    end
+
+    def to_header
+      return "" if empty?
+      parts = []
+      if @no_store
+        parts << "private" if @private
+        parts << "must-understand" if @must_understand
+        parts << "no-store"
+      elsif @no_cache
+        parts << "public" if @public
+        parts << "no-cache"
+        @extras.each { |e| parts << e }
+      else
+        parts << "max-age=#{@max_age}" if @has_max_age
+        parts << (@public ? "public" : "private")
+        parts << "must-revalidate" if @must_revalidate
+        parts << "stale-while-revalidate=#{@stale_while_revalidate}" if @has_stale_while_revalidate
+        parts << "stale-if-error=#{@stale_if_error}" if @has_stale_if_error
+        parts << "immutable" if @immutable
+        @extras.each { |e| parts << e }
+      end
+      parts.join(", ")
     end
   end
 
@@ -328,6 +698,7 @@ module ActionController
 
     def self.allow_forgery_protection=(value)
       ActionController.set_forgery_flag(value)
+      ActionController.set_forgery_switched_off(!value)
     end
 
     attr_accessor :params, :session, :flash, :request_method, :request_path, :request_format
@@ -342,6 +713,12 @@ module ActionController
     # The dispatcher sets it; false keeps every other request on the
     # html path.
     attr_accessor :accepts_any_format
+    # Rails' `request.should_apply_vary_header?`: the response format
+    # was negotiated from the request's Accept header (no `format`
+    # param, a non-browser Accept, or an XHR). The dispatcher sets it;
+    # `render` and `send_data` then answer `Vary: Accept`. False keeps
+    # every target that does not set it as it was.
+    attr_accessor :vary_on_accept
     # Rails' `request.path_parameters`: the matched route's own segments
     # (`{"length" => "1y"}` on `/top/1y`), not the query string. The
     # dispatcher assigns it; a `url_for` options hash reads it to fill a
@@ -351,15 +728,35 @@ module ActionController
     # sets it only in a controller that reads it.
     attr_reader   :action_name
     attr_reader   :status, :body, :location, :content_type
-    # Cache-Control, split into two TYPED readers rather than Rails'
-    # one mixed Hash. Rails' `response.cache_control` is
-    # `{public: true, max_age: 31556952}` — an Integer and a boolean in
-    # one container, which is the type bag every strict target pays
-    # for. The two facts are kept apart here and re-assembled into
-    # Rails' Hash shape by the TEST harness
-    # (ActionResponse#cache_control), the only reader that wants the
-    # subscript spelling.
-    attr_reader   :cache_control_max_age, :cache_control_public
+
+    # `response.cache_control_max_age` / `_public` — delegate to the
+    # typed `CacheControlStore` (above HeaderStore) so these two
+    # pre-existing readers keep working unchanged for every caller
+    # that predates it, the TEST harness included
+    # (ActionResponse#cache_control reassembles Rails' mixed Hash from
+    # exactly these two calls).
+    def cache_control_max_age
+      @cache_control.max_age
+    end
+
+    def cache_control_public
+      @cache_control.public?
+    end
+
+    # `response` is this controller in the shared runtime, so controller
+    # actions that set `response.content_type` need the same writer Rails'
+    # response object exposes.
+    def content_type=(value)
+      @content_type = value
+      @content_type_explicit = true
+      @content_type
+    end
+
+    # Rails' `response.media_type`, the content type without its
+    # parameters; campfire's CachedResponses only stores `text/html`.
+    def media_type
+      @content_type.to_s.split(";")[0].to_s.strip
+    end
 
     def initialize
       @params  = {}
@@ -375,15 +772,18 @@ module ActionController
       @request_format = :html
       @query_string = +""
       @accepts_any_format = false
+      @vary_on_accept = false
       @content_type = "text/html; charset=utf-8"
+      @content_type_explicit = false
       @headers = ActionController::HeaderStore.new
       @performed = false
+      @head_response = false
       # Set unconditionally, not on first `expires_in`: an ivar a strict
       # target never sees assigned has no type to infer, and the readers
-      # above are reachable on every controller. 0 = "no max-age
-      # stated", which is also what a response without the header means.
-      @cache_control_max_age = 0
-      @cache_control_public = false
+      # above are reachable on every controller. Empty store = no
+      # max-age stated, which is also what a response without the
+      # header means.
+      @cache_control = ActionController::CacheControlStore.new
     end
 
     # True once render/redirect_to/head has produced a response.
@@ -392,6 +792,13 @@ module ActionController
     # halting semantics: a filter that responds skips the action.
     def performed?
       @performed
+    end
+
+    # Rails' head vs redirect_to: a 3xx from `head` is not a Location
+    # redirect body. Overlay `head` sets the flag; the shared keyword
+    # form does not, so this stays false there.
+    def head_response?
+      @head_response
     end
 
     # Discard the current session (Rails' logout idiom). The dispatch
@@ -481,6 +888,18 @@ module ActionController
       @performed = true
       @content_type = content_type unless content_type.nil?
       @location = ActionController.sanitize_location(location) unless location.nil?
+      apply_vary_header
+      nil
+    end
+
+    # Rails' `_set_vary_header`, which every `render` runs (`send_data`
+    # renders too): `Vary: Accept` when the format was negotiated from
+    # the Accept header and the action set no Vary of its own. A
+    # redirect or a `head` does not render, so it carries none.
+    def apply_vary_header
+      return nil unless @vary_on_accept
+      vary = @headers["Vary"]
+      @headers["Vary"] = "Accept" if vary.nil? || vary.strip.empty?
       nil
     end
 
@@ -506,72 +925,73 @@ module ActionController
       nil
     end
 
-    # `head(:no_content, content_type: "application/json")` — empty
-    # body, status only. The `content_type` kwarg is set by the
-    # respond_to-flattener's JSON branch when it preserves a
-    # `head :sym` terminal; html branches omit it and the default
-    # text/html stands. (Body-empty responses make Content-Type
-    # mostly irrelevant per RFC 7230, but some HTTP clients still
-    # parse it, so being explicit costs nothing.)
-    # `location:` is Rails' own option and campfire's bot create writes
-    # it (`head :created, location: message_url(@message)`) — a 201 that
-    # names the resource it made. It is NOT a redirect: `redirect?` gates
-    # on a 3xx status, so setting the location beside a 201 records the
-    # URL without turning the response into one.
+    # The strict cross-target runtimes support the bounded status and
+    # keyword form only. Rails 8.1.4's options-hash semantics live in the
+    # Ruby/Spinel overlay, where their richer runtime dependencies exist.
+    # Strict emit cannot construct the custom DoubleRenderError in every
+    # target, so reject a second response with the supported ArgumentError.
     def head(status, content_type: nil, location: nil)
+      raise ArgumentError, "response has already been performed" if @performed
+      resolved_status = resolve_status(status)
       @location = ActionController.sanitize_location(location) unless location.nil?
-      @status = resolve_status(status)
-      @body   = +""
+      @status = resolved_status
+      @body = +""
       @performed = true
-      @content_type = content_type unless content_type.nil?
+      if (@status >= 100 && @status < 200) || @status == 204 || @status == 205 || @status == 304
+        @content_type = ""
+      else
+        @content_type = content_type unless content_type.nil?
+        @content_type = media_type
+      end
       nil
     end
 
     # `response.headers["Expires"] = …` — Rails actions reach header
     # state through the response object; this controller IS its own
-    # buffered response, so `response` returns self and `headers` the
-    # extra-header hash. The CGI harness emits status/body/
-    # content-type today; extra headers are buffered but unsent — a
-    # ledgered seam (they tune caching, not content), wired through
-    # the harness when a consumer needs them.
+    # response, so `response` returns self and `headers` the extra-header
+    # store. The Ruby CGI and Rack dispatchers copy this store to the
+    # outgoing response.
     def response
       self
     end
 
-    # ---- conditional GET: ALWAYS FRESH -----------------------------
+    # Rails' `self.response_body =` (campfire's MessagesController and
+    # CachedResponses serve a prebuilt page this way). A body is a
+    # response, so the before_action halting check sees it; nil clears
+    # it, as in Rails, and `body` stays the String it always is.
+    def response_body
+      @body
+    end
+
+    def response_body=(value)
+      @body = value.to_s
+      @performed = !value.nil?
+      @body
+    end
+
+    # ---- conditional GET -------------------------------------------
     #
     # Rails' `fresh_when` / `stale?` compare the client's
-    # `If-None-Match` / `If-Modified-Since` against an ETag or
-    # timestamp and answer 304 on a match. Neither half of that
-    # comparison exists here: this controller has no request object
-    # (only `@request_format`), so there is nothing to read the
-    # conditional headers FROM, and the extra-header hash above is
-    # buffered but never sent, so there is nothing to write the
-    # validators TO.
+    # `If-None-Match` against an ETag and answer 304 on a match.
+    # Campfire's `MessagesController#index` spells
+    # `fresh_when etag: Digest::SHA256.hexdigest(body), template: false`
+    # (Ruby 3 packs those keywords into one Hash argument), and
+    # `CachedResponsesTest` asserts the second GET with that ETag is
+    # `:not_modified`. Record-shaped `stale?(etag: record)` stays
+    # always-stale until a cache_key seam is modeled.
     #
-    # What IS available is the answer Rails gives when a client sends
-    # no conditional header at all: the response is stale, render it.
-    # That is this implementation, and it is a subset rather than a
-    # stub — always-render is semantically CORRECT for every request,
-    # it just never earns the 304. The cost is bandwidth, not
-    # behavior, which is why it can ship ahead of the plumbing.
-    #
-    # Monomorphic on the shapes the corpus writes — `fresh_when
-    # @messages` and `stale?(etag: record)`. Rails accepts several more
-    # (`fresh_when(etag:, last_modified:)`, `stale?(record)`); each
-    # would be its own method here when a call site asks, rather than
-    # one method with a union parameter no target can narrow.
-    # Empty body, not `nil`: the same no-op idiom
-    # `Base.preload_associations` uses. A body that is only a bare `nil`
-    # gives Rust an `Option` with nothing to infer its parameter from
-    # (`E0282: type annotations needed` on a lone `None;`), where an
-    # empty body is a plain `void`.
     # The parameter is NOT named `record`: the Elixir emitter prepends
     # the controller struct as an implicit first argument and calls it
     # `record`, so a same-named parameter of our own emits
-    # `def fresh_when(_record, _record)` — a duplicate match variable,
-    # which that target's `--warnings-as-errors` build rejects. Every
-    # other method here already avoids the name; this one found out why.
+    # `def fresh_when(_record, _record)`.
+    # ---- conditional GET (strict-target stubs) ---------------------
+    #
+    # Full `fresh_when` / `stale?` / If-None-Match matching lives in
+    # `current.rb`'s Base reopen, next to `attr_accessor :request`.
+    # Strict targets have no Request seat on Base yet; always-render /
+    # always-stale is the same contract these stubs had before #829,
+    # and keeps rust/kotlin/… emit compiling. The Ruby/Spinel path
+    # overrides the stubs when a Request is parked.
     def fresh_when(subject)
     end
 
@@ -579,34 +999,47 @@ module ActionController
       true
     end
 
-    # `expires_in 1.year, public: true` — Rails' Cache-Control writer.
-    # campfire's QR code, avatar and logo actions all open with one, and
-    # the QR test reads the result back
-    # (`response.cache_control[:max_age]`), which is what makes this a
-    # VALUE the harness carries rather than a header it would be enough
-    # to buffer.
+    # `expires_in 1.year, public: true` — Rails' Cache-Control writer,
+    # following activesupport 8.1.4's `expires_in` to the keyword:
+    # deletes `:no_store`, then merges all six of `max_age:`, `public:`,
+    # `must_revalidate:`, `stale_while_revalidate:`, `stale_if_error:`,
+    # `immutable:` — an option THIS call does not pass overwrites
+    # whatever the store already held for it (a bare `expires_in 60`
+    # right after `response.cache_control.replace(immutable: true)`
+    # drops `:immutable`, exactly as Rails does). `commit_cache_control!`
+    # (the ruby-family `cache_control.rb` reopen) writes the composed
+    # header from the store onto the wire.
     #
-    # SECONDS, not a Duration. `lower::duration`'s `rewrite_expires_in`
-    # unwraps the corpus' `1.year` at the CALL SITE — the same grounding
+    # SECONDS, not a Duration, for every duration-shaped argument.
+    # `lower::duration`'s `rewrite_expires_in` unwraps the corpus'
+    # `1.year` / `stale_while_revalidate: 30.seconds` /
+    # `stale_if_error: 1.day` at the CALL SITE — the same grounding
     # `signed_id(expires_in:)` gets — so this signature stays Integer
     # and no strict target pays for an `untyped` parameter here.
-    # `stale_while_revalidate: 0` means "not stated", which keeps the
-    # parameter Integer rather than nullable; two of campfire's three
-    # call sites pass it, so accepting only `public:` would have turned
-    # a NoMethodError into an ArgumentError at those two and looked like
-    # progress.
     #
-    # NO HEADER IS WRITTEN. Composing the `Cache-Control` string here
-    # and parking it in the buffered-but-unsent `headers` hash above
-    # would be work nothing reads — and `@headers[k] = v` does not
-    # survive the Rust emitter, which renders a Hash index-assign as
-    # `self.headers[k] = v` where `HashMap` wants `.insert()` (E0594:
-    # `IndexMut` is not implemented). The two readers hold everything
-    # the response needs; the wire spelling is the harness's to compose
-    # when it starts emitting headers at all.
-    def expires_in(seconds, public: false, stale_while_revalidate: 0)
-      @cache_control_max_age = seconds
-      @cache_control_public = public
+    # `stale_while_revalidate:` / `stale_if_error:` default to -1
+    # ("not stated") rather than 0: Rails' merge treats a literal `0`
+    # as a STATED zero-second window (still a key in the Hash) and an
+    # omitted keyword as clearing whatever a prior call set, so this
+    # signature needs a sentinel no real duration can be — -1 — to
+    # tell the two apart without a second boolean parameter per field.
+    def expires_in(seconds, public: false, must_revalidate: false,
+                    stale_while_revalidate: -1, stale_if_error: -1, immutable: false)
+      @cache_control.no_store = false
+      @cache_control.max_age = seconds
+      @cache_control.public = public
+      @cache_control.must_revalidate = must_revalidate
+      if stale_while_revalidate == -1
+        @cache_control.clear_stale_while_revalidate
+      else
+        @cache_control.stale_while_revalidate = stale_while_revalidate
+      end
+      if stale_if_error == -1
+        @cache_control.clear_stale_if_error
+      else
+        @cache_control.stale_if_error = stale_if_error
+      end
+      @cache_control.immutable = immutable
       nil
     end
 
@@ -616,16 +1049,16 @@ module ActionController
 
     # `send_data data, type:, disposition:` — a binary response body
     # (lobsters streams avatar PNGs). Same buffering contract as
-    # render. `disposition` is accepted but not yet buffered — extra
-    # headers ride the same unsent seam as `headers` above, and the
-    # Content-Disposition write joins it when the harness wires
-    # header emission.
+    # render. `disposition` is retained as a Content-Disposition
+    # response header. The Ruby family and Spinel reopen it with
+    # `filename:` (runtime/spinel/action_controller_send_data.rb).
     def send_data(data, type: "application/octet-stream", disposition: "attachment")
       @body = data
       @content_type = type
       @performed = true
       disp = disposition.to_s == "inline" ? "inline" : "attachment"
       @headers["Content-Disposition"] = disp
+      apply_vary_header
       nil
     end
 
@@ -679,11 +1112,17 @@ module ActionController
 
     # Relative locations (`/path`, not `//host`) pass. An absolute URL
     # must name this request's host; a missing request refuses any host.
+    # The port does not count, as in Rails' `_url_host_allowed?`
+    # (`URI(url).host == request.host`): `redirect_to articles_url` from
+    # a `Host: blog.test:80` request names `http://blog.test/articles`,
+    # the standard port dropped, and is the same host.
     def same_host_location(loc)
       host = ActionController.location_host(loc)
       return loc if host.empty?
       req_host = request_host_for_redirect
-      if req_host.empty? || host != req_host.downcase
+      if req_host.empty? ||
+         ActionController.url_host_without_port(host) !=
+           ActionController.url_host_without_port(req_host.downcase)
         raise ArgumentError, "Unsafe redirect to \"" + loc + "\", pass allow_other_host: true to redirect anyway."
       end
       loc
@@ -691,6 +1130,49 @@ module ActionController
 
     def request_host_for_redirect
       ""
+    end
+
+    # Rails' `ActionController::UrlFor#default_url_options`: the options
+    # every URL this controller builds starts from. None by default; an
+    # app overrides it (campfire's `{ port: request.optional_port }`, a
+    # `host:` for links in a mail-like body) and its keys win over the
+    # request's. Typed as Rails' values are used here: each is read
+    # back as a String, so an Integer `port:` reads as its digits and a
+    # nil one as none.
+    def default_url_options
+      {}
+    end
+
+    # The scheme of the request the URL is built against, `://`
+    # included. `current.rb` answers the real request's; with none in
+    # scope Rails' default is http.
+    def request_protocol_for_url
+      "http://"
+    end
+
+    # A `<x>_url` route helper, which the controller lowerer rewrites to
+    # `url_from_path(RouteHelpers.<x>_path(…))`. Rails'
+    # `url_options` is the request's host, `optional_port` and protocol
+    # with `default_url_options` merged over them, so each of the three
+    # keys the app names replaces the request's — and a key it names
+    # with a nil value (`port: nil`) removes it.
+    #
+    # With no host at all, neither the request's nor the app's, the
+    # path is the answer: Rails raises "Missing host to link to!", and
+    # a path is what a browser resolves against the page it is on.
+    def url_from_path(path)
+      options = default_url_options
+      req_host = request_host_for_redirect
+      protocol = request_protocol_for_url
+      host = ActionController.url_host_without_port(req_host)
+      port = ActionController.url_port_of(req_host)
+      standard = protocol == "https://" ? "443" : "80"
+      port = "" if port == standard
+      protocol = options.fetch(:protocol, nil).to_s if options.key?(:protocol)
+      host = options.fetch(:host, nil).to_s if options.key?(:host)
+      port = options.fetch(:port, nil).to_s if options.key?(:port)
+      return path if host == ""
+      ActionController.build_host_url(protocol, host, port, path)
     end
 
     # Monomorphic on Symbol — real-blog never passes a literal Integer

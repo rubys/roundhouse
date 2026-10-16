@@ -105,6 +105,33 @@ fn walk_statement(
             Err(err) => recover(err),
         };
     }
+    // `alias new old` copies the method as it stands, the same as
+    // `alias_method` below and the library-class walk's `alias`.
+    if let Some(alias) = stmt.as_alias_method_node() {
+        let to = super::library_class::alias_keyword_name(&alias.new_name());
+        let from = super::library_class::alias_keyword_name(&alias.old_name());
+        let source = to.zip(from).and_then(|(to, from)| {
+            out.methods
+                .iter()
+                .rposition(|m| m.name.as_str() == from && m.receiver == MethodReceiver::Class)
+                .map(|i| (to, i))
+        });
+        let Some((to, source)) = source else {
+            return unsupported(
+                file,
+                "unsupported statement inside `class << self`: `alias` of a method the block does not define",
+            );
+        };
+        let mut copy = out.methods[source].clone();
+        copy.name = Symbol::from(to.as_str());
+        copy.name_span = crate::span::Span {
+            file: super::sources::file_id(file),
+            start: alias.location().start_offset() as u32,
+            end: alias.location().end_offset() as u32,
+        };
+        out.methods.push(copy);
+        return Ok(());
+    }
     let Some(call) = stmt.as_call_node() else {
         return unsupported(file, &format!("unsupported statement inside `class << self`: {stmt:?}"));
     };

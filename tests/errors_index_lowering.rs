@@ -1,11 +1,9 @@
 //! `errors[:field]` grounding (`lower::apply_errors_index_lowering`).
 //!
-//! Shape tests over the projection: the framework runtime's `errors` is
-//! an `Array[String]` of FULL messages, so Rails' per-field read becomes
-//! `ActiveSupport.errors_for(errors, "<Humanized> ")` — a prefix strip
-//! against the text `errors.add` / `validates` baked. The receiver of
-//! `errors` survives, `:base` declines (it carries no prefix), and an
-//! `[]` on anything that is not an `errors` reader is left alone.
+//! Shape tests over the projection: Rails' per-field read becomes
+//! `error_messages_for`, a pick over the `error_details` `errors.add` /
+//! `validates` keep for each message. The receiver of `errors` survives, and an `[]` on
+//! anything that is not an `errors` reader is left alone.
 
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::ruby::emit_library;
@@ -32,7 +30,7 @@ fn lower_and_emit(source: &str) -> (String, Vec<String>) {
 }
 
 #[test]
-fn self_receiver_grounds_to_the_prefix_strip() {
+fn self_receiver_grounds_to_the_attribute_pick() {
     let (out, diags) = lower_and_emit(
         r#"
 class Draft
@@ -43,30 +41,10 @@ end
 "#,
     );
     assert!(
-        out.contains(r#"ActiveSupport.errors_for(errors, "Url ")"#),
+        out.contains(r#"error_messages_for("url")"#),
         "expected the grounded projection:\n{out}"
     );
     assert!(diags.is_empty(), "unexpected residue: {diags:?}");
-}
-
-#[test]
-fn multi_word_field_humanizes_like_the_bake() {
-    // The prefix has to be spelled the way `errors.add` baked it, or
-    // the strip matches nothing: `humanize` and this pass share one
-    // implementation for exactly that reason.
-    let (out, _) = lower_and_emit(
-        r#"
-class Draft
-  def problems
-    errors[:client_message_id]
-  end
-end
-"#,
-    );
-    assert!(
-        out.contains(r#""Client message ""#),
-        "expected the humanized field plus its trailing space:\n{out}"
-    );
 }
 
 #[test]
@@ -83,15 +61,13 @@ end
 "#,
     );
     assert!(
-        out.contains("record.errors"),
+        out.contains(r#"record.error_messages_for("url")"#),
         "expected the foreign receiver preserved:\n{out}"
     );
 }
 
 #[test]
-fn base_declines_with_residue() {
-    // `:base` messages are baked with NO humanized prefix, so there is
-    // no text to match; the site stays dynamic and is ledgered.
+fn base_picks_by_attribute() {
     let (out, diags) = lower_and_emit(
         r#"
 class Draft
@@ -102,11 +78,10 @@ end
 "#,
     );
     assert!(
-        out.contains("errors[:base]"),
-        "`:base` should be left alone:\n{out}"
+        out.contains(r#"error_messages_for("base")"#),
+        "expected the `:base` projection:\n{out}"
     );
-    assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
-    assert!(diags[0].contains("errors[:field]"), "{diags:?}");
+    assert!(diags.is_empty(), "unexpected residue: {diags:?}");
 }
 
 #[test]
@@ -156,10 +131,10 @@ end
 "#,
     );
     assert!(
-        out.contains(r#"ActiveSupport.errors_for(errors, "Url ").any?"#),
+        out.contains(r#"error_messages_for("url").any?"#),
         "expected `key?` as a non-empty field projection:\n{out}"
     );
-    assert!(!out.contains("messages"), "no `messages` should survive:\n{out}");
+    assert!(!out.contains("errors.messages"), "no `messages` should survive:\n{out}");
     assert!(diags.is_empty(), "unexpected residue: {diags:?}");
 }
 
@@ -175,7 +150,7 @@ end
 "#,
     );
     assert!(
-        out.contains(r#"ActiveSupport.errors_for(record.errors, "Url ")"#),
+        out.contains(r#"record.error_messages_for("url")"#),
         "expected the foreign receiver's projection:\n{out}"
     );
     assert!(diags.is_empty(), "unexpected residue: {diags:?}");
@@ -202,19 +177,175 @@ end
 }
 
 #[test]
-fn whole_messages_hash_declines_with_residue() {
-    // The accumulator keeps no attribute column, so a use of the whole
-    // Hash has nothing to be rebuilt from.
+fn whole_messages_hash_reads_the_record_s_error_details() {
     let (out, diags) = lower_and_emit(
         r#"
 class Draft
   def problems
     errors.messages.compact_blank
   end
+
+  def problems_on(field)
+    errors.messages[field]
+  end
 end
 "#,
     );
-    assert!(out.contains("errors.messages"), "left alone:\n{out}");
-    assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
-    assert!(diags[0].contains("errors.messages"), "{diags:?}");
+    assert!(out.contains("ActiveSupport.errors_messages(error_details).compact_blank"), "{out}");
+    assert!(out.contains("ActiveSupport.errors_messages(error_details)[field]"), "a field that is not a literal reads the Hash:\n{out}");
+    assert!(diags.is_empty(), "unexpected residue: {diags:?}");
+}
+
+#[test]
+fn membership_asks_the_attribute_s_messages() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  include ActiveModel::Validations
+
+  def problems
+    [errors.include?(:url), errors.key?("url"), Draft.new.errors.has_key?(:base)]
+  end
+end
+"#,
+    );
+    assert!(out.contains(r#"error_messages_for("url").any?, error_messages_for("url").any?"#), "{out}");
+    assert!(out.contains(r#"Draft.new.error_messages_for("base").any?"#), "{out}");
+    assert!(diags.is_empty(), "unexpected residue: {diags:?}");
+}
+
+#[test]
+fn membership_on_a_dynamic_field_is_an_error() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  include ActiveModel::Validations
+
+  def problem?(field)
+    errors.include?(field)
+  end
+end
+"#,
+    );
+    assert!(out.contains("errors.include?(field)"), "left alone:\n{out}");
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert!(diags[0].contains("errors.include?"), "{diags:?}");
+}
+
+#[test]
+fn attribute_names_reads_the_record_s_error_details() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  include ActiveModel::Validations
+
+  def problem_names
+    errors.attribute_names
+  end
+end
+"#,
+    );
+    assert!(out.contains("ActiveSupport.errors_attribute_names(error_details)"), "{out}");
+    assert!(diags.is_empty(), "unexpected residue: {diags:?}");
+}
+
+#[test]
+fn a_record_that_is_not_a_plain_read_is_read_once() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  def problems
+    Draft.latest.errors[:url]
+  end
+end
+"#,
+    );
+    assert!(out.contains(r#"Draft.latest.error_messages_for("url")"#), "{out}");
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn to_hash_groups_the_record_s_error_details() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  def problems
+    errors.to_hash
+  end
+
+  def latest_problems
+    Draft.latest.errors.to_hash
+  end
+end
+"#,
+    );
+    assert!(out.contains("ActiveSupport.errors_to_hash(error_details)"), "expected the projection on self:\n{out}");
+    assert!(
+        out.contains("ActiveSupport.errors_to_hash(Draft.latest.error_details)"),
+        "expected the projection to read the record once:\n{out}"
+    );
+    assert!(diags.is_empty(), "unexpected residue: {diags:?}");
+}
+
+
+#[test]
+fn an_app_s_own_errors_array_is_left_alone() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Probe
+  def errors
+    [:timeout]
+  end
+
+  def timed_out?
+    errors.include?(:timeout)
+  end
+end
+"#,
+    );
+    assert!(out.contains("errors.include?(:timeout)"), "{out}");
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn iterating_errors_iterates_the_error_details() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Draft
+  include ActiveModel::Validations
+
+  def problems
+    errors.map { |error| [error.attribute, error.full_message] }
+  end
+
+  def base_problem
+    Draft.new.errors.find { |error| error.attribute == :base }
+  end
+
+  def first_attribute
+    errors.first.attribute
+  end
+end
+"#,
+    );
+    assert!(out.contains("error_details.map { |error| [error.attribute.to_sym, error.full_message] }"), "{out}");
+    assert!(out.contains("Draft.new.error_details.find { |error| error.attribute.to_sym == :base }"), "{out}");
+    assert!(out.contains("error_details.first.attribute.to_sym"), "{out}");
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn a_blockless_count_or_question_stays_on_the_messages() {
+    let (out, _) = lower_and_emit(
+        r#"
+class Draft
+  include ActiveModel::Validations
+
+  def summary
+    [errors.count, errors.any?, errors.count { |error| error.attribute == :base }]
+  end
+end
+"#,
+    );
+    assert!(out.contains("[errors.count, errors.any?, error_details.count { |error| error.attribute.to_sym == :base }]"), "{out}");
 }

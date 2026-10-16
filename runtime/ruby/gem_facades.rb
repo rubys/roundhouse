@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Gem façades — typed, loudly-raising stand-ins for native/third-party
 # gems that are REACHABLE in the require graph but never EXECUTED on
 # the read path. Spinel AOT must type-check the whole reachable graph,
@@ -219,6 +220,10 @@ require_relative "rqrcode_facade"
 # spin-shaped spinel tree swaps that FILE for `require "nokogiri"` (the
 # spinel-nokogiri spin package) when the app names Nokogiri.
 require_relative "nokogiri_facade"
+
+# Pay — first-slice exception + class constants (see runtime/ruby/pay.rb).
+# Stripped with the file when Gemfile.lock has no `pay`.
+require_relative "pay"
 
 # SVG::Graph::TimeSeries — SVG statistics graphs. lib/time_series.rb
 # subclasses it and the stats controller instantiates it; off the read
@@ -521,3 +526,8 @@ module Sentry
     nil
   end
 end
+
+# OpenTelemetry façade lives in its own file, same reason the swappable
+# ones do (whole-file grain) even though this one never swaps for a real
+# gem on any target — see runtime/ruby/open_telemetry_facade.rb.
+require_relative "open_telemetry_facade"

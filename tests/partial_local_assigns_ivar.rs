@@ -42,6 +42,11 @@ const ROUTES_INDEX: &str =
 
 /// The spinel tree for `APP` plus `files`.
 fn spinel(files: &[(&str, &str)]) -> Vec<(String, String)> {
+    emit(BuildTarget::Spinel, files)
+}
+
+/// The `target` tree for `APP` plus `files`.
+fn emit(target: BuildTarget, files: &[(&str, &str)]) -> Vec<(String, String)> {
     let tree: HashMap<PathBuf, Vec<u8>> = APP
         .iter()
         .chain(files)
@@ -49,7 +54,7 @@ fn spinel(files: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect();
     let mut app = ingest_app_from_tree(tree).expect("ingest");
     roundhouse::session::analyze_and_lower(&mut app);
-    target_files(&app, Path::new("."), BuildTarget::Spinel).expect("spinel files")
+    target_files(&app, Path::new("."), target).expect("target files")
 }
 
 /// The emitted source at `path`.
@@ -228,6 +233,62 @@ fn a_reserved_word_controller_local_passes_the_same_arguments() {
         "class_",
         "app/controllers/posts_controller.rb",
     );
+    // As for `error` below, the same-named local wins over the ivar: the
+    // key is `class`, the param it binds is `class_` (#571).
+    let source = file(&files, "app/controllers/posts_controller.rb");
+    assert!(source.contains("Views::Posts.card(nil, \"x\")"), "{source}");
+}
+
+const ROUTES_PREVIEW: &str =
+    "Rails.application.routes.draw do\n  get \"posts/preview\", to: \"posts#preview\"\nend\n";
+
+/// A controller render passes the ivar the action assigned, `@class`.
+/// The partial's param is `class_`, but `@class_` is an ivar nothing
+/// assigns: the partial would render with nil (#571).
+#[test]
+fn a_controller_render_passes_a_reserved_word_ivar_by_its_own_name() {
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let files = emit(
+            target,
+            &[
+                ("config/routes.rb", ROUTES_PREVIEW),
+                (
+                    "app/controllers/posts_controller.rb",
+                    "class PostsController < ApplicationController\n  def preview\n    @class = \"wide\"\n    render partial: \"posts/card\"\n  end\nend\n",
+                ),
+                CARD,
+            ],
+        );
+        let source = file(&files, "app/controllers/posts_controller.rb");
+        assert_parses(source, "app/controllers/posts_controller.rb");
+        assert!(
+            source.contains("Views::Posts.card(nil, @class)"),
+            "{target:?}\n{source}"
+        );
+    }
+}
+
+/// A helper's render binds its `locals:` through the same contract
+/// (`apply_library_partial_render_lowering`): the key `class` reaches
+/// the param `class_`.
+#[test]
+fn a_reserved_word_helper_local_reaches_the_partial() {
+    let files = spinel(&[
+        ("config/routes.rb", ROUTES_INDEX),
+        ("app/controllers/posts_controller.rb", CLASS_INDEX),
+        CARD,
+        ("app/views/posts/index.html.erb", "<%= card_html %>\n"),
+        (
+            "app/helpers/posts_helper.rb",
+            "module PostsHelper\n  def card_html\n    render partial: \"posts/card\", locals: { class: \"x\" }\n  end\nend\n",
+        ),
+    ]);
+    let (path, source) = files
+        .iter()
+        .find(|(p, _)| p.ends_with("posts_helper.rb"))
+        .expect("posts_helper.rb");
+    assert_parses(source, path);
+    assert!(source.contains("Views::Posts.card(nil, \"x\")"), "{source}");
 }
 
 /// A controller-side partial render binds the extras through

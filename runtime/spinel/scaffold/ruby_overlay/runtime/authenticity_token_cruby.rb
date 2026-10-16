@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby-only: the masked-token XOR as two 32-byte unpacks and one pack.
 #
 # The shared AuthenticityToken.xor builds its result one `Integer#chr` at

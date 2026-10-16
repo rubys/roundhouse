@@ -126,7 +126,12 @@ fn the_relation_delegate_preloads() {
     );
     let at = src.find("def with_rich_text_body_and_embeds").unwrap_or_else(|| panic!("{src}"));
     assert!(
-        src[at..].starts_with("def with_rich_text_body_and_embeds\n      preload(:rich_text_body)\n"),
+        // `_and_embeds` preloads the record class's own embeds beneath
+        // the rich text, as Rails' `includes(rich_text_body: {
+        // embeds_attachments: :blob })` does.
+        src[at..].starts_with(
+            "def with_rich_text_body_and_embeds\n      preload({ rich_text_body: :embeds_attachments })\n"
+        ),
         "{}",
         &src[at..(at + 80).min(src.len())]
     );

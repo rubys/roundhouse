@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby-only ActiveSupport::Duration.
 #
 # Rails adds duration builders to Integer/Numeric (`70.days`, `1.week`) plus
@@ -56,6 +57,11 @@ module ActiveSupport
 
     def to_i = @seconds.to_i
     def to_f = @seconds.to_f
+    # Numeric predicates (Rails delegates them to the value; net/http
+    # asks `zero?` of a timeout).
+    def zero? = @seconds.zero?
+    def positive? = @seconds.positive?
+    def negative? = @seconds.negative?
     # Rails parity: Duration#to_s is the seconds value's to_s
     # (`30.minutes.to_s == "1800"`) — also what interpolation calls
     # (lobsters embeds durations in cache keys).
@@ -78,6 +84,27 @@ module ActiveSupport
     def coerce(other)
       [other, @seconds]
     end
+
+    # Arithmetic with a number or another duration is a duration, as in
+    # Rails (`7.seconds - 0.5 == 6.5.seconds`), and `divmod`, below, is
+    # how Ruby's C side converts an interval. `TCPSocket.new` uses that
+    # conversion for `connect_timeout:`; `Net::HTTP.start` subtracts
+    # elapsed time from `open_timeout: TIMEOUT` (TIMEOUT = 7.seconds).
+    # Without this arithmetic, campfire's fetch failed on
+    # `undefined method '-'`.
+    def +(other) = Duration.new(@seconds + Duration.value_of(other))
+    def -(other) = Duration.new(@seconds - Duration.value_of(other))
+    def *(other) = Duration.new(@seconds * Duration.value_of(other))
+    def /(other) = other.is_a?(Duration) ? @seconds / other.seconds : Duration.new(@seconds / other)
+    def -@ = Duration.new(-@seconds)
+    def to_r = @seconds.to_r
+    # What Ruby's C side converts a non-numeric interval with (`IO.select`,
+    # `TCPSocket.new(connect_timeout:)`): `divmod(1)` into whole and part.
+    def divmod(other) = @seconds.divmod(Duration.value_of(other))
+    def <=>(other) = @seconds <=> Duration.value_of(other)
+    include Comparable
+
+    def self.value_of(other) = other.is_a?(Duration) ? other.seconds : other
   end
 end
 

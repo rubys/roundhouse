@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `runtime/ruby/logger.rb` against Ruby's own `Logger` and Rails'
 # `TaggedLogging`.
 #

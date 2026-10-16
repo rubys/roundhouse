@@ -1,0 +1,5 @@
+# dry-validation 1.11.1 config/errors.yml, MIT License, Copyright (c) the dry-rb team.
+en:
+  dry_validation:
+    errors:
+      acceptance: "must accept %{key}"

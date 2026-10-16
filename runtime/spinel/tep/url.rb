@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Percent-decoding + form-urlencoded query parser.
 module Tep
   class Url

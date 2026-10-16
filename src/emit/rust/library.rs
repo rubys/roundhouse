@@ -47,6 +47,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods: std::mem::take(&mut colored),
         nullable_columns: Vec::new(),
         origin: None,
@@ -511,7 +512,7 @@ fn collect_class_method_param_tys(
             Some(Ty::Fn { params, .. }) => params
                 .iter()
                 .filter(|p| !matches!(p.kind, ParamKind::Block | ParamKind::KeywordRest))
-                .map(|p| p.ty.clone())
+                .map(|p| (*p.ty).clone())
                 .collect(),
             _ => continue,
         };
@@ -594,7 +595,7 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
                 t
             }
             Some(t) => Ty::Union {
-                variants: vec![Ty::Nil, t],
+                variants: vec![Ty::Nil, t].into(),
             },
             // Nil-only ivar (e.g. `@location = nil` with no other
             // assignments visible in the class body) — widen to
@@ -602,7 +603,7 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
             // value-typed payload without an E0308. Without widening
             // the field types as `()` and every other path fails.
             None => Ty::Union {
-                variants: vec![Ty::Nil, Ty::Untyped],
+                variants: vec![Ty::Nil, Ty::Untyped].into(),
             },
         }
     } else {
@@ -688,7 +689,7 @@ fn walk_collect_ivars(
                 record(
                     name.as_str(),
                     Ty::Array {
-                        elem: Box::new(elem),
+                        elem: std::sync::Arc::new(elem),
                     },
                     order,
                     observed,
@@ -712,8 +713,8 @@ fn walk_collect_ivars(
                     record(
                         key,
                         Ty::Hash {
-                            key: Box::new(k_ty),
-                            value: Box::new(v_ty),
+                            key: std::sync::Arc::new(k_ty),
+                            value: std::sync::Arc::new(v_ty),
                         },
                         order,
                         observed,
@@ -806,7 +807,8 @@ fn walk_collect_ivar_reads(
             walk_collect_ivar_reads(body, written, order, observed);
         }
         ExprNode::Return { value } => walk_collect_ivar_reads(value, written, order, observed),
-        _ => {}
+        // Not only the shapes above: a read inside a local's value (`article = Article.find(@params[:id])`) is a read too.
+        _ => e.node.for_each_child(&mut |child| walk_collect_ivar_reads(child, written, order, observed)),
     }
 }
 
@@ -1203,8 +1205,8 @@ end
         );
         let val_at = method_body(&src, "val_at");
         assert!(
-            val_at.contains("unwrap_or_default()"),
-            "vals[i].to_s on Option must unwrap_or_default:\n{val_at}"
+            !val_at.contains(".map("),
+            "vals[i].to_s on Array[String] must not Option-map a plain String:\n{val_at}"
         );
         let render = method_body(&src, "render");
         assert!(
@@ -1225,5 +1227,38 @@ end
             csrf.contains("serde_json::Value::Null"),
             "untyped nil tail is Value::Null:\n{csrf}"
         );
+    }
+}
+
+#[cfg(test)]
+mod numeric_unary_emit_tests {
+    use super::emit_library_class;
+
+    fn emit(ruby: &str, rbs: &str) -> String {
+        let classes = crate::runtime_src::parse_library_with_rbs(ruby.as_bytes(), rbs, "unary.rb")
+            .expect("snippet parses and types");
+        let mut app = crate::App::new();
+        app.library_classes = classes;
+        crate::lower::numeric_unary::apply_numeric_unary_lowering(&mut app);
+        crate::emit::rust::decide::decide_classes(&mut app.library_classes);
+        crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+            app.library_classes.iter().map(|c| emit_library_class(c).expect("emits")).collect()
+        })
+    }
+
+    /// `-n` is a `-@` send; it used to come out as the method call
+    /// `n.-@()`, which does not parse. `(-5).abs` lost its parens, and
+    /// `-5_i64.abs()` is `-(5_i64.abs())`: -5, with no error anywhere.
+    #[test]
+    fn negation_is_arithmetic_and_negative_receivers_keep_parens() {
+        let out = emit(
+            "module Unary\n  def self.neg(n)\n    -n\n  end\n  def self.neg_sum(n)\n    -(n + 4)\n  end\n  def self.pos(n)\n    +n\n  end\n  def self.neg_abs\n    (-5).abs\n  end\n  def self.diff_abs(n)\n    (n - 10).abs\n  end\nend\n",
+            "module Unary\n  def self.neg: (Integer n) -> Integer\n  def self.neg_sum: (Integer n) -> Integer\n  def self.pos: (Integer n) -> Integer\n  def self.neg_abs: () -> Integer\n  def self.diff_abs: (Integer n) -> Integer\nend\n",
+        );
+        assert!(!out.contains("-@") && !out.contains("+@"), "operator method leaked:\n{out}");
+        assert!(out.contains("n * -1_i64"), "`-n` not lowered:\n{out}");
+        assert!(out.contains("(n + 4_i64) * -1_i64"), "`-(n + 4)` re-associated:\n{out}");
+        assert!(out.contains("(-5_i64).abs()"), "negative receiver lost its parens:\n{out}");
+        assert!(out.contains("(n - 10_i64).abs()"), "infix receiver lost its parens:\n{out}");
     }
 }

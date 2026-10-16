@@ -32,6 +32,10 @@ public class RoundhouseTestCase
     protected Flash __flash = new Flash();
     protected Session __session = new Session();
 
+    public record TestResponse(string Body, long Status);
+
+    public TestResponse Response() => new TestResponse(__body, __status);
+
     public RoundhouseTestCase()
     {
         if (RoundhouseTestSetup.SchemaSql.Length > 0)

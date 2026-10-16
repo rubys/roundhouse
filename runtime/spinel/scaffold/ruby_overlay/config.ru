@@ -14,6 +14,7 @@ require "rack"
 require_relative "main"
 require_relative "cable"
 require_relative "runtime/gzip_cache"
+require_relative "runtime/thruster_cache"
 
 Main.configure_default_adapter!
 
@@ -46,23 +47,47 @@ ActiveJob.drain_in_background!
 # to that stream name.
 Broadcasts.set_transport(Cable::Registry)
 
+# Thruster's response cache, in process (runtime/thruster_cache.rb says
+# why). Outermost, so a stored stylesheet or avatar is answered before
+# the static file server or the app is reached, as Thruster answers
+# before Puma.
+use ThrusterCache::Middleware
+
 # Static asset serving — `rake assets` lays files out under
 # `static/assets/*` (CSS + JS) plus root-level icons. Rack::Static
 # intercepts those URLs before the Rack adapter dispatches to
 # Main.run_rack. Anything else falls through to the dynamic Router.
-use Rack::Static, urls: ["/assets", "/icon.png", "/icon.svg"], root: "static"
+#
+# Both carry `config.public_file_server.headers`, as ActionDispatch::Static
+# does: campfire's production `Cache-Control: public, max-age=2592000`,
+# without which no browser — and no cache in front of the app — keeps a
+# stylesheet. Lowercased because Rack 3 requires lowercase response
+# header names.
+STATIC_HEADERS = Rails.application.public_file_server_headers
+  .to_h { |name, value| [name.downcase, value] }.freeze
+use Rack::Static, urls: ["/assets", "/icon.png", "/icon.svg"], root: "static",
+    header_rules: STATIC_HEADERS.empty? ? [] : [[:all, STATIC_HEADERS]]
 # Rails' ActionDispatch::Static: a GET/HEAD for a file that exists under
 # public/ (robots.txt, the error pages) is served ahead of the routes.
 # Not `Rack::Static, urls: [""], cascade: true`: Rack::Files answers a
 # POST with 405, which does not cascade, and every form post died there.
-PUBLIC_FILES = Rack::Files.new("public")
+#
+# The files are listed ONCE, at boot, as the hand-ported campfire on Falcon
+# does (its Assets table), rather than stat'ed per request as Rails'
+# FileHandler does: the stat was ~5% of a `/up` request on the bench box,
+# paid by every route. A file put under public/ after boot is not served
+# until a restart, which no deploy of a precompiled public/ does. An exact
+# key lookup also leaves no `..` to guard against.
+PUBLIC_FILES = Rack::Files.new("public", STATIC_HEADERS)
+PUBLIC_PATHS = Dir.glob("**/*", File::FNM_DOTMATCH, base: "public")
+  .select { |rel| File.file?(File.join("public", rel)) }
+  .to_h { |rel| ["/#{rel}", true] }.freeze
 use(Class.new do
   def initialize(app) = @app = app
 
   def call(env)
-    path = env["PATH_INFO"].to_s
-    if %w[GET HEAD].include?(env["REQUEST_METHOD"]) && !path.include?("..") &&
-       File.file?(File.join("public", path))
+    method = env["REQUEST_METHOD"]
+    if (method == "GET" || method == "HEAD") && PUBLIC_PATHS.key?(env["PATH_INFO"])
       PUBLIC_FILES.call(env)
     else
       @app.call(env)
@@ -104,7 +129,10 @@ app = lambda do |env|
   # site is Rails' 404, and the app's `connect` never runs for it.
   if env["PATH_INFO"] == "/cable"
     unless ActionController::RequestForgeryProtection.cable_origin_allowed?(
-        env["HTTP_ORIGIN"].to_s, env["HTTP_HOST"].to_s, Rails.env.development?)
+        env["HTTP_ORIGIN"].to_s,
+        ActionController::RequestForgeryProtection.host_origin_for(
+          env["HTTP_HOST"].to_s, env["HTTPS"].to_s, env["HTTP_X_FORWARDED_PROTO"].to_s,
+          env["rack.url_scheme"].to_s))
       return [404, { "content-type" => "text/plain" }, ["Page not found"]]
     end
     if Db.with_connection { Cable.upgrade(env) }

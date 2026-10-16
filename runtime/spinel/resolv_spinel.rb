@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Resolv, reopened over spinel's `Socket` so `Resolv.getaddresses` is a
 # real lookup on the compiled binary — `runtime/resolv.rb` carries the
 # stub walk and leaves `resolve` (the unstubbed hook) failing loudly for

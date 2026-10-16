@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::WebSocket::Handshake -- RFC 6455 §1.3 server-side handshake.
 #
 # `check(req)`:

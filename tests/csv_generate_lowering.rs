@@ -25,6 +25,16 @@ fn write_headers_becomes_the_first_row() {
     );
 }
 
+/// A block with an optional parameter is not the `|csv|` shape: the call
+/// is left as written, its `headers:` / `write_headers:` options included.
+#[test]
+fn a_block_with_an_optional_parameter_keeps_the_call_as_written() {
+    assert_eq!(
+        emit("CSV.generate(\"\", headers: [\"a\"], write_headers: true) { |csv, row = [1]| csv << row }"),
+        "CSV.generate(\"\", headers: [\"a\"], write_headers: true) { |csv, row = [1]| csv << row }"
+    );
+}
+
 #[test]
 fn a_computed_write_headers_guards_the_row() {
     assert_eq!(

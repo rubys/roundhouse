@@ -74,6 +74,10 @@ pub struct AssociationEdge {
     /// `Direct` for tree edges; `Registry` for edges that participate
     /// in a cycle.
     pub resolution: Resolution,
+    /// The declared `primary_key:` (owner column for has_one/has_many,
+    /// target column for belongs_to), `None` for the default `id`.
+    /// Consumers that assume `id` must check it.
+    pub primary_key: Option<Symbol>,
 }
 
 /// Compute the full association graph for `app`. Every declared
@@ -100,6 +104,12 @@ pub fn compute_association_graph(app: &App) -> Vec<AssociationEdge> {
 }
 
 fn lift_edge(from: ClassId, assoc: &Association) -> AssociationEdge {
+    let mut edge = lift_edge_shape(from, assoc);
+    edge.primary_key = super::assoc_primary_key::custom_primary_key(assoc).cloned();
+    edge
+}
+
+fn lift_edge_shape(from: ClassId, assoc: &Association) -> AssociationEdge {
     match assoc {
         Association::HasMany {
             name,
@@ -120,6 +130,7 @@ fn lift_edge(from: ClassId, assoc: &Association) -> AssociationEdge {
             through: through.clone(),
             join_table: None,
             resolution: Resolution::Direct,
+            primary_key: None,
         },
         Association::BelongsTo {
             name,
@@ -135,6 +146,7 @@ fn lift_edge(from: ClassId, assoc: &Association) -> AssociationEdge {
             through: None,
             join_table: None,
             resolution: Resolution::Direct,
+            primary_key: None,
         },
         Association::HasOne {
             name,
@@ -150,6 +162,7 @@ fn lift_edge(from: ClassId, assoc: &Association) -> AssociationEdge {
             through: None,
             join_table: None,
             resolution: Resolution::Direct,
+            primary_key: None,
         },
         Association::HasAndBelongsToMany {
             name,
@@ -167,6 +180,7 @@ fn lift_edge(from: ClassId, assoc: &Association) -> AssociationEdge {
             through: None,
             join_table: Some(join_table.clone()),
             resolution: Resolution::Direct,
+            primary_key: None,
         },
     }
 }
@@ -271,6 +285,7 @@ mod tests {
             class_attr_defaults: indexmap::IndexMap::new(),
             lexical_json_shadow: false,
             sti_subclass_names: Vec::new(),
+            i18n: Default::default(),
             span: crate::span::Span::synthetic(),
         }
     }
@@ -282,10 +297,13 @@ mod tests {
             foreign_key: sym(fk),
             foreign_key_explicit: false,
             through: None,
+            source: None,
+            class_explicit: false,
             dependent: Dependent::None,
             as_interface: None,
             scope: None,
             extension: Vec::new(),
+            primary_key: None,
         }
     }
 

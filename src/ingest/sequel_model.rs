@@ -98,6 +98,7 @@ pub fn ingest_sequel_model(
         class_attr_defaults: indexmap::IndexMap::new(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        i18n: Default::default(),
         span: Span {
             file: super::sources::file_id(file),
             start: class_loc.start_offset() as u32,
@@ -238,12 +239,15 @@ fn parse_sequel_association(
                 foreign_key,
                 foreign_key_explicit,
                 through: None,
+                source: None,
+                class_explicit: false,
                 dependent,
                 as_interface: None,
                 scope: order_expr,
                 // Sequel has no association-extension block — its
                 // `one_to_many` takes a dataset block, a different thing.
                 extension: Vec::new(),
+                primary_key: None,
             }
         }
         "one_to_one" => Association::HasOne {
@@ -256,9 +260,11 @@ fn parse_sequel_association(
                 .map(|s| Symbol::from(s.as_str()))
                 .unwrap_or_else(|| Symbol::from(format!("{owner_snake}_id"))),
             dependent: Dependent::None,
+            through: None,
             as_interface: None,
             scope: None,
             autosave: false,
+            primary_key: None,
         },
         "many_to_one" => Association::BelongsTo {
             name: name.clone(),
@@ -482,6 +488,7 @@ fn parse_validation_helper(call: &ruby_prism::CallNode<'_>) -> Option<Vec<Valida
                             min,
                             max,
                             message: message.clone(),
+                            allow_nil: None,
                         }],
                     })
                     .collect()

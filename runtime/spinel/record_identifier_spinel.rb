@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `ActionView::RecordIdentifier.dom_id` for the spinel tree — the CRuby
 # overlay's `action_view_record_identifier.rb`, whose header says why the
 # module lives beside the shared runtime and not in it (targets that

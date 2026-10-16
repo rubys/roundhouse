@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Spam gate behind `invisible_captcha` (the invisible_captcha gem).
 #
 # The lowering synthesizes:

@@ -10,6 +10,9 @@
 //!
 //! Analysis runs on a worker thread, watched for time and resident memory,
 //! so that a regression fails in seconds instead of exhausting the machine.
+//! The settled sizes hold by construction, since every carried type passes
+//! through the bound; a type that moves round after round within it shows
+//! instead in where the fixpoint loops stop.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -20,7 +23,7 @@ use std::time::{Duration, Instant};
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
-use roundhouse::analyze::{diagnose, Analyzer, Severity};
+use roundhouse::analyze::{diagnose, Analyzer, FixpointRounds, LoopEnd, Severity};
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app_from_tree;
 use roundhouse::ty::Ty;
@@ -146,7 +149,7 @@ fn measure(ty: &Ty) -> (usize, usize) {
         Ty::Union { variants } => (variants.iter().collect(), false),
         Ty::Class { args, .. } => (args.iter().collect(), !args.is_empty()),
         Ty::Fn { params, block, ret, .. } => (
-            params.iter().map(|p| &p.ty).chain(block.as_deref()).chain(std::iter::once(&**ret)).collect(),
+            params.iter().map(|p| &*p.ty).chain(block.as_deref()).chain(std::iter::once(&**ret)).collect(),
             true,
         ),
         _ => (Vec::new(), false),
@@ -172,6 +175,7 @@ struct Settled {
     returns: Vec<(String, Ty)>,
     params: Vec<(String, Ty)>,
     errors: Vec<String>,
+    rounds: FixpointRounds,
 }
 
 /// Analyze an app holding `files` (beside an empty schema, an
@@ -214,7 +218,7 @@ fn analyze(files: &[(&str, &str)], methods: &[(&str, &str, bool)]) -> Settled {
             .filter(|d| d.severity == Severity::Error)
             .map(|d| d.message)
             .collect();
-        Settled { returns, params, errors }
+        Settled { returns, params, errors, rounds: analyzer.fixpoint_rounds() }
     })
 }
 
@@ -273,6 +277,23 @@ fn assert_bounded(settled: &Settled) {
     }
 }
 
+/// The fixpoint ends on a fixed point rather than on a round cap. The
+/// production rounds may run out first: the first view round harvests
+/// production again, so its check passing, or the absorb rounds settling,
+/// is production settling just past its cap.
+fn assert_settles(settled: &Settled) {
+    let rounds = settled.rounds;
+    let production_settles = matches!(rounds.production, LoopEnd::Settled(_))
+        || rounds.views_and_tests == LoopEnd::Settled(0)
+        || matches!(rounds.absorb, LoopEnd::Settled(_));
+    assert!(
+        production_settles
+            && matches!(rounds.views_and_tests, LoopEnd::Settled(_))
+            && rounds.absorb != LoopEnd::RanToCap,
+        "the fixpoint stopped on a round cap: {rounds:?}"
+    );
+}
+
 #[test]
 fn a_two_method_cycle_settles_bounded() {
     let settled = analyze(
@@ -280,6 +301,7 @@ fn a_two_method_cycle_settles_bounded() {
         &[("TreesController", "walk_0", false), ("TreesController", "walk_1", false)],
     );
     assert_bounded(&settled);
+    assert_settles(&settled);
 }
 
 #[test]
@@ -289,6 +311,7 @@ fn a_class_method_cycle_settles_bounded() {
         &[("Walker", "walk", true), ("Walker", "step", true)],
     );
     assert_bounded(&settled);
+    assert_settles(&settled);
 }
 
 #[test]
@@ -299,10 +322,11 @@ fn a_result_merged_back_into_its_own_parameter_settles_bounded() {
     );
     assert_bounded(&settled);
     assert!(!settled.params.is_empty(), "canonical's parameter was never unified");
+    assert_settles(&settled);
 }
 
-/// The harvest cuts this method's direct self-nesting, but its return
-/// still gained a level every round and ran both loops to their caps.
+/// The harvest cuts this method's direct self-nesting, so its return
+/// settles without reaching the bound.
 #[test]
 fn a_self_recursive_walk_settles_bounded() {
     let settled = analyze(
@@ -310,6 +334,7 @@ fn a_self_recursive_walk_settles_bounded() {
         &[("TreesController", "walk", false)],
     );
     assert_bounded(&settled);
+    assert_settles(&settled);
 }
 
 /// The call sites live in the class, so analysis sees the same feedback
@@ -318,6 +343,10 @@ const TREE_WALK: &str = r#"
 class TreeWalk
   def walked
     walk_0({ "a" => [1, { "b" => "x" }] })
+  end
+
+  def walked_by_class
+    Walker.walk({ "a" => [1, { "b" => "x" }] })
   end
 
   def canonicalized
@@ -358,18 +387,21 @@ end
 /// A clean `check` on these shapes is a claim that they run: the bounded
 /// types must not cost the emitted program its values.
 #[test]
-fn the_cycle_and_the_merged_back_result_run_once_emitted() {
+fn the_cycles_and_the_merged_back_result_run_once_emitted() {
     let run = watched(|| {
         emit_and_run::empty_app()
             .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
             .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
             .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"probes\" do |t|\n    t.string \"name\"\n  end\nend\n")
             .write("app/models/tree_walk.rb", TREE_WALK)
+            .write("app/models/walker.rb", CLASS_METHOD_CYCLE)
             .run_ruby(
                 r#"
 walk = TreeWalk.new
 walked = walk.walked
 raise "cycle lost values: #{walked.inspect}" unless walked == { "a" => [1, { "b" => "x" }] }
+walked = walk.walked_by_class
+raise "class-method cycle lost values: #{walked.inspect}" unless walked == { "a" => [1, { "b" => "x" }] }
 canonical = walk.canonicalized
 expected = { "a" => { "b" => [1, "x"], "d" => 2 }, "c" => [{ "b" => [1, "x"], "e" => nil }] }
 raise "merge feedback lost values: #{canonical.inspect}" unless canonical == expected

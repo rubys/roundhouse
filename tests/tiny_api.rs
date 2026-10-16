@@ -621,6 +621,52 @@ fn spinel_gate_models_run() {
     assert_ran(&output, &scratch, "TINY API MODELS OK");
 }
 
+const DURATION_COMPARISONS: &str = r#"
+duration = ActiveSupport::Duration.seconds(60)
+raise "Float < below" unless 59.5 < duration
+raise "Float < equal" if 60.0 < duration
+raise "Float < above" if 60.5 < duration
+raise "Float <= below" unless 59.5 <= duration
+raise "Float <= equal" unless 60.0 <= duration
+raise "Float <= above" if 60.5 <= duration
+raise "Integer < below" unless 59 < duration
+raise "Integer < equal" if 60 < duration
+raise "Integer < above" if 61 < duration
+puts "DURATION COMPARISONS OK"
+"#;
+
+#[test]
+fn numeric_duration_comparisons_match_rails() {
+    let rails = Command::new("ruby")
+        .args(["-ractive_support/all", "-e", DURATION_COMPARISONS])
+        .output().expect("run Rails duration comparisons");
+    assert!(rails.status.success(), "{}", String::from_utf8_lossy(&rails.stderr));
+    for runtime in [
+        "runtime/spinel/active_support_duration.rb",
+        "runtime/spinel/scaffold/ruby_overlay/runtime/active_support_duration.rb",
+    ] {
+        let output = Command::new("ruby").args(["-r", &format!("./{runtime}"), "-e", DURATION_COMPARISONS])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output().expect("run runtime duration comparisons");
+        assert!(output.status.success(), "{runtime}: {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.stdout, rails.stdout, "{runtime}");
+    }
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn spinel_gate_numeric_duration_comparisons_match_rails() {
+    let scratch = emit_spinel("duration-coerce");
+    std::fs::write(scratch.join("contract.rb"), format!(
+        "require_relative \"runtime/active_support_duration\"\n{DURATION_COMPARISONS}"
+    )).expect("write duration consumer");
+    let spinel = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+    compile(&scratch, &spinel, &["contract.rb", "--rbs", ".", "-o", "contract"]);
+    let output = Command::new(scratch.join("contract"))
+        .current_dir(&scratch).output().expect("run duration consumer");
+    assert_ran(&output, &scratch, "DURATION COMPARISONS OK");
+}
+
 /// The CRuby lane's routed JSON requests, sent over HTTP to the built
 /// binary. On main every routed request answers 500 and the server
 /// logs `NoMethodError: undefined method 'params=' for an instance of

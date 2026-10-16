@@ -397,7 +397,49 @@ fn emit_stmts(stmts: &[Expr]) -> String {
         }
     }
 
-    format!("{}\n{}", emit_stmt(head), emit_stmts(rest))
+    // The final threaded record update can be discarded by a later Ruby
+    // return (`expires_in` ends in `nil`). Keep evaluating the update,
+    // but underscore the unused Elixir binding so warnings-as-errors
+    // stays clean.
+    let head = match &*head.node {
+        ExprNode::Assign {
+            target: LValue::Var { name, .. },
+            value,
+        } if name.as_str() == "record"
+            && !rest.iter().any(later_statement_uses_record) =>
+        {
+            format!("_record = {}", emit_expr(value))
+        }
+        _ => emit_stmt(head),
+    };
+    format!("{}\n{}", head, emit_stmts(rest))
+}
+
+/// Later statements use `record` either by reading the local or by an
+/// implicit-self / `self.record` send that `emit_send` will thread as
+/// a leading `record` argument (`save()` → `save(record)`).
+fn later_statement_uses_record(e: &Expr) -> bool {
+    super::library::references_var(e, "record") || implicit_record_send(e)
+}
+
+fn implicit_record_send(e: &Expr) -> bool {
+    if let ExprNode::Send { recv, method, .. } = &*e.node {
+        let fname = super::library::elixir_fn_name(method.as_str());
+        if threads_record(&fname)
+            && recv
+                .as_ref()
+                .is_none_or(|r| is_record_var(r) || matches!(&*r.node, ExprNode::SelfRef))
+        {
+            return true;
+        }
+    }
+    let mut hit = false;
+    e.node.for_each_child(&mut |c| {
+        if !hit {
+            hit = implicit_record_send(c);
+        }
+    });
+    hit
 }
 
 /// String-accumulator hint consumer — the view/jbuilder lowerer's
@@ -1123,6 +1165,16 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // An element that is never nil or false makes `any?` / `none?` a question of size
+    if matches!(method, "any?" | "none?") && args.is_empty() {
+        if let Some(r) = recv.filter(|r| {
+            matches!(effective_recv_ty(r), Some(crate::ty::Ty::Array { elem }) if matches!(*elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym))
+        }) {
+            let empty = format!("Enum.empty?({})", emit_expr(r));
+            return if method == "none?" { empty } else { format!("not {empty}") };
+        }
+    }
+
     // `recv.empty?` — Array/list → `Enum.empty?`, Hash → `map_size == 0`.
     // An unknown/struct receiver falls through (a struct's own `empty?`
     // method routes via the self-call / method-on-record paths).
@@ -1181,6 +1233,30 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // stored ISO-8601 text into a native UTC `%DateTime{}` — the
     // hand-written `RhDateTime.parse` (runtime/elixir/v2/rh_datetime.ex),
     // not a transpiled `ActiveSupport` module (no such unit exists).
+    // `ActiveRecord::ErrorDetail` (runtime/ruby/active_record/base.rb) is a map here: the Elixir model keeps no transpiled Base.
+    if method == "new" && args.len() == 6 {
+        if let Some(ExprNode::Const { path }) = recv.map(|r| &*r.node) {
+            if path.iter().map(|s| s.as_str()).eq(["ActiveRecord", "ErrorDetail"]) {
+                return format!(
+                    "%{{attribute: {}, kind: {}, message: {}, full_message: {}, symbolic: {}, optionless: {}}}",
+                    emit_expr(&args[0]),
+                    emit_expr(&args[1]),
+                    emit_expr(&args[2]),
+                    emit_expr(&args[3]),
+                    emit_expr(&args[4]),
+                    emit_expr(&args[5]),
+                );
+            }
+        }
+    }
+    // `Base#error_messages_for(attribute)`: the messages of the details on `attribute`.
+    if method == "error_messages_for" && args.len() == 1 && (recv.is_some() || is_record_threading_context()) {
+        let record = recv.map(emit_expr).unwrap_or_else(|| "record".to_string());
+        return format!(
+            "(for detail <- {record}.error_details, detail.attribute == {}, do: detail.message)",
+            emit_expr(&args[0]),
+        );
+    }
     if method == "parse_db_time" && args.len() == 1 {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
@@ -1471,11 +1547,24 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 _ if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Float)) => {
                     format!(":math.fmod({ls}, {rs})")
                 }
+                // Not `rem/2` for two Integers: it takes the dividend's sign, where Ruby's takes the divisor's.
+                _ if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Int))
+                    && matches!(arg.ty.as_ref(), Some(crate::ty::Ty::Int)) =>
+                {
+                    format!("Integer.mod({ls}, {rs})")
+                }
                 _ => format!("rem({ls}, {rs})"),
             };
         }
         if method == "**" {
             return format!(":math.pow({}, {})", emit_expr(r), emit_expr(arg));
+        }
+        // Not `div/2`: it truncates toward zero, where Ruby's Integer#/ floors.
+        if method == "/"
+            && matches!(r.ty.as_ref(), Some(crate::ty::Ty::Int))
+            && matches!(arg.ty.as_ref(), Some(crate::ty::Ty::Int))
+        {
+            return format!("Integer.floor_div({}, {})", emit_expr(r), emit_expr(arg));
         }
         if is_infix(method) {
             return format!("{} {method} {}", emit_expr(r), emit_expr(arg));
@@ -1951,6 +2040,13 @@ fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
             }
         }
     }
+    // The form builder synthesizes this call after the view body is typed, and that per-view typer cannot see the record's `errors`
+    if let ExprNode::Send { method, .. } = &*e.node {
+        if method.as_str() == "error_messages_for"
+        {
+            return Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Str) });
+        }
+    }
     // Fall back to the node's own ty.
     match e.ty.as_ref() {
         Some(t) if !matches!(t, crate::ty::Ty::Untyped) => Some(t.clone()),
@@ -2204,7 +2300,7 @@ mod tests {
         })
     }
     fn arr() -> Ty {
-        Ty::Array { elem: Box::new(Ty::Untyped) }
+        Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }
     }
 
     fn unary(method: &str, recv: Expr) -> Expr {
@@ -2218,7 +2314,7 @@ mod tests {
     }
 
     fn block_send(recv: &str, method: &str, params: &[&str], body: Expr) -> Expr {
-        let lambda = Expr::new(crate::span::Span::synthetic(), ExprNode::Lambda { rest_param: None,
+        let lambda = Expr::new(crate::span::Span::synthetic(), ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: params.iter().map(|p| Symbol::from(*p)).collect(),
             block_param: None,
             body,
@@ -2358,7 +2454,7 @@ mod tests {
         // the receiver.
         let record = var_t(
             "record",
-            Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Base")), args: vec![] },
+            Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Base")), args: vec![].into() },
         );
         let call = Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
             recv: Some(record),
@@ -2485,7 +2581,7 @@ mod tests {
     #[test]
     fn hash_methods_map_to_elixir_map() {
         let hash = || {
-            var_t("h", Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) })
+            var_t("h", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) })
         };
         let no_args = |m: &str| Expr::new(crate::span::Span::synthetic(), ExprNode::Send {
             recv: Some(hash()),
@@ -2538,6 +2634,7 @@ mod tests {
                 parent: None,
                 parent_span: Default::default(),
                 includes: vec![],
+                include_spans: Vec::new(),
                 methods: vec![],
                 nullable_columns: Vec::new(),
                 origin: None,
@@ -2664,6 +2761,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![render, resolve],
             nullable_columns: Vec::new(),
             origin: None,
@@ -2695,7 +2793,7 @@ mod tests {
         // the threaded record) → polymorphic `instance.__struct__.save(
         // instance)`. `instance.id` (a struct field) → field read.
         let mut instance = syn(ExprNode::Var { id: VarId(0), name: sym("instance") });
-        instance.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![] });
+        instance.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![].into() });
         let save_call = call(instance.clone(), "save", vec![]);
         let id_read = call(instance, "id", vec![]);
 
@@ -2709,7 +2807,7 @@ mod tests {
             emit_expr(&call(
                 {
                     let mut v = syn(ExprNode::Var { id: VarId(0), name: sym("instance") });
-                    v.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![] });
+                    v.ty = Some(Ty::Class { id: ClassId(sym("Foo")), args: vec![].into() });
                     v
                 },
                 "id",
@@ -2746,7 +2844,7 @@ mod tests {
             emit_expr(&call(var_t("s", Ty::Str), "include?", vec![lit(":")])),
             "String.contains?(s, \":\")"
         );
-        let nilable = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        let nilable = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
         assert_eq!(
             emit_expr(&call(var_t("pp", nilable), "include?", vec![lit(":")])),
             "String.contains?(pp, \":\")"
@@ -2757,7 +2855,7 @@ mod tests {
     fn container_query_methods_dispatch_on_type() {
         // Array receiver → Enum.*; Hash receiver → Map.* / map_size.
         let arr = || var_t("xs", arr());
-        let hsh = || var_t("h", Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) });
+        let hsh = || var_t("h", Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) });
         assert_eq!(emit_expr(&call(arr(), "empty?", vec![])), "Enum.empty?(xs)");
         assert_eq!(emit_expr(&call(hsh(), "empty?", vec![])), "map_size(h) == 0");
         assert_eq!(
@@ -2806,7 +2904,7 @@ mod tests {
             id: VarId(0),
             name: Symbol::from("row"),
         });
-        row.ty = Some(Ty::Class { id: ClassId(Symbol::from("ArticleRow")), args: vec![] });
+        row.ty = Some(Ty::Class { id: ClassId(Symbol::from("ArticleRow")), args: vec![].into() });
         assert_eq!(emit_expr(&call(row, "id", vec![])), "row.id");
 
         set_current_class_name("");
@@ -2902,6 +3000,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![truncate],
             nullable_columns: Vec::new(),
             origin: None,
@@ -2947,13 +3046,13 @@ mod tests {
         clear_param_types();
         register_field_types(
             "Article",
-            &[("errors".to_string(), Ty::Array { elem: Box::new(Ty::Str) })],
+            &[("errors".to_string(), Ty::Array { elem: std::sync::Arc::new(Ty::Str) })],
         );
         register_param_types(
             "Views::Articles",
             &[(
                 "article".to_string(),
-                Ty::Class { id: ClassId(Symbol::from("Article")), args: vec![] },
+                Ty::Class { id: ClassId(Symbol::from("Article")), args: vec![].into() },
             )],
         );
         set_current_class_name("Views::Articles");
@@ -3071,8 +3170,8 @@ mod tests {
         let recv = var_t(
             "counts",
             Ty::Hash {
-                key: Box::new(Ty::Int),
-                value: Box::new(Ty::Int),
+                key: std::sync::Arc::new(Ty::Int),
+                value: std::sync::Arc::new(Ty::Int),
             },
         );
         let key = var_t("id", Ty::Int);
@@ -3122,6 +3221,80 @@ mod tests {
         assert_eq!(emit_expr(&outer), "\"SELECT \" <> col <> tail");
         // A genuinely numeric `+` (no string root) stays `+`.
         assert_eq!(emit_expr(&call(var_t("m", Ty::Int), "+", vec![var_t("n", Ty::Int)])), "m + n");
+    }
+
+    fn record_assign(value: Expr) -> Expr {
+        Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Var {
+                    id: VarId(0),
+                    name: Symbol::from("record"),
+                },
+                value,
+            },
+        )
+    }
+
+    fn nil_lit() -> Expr {
+        Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Nil,
+            },
+        )
+    }
+
+    #[test]
+    fn unused_final_record_rebind_uses_underscore_binding() {
+        let updated = var_t("updated_record", Ty::Untyped);
+        let unused = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![record_assign(updated.clone()), nil_lit()],
+            },
+        );
+        assert_eq!(
+            emit_method_body(&unused),
+            "_record = updated_record\nnil"
+        );
+
+        let used = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![
+                    record_assign(updated),
+                    var_t("record", Ty::Untyped),
+                ],
+            },
+        );
+        assert_eq!(emit_method_body(&used), "record = updated_record\nrecord");
+    }
+
+    #[test]
+    fn unused_final_record_rebind_keeps_binding_for_implicit_save() {
+        set_record_methods(["save".to_string()].into_iter().collect());
+        let save = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("save"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let body = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![record_assign(var_t("updated_record", Ty::Untyped)), save, nil_lit()],
+            },
+        );
+        assert_eq!(
+            emit_method_body(&body),
+            "record = updated_record\nsave(record)\nnil"
+        );
+        set_record_methods(Default::default());
     }
 }
 
@@ -3183,7 +3356,7 @@ fn emit_string_interp(parts: &[InterpPart]) -> String {
 /// characters json_builder's `ESCAPES` keys carry as raw bytes
 /// (backspace `\b` 0x08, form feed `\f` 0x0c, …). Other control chars
 /// fall back to `\xHH`.
-fn push_escaped(out: &mut String, value: &str) {
+pub(super) fn push_escaped(out: &mut String, value: &str) {
     for c in value.chars() {
         match c {
             '"' => out.push_str("\\\""),

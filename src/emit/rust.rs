@@ -197,10 +197,16 @@ use crate::models::*;
 #[allow(unused_imports)]
 use crate::views::*;
 #[allow(unused_imports)]
-use crate::errors_ext::{raise, NotImplementedError, RecordNotFound, RecordInvalid};
+use crate::errors_ext::{raise, ArgumentError, NotImplementedError, RecordNotFound, RecordInvalid};
 ";
 
+/// The written-down `render json:` encoder (`lower::as_json_writer`) in a model's `as_json_str`.
+/// Not in MODEL_IMPORTS: a test file joins those with FRAMEWORK_TEST_IMPORTS, which import it too.
+const MODEL_JSON_IMPORT: &str = "#[allow(unused_imports)]\nuse crate::json_builder::JsonBuilder;\n";
+
 const MODEL_IMPORTS: &str = "\
+#[allow(unused_imports)]
+use crate::active_record_base::ErrorDetail;
 #[allow(unused_imports)]
 use crate::param_value::ParamValue;
 #[allow(unused_imports)]
@@ -348,18 +354,31 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // calls in a runtime file resolve to other methods in the same
     // file. Cross-unit miscompiles, if they surface, get added to
     // `register_hand_written_runtime` against the concrete site.
-    // Runtime emit (inside `rust_units`) walks `emit_library_class`
-    // before the cross-LC registry exists, so install a default
-    // `EmitCtx` for the duration. Phase 2 of #24 moved the per-class
-    // scope thread-locals (`IVAR_TYPES`, `CLASS_METHOD_PARAM_TYS`,
-    // `STATIC_METHODS`, `CONSTRUCTOR_FIELDS`) onto `EmitCtx` fields;
+    // Runtime emit walks `emit_library_class` inside `rust_units`. Seed
+    // the Const-recv registry from every runtime Library LC first so
+    // sibling classes in one source file resolve — e.g.
+    // `AssociationReflection::new` called from `ActiveRecord::Base`
+    // (#832). An empty `EmitCtx` left that call padded against
+    // Base#initialize and emitted `None` for a Value param. Phase 2
+    // of #24 moved the per-class scope thread-locals onto `EmitCtx`;
     // the `with_X<F>` wrappers panic if no `EmitCtx` is installed.
-    // The empty struct's pipeline-global registries are fine here —
-    // runtime files don't call back into the app's class methods, and
-    // the real `EmitCtx` (populated below by
-    // `collect_global_class_methods`) wraps the subsequent per-file
-    // app emit loop.
-    let runtime_units = crate::emit::rust::expr::with_emit_ctx(EmitCtx::default(), || {
+    // App emit installs a fuller ctx below via
+    // `collect_global_class_methods` (models + runtime + …).
+    let mut runtime_lcs_pre: Vec<crate::dialect::LibraryClass> = Vec::new();
+    crate::runtime_loader::rust_library_classes(|classes| {
+        runtime_lcs_pre.extend(classes.iter().cloned());
+    })
+    .expect("rust runtime parse failed (Ruby source error)");
+    let runtime_emit_ctx = collect_global_class_methods(
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+        &runtime_lcs_pre,
+    );
+    let runtime_units = crate::emit::rust::expr::with_emit_ctx(runtime_emit_ctx, || {
         crate::runtime_loader::rust_units(|_path, mut classes| {
             let registry = crate::emit::rust::decide::str_color::build_registry(&classes, &[]);
             crate::emit::rust::decide::str_color::color_classes(&mut classes, &registry);
@@ -849,11 +868,16 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // from that Ruby file and inherits the split, but these
                 // model impls are generated here, so a tree-level grep
                 // for the name finds it in the runtime and still misses
-                // the model. `smoke (rust)` is what caught that.
+                // the model. `smoke (rust)` is what caught that, and
+                // again for `_insert_row` (fixtures and bulk inserts:
+                // timestamps filled, no validations, no callbacks).
                 format!(
                     "\nimpl {name} {{\n\
                         pub fn mark_persisted_bang(&mut self) {{ }}\n\
                         pub fn errors(&self) -> Vec<String> {{ crate::errors_ext::validation_errors_snapshot() }}\n\
+                        pub fn error_details(&self) -> Vec<crate::active_record_base::ErrorDetail> {{ crate::errors_ext::validation_error_details_snapshot().iter().map(|(a, k, m, f, s, o)| crate::active_record_base::ErrorDetail::new(a, k, m, f, *s, *o)).collect() }}\n\
+                        pub fn push_error_detail(error: crate::active_record_base::ErrorDetail) {{ crate::errors_ext::validation_error_details_push(error.attribute(), error.kind(), error.message(), error.full_message(), error.symbolic(), error.optionless()) }}\n\
+                        pub fn error_messages_for(&self, attribute: &str) -> Vec<String> {{ crate::errors_ext::validation_error_details_snapshot().into_iter().filter(|(a, _, _, _, _, _)| a == attribute).map(|(_, _, m, _, _, _)| m).collect() }}\n\
                         pub fn save(&mut self) -> bool {{\n\
                             crate::errors_ext::validation_errors_clear();\n\
                             self.validate();\n\
@@ -864,6 +888,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                             if self.id == 0 {{ self.id = self._adapter_insert();{after_create_commit} }}\n\
                             else if Self::_adapter_exists_by_id_pred(self.id) {{ self._adapter_update();{after_update_commit} }}\n\
                             else {{ let _ = self._adapter_insert();{after_create_commit} }}\n\
+                            true\n\
+                        }}\n\
+                        pub fn _insert_row(&mut self) -> bool {{\n\
+                            self.fill_timestamps(true);\n\
+                            self.id = self._adapter_insert();\n\
                             true\n\
                         }}\n\
                         pub fn save_bang(&mut self) -> Self {{\n\
@@ -906,11 +935,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             // `errors` send differently), this rewrite stops firing
             // and the bare `errors().push` falls through harmlessly
             // until updated.
-            let content = format!("{MODEL_IMPORTS}{body}{ar_shim}");
-            let content = content.replace(
-                "self.errors().push(",
-                "crate::errors_ext::validation_errors_push(",
-            );
+            let content = format!("{MODEL_IMPORTS}{MODEL_JSON_IMPORT}{body}{ar_shim}");
+            let content = content
+                .replace("self.errors().push(", "crate::errors_ext::validation_errors_push(")
+                .replace("self.error_details().push(", "Self::push_error_detail(");
             files.push(EmittedFile {
                 path: PathBuf::from(format!("src/models/{stem}.rs")),
                 content,
@@ -930,9 +958,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // RouteHelpers`). Append per-method delegating wrappers so
         // both call shapes resolve.
         let bare_wrappers = render_route_helpers_bare_wrappers(lc);
+        let import = if body.contains("ViewHelpers::") { "use crate::view_helpers::ViewHelpers;\n\n" } else { "" };
         files.push(EmittedFile {
             path: PathBuf::from("src/route_helpers.rs"),
-            content: format!("{body}{bare_wrappers}"),
+            content: format!("{import}{body}{bare_wrappers}"),
         });
     }
 
@@ -1055,6 +1084,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // but do not embed Base — stub the two Sends so the
                 // inherited process_action compiles. Full CSRF via
                 // the http thread-local surface is a follow-on.
+                // `verify_authenticity_token` takes `&self`, not `&mut self`: the stub writes nothing, and a controller whose actions write no ivar runs `process_action` on `&self`.
                 let ac_shim = format!(
                     "\nimpl {name} {{\n\
                     \x20   pub fn render(&self, content: String) {{\n\
@@ -1082,7 +1112,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     \x20       let content_type = opts.get(\"content_type\").and_then(|v| v.as_str()).map(|s| s.to_string());\n\
                     \x20       crate::http::response_set_head(status, content_type);\n\
                     \x20   }}\n\
-                    \x20   pub fn verify_authenticity_token(&mut self) {{}}\n\
+                    \x20   pub fn verify_authenticity_token(&self) {{}}\n\
                     \x20   pub fn performed_pred(&self) -> bool {{ false }}\n\
                     }}\n",
                     name = lc.name.0.as_str()
@@ -1106,10 +1136,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 // into `c.flash` only when the field exists; the
                 // outgoing path is field-independent (thread-local).
                 let has_flash = body.contains("pub flash:");
+                let has_params = body.contains("pub params:");
                 let axum_wrappers = render_axum_handler_wrappers(
                     lc.name.0.as_str(),
                     &flat_routes_2c,
                     has_flash,
+                    has_params,
                     sets_action_name,
                 );
                 let content = format!("{CONTROLLER_IMPORTS}{body}{ac_shim}{axum_wrappers}");
@@ -1144,6 +1176,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     parent: None,
                     parent_span: Default::default(),
                     includes: Vec::new(),
+                    include_spans: Vec::new(),
                     methods: Vec::new(),
                     nullable_columns: Vec::new(),
                     origin: None,
@@ -1391,7 +1424,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     if !controller_test_modules.is_empty() {
         let mut ctrl_entries: Vec<(String, String)> = Vec::new();
         for tm in &controller_test_modules {
-            let file = spec::emit_rust_test_module(tm, app);
+            let file = spec::with_route_helpers(&route_helper_funcs, || spec::emit_rust_test_module(tm, app));
             let class_name = tm.name.0.as_str().to_string();
             let stem = file
                 .path
@@ -1556,6 +1589,7 @@ fn render_axum_handler_wrappers(
     controller_name: &str,
     flat_routes: &[crate::lower::FlatRoute],
     has_flash: bool,
+    has_params: bool,
     sets_action_name: bool,
 ) -> String {
     use crate::dialect::HttpMethod;
@@ -1584,10 +1618,13 @@ fn render_axum_handler_wrappers(
         let action = r.action.as_str();
         let method_name = if action == "new" { "new_action" } else { action };
         let path_params = &r.path_params;
-        let has_body = matches!(
-            r.method,
-            HttpMethod::Post | HttpMethod::Patch | HttpMethod::Put,
-        );
+        let carries_body = |method: &HttpMethod| matches!(method, HttpMethod::Post | HttpMethod::Patch | HttpMethod::Put);
+        // Also a body another route to the action carries, where the controller reads `params`: `get` and `post` to one action share this wrapper, and axum's `Form` reads a GET's query string.
+        let has_body = carries_body(&r.method)
+            || has_params
+                && flat_routes.iter().any(|other| {
+                    other.controller.0.as_str() == controller_name && other.action == r.action && carries_body(&other.method)
+                });
         // Path params come in as String. The handler body strips an
         // optional `.json` suffix off each one before parsing as i64
         // — for `/articles/{id}` URLs ending in `.json`, matchit's
@@ -1633,22 +1670,48 @@ fn render_axum_handler_wrappers(
         if !path_extractor.is_empty() {
             args.push(path_extractor);
         }
+        // Rails' `params` holds the query string too; only a controller that reads `params` has the field to take it.
+        if has_params {
+            args.push(
+                "axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>"
+                    .to_string(),
+            );
+        }
         if has_body {
             // Body extractor MUST be last per axum's contract (each
             // request body can only be consumed once; placing it
             // after the `Path` extractors keeps the consumption
             // ordering deterministic).
-            args.push(
-                "axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>"
-                    .to_string(),
-            );
+            if carries_body(&r.method) {
+                args.push(
+                    "axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>"
+                        .to_string(),
+                );
+            } else {
+                // Not a bare `Form`: this wrapper serves the action's other verbs too, and a DELETE with no form body would be refused before the action runs.
+                args.push(
+                    "form: Result<axum::extract::Form<std::collections::HashMap<String, String>>, axum::extract::rejection::FormRejection>"
+                        .to_string(),
+                );
+            }
         }
         let args_str = args.join(", ");
 
         let mut body = String::new();
+        if has_body && !carries_body(&r.method) {
+            body.push_str("    let form = form.map(|f| f.0).unwrap_or_default();\n");
+        }
         body.push_str("    crate::http::response_clear();\n");
         body.push_str("    crate::http::request_format_set(_fmt.0);\n");
-        if has_body {
+        if has_params {
+            if has_body {
+                // Query after form, as Rails' `request_parameters.merge(query_parameters)`: a shallow merge where the query wins.
+                body.push_str("    let mut params = crate::http::params_from_form(form);\n");
+                body.push_str("    params.extend(crate::http::params_from_form(query));\n");
+            } else {
+                body.push_str("    let mut params = crate::http::params_from_form(query);\n");
+            }
+        } else if has_body {
             body.push_str("    let mut params = crate::http::params_from_form(form);\n");
         } else if !path_params.is_empty() {
             body.push_str(
@@ -1672,7 +1735,7 @@ fn render_axum_handler_wrappers(
                 "    params.insert({p:?}.to_string(), serde_json::Value::from({p}));\n",
             ));
         }
-        if has_body || !path_params.is_empty() {
+        if has_params || has_body || !path_params.is_empty() {
             body.push_str(&format!(
                 "    let mut c = {controller_name} {{ params, ..Default::default() }};\n",
             ));
@@ -2308,7 +2371,7 @@ fn collect_global_class_methods(
                     .iter()
                     .map(|p| Param {
                         name: Symbol::from(p.as_str()),
-                        ty: Ty::Untyped,
+                        ty: Ty::Untyped.into(),
                         kind: ParamKind::Required,
                     })
                     .collect(),

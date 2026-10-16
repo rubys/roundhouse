@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Ruby's `Logger` and the two ActiveSupport wrappers a Rails app puts
 # in front of it — the logger stack `config.logger =` builds.
 #

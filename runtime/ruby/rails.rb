@@ -13,6 +13,9 @@
 # `Rails.cache` is a no-op store (every `fetch` recomputes via its block);
 # correct, just not actually caching, which is adequate until a real cache
 # backend is wired.
+
+require_relative "active_support_reporters"
+
 module Rails
   class << self
     # RAILS_ENV, parked by the scaffold main.rb at boot (the runtime
@@ -101,6 +104,22 @@ module Rails
     def to_path
       @base
     end
+
+    # Pathname's file readers, which read the file the path names.
+    # A class-body constant is often built from
+    # `Rails.root.join("db/data/...").readlines(chomp: true)`; without
+    # these, Kernel's private `readlines` answered and raised.
+    def readlines(chomp: false)
+      File.read(@base).lines(chomp: chomp)
+    end
+
+    def read
+      File.read(@base)
+    end
+
+    def exist?
+      File.exist?(@base)
+    end
   end
 
   # One store per process. A fresh `Cache.new` per call would make every
@@ -124,15 +143,74 @@ module Rails
     warn(line)
   end
 
+  # `Rails.error` / `Rails.event` — ActiveSupport's process-wide
+  # reporters, as railties' lib/rails.rb answers them
+  # (active_support_reporters.rb).
+  def self.error
+    ActiveSupport.error_reporter
+  end
+
+  def self.event
+    ActiveSupport.event_reporter
+  end
+
   def self.application
     Application.new
   end
 
   # `Rails.env.production?` etc. — a plain object answering the known
   # environment predicates (no `method_missing`, no `String` subclass).
+  # Rails' is ActiveSupport::EnvironmentInquirer (activesupport 8.1.4
+  # environment_inquirer.rb), a StringInquirer: it IS the name, so it
+  # compares, interpolates and converts as that String, `local?` is
+  # development or test, and "local" is refused as a name.
   class Env
     def initialize(name)
+      raise ArgumentError, "'local' is a reserved environment name" if name == "local"
       @name = name
+    end
+
+    # `LOCAL_ENVIRONMENTS = %w[ development test ]`.
+    def local?
+      @name == "development" || @name == "test"
+    end
+
+    def to_s
+      @name
+    end
+
+    def to_str
+      @name
+    end
+
+    def to_sym
+      @name.to_sym
+    end
+
+    def inspect
+      @name.inspect
+    end
+
+    # String equality, as the String it is in Rails: `Rails.env ==
+    # "test"`, and through `to_str`, `"test" == Rails.env` and `when
+    # "test"`. A Symbol is not equal (`Rails.env == :test` is false).
+    def ==(other)
+      if other.is_a?(Env)
+        @name == other.to_s
+      else
+        other.is_a?(String) && @name == other
+      end
+    end
+
+    # Hash-key equality is Env-only. `==` stays String-like for
+    # `Rails.env == "test"`, but `eql?` must match `hash` (name only)
+    # so a String-keyed map does not treat Env as interchangeable.
+    def eql?(other)
+      other.is_a?(Env) && @name == other.to_s
+    end
+
+    def hash
+      @name.hash
     end
 
     def development?
@@ -384,6 +462,56 @@ module Rails
       "_session"
     end
 
+    # `config.action_controller.forgery_protection_verification_strategy`,
+    # as the forgery check reads it (runtime/spinel/
+    # request_forgery_protection.rb). Rails' class default; ingest lifts
+    # `load_defaults 8.2` (`:header_only`) or an app's own
+    # `protect_from_forgery using:` into an override on the app's
+    # reopen, the same shape as `session_cookie_key`.
+    def forgery_protection_verification_strategy
+      "header_or_legacy_token"
+    end
+
+    # `config.public_file_server.headers`: what the static file server
+    # adds to every `public/` (and `/assets/`) response — the
+    # `Cache-Control` a browser, or a cache in front of the app, keeps a
+    # stylesheet by. Rails' default sends nothing extra; ingest lifts an
+    # app's own Hash into an override on the reopen
+    # (src/ingest/public_file_server_config.rs).
+    def public_file_server_headers
+      {}
+    end
+
+    # Action Cable's three origin settings, as the `/cable` handshake
+    # check reads them (runtime/spinel/request_forgery_protection.rb):
+    # Rails' defaults. Ingest lifts an app's `config.action_cable.*`
+    # assignments, per environment, into overrides on the app's reopen
+    # (`ingest::action_cable_config`), the same shape as
+    # `forgery_protection_verification_strategy`.
+    #
+    # `allowed_request_origins` is unset outside development; in
+    # development Action Cable's engine sets it to
+    # `/https?:\/\/localhost:\d+/`, matched with `===`, so unanchored.
+    def action_cable_origin_listed?(origin)
+      Rails.env.development? && /https?:\/\/localhost:\d+/ === origin
+    end
+
+    def action_cable_allow_same_origin_as_host
+      true
+    end
+
+    def action_cable_disable_request_forgery_protection
+      false
+    end
+
+    # Whether forms carry no authenticity token field at all: an app
+    # helper overriding ActionView's `token_tag` to answer "" (the shape
+    # header-only forgery protection uses) makes it true; ingest
+    # synthesizes the override on the app's reopen.
+    def token_fields_omitted
+      false
+    end
+
     # `GlobalID.app` — the first segment of every `gid://<app>/<Model>/
     # <id>` URI this runtime mints. Rails derives it from the
     # application's railtie name (`campfire_application` minus the
@@ -458,6 +586,19 @@ module Rails
       {}
     end
 
+    # The Rack env defaults every request starts from
+    # (`Rails.application.env_config`). Held in a constant because
+    # `Rails.application` answers a fresh Application each call, and a
+    # test that sets a key has to read it back. No key is consulted yet:
+    # campfire's tests set `action_dispatch.show_exceptions` to
+    # `:rescuable`, and a forgery failure here always renders the 422
+    # that setting asks for.
+    ENV_CONFIG = {}
+
+    def env_config
+      ENV_CONFIG
+    end
+
     # The zone every ActiveRecord temporal value is PRESENTED in. Same
     # framework-default shape as `session_cookie_key` above: Rails always
     # has one (`config.time_zone` defaults to "UTC"), ingest lifts an
@@ -466,10 +607,19 @@ module Rails
     # strict target can call it without a `respond_to?` guard.
     #
     # The value is a Rails zone NAME ("Central Time (US & Canada)"), not
-    # an IANA identifier; `ActiveSupport::RAILS_TZ_TO_IANA` translates,
-    # and main.rb pins ENV["TZ"] from the result before any render.
+    # an IANA identifier; `ActiveSupport::ZONE_NAMES` translates, and the
+    # boot makes it the runtime's default zone before any render.
     def config_time_zone
       "UTC"
+    end
+
+    # `config.filter_parameters`: the keys `request.filtered_parameters`
+    # masks (Rails' `rails new` initializer lists `:passw`, `:token`,
+    # ...). Same framework-default shape as `config_time_zone` above:
+    # Rails' default list is empty, and ingest lifts an app's Symbol and
+    # String filters, each as its String, into an override on the reopen.
+    def config_filter_parameters
+      []
     end
 
     # `config.active_storage.variable_content_types -= %w[…]` — the

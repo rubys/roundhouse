@@ -119,21 +119,12 @@ fn rewrite(expr: &mut Expr, facts: &Facts) {
         if args.is_empty() {
             if let Some(label) = method.as_str().strip_suffix('?') {
                 if !label.is_empty() && !facts.app_string_methods.contains(method) {
-                    if let ExprNode::Send {
-                        recv: Some(inner),
-                        method: inner_method,
-                        args: inner_args,
-                        block: None,
-                        ..
-                    } = &*recv.node
-                    {
-                        if inner_method.as_str() == "inquiry" && inner_args.is_empty() {
-                            let mut inner = inner.clone();
-                            rewrite(&mut inner, facts);
-                            let span = expr.span;
-                            *expr = eq_label(span, inner, label);
-                            return;
-                        }
+                    if let Some(inner) = crate::analyze::inquiry::inquirer_value(recv) {
+                        let mut inner = inner.clone();
+                        rewrite(&mut inner, facts);
+                        let span = expr.span;
+                        *expr = eq_label(span, inner, label);
+                        return;
                     }
                 }
             }
@@ -142,17 +133,15 @@ fn rewrite(expr: &mut Expr, facts: &Facts) {
 
     expr.node.for_each_child_mut(&mut |c| rewrite(c, facts));
 
+    // `<recv>.inquiry` / `ActiveSupport::StringInquirer.new(<recv>)` — the inquirer is its string.
+    if let Some(inner) = crate::analyze::inquiry::inquirer_value(expr) {
+        *expr = inner.clone();
+        return;
+    }
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
         return;
     };
     if !args.is_empty() {
-        return;
-    }
-
-    // `<recv>.inquiry` — the inquirer is its string.
-    if method.as_str() == "inquiry" {
-        let inner = recv.clone();
-        *expr = inner;
         return;
     }
 

@@ -180,9 +180,40 @@ class UnitBatchTests(unittest.TestCase):
                 self.assertTrue(set(shards[left]).isdisjoint(shards[right]))
         self.assertEqual(unit.select_shard(names, 0, 1), names)
 
+    def test_select_shard_puts_the_heaviest_target_alone_and_offsets_shard_zero(self):
+        names = ["big", "a", "b", "c", "d"]
+        weights = {"big": 10}
+        self.assertEqual(unit.select_shard(names, 0, 2, weights), ["big"])
+        self.assertEqual(unit.select_shard(names, 1, 2, weights), ["a", "b", "c", "d"])
+        self.assertEqual(unit.select_shard(names, 0, 2, weights, 20), [])
+
+    def test_split_share_gives_each_test_to_one_shard(self):
+        tests = ["c", "a", "e", "b", "d"]
+        shares = [unit.split_share(tests, index, 2) for index in range(2)]
+        self.assertEqual(shares, [["a", "c", "e"], ["b", "d"]])
+
+    def test_a_split_target_is_left_out_of_the_shard_batches(self):
+        names = ["alpha", "emit_and_run", "gamma"]
+        meta = {
+            "target_directory": "/tmp",
+            "packages": [{
+                "name": "roundhouse",
+                "targets": [{"name": name, "kind": ["test"]} for name in names],
+            }],
+        }
+        stdout = io.StringIO()
+        with mock.patch.object(unit, "cargo_metadata", return_value=meta), mock.patch.object(
+            unit, "verify_coverage"
+        ), mock.patch.object(unit, "LIB_BINS_SECONDS", 0), mock.patch(
+            "sys.stdout", stdout
+        ), mock.patch("sys.stderr", io.StringIO()):
+            unit.main(["--list-only", "--shard-index", "0", "--shard-count", "1"])
+        self.assertEqual(stdout.getvalue().splitlines(), ["alpha", "gamma"])
+
     def test_list_only_prints_selected_shard_after_global_coverage(self):
         names = [f"t{i:02d}" for i in range(7)]
-        expected = ["t01", "t04"]
+        # Shard 0's library and binary tests outweigh seven unlisted targets.
+        expected = ["t00", "t02", "t04", "t06"]
         meta = {
             "target_directory": "/tmp",
             "packages": [{
@@ -204,7 +235,7 @@ class UnitBatchTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue().splitlines(), expected)
         err = stderr.getvalue()
         self.assertIn("shard 1 of 3", err)
-        self.assertIn("2 selected of 7", err)
+        self.assertIn("4 selected of 7", err)
 
     def test_nonzero_shard_skips_library_and_binary_units(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -234,7 +265,7 @@ class UnitBatchTests(unittest.TestCase):
                 }],
             }), mock.patch.object(unit, "verify_coverage"), mock.patch.object(
                 unit, "run_cargo", side_effect=fake_run
-            ):
+            ), mock.patch.object(unit, "LIB_BINS_SECONDS", 0):
                 code = unit.main(
                     ["--shard-index", "1", "--shard-count", "2", "--no-timings"]
                 )
@@ -299,7 +330,7 @@ class UnitBatchTests(unittest.TestCase):
                 }],
             }), mock.patch.object(unit, "verify_coverage"), mock.patch.object(
                 unit, "run_cargo", side_effect=fake_run
-            ):
+            ), mock.patch.object(unit, "LIB_BINS_SECONDS", 0):
                 code = unit.main(
                     ["--shard-index", "1", "--shard-count", "2", "--no-timings"]
                 )

@@ -99,8 +99,11 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             as_name,
             locals,
             cached,
+            cached_key,
         } => {
-            if *cached {
+            if let Some(key) = cached_key {
+                wrap_keyed_cached_collection(collection, partial, *as_name, *locals, key, ctx)
+            } else if *cached {
                 wrap_cached_collection(collection, partial, *as_name, *locals, ctx)
             } else {
                 emit_named_collection_each(collection, partial, *as_name, *locals, ctx)
@@ -166,9 +169,9 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                 let lookup = |n: &str| -> Option<Expr> {
                     entry.locals.iter().find(|(k, _)| k.as_str() == n).map(|(_, v)| {
                         match &*v.node {
-                            ExprNode::Ivar { name } => var_ref(Symbol::from(
-                                crate::naming::safe_local(name.as_str()),
-                            )),
+                            ExprNode::Ivar { name } => {
+                                var_ref(Symbol::from(ctx.ivar_local(name.as_str())))
+                            }
                             _ => v.clone(),
                         }
                     })
@@ -278,9 +281,11 @@ fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
                     (is_strict || n.as_str() != record_name)
                         && !declared.contains(n.as_str())
                 })
-                // Caller bodies are post-ivar-rewrite: a reserved-word
-                // ivar (`@for`) lives there as its `safe_local` form.
-                .map(|n| var_ref(Symbol::from(crate::naming::safe_local(n.as_str()))))
+                // Caller bodies are post-ivar-rewrite: an ivar lives
+                // there as the CALLER's local for it (`@for` → `for_`,
+                // see `ivar_local_names`). The partial binds it by
+                // position, under its own name.
+                .map(|n| var_ref(Symbol::from(ctx.ivar_local(n.as_str()))))
                 .collect()
         })
         .unwrap_or_default()
@@ -295,6 +300,35 @@ fn emit_named_collection_each(
     locals: Option<&[(Expr, Expr)]>,
     ctx: &ViewCtx,
 ) -> Option<Expr> {
+    let (var_name, render_call) = named_collection_item_render(partial, as_name, locals, ctx)?;
+    let inner = accumulator_append_call(render_call, ctx);
+    let block_lambda = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda { extra_params: Vec::new(),
+            rest_param: None,
+            params: vec![var_name],
+            block_param: None,
+            body: inner,
+            block_style: BlockStyle::Brace,
+        },
+    );
+    Some(send(
+        Some(collection.clone()),
+        "each",
+        Vec::new(),
+        Some(block_lambda),
+        false,
+    ))
+}
+
+/// The element local and the `Views::<Module>.<partial>(element, …)` call
+/// one collection element renders through.
+fn named_collection_item_render(
+    partial: &str,
+    as_name: Option<&str>,
+    locals: Option<&[(Expr, Expr)]>,
+    ctx: &ViewCtx,
+) -> Option<(Symbol, Expr)> {
     let (module_dir, base_name) = match partial.rsplit_once('/') {
         Some((dir, name)) => (dir.to_string(), name.to_string()),
         None => (ctx.resource_dir.clone(), partial.to_string()),
@@ -325,24 +359,200 @@ fn emit_named_collection_each(
         None,
         true,
     );
-    let inner = accumulator_append_call(render_call, ctx);
-    let block_lambda = Expr::new(
-        Span::synthetic(),
-        ExprNode::Lambda {
-            rest_param: None,
-            params: vec![var_name],
-            block_param: None,
-            body: inner,
-            block_style: BlockStyle::Brace,
+    Some((var_name, render_call))
+}
+
+/// Rails' collection cache with a callable key (`cached: ->(item) { key }`),
+/// as `ActionView::CollectionCaching` runs it:
+///
+/// ```ruby
+/// c = <collection>
+/// if ActionView::ViewHelpers.collection_caching?
+///   c.preload_associations(c) if c.respond_to?(:preload_associations)
+///   keys = []
+///   c.each { |item| keys << ActionView::ViewHelpers.collection_fragment_key("x/y", <key>) }
+///   hits = ActionView::ViewHelpers.collection_fragment_read_multi(keys)
+///   i = 0
+///   c.each do |y|
+///     if hits[i].nil? then io << collection_fragment_write(keys[i], <render y>) else io << hits[i] end
+///     i += 1
+///   end
+///   ActionView::ViewHelpers.collection_rendered("app/views/x/_y.html.erb", hits)
+/// else
+///   c.preload_associations(c) if c.respond_to?(:preload_associations)
+///   c.each { |y| io << <render y> }
+/// end
+/// ```
+///
+/// The collection is preloaded before the keys are built, because the
+/// key may read associations (Rails' `collection.preload!`); every key
+/// is built and read before any element renders (`read_multi`). With
+/// caching off, a collection that can preload still does, as Rails'
+/// `PreloadCollectionIterator` does at iteration: campfire's message
+/// page is loaded with `skip_preloading!` and relies on it, and without
+/// it each of 40 messages loaded five associations on its own.
+fn wrap_keyed_cached_collection(
+    collection: &Expr,
+    partial: &str,
+    as_name: Option<&str>,
+    locals: Option<&[(Expr, Expr)]>,
+    key_lambda: &Expr,
+    ctx: &ViewCtx,
+) -> Option<Expr> {
+    let ExprNode::Lambda { params, body, .. } = &*key_lambda.node else {
+        return None;
+    };
+    let [key_param] = params.as_slice() else {
+        return None;
+    };
+    let (var_name, render_call) = named_collection_item_render(partial, as_name, locals, ctx)?;
+    let span = collection.span;
+    let uniq = span.start;
+    let name = |stem: &str| Symbol::from(format!("__ck_{stem}_{uniq}"));
+    let (coll, keys, hits, idx, hit) =
+        (name("c"), name("keys"), name("hits"), name("i"), name("hit"));
+    let cap = format!("__ck_io_{uniq}");
+    let assign = |target: &Symbol, value: Expr| {
+        Expr::new(
+            span,
+            ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: target.clone() },
+                value,
+            },
+        )
+    };
+    let block = |param: Symbol, body: Expr| {
+        Expr::new(
+            span,
+            ExprNode::Lambda { extra_params: Vec::new(),
+                rest_param: None,
+                params: vec![param],
+                block_param: None,
+                body,
+                block_style: BlockStyle::Brace,
+            },
+        )
+    };
+    let int_lit = |value: i64| Expr::new(span, ExprNode::Lit { value: Literal::Int { value } });
+    let str_lit = |value: &str| {
+        Expr::new(span, ExprNode::Lit { value: Literal::Str { value: value.to_string() } })
+    };
+    let at = |array: &Symbol| send(Some(var_ref(array.clone())), "[]", vec![var_ref(idx.clone())], None, false);
+    let preload = || Expr::new(
+        span,
+        ExprNode::If {
+            cond: send(
+                Some(var_ref(coll.clone())),
+                "respond_to?",
+                vec![lit_sym(Symbol::from("preload_associations"))],
+                None,
+                false,
+            ),
+            then_branch: send(
+                Some(var_ref(coll.clone())),
+                "preload_associations",
+                vec![var_ref(coll.clone())],
+                None,
+                false,
+            ),
+            else_branch: nil_lit(),
         },
     );
-    Some(send(
-        Some(collection.clone()),
+
+    let build_keys = send(
+        Some(var_ref(coll.clone())),
         "each",
         Vec::new(),
-        Some(block_lambda),
+        Some(block(
+            key_param.clone(),
+            seq(vec![
+                send(
+                    Some(var_ref(keys.clone())),
+                    "<<",
+                    vec![view_helpers_call(
+                        "collection_fragment_key",
+                        vec![str_lit(partial), body.clone()],
+                    )],
+                    None,
+                    false,
+                ),
+                nil_lit(),
+            ]),
+        )),
         false,
-    ))
+    );
+    let read_all = assign(
+        &hits,
+        view_helpers_call("collection_fragment_read_multi", vec![var_ref(keys.clone())]),
+    );
+    // Rails' `render_collection.action_view` names the partial's template
+    // file; the walker lowers HTML ERB, so that is its extension.
+    let identifier = match partial.rsplit_once('/') {
+        Some((dir, base)) => format!("app/views/{dir}/_{base}.html.erb"),
+        None => format!("app/views/_{partial}.html.erb"),
+    };
+    let rendered = view_helpers_call(
+        "collection_rendered",
+        vec![str_lit(&identifier), var_ref(hits.clone())],
+    );
+    let miss_ctx = ViewCtx { accumulator: cap.clone(), ..ctx.clone() };
+    let miss = seq(vec![
+        assign_accumulator_string_new(&cap),
+        accumulator_append_call(render_call.clone(), &miss_ctx),
+        accumulator_append_call(
+            view_helpers_call(
+                "collection_fragment_write",
+                vec![at(&keys), super::accumulator_result_ref(&cap)],
+            ),
+            ctx,
+        ),
+    ]);
+    let render_each = send(
+        Some(var_ref(coll.clone())),
+        "each",
+        Vec::new(),
+        Some(block(
+            var_name.clone(),
+            seq(vec![
+                assign(&hit, at(&hits)),
+                Expr::new(
+                    span,
+                    ExprNode::If {
+                        cond: send(Some(var_ref(hit.clone())), "nil?", Vec::new(), None, false),
+                        then_branch: miss,
+                        else_branch: accumulator_append_call(var_ref(hit.clone()), ctx),
+                    },
+                ),
+                assign(&idx, send(Some(var_ref(idx.clone())), "+", vec![int_lit(1)], None, false)),
+                nil_lit(),
+            ]),
+        )),
+        false,
+    );
+    let cached = seq(vec![
+        preload(),
+        assign(&keys, Expr::new(span, ExprNode::Array { elements: Vec::new(), style: Default::default() })),
+        build_keys,
+        read_all,
+        assign(&idx, int_lit(0)),
+        render_each,
+        rendered,
+    ]);
+    let uncached = seq(vec![
+        preload(),
+        emit_named_collection_each(&var_ref(coll.clone()), partial, as_name, locals, ctx)?,
+    ]);
+    Some(seq(vec![
+        assign(&coll, collection.clone()),
+        Expr::new(
+            span,
+            ExprNode::If {
+                cond: view_helpers_call("collection_caching?", Vec::new()),
+                then_branch: cached,
+                else_branch: uncached,
+            },
+        ),
+    ]))
 }
 
 /// At or below this length, `cached: true` skips the collection store:
@@ -479,14 +689,17 @@ fn wrap_cached_collection(
         false,
     );
     let append_version = send(Some(append_slash), "<<", vec![version], None, false);
+    // The block ends in `nil`: with `key << …` last, its value is the key
+    // itself, and Spinel boxes that value (a copy of the whole buffer) on
+    // every element when `each` takes the block as a proc. `each` drops it.
     let key_lambda = Expr::new(
         span,
-        ExprNode::Lambda {
+        ExprNode::Lambda { extra_params: Vec::new(),
             rest_param: None,
             params: vec![rec_name],
             block_param: None,
-            body: append_version,
-            block_style: BlockStyle::Brace,
+            body: seq(vec![append_version, nil_lit()]),
+            block_style: BlockStyle::Do,
         },
     );
     let build_key = send(
@@ -497,18 +710,15 @@ fn wrap_cached_collection(
         false,
     );
 
+    // Through the controller on the ruby family and spinel, as the
+    // single-fragment `<% cache %>` is (`ActionView::ViewHelpers.
+    // fragment_read`); the runtime's own store elsewhere.
     let store = || {
-        send(
-            Some(Expr::new(
-                span,
-                ExprNode::Const {
-                    path: vec![Symbol::from("Rails")],
-                },
-            )),
-            "cache",
-            Vec::new(),
-            None,
-            false,
+        Expr::new(
+            span,
+            ExprNode::Const {
+                path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
+            },
         )
     };
     let key_ref = || var_ref(key_name.clone());
@@ -522,7 +732,7 @@ fn wrap_cached_collection(
             },
             value: send(
                 Some(store()),
-                "read_str",
+                "fragment_read",
                 vec![key_ref()],
                 None,
                 true,
@@ -547,7 +757,7 @@ fn wrap_cached_collection(
         accumulator_append_call(
             send(
                 Some(store()),
-                "write_str",
+                "fragment_write",
                 vec![
                     key_ref(),
                     super::accumulator_result_ref(&cap),
@@ -683,7 +893,7 @@ fn partial_extra_named_args(
                         && !declared.contains(n.as_str())
                 })
                 .map(|n| {
-                    let safe = crate::naming::safe_local(n.as_str());
+                    let safe = ctx.ivar_local(n.as_str());
                     (safe.clone(), var_ref(Symbol::from(safe)))
                 })
                 .collect()
@@ -719,7 +929,7 @@ fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
     let inner = accumulator_append_call(render_call, ctx);
     let block_lambda = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![var_name],
             block_param: None,
             body: inner,
@@ -909,9 +1119,12 @@ pub(super) fn emit_layout_block(
     block: &Expr,
     ctx: &ViewCtx,
 ) -> Option<Vec<Expr>> {
-    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else {
         return None;
     };
+    if !extra_params.is_empty() {
+        return None;
+    }
     let cap = "_layout_body";
     let cap_ctx = ViewCtx {
         accumulator: cap.to_string(),

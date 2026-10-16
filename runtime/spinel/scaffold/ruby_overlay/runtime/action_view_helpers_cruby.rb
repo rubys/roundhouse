@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby-only spellings of three shared ViewHelpers hot paths.
 #
 # The shared bodies are written in the one shape every target emitter

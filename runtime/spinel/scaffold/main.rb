@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Top-level entry point for the spinel-blog application.
 #
 # Reads a CGI request from ENV + $stdin, dispatches through the router
@@ -41,6 +42,19 @@ module Main
     end
   end
 
+  # Rails' `request.path_parameters`: the route's captures, with the
+  # controller and action the request was dispatched to. The
+  # controller's own `path_parameters` and params keep the captures alone.
+  def self.route_parameters(controller, matched)
+    out = {}
+    matched.path_params.each { |k, v| out[k] = v }
+    # The dispatched controller and action win over a capture of the same
+    # name: Rails dispatches by these two, so they name what ran.
+    out["controller"] = controller.controller_path
+    out["action"] = matched.action.to_s
+    out
+  end
+
   # The controller's params, built the way Rails builds them
   # (`ActionDispatch::Http::Parameters#parameters`): the body's params,
   # the query string's merged over them, the route's path captures over
@@ -54,9 +68,12 @@ module Main
   # `user_ids[]=2&user_ids[]=3` reached the controller as `{"" => "3"}`.
   #
   # A multipart body's text fields arrive by name from its parser
-  # (`Tep::Request#body_fields`), and a JSON body's flattened the same
-  # way, so a repeated multipart field still keeps its last value; the urlencoded body and the query string are
-  # parsed from their raw bytes and keep every one.
+  # (`Tep::Request#body_fields`), so repeated multipart fields still
+  # keep their last value. JSON has a separate typed channel
+  # (`Tep::Request#json_body_params`) and keeps nested objects, arrays,
+  # numbers, booleans, and nulls intact, then applies Rails' default
+  # deep-munge rule that removes nil array members. The urlencoded body
+  # and query string are parsed from their raw bytes and keep every pair.
   # Rails' "any format": an Accept that is a bare `*/*` (parameters
   # allowed), which Rails takes as a valid header whose one format is
   # Mime::ALL. A browser's list ending in `, */*` is "browser-like" and
@@ -66,13 +83,18 @@ module Main
     accept.split(";", 2)[0].to_s.strip == "*/*"
   end
 
-  def self.request_params(req, path_params)
-    query = ParamBuilder.from_query_string(req.raw_query)
-    return nil if query.nil?
+  # The body's params alone - Rails' `request_parameters`, which
+  # ParamsWrapper copies from. Return a fresh root hash because
+  # `request_params` merges query and path keys into its body hash.
+  # URL-encoded and multipart form data are nested by `ParamBuilder`;
+  # JSON is normalized by `ParamBuilder.from_json` to keep typed values
+  # and Rails' default deep-munge behavior. nil where Rails answers 400,
+  # including a JSON body that does not parse (Rails' ParseError).
+  def self.request_body_params(req)
     body = {}
     if req.form?
       body = ParamBuilder.from_query_string(req.raw_body)
-    elsif req.multipart? || req.json?
+    elsif req.multipart?
       keys = []
       values = []
       present = []
@@ -82,7 +104,16 @@ module Main
         present.push(true)
       end
       body = ParamBuilder.build(keys, values, present)
+    elsif req.json?
+      body = req.json_body_malformed ? nil : ParamBuilder.from_json(req.json_body_params)
     end
+    body
+  end
+
+  def self.request_params(req, path_params)
+    query = ParamBuilder.from_query_string(req.raw_query)
+    return nil if query.nil?
+    body = Main.request_body_params(req)
     return nil if body.nil?
     out = body
     query.each { |k, v| out[k] = v }
@@ -191,7 +222,33 @@ module Main
       return nil
     end
     res.headers["Content-Type"] = Main.asset_content_type(path)
+    # `config.public_file_server.headers`, as ActionDispatch::Static
+    # sends them on every public/ and /assets/ file.
+    Rails.application.public_file_server_headers.each do |name, value|
+      res.headers[name] = value
+    end
     res.send_file(disk)
+    nil
+  end
+
+  # A 404 the app did not rescue (no route, ActionNotFound,
+  # RecordNotFound), answered as Rails' production exceptions app
+  # (ActionDispatch::PublicExceptions) does: `{"status":404,"error":
+  # "Not Found"}` when the request's format is JSON
+  # (ActionDispatch::MimeNegotiation.json_format?), the HTML page
+  # otherwise. `format_param` is the request's `format` parameter, ""
+  # when it has none.
+  def self.render_not_found(res, format_param, path, req)
+    res.status = 404
+    extension = path.end_with?(".json") ? "json" : ""
+    if ActionDispatch::MimeNegotiation.json_format?(format_param, extension,
+         req.req_headers.fetch("accept", ""), req.req_headers.fetch("x-requested-with", ""),
+         req.req_headers.fetch("content-type", ""))
+      res.headers["Content-Type"] = "application/json; charset=UTF-8"
+      res.body = "{\"status\":404,\"error\":\"Not Found\"}"
+    else
+      res.body = "<h1>404 Not Found</h1>"
+    end
     nil
   end
 
@@ -265,6 +322,10 @@ module Main
   # pass are the ones a single request enqueued, and they are far more
   # likely to touch the same rows than not.
   #
+  # A queued job is a closure over its arguments or, for a job whose
+  # arguments serialize, a closure over its ActiveJob payload that runs
+  # it through the generated job registry (runtime/job_registry.rb).
+  #
   # NOTHING IS RETRIED and nothing survives a restart. The queue is a
   # process-local Array — that is the honest shape for a single-worker
   # binary with no store, and it is the ledgered limit rather than an
@@ -281,9 +342,28 @@ module Main
     0
   end
 
+  # Rails' Rack::Runtime and ActionDispatch::RequestId around the whole
+  # request (runtime/action_dispatch/request_id.rb): every response the
+  # app answers carries X-Request-Id and X-Runtime, its error pages
+  # included. They sit behind ActionDispatch::Static, so a file sent
+  # from static/ or public/ carries neither, and the /cable upgrade is
+  # left as Action Cable answers it.
+  def self.dispatch(req, res)
+    started = ActionDispatch::Runtime.clock_time
+    Main.dispatch_request(req, res)
+    return nil if res.file_path.length > 0 || res.upgrading_ws
+    res.headers[ActionDispatch::RequestId::HEADER] =
+      ActionDispatch::RequestId.make(req.req_headers.fetch("x-request-id", ""))
+    # Rack::Runtime leaves a value the app set itself.
+    unless res.headers.keys.any? { |k| k.downcase == "x-runtime" }
+      res.headers[ActionDispatch::Runtime::HEADER] = ActionDispatch::Runtime.header_value(started)
+    end
+    nil
+  end
+
   # Serve static files or dispatch the complete request path through Router,
   # preserving literal suffix routes while negotiating the response format.
-  def self.dispatch(req, res)
+  def self.dispatch_request(req, res)
     ActionView::ViewHelpers.reset_slots!
     Broadcasts.reset_log!
     # Under RH_SQL_TRACE the request line brackets its queries, so a
@@ -344,8 +424,9 @@ module Main
 
     matched = ActionDispatch::Router.match(verb, request_path, Main.route_table)
     if matched.nil?
-      res.status = 404
-      res.body = "<h1>404 Not Found</h1>"
+      # No route: the format is the `?format=` param, a trusted Accept,
+      # or the path's extension (Main.render_not_found).
+      Main.render_not_found(res, req.req_params.fetch("format", ""), request_path, req)
       return
     end
     # A `(.:format)` EXTENSION the router stripped off the path
@@ -363,6 +444,7 @@ module Main
     request_format = :json if path_format == "json"
     request_format = :turbo_stream if path_format == "turbo_stream"
     request_format = :rss if path_format == "rss"
+    request_format = :xml if path_format == "xml"
     # `/service-worker.js`: campfire's raw service-worker template.
     request_format = :js if path_format == "js"
     # A route-forced format (`get "/rss" => "home#index", :format => "rss"`)
@@ -384,6 +466,8 @@ module Main
       request_format = :rss
     elsif matched.req_format == :json
       request_format = :json
+    elsif matched.req_format == :xml
+      request_format = :xml
     end
 
     controller = Main.instantiate_controller(matched.controller)
@@ -410,11 +494,17 @@ module Main
     request_obj.remote_ip = req.remote_host
     request_obj.referer = req.req_headers.fetch("referer", "")
     request_obj.host = req.req_headers.fetch("host", "localhost")
+    request_obj.path_parameters = Main.route_parameters(controller, matched)
+    # The controller's params, copied into the request's own slot (as
+    # `Request.for` copies, see runtime/action_dispatch/request.rb):
+    # `request.filtered_parameters` reads them.
+    params.each { |k, v| request_obj.params[k] = v }
     fmt_name = "html"
     fmt_name = "json" if request_format == :json
     fmt_name = "rss" if request_format == :rss
     fmt_name = "turbo_stream" if request_format == :turbo_stream
     fmt_name = "js" if request_format == :js
+    fmt_name = "xml" if request_format == :xml
     request_obj.format = fmt_name
     request_obj.body = req.raw_body
     # Write straight into the RBS-pinned `@env` (Hash[String, untyped] ->
@@ -424,12 +514,17 @@ module Main
     # StrStr->StrPoly mismatch. Writing Strings into the poly field in place
     # is a valid poly-member write and never constructs the competing hash.
     user_agent = req.req_headers.fetch("user-agent", "")
-    request_obj.env["HTTP_USER_AGENT"] = user_agent
-    # The scheme a TLS-terminating proxy (Fly, a load balancer) saw;
-    # `Request#ssl?` reads it, and every absolute URL's `https://`
-    # depends on it.
-    request_obj.env["HTTP_X_FORWARDED_PROTO"] = req.req_headers.fetch("x-forwarded-proto", "")
-    # …AND the reader, which is a DIFFERENT slot. The overlay twin's
+    # `request.headers` follows Rails' HTTP-to-CGI env mapping. Copy all
+    # parsed headers, not just those the dispatcher itself reads: cache
+    # validators, `Accept-Encoding`, and `Turbo-Frame` are consumed by
+    # application code after dispatch. Write directly into the RBS-pinned
+    # env field so each value keeps its poly-hash representation. This
+    # includes `X-Forwarded-Proto`, CSRF/origin/fetch metadata, auth, and
+    # content type; keeping one mapping avoids a drifting header allowlist.
+    req.req_headers.each do |name, value|
+      request_obj.env[ActionDispatch::Http::Headers.env_name(name)] = value
+    end
+    # `user_agent` is ALSO a separate reader slot. The overlay twin's
     # `user_agent` reads `@env["HTTP_USER_AGENT"]`; the shared runtime's
     # (`runtime/ruby/action_dispatch/request.rb`) returns `@user_agent`,
     # which only `Request.for` assigns and this path does not go
@@ -442,18 +537,13 @@ module Main
     # asked. A 200 the whole time, which is why only reading the page
     # found it.
     request_obj.user_agent = user_agent
-    request_obj.env["HTTP_X_REQUESTED_WITH"] = req.req_headers.fetch("x-requested-with", "")
-    # The two headers the forgery check reads
-    # (runtime/request_forgery_protection.rb): the token JavaScript
-    # posts, and the Origin it compares with the Host.
-    request_obj.env["HTTP_X_CSRF_TOKEN"] = req.req_headers.fetch("x-csrf-token", "")
-    request_obj.env["HTTP_ORIGIN"] = req.req_headers.fetch("origin", "")
-    # The credentials the HTTP Token/Basic helpers parse
-    # (runtime/http_authentication.rb).
-    request_obj.env["HTTP_AUTHORIZATION"] = req.req_headers.fetch("authorization", "")
-    # The body's declared type, for the one route that checks it
-    # against what was promised: Active Storage's direct-upload PUT.
-    request_obj.env["CONTENT_TYPE"] = req.req_headers.fetch("content-type", "")
+    # The body's params alone, for ParamsWrapper (`Params.wrap`).
+    body_params = Main.request_body_params(req)
+    request_obj.request_parameters = body_params unless body_params.nil?
+    # The query string's params alone (`request.query_parameters`), nested
+    # by the same builder `request_params` merged them with.
+    query_params = ParamBuilder.from_query_string(req.raw_query)
+    request_obj.query_parameters = query_params unless query_params.nil?
     controller.request = request_obj
     controller.query_string = request_obj.query_string
     ActionController::Current.request = request_obj
@@ -503,14 +593,46 @@ module Main
     controller.flash = ActionDispatch::Flash.new(inbound_flash)
     controller.request_format = request_format
     controller.accepts_any_format = Main.accepts_any_format?(req.req_headers.fetch("accept", ""))
+    # Rails' `Vary: Accept` on a render whose format came from the Accept
+    # header (runtime/action_dispatch/mime_negotiation.rb). A `format`
+    # param - the path extension, `?format=`, a route's own format -
+    # is read instead of Accept.
+    controller.vary_on_accept = ActionDispatch::MimeNegotiation.should_apply_vary_header?(
+      req.req_headers.fetch("accept", ""), req.req_headers.fetch("x-requested-with", ""),
+      req.req_headers.fetch("content-type", ""),
+      controller.params.key?("format") || !matched.req_format.nil?)
 
     begin
       controller.process_action(matched.action)
-    rescue ActiveRecord::RecordNotFound, ActionController::RoutingError
-      res.status = 404
-      res.body = "<h1>404 Not Found</h1>"
+    rescue ActiveRecord::RecordNotFound, ActionController::RoutingError, AbstractController::ActionNotFound
+      # The routed format (extension, route default) is the `format`
+      # param; an html one may still name `?format=`.
+      format_param = request_format == :html ? req.req_params.fetch("format", "") : fmt_name
+      Main.render_not_found(res, format_param, request_path, req)
+      return
+    rescue ActionController::ParameterMissing, ActionController::BadRequest
+      # `params.expect` / `params.require` refused the request and the app
+      # did not rescue it: Rails' rescue_responses answer :bad_request.
+      res.status = 400
+      res.body = "<h1>400 Bad Request</h1>"
+      return
+    rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotSaved, ActionController::InvalidAuthenticityToken
+      # Not a 500: Rails' rescue_responses answer these with 422.
+      res.status = 422
+      res.body = "<h1>422 Unprocessable Content</h1>"
       return
     end
+
+    # Compose `Cache-Control` from whatever `response.cache_control`
+    # holds (`expires_in`, `replace`/`merge!`/`[]=`) onto the buffered
+    # header store - a no-op unless the action or one of its filters
+    # touched the store. Then Rails' Rack::ETag and Rack::ConditionalGet
+    # (action_controller/conditional_get.rb): the body ETag, the default
+    # Cache-Control, and a 304 for a matching If-None-Match. Both run
+    # before the status, body and headers are copied below, since a 304
+    # changes all three.
+    controller.commit_cache_control!
+    controller.commit_conditional_get!(req.verb, req.req_headers.fetch("if-none-match", ""))
 
     res.status = controller.status
     # The layout wrap happens at the controller's render call sites
@@ -534,7 +656,10 @@ module Main
     # controller's type unconditionally (ruby_overlay/main.rb); this is
     # the same contract. RSS keeps its fixed feed type, matching what
     # that overlay dispatch returns for the same routes.
-    if request_format == :rss
+    if controller.content_type.empty?
+      # Head responses in Rails omit Content-Type for statuses that do
+      # not permit a body (1xx, 204, 205, and 304).
+    elsif request_format == :rss
       res.headers["Content-Type"] = "application/rss+xml; charset=utf-8"
     elsif controller.content_type != "text/html; charset=utf-8"
       res.headers["Content-Type"] = controller.content_type
@@ -674,6 +799,7 @@ end
 # (no OptionParser — stdlib optparse isn't in the spinel subset).
 port = (ENV["PORT"] || "3000").to_i
 workers = (ENV["WORKERS"] || "1").to_i
+binding_arg = ""
 i = 0
 while i < ARGV.length
   arg = ARGV[i]
@@ -682,6 +808,7 @@ while i < ARGV.length
     puts ""
     puts "  -p, --port N     listen port (default 3000; PORT env)"
     puts "  -w, --workers N  prefork N processes (default 1; WORKERS env)"
+    puts "  -b, --binding IP bind to IP (BINDING env; default localhost in development, 0.0.0.0 otherwise)"
     puts "  -h, --help       show this help and exit"
     puts ""
     puts "  OS workers per process: one per core; SPINEL_WORKERS=N caps it"
@@ -695,6 +822,9 @@ while i < ARGV.length
   elsif (arg == "--workers" || arg == "-w") && i + 1 < ARGV.length
     workers = ARGV[i + 1].to_i
     i += 2
+  elsif (arg == "--binding" || arg == "-b") && i + 1 < ARGV.length
+    binding_arg = ARGV[i + 1]
+    i += 2
   else
     $stderr.puts "unknown option: " + arg + " (try --help)"
     exit(1)
@@ -704,6 +834,26 @@ if port <= 0 || port > 65535
   $stderr.puts "invalid port: " + port.to_s
   exit(1)
 end
+# The listen address as `rails server` picks it: -b, else BINDING, else
+# localhost in development and 0.0.0.0 in every other environment.
+if binding_arg.empty?
+  binding_env = ENV["BINDING"].to_s
+  rails_env = ENV["RAILS_ENV"].to_s
+  binding_arg = if !binding_env.empty?
+    binding_env
+  elsif rails_env.empty? || rails_env == "development"
+    "localhost"
+  else
+    "0.0.0.0"
+  end
+end
+# An address-specific listener is not shared across prefork processes
+# (SO_REUSEPORT is the every-interface listener's), so -w N > 1 needs it.
+if workers > 1 && binding_arg != "0.0.0.0"
+  $stderr.puts "--workers " + workers.to_s + " needs --binding 0.0.0.0 (one listener per process shares only that address)"
+  exit(1)
+end
+Tep::APP.bind_host = binding_arg
 Main.configure_default_adapter!
 # Serving, so WAL checkpoints move off the request path: a background
 # thread runs them instead of some request's COMMIT

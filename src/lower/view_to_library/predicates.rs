@@ -190,8 +190,9 @@ pub(super) fn rewrite_predicates(
         // as Rails does (runtime/ruby/active_support_ext.rb). Only the
         // whole-body `param.present?` / `param.blank?` shape; any other
         // block is left alone.
-        ExprNode::Lambda { params, body, .. }
+        ExprNode::Lambda { params, extra_params, body, .. }
             if params.len() == 1
+                && extra_params.is_empty()
                 && matches!(&*body.node,
                     ExprNode::Send { recv: Some(r), method, args, block: None, .. }
                         if args.is_empty()

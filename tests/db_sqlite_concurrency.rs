@@ -26,7 +26,7 @@ fn run(name: &str, body: &str) {
         r#"
 require {pool:?}
 require {shim:?}
-module ActiveRecord; class RecordNotUnique < StandardError; end; end
+require {errors:?}
 def check(what, ok)
   raise "FAILED: #{{what}}" unless ok
 end
@@ -43,6 +43,7 @@ puts "OK"
 "#,
         pool = root.join("runtime/ruby/active_record/connection_pool.rb"),
         shim = root.join("runtime/spinel/db_cruby.rb"),
+        errors = root.join("runtime/ruby/active_record/errors.rb"),
         db = dir.join("test.sqlite3"),
     );
     std::fs::write(dir.join("check.rb"), script).unwrap();
@@ -231,6 +232,52 @@ parent = File.join(File.dirname(path), "not-a-dir")
 File.write(parent, "x")
 got = Db.try_checkpoint_lock(File.join(parent, "x.lock"))
 check("setup failure is nil so checkpoint still runs", got.nil?)
+"#,
+    );
+}
+
+/// A server that checkpoints in a process of its own (falcon.rb): after
+/// `checkpoint_in_own_process!` a serving lease turns automatic
+/// checkpoints off and starts no thread, and `run_checkpointer` in
+/// another process copies the WAL into the database file.
+#[test]
+fn checkpoints_run_in_a_process_of_their_own() {
+    run(
+        "checkpoint_own_process",
+        r#"
+path = Db.instance_variable_get(:@path)
+Db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)")
+Db.checkpoint_in_own_process!
+threads = Thread.list.size
+Db.with_connection do
+  c = Db.current_dbh
+  check("serving connection leaves checkpoints to the checkpointer", c.execute("PRAGMA wal_autocheckpoint")[0][0] == 0)
+end
+check("no checkpoint thread in a serving process", Thread.list.size == threads)
+check("no checkpointer pid in a serving process", Db.instance_variable_get(:@checkpointer_pid).nil?)
+200.times { |i| Db.exec("INSERT INTO t (body) VALUES ('row #{i}')") }
+
+# The database file alone, without its WAL: what a checkpoint has copied.
+def rows_in_main_file(path)
+  copy = path + ".copy"
+  File.binwrite(copy, File.binread(path))
+  db = SQLite3::Database.new(copy)
+  n = (db.execute("SELECT COUNT(*) FROM t")[0][0] rescue 0)
+  db.close
+  File.delete(copy)
+  n
+end
+check("rows still only in the WAL", rows_in_main_file(path) < 200)
+
+pid = fork do
+  Db.configure(path, pool_size: 1)
+  Db.run_checkpointer
+end
+deadline = Time.now + 10
+sleep 0.1 until rows_in_main_file(path) == 200 || Time.now > deadline
+Process.kill("KILL", pid)
+Process.wait(pid)
+check("the checkpointer process copied the WAL", rows_in_main_file(path) == 200)
 "#,
     );
 }
@@ -459,7 +506,7 @@ Db.with_connection do
       begin
         Db.exec("INSERT INTO t VALUES (2)")
         outcome = :wrote
-      rescue SQLite3::BusyException
+      rescue ActiveRecord::StatementTimeout
         outcome = :busy
       end
     end

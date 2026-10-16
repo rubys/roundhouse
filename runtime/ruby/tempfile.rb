@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Ruby's `Tempfile.create` — a file with a unique name, yielded to a
 # block and removed when the block ends.
 #

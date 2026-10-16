@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # A mocha stub or expectation on an APP method — the half of mocha
 # `lower::mocha`'s table cannot hold a row for, because the method is
 # the app's own (`Webhook#post`, `User#reset_remote_connections`), not a

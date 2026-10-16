@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby/JRuby's fast implementation of the shared header policy. Keep regex
 # matching in this overlay: strict-target String runtimes cannot emit match?.
 module ActionController

@@ -498,6 +498,7 @@ fn node_kind(node: &ExprNode) -> &'static str {
         ExprNode::Ivar { .. } => "Ivar",
         ExprNode::ForwardArgs => "ForwardArgs",
         ExprNode::ForwardKeywords => "ForwardKeywords",
+        ExprNode::ForwardKeywordsWithPairs { .. } => "ForwardKeywordsWithPairs",
         ExprNode::Defined { .. } => "Defined",
         ExprNode::KeywordSplat { .. } => "KeywordSplat",
         ExprNode::Const { .. } => "Const",

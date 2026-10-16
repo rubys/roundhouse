@@ -65,7 +65,7 @@ pub(crate) fn emit_go_tests(tm: &TestModule, app: &App) -> EmittedFile {
             if !app.fixtures.is_empty() {
                 writeln!(s, "\tsetupTest()").unwrap();
             }
-            let body = emit_go_controller_test_body(test, app, &ctx);
+            let body = emit_go_controller_test_body(test, tm.setup.as_ref(), app, &ctx);
             for line in body.lines() {
                 writeln!(s, "\t{line}").unwrap();
             }
@@ -286,6 +286,16 @@ fn emit_test_send_go(
         }
     }
 
+    // `Class.new` → the model's constructor, which sets its defaults where a bare struct literal would not.
+    if let Some(r) = recv
+        && method == "new"
+        && args.is_empty()
+        && let ExprNode::Const { path } = &*r.node
+        && let Some(class_name) = path.last()
+        && ctx.known_models.iter().any(|s| s == class_name)
+    {
+        return format!("New{}()", class_name.as_str());
+    }
     // `Class.new(hash)` → `&Class{ Field: val, ... }` struct literal.
     if let Some(r) = recv {
         if method == "new" && args.len() == 1 {

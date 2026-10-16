@@ -56,7 +56,7 @@ fn the_per_model_registry_types_save_bang_as_the_model() {
     assert_eq!(ret("save"), Ty::Bool, "`save` answers whether it saved");
     assert_eq!(
         ret("save!"),
-        Ty::Class { id: ClassId(Symbol::from("Domain")), args: vec![] },
+        Ty::Class { id: ClassId(Symbol::from("Domain")), args: vec![].into() },
         "`save!` answers the record — it raises rather than returning false",
     );
 }

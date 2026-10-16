@@ -119,7 +119,7 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
             // `defstruct` requires the bare-atom fields (nil default) FIRST,
             // then the keyword-default ones — so partition rather than
             // interleave.
-            let is_list_field = |f: &str| f == "errors" || f.ends_with("_cache");
+            let is_list_field = |f: &str| f == "errors" || f == "error_details" || f.ends_with("_cache");
             let mut decls: Vec<String> = fields
                 .iter()
                 .filter(|f| !is_list_field(f))
@@ -454,6 +454,9 @@ pub(super) fn references_var(e: &Expr, name: &str) -> bool {
                 || opt(block, name)
         }
         ExprNode::Hash { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| references_var(k, name) || references_var(v, name)),
+        ExprNode::ForwardKeywordsWithPairs { entries } => entries
             .iter()
             .any(|(k, v)| references_var(k, name) || references_var(v, name)),
         ExprNode::Array { elements, .. } => elements.iter().any(|x| references_var(x, name)),

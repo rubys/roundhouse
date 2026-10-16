@@ -26,7 +26,9 @@
 //! shakeable names — presence/dirty predicates, `update!` — are
 //! candidates, so user methods can't be touched). Everything else
 //! (tep transport, spinel shims, scaffold, tests) is scanned for
-//! usages but never edited.
+//! usages but never edited, `config.ru` among it: it is the CRuby tree's
+//! Rack entry point, and a runtime method only it calls (the static file
+//! server's `public_file_server_headers`) was being dropped.
 //!
 //! Runs to a fixed point: dropping a body removes its calls, which can
 //! orphan further defs on the next pass.
@@ -317,10 +319,10 @@ pub fn shake_tree(
         let mut usage = HashSet::new();
         let mut stable_tokens = HashSet::new();
         for ((path, content), &rescan) in files.iter().zip(&rescan) {
-            if !rescan && (pass != 0 || !path.ends_with(".rb")) {
+            let is_rb = path.ends_with(".rb") || path.ends_with(".ru");
+            if !rescan && (pass != 0 || !is_rb) {
                 continue;
             }
-            let is_rb = path.ends_with(".rb");
             let out = if rescan { &mut usage } else { &mut stable_tokens };
             for line in content.lines() {
                 let defined = if is_rb {
@@ -467,6 +469,16 @@ mod tests {
             "module Probe\n  def live!: () -> Integer\n  def mentioned?: () -> Integer\n  def initialize: () -> Integer\nend\n"
         );
         assert_eq!(files[2], entry);
+    }
+
+    #[test]
+    fn a_method_only_config_ru_calls_is_kept() {
+        let mut files = vec![
+            ("runtime/rails.rb".into(), "class App\n  def from_rack; 1; end\n  def unused; 2; end\nend\n".into()),
+            ("config.ru".into(), "HEADERS = App.new.from_rack\nrun ->(env) { [200, {}, []] }\n".into()),
+        ];
+        shake_tree(&mut files, &HashSet::new(), "test");
+        assert_eq!(files[0].1, "class App\n  def from_rack; 1; end\nend\n");
     }
 
     #[test]

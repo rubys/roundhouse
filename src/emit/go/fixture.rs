@@ -59,11 +59,19 @@ pub(crate) fn emit_go_fixtures(app: &App) -> EmittedFile {
         // AUTOINCREMENT id in FixtureIDs.
         writeln!(s).unwrap();
         writeln!(s, "func {ns}LoadAll() {{").unwrap();
+        let temporal = crate::lower::fixture_to_library::temporal_columns(app, &fixture.class);
         for record in &fixture.records {
             let label = record.label.as_str();
             writeln!(s, "\t{{").unwrap();
             writeln!(s, "\t\tr := &{class_name}{{}}").unwrap();
             for field in &record.fields {
+                // Not the column's own field: the struct keeps a date or datetime as its stored text, in `<Col>Raw`.
+                if let crate::lower::LoweredFixtureValue::Literal { raw, .. } = &field.value
+                    && crate::lower::fixture_to_library::is_stored_temporal(&temporal, &field.column, raw)
+                {
+                    writeln!(s, "\t\tr.{} = {raw:?}", go_field_name(&format!("{}_raw", field.column.as_str()))).unwrap();
+                    continue;
+                }
                 let col = go_field_name(field.column.as_str());
                 let val = match &field.value {
                     crate::lower::LoweredFixtureValue::Literal { ty, raw } => {

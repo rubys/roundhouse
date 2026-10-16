@@ -176,14 +176,14 @@ pub(crate) fn preserve_argument_owners(app: &mut App, registry: &HashMap<ClassId
                                 value.span,
                                 ExprNode::Var { id: VarId(0), name: p.name.clone() },
                             );
-                            arg.ty = Some(p.ty.clone());
+                            arg.ty = Some((*p.ty).clone());
                             arg
                         })
                         .collect();
                     bridge.signature = Some(Ty::Fn {
-                        params,
+                        params: params.into(),
                         block: None,
-                        ret: Box::new(ret),
+                        ret: std::sync::Arc::new(ret),
                         effects: effects.clone(),
                     });
                     let recv = Expr::new(

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require "json"
 # Active Storage's BYTES half, for the ruby family: the disk service,
 # the attachable coercion, the image analyzer, and the three engine
@@ -64,6 +65,15 @@ module ActiveStorage
   end
 
   class Blob
+    # Rails' `ActiveStorage::Blob` is an `ActionText::Attachable`: the
+    # sgid a rich-text `<action-text-attachment>` node carries for an
+    # uploaded file (campfire's helper tests embed one). Here, not in
+    # the shared Blob, because the signing is ruby-family only, as
+    # `lower::attachable`'s per-model mint is.
+    def attachable_sgid
+      ActionText::SignedGlobalId.generate("ActiveStorage::Blob", @id)
+    end
+
     # Rails' attachable coercion: an `ActionDispatch::Http::UploadedFile`
     # (a multipart part, or the test harness's fixture) becomes a blob
     # by uploading it; a blob is itself; a String is a signed blob id
@@ -109,12 +119,48 @@ module ActiveStorage
     end
   end
 
+  # Rails' `ActiveStorage::FixtureSet.blob(filename:, **attributes)`,
+  # which a blobs.yml row renders with ERB. Rails builds the blob with a
+  # fresh key, `unfurl`s the file under `test/fixtures/files` (MD5
+  # checksum, detected content type, byte size, `identified: true` in
+  # the metadata), assigns the call's attributes, uploads the bytes and
+  # renders the row; the fixture set then inserts it. Here the loader
+  # (`lower::fixture_to_library`) passes the row's id and the call's
+  # literal arguments, and this does the rest in one step. An empty
+  # string is an argument the call did not pass.
+  #
+  # The content type comes from the extension (Marcel's filename half;
+  # Rails also sniffs the bytes). The metadata is `identified` only, as
+  # Rails' fixture blob is not analyzed. The key is derived, as every key
+  # in this runtime is (`Blob.generate_key`); the id is in its input so
+  # two rows from one file cannot collide on the unique index.
+  class FixtureSet
+    def self.load_blob!(id, filename, service_name, content_type)
+      data = File.binread("test/fixtures/files/" + filename)
+      key = Blob.generate_key(id.to_s + "/" + filename, data.length)
+      Blob.service.upload(key, data)
+      ActiveRecord.adapter.insert("active_storage_blobs", {
+        "id" => id,
+        "key" => key,
+        "filename" => filename,
+        "content_type" => content_type == "" ? ActiveStorage.content_type_for_filename(filename) : content_type,
+        "metadata" => "{\"identified\":true}",
+        "service_name" => service_name == "" ? "local" : service_name,
+        "byte_size" => data.length,
+        "checksum" => Digest::MD5.base64digest(data),
+        "created_at" => ActiveSupport.db_now,
+      })
+      nil
+    end
+  end
+
   # Width and height from the file's header, for the formats a browser
   # renders inline: PNG, GIF, JPEG, BMP, WebP. Header reads only — no
   # decoder — which is all Rails' own `ImageAnalyzer` reports either.
   # `[0, 0]` for anything else, which `BlobMetadata` answers as nil.
   class ImageAnalyzer
     def self.dimensions(data, content_type)
+      return Previewer.video_dimensions(data) if content_type.start_with?("video/")
       n = data.bytesize
       return [0, 0] if n < 10
       b0 = data.getbyte(0).to_i
@@ -209,7 +255,8 @@ module ActiveStorage
   # own table (`Main.route_table`), and the controllers behind them.
   # Rails answers the two redirect routes with a redirect to the disk
   # route — the blob's SERVICE URL, which for the disk service is this
-  # same process — so that is what these do. The last two are the
+  # same process — so that is what these do; the proxy route answers
+  # with the bytes itself. The last two are the
   # DIRECT UPLOAD pair: the browser POSTs the blob's metadata and gets
   # a signed PUT url back, then PUTs the bytes there.
   #
@@ -222,6 +269,10 @@ module ActiveStorage
         ActionDispatch::Router::Route.new(
           "GET", "/rails/active_storage/blobs/redirect/:signed_id/*filename",
           :active_storage_blobs_redirect, :show
+        ),
+        ActionDispatch::Router::Route.new(
+          "GET", "/rails/active_storage/blobs/proxy/:signed_id/*filename",
+          :active_storage_blobs_proxy, :show
         ),
         ActionDispatch::Router::Route.new(
           "GET", "/rails/active_storage/representations/redirect/:signed_blob_id/:variation_key/*filename",
@@ -247,6 +298,8 @@ module ActiveStorage
     def self.instantiate_controller(sym)
       if sym == :active_storage_blobs_redirect
         ActiveStorage::Blobs::RedirectController.new
+      elsif sym == :active_storage_blobs_proxy
+        ActiveStorage::Blobs::ProxyController.new
       elsif sym == :active_storage_representations_redirect
         ActiveStorage::Representations::RedirectController.new
       elsif sym == :active_storage_direct_uploads
@@ -289,6 +342,40 @@ module ActiveStorage
           disposition = Params.str(@params, "disposition", "inline")
           redirect_to(ActiveStorage::DiskKey.disk_url(blob, disposition))
         end
+        nil
+      end
+    end
+
+    # Rails' `Blobs::ProxyController#show`: the bytes from this
+    # process, no redirect, under `http_cache_forever(public: true)`'s
+    # Cache-Control so a CDN in front keeps them (the signed id never
+    # expires by default). The disposition is the query's, held to
+    # `inline`/`attachment` as Rails' `content_disposition_with` holds
+    # it. Not modelled: a `Range` request (Rails answers 206 with the
+    # slice; this answers 200 with the whole body, which HTTP allows),
+    # so `Accept-Ranges` is not advertised, and the ETag/Last-Modified
+    # pair `http_cache_forever` adds for conditional GETs.
+    class ProxyController < ActionController::Base
+      def process_action(action_name)
+        ActiveStorage.set_current(request)
+        show
+        nil
+      end
+
+      def show
+        blob = ActiveStorage::Blob.find_signed(Params.str(@params, "signed_id", ""))
+        service = ActiveStorage::Blob.service
+        if blob.nil? || !service.exist?(blob.key)
+          head(:not_found)
+          return nil
+        end
+        forced = blob.forced_disposition_for_serving
+        asked = forced == "" ? Params.str(@params, "disposition", "inline") : forced
+        disposition = asked == "attachment" ? "attachment" : "inline"
+        headers["Cache-Control"] = "max-age=3155695200, public, immutable"
+        send_data(service.download(blob.key), type: blob.content_type_for_serving, disposition: disposition)
+        headers["Content-Disposition"] = disposition + "; filename=\"" +
+          ActiveStorage.url_filename(blob.filename.to_s) + "\""
         nil
       end
     end
@@ -470,7 +557,7 @@ module ActiveStorage
         return nil
       end
       headers["Cache-Control"] = "max-age=3600, public"
-      send_data(service.download(key), type: blob.content_type, disposition: disposition)
+      send_data(service.download(key), type: blob.content_type_for_serving, disposition: disposition)
       # send_data writes only `inline`/`attachment`; restore the
       # sanitized filename after that overwrite.
       headers["Content-Disposition"] = (disposition == "attachment" ? "attachment" : "inline") + "; filename=\"" +

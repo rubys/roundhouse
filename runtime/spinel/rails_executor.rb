@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `Rails.application.executor.wrap { … }` — Rails' way of running work
 # on a thread the framework did not start: the block gets the
 # per-unit-of-work context a request has, which for this runtime means

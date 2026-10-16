@@ -1,5 +1,11 @@
+module AbstractController
+  class DoubleRenderError < StandardError
+  end
+end
+
 module ActionController
   def self.header_key_ok?: (String? k) -> bool
+  def self.header_key_byte_ok?: (Integer byte) -> bool
   def self.header_value_ok?: (String? v) -> bool
   def self.header_control?: (String c) -> bool
   def self.sanitize_location: (String path) -> String
@@ -7,22 +13,90 @@ module ActionController
   def self.strip_trailing_controls: (String s) -> String
   def self.location_host: (String url) -> String
   def self.find_substr: (String hay, String needle) -> Integer
+  def self.build_host_url: (String protocol, String host, String port, String path) -> String
+  def self.normalize_url_protocol: (String protocol) -> String
+  def self.url_host_without_port: (String hostport) -> String
+  def self.url_port_of: (String hostport) -> String
   def self.find_last: (String hay, String needle) -> Integer
   def self.forgery_flag: () -> bool
   def self.set_forgery_flag: (bool value) -> void
+  def self.forgery_switched_off: () -> bool
+  def self.set_forgery_switched_off: (bool value) -> void
   def self.masked_authenticity_token: () -> String
   def self.csrf_token_valid?: (String given, String expected) -> bool
 
   class HeaderStore
     @keys: Array[String]
+    @lower: Array[String]
     @vals: Array[String]
     def initialize: () -> void
     def []: (String key) -> String?
     def []=: (String key, String? value) -> void
+    def store_value: (String key, String? value) -> void
+    def slice: (*String names) -> Hash[String, String]
+    def merge!: (Hash[String, String?] other) -> HeaderStore
+    def delete: (String key) -> String?
     def size: () -> Integer
     def key_at: (Integer i) -> String
     def val_at: (Integer i) -> String
+    def index_of: (String key) -> Integer
   end
+
+  # Typed store backing `response.cache_control`. See the .rb for the
+  # Rails 8.1.4 field/branch/order contract `to_header` follows. The
+  # Hash-like `[]`/`[]=`/`delete`/`merge!`/`replace` surface is a
+  # ruby-family reopen (`cache_control.rb`'s own .rbs), not declared
+  # here.
+  class CacheControlStore
+    @public: bool
+    @private: bool
+    @no_store: bool
+    @no_cache: bool
+    @must_revalidate: bool
+    @must_understand: bool
+    @immutable: bool
+    @max_age: Integer
+    @has_max_age: bool
+    @stale_while_revalidate: Integer
+    @has_stale_while_revalidate: bool
+    @stale_if_error: Integer
+    @has_stale_if_error: bool
+    @extras: Array[String]
+
+    def initialize: () -> void
+    def public?: () -> bool
+    def public=: (bool) -> void
+    def private?: () -> bool
+    def private=: (bool) -> void
+    def no_store?: () -> bool
+    def no_store=: (bool) -> void
+    def no_cache?: () -> bool
+    def no_cache=: (bool) -> void
+    def must_revalidate?: () -> bool
+    def must_revalidate=: (bool) -> void
+    def must_understand?: () -> bool
+    def must_understand=: (bool) -> void
+    def immutable?: () -> bool
+    def immutable=: (bool) -> void
+    def max_age: () -> Integer
+    def max_age?: () -> bool
+    def max_age=: (Integer) -> void
+    def clear_max_age: () -> void
+    def stale_while_revalidate: () -> Integer
+    def stale_while_revalidate?: () -> bool
+    def stale_while_revalidate=: (Integer) -> void
+    def clear_stale_while_revalidate: () -> void
+    def stale_if_error: () -> Integer
+    def stale_if_error?: () -> bool
+    def stale_if_error=: (Integer) -> void
+    def clear_stale_if_error: () -> void
+    def extras: () -> Array[String]
+    def extras=: (Array[String]) -> void
+    def clear: () -> void
+    def empty?: () -> bool
+    def to_header: () -> String
+  end
+
   # Symbolic-status to integer-code mapping (`STATUS_CODES`) is a
   # Ruby-level frozen Hash literal — module-level constant, not a
   # method. RBS doesn't require declaring constants for the strict
@@ -39,7 +113,7 @@ module ActionController
     def self.allow_forgery_protection=: (bool) -> void
     # `attr_accessor` produces getter+setter pairs for each name.
     # `params` is a String-keyed Hash whose values are recursive
-    # `Roundhouse::ParamValue` — String leaves, nested Hashes, and
+    # `Roundhouse::ParamValue` — JSON scalar leaves, nested Hashes, and
     # Arrays (Rails-shape `comment[author][name]=x`, `tags[]=a`).
     # Each target's runtime declares its own recursive realization
     # (`runtime/crystal/param_value.cr`, `runtime/typescript/
@@ -64,9 +138,16 @@ module ActionController
     def query_string=: (String) -> String
     def accepts_any_format: () -> bool
     def accepts_any_format=: (bool) -> bool
+    def vary_on_accept: () -> bool
+    def vary_on_accept=: (bool) -> bool
+    # Rails' `_set_vary_header` (render, send_data); see the .rb.
+    def apply_vary_header: () -> nil
     def path_parameters: () -> Hash[String, String]
     def path_parameters=: (Hash[String, String]) -> Hash[String, String]
     @headers: ActionController::HeaderStore
+    @content_type_explicit: bool
+    @head_response: bool
+    @cache_control: ActionController::CacheControlStore
     def action_name: () -> String
     def assign_action_name: (Symbol name) -> String
 
@@ -80,14 +161,19 @@ module ActionController
     # `@status =`, `@body =`, `@location =` from render/redirect_to/head).
     def status: () -> Integer
     def body: () -> String
+    def response_body: () -> String
+    def response_body=: (String? value) -> String
     def location: () -> String?
     def content_type: () -> String
+    def media_type: () -> String
+    def content_type=: (String value) -> String
 
     # True once render/redirect_to/head has produced a response — the
     # halting check the synthesized before_action preamble runs after
     # each filter that can render or redirect (Rails: a filter that
     # responds halts the chain and skips the action).
     def performed?: () -> bool
+    def head_response?: () -> bool
 
     def initialize: () -> void
 
@@ -120,15 +206,23 @@ module ActionController
       ?status: Symbol
     ) -> void
 
-    # `head(:no_content, content_type: "application/json")` — empty
-    # body, status only; content_type optional.
+    # The shared strict-target implementation supports the bounded
+    # keyword form. The Ruby/Spinel options-hash extension has its own
+    # signature in runtime/spinel/action_controller_head.rbs.
     def head: (Symbol status, ?content_type: String?, ?location: String?) -> void
     def response: () -> Base
+    # Strict stubs; Ruby/Spinel reopen in current.rb fills these in.
     def fresh_when: (untyped subject) -> void
     def stale?: (?etag: untyped) -> bool
-    # Integer SECONDS — `lower::duration::rewrite_expires_in` grounds the
-    # corpus' `1.year` / `1.week` before the call reaches here.
-    def expires_in: (Integer seconds, ?public: bool, ?stale_while_revalidate: Integer) -> void
+    # Integer SECONDS on every duration-shaped keyword —
+    # `lower::duration::rewrite_expires_in` grounds the corpus' `1.year`
+    # / `1.week` / `stale_while_revalidate: 30.seconds` /
+    # `stale_if_error: 1.day` before the call reaches here. -1 on
+    # `stale_while_revalidate:` / `stale_if_error:` means "not stated"
+    # (see the .rb).
+    def expires_in: (Integer seconds, ?public: bool, ?must_revalidate: bool,
+                      ?stale_while_revalidate: Integer, ?stale_if_error: Integer,
+                      ?immutable: bool) -> void
     def cache_control_max_age: () -> Integer
     def cache_control_public: () -> bool
     def headers: () -> ActionController::HeaderStore
@@ -140,6 +234,9 @@ module ActionController
     def request_for_csrf: () -> untyped
     def same_host_location: (String loc) -> String
     def request_host_for_redirect: () -> String
+    def default_url_options: () -> Hash[Symbol, String]
+    def request_protocol_for_url: () -> String
+    def url_from_path: (String path) -> String
 
     # Monomorphic on Symbol — body looks up STATUS_CODES. Integer
     # pass-through was previously supported via `is_a?(Integer)`

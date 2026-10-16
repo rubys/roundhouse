@@ -64,7 +64,7 @@ impl GemTy {
             GemTy::Untyped => Ty::Untyped,
             GemTy::Instance(path) => Ty::Class {
                 id: ClassId(Symbol::from(path)),
-                args: vec![],
+                args: vec![].into(),
             },
         }
     }
@@ -166,6 +166,9 @@ pub const GEM_CATALOG: &[GemClass] = &[
             ("klass", GemTy::Untyped),
             ("name", GemTy::Sym),
             ("macro", GemTy::Sym),
+            // Nil when the association did not declare `counter_cache:`
+            // (campfire's Message→Room). Untyped until option ingest lands.
+            ("counter_cache_column", GemTy::Untyped),
         ],
     },
     // Arel — ActiveRecord's low-level SQL AST builder. `sql` wraps a
@@ -215,6 +218,44 @@ pub const GEM_CATALOG: &[GemClass] = &[
         name: "ROTP::Base32",
         class_methods: &[("random", GemTy::Str), ("random_base32", GemTy::Str)],
         instance_methods: &[],
+    },
+    // htmlentities — entity encode/decode; both directions return the
+    // converted String (lobsters' `HtmlEncoder` wraps one instance).
+    GemClass {
+        name: "HTMLEntities",
+        class_methods: &[],
+        instance_methods: &[("encode", GemTy::Str), ("decode", GemTy::Str)],
+    },
+    // commonmarker 2.x — lobsters' Markdowner parses to a node tree,
+    // edits it, and renders it back. The gem on the ruby family,
+    // spinel-commonmarker (same surface over cmark-gfm) on spinel.
+    // Node links answer a Node or nil, and the editing calls answer
+    // what the gem's C side does; those stay gradual.
+    GemClass {
+        name: "Commonmarker",
+        class_methods: &[
+            ("parse", GemTy::Instance("Commonmarker::Node")),
+            ("to_html", GemTy::Str),
+        ],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Commonmarker::Node",
+        class_methods: &[],
+        instance_methods: &[
+            ("type", GemTy::Sym),
+            ("string_content", GemTy::Str),
+            ("string_content=", GemTy::Str),
+            ("to_html", GemTy::Str),
+            ("to_commonmark", GemTy::Str),
+            ("first_child", GemTy::Untyped),
+            ("insert_before", GemTy::Untyped),
+            ("insert_after", GemTy::Untyped),
+            ("append_child", GemTy::Untyped),
+            ("delete", GemTy::Untyped),
+            ("walk", GemTy::Untyped),
+            ("each", GemTy::Untyped),
+        ],
     },
     // RQRCode — QR-code rendering; the `as_*` methods serialize to a
     // String in the requested format.
@@ -273,7 +314,31 @@ pub const GEM_CATALOG: &[GemClass] = &[
     },
     GemClass {
         name: "Nokogiri",
-        class_methods: &[("HTML", GemTy::Untyped), ("XML", GemTy::Untyped)],
+        class_methods: &[
+            ("HTML", GemTy::Untyped),
+            ("HTML4", GemTy::Untyped),
+            ("HTML5", GemTy::Untyped),
+            ("XML", GemTy::Untyped),
+        ],
+        instance_methods: &[],
+    },
+    // Nokogiri's HTML5 parser (gumbo, vendored by the gem and carried by
+    // spinel-nokogiri): `Nokogiri::HTML5.fragment(html)` and the module's
+    // Document/DocumentFragment classes. The parsed tree stays unmodeled,
+    // as `Nokogiri::HTML`'s does.
+    GemClass {
+        name: "Nokogiri::HTML5",
+        class_methods: &[("parse", GemTy::Untyped), ("fragment", GemTy::Untyped)],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Nokogiri::HTML5::Document",
+        class_methods: &[("parse", GemTy::Untyped)],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Nokogiri::HTML5::DocumentFragment",
+        class_methods: &[("parse", GemTy::Untyped)],
         instance_methods: &[],
     },
     // pdf-reader — PDF metadata/text extraction.
@@ -312,6 +377,46 @@ pub const GEM_CATALOG: &[GemClass] = &[
     GemClass {
         name: "Rack::MiniProfiler",
         class_methods: &[("authorize_request", GemTy::Untyped)],
+        instance_methods: &[],
+    },
+    // pay — Stripe/Braintree/Paddle billing (Jumpstart Pro). First slice:
+    // exception classes for `rescue Pay::Error` / `Pay::ActionRequired`,
+    // and the model class constants for `is_a?(Pay::Charge)` /
+    // `is_a?(Pay::Subscription)`. Not ActiveRecord: `.all` / scopes /
+    // `payment_processor` stay **errors** (attribution skips
+    // unknown-gem downgrade for any `GEM_CATALOG` receiver — see
+    // `catalogued_class_receiver`). The gem stays **Unknown** in the
+    // census so *other* Pay::* names (Currency, PaddleClassic, …)
+    // remain gap-attributed notes rather than invented errors.
+    // Runtime: `runtime/ruby/pay.rb` façade (see `apply_pay_demand`).
+    GemClass {
+        name: "Pay",
+        class_methods: &[],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Pay::Error",
+        class_methods: &[],
+        instance_methods: &[("message", GemTy::Str), ("to_s", GemTy::Str)],
+    },
+    GemClass {
+        name: "Pay::ActionRequired",
+        class_methods: &[],
+        instance_methods: &[("message", GemTy::Str), ("to_s", GemTy::Str)],
+    },
+    GemClass {
+        name: "Pay::Charge",
+        class_methods: &[],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Pay::Subscription",
+        class_methods: &[],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Pay::Customer",
+        class_methods: &[],
         instance_methods: &[],
     },
 ];

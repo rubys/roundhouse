@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Ruby-family-only ViewHelpers extensions — a reopen, same pattern as
 # active_record/connection.rb: NOT listed in runtime_loader's strict-
 # target tables (the scaffold dir-walk ships it to spinel/CRuby/JRuby
@@ -6,6 +7,8 @@
 # while-loops with post-loop reads hit the functionalize sign-threading
 # gap) — they join the universal file when those lanes' emitters catch
 # up and lobsters reaches them.
+require_relative "../action_view_number_helper"
+
 module ActionView
   module ViewHelpers
     # `content_security_policy_nonce` — the per-request CSP script
@@ -18,21 +21,53 @@ module ActionView
       "roundhouse-nonce"
     end
 
+    # The ruby family's `url_for_path` (see the universal body in
+    # view_helpers.rb): absolute, on the request's scheme and host —
+    # `Rails.application.protocol` / `.domain`, the grounding an ERB
+    # view's `_url` gets — as Rails' view `url_for` answers it.
+    #
+    # Under the test harness the origin is the integration session's
+    # instead (`url_origin`, set from `host!` / `https!`): a test body's
+    # `_url` runs between requests, where Rails answers
+    # `http://www.example.com/…` and the last request is no guide. Every
+    # request the harness dispatches carries that same origin, so a view
+    # rendered inside one answers the same either way. Empty outside
+    # tests.
+    @url_origin = ""
+
+    def self.url_origin=(origin)
+      @url_origin = origin
+    end
+
+    def self.url_for_path(path)
+      origin = @url_origin
+      return origin + path unless origin.empty?
+      # Through the controller's `_url` builder, so the scheme's
+      # standard port drops out (`Host: blog.test:80` names
+      # `http://blog.test/…`, as Rails and `url_from_path` do).
+      hostport = Rails.application.domain
+      ActionController.build_host_url(
+        Rails.application.protocol, hostport, ActionController.url_port_of(hostport), path
+      )
+    end
+
     # Rails `class_names` (alias of `token_list`): strings/arrays add
     # their tokens, hash entries contribute their key when the value is
-    # truthy (`class_names("nav", current_page: cur == path)`), nil and
-    # blank tokens drop. Joined with single spaces.
+    # truthy (`class_names("nav", current_page: cur == path)`), nested
+    # arrays recurse, and nil, false and blank tokens drop. Joined with
+    # single spaces.
     def self.class_names(*args)
       tokens = []
       args.each do |arg|
         if arg.is_a?(Hash)
-          arg.each { |k, v| tokens << k.to_s if v }
-        elsif arg.is_a?(Array)
-          arg.each do |a|
-            s = a.to_s
-            tokens << s unless s.strip.empty?
+          arg.each do |k, v|
+            key = k.to_s
+            tokens << key if v && !key.strip.empty?
           end
-        elsif !arg.nil?
+        elsif arg.is_a?(Array)
+          s = class_names(*arg)
+          tokens << s unless s.empty?
+        elsif arg
           s = arg.to_s
           tokens << s unless s.strip.empty?
         end
@@ -40,28 +75,12 @@ module ActionView
       tokens.join(" ")
     end
 
-    # `number_with_delimiter(12345)` → "12,345" — comma grouping every
-    # three digits, sign-aware. Integer-only, matching the signature
-    # (every corpus arg is a count); while-loop over the digit string
-    # so every target runtime types it; byte-equal to the CRuby overlay
-    # variant it supersedes on the replay-locked /u page. The overlay's
-    # `delimiter:` kwarg and float handling have no caller — the shared
-    # version stays monomorphic.
-    def self.number_with_delimiter(value)
-      int = value.to_s
-      sign = +""
-      if int.start_with?("-")
-        sign = "-"
-        int = int[1, int.length - 1].to_s
-      end
-      out = +""
-      i = int.length
-      while i > 3
-        out = "," + int[i - 3, 3].to_s + out
-        i = i - 3
-      end
-      out = int[0, i].to_s + out
-      sign + out
+    def self.number_helper_for_template(method, value, options = {})
+      ActionView::Helpers::NumberHelper.template_number_helper(method, value, options)
+    end
+
+    def self.number_with_delimiter(value, options = {})
+      number_helper_for_template(:number_with_delimiter, value, options)
     end
 
     # Rails' sanitize_to_id — the default `id` a `*_tag` control
@@ -139,30 +158,38 @@ module ActionView
       "<textarea#{render_attrs(head)}#{render_attrs(opts)}>\n#{html_escape(content.to_s)}</textarea>"
     end
 
-    # `number_with_precision(4.5678, precision: 2)` → "4.57" — the
-    # overlay number-helper's exact shape; here so the spinel tree
-    # carries it (users/show renders karma averages). On CRuby the
-    # overlay's later require re-defines it, same bytes.
-    def self.number_with_precision(value, precision: 3)
-      format("%.#{precision}f", value.to_f)
+    def self.number_with_precision(value, options = {})
+      number_helper_for_template(:number_with_precision, value, options)
     end
 
-    # `number_to_human(5, format: "%n%u")` → "5"; `number_to_human(1500)`
-    # → "1 Thousand". Rails scales by powers of 1000 with a unit label.
-    # lobsters' `upvoter_score` passes a small INTEGER score + format
-    # "%n%u", so the unit-less common case renders as the plain number;
-    # integer-only (no float/precision machinery) keeps every site typed.
-    def self.number_to_human(value, format: "%n %u")
-      units = ["", "Thousand", "Million", "Billion", "Trillion", "Quadrillion"]
-      neg = value < 0
-      n = neg ? -value : value
-      idx = 0
-      while n >= 1000 && idx < units.length - 1
-        n = n / 1000
-        idx = idx + 1
-      end
-      num = neg ? "-" + n.to_s : n.to_s
-      format.sub("%n", num).sub("%u", units[idx]).strip
+    # Rails' `fragment_name_with_digest(name, digest_path)` — the key a
+    # helper hands `cache`/`Rails.cache` for a fragment it renders itself
+    # (campfire's `MessagesHelper#cache_message_actions`). Rails puts the
+    # current template's digest path in front; templates carry no digest
+    # here (see runtime/spinel/action_controller_fragment_caching.rb), so
+    # an explicit `digest_path` is kept and an omitted one adds nothing.
+    def self.fragment_name_with_digest(name, digest_path)
+      digest_path.nil? ? name : [digest_path] + name
+    end
+
+    def self.number_to_currency(value, options = {})
+      number_helper_for_template(:number_to_currency, value, options)
+    end
+
+    def self.number_to_human(value, options = {})
+      number_helper_for_template(:number_to_human, value, options)
+    end
+
+    def self.number_to_human_size(value, options = {})
+      number_helper_for_template(:number_to_human_size, value, options)
+    end
+
+    def self.number_to_percentage(value, options = {})
+      number_helper_for_template(:number_to_percentage, value, options)
+    end
+
+    def self.number_to_phone(value, options = {})
+      number_helper_for_template(:number_to_phone, value, options)
     end
 
     # `time_ago_in_words` / `distance_of_time_in_words`. The bucket walk
@@ -444,6 +471,17 @@ module ActionView
       sanitize_engine(html.to_s, tags, attributes)
     end
 
+    # `sanitize(html, tags:, attributes:)` written in a view or helper —
+    # the caller's allow-lists, as `sanitize_allowing`, but the VIEW
+    # form: the CRuby overlay answers a safe buffer here, as it does for
+    # `sanitize`, where `sanitize_allowing` (a content filter's) stays a
+    # plain String. The keyword call is rewritten to this one at emit
+    # (emit/ruby/library.rs), since `sanitize`'s arity is fixed. campfire's
+    # `MessagesHelper#auto_link_text` is the caller.
+    def self.sanitize_with(html, tags, attributes)
+      sanitize_engine(html.to_s, tags, attributes)
+    end
+
     # ── the safe-list engine and its rule tables ─────────────────────
     #
     # Every table below is PORTED from the gems named above, not
@@ -627,6 +665,18 @@ module ActionView
                 i = after
               else
                 name = sanitize_tag_name(raw)
+                # The parser drops ONE newline (LF, CR, or CRLF) right
+                # after a <pre> or <listing> start tag, kept or stripped,
+                # so the gem's output has lost it — measured:
+                # "<pre>\n\nx</pre>" sanitizes to "<pre>\nx</pre>".
+                # campfire's auto_link_text test pins it.
+                if name == "pre" || name == "listing"
+                  if s[after, 2] == "\r\n"
+                    after = after + 2
+                  elsif s[after, 1] == "\n" || s[after, 1] == "\r"
+                    after = after + 1
+                  end
+                end
                 if name == "svg" || name == "math"
                   # Foreign content is PRUNED whole — children, text and
                   # all — matching the gem's namespace rule. A

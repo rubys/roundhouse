@@ -64,6 +64,7 @@ var (
 	statements  = map[int64]*stmtEntry{}
 	nextStmtID  int64
 	lastRowID   int64
+	lastChanges int64
 )
 
 // SetupTestDB installs a fresh :memory: sqlite connection and runs
@@ -176,6 +177,7 @@ func resetStmts() {
 	statements = map[int64]*stmtEntry{}
 	nextStmtID = 0
 	lastRowID = 0
+	lastChanges = 0
 	stmtMu.Unlock()
 }
 
@@ -197,6 +199,11 @@ func Db_exec(query string) {
 	if id, err := res.LastInsertId(); err == nil {
 		stmtMu.Lock()
 		lastRowID = id
+		stmtMu.Unlock()
+	}
+	if n, err := res.RowsAffected(); err == nil {
+		stmtMu.Lock()
+		lastChanges = n
 		stmtMu.Unlock()
 	}
 }
@@ -570,6 +577,14 @@ func Db_last_insert_rowid() int64 {
 	stmtMu.Lock()
 	defer stmtMu.Unlock()
 	return lastRowID
+}
+
+// Db_changes returns the rows affected by the most recent Db_exec —
+// what Rails' `Model.delete_all` returns.
+func Db_changes() int64 {
+	stmtMu.Lock()
+	defer stmtMu.Unlock()
+	return lastChanges
 }
 
 // Db_escape_string SQL-quotes a string literal per SQLite's escape

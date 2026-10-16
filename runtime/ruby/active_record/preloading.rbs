@@ -1,0 +1,9 @@
+module ActiveRecord
+  module Preloading
+    def self.records: (Array[Base] records, Array[untyped] specs) -> nil
+  end
+
+  class Base
+    def _preload_as_group: (Array[Base] group, Array[untyped] specs) -> void
+  end
+end

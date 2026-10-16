@@ -2,6 +2,14 @@
 # beside this file). Dropped alongside the façade when the spin-shaped
 # spinel tree swaps in the real rqrcode package (its surface is
 # inferred from the package source).
+module RQRCodeCore
+  class QRCodeArgumentError < ArgumentError
+  end
+
+  class QRCodeRunTimeError < RuntimeError
+  end
+end
+
 module RQRCode
   class QRCode
     @data: String

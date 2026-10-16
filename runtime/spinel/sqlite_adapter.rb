@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Generic ActiveRecord adapter facade routed through the `Db.*` primitive
 # surface. Implements the 10-method contract that AR Base's `_adapter_*`
 # defaults call into when a model hasn't received the lowerer's Level-3
@@ -13,12 +14,20 @@
 # placeholder bind params — the FFI shim can't construct SQLITE_TRANSIENT
 # for bind_text, so the shared contract is "inline escaped values".
 module SqliteAdapter
+  # Quote one schema-validated SQL identifier (not a value); SQLite
+  # doubles embedded quotes and accepts this SQL-standard spelling.
+  def self.quote_column_name(name)
+    "\"#{name.to_s.gsub("\"", "\"\"")}\""
+  end
+
   def self.configure(database_path)
     Db.configure(database_path)
   end
 
+  # Writes run with their values written in: a Relation's bind marks
+  # (`Relation#bind_literal`) are dropped here, not lifted.
   def self.execute_ddl(sql)
-    Db.exec(sql)
+    Db.exec(ActiveRecord::Relation.inline_sql(sql))
   end
 
   # Rows affected by the last INSERT/UPDATE/DELETE — Rails'

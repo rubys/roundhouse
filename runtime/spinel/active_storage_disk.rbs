@@ -13,8 +13,13 @@ module ActiveStorage
   end
 
   class Blob
+    def attachable_sgid: () -> String
     def self.from_attachable: (untyped value) -> ActiveStorage::Blob?
     def self.from_io_hash: (untyped value) -> ActiveStorage::Blob?
+  end
+
+  class FixtureSet
+    def self.load_blob!: (Integer id, String filename, String service_name, String content_type) -> nil
   end
 
   class ImageAnalyzer
@@ -41,6 +46,12 @@ module ActiveStorage
 
   module Blobs
     class RedirectController < ActionController::Base
+      def process_action: (Symbol action_name) -> nil
+      def show: () -> nil
+    end
+
+    class ProxyController < ActionController::Base
+      @headers: ActionController::HeaderStore
       def process_action: (Symbol action_name) -> nil
       def show: () -> nil
     end

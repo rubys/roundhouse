@@ -1,17 +1,26 @@
 # Typing contract for the ruby-family ViewHelpers extensions.
 module ActionView
   module ViewHelpers
+    type number_option_value = String | Integer | Float | Rational | Symbol | bool | Regexp | nil | Hash[Symbol, String | Hash[Symbol, String]]
     def self.content_security_policy_nonce: () -> String
+    def self.url_origin=: (String origin) -> String
+    def self.url_for_path: (String path) -> String
     def self.class_names: (*(String | Symbol | Integer | bool | Hash[String | Symbol, untyped] | Array[untyped] | nil) args) -> String
-    def self.number_with_delimiter: (Integer value) -> String
+    def self.number_helper_for_template: (Symbol method, Object value, ?Hash[Symbol | String, number_option_value] options) -> String?
+    def self.number_with_delimiter: (Object value, ?Hash[Symbol | String, number_option_value] options) -> String?
     def self.sanitize_to_id: (String name) -> String
     def self.capture: () { () -> untyped } -> String
     def self.concat: (String string) -> String
     def self.polymorphic_url: (untyped record, ?only_path: bool) -> String
     def self.hidden_field_tag: (String | Symbol name, ?(String | Integer | Float | bool | nil) value, ?Hash[Symbol, untyped] opts) -> String
     def self.text_area_tag: (String | Symbol name, ?String? content, ?Hash[Symbol, untyped] opts) -> String
-    def self.number_with_precision: (Integer | Float value, ?precision: Integer) -> String
-    def self.number_to_human: (Integer value, ?format: String) -> String
+    def self.number_with_precision: (Object value, ?Hash[Symbol | String, number_option_value] options) -> String?
+    def self.number_to_currency: (Object value, ?Hash[Symbol | String, number_option_value] options) -> String?
+    def self.number_to_human: (Object value, ?Hash[Symbol | String, number_option_value] options) -> String?
+    def self.number_to_human_size: (Object value, ?Hash[Symbol | String, number_option_value] options) -> String?
+    def self.number_to_percentage: (Object value, ?Hash[Symbol | String, number_option_value] options) -> String?
+    def self.number_to_phone: (Object value, ?Hash[Symbol | String, number_option_value] options) -> String?
+    def self.fragment_name_with_digest: (Array[untyped] name, String? digest_path) -> Array[untyped]
     # `::Time`, not `Time` — these sigs sit inside `module ActionView`,
     # where a bare `Time` resolves to `ActionView::Time` and types the
     # params as an unknown class, leaving the whole body's arithmetic
@@ -24,6 +33,7 @@ module ActionView
     def self.strip_tags: (String html) -> String
     def self.sanitize: (String html) -> String
     def self.sanitize_allowing: (String html, Array[String] tags, Array[String] attributes) -> String
+    def self.sanitize_with: (String html, Array[String] tags, Array[String] attributes) -> String
     # The safe-list engine and its ported rule tables.
     def self.sanitize_engine: (String s, Array[String] tags, Array[String] attributes) -> String
     def self.sanitize_default_tags: () -> Array[String]

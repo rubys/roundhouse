@@ -16,7 +16,8 @@ use ruby_prism::Node;
 
 use indexmap::IndexMap;
 
-use crate::schema::{Column, ColumnType, Index, Schema, Table};
+use crate::schema::generated::GeneratedExpressionDialect;
+use crate::schema::{Column, ColumnType, GeneratedColumn, GeneratedColumnStorage, Index, Schema, Table};
 use crate::{Symbol, TableRef};
 
 use super::util::{
@@ -25,7 +26,24 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+/// Ingest a Rails schema with the Portable generated-expression grammar.
+/// PostgreSQL-only casts require the explicit DDL-dialect entry point.
 pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
+    ingest_schema_with_generated_expression_dialect(
+        source,
+        file,
+        GeneratedExpressionDialect::Portable,
+    )
+}
+
+/// Ingest a Rails schema while validating generated expressions for an
+/// explicit DDL source dialect. Application ingestion continues to call
+/// [`ingest_schema`] and therefore retains the Portable default.
+pub fn ingest_schema_with_generated_expression_dialect(
+    source: &[u8],
+    file: &str,
+    dialect: GeneratedExpressionDialect,
+) -> IngestResult<Schema> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -39,7 +57,9 @@ pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
     walk_calls(&root, &mut |call| {
         match constant_id_str(&call.name()) {
             "create_table" => {
-                if let Some((name, table)) = table_from_create_table(call, file, &mut gaps) {
+                if let Some((name, table)) =
+                    table_from_create_table(call, file, &mut gaps, dialect)
+                {
                     schema.tables.insert(name, table);
                 }
             }
@@ -101,12 +121,29 @@ pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
 /// Only the migration's `change` method is replayed (`up` when no
 /// `change` exists; `down` is never touched). Schema-mutating verbs we
 /// can't fold deterministically (`change_table`, `execute`, raw-SQL
-/// shapes — see `UNSUPPORTED_VERBS`) error with a pointer to
+/// shapes — see `UNSUPPORTED_VERBS`, or a verb whose table or column
+/// name is not a literal) error with a pointer to
 /// `rails db:migrate`, which materializes the schema.rb this fallback
 /// substitutes for. Receiver-less calls that aren't recognized verbs
 /// are ignored: migrations legitimately contain arbitrary Ruby (data
 /// backfills, `say`, …) that doesn't affect the schema.
 pub fn ingest_migration(source: &[u8], file: &str, schema: &mut Schema) -> IngestResult<()> {
+    ingest_migration_with_generated_expression_dialect(
+        source,
+        file,
+        schema,
+        GeneratedExpressionDialect::Portable,
+    )
+}
+
+/// Fold one migration using an explicit generated-expression grammar.
+/// The default [`ingest_migration`] remains Portable for application ingest.
+pub fn ingest_migration_with_generated_expression_dialect(
+    source: &[u8],
+    file: &str,
+    schema: &mut Schema,
+    dialect: GeneratedExpressionDialect,
+) -> IngestResult<()> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -141,13 +178,23 @@ pub fn ingest_migration(source: &[u8], file: &str, schema: &mut Schema) -> Inges
             return;
         }
         let verb = constant_id_str(&call.name()).to_string();
-        if let Err(e) = apply_migration_verb(&verb, call, file, schema) {
+        if let Err(e) = apply_migration_verb(&verb, call, file, schema, dialect) {
             err = Some(e);
         }
     });
     match err {
         Some(e) => Err(e),
-        None => Ok(()),
+        None => {
+            for table in schema.tables.values() {
+                if let Some((column, reason)) = crate::schema::generated::validate_table_with_dialect(table, dialect).into_iter().next() {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!("generated column dropped: {}.{column}: {reason}", table.name),
+                    });
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -164,11 +211,13 @@ const UNSUPPORTED_VERBS: &[&str] = &[
     "up_only",
 ];
 
+/// Apply one recognized schema-changing migration verb under the selected expression dialect.
 fn apply_migration_verb(
     verb: &str,
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     schema: &mut Schema,
+    dialect: GeneratedExpressionDialect,
 ) -> Result<(), IngestError> {
     if UNSUPPORTED_VERBS.contains(&verb) {
         return Err(IngestError::Unsupported {
@@ -185,11 +234,31 @@ fn apply_migration_verb(
         .map(|a| a.arguments().iter().collect())
         .unwrap_or_default();
     let arg_name = |i: usize| args.get(i).and_then(table_name_value);
+    // A verb whose table or column name is not a literal cannot apply,
+    // and skipping it left the column typed: a
+    // `remove_column(:idx, :"col_#{n}")` in an `each` loop
+    // kept the dropped columns.
+    let named = match verb {
+        "drop_table" | "add_timestamps" => 1,
+        "rename_table" | "remove_column" | "change_column_null" | "change_column_default"
+        | "add_reference" | "add_belongs_to" | "remove_reference" | "remove_belongs_to" => 2,
+        "add_column" | "change_column" | "rename_column" => 3,
+        _ => 0,
+    };
+    if let Some(i) = (0..named).find(|&i| arg_name(i).is_none()) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "migration `{verb}` argument {} is not a literal name; the schema fold cannot apply it",
+                i + 1
+            ),
+        });
+    }
 
     match verb {
         "create_table" => {
             let mut gaps: Vec<IngestError> = Vec::new();
-            let built = table_from_create_table(call, file, &mut gaps);
+            let built = table_from_create_table(call, file, &mut gaps, dialect);
             if let Some(gap) = gaps.into_iter().next() {
                 return Err(gap);
             }
@@ -211,12 +280,95 @@ fn apply_migration_verb(
             }
         }
         "add_column" | "change_column" => {
+            // Check an existing generated target before interpreting the
+            // requested type/options. Even an unknown replacement type
+            // must not bypass the explicit generated-column boundary.
+            if verb == "change_column" {
+                if let (Some(t), Some(c)) = (arg_name(0), arg_name(1)) {
+                    let targets_generated = schema
+                        .tables
+                        .get(&Symbol::from(t.as_str()))
+                        .is_some_and(|table| {
+                            table.columns.iter().any(|column| {
+                                column.name.as_str() == c.as_str()
+                                    && column.generated.is_some()
+                            })
+                        });
+                    if targets_generated {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "generated column changes are not supported: {t}.{c}"
+                            ),
+                        });
+                    }
+                }
+            }
             if let (Some(t), Some(c), Some(ty)) = (arg_name(0), arg_name(1), arg_name(2)) {
-                let opts = parse_column_opts(args.iter().skip(3));
-                let col = column_with_type(&ty, c, &opts, &t, file)?;
-                if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
-                    // change_column replaces; add_column after a
-                    // replace-shaped history stays idempotent.
+                let option_args = &args[3..];
+                if has_column_option_splats(option_args) {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!(
+                            "column options for {t}.{c} cannot use keyword splats because generated-column metadata may be hidden"
+                        ),
+                    });
+                }
+                let generated_option = has_generated_column_options(option_args);
+                let generated = ty == "virtual" || generated_option;
+                let col = if generated {
+                    if verb == "change_column" {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!("generated column changes are not supported: {t}.{c}"),
+                        });
+                    }
+                    generated_column_from_options(
+                        c,
+                        &t,
+                        file,
+                        if ty == "virtual" { None } else { Some(&ty) },
+                        option_args,
+                    )?
+                } else {
+                    let opts = parse_column_opts(option_args.iter());
+                    column_with_type(&ty, c, &opts, &t, file)?
+                };
+                if let Some(table) = schema.tables.get(&Symbol::from(t.as_str())) {
+                    // This fold replaces a same-named column for both
+                    // verbs. Do not let an ordinary add/change erase the
+                    // generated expression and make the field writable.
+                    if col.generated.is_none()
+                        && table.columns.iter().any(|existing| {
+                            existing.name == col.name && existing.generated.is_some()
+                        })
+                    {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "generated column `{}.{}` cannot be replaced by an ordinary column with `{verb}`",
+                                t,
+                                col.name.as_str(),
+                            ),
+                        });
+                    }
+                    // Validate the replacement against the complete
+                    // candidate before changing the folded schema. This
+                    // keeps failed generated replacements (and ordinary
+                    // replacements that invalidate generated operands)
+                    // from erasing the previous metadata in survey mode.
+                    let mut candidate = table.clone();
+                    candidate.columns.retain(|existing| existing.name != col.name);
+                    candidate.columns.push(col.clone());
+                    if table.columns.iter().any(|column| column.generated.is_some())
+                        || col.generated.is_some()
+                    {
+                        validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
+                    }
+                }
+                // change_column replaces; add_column after a
+                // replace-shaped history stays idempotent.
+                if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
                     table.columns.retain(|x| x.name != col.name);
                     table.columns.push(col);
                 }
@@ -224,16 +376,38 @@ fn apply_migration_verb(
         }
         "remove_column" => {
             if let (Some(t), Some(c)) = (arg_name(0), arg_name(1)) {
-                if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
+                if let Some(table) = schema.tables.get(&Symbol::from(t.as_str())) {
                     refuse_predicate_column(verb, table, &c, file)?;
+                    refuse_indexed_generated_column_mutation(verb, table, &c, file)?;
+                    if table.columns.iter().any(|column| column.generated.is_some()) {
+                        let mut candidate = table.clone();
+                        candidate.columns.retain(|column| column.name.as_str() != c);
+                        validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
+                    }
+                }
+                if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
                     table.columns.retain(|x| x.name.as_str() != c);
                 }
             }
         }
         "rename_column" => {
             if let (Some(t), Some(old), Some(new)) = (arg_name(0), arg_name(1), arg_name(2)) {
-                if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
+                if let Some(table) = schema.tables.get(&Symbol::from(t.as_str())) {
                     refuse_predicate_column(verb, table, &old, file)?;
+                    if old != new {
+                        refuse_indexed_generated_column_mutation(verb, table, &old, file)?;
+                        if table.columns.iter().any(|column| column.generated.is_some()) {
+                            let mut candidate = table.clone();
+                            for column in &mut candidate.columns {
+                                if column.name.as_str() == old {
+                                    column.name = Symbol::from(new.clone());
+                                }
+                            }
+                            validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
+                        }
+                    }
+                }
+                if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
                     for col in &mut table.columns {
                         if col.name.as_str() == old {
                             col.name = Symbol::from(new.clone());
@@ -262,10 +436,22 @@ fn apply_migration_verb(
             if let (Some(t), Some(c)) = (arg_name(0), arg_name(1)) {
                 let positional = args.get(2).and_then(default_value);
                 let to_kwarg = kwarg_value(args.iter().skip(2), "to").and_then(|v| default_value(&v));
-                if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
+                let default = to_kwarg.clone().or_else(|| positional.clone());
+                if let Some(table) = schema.tables.get(&Symbol::from(t.as_str())) {
+                    if table.columns.iter().any(|column| column.generated.is_some()) {
+                        let mut candidate = table.clone();
+                        for col in &mut candidate.columns {
+                            if col.name.as_str() == c {
+                                col.default = default.clone();
+                            }
+                        }
+                        validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
+                    }
+                }
+                if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
                     for col in &mut table.columns {
                         if col.name.as_str() == c {
-                            col.default = to_kwarg.clone().or_else(|| positional.clone());
+                            col.default = default.clone();
                         }
                     }
                 }
@@ -287,7 +473,27 @@ fn apply_migration_verb(
         }
         "remove_reference" | "remove_belongs_to" => {
             if let (Some(t), Some(name)) = (arg_name(0), arg_name(1)) {
-                if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
+                if let Some(table) = schema.tables.get(&Symbol::from(t.as_str())) {
+                    if table.columns.iter().any(|column| {
+                        column.name.as_str() == name && column.generated.is_some()
+                    }) {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!(
+                                "generated column cannot be removed with `{verb}`: {}.{name} is not a reference",
+                                table.name.as_str()
+                            ),
+                        });
+                    }
+                    if table.columns.iter().any(|column| column.generated.is_some()) {
+                        let mut candidate = table.clone();
+                        candidate
+                            .columns
+                            .retain(|column| column.name.as_str() != name);
+                        validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
+                    }
+                }
+                if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
                     table.columns.retain(|x| x.name.as_str() != name);
                 }
             }
@@ -297,7 +503,7 @@ fn apply_migration_verb(
                 if !columns.is_empty() {
                     if let Some(table) = schema.tables.get_mut(&Symbol::from(t.clone())) {
                         if columns.iter().all(|c| table.columns.iter().any(|col| col.name == *c)) {
-                            table.indexes.push(build_index(&t, columns, args.iter().skip(2)));
+                            table.indexes.push(build_index(&t, columns, args.iter().skip(2), file)?);
                         }
                     }
                 }
@@ -364,6 +570,67 @@ fn refuse_predicate_column(
             index.name.as_str()
         ),
     })
+}
+
+/// Renaming or removing an indexed generated output would leave its index
+/// referring to a column name the fold no longer knows. Ordinary index
+/// mutation remains governed by the existing migration-fold behavior.
+fn refuse_indexed_generated_column_mutation(
+    verb: &str,
+    table: &Table,
+    column: &str,
+    file: &str,
+) -> Result<(), IngestError> {
+    let is_generated = table.columns.iter().any(|existing| {
+        existing.name.as_str() == column && existing.generated.is_some()
+    });
+    if !is_generated {
+        return Ok(());
+    }
+    let Some(index) = table
+        .indexes
+        .iter()
+        .find(|index| index.columns.iter().any(|indexed| indexed.as_str() == column))
+    else {
+        return Ok(());
+    };
+    let action = match verb {
+        "rename_column" => "renamed",
+        "remove_column" => "removed",
+        _ => "mutated",
+    };
+    Err(IngestError::Unsupported {
+        file: file.into(),
+        message: format!(
+            "generated column index mutation is unsupported: {}.{column} is used by index `{}` and cannot be {action} without rewriting the index",
+            table.name.as_str(),
+            index.name.as_str()
+        ),
+    })
+}
+
+/// Keep migration-derived schema state unchanged when a candidate
+/// mutation breaks a generated expression or another generated-table
+/// invariant. Expressions remain source SQL; renames never rewrite them.
+fn validate_generated_migration_candidate(
+    table: &Table,
+    verb: &str,
+    file: &str,
+    dialect: GeneratedExpressionDialect,
+) -> Result<(), IngestError> {
+    if let Some((column, reason)) = crate::schema::generated::validate_table_with_dialect(table, dialect)
+        .into_iter()
+        .next()
+    {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "generated column mutation is unsupported: {verb} on {}.{column}: {reason}",
+                table.name.as_str()
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Whether `predicate` names `column`: outside its string literals, a
@@ -515,9 +782,11 @@ fn build_index<'pr>(
     table_name: &str,
     columns: Vec<Symbol>,
     kwarg_nodes: impl Iterator<Item = &'pr Node<'pr>>,
-) -> Index {
+    file: &str,
+) -> IngestResult<Index> {
     let mut explicit_name: Option<String> = None;
     let mut unique = false;
+    let mut using: Option<String> = None;
     let mut predicate: Option<String> = None;
     for node in kwarg_nodes {
         let Some(kh) = node.as_keyword_hash_node() else { continue };
@@ -532,6 +801,7 @@ fn build_index<'pr>(
                 // a unique one, dropping it widened the constraint to
                 // every row.
                 "where" => predicate = string_value(value),
+                "using" => using = Some(index_access_method(value, file, table_name)?),
                 _ => {}
             }
         }
@@ -540,7 +810,33 @@ fn build_index<'pr>(
         let cols: Vec<&str> = columns.iter().map(|c| c.as_str()).collect();
         format!("index_{}_on_{}", table_name, cols.join("_and_"))
     });
-    Index { name: Symbol::from(name), columns, unique, predicate }
+    Ok(Index { name: Symbol::from(name), columns, unique, using, predicate })
+}
+
+/// Rails interpolates `using:` as an unquoted SQL identifier. Fold its
+/// spelling as PostgreSQL does, and reject values that would not safely
+/// round-trip through that schema DSL instead of silently using btree.
+fn index_access_method(value: &Node<'_>, file: &str, table: &str) -> IngestResult<String> {
+    let method = string_value(value).or_else(|| symbol_value(value)).ok_or_else(|| {
+        IngestError::Unsupported {
+            file: file.into(),
+            message: format!("index access method for `{table}` must be a literal symbol or string"),
+        }
+    })?;
+    let mut chars = method.chars();
+    let valid_identifier = chars
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$'));
+    if !valid_identifier || method.len() > 63 {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "index access method for `{table}` must be an ASCII unquoted SQL identifier"
+            ),
+        });
+    }
+    Ok(method.to_ascii_lowercase())
 }
 
 /// `create_table NAME[, opts] do |t| … end` → (table key, Table).
@@ -549,6 +845,7 @@ fn table_from_create_table(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     gaps: &mut Vec<IngestError>,
+    dialect: GeneratedExpressionDialect,
 ) -> Option<(Symbol, Table)> {
     let args = call.arguments()?;
     let first = args.arguments().iter().next();
@@ -634,7 +931,12 @@ fn table_from_create_table(
             Some("integer") if !id_default => (Some("integer"), None),
             other => (other, id_limit),
         };
-        let opts = ColumnOpts { nullable: Some(false), default: None, limit: key_limit };
+        let opts = ColumnOpts {
+            nullable: Some(false),
+            default: None,
+            limit: key_limit,
+            ..ColumnOpts::default()
+        };
         let key = match key_type {
             None | Some("bigint") | Some("primary_key") => Ok(Column {
                 name: Symbol::from(id_name.as_str()),
@@ -642,6 +944,9 @@ fn table_from_create_table(
                 nullable: false,
                 default: None,
                 primary_key: true,
+                generated: None,
+                generated_text_compatible: None,
+                generated_int4_compatible: None,
             }),
             Some(t) => column_with_type(t, id_name.clone(), &opts, &table_name, file),
         };
@@ -668,8 +973,10 @@ fn table_from_create_table(
                     if let Some(call) = stmt.as_call_node() {
                         let call_name = constant_id_str(&call.name()).to_string();
                         if call_name == "index" {
-                            if let Some(idx) = index_from_call(&call, &table_name) {
-                                indexes.push(idx);
+                            match index_from_call(&call, &table_name, file) {
+                                Ok(Some(idx)) => indexes.push(idx),
+                                Ok(None) => {}
+                                Err(gap) => gaps.push(gap),
                             }
                         } else if call_name == "timestamps" {
                             // Migration macro; schema.rb has these
@@ -692,16 +999,29 @@ fn table_from_create_table(
     // ledgered above) cannot apply: sqlite refuses the seed at `no such
     // column`. The index goes with the column.
     indexes.retain(|idx| idx.columns.iter().all(|c| columns.iter().any(|col| col.name == *c)));
-    Some((
-        Symbol::from(table_name.clone()),
-        Table {
-            name: Symbol::from(table_name),
-            columns,
-            indexes,
-            foreign_keys: vec![],
-            virtual_module: None,
-        },
-    ))
+    let mut table = Table {
+        name: Symbol::from(table_name.as_str()),
+        columns,
+        indexes,
+        foreign_keys: vec![],
+        virtual_module: None,
+    };
+    let invalid_generated = crate::schema::generated::validate_table_with_dialect(&table, dialect);
+    for (column, reason) in &invalid_generated {
+        gaps.push(IngestError::Unsupported {
+            file: file.into(),
+            message: format!("generated column dropped: {table_name}.{column}: {reason}"),
+        });
+    }
+    if !invalid_generated.is_empty() {
+        table.columns.retain(|col| {
+            !invalid_generated.iter().any(|(name, _)| name == col.name.as_str())
+        });
+        table.indexes.retain(|idx| {
+            idx.columns.iter().all(|name| table.columns.iter().any(|col| col.name == *name))
+        });
+    }
+    Some((Symbol::from(table_name), table))
 }
 
 /// `create_virtual_table "name", "module", ["arg", …]` → (key, Table).
@@ -735,6 +1055,9 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             nullable: true,
             default: None,
             primary_key: false,
+            generated: None,
+            generated_text_compatible: None,
+            generated_int4_compatible: None,
         })
         .collect();
     Some((
@@ -834,6 +1157,9 @@ fn view_columns_from_sql(sql: &str, tables: &IndexMap<Symbol, Table>) -> Vec<Col
             nullable: true,
             default: None,
             primary_key: false,
+            generated: None,
+            generated_text_compatible: None,
+            generated_int4_compatible: None,
         });
     }
     columns
@@ -898,6 +1224,9 @@ fn timestamp_columns() -> [Column; 2] {
         nullable: false,
         default: None,
         primary_key: false,
+        generated: None,
+        generated_text_compatible: None,
+        generated_int4_compatible: None,
     };
     [col("created_at"), col("updated_at")]
 }
@@ -912,6 +1241,9 @@ fn reference_column(name: &str) -> Column {
         nullable: true,
         default: None,
         primary_key: false,
+        generated: None,
+        generated_text_compatible: None,
+        generated_int4_compatible: None,
     }
 }
 
@@ -922,6 +1254,8 @@ struct ColumnOpts {
     nullable: Option<bool>,
     default: Option<String>,
     limit: Option<u32>,
+    /// A present array option is non-scalar unless explicitly false or nil.
+    array: bool,
 }
 
 // Not `string_value` alone: schema.rb dumps an integer, float or boolean default unquoted (`default: 0`, `default: true`).
@@ -935,6 +1269,7 @@ fn default_value(node: &Node<'_>) -> Option<String> {
     bool_value(node).map(|b| b.to_string()).or_else(|| string_value(node))
 }
 
+/// Collect column options while retaining array metadata omitted by the normalized column type.
 fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> ColumnOpts {
     let mut opts = ColumnOpts::default();
     for node in nodes {
@@ -953,6 +1288,12 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
                         }
                     }
                 }
+                "array" => {
+                    opts.array = match bool_value(value) {
+                        Some(enabled) => enabled,
+                        None => value.as_nil_node().is_none(),
+                    };
+                }
                 _ => {}
             }
         }
@@ -960,9 +1301,179 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
     opts
 }
 
+/// Whether the option list names any Rails-generated-column field.
+/// `as:` and `stored:` must never be ignored and turn a computed column
+/// into an ordinary writable column. `type:` alone is not a generated
+/// column marker: ordinary references/belongs_to declarations may carry
+/// it as an option.
+fn has_generated_column_options(nodes: &[Node<'_>]) -> bool {
+    nodes.iter().any(|node| {
+        node.as_keyword_hash_node().is_some_and(|hash| {
+            hash.elements().iter().any(|element| {
+                element.as_assoc_node().is_some_and(|assoc| {
+                    matches!(symbol_value(&assoc.key()).as_deref(), Some("as" | "stored"))
+                })
+            })
+        }) || node.as_hash_node().is_some_and(|hash| {
+            hash.elements().iter().any(|element| {
+                element.as_assoc_node().is_some_and(|assoc| {
+                    matches!(symbol_value(&assoc.key()).as_deref(), Some("as" | "stored"))
+                })
+            })
+        })
+    })
+}
+
+/// An option splat can hide `as:`, `stored:`, or `type:` from this schema
+/// fold. Do not let the ordinary-column path silently discard that metadata.
+fn has_column_option_splats(nodes: &[Node<'_>]) -> bool {
+    nodes.iter().any(|node| {
+        node.as_assoc_splat_node().is_some()
+            || node.as_keyword_hash_node().is_some_and(|hash| {
+                hash.elements()
+                    .iter()
+                    .any(|element| element.as_assoc_splat_node().is_some())
+            })
+            || node.as_hash_node().is_some_and(|hash| {
+                hash.elements()
+                    .iter()
+                    .any(|element| element.as_assoc_splat_node().is_some())
+            })
+    })
+}
+
+/// Parse the strict option set for a generated schema/migration column.
+/// For `t.virtual`, `fallback_type` is absent and `type:` is required.
+/// For `add_column` with an ordinary type and `as:`, the positional type
+/// is retained and a conflicting `type:` is rejected.
+fn generated_column_from_options(
+    col_name: String,
+    table: &str,
+    file: &str,
+    fallback_type: Option<&str>,
+    nodes: &[Node<'_>],
+) -> Result<Column, IngestError> {
+    let unsupported = |message: String| IngestError::Unsupported { file: file.into(), message };
+    let mut type_name = fallback_type.map(str::to_string);
+    let mut expression: Option<String> = None;
+    let mut stored: Option<bool> = None;
+    let mut opts = ColumnOpts::default();
+    let mut seen: Vec<String> = Vec::new();
+
+    for node in nodes {
+        let Some(hash) = node.as_keyword_hash_node() else {
+            return Err(unsupported(format!(
+                "generated column options for {table}.{col_name} must be keyword arguments"
+            )));
+        };
+        for element in hash.elements().iter() {
+            let Some(assoc) = element.as_assoc_node() else {
+                return Err(unsupported(format!(
+                    "generated column options for {table}.{col_name} are not supported"
+                )));
+            };
+            let Some(key) = symbol_value(&assoc.key()) else {
+                return Err(unsupported(format!(
+                    "generated column option key for {table}.{col_name} must be a symbol"
+                )));
+            };
+            if seen.iter().any(|existing| existing == &key) {
+                return Err(unsupported(format!(
+                    "generated column option `{key}` is repeated for {table}.{col_name}"
+                )));
+            }
+            seen.push(key.clone());
+
+            let value = assoc.value();
+            match key.as_str() {
+                "type" => {
+                    if type_name.is_some() {
+                        return Err(unsupported(format!(
+                            "generated column {table}.{col_name} has both a positional type and `type:`"
+                        )));
+                    }
+                    type_name = name_value(&value);
+                    if type_name.is_none() {
+                        return Err(unsupported(format!(
+                            "generated column type for {table}.{col_name} must be a string or symbol"
+                        )));
+                    }
+                }
+                "as" => {
+                    expression = string_value(&value);
+                    if expression.is_none() {
+                        return Err(unsupported(format!(
+                            "generated expression for {table}.{col_name} must be a string literal"
+                        )));
+                    }
+                }
+                "stored" => {
+                    stored = bool_value(&value);
+                    if stored.is_none() {
+                        return Err(unsupported(format!(
+                            "generated storage mode for {table}.{col_name} must be a boolean"
+                        )));
+                    }
+                }
+                "null" => {
+                    opts.nullable = bool_value(&value);
+                    if opts.nullable.is_none() {
+                        return Err(unsupported(format!(
+                            "generated column nullability for {table}.{col_name} must be a boolean"
+                        )));
+                    }
+                }
+                "limit" => {
+                    let Some(limit) = integer_value(&value).and_then(|n| u32::try_from(n).ok()) else {
+                        return Err(unsupported(format!(
+                            "generated column limit for {table}.{col_name} must be a non-negative integer"
+                        )));
+                    };
+                    opts.limit = Some(limit);
+                }
+                "default" => {
+                    return Err(unsupported(format!(
+                        "generated columns cannot also have a default: {table}.{col_name}"
+                    )));
+                }
+                "primary_key" => {
+                    if bool_value(&value).unwrap_or(true) {
+                        return Err(unsupported(format!(
+                            "generated columns cannot be primary keys: {table}.{col_name}"
+                        )));
+                    }
+                }
+                _ => {
+                    return Err(unsupported(format!(
+                        "generated column option `{key}` is unsupported for {table}.{col_name}"
+                    )));
+                }
+            }
+        }
+    }
+
+    let type_name = type_name.ok_or_else(|| {
+        unsupported(format!("generated column type is missing for {table}.{col_name}"))
+    })?;
+    let expression = expression.ok_or_else(|| {
+        unsupported(format!("generated expression is missing for {table}.{col_name}"))
+    })?;
+    let mut column = column_with_type(&type_name, col_name.clone(), &opts, table, file)?;
+    column.generated = Some(GeneratedColumn {
+        expression,
+        storage: if stored.unwrap_or(false) {
+            GeneratedColumnStorage::Stored
+        } else {
+            GeneratedColumnStorage::Virtual
+        },
+    });
+    Ok(column)
+}
+
 /// A column-type name (`t.<type>` / `add_column …, :<type>`) to its
 /// `ColumnType`. The Postgres-only types map to their SQLite storage:
-/// `uuid` is its own variant (TEXT, typed String); `jsonb` is `json`;
+/// `uuid`, `json`, and `jsonb` retain distinct schema variants even when
+/// their shared SQLite/runtime representation uses text;
 /// `citext` is text; `timestamptz` is a datetime; the network types
 /// and a PG `enum` are strings. `timestamp` is Rails' own alias for
 /// `datetime` (`TableDefinition#timestamp`), which a MySQL-backed
@@ -984,7 +1495,10 @@ fn column_with_type(
         // solid_cache's and solid_cable's schemas still write it for their
         // hash columns.
         "integer" if matches!(opts.limit, Some(5..=8)) => ColumnType::BigInt,
-        "integer" => ColumnType::Integer,
+        // `smallint` is the PostgreSQL adapter's native type name, which
+        // `t.column :island, :smallint` passes through; structure.sql's
+        // `smallint` reads alike.
+        "integer" | "smallint" => ColumnType::Integer,
         "bigint" => ColumnType::BigInt,
         "float" => ColumnType::Float,
         "decimal" | "numeric" => ColumnType::Decimal { precision: None, scale: None },
@@ -995,7 +1509,8 @@ fn column_with_type(
         "datetime" | "timestamp" | "timestamptz" => ColumnType::DateTime,
         "time" => ColumnType::Time,
         "binary" => ColumnType::Binary,
-        "json" | "jsonb" => ColumnType::Json,
+        "json" => ColumnType::Json,
+        "jsonb" => ColumnType::Jsonb,
         "uuid" => ColumnType::Uuid,
         "references" | "belongs_to" => {
             ColumnType::Reference { table: TableRef(Symbol::from(col_name.as_str())) }
@@ -1010,12 +1525,40 @@ fn column_with_type(
         }
     };
 
+    // Several PostgreSQL-only aliases are represented as ordinary
+    // strings/text for existing application typing. Preserve just the
+    // negative provenance needed by the generated-expression validator:
+    // these source types do not have the portable text semantics of
+    // Rails `string`/`text` columns.
+    let generated_text_compatible = (opts.array || matches!(
+        type_name,
+        "inet" | "cidr" | "macaddr" | "enum" | "citext"
+    ) || (type_name == "text" && opts.limit.is_some()))
+    .then_some(false);
+    // Rails' PostgreSQL adapter maps integer limits 1 and 2 to smallint,
+    // 3 and 4 to integer, and 5 through 8 to bigint. The shared ordinary
+    // IR keeps limits 1/2 as Integer, so preserve only the negative fact
+    // needed to reject them as generated int4 results. Invalid sizes also
+    // cannot be treated as exact int4; 5..=8 are already BigInt above.
+    let generated_int4_compatible = if type_name == "integer" {
+        match opts.limit {
+            Some(0 | 1 | 2) => Some(false),
+            Some(3 | 4) | None | Some(5..=8) => None,
+            Some(_) => Some(false),
+        }
+    } else {
+        None
+    };
+
     Ok(Column {
         name: Symbol::from(col_name),
         col_type,
         nullable: opts.nullable.unwrap_or(true),
         default: opts.default.clone(),
         primary_key: false,
+        generated: None,
+        generated_text_compatible,
+        generated_int4_compatible,
     })
 }
 
@@ -1035,6 +1578,30 @@ fn column_from_call(
     }
 
     let col_type_name = constant_id_str(&call.name()).to_string();
+    if col_type_name == "virtual" {
+        let Some(args_node) = call.arguments() else {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!("generated column declaration has no arguments in {table}"),
+            });
+        };
+        let args: Vec<Node<'_>> = args_node.arguments().iter().collect();
+        let Some(col_name) = args.first().and_then(name_value) else {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!("generated column declaration has no name in {table}"),
+            });
+        };
+        if has_column_option_splats(&args[1..]) {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!(
+                    "column options for {table}.{col_name} cannot use keyword splats because generated-column metadata may be hidden"
+                ),
+            });
+        }
+        return generated_column_from_options(col_name, table, file, None, &args[1..]).map(Some);
+    }
     // `t.<constraint>` lines are table-level declarations, not columns;
     // the fold does not model them and they cost the DDL nothing.
     if matches!(
@@ -1046,23 +1613,57 @@ fn column_from_call(
     let Some(args_node) = call.arguments() else { return Ok(None) };
     let args: Vec<Node<'_>> = args_node.arguments().iter().collect();
     let Some(col_name) = args.first().and_then(name_value) else { return Ok(None) };
+    if has_column_option_splats(&args[1..]) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "column options for {table}.{col_name} cannot use keyword splats because generated-column metadata may be hidden"
+            ),
+        });
+    }
+    if has_generated_column_options(&args[1..]) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "generated column options on `t.{col_type_name}` are unsupported in {table}; use `t.virtual`"
+            ),
+        });
+    }
+    // `t.column :name, :type, …` is the generic form of `t.<type> :name, …`
+    // (`TableDefinition#column`).
+    if col_type_name == "column" {
+        let Some(type_name) = args.get(1).and_then(name_value) else {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!("column dropped: {table}.{col_name} has no literal type"),
+            });
+        };
+        let opts = parse_column_opts(args.iter().skip(2));
+        return column_with_type(&type_name, col_name, &opts, table, file).map(Some);
+    }
     let opts = parse_column_opts(args.iter().skip(1));
     column_with_type(&col_type_name, col_name, &opts, table, file).map(Some)
 }
 
-fn index_from_call(call: &ruby_prism::CallNode<'_>, table_name: &str) -> Option<Index> {
+fn index_from_call(
+    call: &ruby_prism::CallNode<'_>,
+    table_name: &str,
+    file: &str,
+) -> IngestResult<Option<Index>> {
     // Expected: t.index ["article_id"], name: "...", unique: true
     //       or: t.index :article_id  (migration single-column form)
-    let recv = call.receiver()?;
-    recv.as_local_variable_read_node()?;
-
-    let args_node = call.arguments()?;
-    let args: Vec<Node<'_>> = args_node.arguments().iter().collect();
-    let columns = args.first().map(column_name_list)?;
-    if columns.is_empty() {
-        return None;
+    let Some(recv) = call.receiver() else { return Ok(None) };
+    if recv.as_local_variable_read_node().is_none() {
+        return Ok(None);
     }
-    Some(build_index(table_name, columns, args.iter().skip(1)))
+
+    let Some(args_node) = call.arguments() else { return Ok(None) };
+    let args: Vec<Node<'_>> = args_node.arguments().iter().collect();
+    let Some(columns) = args.first().map(column_name_list) else { return Ok(None) };
+    if columns.is_empty() {
+        return Ok(None);
+    }
+    build_index(table_name, columns, args.iter().skip(1), file).map(Some)
 }
 
 #[cfg(test)]
@@ -1108,6 +1709,52 @@ mod tests {
         let clips = &schema.tables[&Symbol::from("clips")];
         assert!(matches!(clips.columns[3].col_type, ColumnType::Float));
         assert!(!clips.columns[4].nullable, "timestamps are null: false");
+    }
+
+    #[test]
+    fn a_non_literal_column_name_is_a_gap_not_a_skip() {
+        let mut schema = fold(&[r#"
+            class CreateIdx < ActiveRecord::Migration[8.1]
+              def change
+                create_table :idx do |t|
+                  t.string :col_1
+                end
+              end
+            end
+        "#]);
+        let err = ingest_migration(
+            br#"
+            class DropSlots < ActiveRecord::Migration[8.1]
+              def up
+                (1..1).each { |n| remove_column(:idx, :"col_#{n}") }
+              end
+            end
+        "#,
+            "drop.rb",
+            &mut schema,
+        )
+        .expect_err("a non-literal name cannot apply");
+        assert!(err.to_string().contains("`remove_column` argument 2 is not a literal"), "{err}");
+    }
+
+    #[test]
+    fn generic_column_with_a_native_type() {
+        // `t.column(:island, :smallint, …)`.
+        let schema = fold(&[r#"
+            class CreateCounts < ActiveRecord::Migration[8.1]
+              def change
+                create_table :counts do |t|
+                  t.column(:island, :smallint, null: false)
+                  t.column "label", "string"
+                end
+              end
+            end
+        "#]);
+        assert_eq!(col_names(&schema, "counts"), ["id", "island", "label"]);
+        let counts = &schema.tables[&Symbol::from("counts")];
+        assert!(matches!(counts.columns[1].col_type, ColumnType::Integer));
+        assert!(!counts.columns[1].nullable);
+        assert!(matches!(counts.columns[2].col_type, ColumnType::String { .. }));
     }
 
     #[test]
@@ -1223,34 +1870,37 @@ mod tests {
         assert_eq!(col_names(&schema, "users"), ["id", "email"]);
     }
 
-    /// `where:` makes a partial index, in `t.index` and `add_index`
-    /// alike; the predicate is kept as written.
+    /// Index metadata from both table-block `t.index` and migration
+    /// `add_index` calls survives the same schema fold.
     #[test]
-    fn index_where_is_the_partial_predicate() {
+    fn migration_index_options_keep_predicate_and_access_method() {
         let schema = fold(&[r#"
             class CreateTokens < ActiveRecord::Migration[8.1]
               def change
                 create_table :tokens do |t|
                   t.bigint :user_id, null: false
                   t.datetime :revoked_at
+                  t.jsonb :payload
                   t.index :user_id, unique: true, where: "revoked_at IS NULL", name: "live"
                 end
                 add_index :tokens, :revoked_at, where: "revoked_at IS NOT NULL"
                 add_index :tokens, [:user_id, :revoked_at]
+                add_index :tokens, :payload, using: :gin, name: "payload_gin"
               end
             end
         "#]);
-        let indexes: Vec<(&str, bool, Option<&str>)> = schema.tables[&Symbol::from("tokens")]
+        let indexes: Vec<(&str, bool, Option<&str>, Option<&str>)> = schema.tables[&Symbol::from("tokens")]
             .indexes
             .iter()
-            .map(|i| (i.name.as_str(), i.unique, i.predicate.as_deref()))
+            .map(|i| (i.name.as_str(), i.unique, i.predicate.as_deref(), i.using.as_deref()))
             .collect();
         assert_eq!(
             indexes,
             [
-                ("live", true, Some("revoked_at IS NULL")),
-                ("index_tokens_on_revoked_at", false, Some("revoked_at IS NOT NULL")),
-                ("index_tokens_on_user_id_and_revoked_at", false, None),
+                ("live", true, Some("revoked_at IS NULL"), None),
+                ("index_tokens_on_revoked_at", false, Some("revoked_at IS NOT NULL"), None),
+                ("index_tokens_on_user_id_and_revoked_at", false, None, None),
+                ("payload_gin", false, None, Some("gin")),
             ]
         );
     }

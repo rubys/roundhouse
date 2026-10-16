@@ -42,21 +42,23 @@ use crate::span::Span;
 
 /// Top-level entry. Walk `body` bottom-up, rewriting recognized
 /// assertion Sends to inline raise statements. Unrecognized Sends
-/// pass through unchanged.
-pub fn inline_assertions(body: &Expr) -> Expr {
+/// pass through unchanged, and so does a recognized name the test
+/// class defines itself (`own`): the call reaches that method, not
+/// Minitest's.
+pub fn inline_assertions(body: &Expr, own: &dyn Fn(&str) -> bool) -> Expr {
     let mut clone = body.clone();
-    inline_assertions_in_place(&mut clone);
+    inline_assertions_in_place(&mut clone, own);
     clone
 }
 
 /// In-place twin. Returns whether any assertion was rewritten (or a
 /// nested Seq flattened as a rewrite's result) so the test lowerer
 /// can skip a follow-up typing pass.
-pub fn inline_assertions_in_place(body: &mut Expr) -> bool {
-    walk_inline(body)
+pub fn inline_assertions_in_place(body: &mut Expr, own: &dyn Fn(&str) -> bool) -> bool {
+    walk_inline(body, own)
 }
 
-fn walk_inline(e: &mut Expr) -> bool {
+fn walk_inline(e: &mut Expr, own: &dyn Fn(&str) -> bool) -> bool {
     if matches!(&*e.node, ExprNode::Seq { .. }) {
         let exprs = match &mut *e.node {
             ExprNode::Seq { exprs } => std::mem::take(exprs),
@@ -65,7 +67,7 @@ fn walk_inline(e: &mut Expr) -> bool {
         let mut out: Vec<Expr> = Vec::with_capacity(exprs.len());
         let mut changed = false;
         for mut child in exprs {
-            if walk_inline(&mut child) {
+            if walk_inline(&mut child, own) {
                 changed = true;
             }
             let node = std::mem::replace(&mut *child.node, ExprNode::SelfRef);
@@ -86,11 +88,11 @@ fn walk_inline(e: &mut Expr) -> bool {
     }
     let mut changed = false;
     e.node.for_each_child_mut(&mut |c| {
-        if walk_inline(c) {
+        if walk_inline(c, own) {
             changed = true;
         }
     });
-    if let Some(replacement) = rewrite_send(e) {
+    if let Some(replacement) = rewrite_send(e, own) {
         *e = replacement;
         return true;
     }
@@ -100,7 +102,7 @@ fn walk_inline(e: &mut Expr) -> bool {
 /// Rewrite a bare-receiver `assert_*`/`refute_*` Send into an inline
 /// raise expression. Returns None for non-assertion Sends so the
 /// caller passes them through unchanged.
-fn rewrite_send(e: &Expr) -> Option<Expr> {
+fn rewrite_send(e: &Expr, own: &dyn Fn(&str) -> bool) -> Option<Expr> {
     let ExprNode::Send { recv, method, args, block, .. } = &*e.node else {
         return None;
     };
@@ -113,6 +115,9 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
         None => {}
         Some(r) if matches!(&*r.node, ExprNode::SelfRef) => {}
         _ => return None,
+    }
+    if own(method.as_str()) {
+        return None;
     }
     let span = e.span;
     match method.as_str() {
@@ -233,6 +238,15 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 span,
                 not_expr(span, send_method(span, val, "is_a?", vec![klass])),
                 "assert_kind_of failed".to_string(),
+            ))
+        }
+        "assert_not_kind_of" | "refute_kind_of" if args.len() >= 2 => {
+            let klass = args[0].clone();
+            let val = args[1].clone();
+            Some(raise_if(
+                span,
+                send_method(span, val, "is_a?", vec![klass]),
+                "refute_kind_of failed".to_string(),
             ))
         }
         // OBJECT IDENTITY, which is a different question from `==` and
@@ -522,7 +536,7 @@ fn lower_assert_throws(span: Span, tag: &Expr, block: Option<&Expr>) -> Option<E
             args: vec![tag.clone()],
             block: Some(Expr::new(
                 span,
-                ExprNode::Lambda { rest_param: None,
+                ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                     params: vec![],
                     block_param: None,
                     body: caught_body,
@@ -826,7 +840,7 @@ mod array_literal_tests {
 
     #[test]
     fn a_scalar_actual_is_left_alone() {
-        let actual = call(var("message"), "ids", Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Int) }));
+        let actual = call(var("message"), "ids", Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Int) }));
         let out = materialised_for_array_literal(&arr(vec![var("one")]), actual);
         assert_eq!(method_of(&out), "to_a", "an Array-typed call is still asked: `Array#to_a` is identity, and the analyzer's Array is sometimes a relation");
         let actual = call(var("message"), "title", Some(crate::ty::Ty::Nil));
@@ -835,7 +849,7 @@ mod array_literal_tests {
         let out = materialised_for_array_literal(&var("expected"), call(var("m"), "mentionees", None));
         assert_eq!(method_of(&out), "mentionees", "an expected side of unknown type is left alone");
         let mut typed = var("messages");
-        typed.ty = Some(crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Untyped) });
+        typed.ty = Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Untyped) });
         let out = materialised_for_array_literal(&typed, call(var("m"), "search", None));
         assert_eq!(method_of(&out), "to_a", "a local the typer knows holds an Array counts as the literal does");
     }

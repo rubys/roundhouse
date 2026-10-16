@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "test_helper"
 # Fixture modules the index renders comments from. Emitted tests get
 # these injected by src/emit/ruby.rs; this hand-written test names them

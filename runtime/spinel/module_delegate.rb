@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `Module#delegate` — ActiveSupport's, for the GEMS in the emitted
 # Gemfile, not for app code.
 #

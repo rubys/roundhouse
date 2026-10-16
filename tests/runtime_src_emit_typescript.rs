@@ -83,8 +83,9 @@ for (const [count, expected] of [
     assert!(run.status.success(), "{emitted}\n{}", String::from_utf8_lossy(&run.stderr));
 }
 
-/// Phase 1 second target: errors.rb has four classes (RecordNotFound,
-/// ValueTooLong, RecordNotUnique, RecordInvalid), one with a synth attr_reader
+/// Phase 1 second target: errors.rb has five classes (RecordNotFound,
+/// ValueTooLong, RecordNotUnique, SoleRecordExceeded, RecordInvalid), one
+/// with a synth attr_reader
 /// (`record`) and an `initialize` that calls `super(...)`. Validates parent extends
 /// (StandardError → Error), constructor synthesis, attr_reader-as-
 /// field detection, and `@ivar` → `this.x` in the constructor body.
@@ -98,7 +99,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
     let classes = parse_library_with_rbs(&ruby, &rbs, "runtime/ruby/active_record/errors.rb")
         .expect("parse_library_with_rbs");
 
-    assert_eq!(classes.len(), 4, "expected 4 classes; got {}", classes.len());
+    assert_eq!(classes.len(), 23, "expected 23 classes; got {}", classes.len());
 
     let not_found = classes
         .iter()
@@ -106,7 +107,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
         .expect("ActiveRecord::RecordNotFound");
     let nf_ts = emit_library_class(not_found).expect("emit RecordNotFound");
     assert!(
-        nf_ts.contains("export class RecordNotFound extends Error"),
+        nf_ts.contains("export class RecordNotFound extends ActiveRecordError"),
         "RecordNotFound: {nf_ts}"
     );
 
@@ -116,7 +117,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
         .expect("ActiveRecord::ValueTooLong");
     let tl_ts = emit_library_class(too_long).expect("emit ValueTooLong");
     assert!(
-        tl_ts.contains("export class ValueTooLong extends Error"),
+        tl_ts.contains("export class ValueTooLong extends StatementInvalid"),
         "ValueTooLong: {tl_ts}"
     );
 
@@ -126,7 +127,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
         .expect("ActiveRecord::RecordNotUnique");
     let nu_ts = emit_library_class(not_unique).expect("emit RecordNotUnique");
     assert!(
-        nu_ts.contains("export class RecordNotUnique extends Error"),
+        nu_ts.contains("export class RecordNotUnique extends WrappedDatabaseException"),
         "RecordNotUnique: {nu_ts}"
     );
 
@@ -136,7 +137,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
         .expect("ActiveRecord::RecordInvalid");
     let inv_ts = emit_library_class(invalid).expect("emit RecordInvalid");
     assert!(
-        inv_ts.contains("export class RecordInvalid extends Error"),
+        inv_ts.contains("export class RecordInvalid extends ActiveRecordError"),
         "missing class header: {inv_ts}"
     );
     assert!(
@@ -270,4 +271,29 @@ fn runtime_corpus_phase1_gap_survey() {
         parse_ok, RUNTIME_PAIRS.len(), emit_ok, RUNTIME_PAIRS.len(),
     );
     eprintln!("{report}");
+}
+
+/// Ruby methods whose same-named JS native means something else.
+/// `Array#sort` on numbers needs a numeric comparator (JS's default
+/// compares as strings, so `[10, 9, 1].sort()` is `[1, 10, 9]`).
+/// `String#gsub` with a String pattern replaces every occurrence
+/// (`replaceAll`); an empty literal pattern uses `replace(/(?:)/gu, …)`
+/// so steps are by code point (not UTF-16 units).
+#[test]
+fn native_semantics_follow_ruby() {
+    let methods = parse_methods_with_rbs(
+        "module Natives\n  def sorted(xs)\n    xs.sort\n  end\n  def words(xs)\n    xs.sort\n  end\n  def swap(s)\n    s.gsub(\"l\", \"L\")\n  end\n  def swap_rx(s)\n    s.gsub(/l+/, \"L\")\n  end\n  def spread(s)\n    s.gsub(\"\", \"-\")\n  end\nend\n",
+        "module Natives\n  def sorted: (Array[Integer]) -> Array[Integer]\n  def words: (Array[String]) -> Array[String]\n  def swap: (String) -> String\n  def swap_rx: (String) -> String\n  def spread: (String) -> String\nend\n",
+    )
+    .expect("parse");
+    let sorted = emit_method(&methods[0]);
+    let words = emit_method(&methods[1]);
+    let swap = emit_method(&methods[2]);
+    let swap_rx = emit_method(&methods[3]);
+    let spread = emit_method(&methods[4]);
+    assert!(sorted.contains("[...xs].sort((a, b) => a - b)"), "numeric sort:\n{sorted}");
+    assert!(words.contains("[...xs].sort()"), "string sort keeps the default:\n{words}");
+    assert!(swap.contains("s.replaceAll(\"l\", \"L\")"), "string gsub:\n{swap}");
+    assert!(swap_rx.contains("s.replace(/l+/g, \"L\")"), "regex gsub:\n{swap_rx}");
+    assert!(spread.contains("s.replace(/(?:)/gu, \"-\")"), "empty gsub:\n{spread}");
 }

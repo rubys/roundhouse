@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Controller-level cookie access — Rails' `cookies` CookieJar. `cookies[:k]`
 # reads the inbound cookie; `cookies[:k] = v` records a write the dispatcher
 # serializes as Set-Cookie, and `cookies.permanent[:k] = v` records one that

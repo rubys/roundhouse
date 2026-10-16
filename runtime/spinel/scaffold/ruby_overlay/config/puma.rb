@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Puma configuration — mirrors Rails 7.1+ generator output so
 # benchmarks against a baseline Rails app run under identical
 # server configuration.

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The cookies the two ruby-family dispatchers write for themselves — the
 # session and the flash messages — signed, so a client can read them but
 # not forge them. A value that does not verify (edited, plaintext, signed

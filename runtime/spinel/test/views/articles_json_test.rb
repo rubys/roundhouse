@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Minitest-shaped: this is a CRuby-only framework test, quarantined
 # out of the spin shape by `project.rs::spin_shape` (it is not a spin
 # test program and gets no snapshot). It therefore loads its own
@@ -14,14 +15,16 @@ require "views"
 # `fixtures/real-blog/app/views/articles/*.json.jbuilder`. Asserts on
 # substring matches over the lowered JSON output rather than parsing
 # (the spinel-subset `runtime/json.rb` shim only emits `JSON.generate`;
-# no `parse` companion). Rails-vs-CRuby `Time#to_s` divergence and
-# host-aware URL generation (`article_url` → "http://host/articles/
-# 1.json") are tracked as Phase-8 follow-on concerns, not Phase-4
-# blockers.
+# no `parse` companion). `article_url` is absolute on the test host,
+# format suffix included (`http://www.example.com/articles/N.json`).
 
 class ViewsArticlesJsonTest < Minitest::Test
   def setup
     SchemaSetup.reset!
+    # A direct view render has no request. The integration harness
+    # parks Rails' test host here (TestBase#setup / host!); do the
+    # same so `url_for_path` answers the absolute URL Rails writes.
+    ActionView::ViewHelpers.url_origin = "http://www.example.com"
     @article = Article.new(
       title: "Getting Started",
       body: "Rails is a web application framework running on Ruby.",
@@ -51,13 +54,12 @@ class ViewsArticlesJsonTest < Minitest::Test
     assert_match(/"updated_at":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"/, j)
   end
 
-  def test_article_json_partial_url_uses_path_helper
+  def test_article_json_partial_url_is_absolute
     j = Views::Articles.article_json(@article)
-    # `json.url article_url(article, format: :json)` lowers through
-    # the route-helper rewrite to `RouteHelpers.article_path(id)`.
-    # Host + format suffix are Phase 8 work; the path component must
-    # match the canonical route shape regardless.
-    assert_includes j, %("url":"/articles/#{@article.id}")
+    # `json.url article_url(article, format: :json)` lowers to
+    # `ViewHelpers.url_for_path(RouteHelpers.article_path(id) + ".json")`.
+    # Rails answers an absolute URL on the test host, format suffix included.
+    assert_includes j, %("url":"http://www.example.com/articles/#{@article.id}.json")
   end
 
   def test_article_json_escapes_special_characters
@@ -84,7 +86,6 @@ class ViewsArticlesJsonTest < Minitest::Test
   # ── index: index_json.rb ────────────────────────────────────────
 
   def test_index_json_renders_empty_array_for_empty_collection
-    Article._adapter_truncate
     assert_equal "[]", Views::Articles.index_json([])
   end
 
@@ -115,7 +116,7 @@ class ViewsArticlesJsonTest < Minitest::Test
   # ActiveRecord.adapter stays nil per test_helper's policy (any path
   # that falls through surfaces a NoMethodError; the lowered
   # controllers use Level-3 Db.exec, not the adapter dispatcher).
-  def test_delete_articles_json_returns_204_with_json_content_type
+  def test_delete_articles_json_returns_204_without_content_type
     require_relative "../../main"
     out = StringIO.new
     Main.run(
@@ -124,7 +125,9 @@ class ViewsArticlesJsonTest < Minitest::Test
       out,
     )
     assert_match(/^Status: 204\b/, out.string)
-    assert_includes out.string, "Content-Type: application/json"
+    # Rails omits Content-Type on 204, 205, 304, and 1xx. `head` clears
+    # it for those statuses; a JSON content type here was the older shape.
+    refute_includes out.string, "Content-Type:"
   end
 
   def test_post_articles_json_returns_201_with_location_and_body

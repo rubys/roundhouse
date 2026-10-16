@@ -217,7 +217,7 @@ impl EmitCtx {
         self.global_class_methods
             .get(class)
             .and_then(|methods| methods.get(method))
-            .map(|params| params.iter().map(|p| p.ty.clone()).collect())
+            .map(|params| params.iter().map(|p| (*p.ty).clone()).collect())
     }
 
     /// Rich variant returning the full `Param` list (name + ty +

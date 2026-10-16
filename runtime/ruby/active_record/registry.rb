@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Cross-model registry. Bridges the import-cycle gap in strict-typed
 # targets (Go, Rust, future Kotlin/Swift) where `Article has_many
 # :comments` + `Comment belongs_to :article` can't both be expressed

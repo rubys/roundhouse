@@ -171,7 +171,7 @@ module Roundhouse
       # query-string entries are always String leaves; form-body keys
       # may be bracket-nested (`comment[commenter]`) and surface as
       # `Hash(String, ParamValue)` sub-trees. The slot's typed value
-      # union `Roundhouse::ParamValue = String | Hash(...) | Array(...)`
+      # union `Roundhouse::ParamValue = JSON scalars | Hash(...) | Array(...)`
       # accepts either shape; the lowered `<Resource>Params.from_raw`
       # emit narrows via `is_a?(Hash)` / `is_a?(String)` at access.
       merged = {} of String => Roundhouse::ParamValue

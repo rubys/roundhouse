@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # A TIME bind rendered into SQL text must use the same format the
 # temporal COLUMN is stored in.
 #

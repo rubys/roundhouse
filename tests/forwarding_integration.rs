@@ -397,6 +397,312 @@ fn inherited_full_model_contract_cannot_be_replaced_by_subclass_synthesis() {
 }
 
 #[test]
+fn keyword_packet_keeps_unaffected_base_and_sibling_contracts() {
+    let parent = r#"
+class ForwardingRecord < ApplicationRecord
+  self.abstract_class = true
+  def self._conflict_predicate(**); :inherited; end
+end
+"#;
+    let descendants = r#"
+class ChildArticle < Article; end
+class SiblingRecord < ForwardingRecord; end
+"#;
+    let probe = r#"
+class Probe
+  def self.base(**)
+    ForwardingRecord._conflict_predicate(**)
+  end
+
+  def self.sibling(**)
+    SiblingRecord._conflict_predicate(**)
+  end
+end
+"#;
+
+    let run = emit_and_run::real_blog()
+        .write("app/models/forwarding_record.rb", parent)
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord",
+            "class Article < ForwardingRecord",
+        )
+        .write("app/lib/keyword_forwarding_descendants.rb", descendants)
+        .write("app/lib/probe.rb", probe)
+        .edit(
+            "db/schema.rb",
+            "    t.string \"title\"",
+            "    t.string \"title\"\n    t.index [\"title\"], name: \"index_articles_live_title\", unique: true, where: \"(id > 0)\"",
+        )
+        .run_ruby(
+            "raise 'base dispatch changed' unless Probe.base(value: 11) == :inherited; raise 'sibling dispatch changed' unless Probe.sibling(value: 12) == :inherited; puts 'base and sibling keyword calls still dispatch'",
+        );
+    run.assert_passes();
+    assert!(run.errors.is_empty(), "errors={:?}", run.errors);
+    assert_eq!(run.stdout, "base and sibling keyword calls still dispatch\n");
+}
+
+#[test]
+fn keyword_super_packet_to_plain_parent_emits_and_executes() {
+    let classes = r#"
+class PacketParent
+  def self.route(**)
+    :parent_contract
+  end
+end
+
+class PacketChild < PacketParent
+  def self.route(**)
+    super(**)
+  end
+end
+"#;
+    let run = emit_and_run::real_blog()
+        .write("app/lib/keyword_super_packets.rb", classes)
+        .run_ruby(
+            "raise 'super keyword packet changed' unless PacketChild.route(value: 17) == :parent_contract; puts 'plain parent keyword contract preserved'",
+        );
+
+    run.assert_passes();
+    assert!(run.errors.is_empty(), "errors={:?}", run.errors);
+    assert_eq!(run.stdout, "plain parent keyword contract preserved\n");
+}
+
+#[test]
+fn keyword_packet_through_super_checks_replaced_model_ancestor() {
+    let parent = r#"
+class ForwardingRecord < ApplicationRecord
+  self.abstract_class = true
+  def self._conflict_predicate(**); :source; end
+end
+"#;
+    let child = r#"
+class ChildArticle < Article
+  def self._conflict_predicate(**)
+    super(**)
+  end
+end
+"#;
+    // The source keyword-rest contract accepts this call. Article's partial
+    // index instead synthesizes a positional columns method; `super(**)`
+    // reaches that replacement from the child's inherited lookup chain.
+    let native_source = r#"
+class ForwardingRecord
+  def self._conflict_predicate(**); :source; end
+end
+class Article < ForwardingRecord
+  def self._conflict_predicate(columns); columns.join(","); end
+end
+class ChildArticle < Article
+  def self._conflict_predicate(**); super(**); end
+end
+begin
+  ChildArticle._conflict_predicate(columns: [:id])
+  raise "super packet unexpectedly matched the source keyword-rest contract"
+rescue NoMethodError => error
+  raise unless error.name == :join
+end
+puts "super packet reaches the synthesized positional contract"
+"#;
+    let native = Command::new("ruby")
+        .args(["-e", native_source])
+        .output()
+        .unwrap();
+    assert!(
+        native.status.success(),
+        "native stderr: {}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&native.stdout),
+        "super packet reaches the synthesized positional contract\n"
+    );
+
+    let run = emit_and_run::real_blog()
+        .write("app/models/forwarding_record.rb", parent)
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord",
+            "class Article < ForwardingRecord",
+        )
+        .write("app/lib/keyword_forwarding_child.rb", child)
+        .edit(
+            "db/schema.rb",
+            "    t.string \"title\"",
+            "    t.string \"title\"\n    t.index [\"title\"], name: \"index_articles_live_title\", unique: true, where: \"(id > 0)\"",
+        )
+        .run_ruby("puts 'super packet into a replaced model ancestor is diagnosed'");
+    assert!(run.success, "actual={}; stderr={}", run.stdout, run.stderr);
+    assert_eq!(
+        run.stdout,
+        "super packet into a replaced model ancestor is diagnosed\n"
+    );
+    assert_eq!(run.errors.len(), 1, "errors={:?}", run.errors);
+    assert!(
+        run.errors[0].contains("model method synthesis"),
+        "errors={:?}; actual={}; stderr={}",
+        run.errors,
+        run.stdout,
+        run.stderr
+    );
+}
+
+#[test]
+fn keyword_packet_checks_inherited_model_contract_replaced_by_synthesis() {
+    let parent = r#"
+class ForwardingRecord < ApplicationRecord
+  self.abstract_class = true
+  def self._conflict_predicate(**); :inherited; end
+  def self.virtual_relay(**); _conflict_predicate(**); end
+end
+"#;
+    let descendants = r#"
+class ChildArticle < Article; end
+class SiblingRecord < ForwardingRecord; end
+"#;
+    let probe = r#"
+class Probe
+  def self.relay(**)
+    Article._conflict_predicate(**)
+  end
+
+  def self.mixed(**)
+    Article._conflict_predicate(kind: :generic, **)
+  end
+
+  def self.child(**)
+    ChildArticle._conflict_predicate(**)
+  end
+end
+"#;
+    let native_source = r##"
+class ForwardingRecord
+  def self._conflict_predicate(**); :inherited; end
+  def self.virtual_relay(**); _conflict_predicate(**); end
+end
+class Article < ForwardingRecord
+  def self._conflict_predicate(columns); :generated; end
+end
+class ChildArticle < Article; end
+class SiblingRecord < ForwardingRecord; end
+class Probe
+  def self.base(**); ForwardingRecord._conflict_predicate(**); end
+  def self.sibling(**); SiblingRecord._conflict_predicate(**); end
+  def self.relay(**); Article._conflict_predicate(**); end
+  def self.mixed(**); Article._conflict_predicate(kind: :generic, **); end
+  def self.child(**); ChildArticle._conflict_predicate(**); end
+end
+raise "base dispatch changed" unless Probe.base(value: 11) == :inherited
+raise "sibling dispatch changed" unless Probe.sibling(value: 12) == :inherited
+[[Article, :single], [Article, :mixed], [ChildArticle, :single], [Article, :virtual]].each do |klass, mode|
+  actual = case mode
+  when :virtual then klass.virtual_relay(value: 13)
+  when :mixed then klass._conflict_predicate(kind: :generic, value: 13)
+  else klass._conflict_predicate(value: 13)
+  end
+  raise "#{klass} #{mode} did not select the synthesized method" unless actual == :generated
+end
+puts "base and sibling keyword calls still dispatch"
+"##;
+    let native = Command::new("ruby")
+        .args(["-e", native_source])
+        .output()
+        .unwrap();
+    assert!(
+        native.status.success(),
+        "native stderr: {}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&native.stdout),
+        "base and sibling keyword calls still dispatch\n"
+    );
+
+    let run = emit_and_run::real_blog()
+        .write("app/models/forwarding_record.rb", parent)
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord",
+            "class Article < ForwardingRecord",
+        )
+        .write("app/lib/keyword_forwarding_descendants.rb", descendants)
+        .write("app/lib/probe.rb", probe)
+        .edit(
+            "db/schema.rb",
+            "    t.string \"title\"",
+            "    t.string \"title\"\n    t.index [\"title\"], name: \"index_articles_live_title\", unique: true, where: \"(id > 0)\"",
+        )
+        .run_ruby("puts 'unsafe inherited keyword destinations are diagnosed'");
+    assert!(run.success, "actual={}; stderr={}", run.stdout, run.stderr);
+    assert_eq!(run.stdout, "unsafe inherited keyword destinations are diagnosed\n");
+    assert_eq!(run.errors.len(), 4, "errors={:?}", run.errors);
+    assert!(
+        run.errors.iter().all(|e| e.contains("model method synthesis")),
+        "errors={:?}; actual={}; stderr={}",
+        run.errors,
+        run.stdout,
+        run.stderr
+    );
+}
+
+#[test]
+fn keyword_packet_refuses_model_owned_contract_replaced_by_synthesis() {
+    let probe = r#"
+class Probe
+  def self.relay(**)
+    Article._conflict_predicate(**)
+  end
+end
+"#;
+    let native_source = r#"
+class Article
+  def self._conflict_predicate(**); :source; end
+  def self._conflict_predicate(columns); :generated; end
+end
+class Probe
+  def self.relay(**); Article._conflict_predicate(**); end
+end
+raise "model-owned source method unexpectedly survived synthesis" unless Probe.relay(value: 41) == :generated
+puts "model-owned source method is replaced"
+"#;
+    let native = Command::new("ruby")
+        .args(["-e", native_source])
+        .output()
+        .unwrap();
+    assert!(
+        native.status.success(),
+        "native stderr: {}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&native.stdout),
+        "model-owned source method is replaced\n"
+    );
+
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord",
+            "class Article < ApplicationRecord\n  def self._conflict_predicate(**); :source; end",
+        )
+        .write("app/lib/probe.rb", probe)
+        .edit(
+            "db/schema.rb",
+            "    t.string \"title\"",
+            "    t.string \"title\"\n    t.index [\"title\"], name: \"index_articles_live_title\", unique: true, where: \"(id > 0)\"",
+        )
+        .run_ruby("puts 'model-owned replacement is diagnosed'");
+    assert!(run.success, "actual={}; stderr={}", run.stdout, run.stderr);
+    assert_eq!(run.stdout, "model-owned replacement is diagnosed\n");
+    assert_eq!(run.errors.len(), 1, "errors={:?}", run.errors);
+    assert!(
+        run.errors[0].contains("model method synthesis"),
+        "errors={:?}",
+        run.errors
+    );
+}
+
+#[test]
 fn full_mixin_forwarder_refuses_an_ordinary_destination_shadowed_by_model_synthesis() {
     for (name, refused) in [("custom_title", false), ("title", true)] {
         let api = format!(

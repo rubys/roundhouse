@@ -70,7 +70,7 @@ fn a_constant_stored_value_is_compared_unfolded() {
     assert!(out.contains("def archived?"), "got:\n{out}");
     assert!(out.contains("status == Status::ARCHIVED"), "got:\n{out}");
     assert!(out.contains("def open!"), "got:\n{out}");
-    assert!(out.contains("update!(status: Status::OPEN)"), "got:\n{out}");
+    assert!(out.contains("update!({ status: Status::OPEN })"), "got:\n{out}");
 }
 
 /// A label spelled as a constant the class body assigned, including an
@@ -92,7 +92,7 @@ fn an_interpolated_label_is_folded() {
     );
     assert!(out.contains("def unset?"), "got:\n{out}");
     assert!(out.contains("def ready!"), "got:\n{out}");
-    assert!(out.contains("update!(phase: 1)"), "got:\n{out}");
+    assert!(out.contains("update!({ phase: 1 })"), "got:\n{out}");
 }
 
 /// A mapping derived from a class-body label list maps each label to its

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `Rails::HTML5::SafeListSanitizer`'s two class-level lists, for spinel:
 # what the `rails-html-sanitizer` gem answers on the ruby family, where
 # the gem itself is loaded. campfire reads them at LOAD time since the

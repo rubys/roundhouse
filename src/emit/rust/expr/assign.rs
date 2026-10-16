@@ -156,7 +156,7 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
                 let leaf = cls.rsplit("::").next().unwrap_or(cls);
                 if leaf == "HeaderStore" {
                     let opt_str = crate::ty::Ty::Union {
-                        variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil],
+                        variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil].into(),
                     };
                     let wrapped = super::coerce_arg_for_param_ty(value, &opt_str);
                     return format!(
@@ -267,7 +267,7 @@ fn empty_hash_return_ty(value: &Expr) -> Option<crate::ty::Ty> {
                 (**key).clone()
             };
             Some(crate::ty::Ty::Hash {
-                key: Box::new(k),
+                key: std::sync::Arc::new(k),
                 value: v.clone(),
             })
         }

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::Response -- what the handler writes back. Headers are a Bag
 # (string-keyed); the framework adds Content-Length / Connection
 # automatically when serializing.

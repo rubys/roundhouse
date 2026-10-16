@@ -35,7 +35,7 @@ pub(super) fn push_broadcasts_methods(methods: &mut Vec<MethodDef>, model: &Mode
         }
 
         let (channel_expr, self_param) = match &*args[0].node {
-            ExprNode::Lambda { body, params, .. } => (body.clone(), params.first().cloned()),
+            ExprNode::Lambda { body, params, extra_params, .. } if extra_params.is_empty() => (body.clone(), params.first().cloned()),
             ExprNode::Lit { value: Literal::Str { .. } } => (args[0].clone(), None),
             _ => continue,
         };
@@ -639,13 +639,19 @@ fn rewrite_self_broadcast(
     model: &Model,
     span: Span,
 ) -> Option<Expr> {
-    let (positional, opts) = split_trailing_kwargs(args);
+    let (positional, mut opts, given_html) = split_options(args, span)?;
     if positional.is_empty() {
         return None;
     }
     // Rendering options that would change WHAT is rendered are not
     // modeled yet; taking the default partial anyway would broadcast
-    // the wrong markup, which is worse than not broadcasting.
+    // the wrong markup, which is worse than not broadcasting. `html:`
+    // is the exception: the caller already rendered it.
+    let given_html = match opts.iter().position(|(k, _)| k.as_str() == "html") {
+        Some(i) if given_html.is_none() => Some(GivenHtml::Always(opts.remove(i).1)),
+        Some(_) => return decline(span, "broadcast option `html:` given twice"),
+        None => given_html,
+    };
     for (key, _) in &opts {
         match key.as_str() {
             "target" => {}
@@ -669,9 +675,21 @@ fn rewrite_self_broadcast(
         },
     };
 
-    let html = match action {
-        BroadcastAct::Remove => None,
-        _ => Some(views_render_self(&model.name)),
+    let html = match (action, given_html) {
+        (BroadcastAct::Remove, None) => None,
+        (BroadcastAct::Remove, Some(_)) => {
+            return decline(span, "broadcast_remove_to option `html:`")
+        }
+        (_, None) => Some(views_render_self(&model.name)),
+        (_, Some(GivenHtml::Always(html))) => Some(html),
+        (_, Some(GivenHtml::When(cond, html))) => Some(Expr::new(
+            span,
+            ExprNode::If {
+                cond,
+                then_branch: html,
+                else_branch: views_render_self(&model.name),
+            },
+        )),
     };
     let call = broadcasts_call(action, stream, target, html);
 
@@ -727,8 +745,7 @@ fn streamables(
             // `broadcast_append_to self` — Rails' own shorthand for a
             // per-record stream. No association read, so no nil guard.
             ExprNode::SelfRef => parts.push(Streamable::Record {
-                singular: crate::naming::snake_case(model.name.0.as_str()),
-                id: Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") }),
+                record: Expr::new(Span::synthetic(), ExprNode::SelfRef),
             }),
             ExprNode::Send { recv: None, method: name, args: a, block: None, .. }
                 if a.is_empty() =>
@@ -741,16 +758,14 @@ fn streamables(
                     }
                     _ => None,
                 });
-                let Some(target) = target else {
+                if target.is_none() {
                     return decline_opt(span, &format!("streamable `{name}` is not a belongs_to"));
-                };
+                }
                 if owner.is_some() {
                     return decline_opt(span, "more than one record streamable");
                 }
-                let singular = crate::naming::snake_case(target.0.as_str());
                 parts.push(Streamable::Record {
-                    singular,
-                    id: read_id(var_ref(owner_local())),
+                    record: var_ref(owner_local()),
                 });
                 owner = Some(OwnerRef { expr: arg.clone() });
             }
@@ -825,19 +840,6 @@ fn literal_text(e: &Expr) -> Option<String> {
     }
 }
 
-fn read_id(recv: Expr) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(recv),
-            method: Symbol::from("id"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    )
-}
-
 fn return_if_nil(name: Symbol) -> Expr {
     let cond = Expr::new(
         Span::synthetic(),
@@ -883,6 +885,56 @@ fn decline<T>(span: Span, what: &str) -> Option<T> {
 
 fn decline_opt<T>(span: Span, what: &str) -> Option<T> {
     decline(span, what)
+}
+
+/// Markup the caller rendered and handed in with `html:`, so the
+/// broadcast sends it instead of rendering the default partial.
+enum GivenHtml {
+    Always(Expr),
+    /// `**(cond ? { html: x } : {})` — `x` when `cond`, else the
+    /// default partial.
+    When(Expr, Expr),
+}
+
+/// The trailing options, including the one conditional double splat
+/// Rails code writes to pass rendered markup only when it has some:
+/// `**(html ? { html: html } : {})`, which ingest spells
+/// `{ … }.merge(if html then { html: html } else {} end)`. Any other
+/// merged value declines the call.
+fn split_options(
+    args: &[Expr],
+    span: Span,
+) -> Option<(&[Expr], Vec<(Symbol, Expr)>, Option<GivenHtml>)> {
+    let Some(last) = args.last() else {
+        return Some((args, Vec::new(), None));
+    };
+    let ExprNode::Send { recv: Some(base), method, args: merged, block: None, .. } = &*last.node
+    else {
+        let (positional, opts) = split_trailing_kwargs(args);
+        return Some((positional, opts, None));
+    };
+    if method.as_str() != "merge" || merged.len() != 1 {
+        return Some((args, Vec::new(), None));
+    }
+    let ExprNode::Hash { .. } = &*base.node else {
+        return Some((args, Vec::new(), None));
+    };
+    let (_, opts) = split_trailing_kwargs(std::slice::from_ref(base));
+    let ExprNode::If { cond, then_branch, else_branch } = &*merged[0].node else {
+        return decline(span, "broadcast options merged from a computed hash");
+    };
+    let only_html = |e: &Expr| match &*e.node {
+        ExprNode::Hash { entries, .. } if entries.len() == 1 => {
+            sym_key(&entries[0].0).filter(|k| k.as_str() == "html").map(|_| entries[0].1.clone())
+        }
+        _ => None,
+    };
+    let empty = |e: &Expr| matches!(&*e.node, ExprNode::Hash { entries, .. } if entries.is_empty());
+    let given = match (only_html(then_branch), empty(else_branch)) {
+        (Some(html), true) => GivenHtml::When(cond.clone(), html),
+        _ => return decline(span, "broadcast options merged from a conditional other than `html:`"),
+    };
+    Some((&args[..args.len() - 1], opts, Some(given)))
 }
 
 fn split_trailing_kwargs(args: &[Expr]) -> (&[Expr], Vec<(Symbol, Expr)>) {

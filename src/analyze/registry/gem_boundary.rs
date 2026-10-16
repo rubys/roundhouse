@@ -24,20 +24,10 @@ use std::collections::{HashMap, HashSet};
 use crate::app::App;
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
+use crate::gem_boundary::RUBY_CORE;
 
 use super::super::body::ClassInfo;
 
-/// Ruby's own top-level names. An RBI that mentions them is patching or
-/// extending the language, not declaring a gem class.
-const RUBY_CORE: &[&str] = &[
-    "BasicObject", "Object", "Module", "Class", "Kernel", "Comparable", "Enumerable", "Enumerator",
-    "Numeric", "Integer", "Float", "Rational", "Complex", "String", "Symbol", "Array", "Hash",
-    "Range", "Regexp", "MatchData", "Struct", "Proc", "Method", "UnboundMethod", "Time", "Date",
-    "DateTime", "IO", "File", "Dir", "Exception", "StandardError", "RuntimeError", "NilClass",
-    "TrueClass", "FalseClass", "Set", "Random", "Process", "Signal", "Math", "Marshal", "GC",
-    "ObjectSpace", "Thread", "Mutex", "Fiber", "Ractor", "Data", "Encoding", "Binding",
-    "BigDecimal", "Pathname", "StringIO", "URI", "JSON", "Logger", "Singleton", "Forwardable",
-];
 
 /// Mixins that add no callable surface a caller could miss: sorbet's
 /// own `extend T::Sig`, and the ActiveSupport::Concern marker.
@@ -183,6 +173,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>, ap
     let reopened: Vec<&ClassId> = declared
         .keys()
         .filter(|id| !fresh.contains(*id) && !app_owned.contains(*id) && classes.contains_key(*id))
+        .filter(|id| !app.extensions.is_rails_dependent(&declared[*id].gem))
         .filter(|id| {
             let name = id.0.as_str();
             !RUBY_CORE.contains(&name.split("::").next().unwrap_or(name))
@@ -238,10 +229,10 @@ fn prune_ty(ty: &Ty, resolve: &dyn Fn(&ClassId) -> Option<ClassId>) -> Ty {
             },
             None => Ty::Untyped,
         },
-        Ty::Array { elem } => Ty::Array { elem: Box::new(prune_ty(elem, resolve)) },
+        Ty::Array { elem } => Ty::Array { elem: std::sync::Arc::new(prune_ty(elem, resolve)) },
         Ty::Hash { key, value } => Ty::Hash {
-            key: Box::new(prune_ty(key, resolve)),
-            value: Box::new(prune_ty(value, resolve)),
+            key: std::sync::Arc::new(prune_ty(key, resolve)),
+            value: std::sync::Arc::new(prune_ty(value, resolve)),
         },
         Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(|t| prune_ty(t, resolve)).collect() },
         Ty::Union { variants } => {
@@ -250,10 +241,10 @@ fn prune_ty(ty: &Ty, resolve: &dyn Fn(&ClassId) -> Option<ClassId>) -> Ty {
         Ty::Fn { params, block, ret, effects } => Ty::Fn {
             params: params
                 .iter()
-                .map(|p| crate::ty::Param { name: p.name.clone(), ty: prune_ty(&p.ty, resolve), kind: p.kind.clone() })
+                .map(|p| crate::ty::Param { name: p.name.clone(), ty: prune_ty(&p.ty, resolve).into(), kind: p.kind.clone() })
                 .collect(),
-            block: block.as_ref().map(|b| Box::new(prune_ty(b, resolve))),
-            ret: Box::new(prune_ty(ret, resolve)),
+            block: block.as_ref().map(|b| std::sync::Arc::new(prune_ty(b, resolve))),
+            ret: std::sync::Arc::new(prune_ty(ret, resolve)),
             effects: effects.clone(),
         },
         other => other.clone(),

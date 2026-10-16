@@ -185,11 +185,12 @@ fn fixture_population_does_not_add_a_constructor_phase_argument() {
     assert!(model.contains("def initialize(attrs = ActiveRecord::Base::EMPTY_ATTRS)"), "{model}");
     assert!(!model.contains("schema_defaults"), "fixture policy must not enter initialize: {model}");
     // Retain the existing hook machinery and constructor-before-population
-    // order, not Rails callback-free fixture parity (a separate runtime gap).
+    // order. The insert itself is callback-free, as Rails' is; that the
+    // constructor still runs `after_initialize` is the remaining gap.
     assert!(model.contains("after_initialize if !(attrs.equal? ActiveRecord::Base::HYDRATE_ATTRS)"), "{model}");
     let construction = fixture.find("instance = Article.new\n").expect("ordinary construction");
     let population = fixture.find("instance._write_severity_raw \"mild\"").expect("raw schema population");
-    let save = fixture.find("instance.save_after_validation").expect("existing fixture save");
+    let save = fixture.find("instance._insert_row").expect("callback-free fixture insert");
     assert!(construction < population && population < save, "{fixture}");
 }
 

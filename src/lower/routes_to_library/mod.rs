@@ -21,7 +21,7 @@ use crate::dialect::{HttpMethod, LibraryFunction, Param};
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, Expr, ExprNode, InterpPart, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
-use crate::lower::routes::{flatten_routes, FlatRoute};
+use crate::lower::routes::{flatten_routes, flatten_routes_for_helpers, FlatRoute};
 use crate::lower::typing::{fn_sig, lit_str, lit_sym, with_ty};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -47,17 +47,22 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
         return Vec::new();
     }
     let module_path = vec![Symbol::from("RouteTable")];
-    // Same partition the per-target Spinel emit used: path "/" goes
-    // to `RouteTable.root`, everything else to `RouteTable.table`. Callers
-    // typically combine them at use site (`[RouteTable.root] +
-    // RouteTable.table`).
-    let (root_routes, table_routes): (Vec<&FlatRoute>, Vec<&FlatRoute>) =
-        flat.iter().partition(|r| r.path == "/");
+    // The first route on path "/" (the `root`, when the app has one)
+    // goes to `RouteTable.root`, every other route to `RouteTable.table`.
+    // Callers combine them at use site (`[RouteTable.root] +
+    // RouteTable.table`). Only the first: Rails matches on verb AND
+    // path, so a `match "/", via: %i[post delete]` beside a `root` (or
+    // the second verb of that `match`) is a route of its own, and it
+    // stays in the table in declaration order.
+    let root_index = flat.iter().position(|r| r.path == "/");
+    let root_routes: Vec<&FlatRoute> = root_index.map(|i| &flat[i]).into_iter().collect();
+    let table_routes: Vec<&FlatRoute> =
+        flat.iter().enumerate().filter(|(i, _)| Some(*i) != root_index).map(|(_, r)| r).collect();
 
     let route_class_id = ClassId(Symbol::from("ActionDispatch::Router::Route"));
     let route_ty = Ty::Class {
         id: route_class_id.clone(),
-        args: vec![],
+        args: vec![].into(),
     };
 
     let mut out: Vec<LibraryFunction> = Vec::new();
@@ -73,7 +78,7 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
                 style: ArrayStyle::Brackets,
             },
         ),
-        Ty::Array { elem: Box::new(route_ty.clone()) },
+        Ty::Array { elem: std::sync::Arc::new(route_ty.clone()) },
     );
     out.push(LibraryFunction {
         module_path: module_path.clone(),
@@ -84,7 +89,7 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
         body: table_body,
         signature: Some(fn_sig(
             vec![],
-            Ty::Array { elem: Box::new(route_ty.clone()) },
+            Ty::Array { elem: std::sync::Arc::new(route_ty.clone()) },
         )),
         effects: EffectSet::default(),
         is_async: false,
@@ -147,7 +152,8 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
     // `String` (not `Array[String]`) keeps the optional tail one type
     // across strict/AOT targets; constraint-free routes keep their
     // 4-/5-arg shape.
-    if !r.int_params.is_empty() {
+    let seg_constraints = crate::lower::segment_pattern::encode_route_constraints(&r.seg_patterns);
+    if !r.int_params.is_empty() || !seg_constraints.is_empty() {
         if r.format.is_none() {
             let mut nil = Expr::new(
                 Span::synthetic(),
@@ -157,6 +163,17 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
             args.push(nil);
         }
         args.push(lit_str(r.int_params.join(" ")));
+    }
+    // Segment-pattern requirements (anything beyond the digit class —
+    // `constraints(slug: %r{[^@/.]+})`, compiled by `segment_pattern`
+    // into a portable, backtrack-free encoding) ride the optional 7th
+    // positional as ONE combined string, the same reason `int_params`
+    // stays a scalar rather than an array: a `nil`-or-`[]` optional
+    // tail collapses to `Any?`/a bare variadic on several strict
+    // targets. Routes with no such requirement keep their existing
+    // 4-/5-/6-arg shape, so unconstrained apps emit byte-identical.
+    if !seg_constraints.is_empty() {
+        args.push(lit_str(seg_constraints));
     }
     let class_path: Vec<Symbol> = class_id
         .0
@@ -198,7 +215,7 @@ pub(crate) fn controller_symbol(class_name: &str) -> String {
 /// `LibraryFunction`s, one per named route. Empty when the app has
 /// no routes.
 pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
-    let flat = flatten_routes(app);
+    let flat = flatten_routes_for_helpers(app);
     if flat.is_empty() {
         return Vec::new();
     }
@@ -400,7 +417,7 @@ pub fn lower_url_option_helpers(app: &App) -> Vec<LibraryFunction> {
     if extra_sets.is_empty() {
         return Vec::new();
     }
-    let flat = flatten_routes(app);
+    let flat = flatten_routes_for_helpers(app);
     let module_path = vec![Symbol::from("RouteHelpers")];
     extra_sets
         .iter()
@@ -672,7 +689,7 @@ fn build_url_options_function(
         .chain(extras.iter().cloned())
         .collect();
     // The request's path parameters, last: what the RECALL arms read.
-    let recall_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
+    let recall_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
     LibraryFunction {
         module_path: module_path.to_vec(),
         name: Symbol::from(url_options_helper_name(extras)),
@@ -898,11 +915,15 @@ fn build_helper_function(
         .enumerate()
         .filter(|(_, p)| !keyworded(p))
         .map(|(i, p)| {
+            // Not `param_ty` for a defaulted segment: its default is the route table's text, so the type follows that `Str`, as the keyword half below does.
+            if seg_default(p).is_some() {
+                return (Symbol::from(p.clone()), Ty::Str);
+            }
             let base = param_ty(p, slug_params.contains(p.as_str()));
             let ty = if i < required {
                 base
             } else {
-                Ty::Union { variants: vec![base, Ty::Nil] }
+                Ty::Union { variants: vec![base, Ty::Nil].into() }
             };
             (Symbol::from(p.clone()), ty)
         })
@@ -930,7 +951,7 @@ fn build_helper_function(
             // default apply failed the C build with an int-conversion.
             // One description, and the default is the one that is
             // always present.
-            ty: crate::ty::Ty::Str,
+            ty: crate::ty::Ty::Str.into(),
             kind: crate::ty::ParamKind::Keyword { required: false },
         });
     }
@@ -958,7 +979,7 @@ fn build_helper_function(
         ));
         sig_params.push((
             format_sym.clone(),
-            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
         ));
         // <path> + (format.to_s == "" ? "" : ".#{format}")
         //
@@ -1096,7 +1117,7 @@ fn build_helper_function(
             // Some(false)` used to override to Integer and is what made
             // campfire's messages_controller_test never link.
             let value_ty = if key.array {
-                Ty::Array { elem: Box::new(param_ty(singular_key(&key.name), false)) }
+                Ty::Array { elem: std::sync::Arc::new(param_ty(singular_key(&key.name), false)) }
             } else if key.record_slug == Some(true) {
                 Ty::Str
             } else {
@@ -1104,7 +1125,7 @@ fn build_helper_function(
             };
             query_sig.push(crate::ty::Param {
                 name: sym,
-                ty: Ty::Union { variants: vec![value_ty, Ty::Nil] },
+                ty: Ty::Union { variants: vec![value_ty, Ty::Nil].into() }.into(),
                 kind: crate::ty::ParamKind::Keyword { required: false },
             });
         }
@@ -1510,7 +1531,7 @@ fn format_variant_demand(
     // against the LONGEST route name it starts with or `story_comments`
     // reads as route `story` with format `comments`.
     let mut names: Vec<String> =
-        flatten_routes(app).into_iter().filter(|r| r.named).map(|r| r.as_name).collect();
+        flatten_routes_for_helpers(app).into_iter().filter(|r| r.named).map(|r| r.as_name).collect();
     names.sort();
     names.dedup();
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));
@@ -1588,8 +1609,11 @@ fn for_each_route_call_site(app: &App, f: &mut impl FnMut(&Expr)) {
 fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
     let mut out = path;
     for (i, key) in keys.iter().enumerate() {
+        // Not `var_ref`'s own type: an omitted key is nil, and a `nil?` on a non-nilable receiver folds to `false` on Rust.
         let is_nil = |k: &str| -> Expr {
-            send_method(var_ref(k), "nil?", Vec::new())
+            let var = var_ref(k);
+            let ty = var.ty.clone().map(|t| Ty::Union { variants: vec![t, Ty::Nil].into() });
+            with_ty(send_method(Expr { ty, ..var }, "nil?", Vec::new()), Ty::Bool)
         };
         let key_name = key.name.as_str();
         // `?` only while nothing earlier was rendered. The first key
@@ -1610,31 +1634,37 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
                     },
                 );
             }
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::If {
-                    cond,
-                    then_branch: lit_str("?".to_string()),
-                    else_branch: lit_str("&".to_string()),
-                },
+            with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond,
+                        then_branch: lit_str("?".to_string()),
+                        else_branch: lit_str("&".to_string()),
+                    },
+                ),
+                Ty::Str,
             )
             })
         };
         let url_encode = |value: Expr| -> Expr {
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Send {
-                    recv: Some(Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Const {
-                            path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
-                        },
-                    )),
-                    method: Symbol::from("url_encode"),
-                    args: vec![send_method(value, "to_s", Vec::new())],
-                    block: None,
-                    parenthesized: true,
-                },
+            with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Const {
+                                path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
+                            },
+                        )),
+                        method: Symbol::from("url_encode"),
+                        args: vec![with_ty(send_method(value, "to_s", Vec::new()), Ty::Str)],
+                        block: None,
+                        parenthesized: true,
+                    },
+                ),
+                Ty::Str,
             )
         };
         // Rails renders an Array option as one `k[]=v` pair per
@@ -1661,7 +1691,7 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
                     args: Vec::new(),
                     block: Some(Expr::new(
                         Span::synthetic(),
-                        ExprNode::Lambda { rest_param: None,
+                        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
                             params: vec![elem],
                             block_param: None,
                             body,
@@ -1678,7 +1708,7 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
                 Some(sep) => parts.push(InterpPart::Expr { expr: sep }),
             }
             parts.push(InterpPart::Expr { expr: joined });
-            Expr::new(Span::synthetic(), ExprNode::StringInterp { parts })
+            with_ty(Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }), Ty::Str)
         } else {
             let mut parts: Vec<InterpPart> = Vec::new();
             match separator {
@@ -1689,17 +1719,20 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
                 }
             }
             parts.push(InterpPart::Expr { expr: url_encode(var_ref(key_name)) });
-            Expr::new(Span::synthetic(), ExprNode::StringInterp { parts })
+            with_ty(Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }), Ty::Str)
         };
-        let arm = Expr::new(
-            Span::synthetic(),
-            ExprNode::If {
-                cond: send_method(var_ref(key_name), "nil?", Vec::new()),
-                then_branch: lit_str(String::new()),
-                else_branch: pair,
-            },
+        let arm = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: is_nil(key_name),
+                    then_branch: lit_str(String::new()),
+                    else_branch: pair,
+                },
+            ),
+            Ty::Str,
         );
-        out = send_method(out, "+", vec![arm]);
+        out = with_ty(send_method(out, "+", vec![arm]), Ty::Str);
     }
     out
 }
@@ -2062,7 +2095,7 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
             Span::synthetic(),
             ExprNode::Var { id: VarId(0), name: Symbol::from("params") },
         ),
-        Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+        Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
     );
     let call = |recv: Option<Expr>, m: &str, args: Vec<Expr>, ty: Ty| {
         with_ty(
@@ -2142,7 +2175,7 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
         signature: Some(fn_sig(
             vec![(
                 Symbol::from("params"),
-                Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) },
+                Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) },
             )],
             Ty::Str,
         )),

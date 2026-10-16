@@ -49,7 +49,7 @@ fn qualify_siblings(expr: &mut Expr, owner: &ClassId, methods: &HashSet<Symbol>)
             });
             receiver.ty = Some(crate::ty::Ty::Class {
                 id: owner.clone(),
-                args: vec![],
+                args: vec![].into(),
             });
             *recv = Some(receiver);
         }

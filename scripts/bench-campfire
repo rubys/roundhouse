@@ -10,7 +10,7 @@
 #
 # Usage:  scripts/bench-campfire [options] [LANE ...]
 #
-#   LANE ∈ { rails | ruby | spinel | rust | go | elixir |
+#   LANE ∈ { rails | ruby | ruby-falcon | spinel | rust | go | elixir |
 #            rails-1p | ruby-1p | spinel-1p |
 #            jruby | truffleruby | rails-truffleruby |
 #            rails-nocache | rails-nocache-1p }
@@ -30,6 +30,20 @@
 #                    RENDERING
 #     ruby           roundhouse emit on CRuby, the same Puma shape and
 #                    the same allocator
+#     ruby-falcon    the SAME emitted tree and config.ru under Falcon
+#                    instead of Puma: the emit's falcon.rb (forked
+#                    workers, ThrusterCache's Protocol::HTTP front ahead
+#                    of the Rack adapter), the same worker count,
+#                    jemalloc, YJIT. Falcon is the server
+#                    tobi's lane runs, and on the box its hello-world
+#                    floor is ~2x Puma's (106k vs 54k req/s, 2026-10-15),
+#                    which is the ceiling the static routes hit. HTTP
+#                    only: the WebSocket phase still drives `ruby` under
+#                    Puma (cable.rb hijacks the socket the Puma way). The
+#                    Falcon gem is not in the emitted Gemfile; this lane
+#                    adds it in a `Gemfile.falcon` beside the emit, at the
+#                    version tobi's lock pins, so the two lanes run the
+#                    same server.
 #     spinel         the roundhouse spinel BINARY, workers autodetected
 #     jruby          the roundhouse emit for the JVM (`--target jruby`:
 #                    the same tree over JDBC), ONE process, one Puma
@@ -235,6 +249,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
+. "$REPO_ROOT/scripts/lib/trim-logs.sh"           # trim_logs: the exit trap's log cap
 # A local spinel checkout (AGENTS.md: ~/git/spinel) is enough; CI puts
 # the same binaries on PATH. Prepend so `command -v spin` / `spinel` work
 # without a profile.
@@ -327,7 +342,7 @@ while [[ $# -gt 0 ]]; do
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
         -h|--help)     sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
-        rails|rails-nocache|ruby|spinel|tobi|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
+        rails|rails-nocache|ruby|ruby-falcon|spinel|tobi|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -447,6 +462,10 @@ cleanup() {
         sleep 0.3
         kill -KILL "$SERVER_PID" 2>/dev/null || true
     fi
+    # The logs live in the results directory, which is kept: untrimmed,
+    # every run archived a 3 GB rails.log (scripts/lib/trim-logs.sh).
+    # Not under --keep, where a live server is still writing one.
+    (( KEEP == 0 )) && trim_logs "${LOG_DIR:-}"
     exit "$code"
 }
 trap cleanup EXIT INT TERM
@@ -733,6 +752,24 @@ if wants_lane rust && [[ ! -x "$RUST_BIN" ]]; then
     fail "no rust campfire binary at $RUST_BIN — dropping the rust lane"
     drop_lane rust build "once-campfire-rust binary not built (cargo build --release -p campfire)"
 fi
+# The ruby-falcon lane's bundle: the emit's own Gemfile and lock plus
+# falcon, at the version tobi's lock pins (0.57.0 when there is no tobi
+# checkout to read). Resolved again every run — cheap when the gems are
+# already installed — because `prepare` writes a fresh Gemfile.
+if wants_lane ruby-falcon; then
+    FALCON_VERSION="$(sed -n 's/^    falcon (\([^)]*\))$/\1/p' "$TOBI_ROOT/Gemfile.lock" 2>/dev/null | head -1)"
+    FALCON_VERSION="${FALCON_VERSION:-0.57.0}"
+    { cp "$EMIT/Gemfile" "$EMIT/Gemfile.falcon" &&
+      cp "$EMIT/Gemfile.lock" "$EMIT/Gemfile.falcon.lock" &&
+      printf '\n# Added by scripts/bench-campfire for the ruby-falcon lane.\ngem "falcon", "%s"\n' \
+          "$FALCON_VERSION" >> "$EMIT/Gemfile.falcon" &&
+      (cd "$EMIT" && BUNDLE_GEMFILE="$EMIT/Gemfile.falcon" bundle install \
+          > "$LOG_DIR/bundle-ruby-falcon.log" 2>&1 ||
+       BUNDLE_GEMFILE="$EMIT/Gemfile.falcon" bundle check >> "$LOG_DIR/bundle-ruby-falcon.log" 2>&1); } || {
+        fail "the emit's falcon bundle failed (see $LOG_DIR/bundle-ruby-falcon.log) — dropping the ruby-falcon lane"
+        drop_lane ruby-falcon build "the emit's falcon bundle failed" "$LOG_DIR/bundle-ruby-falcon.log"
+    }
+fi
 if wants_lane tobi && ! ( cd "$TOBI_ROOT" 2>/dev/null && bundle check >/dev/null 2>&1 &&
                           [[ -f lib/campfire_vips.so && -f vendor/gems/extralite/lib/extralite_ext.so ]] ); then
     fail "$TOBI_ROOT is not bundled and built — dropping the tobi lane"
@@ -978,6 +1015,22 @@ start_lane() {
                 config.ru ) > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
+        ruby-falcon)
+            # The `ruby` lane's process, env and allocator, with the
+            # emit's falcon.rb forking the workers instead of Puma. Each
+            # forked child loads config.ru itself, so each opens its own
+            # SQLite handle — the job puma.rb's before_worker_boot does
+            # for the `ruby` lane — and cache hits are answered ahead of
+            # Falcon's Rack adapter (falcon.rb's header says why).
+            local jem w; jem="$(find_jemalloc || true)"; w="$(deployed_worker_count)"
+            printf 'server=falcon %s via falcon.rb (forked)\njemalloc=%s\nworkers=%s\n' \
+                "$FALCON_VERSION" "${jem:-ABSENT}" "$w" > "$shape"
+            ( cd "$EMIT" && exec env RAILS_ENV=production RUBY_YJIT_ENABLE=1 \
+                BUNDLE_GEMFILE="$EMIT/Gemfile.falcon" ${jem:+LD_PRELOAD="$jem"} \
+                BIND=127.0.0.1 PORT="$port" WEB_CONCURRENCY="$w" \
+                bundle exec ruby falcon.rb ) > "$log" 2>&1 &
+            SERVER_PID=$!
+            ;;
         jruby)
             # One process, a thread per hardware thread, no GVL: the JVM
             # runs Ruby threads in parallel, so the shape Rails reaches
@@ -1144,44 +1197,84 @@ start_lane() {
 login_cookie() {
     local lane="$1" port="$2"
     local jar="$LOG_DIR/jar-$lane.txt"
-    rm -f "$jar"
+    local form_body="$LOG_DIR/login-form-$lane.html"
+    local post_body="$LOG_DIR/login-post-$lane.body"
+    rm -f "$jar" "$form_body" "$post_body"
+    # On failure keep form HTML + POST body under $LOG_DIR so a red lane
+    # shows whether /session/new was empty, 5xx, or a CSRF miss — not just
+    # "sign-in returned N".
+    dump_login_failure() {
+        local why="$1"
+        {
+            echo "login_cookie[$lane] $why (port=$port)"
+            echo "--- GET /session/new (first 4k) ---"
+            [[ -f "$form_body" ]] && head -c 4096 "$form_body" || echo "(no form body)"
+            echo
+            echo "--- POST /session (first 4k) ---"
+            [[ -f "$post_body" ]] && head -c 4096 "$post_body" || echo "(no post body)"
+            echo
+            echo "--- cookie jar ---"
+            [[ -f "$jar" ]] && cat "$jar" || echo "(no jar)"
+        } >&2
+        fail "$lane $why"
+    }
     case "$lane" in
         rails|rails-nocache|rails-1p|rails-nocache-1p|rails-truffleruby)
             scripts/campfire-oracle login --out "$ORACLE" --port "$port" --jar "$jar" >/dev/null \
-                || { fail "$lane sign-in failed"; return 1; }
+                || { dump_login_failure "sign-in failed"; return 1; }
             ;;
-        ruby|ruby-1p|spinel|spinel-1p|jruby|truffleruby|elixir)
-            # The emitted tree verifies campfire's `protect_from_forgery
-            # with: :exception` (09567dd7), so the token comes from the
-            # lane's own form, under the session cookie that holds it.
-            # Elixir still renders the meta tag; rust/go do not.
-            local token code
-            token="$(curl -sS -H 'Accept-Encoding: identity' -c "$jar" \
-                     "http://127.0.0.1:$port/session/new" \
-                     | grep -o 'name="authenticity_token" value="[^"]*"' | head -1 \
-                     | sed 's/.*value="//; s/"$//')"
-            [[ -n "$token" ]] || { fail "$lane served no CSRF token at /session/new"; return 1; }
-            code="$(curl -sS -b "$jar" -c "$jar" -o /dev/null -w '%{http_code}' \
+        ruby|ruby-1p|ruby-falcon|spinel|spinel-1p|jruby|truffleruby|elixir)
+            # The emitted tree verifies what the pinned campfire asks
+            # for. Since the edbc779 pin that is `protect_from_forgery
+            # using: :header_only` with a `token_tag` of "" (e7e5f86b):
+            # no token on the page, and the browser's Fetch Metadata and
+            # Origin are the proof — the same fallback `campfire-oracle
+            # login` makes for the rails lane. An older pin still renders
+            # `authenticity_token`, and then that is what is sent.
+            local token code form_code
+            form_code="$(curl -sS -H 'Accept-Encoding: identity' -c "$jar" \
+                         -o "$form_body" -w '%{http_code}' \
+                         "http://127.0.0.1:$port/session/new" || echo curl_fail)"
+            [[ "$form_code" == "200" ]] || {
+                dump_login_failure "GET /session/new returned $form_code"
+                return 1
+            }
+            token="$(grep -o 'name="authenticity_token" value="[^"]*"' "$form_body" | head -1 \
+                     | sed 's/.*value="//; s/"$//' || true)"
+            local -a csrf=(-H "Sec-Fetch-Site: same-origin" -H "Origin: http://127.0.0.1:$port")
+            [[ -n "$token" ]] && csrf=(--data-urlencode "authenticity_token=$token")
+            code="$(curl -sS -b "$jar" -c "$jar" -o "$post_body" -w '%{http_code}' \
                     -X POST "http://127.0.0.1:$port/session" \
                     --data-urlencode "email_address=user1@example.com" \
                     --data-urlencode "password=secret123456" \
-                    --data-urlencode "authenticity_token=$token")"
-            [[ "$code" == "302" ]] || { fail "$lane sign-in returned $code"; return 1; }
+                    "${csrf[@]}" || echo curl_fail)"
+            [[ "$code" == "302" ]] || {
+                dump_login_failure "sign-in returned $code"
+                return 1
+            }
             ;;
         rust|go|tobi)
             # Header-only forgery protection: no authenticity_token on
             # the page. Sec-Fetch-Site + Origin (with port) is enough on
             # plain HTTP; the session cookie still has to be minted by
             # posting the real form.
-            local code
-            curl -sS -c "$jar" -o /dev/null "http://127.0.0.1:$port/session/new"
-            code="$(curl -sS -b "$jar" -c "$jar" -o /dev/null -w '%{http_code}' \
+            local code form_code
+            form_code="$(curl -sS -c "$jar" -o "$form_body" -w '%{http_code}' \
+                        "http://127.0.0.1:$port/session/new" || echo curl_fail)"
+            [[ "$form_code" == "200" ]] || {
+                dump_login_failure "GET /session/new returned $form_code"
+                return 1
+            }
+            code="$(curl -sS -b "$jar" -c "$jar" -o "$post_body" -w '%{http_code}' \
                     -X POST "http://127.0.0.1:$port/session" \
                     -H "Sec-Fetch-Site: same-origin" \
                     -H "Origin: http://127.0.0.1:$port" \
                     --data-urlencode "email_address=user1@example.com" \
-                    --data-urlencode "password=secret123456")"
-            [[ "$code" == "302" ]] || { fail "$lane sign-in returned $code"; return 1; }
+                    --data-urlencode "password=secret123456" || echo curl_fail)"
+            [[ "$code" == "302" ]] || {
+                dump_login_failure "sign-in returned $code"
+                return 1
+            }
             ;;
     esac
     awk '/session_token|_campfire_session/ {printf "%s=%s; ", $6, $7}' "$jar"
@@ -1325,6 +1418,7 @@ for lane in "${LANES[@]}"; do
         rails-nocache-1p)    shape_note="1 worker x $THREADS threads, RENDERING (no fragment cache)" ;;
         rails|rails-nocache) shape_note="campfire's own worker formula x $THREADS threads, thruster, jemalloc, resque-pool" ;;
         ruby)                shape_note="$(deployed_worker_count) worker(s) x $THREADS threads, jemalloc" ;;
+        ruby-falcon)         shape_note="the ruby emit under Falcon $FALCON_VERSION, $(deployed_worker_count) forked workers, jemalloc" ;;
         spinel)              shape_note="one process, workers autodetected" ;;
         spinel-1p)           shape_note="one process, SPINEL_WORKERS=1" ;;
         rust)                shape_note="once-campfire-rust, one process, own front server" ;;
@@ -1433,7 +1527,12 @@ for lane in "${LANES[@]}"; do
             case "$lane" in
                 rust|go|tobi) ;;
                 *)
-                    if [[ -z "$csrf" ]]; then
+                    # A header-only app (the edbc779 pin) renders no token:
+                    # the Sec-Fetch-Site + Origin the POST script sends are
+                    # the proof, as at sign-in. parse_wrk still nulls a
+                    # cell that drew a 422.
+                    if [[ -z "$csrf" ]] &&
+                       ! grep -rqs 'using: :header_only' "$APP/app/controllers"; then
                         fail "$lane POST skipped: no CSRF token (a 422 is not a write measurement)"
                         continue
                     fi
@@ -1780,6 +1879,7 @@ tr_ran      = targets_ran.include?("truffleruby")
 rails_tr_ran = targets_ran.include?("rails-truffleruby")
 one_p_ran   = targets_ran.any? { |t| t.end_with?("-1p") }
 tobi_ran    = targets_ran.include?("tobi")
+falcon_ran  = targets_ran.include?("ruby-falcon")
 
 env["notes"] = [
   ("<code>rails</code> and the emit lanes BOTH serve campfire's message " \
@@ -1813,6 +1913,14 @@ env["notes"] = [
   "<code>spinel</code> needs none of this: " \
   "one process, green threads, one shared registry — which is why it is " \
   "the emit lane the WebSocket tier can measure at its full worker count.",
+  ("<code>ruby-falcon</code> is the SAME emitted tree and " \
+   "<code>config.ru</code> as <code>ruby</code>, served by Falcon " \
+   "(the emit's <code>falcon.rb</code>: forked workers, the same count " \
+   "and allocator, cache hits answered ahead of Falcon's Rack adapter) " \
+   "instead of Puma: the server <code>tobi</code> runs. It isolates what " \
+   "the app server costs. Falcon is added to the emit's " \
+   "bundle by this harness, at the version tobi's lock pins; the emitted " \
+   "Gemfile names only Puma, and the WebSocket phase still runs Puma." if falcon_ran),
   ("The <code>-1p</code> lanes are the diagnostic, and what they pin is " \
   "ONE CPU rather than one process — CRuby needs a process per core " \
   "because of the GVL, while the binary is a single process either way " \

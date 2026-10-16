@@ -31,7 +31,11 @@ pub(crate) fn rewrite_node(e: &mut Expr) {
     if method.as_str() != "values_at" || args.len() != 1 {
         return;
     }
-    if !matches!(&*recv.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+    // A numbered parameter (`_1`) cannot be read from the new block,
+    // which has an ordinary parameter.
+    if !matches!(&*recv.node, ExprNode::Var { name, .. } if !crate::naming::is_numbered_param(name.as_str()))
+        && !matches!(&*recv.node, ExprNode::Ivar { .. })
+    {
         return;
     }
     let ExprNode::Splat { value: keys } = &*args[0].node else { return };
@@ -52,7 +56,7 @@ pub(crate) fn rewrite_node(e: &mut Expr) {
     );
     let block = Expr::new(
         e.span,
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![key_var],
             block_param: None,
             body: lookup,

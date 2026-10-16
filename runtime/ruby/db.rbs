@@ -11,11 +11,24 @@
 # narrowing happens at emit time.
 module Db
   def self.configure: (String, ?pool_size: Integer) -> void
+  # `ActiveRecord::Base.connection_db_config` and `transaction_open?`
+  # (runtime/spinel/active_record_db_config.rb): the configured
+  # database, the adapter name Rails reports for it, and whether the
+  # holder is in a transaction of its own (not the request snapshot).
+  def self.database_path: () -> String
+  def self.adapter_name: () -> String
+  def self.transaction_open?: () -> bool
   def self.close: () -> void
   def self.exec: (String) -> void
   def self.prepare: (String) -> Integer
   # Reads with too many SQL shapes bypass the cache; finalize releases them.
   def self.prepare_uncached: (String) -> Integer
+  # `prepare` for SQL carrying `Relation#bind_literal` marks: lifts them
+  # to placeholders and binds the values.
+  def self.prepare_marked: (String) -> Integer
+  # Post-lift / post-inline prepare that never re-enters prepare_marked
+  # (literal \x01 bytes must reach the backend intact).
+  def self.prepare_plain: (String) -> Integer
   def self.step?: (Integer) -> bool
   def self.column_int: (Integer, Integer) -> Integer
   def self.column_float: (Integer, Integer) -> Float
@@ -41,6 +54,11 @@ module Db
   def self.bind_int_opt: (Integer, Integer, Integer?) -> void
   def self.bind_text_opt: (Integer, Integer, String?) -> void
   def self.bind_bool_opt: (Integer, Integer, bool?) -> void
+  # A write with a RETURNING clause (roundhouse#91): runs like `exec`
+  # (and clears the query cache like it), then answers a handle over the
+  # returned rows: step?/column_*/finalize as for a read. `changes` is
+  # the write's affected-row count.
+  def self.exec_returning: (String) -> Integer
   def self.last_insert_rowid: () -> Integer
   def self.changes: () -> Integer
   # Query-log capture (issue #27) — records the SQL each prepare/exec
@@ -55,6 +73,7 @@ module Db
   def self.escape_string: (String) -> String
   def self.escape_int: (Integer) -> String
   def self.escape_int_list: (Array[Integer]) -> String
+  def self.escape_string_list: (Array[String]) -> String
   # Nullable-column writes: nil renders the SQL keyword NULL, so a
   # column the schema calls nullable round-trips as nil rather than as
   # the type's zero.
@@ -62,4 +81,14 @@ module Db
   def self.escape_int_opt: (Integer?) -> String
   def self.escape_float_opt: (Float?) -> String
   def self.escape_bool_opt: (bool?) -> String
+  # Per-thread `ActiveRecord::Base.transaction` nesting depth
+  # (connection.rb): 0 outside any open transaction, incremented by a
+  # joining nested call. A typed accessor instead of a raw
+  # `Thread.current`/`Fiber[]` read so connection.rb's `self.transaction`
+  # body stays concretely typed — each shim boxes it behind its own
+  # in-lease storage convention (`Thread.current` in the spinel-FFI
+  # shim, `Fiber[]` in the cruby/jruby gem shims, same as their own
+  # `current_dbh`/`current_conn`).
+  def self._txn_depth: () -> Integer
+  def self._txn_depth=: (Integer) -> Integer
 end

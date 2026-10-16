@@ -41,9 +41,11 @@ use crate::diagnostic::Diagnostic;
 /// entry points that want source-shaped IR (LSP/MCP/preview/check) call
 /// `Analyzer` directly and skip the lowerings on purpose.
 pub fn analyze_and_lower(app: &mut App) -> Vec<Diagnostic> {
-    let mut analyzer = crate::analyze::Analyzer::new(app);
-    analyzer.analyze(app);
-    crate::timings::phase("post-analyze lowerings", || {
-        crate::lower::apply_post_analyze_lowerings(app, analyzer.class_registry())
+    crate::lower::i18n_translate::with_plan_cache(|| {
+        let mut analyzer = crate::analyze::Analyzer::new(app);
+        analyzer.analyze(app);
+        crate::timings::phase("post-analyze lowerings", || {
+            crate::lower::apply_post_analyze_lowerings(app, analyzer.class_registry())
+        })
     })
 }

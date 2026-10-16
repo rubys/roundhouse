@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The IPAddr port's RULE TABLE, address by address.
 #
 # A FRAMEWORK test (`tests/runtime_ruby_unit.rs` runs every file under

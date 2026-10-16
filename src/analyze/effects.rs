@@ -100,7 +100,7 @@ impl super::Analyzer {
         let ctx = Ctx {
             self_ty: Some(Ty::Class {
                 id: class.clone(),
-                args: vec![],
+                args: vec![].into(),
             }),
             ..Ctx::default()
         };
@@ -144,6 +144,13 @@ impl super::Analyzer {
             | ExprNode::ForwardKeywords
             | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
+
+            ExprNode::ForwardKeywordsWithPairs { entries } => {
+                for (key, value) in entries {
+                    self.visit_effects(key, ctx, out);
+                    self.visit_effects(value, ctx, out);
+                }
+            }
 
             ExprNode::Return { value } => self.visit_effects(value, ctx, out),
 
@@ -272,7 +279,18 @@ impl super::Analyzer {
                 self.visit_match_pattern_effects(pattern, ctx, out);
             }
             ExprNode::Seq { exprs } => {
-                for e in exprs { self.visit_effects(e, ctx, out); }
+                // A self binding retypes `self` for the statements after
+                // it, as it does in the typer.
+                let mut bound: Option<Ctx> = None;
+                for e in exprs {
+                    self.visit_effects(e, bound.as_ref().unwrap_or(ctx), out);
+                    if crate::expr::is_self_binding(e) {
+                        let mut next = bound.take().unwrap_or_else(|| ctx.clone());
+                        next.self_ty = e.ty.clone();
+                        next.class_side = e.decisions & crate::expr::SELF_BINDING_CLASS_OBJECT != 0;
+                        bound = Some(next);
+                    }
+                }
             }
             ExprNode::Assign { target, value }
             | ExprNode::OpAssign { target, value, .. } => {

@@ -230,14 +230,23 @@ impl<'s> Interp<'s> {
         };
         let stamp = self.next_stamp();
 
+        // Rails model insertion treats generated attributes as
+        // database-owned, even if `create!` receives a value for one.
+        // Keep the static seed INSERT in step: generated values are
+        // evaluated below (the source still evaluates each hash value),
+        // but never appear in the SQL column list.
         let mut cols: Vec<String> = vec!["id".to_string()];
         let mut vals: Vec<String> = vec![id.to_string()];
         for (k, v) in entries {
             let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
                 return None;
             };
+            let value = self.value(v)?;
+            if self.is_generated_column(&table, key.as_str()) {
+                continue;
+            }
             cols.push(key.as_str().to_string());
-            vals.push(self.value(v)?);
+            vals.push(value);
         }
         // Rails stamps these on every row; the columns are NOT NULL.
         for ts in ["created_at", "updated_at"] {
@@ -305,6 +314,15 @@ impl<'s> Interp<'s> {
             .iter()
             .find(|(_, t)| t.name.as_str() == table)
             .is_some_and(|(_, t)| t.columns.iter().any(|c| c.name.as_str() == col))
+    }
+
+    fn is_generated_column(&self, table: &str, col: &str) -> bool {
+        self.schema
+            .tables
+            .iter()
+            .find(|(_, t)| t.name.as_str() == table)
+            .and_then(|(_, t)| t.columns.iter().find(|column| column.name.as_str() == col))
+            .is_some_and(|column| column.generated.is_some())
     }
 }
 

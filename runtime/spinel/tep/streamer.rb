@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::Streamer -- subclass and override #pump(out). The framework
 # emits chunked-encoding headers, calls pump with a Stream writer,
 # then emits the end-of-stream marker. Cooperative; pump runs to

@@ -197,6 +197,19 @@ fn only_path_on_a_url_stays_a_path() {
     assert!(!out.contains("\"://\""), "and no authority either:\n{out}");
 }
 
+/// And the helper it calls is the `_path` one. Left named `_url`, the
+/// view and controller lowerers ground it as an absolute URL on the
+/// request's host, and `x_url(only_path: true)` rendered
+/// `http://example.org/…` where Rails renders the bare path.
+#[test]
+fn only_path_on_a_url_calls_the_path_helper() {
+    let out = lowered_views(
+        "<%= link_to \"a\", autocompletable_notes_url(only_path: true) %>\n",
+    );
+    assert!(out.contains("autocompletable_notes_path"), "the call is the path helper:\n{out}");
+    assert!(!out.contains("autocompletable_notes_url"), "no `_url` call is left:\n{out}");
+}
+
 /// A hostless `_url` is left exactly as it was — the view lowerer
 /// grounds it with `Rails.application.domain`, and this pass has
 /// nothing to say about a call that named no host.

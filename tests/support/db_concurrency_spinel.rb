@@ -8,7 +8,39 @@
 
 require_relative "db"
 module ActiveRecord
-  class RecordNotUnique < StandardError
+  class ActiveRecordError < StandardError
+  end
+  class StatementInvalid < ActiveRecordError
+  end
+  class WrappedDatabaseException < StatementInvalid
+  end
+  class RecordNotUnique < WrappedDatabaseException
+  end
+  class InvalidForeignKey < WrappedDatabaseException
+  end
+  class ValueTooLong < StatementInvalid
+  end
+  class RangeError < StatementInvalid
+  end
+  class NotNullViolation < StatementInvalid
+  end
+  class CheckViolation < StatementInvalid
+  end
+  class ExclusionViolation < StatementInvalid
+  end
+  class TransactionRollbackError < StatementInvalid
+  end
+  class SerializationFailure < TransactionRollbackError
+  end
+  class Deadlocked < TransactionRollbackError
+  end
+  class QueryAborted < StatementInvalid
+  end
+  class LockWaitTimeout < StatementInvalid
+  end
+  class StatementTimeout < QueryAborted
+  end
+  class QueryCanceled < QueryAborted
   end
 end
 def check(what, ok)

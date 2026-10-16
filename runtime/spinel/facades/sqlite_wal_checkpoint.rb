@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # SQLite WAL checkpoint background thread — façade for Spinel AOT.
 #
 # Preview Campfire's real body uses `ActiveRecord::Base.connection_db_config`,

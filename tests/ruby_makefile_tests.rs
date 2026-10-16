@@ -98,10 +98,11 @@ fn an_app_without_tests_does_not_inherit_scaffold_test_stems() {
     for target in [BuildTarget::Ruby, BuildTarget::Jruby] {
         let files = emit(&[], target);
         assert!(test_stems(&files).is_empty(), "{target:?}");
+        // Not article_broadcasts_test: it ships only to an app with the blog's Article.
         assert!(
             files
                 .iter()
-                .any(|(p, _)| p == "test/models/article_broadcasts_test.rb")
+                .any(|(p, _)| p == "test/tools/check_spinel_subset_test.rb")
         );
     }
 }

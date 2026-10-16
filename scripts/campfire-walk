@@ -11,11 +11,10 @@
 # measurement available — and until now that measurement lived in a scratch
 # tree that died with the session.
 #
-# THE STUB FILE IS THE LEDGER. scripts/campfire-walk-stubs.rb stands in for
-# what the compiler does not model yet, one entry per gap, and is spliced in
-# ahead of the app. A gap closed in the compiler is an entry DELETED here, so
-# the diff of that file is the progress report. Never fix a compiler bug by
-# adding a stub.
+# STUB LEDGER: when `scripts/campfire-walk-stubs.rb` exists it is spliced
+# ahead of the app (one `# GAP` entry per unmodeled wall). Tip Campfire
+# cleared every entry (#818); the file is gone and the splice is skipped.
+# Never fix a compiler bug by adding a stub.
 #
 # Usage:  scripts/campfire-walk [options] [APP_PATH]
 #
@@ -114,7 +113,7 @@ echo "  $(sqlite3 "$OUT/storage/development.sqlite3" \
 
 cp "$REPO_ROOT/scripts/campfire-walk-drive.rb" "$OUT/walk_drive.rb"
 
-if (( STUBS )); then
+if (( STUBS )) && [[ -f "$REPO_ROOT/scripts/campfire-walk-stubs.rb" ]]; then
     cp "$REPO_ROOT/scripts/campfire-walk-stubs.rb" "$OUT/walk_stubs.rb"
     # Into BOOT.rb, not main.rb: 78b9ca0a moved the require chain there
     # (main.rb is boot plus the server), taking `app/models` — the first
@@ -129,6 +128,8 @@ if (( STUBS )); then
       File.write(path, src.sub(anchor, %(require_relative "walk_stubs"\n) + anchor))
     ' "$OUT/boot.rb"
     echo "  spliced walk_stubs.rb ($(grep -c '^# GAP' "$OUT/walk_stubs.rb") ledger entries) into boot.rb"
+elif (( STUBS )); then
+    step "ledger empty — no walk_stubs.rb to splice"
 else
     step "walking WITHOUT stubs"
 fi

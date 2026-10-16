@@ -14,7 +14,7 @@ use crate::ty::Ty;
 pub(super) struct InferenceSig {
     pub instance: HashMap<ClassId, HashMap<Symbol, Ty>>,
     pub class_methods: HashMap<ClassId, HashMap<Symbol, Ty>>,
-    pub params: HashMap<(ClassId, Symbol), Vec<Ty>>,
+    pub params: HashMap<super::ParamKey, Vec<Ty>>,
 }
 
 /// Snapshot for dirty-frontier construction: the convergence sig plus
@@ -59,7 +59,7 @@ pub(super) fn moved_method_names(
 pub(super) fn dirty_classes_for_retype(
     app: &App,
     classes: &HashMap<ClassId, ClassInfo>,
-    inferred_params: &HashMap<(ClassId, Symbol), Vec<Ty>>,
+    inferred_params: &HashMap<super::ParamKey, Vec<Ty>>,
     callers_by_target: &HashMap<(ClassId, Symbol), HashSet<ClassId>>,
     hints: &DirtyHints,
     lexical_parent: impl Fn(&ClassId, &ClassId) -> ClassId,

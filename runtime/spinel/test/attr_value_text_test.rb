@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Minitest-shaped, like hash_to_query_test.rb: a CRuby-only framework
 # test of the ruby family's Array attribute-value reopen
 # (runtime/attr_value_text.rb over the shared runtime/action_view). The
@@ -17,6 +18,11 @@ class AttrValueTextTest < Minitest::Test
     assert_equal %(<a class="direct unread direct" href="/r">x</a>),
       ActionView::ViewHelpers.link_to("x", "/r", class: ["direct", { unread: true, other: nil }, "direct", nil, ""])
     assert_equal %(<a class="" href="/r">x</a>), ActionView::ViewHelpers.link_to("x", "/r", class: [])
+  end
+
+  def test_a_literal_false_array_element_is_dropped_like_nil
+    assert_equal %(<a class="direct cold" href="/r">x</a>),
+      ActionView::ViewHelpers.link_to("x", "/r", class: ["direct", false, "cold"])
   end
 
   def test_any_other_array_value_is_space_joined

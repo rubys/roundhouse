@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `Timeout.timeout` / `Timeout::Error` — Campfire's unfurl deadline and
 # TimeLimitedVideoPreviewer#capture.
 #

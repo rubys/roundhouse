@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -20,12 +21,10 @@ reuse = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(reuse)
 
 
-def bundle(receipt, reports=None):
+def bundle(receipt):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("receipt.json", json.dumps(receipt))
-        for name, data in (reports or {}).items():
-            archive.writestr(name, data)
     return buffer.getvalue()
 
 
@@ -48,7 +47,6 @@ class EvidenceTests(unittest.TestCase):
             attempt=1,
             executed=True,
             outcomes=["success", "success"],
-            reports={},
         )
         self.run = {
             "id": 400,
@@ -103,7 +101,7 @@ class EvidenceTests(unittest.TestCase):
         for conclusion in ("failure", "cancelled", "success", None):
             with self.subTest(conclusion=conclusion):
                 self.run["conclusion"] = conclusion
-                self.assertEqual(self.find(), (self.job["html_url"], {}))
+                self.assertEqual(self.find(), self.job["html_url"])
                 self.assertIn("actions/runs/400/attempts/1/jobs", self.paths)
 
     def test_rejects_different_pr_repo_branch_workflow_and_inputs(self):
@@ -216,43 +214,26 @@ class EvidenceTests(unittest.TestCase):
         ):
             list(api.pages("jobs", "jobs"))
 
-    def test_zip_paths_duplicates_missing_reports_and_symlinks_are_rejected(self):
+    def test_zip_paths_duplicates_unexpected_files_and_symlinks_are_rejected(self):
         for extra in ("../receipt.json", "/tmp/receipt.json", "run.sh", "receipt.json"):
             with self.subTest(extra=extra):
-                data = bundle(self.receipt, {extra: b"untrusted"})
+                buffer = io.BytesIO()
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    with zipfile.ZipFile(buffer, "w") as archive:
+                        archive.writestr("receipt.json", json.dumps(self.receipt))
+                        archive.writestr(extra, b"untrusted")
                 with self.assertRaises(ValueError):
-                    reuse.read_bundle(data, "store-check")
-        with self.assertRaises(ValueError):
-            reuse.read_bundle(bundle(self.receipt), "writebook-inventory")
+                    reuse.read_bundle(buffer.getvalue())
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as archive:
             link = zipfile.ZipInfo("receipt.json")
             link.external_attr = 0o120777 << 16
             archive.writestr(link, "target")
         with self.assertRaises(ValueError):
-            reuse.read_bundle(buffer.getvalue(), "store-check")
-
-    def test_reports_are_restored_as_data_and_checked_against_the_receipt(self):
-        reports = {
-            "writebook-check.txt": b"honest CLI report",
-            "writebook-inventory-current.json": b'{"schema":1}',
-        }
-        receipt = dict(
-            self.receipt,
-            reports={
-                name: reuse.hashlib.sha256(data).hexdigest()
-                for name, data in reports.items()
-            },
-        )
-        self.assertEqual(
-            reuse.read_bundle(bundle(receipt, reports), "writebook-inventory"),
-            (receipt, reports),
-        )
-        reports["writebook-check.txt"] = b"different report"
-        with self.assertRaises(ValueError):
-            reuse.read_bundle(bundle(receipt, reports), "writebook-inventory")
+            reuse.read_bundle(buffer.getvalue())
         with patch.object(reuse, "MAX_BUNDLE", 10), self.assertRaises(ValueError):
-            reuse.read_bundle(bundle(self.receipt), "store-check")
+            reuse.read_bundle(bundle(self.receipt))
 
 
 class InputTests(unittest.TestCase):
@@ -266,15 +247,16 @@ class InputTests(unittest.TestCase):
         self.git("init", "-q")
         self.git("config", "user.name", "CI test")
         self.git("config", "user.email", "ci@example.invalid")
+        # Not left on: `git commit` detaches `git maintenance run --auto`, which can still be writing .git/objects when the temporary directory is removed.
+        self.git("config", "maintenance.auto", "false")
+        self.git("config", "gc.auto", "0")
         for name in (
             "src/analyze.rs",
             "runtime/ruby/helper.rb",
             "Cargo.lock",
             ".github/workflows/ci.yml",
-            "tests/writebook.rs",
             "tests/unrelated.rs",
             "tests/support/shared.rs",
-            "tests/fixtures/writebook-inventory.json",
             "runtime/ruby/README.md",
             "unknown.file",
         ):
@@ -290,15 +272,6 @@ class InputTests(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-qm", "test input")
 
-    def test_irrelevant_test_edit_does_not_invalidate_but_its_target_test_does(self):
-        before = reuse.repository_inputs("writebook-inventory")
-        Path("tests/unrelated.rs").write_text("another expectation")
-        self.commit()
-        self.assertEqual(reuse.repository_inputs("writebook-inventory"), before)
-        Path("tests/writebook.rs").write_text("changed inventory assertion")
-        self.commit()
-        self.assertNotEqual(reuse.repository_inputs("writebook-inventory"), before)
-
     def test_base_only_merge_change_unknown_addition_deletion_mode_and_shared_inputs_invalidate(
         self,
     ):
@@ -309,16 +282,15 @@ class InputTests(unittest.TestCase):
             "Cargo.lock",
             ".github/workflows/ci.yml",
             "tests/support/shared.rs",
-            "tests/fixtures/writebook-inventory.json",
             "runtime/ruby/README.md",
         ):
             with self.subTest(name=name):
                 self.git("reset", "--hard", original)
-                before = reuse.repository_inputs("writebook-inventory")
+                before = reuse.repository_inputs("store-check")
                 Path(name).write_text("base-only relevant change")
                 self.commit()
                 self.assertNotEqual(
-                    reuse.repository_inputs("writebook-inventory"), before
+                    reuse.repository_inputs("store-check"), before
                 )
         self.git("reset", "--hard", original)
         before = reuse.repository_inputs("store-check")
@@ -498,11 +470,7 @@ class InputTests(unittest.TestCase):
             "GITHUB_STEP_SUMMARY": str(self.root / "summary"),
         }
 
-    def test_probe_hit_restores_reports_and_cannot_mint_new_execution_evidence(self):
-        reports = {
-            "writebook-check.txt": b"validated check",
-            "writebook-inventory-current.json": b"{}",
-        }
+    def test_probe_hit_does_not_mint_execution_evidence(self):
         with (
             patch.dict(os.environ, self.pr_env(), clear=True),
             patch.object(reuse, "GitHub") as api,
@@ -514,16 +482,14 @@ class InputTests(unittest.TestCase):
             patch.object(
                 reuse,
                 "find_execution",
-                return_value=("https://github.com/original/job/42", reports),
+                return_value="https://github.com/original/job/42",
             ),
         ):
             api.return_value.get.return_value = {"workflow_id": 17}
-            reuse.probe("writebook-inventory", self.root / "source")
+            reuse.probe("store-check", self.root / "source")
             self.assertIn("hit=true\n", (self.root / "outputs").read_text())
-            for name, data in reports.items():
-                self.assertEqual(Path(name).read_bytes(), data)
             self.assertFalse(
-                (reuse.state_dir("writebook-inventory") / "bundle").exists()
+                (reuse.state_dir("store-check") / "bundle").exists()
             )
             self.assertIn("original/job/42", (self.root / "summary").read_text())
 
@@ -843,31 +809,28 @@ class InputTests(unittest.TestCase):
         ):
             source = self.root / "source"
             original = (source / "app.rb").read_text()
-            for job in ("store-check", "writebook-inventory"):
-                with self.subTest(job=job):
-                    root = reuse.state_dir(job)
-                    root.mkdir(parents=True)
-                    state = {
-                        "inputs": reuse.execution_inputs(job, source),
-                        "reused": False,
-                        "local": {"input": str(source)},
-                    }
-                    (root / "state.json").write_text(json.dumps(state))
-                    outcomes = ["success"] * len(reuse.JOBS[job]["checks"])
-                    (source / "app.rb").write_text("different validated source")
-                    with self.assertRaises(ValueError):
-                        reuse.record(job, outcomes)
-                    self.assertFalse((root / "bundle").exists())
-                    (source / "app.rb").write_text(original)
-                    environment.return_value = {"rustc": "changed during validation"}
-                    with self.assertRaises(ValueError):
-                        reuse.record(job, outcomes)
-                    self.assertFalse((root / "bundle").exists())
-                    environment.return_value = {"rustc": "before"}
-                    for report in reuse.JOBS[job]["reports"]:
-                        Path(report).write_text("actual successful report")
-                    reuse.record(job, outcomes)
-                    self.assertTrue((root / "bundle/receipt.json").is_file())
+            job = "store-check"
+            root = reuse.state_dir(job)
+            root.mkdir(parents=True)
+            state = {
+                "inputs": reuse.execution_inputs(job, source),
+                "reused": False,
+                "local": {"input": str(source)},
+            }
+            (root / "state.json").write_text(json.dumps(state))
+            outcomes = ["success"] * len(reuse.JOBS[job]["checks"])
+            (source / "app.rb").write_text("different validated source")
+            with self.assertRaises(ValueError):
+                reuse.record(job, outcomes)
+            self.assertFalse((root / "bundle").exists())
+            (source / "app.rb").write_text(original)
+            environment.return_value = {"rustc": "changed during validation"}
+            with self.assertRaises(ValueError):
+                reuse.record(job, outcomes)
+            self.assertFalse((root / "bundle").exists())
+            environment.return_value = {"rustc": "before"}
+            reuse.record(job, outcomes)
+            self.assertTrue((root / "bundle/receipt.json").is_file())
 
     def test_archive_resolution_never_prepares_the_validation_extraction_and_rejects_changed_readme(
         self,

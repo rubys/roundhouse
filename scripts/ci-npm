@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Retry npm install/ci for transient registry failures (ECONNRESET, ETIMEDOUT,
+# 5xx, etc.). Playwright CI jobs already bound browser/apt install; a single
+# registry blip still hard-fails the job (Full validation 38397424326 smoke
+# typescript: `read ECONNRESET` fetching @playwright/test). Keep the real
+# install command — only wrap the network call.
+#
+# Usage:
+#   scripts/ci-npm ci [--no-audit --no-fund ...]
+#   scripts/ci-npm install [--no-audit --no-fund ...]
+set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: $0 ci|install [npm-args...]" >&2
+  exit 2
+fi
+
+ATTEMPTS="${NPM_INSTALL_ATTEMPTS:-4}"
+# Backoff between tries (seconds). Registry blips usually clear quickly.
+SLEEP_BASE="${NPM_INSTALL_RETRY_SLEEP:-5}"
+
+cmd="$1"
+shift
+case "$cmd" in
+  ci|install) ;;
+  *)
+    echo "usage: $0 ci|install [npm-args...]" >&2
+    exit 2
+    ;;
+esac
+
+attempt=1
+while true; do
+  # Capture npm's status in `else`: a failed `if cmd` compound itself exits 0.
+  if npm "$cmd" "$@"; then
+    exit 0
+  else
+    status=$?
+  fi
+  if [ "$attempt" -ge "$ATTEMPTS" ]; then
+    echo "::error::npm ${cmd} failed after ${ATTEMPTS} attempts (last exit ${status})"
+    exit "$status"
+  fi
+  sleep_for=$((SLEEP_BASE * attempt))
+  echo "::warning::npm ${cmd} attempt ${attempt}/${ATTEMPTS} failed (exit ${status}); retrying in ${sleep_for}s"
+  sleep "$sleep_for"
+  attempt=$((attempt + 1))
+done

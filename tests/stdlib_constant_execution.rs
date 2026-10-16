@@ -295,3 +295,154 @@ fn enumerable_constants_execute_in_native_spinel() {
     stdlib_app().write("app/services/enumerable_probe.rb", ENUMERABLE_SOURCE)
         .run_spinel(ENUMERABLE_SCRIPT).assert_passes();
 }
+
+const SYNCHRONIZATION_SOURCE: &str = r#"require "monitor"
+class SynchronizationProbe
+  def self.reentrant_count
+    lock = Monitor.new
+    count = 0
+    lock.synchronize { lock.synchronize { count += 1 } }
+    count
+  end
+  def self.handoff
+    mutex = Mutex.new
+    ready = ConditionVariable.new
+    value = 0
+    thread = Thread.new do
+      mutex.synchronize do
+        value = 42
+        ready.signal
+      end
+    end
+    mutex.synchronize { ready.wait(mutex) while value == 0 }
+    thread.join
+    value
+  end
+  def self.condition_variable_classes
+    [ConditionVariable, Thread::ConditionVariable]
+  end
+end
+"#;
+
+const SYNCHRONIZATION_SCRIPT: &str = r#"
+raise "Monitor reentrancy lost" unless SynchronizationProbe.reentrant_count == 1
+raise "ConditionVariable handoff lost" unless SynchronizationProbe.handoff == 42
+raise "ConditionVariable alias lost" unless SynchronizationProbe.condition_variable_classes.uniq.length == 1
+puts "Monitor and ConditionVariable execution passed"
+"#;
+
+#[test]
+fn monitor_and_condition_variable_constants_execute_after_emission() {
+    stdlib_app().write("app/models/synchronization_probe.rb", SYNCHRONIZATION_SOURCE)
+        .run_ruby(SYNCHRONIZATION_SCRIPT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn monitor_and_condition_variable_constants_execute_in_native_spinel() {
+    stdlib_app().write("app/models/synchronization_probe.rb", SYNCHRONIZATION_SOURCE)
+        .run_spinel(SYNCHRONIZATION_SCRIPT).assert_passes();
+}
+
+const UNIX_SOCKET_SOURCE: &str = r#"require "socket"
+class UnixSocketProbe
+  def self.round_trip(path)
+    server = UNIXServer.new(path)
+    client = UNIXSocket.new(path)
+    peer = server.accept
+    client.write("ping\n")
+    line = peer.readpartial(5)
+    client.close
+    peer.close
+    server.close
+    line
+  end
+  def self.unix_socket?(value)
+    value.is_a?(UNIXSocket)
+  end
+end
+"#;
+
+const UNIX_SOCKET_SCRIPT: &str = r#"
+require "tmpdir"
+Dir.mktmpdir do |dir|
+  raise "UNIX socket round trip lost" unless UnixSocketProbe.round_trip(File.join(dir, "probe.sock")) == "ping\n"
+end
+raise "UNIXSocket class check changed" if UnixSocketProbe.unix_socket?("probe.sock")
+puts "UNIXServer and UNIXSocket execution passed"
+"#;
+
+#[test]
+fn unix_socket_constants_execute_after_emission() {
+    stdlib_app().write("app/models/unix_socket_probe.rb", UNIX_SOCKET_SOURCE)
+        .run_ruby(UNIX_SOCKET_SCRIPT).assert_passes();
+}
+
+/// The two socket classes name one library, and the emitted file requires it once.
+#[test]
+fn unix_socket_classes_share_one_require() {
+    let (emitted, errors) = stdlib_app().write("app/models/unix_socket_probe.rb", UNIX_SOCKET_SOURCE)
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let probe = std::fs::read_to_string(emitted.join("app/models/unix_socket_probe.rb")).expect("emitted probe");
+    assert_eq!(probe.matches("require \"socket\"").count(), 1, "{probe}");
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn unix_socket_constants_execute_in_native_spinel() {
+    stdlib_app().write("app/models/unix_socket_probe.rb", UNIX_SOCKET_SOURCE)
+        .run_spinel(UNIX_SOCKET_SCRIPT).assert_passes();
+}
+
+const OPEN3_AND_FIND_SOURCE: &str = r#"require "open3"
+require "find"
+class ProcessAndTreeProbe
+  def self.echo(text)
+    stdout, _stderr, status = Open3.capture3("cat", stdin_data: text)
+    status.success? ? stdout : ""
+  end
+  def self.files(root)
+    found = []
+    Find.find(root) do |path|
+      Find.prune if File.basename(path) == "skip"
+      found << path if File.file?(path)
+    end
+    found.sort
+  end
+end
+"#;
+
+const OPEN3_AND_FIND_SCRIPT: &str = r#"
+require "tmpdir"
+raise "Open3.capture3 lost" unless ProcessAndTreeProbe.echo("hi") == "hi"
+Dir.mktmpdir do |dir|
+  Dir.mkdir(File.join(dir, "skip"))
+  File.write(File.join(dir, "skip", "hidden.txt"), "x")
+  File.write(File.join(dir, "kept.txt"), "x")
+  raise "Find.find or prune lost" unless ProcessAndTreeProbe.files(dir) == [File.join(dir, "kept.txt")]
+end
+puts "Open3 and Find execution passed"
+"#;
+
+#[test]
+fn open3_and_find_constants_execute_after_emission() {
+    stdlib_app().write("app/models/process_and_tree_probe.rb", OPEN3_AND_FIND_SOURCE)
+        .run_ruby(OPEN3_AND_FIND_SCRIPT).assert_passes();
+}
+
+/// Without a block `Find.find` answers an Enumerator, not nil.
+#[test]
+fn find_without_a_block_is_an_enumerator() {
+    stdlib_app()
+        .write("app/models/item.rb", "require \"find\"\nclass Item < ActiveRecord::Base\n  def self.files(root)\n    Find.find(root).select { |path| File.file?(path) }.length\n  end\nend\n")
+        .run_ruby("require \"tmpdir\"\nDir.mktmpdir do |dir|\n  File.write(File.join(dir, \"a.txt\"), \"x\")\n  raise \"Find.find enumerator lost\" unless Item.files(dir) == 1\nend\nputs \"Find enumerator passed\"\n")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn open3_and_find_constants_execute_in_native_spinel() {
+    stdlib_app().write("app/models/process_and_tree_probe.rb", OPEN3_AND_FIND_SOURCE)
+        .run_spinel(OPEN3_AND_FIND_SCRIPT).assert_passes();
+}

@@ -89,8 +89,7 @@ const LINKS: &str =
 const LINK_PARTIAL: &str = "json.href url\n";
 
 /// A partial next to another statement in the element. Jbuilder renders
-/// both into the element; the lowerer cannot yet, so the pair is left
-/// unsupported rather than built without the partial's fields.
+/// both into the element: the partial's pairs are merged into it.
 const MIXED: &str = r#"json.flagged @widgets do |widget|
   json.partial! "widgets/widget", widget: widget
   json.flag true
@@ -98,7 +97,7 @@ end
 "#;
 
 /// A partial inside a nested object of the element. Jbuilder renders it
-/// into that object; the lowerer cannot yet, the same as `MIXED`.
+/// into that object, the same as `MIXED`.
 const NESTED_MIXED: &str = r#"json.boxed @widgets do |widget|
   json.box do
     json.partial! "widgets/widget", widget: widget
@@ -184,13 +183,16 @@ fn a_key_with_a_collection_and_a_partial_block_is_an_array_of_partials() {
 }
 
 /// The partial's argument gets the rewrites any partial argument in a
-/// pair gets: a `<x>_url` helper becomes `RouteHelpers.<x>_path`.
+/// pair gets: a `<x>_url` helper becomes its `url_for_path` over
+/// `RouteHelpers.<x>_path`.
 #[test]
 fn the_partial_argument_of_a_block_element_is_rewritten() {
     let files = emitted();
     let src = view(&files, "widgets/links_json.rb");
     assert!(
-        src.contains("Views::Widgets.link_json(RouteHelpers.widget_path(widget.id))"),
+        src.contains(
+            "Views::Widgets.link_json(ActionView::ViewHelpers.url_for_path(RouteHelpers.widget_path(widget.id)))"
+        ),
         "the route helper is the runtime's path helper:\n{src}"
     );
 }
@@ -221,37 +223,16 @@ fn array_bang_with_a_block_is_the_whole_template() {
 }
 
 #[test]
-fn a_partial_mixed_into_an_element_is_unsupported_not_dropped() {
-    roundhouse::ingest::survey::activate();
+fn a_partial_mixed_into_an_element_is_merged_into_it() {
     let files = emitted();
-    let gaps = roundhouse::ingest::survey::drain();
-    let src = view(&files, "widgets/mixed_json.rb");
-    assert!(
-        !src.contains("widgets.map") && !src.contains("\\\"flag\\\":"),
-        "no element is built without the partial's fields:\n{src}"
-    );
-    assert!(
-        gaps.iter().any(|g| g.to_string().contains("mixes `json.partial!` with other statements")),
-        "the block is reported as unsupported: {:?}",
-        gaps.iter().map(|g| g.to_string()).collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn a_partial_in_a_nested_object_of_an_element_is_unsupported_not_dropped() {
-    roundhouse::ingest::survey::activate();
-    let files = emitted();
-    let gaps = roundhouse::ingest::survey::drain();
-    let src = view(&files, "widgets/nested_mixed_json.rb");
-    assert!(
-        !src.contains(".map") && !src.contains("\\\"flag\\\":"),
-        "no element is built without the partial's fields:\n{src}"
-    );
-    assert!(
-        gaps.iter().any(|g| g.to_string().contains("mixes `json.partial!` with other statements")),
-        "the block is reported as unsupported: {:?}",
-        gaps.iter().map(|g| g.to_string()).collect::<Vec<_>>()
-    );
+    for file in ["widgets/mixed_json.rb", "widgets/nested_mixed_json.rb"] {
+        let src = view(&files, file);
+        assert!(
+            src.contains("__col0.map") && src.contains("\\\"flag\\\":") && src.contains("Views::Widgets.widget_json(widget)"),
+            "the element is built with the partial's pairs and its own:\n{src}"
+        );
+        assert!(src.contains("_part0[1, "), "the partial's pairs, without its braces:\n{src}");
+    }
 }
 
 /// The nil check and the `map` read one local, so the collection

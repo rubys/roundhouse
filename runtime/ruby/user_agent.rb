@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `useragent` 0.16.11 and `platform_agent` 1.0.1, ported.
 #
 # campfire reaches these on EVERY room page, which is not what the

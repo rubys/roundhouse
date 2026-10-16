@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby-only ActionView url_for: the polymorphic-record url form.
 #
 # `form_with url: comment` (lobsters' commentbox) resolves its action

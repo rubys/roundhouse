@@ -17,8 +17,8 @@ module ActiveSupport
   def self.date_months_ago: (Date d, ?Integer n) -> Date
   def self.date_years_since: (Date d, ?Integer n) -> Date
   def self.date_years_ago: (Date d, ?Integer n) -> Date
-  def self.date_beginning_of_week: (Date d) -> Date
-  def self.date_end_of_week: (Date d) -> Date
+  def self.date_beginning_of_week: (Date d, ?Integer start) -> Date
+  def self.date_end_of_week: (Date d, ?Integer start) -> Date
   def self.date_next_week: (Date d) -> Date
   def self.date_prev_week: (Date d) -> Date
   def self.date_beginning_of_month: (Date d) -> Date

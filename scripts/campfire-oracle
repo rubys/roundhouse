@@ -23,21 +23,19 @@
 # result is not enough — `prepare` records the revision in oracle.json and
 # the report should print it. See [[feedback_pin_benchmarks_not_ledgers]].
 #
-# FRAGMENT CACHING IS A LANE, NOT A DETAIL. campfire renders its message
-# list as `render partial: …, collection: @messages, cached: true`, and
-# production.rb points `cache_store` at Redis. With Redis up, Rails reads
-# 40 rendered message fragments back out of it and never runs the
-# partial. MEASURED on this box, `/rooms/1/messages` after
-# `redis-cli flushall`: 503 ms cold, 5 ms warm — 100x, and the 18-query
-# request log is the same fact from the other side.
+# CACHING IS A LANE, NOT A DETAIL. Current campfire main caches in
+# process: a per-worker full-response ResponseCache (budget from
+# CAMPFIRE_RESPONSE_CACHE_MB, default 64) and a FragmentCache
+# MemoryStore for message fragments and record snapshots, both gated on
+# `perform_caching`. The production Redis `cache_store` is a separate
+# facility, not the backend for these page caches.
 #
-# That is what a campfire deployment really does, so it is a lane worth
-# measuring. It is NOT a comparison against a tree that has no fragment
-# cache: that number is Redis's, not Rails' renderer's. `serve` takes
-# `--no-fragment-cache`, which sets `perform_caching = false` and the
+# That is what a campfire deployment really does, so it is the default.
+# `serve --no-fragment-cache` sets `perform_caching = false` and the
 # null store through `config/initializers/zz_bench_cache.rb` (written by
 # `prepare`, gated on an env var, and the only file this oracle adds to
-# campfire's own source). Rails RENDERING the same page takes ~46 ms.
+# campfire's own source) and a zero response-cache budget, so Rails
+# renders every request.
 #
 # Publish both or publish neither.
 #
@@ -119,10 +117,10 @@
 #   --env NAME      RAILS_ENV for `serve` (default production). Development
 #                   is 12x slower on this app and is not a benchmark.
 #   --no-fragment-cache
-#                   Serve with `perform_caching = false` and the null
-#                   store. Default is ON, which is what a campfire
-#                   deployment does — and which makes the message list a
-#                   Redis read rather than a render. See the header.
+#                   Serve with `perform_caching = false`, the null
+#                   store, and a zero full-response cache budget.
+#                   Default is ON, which is what a campfire deployment
+#                   does. See the header.
 #   --jar PATH      cookie jar for `login` (default <out>/tmp/bench-jar.txt)
 #   --count N       users to mint cookies for (`cookies`, default --users)
 #   --cookie-file P where `cookies` writes them (default <out>/tmp/session-cookies.txt)
@@ -273,12 +271,9 @@ cmd_prepare() {
 # Benchmark lane knob, added by roundhouse's scripts/campfire-oracle.
 # NOT campfire's: inert unless DISABLE_FRAGMENT_CACHE=1.
 #
-# campfire renders its message list with `cached: true` against a
-# Redis-backed store. That is what a deployment does, and it means the
-# 40 message fragments are READ BACK rather than rendered — measured at
-# 503 ms cold against 5 ms warm. A tree with no fragment cache cannot be
-# compared against the warm number; this switch produces the other
-# operand, Rails actually rendering.
+# campfire serves its pages from in-process response and fragment
+# caches. That is what a deployment does; this switch produces the
+# other operand, Rails actually rendering every request.
 if ENV["DISABLE_FRAGMENT_CACHE"] == "1"
   Rails.application.config.action_controller.perform_caching = false
   Rails.application.config.cache_store = :null_store
@@ -358,6 +353,13 @@ cmd_serve() {
     [[ -d "$OUT" ]] || die "no oracle at $OUT — run 'prepare' first"
     if [[ "$RAILS_ENV_NAME" == "production" && ! -f "$OUT/storage/db/production.sqlite3" ]]; then
         die "no production DB — run 'prepare' (it stages one from the seed)"
+    fi
+    # campfire's ResponseCache reads its budget from this; 0 turns the
+    # full-response cache (and the record snapshots behind it) off.
+    if (( FRAGMENT_CACHE )); then
+        export CAMPFIRE_RESPONSE_CACHE_MB=64
+    else
+        export CAMPFIRE_RESPONSE_CACHE_MB=0
     fi
     case "$RUNTIME" in
         cruby) ;;
@@ -670,7 +672,14 @@ cmd_socket_seed() {
     local seed_cookies="${SEED_COOKIES:-$REPO_ROOT/build/campfire-socket-cookies.txt}"
     mkdir -p "$(dirname "$seed_db")" "$(dirname "$seed_cookies")"
 
-    if [[ -f "$seed_db" && -s "$seed_cookies" ]] && (( FORCE == 0 )); then
+    # The cache is keyed by the oracle's db/schema.rb. Keyed by nothing,
+    # the 2026-09-04 seed outlived the edbc779 repin, which added
+    # rooms.messages_count: the emit lanes queried a column the cached
+    # database did not have, and every socket-phase page answered 500.
+    local seed_stamp="$seed_db.schema-sha256" want_stamp
+    want_stamp="$(shasum -a 256 "$OUT/db/schema.rb" | cut -d' ' -f1)"
+    if [[ -f "$seed_db" && -s "$seed_cookies" ]] && (( FORCE == 0 )) \
+        && [[ "$(cat "$seed_stamp" 2>/dev/null)" == "$want_stamp" ]]; then
         step "socket seed already built ($(wc -l < "$seed_cookies") cookies) — $seed_db"
         echo "$seed_db"; return 0
     fi
@@ -712,6 +721,7 @@ cmd_socket_seed() {
     cp "$SS_DEV" "$SS_PROD"; rm -f "$SS_PROD-wal" "$SS_PROD-shm"
     COUNT="$su" COOKIE_FILE="$seed_cookies" cmd_cookies || die "socket seed: minting failed"
     cp "$SS_DEV" "$seed_db"
+    echo "$want_stamp" > "$seed_stamp"
     step "socket seed ready: $seed_db ($(wc -l < "$seed_cookies") cookies)"
     echo "$seed_db"
 }
@@ -722,14 +732,18 @@ cmd_login() {
     token="$(curl -sS -H 'Accept-Encoding: identity' -c "$JAR" \
              "http://127.0.0.1:$PORT/session/new" \
              | grep -o 'name="authenticity_token" value="[^"]*"' | head -1 \
-             | sed 's/.*value="//; s/"$//')"
-    [[ -n "$token" ]] || die "no CSRF token at /session/new — is the server up on :$PORT?"
+             | sed 's/.*value="//; s/"$//' || true)"
+    # Current campfire verifies `header_only` and renders no hidden
+    # token; sign in the way its browser does, same-origin by Fetch
+    # Metadata and Origin. Older pinned trees still carry the token.
+    local -a csrf=(-H 'Sec-Fetch-Site: same-origin' -H "Origin: http://127.0.0.1:$PORT")
+    [[ -n "$token" ]] && csrf=(--data-urlencode "authenticity_token=$token")
     local code
     code="$(curl -sS -b "$JAR" -c "$JAR" -o /dev/null -w '%{http_code}' \
             -X POST "http://127.0.0.1:$PORT/session" \
             --data-urlencode "email_address=user1@example.com" \
             --data-urlencode "password=secret123456" \
-            --data-urlencode "authenticity_token=$token")"
+            "${csrf[@]}")"
     [[ "$code" == "302" ]] || die "sign-in returned $code, expected 302"
     step "signed in — jar at $JAR"
 }

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CGI protocol I/O. Reads requests from ENV + stdin; writes responses
 # to stdout. The shape spinel can ingest (no sockets) and the shape
 # any CGI-aware web server (Apache mod_cgi, nginx fcgiwrap, lighttpd)
@@ -43,13 +44,18 @@ module CgiIo
   }.freeze
 
   # Parse a CGI request from the given env hash + body-readable IO.
-  # Returns: { method:, path:, params:, cookies: }.
+  # Returns: { method:, path:, params:, body_params:, cookies:, accept:,
+  # bad_request: }. `body_params` holds the body's params alone (Rails'
+  # `request_parameters`), which ParamsWrapper copies from. `bad_request`
+  # is true for a JSON body that does not parse, which Rails answers 400.
   def self.parse_request(env, stdin)
     method = (env["REQUEST_METHOD"] || "GET").upcase
     path   = env["PATH_INFO"] || "/"
     query  = env["QUERY_STRING"] || ""
 
     params = {}
+    body_params = {}
+    bad_request = false
     parse_form_into(query, params) unless query.empty?
 
     if method == "POST" || method == "PATCH" || method == "PUT"
@@ -57,28 +63,34 @@ module CgiIo
       ctype  = env["CONTENT_TYPE"] || ""
       if length > 0 && ctype.start_with?("application/x-www-form-urlencoded")
         body = stdin.read(length).to_s
-        parse_form_into(body, params)
+        parse_form_into(body, body_params)
       elsif length > 0 && ctype.start_with?("multipart/form-data")
         # File parts land in the params tree as UploadedFile objects
         # under their bracket-nested name, the way Rack nests them; see
         # runtime/multipart.rb.
         body = stdin.read(length).to_s
         form = ActionDispatch::Http::Multipart.parse(body, ctype)
-        form.fields.each { |k, v| assign_form_pair(params, k, v) }
-        form.files.each { |k, v| assign_form_pair(params, k, v) }
+        form.fields.each { |k, v| assign_form_pair(body_params, k, v) }
+        form.files.each { |k, v| assign_form_pair(body_params, k, v) }
       elsif length > 0 && ctype.start_with?("application/json")
         # `@rails/request.js` with `contentType: "application/json"`
         # (campfire's link unfurl): Rails parses the object into params,
-        # keeping its nesting and its types. A malformed body leaves the
-        # params as they are, and the action's `require` refuses it.
+        # keeping its nesting and its types; a body that is not an object
+        # lands under "_json", and deep_munge drops the nils inside
+        # arrays. A malformed body is Rails' 400 (`bad_request`). The
+        # spinel lane's twin is Tep::Request#parse_body_params with
+        # `ParamBuilder.from_json`.
         body = stdin.read(length).to_s
         begin
           parsed = JSON.parse(body)
-          parsed.each { |k, v| params[k] = v } if parsed.is_a?(Hash)
+          root = parsed.is_a?(Hash) ? parsed : { "_json" => parsed }
+          root.each { |k, v| body_params[k.to_s] = json_munge(v) }
         rescue JSON::ParserError
-          nil
+          bad_request = true
         end
       end
+      # Merged `params` is body ∪ query (query already landed above).
+      body_params.each { |k, v| params[k] = v }
     end
 
     # Rails-style method override: a POST with hidden `_method=delete` (or
@@ -103,7 +115,20 @@ module CgiIo
     # same URL typed into the address bar.
     accept = env.fetch("HTTP_ACCEPT", "").to_s
 
-    { method: method, path: path, params: params, cookies: cookies, accept: accept }
+    { method: method, path: path, params: params, body_params: body_params, cookies: cookies, accept: accept, bad_request: bad_request }
+  end
+
+  # Rails' deep_munge on one parsed JSON value: nils inside Arrays are
+  # dropped at any depth; Hashes and scalars keep their contents (a nil
+  # under a key stays nil).
+  def self.json_munge(v)
+    if v.is_a?(Array)
+      v.compact.map { |e| json_munge(e) }
+    elsif v.is_a?(Hash)
+      v.each_with_object({}) { |(k, e), h| h[k.to_s] = json_munge(e) }
+    else
+      v
+    end
   end
 
   # Write a CGI response to the given writable IO. `set_cookies` is
@@ -112,7 +137,7 @@ module CgiIo
     code   = status.is_a?(Integer) ? status : status.to_i
     reason = REASON_PHRASES.fetch(code, "OK")
     io.write("Status: #{code} #{reason}\r\n")
-    write_header(io, "Content-Type", content_type.to_s)
+    write_header(io, "Content-Type", content_type.to_s) unless content_type.nil? || content_type.to_s.empty?
     write_header(io, "Location", location.to_s) unless location.nil?
     extra_headers.each { |k, v| write_header(io, k.to_s, v.to_s) unless v.nil? }
     set_cookies.each do |name, val|

@@ -32,6 +32,11 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     {
         return;
     }
+    // A block with optional or keyword parameters is not the `|csv|` shape;
+    // decline before any option is taken off the call.
+    if matches!(&*block.node, ExprNode::Lambda { extra_params, .. } if !extra_params.is_empty()) {
+        return;
+    }
     let Some(ExprNode::Hash { entries, .. }) = args.last_mut().map(|a| &mut *a.node) else {
         return;
     };
@@ -68,7 +73,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     let span = body.span;
     let csv_ty = Ty::Class {
         id: ClassId(Symbol::from("CSV")),
-        args: vec![],
+        args: vec![].into(),
     };
     let mut target = Expr::new(
         span,

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Minitest-shaped, like route_helpers_test.rb: a CRuby-only framework
 # test of the ruby family's `Hash#to_query` reopen
 # (runtime/hash_to_query.rb over the shared runtime/action_view). The

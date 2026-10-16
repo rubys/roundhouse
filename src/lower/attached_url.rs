@@ -104,8 +104,21 @@ fn urlize(e: &mut Expr, attrs: &HashSet<Symbol>) {
     }
 }
 
-/// `recv.<attached attr>` (the reader), or a variant chained off one.
+/// `recv.<attached attr>` (the reader), or a variant chained off one —
+/// or any expression the analyzer TYPED as one of the three Active
+/// Storage values. Outside a view the body is typed, so campfire's
+/// `poster = message.attachment.preview(:poster); url_for(poster)` in
+/// a presentation class is known to hand `url_for` a Preview, which
+/// the name rule (a send, by reader name) cannot see through a local.
 fn is_attachment_shaped(e: &Expr, attrs: &HashSet<Symbol>) -> bool {
+    if let Some(crate::ty::Ty::Class { id, .. }) = &e.ty {
+        if matches!(
+            id.0.as_str(),
+            "ActiveStorage::Attached" | "ActiveStorage::VariantWithRecord" | "ActiveStorage::Preview"
+        ) {
+            return true;
+        }
+    }
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*e.node else {
         return false;
     };

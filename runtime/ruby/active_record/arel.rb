@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Arel — the raw-SQL corner of ActiveRecord's query surface, sized to the
 # string-composed Relation runtime: a "fragment" here IS its SQL text.
 # `Arel.sql(...)` marks a caller-authored fragment (identity — Relation
@@ -21,8 +22,10 @@ module Arel
       @sql = sql
     end
 
+    # The text carries the relation's bind marks so `exists` can splice
+    # them into an enclosing read; printed, the values are written in.
     def to_sql
-      @sql
+      ActiveRecord::Relation.inline_sql(@sql)
     end
 
     def exists

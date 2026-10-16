@@ -68,7 +68,7 @@ pub fn apply_route_format_suffix_lowering(app: &mut App) {
 /// Every `<as_name>_path` / `<as_name>_url` the app's routes define.
 pub(crate) fn route_helper_names(app: &App) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    for route in super::routes::flatten_routes(app) {
+    for route in super::routes::flatten_routes_for_helpers(app) {
         if !route.named {
             continue;
         }

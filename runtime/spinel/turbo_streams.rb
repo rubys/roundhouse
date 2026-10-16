@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `Turbo::Streams::StreamName` — the SIGNING half of Turbo's stream
 # names, for a channel that guards its own stream.
 #

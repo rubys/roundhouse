@@ -15,7 +15,8 @@ module Nokogiri
     def inner_html: () -> String
     def attributes: () -> Hash[String, Attr]
     def content=: (untyped _value) -> untyped
-    def replace: (Element _node) -> void
+    def replace: (Element | HTML5::DocumentFragment _node) -> void
+    def to_html: () -> String
   end
 
   class NodeSet
@@ -27,5 +28,16 @@ module Nokogiri
     def meta_encoding: () -> String?
     def at_css: (String _selector) -> Element?
     def create_element: (String _name) -> Element
+  end
+
+  module HTML5
+    def self.fragment: (String _html) -> HTML5::DocumentFragment
+
+    class DocumentFragment
+      def xpath: (String _path) -> NodeSet
+      def css: (String _selector) -> NodeSet
+      def at_css: (String _selector) -> Element?
+      def to_html: (?preserve_newline: bool) -> String
+    end
   end
 end

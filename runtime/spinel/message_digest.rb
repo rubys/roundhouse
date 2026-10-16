@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Keyed-digest primitives for the spinel binary — the sp_crypto half of
 # the two-layer split (message_digest_cruby.rb is the OpenSSL half, and
 # `ruby_runtime_files` swaps it in at this path for the CRuby/JRuby

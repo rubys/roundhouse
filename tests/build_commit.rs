@@ -60,6 +60,11 @@ fn git(dir: &Path, args: &[&str]) -> String {
         "commit.gpgsign=false",
         "-c",
         "core.hooksPath=/dev/null",
+        // Not left on: `git commit` detaches `git maintenance run --auto`, which can still be writing .git/objects when the fixture is removed.
+        "-c",
+        "maintenance.auto=false",
+        "-c",
+        "gc.auto=0",
     ];
     configured.extend_from_slice(args);
     run(dir, "git", &configured, None)

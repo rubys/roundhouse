@@ -78,10 +78,18 @@ pub enum ViewHelperKind<'a> {
     /// `render_attrs(hash)` — the attribute-hash helper the HAML and Slim
     /// compilers emit for dynamic attributes (never written in ERB).
     RenderAttrs { attrs: &'a Expr },
+    /// `haml_class(static, value)` — the HAML compiler's shortcut-class
+    /// merge helper (`.g{ class: k }`, see `src/haml.rs`'s `element`):
+    /// `static_classes` is the folded `.class` shortcuts, `value` the
+    /// hash `class:`'s own (scalar) value.
+    HamlClass { static_classes: &'a Expr, value: &'a Expr },
     /// `<%= pluralize(count, "word") %>`.
     Pluralize { count: &'a Expr, word: &'a Expr },
     /// `<%= truncate(text [, opts]) %>`.
     Truncate { text: &'a Expr, opts: Option<&'a Expr> },
+    /// `<%= word_wrap(text [, opts]) %>` — returns ordinary text, so
+    /// the lowering must escape the result before appending it.
+    WordWrap { text: &'a Expr, opts: Option<&'a Expr> },
     /// `<%= stylesheet_link_tag :name [, opts] %>`.
     StylesheetLinkTag { name: &'a Expr, opts: Option<&'a Expr> },
     /// `<%= content_for(:slot) %>` (getter, no body).
@@ -160,10 +168,16 @@ pub enum RenderPartial<'a> {
         /// `cached: true` — Rails' collection cache. The concatenated
         /// partials are stored under one key (each element's
         /// `cache_key_with_version`) so a warm campfire room page is
-        /// one `read_str`, not 40 fragment lookups. A proc / non-true
-        /// value is declined: that shape customizes the key and is
-        /// not modeled.
+        /// one `read_str`, not 40 fragment lookups.
         cached: bool,
+        /// `cached: ->(item) { key }` — Rails' collection cache with a
+        /// callable key: each element's fragment is stored under the
+        /// key the lambda answers, and the collection is preloaded
+        /// first because the key may read associations (campfire's
+        /// `message_fragment_cache_key`). Any other non-true value (a
+        /// `{ key:, expires_in: }` hash) is not modeled and renders
+        /// uncached.
+        cached_key: Option<&'a Expr>,
     },
     /// `render partial: @above` — the partial NAME is a runtime value
     /// (an ivar/local), not a literal, so it can't be resolved to one
@@ -371,6 +385,7 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
     let mut first_local: Option<&Expr> = None;
     let mut locals_entries: Option<&[(Expr, Expr)]> = None;
     let mut cached = false;
+    let mut cached_key: Option<&Expr> = None;
     for (k, v) in entries {
         match key_of(k).as_deref() {
             Some("partial") => match &*v.node {
@@ -394,9 +409,11 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
                     as_name = Some(value.as_str());
                 }
             }
-            Some("cached") => {
-                cached = matches!(&*v.node, ExprNode::Lit { value: Literal::Bool { value: true } });
-            }
+            Some("cached") => match &*v.node {
+                ExprNode::Lit { value: Literal::Bool { value: true } } => cached = true,
+                ExprNode::Lambda { params, .. } if params.len() == 1 => cached_key = Some(v),
+                _ => {}
+            },
             // An explicit `locals: {…}` hash — keep the entries so the
             // emitter can bind record + extra locals by name.
             Some("locals") => {
@@ -440,6 +457,7 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
             as_name,
             locals: locals_entries,
             cached,
+            cached_key,
         })
     } else {
         Some(RenderPartial::Named {
@@ -528,6 +546,10 @@ pub fn classify_view_helper<'a>(
             Some(ViewHelperKind::TurboStreamFrom { streamables: args })
         }
         ("render_attrs", 1) => Some(ViewHelperKind::RenderAttrs { attrs: &args[0] }),
+        ("haml_class", 2) => Some(ViewHelperKind::HamlClass {
+            static_classes: &args[0],
+            value: &args[1],
+        }),
         ("dom_id", 1) => Some(ViewHelperKind::DomId {
             record: &args[0],
             prefix: None,
@@ -545,6 +567,14 @@ pub fn classify_view_helper<'a>(
             opts: None,
         }),
         ("truncate", 2) => Some(ViewHelperKind::Truncate {
+            text: &args[0],
+            opts: Some(&args[1]),
+        }),
+        ("word_wrap", 1) => Some(ViewHelperKind::WordWrap {
+            text: &args[0],
+            opts: None,
+        }),
+        ("word_wrap", 2) => Some(ViewHelperKind::WordWrap {
             text: &args[0],
             opts: Some(&args[1]),
         }),
@@ -686,10 +716,12 @@ pub fn renders_through_view_path(format: &str) -> bool {
     // `<action>_txt`. Paired with the ingest gate in `ingest::app`'s
     // `walk_erb` the same way `svg`/`json` are: a format admitted only
     // here or only there is silently dropped in between.
+    // `css`: joins them the same way — a CSS responder with no html
+    // sibling (Mastodon's `custom_css#show`), as `<action>_css`.
     matches!(
         format,
         "html" | "turbo_stream" | "svg" | "rss" | "atom" | "xml" | "xls" | "json" | "js" | "pdf"
-            | "csv" | "txt"
+            | "csv" | "txt" | "css" | "md"
     )
 }
 
@@ -767,6 +799,32 @@ pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {
         // unbound, which is a NameError on every render of the page.
         "rich_text_area" | "rich_textarea" => Some(FormBuilderMethod::RichTextArea),
         _ => None,
+    }
+}
+
+/// The builder methods Rails' default `field_error_proc` wraps in
+/// `<div class="field_with_errors">` when their field has errors: every
+/// control that goes through `Tags::Base#tag`, and the label. A hidden
+/// field, a button, the submit and Action Text's editor are not.
+pub fn wraps_field_errors(method: &str) -> bool {
+    classify_form_builder_method(method).is_some_and(FormBuilderMethod::wraps_field_errors)
+}
+
+impl FormBuilderMethod {
+    pub fn wraps_field_errors(self) -> bool {
+        matches!(
+            self,
+            FormBuilderMethod::Label
+                | FormBuilderMethod::TextField
+                | FormBuilderMethod::TextArea
+                | FormBuilderMethod::PasswordField
+                | FormBuilderMethod::CheckBox
+                | FormBuilderMethod::RadioButton
+                | FormBuilderMethod::Select
+                | FormBuilderMethod::UrlField
+                | FormBuilderMethod::EmailField
+                | FormBuilderMethod::FileField
+        )
     }
 }
 
@@ -1239,6 +1297,15 @@ mod tests {
         assert!(matches!(
             classify_view_helper("link_to", &args),
             Some(ViewHelperKind::LinkTo { opts: Some(_), .. })
+        ));
+    }
+
+    #[test]
+    fn word_wrap_keeps_options_for_the_shared_runtime_helper() {
+        let args = vec![str_lit("one two"), sym("options")];
+        assert!(matches!(
+            classify_view_helper("word_wrap", &args),
+            Some(ViewHelperKind::WordWrap { opts: Some(_), .. })
         ));
     }
 

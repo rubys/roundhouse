@@ -406,11 +406,20 @@ end
 # makes these probes ground truth rather than the emit agreeing with
 # itself; before the forgery check landed, both emitted lanes posted the
 # message.
+#
+# The probes send what a BROWSER sends from the other site:
+# `Sec-Fetch-Site: cross-site`. Rails main checks that header before any
+# token, and under `load_defaults 8.2` (`:header_only`) a POST with no
+# header at all over plain http is ACCEPTED — that is a non-browser
+# client, which the header cannot vouch for and CSRF does not threaten.
+# Leaving the header off made the probe ask Rails a question whose
+# answer depends on the strategy rather than on the forgery.
 puts "\n\e[1;34m==>\e[0m a forged post, which must be refused"
 before3 = a.payloads.size
 forged = req("POST", "/rooms/1/messages",
              { "message[body]" => "forged", "message[client_message_id]" => "cable-walk-forged" },
-             accept: "text/vnd.turbo-stream.html, text/html", csrf: false)
+             accept: "text/vnd.turbo-stream.html, text/html", csrf: false,
+             headers: { "Sec-Fetch-Site" => "cross-site" })
 check("a POST without the token is refused", forged.code, "422")
 foreign = req("POST", "/rooms/1/messages",
               { "message[body]" => "forged", "message[client_message_id]" => "cable-walk-foreign" },
@@ -426,13 +435,19 @@ check("neither reaches a socket",
 # cookie is authenticated, so a plaintext one restores nothing and the
 # post is refused; so must ours. The real cookie is put back afterwards,
 # signed-in state and all.
+#
+# `Sec-Fetch-Site: none` keeps the header from vouching (a same-site
+# value would pass Rails main before the token is read): under
+# `:header_or_legacy_token` the token decides, under `:header_only` the
+# header alone refuses. Either way the planted token must not help.
 SESSION_COOKIE = "_campfire_session"
 PLANTED = "planted-token-planted-token-planted-tok"
 real_session = $jar[SESSION_COOKIE]
 $jar[SESSION_COOKIE] = "_csrf_token=#{PLANTED}"
 planted = req("POST", "/rooms/1/messages",
               { "message[body]" => "forged", "message[client_message_id]" => "cable-walk-planted" },
-              accept: "text/vnd.turbo-stream.html, text/html", token: PLANTED)
+              accept: "text/vnd.turbo-stream.html, text/html", token: PLANTED,
+              headers: { "Sec-Fetch-Site" => "none" })
 real_session.nil? ? $jar.delete(SESSION_COOKIE) : $jar[SESSION_COOKIE] = real_session
 check("a planted session cookie's token is refused", planted.code, "422")
 

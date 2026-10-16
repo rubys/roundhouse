@@ -195,3 +195,100 @@ expect_bound_bool(true, 1)
 expect_bound_bool(nil, -7)
 expect_bound_bool(false, 0)
 puts "runtime: nullable boolean preserves SQL NULL passed"
+
+# A write that returns rows: the handle replays them, `changes` is the
+# write's count, and the write empties the request's query cache.
+# RETURNING needs SQLite 3.35; an older library raises a clear error.
+raise "3.35.0 supports RETURNING" if !Db.returning_supported?(3035000)
+raise "3.34.1 has no RETURNING" if Db.returning_supported?(3034001)
+Db.exec("CREATE TABLE returning_rows (id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE)")
+h = Db.exec_returning("INSERT INTO returning_rows (label) VALUES ('alpha'), ('beta') RETURNING id, label")
+expect_int("returning changes", 2, Db.changes)
+expect_int("returning column count", 2, Db.column_count(h))
+# SQLite does not promise an order for RETURNING rows: read both, then
+# accept either order.
+raise "missing first returned row" if !Db.step?(h)
+id_a = Db.column_int(h, 0)
+label_a = Db.column_text(h, 1)
+raise "missing second returned row" if !Db.step?(h)
+id_b = Db.column_int(h, 0)
+label_b = Db.column_text(h, 1)
+raise "extra returned row" if Db.step?(h)
+in_order = id_a == 1 && label_a == "alpha" && id_b == 2 && label_b == "beta"
+reversed = id_a == 2 && label_a == "beta" && id_b == 1 && label_b == "alpha"
+if !in_order && !reversed
+  raise "returned rows: expected {1 alpha, 2 beta} in any order, got " +
+    id_a.to_s + " " + label_a + ", " + id_b.to_s + " " + label_b
+end
+Db.finalize(h)
+h = Db.exec_returning("UPDATE returning_rows SET label = 'none' WHERE id = 99 RETURNING id")
+expect_int("returning no rows changes", 0, Db.changes)
+raise "returned a row for no match" if Db.step?(h)
+Db.finalize(h)
+Db.with_connection do
+  Db.query_cache_begin
+  stmt = Db.prepare("SELECT COUNT(*) FROM returning_rows")
+  raise "missing count" if !Db.step?(stmt)
+  expect_int("count before", 2, Db.column_int(stmt, 0))
+  Db.finalize(stmt)
+  h = Db.exec_returning("INSERT INTO returning_rows (label) VALUES ('gamma') RETURNING id")
+  raise "missing gamma id" if !Db.step?(h)
+  expect_int("gamma id", 3, Db.column_int(h, 0))
+  Db.finalize(h)
+  stmt = Db.prepare("SELECT COUNT(*) FROM returning_rows")
+  raise "missing count after" if !Db.step?(stmt)
+  expect_int("exec_returning clears the query cache", 3, Db.column_int(stmt, 0))
+  Db.finalize(stmt)
+  Db.query_cache_end
+end
+puts "runtime: exec_returning rows, row count and cache invalidation passed"
+
+# exec_returning's capture needs releasing like any other reader. On the
+# Spinel SQLite shim (runtime/spinel/db.rb) that capture lives in
+# @qc_cursors, an array only cleared in bulk at a lease boundary
+# (query_cache_begin/end); outside with_connection there is no lease at
+# all, so a script that calls exec_returning then finalize — with
+# nothing else ever touching the query cache — must not grow that array
+# without bound. Db.qc_cursor_count is a test-only hook: it is always 0
+# on the CRuby/JRuby shims, which hold no such array — a handle there is
+# a plain Ruby object, reclaimed by GC once finalize drops the last
+# reference to it.
+before = Db.qc_cursor_count
+i = 0
+while i < 1000
+  h = Db.exec_returning("INSERT INTO returning_rows (label) VALUES ('loop-" + i.to_s + "') RETURNING id")
+  raise "missing loop row" if !Db.step?(h)
+  Db.finalize(h)
+  i += 1
+end
+expect_int("exec_returning does not leak captures outside a lease", before, Db.qc_cursor_count)
+puts "runtime: exec_returning outside with_connection does not leak captures passed"
+
+# A UNIQUE violation while stepping exec_returning is RecordNotUnique,
+# and statement cleanup must not replace it: the failed step's reset has
+# already consumed the error, so the finalize in the ensure reports OK.
+# The connection then serves a plain read.
+def expect_returning_not_unique(label)
+  h = Db.exec_returning("INSERT INTO returning_rows (label) VALUES ('" + label + "') RETURNING id")
+  raise "missing " + label + " id" if !Db.step?(h)
+  Db.finalize(h)
+  raised = "nothing"
+  begin
+    h = Db.exec_returning("INSERT INTO returning_rows (label) VALUES ('" + label + "') RETURNING id")
+    Db.finalize(h)
+  rescue ActiveRecord::RecordNotUnique
+    raised = "RecordNotUnique"
+  rescue RuntimeError => e
+    raised = "RuntimeError: " + e.message
+  end
+  expect_text("exec_returning duplicate " + label, "RecordNotUnique", raised)
+  stmt = Db.prepare("SELECT COUNT(*) FROM returning_rows WHERE label = '" + label + "'")
+  raise "missing count after duplicate " + label if !Db.step?(stmt)
+  expect_int("rows after duplicate " + label, 1, Db.column_int(stmt, 0))
+  Db.finalize(stmt)
+end
+expect_returning_not_unique("dup-outside")
+Db.with_connection do
+  expect_returning_not_unique("dup-inside")
+end
+puts "runtime: exec_returning UNIQUE violation raises RecordNotUnique passed"

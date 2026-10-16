@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Minitest-shaped: this is a CRuby-only framework test, quarantined
 # out of the spin shape by `project.rs::spin_shape` (it is not a spin
 # test program and gets no snapshot). It therefore loads its own

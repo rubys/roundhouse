@@ -3066,14 +3066,14 @@ pub fn candidate_signature(
         .enumerate()
         .map(|(i, name)| crate::ty::Param {
             name: name.clone(),
-            ty: inferred.and_then(|ts| ts.get(i)).cloned().unwrap_or(Ty::Untyped),
+            ty: inferred.and_then(|ts| ts.get(i)).cloned().unwrap_or(Ty::Untyped).into(),
             kind: crate::ty::ParamKind::Required,
         })
         .collect();
     let fn_ty = Ty::Fn {
-        params,
+        params: params.into(),
         block: None,
-        ret: Box::new(known.clone()),
+        ret: std::sync::Arc::new(known.clone()),
         effects: crate::effect::EffectSet::pure(),
     };
     crate::rbs::print_method_signature(method.as_str(), &fn_ty)
@@ -3457,7 +3457,7 @@ mod tests {
     use crate::ident::{ClassId, Symbol, TyVar};
 
     fn class(name: &str) -> Ty {
-        Ty::Class { id: ClassId(Symbol::new(name)), args: vec![] }
+        Ty::Class { id: ClassId(Symbol::new(name)), args: vec![].into() }
     }
 
     /// A `def` header has a position now: hover answers with the
@@ -3522,9 +3522,9 @@ mod tests {
         assert_eq!(render_ty(&Ty::Str), "String");
         assert_eq!(render_ty(&Ty::Bool), "bool");
         assert_eq!(render_ty(&Ty::Nil), "nil");
-        assert_eq!(render_ty(&Ty::Array { elem: Box::new(Ty::Int) }), "Array[Integer]");
+        assert_eq!(render_ty(&Ty::Array { elem: std::sync::Arc::new(Ty::Int) }), "Array[Integer]");
         assert_eq!(
-            render_ty(&Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) }),
+            render_ty(&Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) }),
             "Hash[Symbol, String]"
         );
         assert_eq!(render_ty(&class("Article")), "Article");
@@ -3532,10 +3532,10 @@ mod tests {
 
     #[test]
     fn render_ty_collapses_nilable_union_to_question_mark() {
-        let t = Ty::Union { variants: vec![class("Article"), Ty::Nil] };
+        let t = Ty::Union { variants: vec![class("Article"), Ty::Nil].into() };
         assert_eq!(render_ty(&t), "Article?");
         // Wider unions keep an explicit `nil` arm.
-        let wide = Ty::Union { variants: vec![Ty::Int, Ty::Str, Ty::Nil] };
+        let wide = Ty::Union { variants: vec![Ty::Int, Ty::Str, Ty::Nil].into() };
         assert_eq!(render_ty(&wide), "Integer | String | nil");
     }
 
@@ -3548,7 +3548,7 @@ mod tests {
     #[test]
     fn can_be_nil_only_for_provable_nil() {
         assert!(can_be_nil(&Ty::Nil));
-        assert!(can_be_nil(&Ty::Union { variants: vec![class("Article"), Ty::Nil] }));
+        assert!(can_be_nil(&Ty::Union { variants: vec![class("Article"), Ty::Nil].into() }));
         assert!(!can_be_nil(&class("Article")));
         assert!(!can_be_nil(&Ty::Var { var: TyVar(0) }));
         assert!(!can_be_nil(&Ty::Untyped));
@@ -3672,7 +3672,7 @@ mod tests {
         // Provable yes.
         assert_eq!(nil_verdict(Some(&Ty::Nil)), Some(true));
         assert_eq!(
-            nil_verdict(Some(&Ty::Union { variants: vec![class("Article"), Ty::Nil] })),
+            nil_verdict(Some(&Ty::Union { variants: vec![class("Article"), Ty::Nil].into() })),
             Some(true)
         );
         // Provable no.
@@ -3683,13 +3683,13 @@ mod tests {
         assert_eq!(nil_verdict(Some(&Ty::Untyped)), None);
         assert_eq!(nil_verdict(Some(&Ty::Var { var: TyVar(0) })), None);
         assert_eq!(
-            nil_verdict(Some(&Ty::Union { variants: vec![Ty::Untyped, Ty::Str] })),
+            nil_verdict(Some(&Ty::Union { variants: vec![Ty::Untyped, Ty::Str].into() })),
             None
         );
         assert_eq!(nil_verdict(None), None);
         // An unknown arm doesn't retract a proven nil arm.
         assert_eq!(
-            nil_verdict(Some(&Ty::Union { variants: vec![Ty::Untyped, Ty::Nil] })),
+            nil_verdict(Some(&Ty::Union { variants: vec![Ty::Untyped, Ty::Nil].into() })),
             Some(true)
         );
     }

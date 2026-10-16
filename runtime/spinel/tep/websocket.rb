@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::WebSocket -- RFC 6455 WebSocket support for spinel-AOT'd apps.
 #
 # Protocol substrate (this file's directory):

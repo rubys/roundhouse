@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Synchronized `Rails.cache` for the spinel binary, overriding the
 # shared runtime's unsynchronized store (runtime/ruby/rails.rb).
 #

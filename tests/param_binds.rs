@@ -139,6 +139,28 @@ end
         )
 }
 
+const STATEMENT_ERRORS: &str = "module ActiveRecord
+  class ActiveRecordError < StandardError
+  end
+  class StatementInvalid < ActiveRecordError
+  end
+  class WrappedDatabaseException < StatementInvalid
+  end
+  class RecordNotUnique < WrappedDatabaseException
+  end
+  class InvalidForeignKey < WrappedDatabaseException
+  end
+  class NotNullViolation < StatementInvalid
+  end
+  class CheckViolation < StatementInvalid
+  end
+  class QueryAborted < StatementInvalid
+  end
+  class StatementTimeout < QueryAborted
+  end
+end
+";
+
 fn success(command: &mut Command) {
     let output = command
         .output()
@@ -337,6 +359,10 @@ fn runtime(native: bool) {
             root.join("runtime/spinel/db_cruby.rb")
         )
     };
+    // The shims raise ActiveRecord's statement errors, which an app gets
+    // from runtime/ruby/active_record/errors.rb; stub them as the other
+    // shim harnesses do.
+    let prelude = format!("{prelude}{STATEMENT_ERRORS}");
     let clear = r#"
 # Both shims clear bindings on release. Probe a missing bind on idle reuse
 # directly, since a generated reader overwrites every slot and cannot see it.

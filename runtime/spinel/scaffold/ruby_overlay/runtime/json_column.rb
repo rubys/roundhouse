@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The storage boundary for schema-less ActiveRecord json/jsonb columns
 # and `serialize …, coder: JSON`. SQLite hands the generated model
 # serialized text; Rails exposes the decoded Array/Hash/scalar.

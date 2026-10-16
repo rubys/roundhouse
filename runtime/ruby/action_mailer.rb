@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActionMailer runtime — the delivery-capture slice.
 #
 # Rails' mailer machinery is method_missing at both ends (class-side

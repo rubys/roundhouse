@@ -93,5 +93,37 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     };
     if let Some(node) = replacement {
         expr.node = Box::new(node);
+        return;
+    }
+    fold_safe_nav(expr);
+}
+
+/// `x.errors&.full_messages`, which `&.` binds as
+/// `(__safe_nav1 = x.errors) && __safe_nav1.full_messages`, and
+/// `x&.errors&.full_messages`, where the bound value is itself
+/// `x && x.errors`: the hop is the same identity, and it is nil-safe on
+/// its own (nil `errors` answers nil either way), so the binding goes
+/// with it. `e.record&.errors&.full_messages&.first` reads the messages
+/// whatever `e.record`'s type, as the `.` spelling does.
+fn fold_safe_nav(expr: &mut Expr) {
+    use crate::expr::{BoolOpKind, LValue};
+    let is_errors = |e: &Expr| {
+        matches!(&*e.node, ExprNode::Send { method, args, block: None, .. }
+            if method.as_str() == "errors" && args.is_empty())
+    };
+    let ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } = &*expr.node else { return };
+    let ExprNode::Assign { target: LValue::Var { name: temp, .. }, value } = &*left.node else { return };
+    let ExprNode::Send { recv: Some(read), method, args, block: None, .. } = &*right.node else { return };
+    if method.as_str() != "full_messages"
+        || !args.is_empty()
+        || !matches!(&*read.node, ExprNode::Var { name, .. } if name == temp)
+    {
+        return;
+    }
+    let folds = is_errors(value)
+        || matches!(&*value.node, ExprNode::BoolOp { op: BoolOpKind::And, right: inner, .. } if is_errors(inner));
+    if folds {
+        let value = value.clone();
+        *expr = value;
     }
 }

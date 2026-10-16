@@ -349,9 +349,8 @@ module CrubyCleanupRegressions
       rescue StandardError => e
         e
       end
-      expected_class = operation == :step ? SQLite3::SQLException : SQLite3::RangeException
-      check("#{operation}: preserve the driver exception class", error.instance_of?(expected_class))
-      check("#{operation}: preserve the driver exception object", error.equal?(original_error))
+      check("#{operation}: translate as Rails does", error.instance_of?(ActiveRecord::StatementInvalid))
+      check("#{operation}: keep the driver exception as the cause", error.cause.equal?(original_error))
       check("#{operation}: cleanup closes the failed statement", raw.closed?)
       check("#{operation}: cleanup releases ownership", stmt[:stmt].nil?)
     end

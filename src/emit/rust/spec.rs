@@ -45,10 +45,11 @@ fn emit_literal_local(lit: &Literal) -> String {
 ///   - Equality: `assert_equal a, b`
 ///   - Model: `Model.last`, `@record.reload`
 ///
-/// Setup (`setup do @article = articles(:one) end`) isn't preserved
-/// in the current IR; ivars read-without-assign auto-prime from the
-/// `<plural>::one()` fixture accessor. Matches real-blog's convention.
-fn emit_rust_controller_test(out: &mut String, test: &Test, app: &App) {
+/// An ivar read without assignment primes from the fixture the setup
+/// assigns it (`@article = articles(:unsigned)`), else from the
+/// `<plural>::one()` fixture accessor.
+fn emit_rust_controller_test(out: &mut String, test: &Test, setup: Option<&Expr>, app: &App) {
+    let fixture_names: Vec<Symbol> = app.fixtures.iter().map(|f| f.name.clone()).collect();
     let name = test_fn_name(&test.name);
     writeln!(out, "#[tokio::test(flavor = \"multi_thread\")]").unwrap();
     writeln!(out, "#[allow(unused_mut, unused_variables)]").unwrap();
@@ -63,6 +64,10 @@ fn emit_rust_controller_test(out: &mut String, test: &Test, app: &App) {
 
     let walked = crate::lower::walk_controller_ivars(&test.body);
     for ivar in walked.ivars_read_without_assign() {
+        if let Some((fixture, label)) = setup.and_then(|s| crate::lower::setup_fixture(s, &ivar, &fixture_names)) {
+            writeln!(out, "    let mut {} = fixtures::{}::{}();", ivar.as_str(), fixture.as_str(), label).unwrap();
+            continue;
+        }
         let plural = crate::naming::pluralize_snake(&crate::naming::camelize(ivar.as_str()));
         writeln!(
             out,
@@ -199,8 +204,15 @@ fn emit_url_expr(expr: &Expr, app: &App) -> String {
         return emit_ctrl_test_expr(expr, app);
     };
     let helper_name = format!("{}_path", helper.helper_base);
-    let args_s: Vec<String> = helper
-        .args
+    let mut args = helper.args.as_slice();
+    let mut query: Option<&[(Expr, Expr)]> = None;
+    if let Some((UrlArg::Raw(last), rest)) = args.split_last()
+        && let ExprNode::Hash { entries, .. } = &*last.node
+    {
+        query = Some(entries);
+        args = rest;
+    }
+    let mut args_s: Vec<String> = args
         .iter()
         .map(|a| match a {
             UrlArg::IvarOrVarId(name) => format!("{name}.id"),
@@ -208,7 +220,59 @@ fn emit_url_expr(expr: &Expr, app: &App) -> String {
             UrlArg::Raw(e) => emit_ctrl_test_expr(e, app),
         })
         .collect();
+    if let Some(entries) = query {
+        args_s.extend(query_args(&helper_name, entries, app));
+    }
     format!("route_helpers::{helper_name}({})", args_s.join(", "))
+}
+
+thread_local! {
+    static ROUTE_HELPERS: std::cell::RefCell<Vec<crate::dialect::LibraryFunction>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `f` with the app's lowered route helpers in reach of `query_args`.
+pub fn with_route_helpers<T>(funcs: &[crate::dialect::LibraryFunction], f: impl FnOnce() -> T) -> T {
+    let prev = ROUTE_HELPERS.with(|c| c.replace(funcs.to_vec()));
+    let result = f();
+    ROUTE_HELPERS.with(|c| c.replace(prev));
+    result
+}
+
+/// A helper's keyword options as its trailing `Option` positionals, in the order the helper declares them.
+fn query_args(helper_name: &str, entries: &[(Expr, Expr)], app: &App) -> Vec<String> {
+    let params = ROUTE_HELPERS.with(|c| {
+        // Outside `with_route_helpers` there is no emission-wide copy, so lower them here.
+        let lowered;
+        let funcs = c.borrow();
+        let funcs: &[crate::dialect::LibraryFunction] = if funcs.is_empty() {
+            lowered = crate::lower::lower_routes_to_library_functions(app);
+            &lowered
+        } else {
+            &funcs
+        };
+        match funcs.iter().find(|f| f.name.as_str() == helper_name).and_then(|f| f.signature.clone()) {
+            Some(crate::ty::Ty::Fn { params, .. }) => params.to_vec(),
+            _ => Vec::new(),
+        }
+    });
+    params
+        .iter()
+        .filter(|p| matches!(p.kind, crate::ty::ParamKind::Keyword { .. }))
+        .map(|p| {
+            let value = entries.iter().find_map(|(k, v)| match &*k.node {
+                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == p.name.as_str() => Some(v),
+                _ => None,
+            });
+            match value {
+                None => "None".to_string(),
+                Some(v) if matches!(p.ty.peel_nilable(), crate::ty::Ty::Str) => {
+                    format!("Some(({}).to_string())", emit_ctrl_test_expr(v, app))
+                }
+                Some(v) => format!("Some({})", emit_ctrl_test_expr(v, app)),
+            }
+        })
+        .collect()
 }
 
 fn emit_assert_select_classified(
@@ -303,6 +367,13 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App) -> String {
                     return format!("{class}::count()");
                 }
             }
+            // `response.body` is the request's `resp`, bound above, not a field of anything named `response`.
+            if m == "body"
+                && args.is_empty()
+                && matches!(&*r.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "response" && args.is_empty())
+            {
+                return "resp.text()".to_string();
+            }
             if args.is_empty() {
                 let recv_s = match &*r.node {
                     ExprNode::Ivar { name } | ExprNode::Var { name, .. } => name.to_string(),
@@ -367,7 +438,7 @@ pub(super) fn emit_rust_test_module(tm: &TestModule, app: &App) -> EmittedFile {
 
     for test in &tm.tests {
         writeln!(s).unwrap();
-        emit_rust_controller_test(&mut s, test, app);
+        emit_rust_controller_test(&mut s, test, tm.setup.as_ref(), app);
     }
 
     let filename = snake_case(tm.name.0.as_str());

@@ -112,8 +112,9 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // `Enum.empty?` rather than a struct-method dispatch.
             fields.push((
                 "errors".to_string(),
-                crate::ty::Ty::Array { elem: Box::new(crate::ty::Ty::Str) },
+                crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Str) },
             ));
+            fields.push(("error_details".to_string(), crate::lower::errors_add::error_details_ty()));
             let name = model.name.0.as_str();
             expr::register_field_types(name, &fields);
             let row_fields: Vec<(String, crate::ty::Ty)> = table
@@ -136,6 +137,12 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // (`record.dom_prefix()`) isn't a registered field, so it still
     // dispatches through `__struct__`.
     expr::register_field_names("ActiveRecord::Base", &["id".to_string()]);
+    // `ActiveRecord::ErrorDetail` is a map here, so what an `errors` iteration yields reads its keys.
+    let mut detail_fields: Vec<(String, crate::ty::Ty)> =
+        ["attribute", "kind", "message", "full_message"].iter().map(|f| (f.to_string(), crate::ty::Ty::Str)).collect();
+    detail_fields.push(("symbolic".to_string(), crate::ty::Ty::Bool));
+    detail_fields.push(("optionless".to_string(), crate::ty::Ty::Bool));
+    expr::register_field_types("ActiveRecord::ErrorDetail", &detail_fields);
 
     // Functional-target lowerings (issue #29): rewrite imperative
     // control flow (while→recursion, …) into the functional IR the
@@ -213,6 +220,17 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         out.push(EmittedFile {
             path: output_path(OutputKind::HandWrittenRuntime { name: "broadcasts.ex" }).path,
             content: include_str!("../../runtime/elixir/v2/broadcasts.ex").to_string(),
+        });
+        // Thin AssociationReflection — Base is not on ELIXIR_RUNTIME
+        // yet, but lowered models call `.new/2` from
+        // `reflect_on_association` (#832).
+        out.push(EmittedFile {
+            path: output_path(OutputKind::HandWrittenRuntime {
+                name: "association_reflection.ex",
+            })
+            .path,
+            content: include_str!("../../runtime/elixir/v2/association_reflection.ex")
+                .to_string(),
         });
 
         // Per-model emit. Elixir has no inheritance, so each model module
@@ -366,13 +384,13 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                 .map(|m| {
                     let cls = crate::ty::Ty::Class {
                         id: crate::ident::ClassId(m.clone().into()),
-                        args: vec![],
+                        args: vec![].into(),
                     };
                     (crate::naming::snake_case(m), cls)
                 })
                 .flat_map(|(singular, cls)| {
                     let plural = crate::naming::pluralize_snake(&singular);
-                    let list = crate::ty::Ty::Array { elem: Box::new(cls.clone()) };
+                    let list = crate::ty::Ty::Array { elem: std::sync::Arc::new(cls.clone()) };
                     [(singular, cls), (plural, list)]
                 })
                 .collect();
@@ -707,7 +725,7 @@ fn emit_routes_table_file(app: &App) -> EmittedFile {
 fn class_ty(class: &str) -> crate::ty::Ty {
     crate::ty::Ty::Class {
         id: crate::ident::ClassId(crate::ident::Symbol::from(class)),
-        args: Vec::new(),
+        args: Vec::new().into(),
     }
 }
 
@@ -806,6 +824,7 @@ fn module_funcs_to_library_class(
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: None,

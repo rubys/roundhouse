@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Native date-only parsing plus UTC-safe timestamp parsing/stamping.
 #
 # Dates store as YYYY-MM-DD, with no time or zone. Separately,
@@ -47,26 +48,6 @@ module ActiveSupport
   # `active_support_date_parsing.rb` (date-gated package). Do not
   # redefine them here — CRuby boot re-injects that file after overlay.
 
-  # Rails zone name → IANA identifier (the ActiveSupport::TimeZone::
-  # MAPPING subset corpora have needed; extend as apps demand). Names
-  # not listed pass through unchanged — a valid IANA string works
-  # as-is in TZ. Consumed by main.rb's boot-time ENV["TZ"] pin.
-  RAILS_TZ_TO_IANA = {
-    "UTC" => "UTC",
-    "Eastern Time (US & Canada)" => "America/New_York",
-    "Central Time (US & Canada)" => "America/Chicago",
-    "Mountain Time (US & Canada)" => "America/Denver",
-    "Pacific Time (US & Canada)" => "America/Los_Angeles",
-    "Arizona" => "America/Phoenix",
-    "Hawaii" => "Pacific/Honolulu",
-    "Alaska" => "America/Anchorage",
-    "London" => "Europe/London",
-    "Paris" => "Europe/Paris",
-    "Berlin" => "Europe/Berlin",
-    "Tokyo" => "Asia/Tokyo",
-    "Sydney" => "Australia/Sydney",
-  }.freeze
-
   def self.parse_db_time(str)
     return nil if str.nil? || str.empty?
     # Fast path for the sqlite3 adapter's own storage form — bare
@@ -83,9 +64,10 @@ module ActiveSupport
     end
     t = str =~ /(Z|[+-]\d\d:?\d\d)\z/ ? Time.parse(str) : Time.parse("#{str} UTC")
     # Present in the app's zone, exactly as ActiveRecord returns
-    # TimeWithZone values in Time.zone: main.rb pins ENV["TZ"] to the
-    # app's config.time_zone (default UTC — Rails' default — so
-    # rendered offsets never follow the HOST's zone). Instants are
+    # TimeWithZone values in Time.zone: the boot sets the app's
+    # config.time_zone (default UTC - Rails' default) as the runtime's
+    # default zone, so rendered offsets never follow the HOST's zone,
+    # while `Time.now` still does, as in Rails. Instants are
     # unchanged; only strftime/iso8601 presentation moves.
     ActiveSupport.present(t)
   end
@@ -131,15 +113,36 @@ module ActiveSupport
     TRAVEL_OFFSET[0]
   end
 
+  # `freeze_time`'s instant, whole seconds since the epoch; 0 = the
+  # clock runs. Rails' `freeze_time` stubs `Time.now` to one value, so
+  # two reads inside the block are EQUAL — an offset alone keeps
+  # ticking between them.
+  FROZEN_AT = [0]
+
   # Whole seconds relative to the real clock. `travel(0)` is Rails'
-  # `travel_back`, which the harness runs after every test.
+  # `travel_back`, which the harness runs after every test; it thaws a
+  # frozen clock too.
   def self.travel(seconds)
     TRAVEL_OFFSET.clear
     TRAVEL_OFFSET << seconds
+    FROZEN_AT.clear
+    FROZEN_AT << 0
+  end
+
+  # Stop the clock at `seconds` (the harness's `freeze_time`).
+  def self.freeze(seconds)
+    FROZEN_AT.clear
+    FROZEN_AT << seconds
+  end
+
+  def self.clock
+    frozen = FROZEN_AT[0]
+    return Time.at(frozen) if frozen != 0
+    Time.now + TRAVEL_OFFSET[0]
   end
 
   def self.now
-    ActiveSupport.present(Time.now + TRAVEL_OFFSET[0])
+    ActiveSupport.present(clock)
   end
 
   # Write-side sibling of `parse_db_time`: current UTC time in Rails'
@@ -191,7 +194,7 @@ module ActiveSupport
   end
 
   def self.parse_time(str)
-    Time.parse(str, Time.now + TRAVEL_OFFSET[0])
+    Time.parse(str, clock)
   end
 
   # Not `Time.parse`: ActiveSupport's `TimeZone#parse` answers nil for no date and lands an offset in the app's zone.

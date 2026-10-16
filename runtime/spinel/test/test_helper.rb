@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Copied verbatim to <out>/test/test_helper.rb (by `make ruby-transpile`
 # or `tests/ruby_toolchain.rs`). `__dir__` is `<out>/test/`, so the
 # `require_relative` paths walk up one level to reach `runtime/`, `config/`,
@@ -21,6 +22,18 @@
 # the future Spinel-AOT target's tree will contain its own
 # `runtime/db.rb` (FFI-backed). Same require path, target-appropriate
 # implementation.
+# Signed stream names in the view suite are vectors. boot.rb asks
+# LocalSecret, and an unset SECRET_KEY_BASE is a fresh random key, so
+# those vectors would move every run. Pin one known key before that
+# resolve. Assignment, not ||=: an empty string is not a pin
+# (LocalSecret treats "" as unset) and a secret inherited from the
+# parent process would sign the vectors with a different key.
+ENV["SECRET_KEY_BASE"] = "roundhouse-test-secret"
+# Rails' own test_helper opens with `ENV["RAILS_ENV"] ||= "test"`, and
+# boot.rb parks it as `Rails.env`. Without it a test process reads as
+# development: `Rails.env.test?` gates (campfire's WAL checkpointer
+# `start(enabled: !Rails.env.test?)`) take the serving branch.
+ENV["RAILS_ENV"] = "test" if ENV["RAILS_ENV"].nil?
 require_relative "../runtime/base64"
 require_relative "../runtime/json_impl"
 require_relative "../runtime/db"
@@ -149,9 +162,11 @@ module SchemaSetup
   # truncate call from `ActiveRecord.adapter.truncate(t)` to
   # `<Model>._adapter_truncate` is the per-model dispatch.
   def self.reset!
-    Article._adapter_truncate if defined?(Article)
-    Comment._adapter_truncate if defined?(Comment)
-    FixtureLoader.load_all!
+    FixtureLoader.with_foreign_keys_deferred do
+      Article._adapter_truncate if defined?(Article)
+      Comment._adapter_truncate if defined?(Comment)
+      FixtureLoader.load_all!
+    end
   end
 end
 
@@ -188,6 +203,17 @@ module FixtureLoader
   # Filter by `*Fixtures` suffix BEFORE `const_get` so deprecated
   # constants like Ruby 3.4's `SortedSet` (which raises on access via
   # autoload) don't get touched while scanning for fixture modules.
+  # Rails' fixture setup: loaded with referential integrity off, then checked (`verify_foreign_keys_for_fixtures`). Not Db's alone: a framework test runs this helper with no Db loaded.
+  def self.with_foreign_keys_deferred
+    if defined?(Db)
+      Db.without_foreign_keys { yield }
+      Db.check_foreign_keys!
+    else
+      yield
+    end
+    nil
+  end
+
   def self.load_all!
     Object.constants.sort.each do |c|
       next unless c.to_s.end_with?("Fixtures")
@@ -218,6 +244,59 @@ end
 # returns opaque tree/node handles — the contract is the surface, not
 # the handle shape.
 module Dom
+  # Markup as a list of tokens two equivalent documents share: each tag
+  # with its name downcased and its attributes sorted, each text run
+  # trimmed, whitespace-only runs dropped. `assert_dom_equal` compares
+  # these.
+  def self.equivalence_tokens(html)
+    out = []
+    html.scan(/<[^>]*>|[^<]+/).each do |tok|
+      if tok.start_with?("<")
+        out << tag_token(tok)
+      else
+        text = tok.strip
+        out << text unless text.empty?
+      end
+    end
+    out
+  end
+
+  # `<td  class="a" id=b>` -> `<td class="a" id="b">`; `</TD >` -> `</td>`.
+  def self.tag_token(tok)
+    inner = tok[1, tok.length - 2].to_s.strip
+    return "</#{inner[1, inner.length].to_s.strip.downcase}>" if inner.start_with?("/")
+    inner = inner[0, inner.length - 1].to_s.strip if inner.end_with?("/")
+    i = 0
+    i += 1 while i < inner.length && !" \t\n\r".include?(inner[i])
+    name = inner[0, i].to_s.downcase
+    attrs = []
+    while i < inner.length
+      i += 1 while i < inner.length && " \t\n\r".include?(inner[i])
+      break if i >= inner.length
+      start = i
+      i += 1 while i < inner.length && !" \t\n\r=".include?(inner[i])
+      key = inner[start, i - start].to_s.downcase
+      i += 1 while i < inner.length && " \t\n\r".include?(inner[i])
+      value = nil
+      if i < inner.length && inner[i] == "="
+        i += 1
+        i += 1 while i < inner.length && " \t\n\r".include?(inner[i])
+        quote = inner[i]
+        if quote == "\"" || quote == "'"
+          close = inner.index(quote, i + 1) || inner.length
+          value = inner[i + 1, close - i - 1].to_s
+          i = close + 1
+        else
+          start = i
+          i += 1 while i < inner.length && !" \t\n\r".include?(inner[i])
+          value = inner[start, i - start].to_s
+        end
+      end
+      attrs << (value.nil? ? key : "#{key}=\"#{value}\"")
+    end
+    attrs.empty? ? "<#{name}>" : "<#{name} #{attrs.sort.join(" ")}>"
+  end
+
   # Parse an HTML document. Stub: the document *is* its html string.
   def self.parse(html)
     html
@@ -582,6 +661,14 @@ module ActiveJob
       assert_enqueued_jobs(0, only: only, &block)
     end
 
+    # Rails' `clear_enqueued_jobs`: the `:test` adapter forgets what it
+    # holds, and a blockless assertion afterwards counts from here.
+    def clear_enqueued_jobs
+      ActiveJob.clear_held
+      @__jobs_from = ActiveJob.performed.length
+      nil
+    end
+
     # The suite runs under the `:test` adapter (see the block comment
     # above), so a job enqueued outside one of these blocks has NOT
     # run. Rails drains its queue here; we hold no arguments to replay,
@@ -721,7 +808,7 @@ class ActionResponse
   attr_reader :status, :body, :location, :flash, :cookies, :content_type
 
   def initialize(status:, body:, location:, flash:, cookies:, content_type: "text/html; charset=utf-8",
-                 cache_control_max_age: 0, cache_control_public: false, headers: {})
+                 cache_control_max_age: 0, cache_control_public: false, cache_control_store: nil, headers: {})
     @status   = status
     @body     = body
     @location = location
@@ -730,6 +817,11 @@ class ActionResponse
     @content_type = content_type
     @cache_control_max_age = cache_control_max_age
     @cache_control_public = cache_control_public
+    # The full typed store, when the caller has one — `cache_control`
+    # below reads EVERY field off it (no_store/private included), not
+    # just the two legacy ones. nil for `relation_find_test.rb`'s
+    # bare `ParsedBodyTest` responses, which never touch Cache-Control.
+    @cache_control_store = cache_control_store
     @extra_headers = headers
   end
 
@@ -743,6 +835,12 @@ class ActionResponse
   # Rails hands a test: campfire's logo test reads
   # `@response.headers["content-type"]`, and against a Hash keyed the
   # way the header is spelled on the wire that read is nil.
+  # Rails' `response.media_type`: the content type without its
+  # parameters (`text/html`, not `text/html; charset=utf-8`).
+  def media_type
+    @content_type.split(";").first.to_s.strip
+  end
+
   def headers
     out = {}
     @extra_headers.each { |k, v| out[k.to_s.downcase] = v }
@@ -751,20 +849,40 @@ class ActionResponse
     out
   end
 
-  # Rails' `response.cache_control` — the one place the two TYPED
-  # controller readers (see ActionController::Base) are re-assembled
-  # into the mixed Hash Rails hands back, because the subscript
-  # spelling is what a test writes:
+  # Rails' `response.cache_control` — the mixed Hash Rails hands back,
+  # because the subscript spelling is what a test writes:
   #
   #   assert_equal 1.year, response.cache_control[:max_age].to_i
   #   assert response.cache_control[:public]
+  #   assert response.cache_control[:no_store]
   #
-  # `:public` is ABSENT rather than false when the response is private,
-  # which is Rails' own shape and what makes the bare truthiness
-  # assertion above mean what it says.
+  # Reads every field off the full typed store when the response
+  # carries one — `:private` / `:no_store` included, not just the two
+  # legacy readers below. `:public` (and every other bool key) is
+  # ABSENT rather than false when unset, which is Rails' own shape and
+  # what makes a bare truthiness assertion like the ones above mean
+  # what it says.
+  #
+  # Falls back to the two legacy TYPED controller readers
+  # (ActionController::Base#cache_control_max_age / _public) when no
+  # store was given — `relation_find_test.rb`'s bare `ParsedBodyTest`
+  # responses construct one directly with neither.
   def cache_control
-    out = { max_age: @cache_control_max_age }
-    out[:public] = true if @cache_control_public
+    return { max_age: @cache_control_max_age, **(@cache_control_public ? { public: true } : {}) } if @cache_control_store.nil?
+
+    store = @cache_control_store
+    out = {}
+    out[:max_age] = store[:max_age] unless store[:max_age].nil?
+    out[:public] = true if store[:public]
+    out[:private] = true if store[:private]
+    out[:no_store] = true if store[:no_store]
+    out[:no_cache] = true if store[:no_cache]
+    out[:must_revalidate] = true if store[:must_revalidate]
+    out[:must_understand] = true if store[:must_understand]
+    out[:immutable] = true if store[:immutable]
+    out[:stale_while_revalidate] = store[:stale_while_revalidate] unless store[:stale_while_revalidate].nil?
+    out[:stale_if_error] = store[:stale_if_error] unless store[:stale_if_error].nil?
+    out[:extras] = store[:extras] unless store[:extras].empty?
     out
   end
 
@@ -823,55 +941,23 @@ end
 # a memory store and turns caching on around one block, through Rails'
 # four knobs, then asserts a cached page runs no presentation queries.
 # The runtime fragment-caches message partials in its own store; these
-# give the test the settings it reads and restores. `MemoryStore` is the
-# store class `Rails.cache` already answers with on this tree.
+# give the test the settings it reads and restores. A fresh
+# `ActiveSupport::Cache::MemoryStore` (runtime/active_support_cache.rb) is
+# a `Rails::Cache`, so it can stand in for `Rails.cache` here. The
+# third knob, `ActionView::PartialRenderer.collection_cache`, is the
+# runtime's own (runtime/action_controller_fragment_caching.rb): the
+# store cached collections really read.
 module Rails
   def self.cache=(store)
     @cache_store = store
   end
 end
 
-module ActiveSupport
-  module Cache
-    class MemoryStore
-      def self.new
-        Rails.cache.class.new
-      end
-    end
-  end
-end
-
-module ActionView
-  class PartialRenderer
-    def self.collection_cache
-      @collection_cache
-    end
-
-    def self.collection_cache=(store)
-      @collection_cache = store
-    end
-  end
-end
-
-module ActionController
-  class Base
-    def self.cache_store
-      @cache_store
-    end
-
-    def self.cache_store=(store)
-      @cache_store = store
-    end
-
-    def self.perform_caching
-      @perform_caching
-    end
-
-    def self.perform_caching=(value)
-      @perform_caching = value
-    end
-  end
-end
+# Rails' test environment does not cache fragments
+# (`config.action_controller.perform_caching = false` in a generated
+# `config/environments/test.rb`); a test turns it on around a block. The
+# knob itself is runtime/action_controller_fragment_caching.rb's.
+ActionController::Base.perform_caching = false
 
 # ---- Query assertions ------------------------------------------------
 #
@@ -967,6 +1053,9 @@ class TestBase
   # invoke `super` — same Minitest before_setup → setup ordering.)
   def setup
     SchemaSetup.reset! if defined?(SchemaSetup)
+    # Each test's integration session starts on Rails' default origin;
+    # a test body's `_url` reads it (`RequestDispatch#sync_url_origin`).
+    ActionView::ViewHelpers.url_origin = "http://www.example.com" if defined?(ActionView::ViewHelpers)
     ActiveSupport.travel(0) if defined?(ActiveSupport)
     # AFTER the schema reset, which reloads fixtures — and our fixture
     # loader runs model callbacks, so a broadcasting `after_create_commit`
@@ -1067,12 +1156,54 @@ class TestBase
     end
   end
 
+  # Rails' `travel(duration) { … }` travels for the block and back.
+  # Taking no block here dropped it unrun — a test whose body sat in the
+  # block passed without executing a line of it.
   def travel(duration)
     travel_to(Time.now + duration.to_i)
+    return unless block_given?
+    begin
+      yield
+    ensure
+      travel_back
+    end
   end
 
   def travel_back
     ActiveSupport.travel(0)
+  end
+
+  # Rails' `freeze_time`: `travel_to(Time.now)`, held still — every
+  # read until `travel_back` (the block's end, or the next test's
+  # setup) answers the same whole second.
+  def freeze_time
+    ActiveSupport.freeze(ActiveSupport.now.to_i)
+    return unless block_given?
+    begin
+      yield
+    ensure
+      travel_back
+    end
+  end
+
+  # Minitest's `assert_nothing_raised`: the block runs, and an exception
+  # from it fails the test by propagating, as any error does here.
+  def assert_nothing_raised(*_exceptions)
+    yield
+  end
+
+  # rails-dom-testing's `assert_dom_equal`: the same markup up to
+  # attribute order and the whitespace between tags. Compared as tokens
+  # (`Dom.equivalence_tokens`), since this harness has no DOM to walk;
+  # entities are compared as written, not decoded.
+  def assert_dom_equal(expected, actual, msg = nil)
+    return if Dom.equivalence_tokens(expected.to_s) == Dom.equivalence_tokens(actual.to_s)
+    raise(msg || "assert_dom_equal failed: expected #{expected.inspect}, got #{actual.inspect}")
+  end
+
+  def assert_dom_not_equal(expected, actual, msg = nil)
+    return unless Dom.equivalence_tokens(expected.to_s) == Dom.equivalence_tokens(actual.to_s)
+    raise(msg || "assert_dom_not_equal failed: #{actual.inspect} is the same markup")
   end
 
   # `assert_match` left as a method — nilable value handling differs
@@ -1309,13 +1440,19 @@ module ActionDispatch
 end
 
 # The other three test-case parents a Rails app writes against.
-# `ActionView::TestCase` LOADS and nothing more so far: every test under
-# it fails on its first `view` — a per-test NoMethodError in the tally,
-# which is the honest reading of "the harness has no such thing yet",
-# and a better one than a NameError taking the file whole. The two
-# cable parents carry their harness below.
+# `ActionView::TestCase`: `view.<helper>` is bound at compile time
+# (`lower::view_test_case`); what the harness supplies is the controller
+# a helper reads (`controller.perform_caching`, campfire's
+# `MessagesHelper`). Rails builds an `ActionView::TestCase::TestController`
+# per test, an ActionController::Base, so a fresh Base is installed as
+# the current controller before each one. The two cable parents carry
+# their harness below.
 module ActionView
   class TestCase < TestBase
+    def setup
+      super
+      ActionController::Current.controller = ActionController::Base.new
+    end
   end
 end
 
@@ -1522,9 +1659,10 @@ module RequestDispatch
   # body under `Content-Type: application/json`, and the app reads
   # them back as params because Rails parses that body. The harness
   # hands the params to the controller directly — the parse Rails does
-  # on the way in — and sets the content type and format the encoder
-  # would; a controller that reads the raw body sees an empty one.
-  # campfire's direct-upload tests are the corpus's use.
+  # on the way in — and sets the content type, format, and
+  # `request_parameters` (body alone) the encoder would; a controller
+  # that reads the raw body sees an empty one. campfire's direct-upload
+  # tests are the corpus's use.
   def get(path, params: {}, headers: {}, env: {}, as: nil)
     dispatch_request("GET", path, params, headers.merge(env), as)
   end
@@ -1627,6 +1765,7 @@ module RequestDispatch
   # test has ever seen.
   def host!(name)
     @__host = name
+    sync_url_origin
   end
 
   def host
@@ -1634,7 +1773,44 @@ module RequestDispatch
     @__host
   end
 
+  # `https!(flag = true)` — Rails' integration session: every later
+  # request in this test arrives over TLS (`request.ssl?`, and so the
+  # `https://` its absolute URLs carry).
+  def https!(flag = true)
+    @__https = flag
+    sync_url_origin
+  end
+
+  # The session's origin, where a test body's `_url` builds its URL
+  # (`ActionView::ViewHelpers.url_for_path`): Rails' integration
+  # session hands its `host` and `https?` to the url helpers.
+  def sync_url_origin
+    protocol = https? ? "https://" : "http://"
+    ActionView::ViewHelpers.url_origin =
+      ActionController.build_host_url(protocol, host, ActionController.url_port_of(host), "")
+  end
+
+  def https?
+    @__https == true
+  end
+
+  # Rails' integration `reset!`: a fresh session — no cookies, session or
+  # flash carried over, the default host, plain http — as a new browser
+  # would bring (campfire's fetch-metadata test signs in once per
+  # `Sec-Fetch-Site` value).
+  def reset!
+    @__session = nil
+    @__flash = nil
+    @__cookies = nil
+    @__response = nil
+    @__host = nil
+    @__https = false
+    sync_url_origin
+    nil
+  end
+
   def dispatch_request(method, path, params, headers = {}, as = nil)
+    path = integration_request_path(path)
     require_relative "../config/routes"
     # Controllers load on demand (the CRuby target's routes.rb no longer
     # eager-requires them; they're lazy-loaded at dispatch). The blog's
@@ -1663,6 +1839,16 @@ module RequestDispatch
     # a query string reaches a test path at all: a route helper renders
     # its non-segment options into one.
     match_path, _, query = path.partition("?")
+    # A form's hidden `_method` carries the real verb (Rack's
+    # MethodOverride), exactly as both production dispatchers apply it
+    # after the body parse. campfire's fetch-metadata test posts
+    # `_method: "delete"` cross-site and expects the DELETE route's
+    # forgery refusal, not "No route matches POST".
+    wire_method = method
+    if method == "POST" && params.is_a?(Hash)
+      override = (params[:_method] || params["_method"]).to_s.upcase
+      method = override if override == "PUT" || override == "PATCH" || override == "DELETE"
+    end
     matched = ActionDispatch::Router.match(
       method, match_path, [RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table
     )
@@ -1679,40 +1865,49 @@ module RequestDispatch
     # check is inline at the call site (not inside stringify_keys) so
     # the helper itself stays strictly typed as `(Hash) -> Hash`.
     #
-    # `stringify_keys(matched.path_params)` (rather than `path_params
-    # .dup`) seeds `merged` as `Hash[String, untyped]` — needed so the
-    # nested-Hash branch of the ternary below has a slot wide enough
-    # to hold a Hash value. `path_params.dup` keeps the StrStrHash
-    # shape, which spinel then refuses to assign a Hash into.
-    merged = stringify_keys(matched.path_params)
+    # `stringify_keys({})` (rather than `path_params.dup` or `{}`)
+    # seeds each Hash below as `Hash[String, untyped]` — needed so the
+    # nested-Hash branch has a slot wide enough to hold a Hash value.
+    # `path_params.dup` keeps the StrStrHash shape, which spinel then
+    # refuses to assign a Hash into.
     # `post url, params: "Hello Bot World!"` — Rails' integration tests
     # take a STRING `params:` as the raw request BODY, not as a
     # parameter hash. campfire's bot endpoint is written that way (a bot
     # POSTs plain text and the controller reads `request.body`), and the
     # harness iterated it: `undefined method 'each' for an instance of
     # String`, every test in the file.
-    # Query-string pairs are parameters too, and they arrive UNDER the
-    # explicit `params:` — Rails merges the request's own parameters
-    # first and lets the caller's hash win on a collision.
     # `CgiIo.parse_form_into` — THE SAME PARSER the production
     # dispatcher uses on `QUERY_STRING` (`parse_request` calls it on
     # exactly this string), so the harness cannot disagree with
     # production about what a query string means. Not `CGI.parse`: Ruby
     # 4.0 no longer ships it, and a hand-rolled split would be a second
     # copy of a table this tree already owns.
-    CgiIo.parse_form_into(query, merged) unless query.empty?
+    from_query = stringify_keys({})
+    CgiIo.parse_form_into(query, from_query) unless query.empty?
+    from_caller = stringify_keys({})
     request_body = +""
     if params.is_a?(String)
       request_body = params.to_s
     else
       params.each do |k, v|
         if v.is_a?(Hash)
-          merged[k.to_s] = stringify_keys(v)
+          from_caller[k.to_s] = stringify_keys(v)
         else
-          merged[k.to_s] = v
+          from_caller[k.to_s] = v
         end
       end
     end
+    # Not one order for every verb: Rack::Test appends a GET's `params:` to its query string, so they win there, while any other verb sends them as the body and Rails' `request_parameters.merge(query_parameters)` lets the query win.
+    merged = stringify_keys({})
+    if wire_method == "GET"
+      from_query.each { |k, v| merged[k] = v }
+      from_caller.each { |k, v| merged[k] = v }
+    else
+      from_caller.each { |k, v| merged[k] = v }
+      from_query.each { |k, v| merged[k] = v }
+    end
+    # Rails' `params.merge!(path_parameters)`: the route's own segments win over both.
+    matched.path_params.each { |k, v| merged[k.to_s] = v }
     controller.params  = merged
     controller.path_parameters = matched.path_params
     controller.session = @__session ||= ActionDispatch::Session.new
@@ -1765,12 +1960,31 @@ module RequestDispatch
       "HTTP_USER_AGENT" => "Roundhouse Test",
     }
     headers.each { |k, v| env[env_key(k.to_s)] = v.to_s }
+    env["HTTPS"] = "on" if https?
     env["CONTENT_TYPE"] = "application/json" if as == :json
     env["REQUEST_METHOD"] = method
     env["PATH_INFO"]      = request_path
     env["QUERY_STRING"]   = request_query
     controller.request = ActionDispatch::Request.for(env, merged)
     controller.request.body = request_body
+    # Body params alone — what ParamsWrapper copies from. Production
+    # dispatchers fill this from the parsed JSON body; the harness
+    # skipped the parse, so without this a wrap under `as: :json`
+    # would nest an empty hash and break flat `params.expect`.
+    if as == :json && !params.is_a?(String)
+      body_params = {}
+      params.each do |k, v|
+        if v.is_a?(Hash)
+          body_params[k.to_s] = stringify_keys(v)
+        else
+          body_params[k.to_s] = v
+        end
+      end
+      controller.request.request_parameters = body_params
+    end
+    # The query string's params alone (`request.query_parameters`), by the
+    # parser the merge above already used.
+    CgiIo.parse_form_into(request_query, controller.request.query_parameters) unless request_query.empty?
     # Raw query for path-option redirects that keep it — same slot every
     # target's dispatcher seeds (`query_string` on the controller).
     controller.query_string = request_query
@@ -1796,21 +2010,35 @@ module RequestDispatch
     #
     # A GET/HEAD reads through one snapshot, as the dispatcher serves it,
     # so the suite exercises the same transaction shape production does.
+    #
+    # And under the query cache, as both production dispatchers and
+    # Rails' executor run a request: an identical SELECT inside one
+    # request replays (Rails logs it as CACHE, and its query counters
+    # skip it), so campfire's "looks up the boosters of all boosts at
+    # once" counts the same queries for two boosts as for three.
+    # Restored to what it found, so a request inside a test's own cached
+    # block leaves that block cached.
     snapshot = method == "GET" || method == "HEAD"
     if Db.in_lease?
+      cached = Db.query_cache_enabled?
+      Db.query_cache_begin unless cached
       Db.read_snapshot_begin if snapshot
       begin
         controller.process_action(matched.action)
       ensure
         Db.read_snapshot_end if snapshot
+        Db.query_cache_end unless cached
       end
     else
       Db.with_connection do
+        cached = Db.query_cache_enabled?
+        Db.query_cache_begin unless cached
         Db.read_snapshot_begin if snapshot
         begin
           controller.process_action(matched.action)
         ensure
           Db.read_snapshot_end if snapshot
+          Db.query_cache_end unless cached
         end
       end
     end
@@ -1819,6 +2047,10 @@ module RequestDispatch
     @__cookies = ActionController::CookieJar.new(
       accept_cookies(cookies.to_h, controller.cookies.pending)
     )
+    # Compose `Cache-Control` from whatever `response.cache_control`
+    # holds onto the buffered header store, right before the copy
+    # below — same contract as the two production wire paths.
+    controller.commit_cache_control!
     copied_headers = {}
     hi = 0
     hn = controller.headers.size
@@ -1835,6 +2067,7 @@ module RequestDispatch
       content_type: controller.content_type,
       cache_control_max_age: controller.cache_control_max_age,
       cache_control_public: controller.cache_control_public,
+      cache_control_store: controller.cache_control,
       headers:  copied_headers,
     )
     # Rails' OWN names, alongside the `__`-prefixed ones the harness
@@ -1959,9 +2192,54 @@ module RequestDispatch
   # Two-argument form retained for hand-written spinel-blog tests
   # (`assert_redirected_to "/articles/1", res`); single-argument form
   # used by emitted tests pulls from the dispatch-stashed response.
+  #
+  # Both sides are compared as ABSOLUTE urls, as Rails'
+  # `normalize_argument_to_redirection` compares them: a path is
+  # resolved against the request (`http://www.example.com` + path). A
+  # controller's `redirect_to articles_url` answers the absolute form
+  # and the scaffold's `redirect_to @article` the path, and a test may
+  # spell its expectation either way.
   def assert_redirected_to(expected_path, response = @__response)
     raise "expected a redirect, got status=#{response.status} location=#{response.location.inspect}" unless response.redirect?
-    raise "expected redirect to #{expected_path.inspect}, got #{response.location.inspect}" unless expected_path == response.location
+    expected = redirection_url_for_assertion(expected_path.to_s)
+    actual = redirection_url_for_assertion(response.location.to_s)
+    raise "expected redirect to #{expected_path.inspect}, got #{response.location.inspect}" unless expected == actual
+  end
+
+  # A path resolved against the request, through the same builder a
+  # controller's `_url` uses, so the scheme's standard port drops out
+  # on both sides (`Host: blog.test:80` names `http://blog.test/…`).
+  def redirection_url_for_assertion(location)
+    return location unless location.start_with?("/")
+    return location if location.start_with?("//")
+    req = @__request
+    protocol = req.nil? ? "http://" : req.protocol
+    hostport = req.nil? ? host : req.host
+    ActionController.build_host_url(protocol, hostport, ActionController.url_port_of(hostport), location)
+  end
+
+  # `get "http://blog.test/articles"` — Rails' integration session takes
+  # an absolute url as readily as a path, and `follow_redirect!` hands
+  # it one whenever the controller redirected to a `_url` helper. The
+  # scheme becomes the session's (Rails' `https!` from the url, so an
+  # `http://` url turns it back off), the authority its host (`host!`),
+  # and the router sees the path.
+  def integration_request_path(path)
+    return path unless path.start_with?("http://") || path.start_with?("https://")
+    https!(path.start_with?("https://"))
+    url_host = ActionController.location_host(path)
+    host!(url_host) unless url_host.empty?
+    # The authority ends at the first `/` or `?`; with no path the
+    # request is for the root, and keeps its query
+    # (`http://h?before=6` → `/?before=6`). A `#fragment` never reaches
+    # the server, so it drops before the router sees the path.
+    rest = path[ActionController.find_substr(path, "://") + 3, path.length].to_s
+    hash = ActionController.find_substr(rest, "#")
+    rest = rest[0, hash].to_s if hash >= 0
+    slash = ActionController.find_substr(rest, "/")
+    query = ActionController.find_substr(rest, "?")
+    return "/" + rest[query, rest.length].to_s if query >= 0 && (slash < 0 || query < slash)
+    slash < 0 ? "/" : rest[slash, rest.length].to_s
   end
 
   # `assert_select` over the Dom primitive surface (defined above). The
@@ -2030,6 +2308,16 @@ module RequestDispatch
     else
       body = selector_or_root.to_s
       selector = content_or_opts
+      content_or_opts = opts
+      opts = nil
+    end
+    # Rails' substitution values: a `?` in an attribute predicate
+    # (`"#row[data-n=?]", value`) takes the argument after the selector,
+    # and the equality test, if any, is the argument after that. Read as
+    # the content string instead, the value was looked for in the
+    # element's text and the predicate matched a literal "?".
+    if selector.to_s.include?("=?]") && content_or_opts.is_a?(String)
+      selector = selector.to_s.sub("=?]", "=\"#{content_or_opts}\"]")
       content_or_opts = opts
       opts = nil
     end

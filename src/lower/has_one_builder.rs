@@ -46,8 +46,9 @@ use crate::span::Span;
 use crate::ty::Ty;
 use std::collections::HashMap;
 
-/// `has_one` declarations by owner: assoc name → (target, foreign key, as:).
-type Builders = HashMap<ClassId, HashMap<Symbol, (ClassId, Symbol, Option<Symbol>)>>;
+/// `has_one` declarations by owner: assoc name → (target, foreign key, as:,
+/// owner key the foreign key matches — `primary_key:`, else `id`).
+type Builders = HashMap<ClassId, HashMap<Symbol, (ClassId, Symbol, Option<Symbol>, Symbol, Ty)>>;
 
 pub fn apply_has_one_builder_lowering(app: &mut App) {
     let mut table: Builders = HashMap::new();
@@ -59,12 +60,24 @@ pub fn apply_has_one_builder_lowering(app: &mut App) {
             if let Association::HasOne { name, target, foreign_key, as_interface, .. } =
                 assoc
             {
+                let owner_key = assoc.owner_key();
+                let owner_key_ty = if owner_key.as_str() == "id" {
+                    Ty::Int
+                } else {
+                    model.attributes.fields.get(&owner_key).cloned().unwrap_or(Ty::Untyped)
+                };
                 table
                     .entry(model.name.clone())
                     .or_default()
                     .insert(
                         name.clone(),
-                        (target.clone(), foreign_key.clone(), as_interface.clone()),
+                        (
+                            target.clone(),
+                            foreign_key.clone(),
+                            as_interface.clone(),
+                            owner_key,
+                            owner_key_ty,
+                        ),
                     );
             }
         }
@@ -160,13 +173,13 @@ fn rewrite(expr: &mut Expr, table: &Builders, self_owner: Option<&ClassId>) {
     } else {
         return;
     };
-    let Some((target, foreign_key, as_interface)) = by_name.get(&Symbol::from(assoc)) else { return };
+    let Some((target, foreign_key, as_interface, owner_key, owner_key_ty)) = by_name.get(&Symbol::from(assoc)) else { return };
 
     // Rails allows the no-argument form (`user.create_webhook!`); the
     // foreign key alone is still a complete row to attempt.
     let mut entries = vec![(
         crate::lower::typing::lit_sym(foreign_key.clone()),
-        owner_id(recv.as_ref()),
+        owner_id(recv.as_ref(), owner_key, owner_key_ty),
     )];
     if let Some(intf) = as_interface {
         entries.push((
@@ -203,28 +216,29 @@ fn rewrite(expr: &mut Expr, table: &Builders, self_owner: Option<&ClassId>) {
     // three constructors answer an instance of the target; `create`
     // (non-bang) answers an unsaved-but-present record when validation
     // fails, never nil, so there is no Nil arm on any of them.
-    expr.ty = Some(Ty::Class { id: target.clone(), args: vec![] });
+    expr.ty = Some(Ty::Class { id: target.clone(), args: vec![].into() });
 }
 
-/// The owner's primary key. With an explicit receiver that is
-/// `<recv>.id`, read at the call site; on implicit self it is `@id`,
+/// The owner column the foreign key matches (`id`, or the association's
+/// `primary_key:`). With an explicit receiver that is
+/// `<recv>.<key>`, read at the call site; on implicit self it is `@<key>`,
 /// which is what the synthesized readers next door use — they are cut
 /// INTO the model, and so is the body this call sits in.
-fn owner_id(recv: Option<&Expr>) -> Expr {
+fn owner_id(recv: Option<&Expr>, key: &Symbol, ty: &Ty) -> Expr {
     let mut e = match recv {
         Some(r) => Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(r.clone()),
-                method: Symbol::from("id"),
+                method: key.clone(),
                 args: vec![],
                 block: None,
                 parenthesized: false,
             },
         ),
-        None => Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") }),
+        None => Expr::new(Span::synthetic(), ExprNode::Ivar { name: key.clone() }),
     };
-    e.ty = Some(Ty::Int);
+    e.ty = Some(ty.clone());
     e
 }
 

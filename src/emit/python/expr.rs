@@ -660,6 +660,8 @@ fn py_const_path(path: &[crate::ident::Symbol]) -> String {
         Some("ActionDispatch" | "ActionController" | "ActionView") if path.len() >= 2 => {
             path.last().unwrap().to_string()
         }
+        // A sibling of `Base` in active_record_base.py, not an attribute of its `ActiveRecord` class
+        Some("ActiveRecord") if path.len() == 2 && path[1].as_str() == "ErrorDetail" => "ErrorDetail".to_string(),
         _ => path
             .iter()
             .map(|s| s.to_string())
@@ -1186,6 +1188,34 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
                 return r#"(_ for _ in ()).throw(TypeError("roundhouse: + with incompatible operand types"))"#.to_string();
             }
         }
+        // Array `&` / `|`: Python's `&`/`|` are undefined for lists.
+        // Membership uses `type(a) is type(b) and a == b` so Int/Float
+        // stay distinct like Ruby `eql?` (`1 | 1.0` keeps both), while
+        // nested lists still compare structurally. Not `dict.fromkeys`
+        // (rejects unhashables). Lambda evaluates each operand once.
+        if method == "&" || method == "|" {
+            use crate::emit::shared::set_op::{classify_set_op, SetOpCase};
+            let eql = "lambda a, b: type(a) is type(b) and a == b";
+            match classify_set_op(method, r, arg) {
+                SetOpCase::ArrayIntersect { .. } => {
+                    return format!(
+                        "(lambda __l, __r, __eq: [x for i, x in enumerate(__l) if any(__eq(x, y) for y in __r) and not any(__eq(x, y) for y in __l[:i])])({}, {}, {})",
+                        emit_expr(r),
+                        emit_expr(arg),
+                        eql,
+                    );
+                }
+                SetOpCase::ArrayUnion { .. } => {
+                    return format!(
+                        "(lambda __a, __eq: [x for i, x in enumerate(__a) if not any(__eq(x, y) for y in __a[:i])])([*{}, *{}], {})",
+                        emit_expr(r),
+                        emit_expr(arg),
+                        eql,
+                    );
+                }
+                SetOpCase::Unknown => {}
+            }
+        }
         // `-` dispatch: Python supports numeric `-` natively; list
         // difference needs a comprehension. Incompatible refuses.
         if method == "-" {
@@ -1226,14 +1256,19 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
         }
         // `/` and `**` dispatch: Python has both natively. Ruby's Int/Int
         // is integer division (towards -infinity); Python's `/` is true
-        // division, and `//` is floor. For now emit `/` unconditionally;
-        // refine if an Int/Int case forces the floor-div distinction.
+        // division, and `//` is floor, so Int / Int emits `//`.
         if method == "/" || method == "**" {
             use crate::emit::shared::div_pow::{classify_div_pow, DivPowCase};
-            if matches!(classify_div_pow(r, arg), DivPowCase::Incompatible) {
-                return format!(
-                    r#"(_ for _ in ()).throw(TypeError("roundhouse: `{method}` with incompatible operand types"))"#
-                );
+            match classify_div_pow(r, arg) {
+                DivPowCase::Incompatible => {
+                    return format!(
+                        r#"(_ for _ in ()).throw(TypeError("roundhouse: `{method}` with incompatible operand types"))"#
+                    );
+                }
+                DivPowCase::IntFloor if method == "/" => {
+                    return format!("{} // {}", emit_expr(r), emit_expr(arg));
+                }
+                _ => {}
             }
         }
         // `%` dispatch: Python's native `%` covers numeric and string
@@ -1254,8 +1289,13 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
         {
             return format!("{}.append({})", emit_expr(r), emit_expr(arg));
         }
-        if is_py_binop(method) {
-            return format!("{} {} {}", emit_expr(r), method, emit_expr(arg));
+        if let Some(prec) = py_binop_prec(method) {
+            return format!(
+                "{} {} {}",
+                emit_operand(r, prec, false),
+                method,
+                emit_operand(arg, prec, true)
+            );
         }
     }
     match recv {
@@ -1304,7 +1344,7 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
             }
         }
         Some(r) => {
-            let recv_s = emit_expr(r);
+            let recv_s = emit_recv(r);
             // Ruby type predicates map to Python builtins on the
             // receiver, not to a name-legalized method call.
             if method == "nil?" && args.is_empty() {
@@ -1409,6 +1449,8 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
     let is_str = matches!(ty, Some(Ty::Str | Ty::Sym));
     let is_array = matches!(ty, Some(Ty::Array { .. }));
     let is_seq = matches!(ty, Some(Ty::Str | Ty::Sym | Ty::Array { .. } | Ty::Hash { .. }));
+    let never_falsy_elems =
+        matches!(ty, Some(Ty::Array { elem }) if matches!(**elem, Ty::Str | Ty::Int | Ty::Float | Ty::Sym));
     Some(match method {
         // Universal Ruby conversions → Python builtins (which accept any
         // value). Skipped on known user classes, which may define their
@@ -1424,6 +1466,9 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         // to seq types so Flash#empty?/Session#empty? (user methods) keep
         // their own definitions.
         "empty?" if no_args && is_seq => format!("len({recv}) == 0"),
+        // An element that is never nil or false makes `any?` / `none?` a question of size
+        "any?" if no_args && never_falsy_elems => format!("len({recv}) > 0"),
+        "none?" if no_args && never_falsy_elems => format!("len({recv}) == 0"),
         "to_h" if no_args && matches!(ty, Some(Ty::Hash { .. })) => format!("dict({recv})"),
         "to_a" if no_args && matches!(ty, Some(Ty::Array { .. })) => format!("list({recv})"),
         // Ruby's single-element `Array#push(x)` is Python's `list.append`.
@@ -1473,10 +1518,23 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         // and argument swap). No-arg join uses the empty separator (Ruby's
         // `$,` default is nil → ""). Gated to Array so a user `join`
         // method on another type isn't shadowed.
-        "join" if is_array => match args_s.first() {
-            Some(sep) => format!("{sep}.join({recv})"),
-            None => format!("\"\".join({recv})"),
-        },
+        // `str.join` only accepts strings; Ruby calls `to_s` on every
+        // element, so non-Str elems go through `map(str, …)` (`[1, 2].join("-")`
+        // is "1-2"; bare `"-".join([1, 2])` is a TypeError). Array[String]
+        // stays a bare join.
+        "join" if is_array => {
+            let str_elems =
+                matches!(ty, Some(Ty::Array { elem }) if matches!(**elem, Ty::Str));
+            let items = if str_elems {
+                recv.to_string()
+            } else {
+                format!("map(str, {recv})")
+            };
+            match args_s.first() {
+                Some(sep) => format!("{sep}.join({items})"),
+                None => format!("\"\".join({items})"),
+            }
+        }
         _ => return None,
     })
 }
@@ -1502,26 +1560,66 @@ fn ruby_isinstance(recv: &str, cls: &str) -> String {
     }
 }
 
+/// A receiver, parenthesized when Python's `.` would otherwise bind
+/// inside it: a negative literal (`-5.abs` is `-(5.abs)`, and `5.abs`
+/// does not even tokenize) or an infix operator (`a - 10.abs`).
+fn emit_recv(r: &Expr) -> String {
+    let s = emit_expr(r);
+    let wrap = match &*r.node {
+        ExprNode::Lit { value: Literal::Int { value } } => *value < 0,
+        ExprNode::Lit { value: Literal::Float { value } } => value.is_sign_negative(),
+        ExprNode::Send { recv: Some(_), method, args, .. } => {
+            args.len() == 1 && is_py_binop(method.as_str())
+        }
+        _ => false,
+    };
+    if wrap { format!("({s})") } else { s }
+}
+
 fn is_py_binop(method: &str) -> bool {
-    matches!(
-        method,
-        "==" | "!="
-            | "<"
-            | "<="
-            | ">"
-            | ">="
-            | "+"
-            | "-"
-            | "*"
-            | "/"
-            | "%"
-            | "**"
-            | "<<"
-            | ">>"
-            | "|"
-            | "&"
-            | "^"
-    )
+    py_binop_prec(method).is_some()
+}
+
+/// Python binding strength of an infix operator, loosest first. The
+/// order matches Ruby's for these operators, except that Python chains
+/// comparisons (`a < b == c`), so one comparison never sits bare inside
+/// another.
+fn py_binop_prec(method: &str) -> Option<u8> {
+    Some(match method {
+        "==" | "!=" | "<" | "<=" | ">" | ">=" => 0,
+        "|" => 1,
+        "^" => 2,
+        "&" => 3,
+        "<<" | ">>" => 4,
+        "+" | "-" => 5,
+        "*" | "/" | "%" => 6,
+        "**" => 7,
+        _ => return None,
+    })
+}
+
+/// An operand of an infix operator of strength `parent`, parenthesized
+/// when it is itself an infix expression that would otherwise
+/// re-associate: `(a + 4) * 2` must not print as `a + 4 * 2`. Operators
+/// are left-associative here, so an equal-strength right operand wraps
+/// too (`a - (b - c)`).
+fn emit_operand(e: &Expr, parent: u8, right: bool) -> String {
+    let s = emit_expr(e);
+    let wrap = match &*e.node {
+        ExprNode::Send { recv: Some(_), method, args, .. } if args.len() == 1 => {
+            match py_binop_prec(method.as_str()) {
+                Some(p) => p < parent || (p == parent && (right || p == 0 || p == 7)),
+                None => false,
+            }
+        }
+        // `-2 ** 2` is `-(2 ** 2)` in Python.
+        ExprNode::Lit { value: Literal::Int { value } } => parent == 7 && !right && *value < 0,
+        ExprNode::Lit { value: Literal::Float { value } } => {
+            parent == 7 && !right && value.is_sign_negative()
+        }
+        _ => false,
+    };
+    if wrap { format!("({s})") } else { s }
 }
 
 pub(super) fn emit_literal(lit: &Literal) -> String {

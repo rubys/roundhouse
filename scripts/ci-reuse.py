@@ -25,28 +25,19 @@ JOBS = {
             "The analyzer reports no errors, no warnings and no ingest gaps on the store",
         ],
         "tests": [],
-        "reports": [],
-    },
-    "writebook-inventory": {
-        "checks": ["Build Roundhouse and run inventory", "Save complete check report"],
-        "tests": ["tests/writebook.rs"],
-        "reports": ["writebook-check.txt", "writebook-inventory-current.json"],
     },
     "smoke-rust": {
         "name": "smoke (rust)",
         "checks": ["scripts/smoke rust"],
-        "reports": [],
         "consumer": ["scripts/smoke", "e2e/"],
     },
     "browser-smoke-typescript": {
         "checks": ["Run SharedWorker browser smoke (emit → vite build → drive)"],
-        "reports": [],
         "consumer": ["tests/browser_smoke/"],
     },
     "rust-inflector": {
         "name": "compare (rust)",
         "checks": ["cargo test --test framework_tests_rust (green subset)"],
-        "reports": [],
         "consumer": ["tests/framework_tests_rust.rs"],
     },
 }
@@ -67,7 +58,7 @@ def digest(value):
 def repository_inputs(job):
     # Unknown paths, all shared test support, fixtures, docs and executable
     # READMEs are included. Only unrelated top-level Rust test binaries are
-    # excluded: these two commands neither compile nor execute them.
+    # excluded: those commands neither compile nor execute them.
     entries = []
     for entry in command("git", "ls-tree", "-rz", "HEAD").split(b"\0"):
         if not entry:
@@ -433,13 +424,12 @@ class GitHub:
         return data
 
 
-def read_bundle(data, job):
+def read_bundle(data):
     # Never extract an old artifact into the workspace or execute its contents.
-    # Only the receipt and explicitly named nonexecutable reports are accepted.
+    # Only the execution receipt is accepted.
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         files = archive.infolist()
-        allowed = {"receipt.json", *JOBS[job]["reports"]}
-        if len(files) != len(allowed) or {f.filename for f in files} != allowed:
+        if len(files) != 1 or files[0].filename != "receipt.json":
             raise ValueError("unexpected receipt bundle paths")
         if sum(f.file_size for f in files) > MAX_BUNDLE:
             raise ValueError("oversized uncompressed bundle")
@@ -450,13 +440,7 @@ def read_bundle(data, job):
         if len(receipt_data) > MAX_RECEIPT:
             raise ValueError("oversized receipt")
         receipt = json.loads(receipt_data)
-        reports = {name: archive.read(name) for name in JOBS[job]["reports"]}
-        expected = {
-            name: hashlib.sha256(data).hexdigest() for name, data in reports.items()
-        }
-        if receipt.get("reports") != expected:
-            raise ValueError("report digest mismatch")
-        return receipt, reports
+        return receipt
 
 
 def successful_execution(jobs, receipt, job):
@@ -505,7 +489,7 @@ def find_execution(api, current, job):
             if artifact["expired"] or not artifact["name"].startswith(prefix):
                 continue
             try:
-                receipt, reports = read_bundle(api.bundle(artifact), job)
+                receipt = read_bundle(api.bundle(artifact))
                 attempt = receipt["attempt"]
                 identity = (
                     "schema",
@@ -533,7 +517,7 @@ def find_execution(api, current, job):
                 )
                 evidence = successful_execution(jobs, receipt, job)
                 if evidence:
-                    return evidence["html_url"], reports
+                    return evidence["html_url"]
             except (ValueError, KeyError, TypeError, zipfile.BadZipFile):
                 continue
     return None
@@ -598,13 +582,9 @@ def probe(job, input_dir):
     current["reused"] = bool(found)
     (root / "state.json").write_text(json.dumps(current))
     if found:
-        url, reports = found
-        for name, data in reports.items():
-            Path(name).write_bytes(data)
-        # Set the hit only after every report has been restored successfully.
         output("hit", "true")
         summary(
-            f"**Reused {job}** from [successful execution]({url}); identical input fingerprint `{current['fingerprint']}`. No new execution receipt is issued."
+            f"**Reused {job}** from [successful execution]({found}); identical input fingerprint `{current['fingerprint']}`. No new execution receipt is issued."
         )
     else:
         summary(
@@ -628,11 +608,7 @@ def record(job, outcomes, validation_dir=None):
     del receipt["local"]
     bundle = root / "bundle"
     bundle.mkdir()
-    receipt.update(executed=True, outcomes=outcomes, reports={})
-    for name in JOBS[job]["reports"]:
-        data = Path(name).read_bytes()
-        receipt["reports"][name] = hashlib.sha256(data).hexdigest()
-        (bundle / name).write_bytes(data)
+    receipt.update(executed=True, outcomes=outcomes)
     (bundle / "receipt.json").write_text(json.dumps(receipt, sort_keys=True))
     output("recorded", "true")
 

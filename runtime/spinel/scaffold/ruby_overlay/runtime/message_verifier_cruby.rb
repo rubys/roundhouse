@@ -99,3 +99,25 @@ module ActionController
     end
   end
 end
+
+# Rack::ETag's body digest through OpenSSL, which takes the CPU's SHA
+# instructions where `Digest::SHA256` does not: the same hex, 1.65 ms ->
+# 0.23 ms for a 396 KB campfire room page on the bench box (29% of a
+# render whose message fragments were cached).
+#
+# One digest object per THREAD, reset by `hexdigest(body)` itself, rather
+# than one per call: building it is half the cost of digesting a small
+# body (`/up`'s: 740 -> 400 ns). A thread variable, not `Thread.current[]`,
+# which is per fiber — under Falcon, per request.
+require "openssl"
+
+module ActionController
+  class Base
+    def self.body_sha256_hex(body)
+      thread = Thread.current
+      digest = thread.thread_variable_get(:roundhouse_sha256) ||
+        thread.thread_variable_set(:roundhouse_sha256, OpenSSL::Digest.new("SHA256"))
+      digest.hexdigest(body)
+    end
+  end
+end

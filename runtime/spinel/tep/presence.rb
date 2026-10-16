@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::Presence -- stub.
 #
 # Upstream tep ships a full Presence battery (who's-online tracking

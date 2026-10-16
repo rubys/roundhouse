@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `ActionController::AllowBrowser::BrowserBlocker` (actionpack 8.1), the
 # question behind `allow_browser versions: …`: is this request's browser
 # one the app gates, and below the floor it set?

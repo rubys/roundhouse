@@ -82,3 +82,39 @@ fn a_spliced_concern_helper_keeps_its_keywords() {
         "{emitted}"
     );
 }
+
+/// Only OPTIONAL keywords: the library ingest flattens the group to
+/// positionals (`from_keyword`), and the splice must put them back, or
+/// the includer's `gadget_call("w", url: "/g")` binds the whole keyword
+/// Hash to `url`.
+#[test]
+fn a_spliced_concern_helper_keeps_optional_only_keywords() {
+    let concern = r##"module GadgetCalls
+  extend ActiveSupport::Concern
+
+  def gadget_call(label, url: nil, verb: :get, body: "")
+    return "none" if url.nil?
+    "#{label} #{verb} #{url}"
+  end
+end
+"##;
+    let controller = r#"class WidgetsController < ApplicationController
+  include GadgetCalls
+
+  def index
+    render plain: gadget_call("w", url: "/gadgets", verb: :put)
+  end
+end
+"#;
+    let files = spinel(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+        ("app/controllers/concerns/gadget_calls.rb", concern),
+        ("app/controllers/widgets_controller.rb", controller),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\nend\n"),
+    ]);
+    assert_parses(&files, "app/controllers/widgets_controller.rb");
+    let emitted = file(&files, "app/controllers/widgets_controller.rb");
+    assert!(emitted.contains("def gadget_call(label, url: nil, verb: :get, body: \"\")"), "{emitted}");
+    let rbs = file(&files, "app/controllers/widgets_controller.rbs");
+    assert!(rbs.contains("?url: "), "{rbs}");
+}

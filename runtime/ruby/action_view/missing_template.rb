@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActionView::MissingTemplate — raised by the render rewrite when a
 # render target was never emitted (the template doesn't exist in the
 # source tree), and RESCUED by app code as a normal path: lobsters'

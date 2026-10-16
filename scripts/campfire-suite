@@ -16,9 +16,11 @@
 # those inflates both numerator and denominator with tests that are not
 # campfire's.
 #
-# STUBS: scripts/campfire-walk-stubs.rb is spliced in, same ledger, same
-# rule — a gap closed in the compiler is an entry DELETED there. `--no-stubs`
-# runs without it to check whether an entry still earns its place.
+# STUBS: when `scripts/campfire-walk-stubs.rb` exists it is spliced in
+# (same ledger rule — a closed gap is a deleted entry). Tip Campfire
+# cleared the ledger (#818); the file is gone, so the default splice is
+# a no-op. `--no-stubs` / `--stubs` still force the choice when a ledger
+# returns.
 #
 # THE SPINEL LANE (`--target spinel`) compiles each of campfire's test
 # files to its own native binary and runs THAT. Same emitted source and
@@ -213,12 +215,13 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ -z "$REUSE" ]]; then
-    # `--allow-unsupported` for the same reason the walk uses it: campfire is
-    # a ledger app. The point is to run what DOES work and count it.
+    # Strict emit: tip Campfire checks at 0 errors, so the suite no longer
+    # needs `--allow-unsupported`. An unsupported construct is an error —
+    # the same contract as campfire-conformance's spinel strict emit.
     step "transpiling $APP → $OUT (target: $TARGET)"
     rm -rf "$OUT"
     roundhouse_run \
-        --target "$TARGET" "$APP" -o "$OUT" --allow-unsupported 2>"$OUT.log" | tail -1
+        --target "$TARGET" "$APP" -o "$OUT" 2>"$OUT.log" | tail -1
     echo "  emit diagnostics: $OUT.log"
 
     # The suite's own fixtures populate every table, so the database only
@@ -227,7 +230,7 @@ if [[ -z "$REUSE" ]]; then
     mkdir -p "$OUT/storage"
     sqlite3 "$OUT/storage/development.sqlite3" < "$OUT/db/seed.sql"
 
-    if (( STUBS )); then
+    if (( STUBS )) && [[ -f "$REPO_ROOT/scripts/campfire-walk-stubs.rb" ]]; then
         cp "$REPO_ROOT/scripts/campfire-walk-stubs.rb" "$OUT/walk_stubs.rb"
         # Into BOOT.rb, not main.rb: `test/test_helper.rb` requires boot.rb
         # (main.rb is boot plus the server, and a test run never loads it).
@@ -241,6 +244,8 @@ if [[ -z "$REUSE" ]]; then
           File.write(path, src.sub(anchor, %(require_relative "walk_stubs"\n) + anchor))
         ' "$OUT/boot.rb"
         echo "  spliced walk_stubs.rb ($(grep -c '^# GAP' "$OUT/walk_stubs.rb") ledger entries) into boot.rb"
+    elif (( STUBS )); then
+        echo "  no scripts/campfire-walk-stubs.rb — ledger empty, splice skipped"
     fi
 fi
 

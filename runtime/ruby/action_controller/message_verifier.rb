@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActiveSupport::MessageVerifier, reproduced at the wire level.
 #
 # This exists so a signed cookie the emitted app mints is one the

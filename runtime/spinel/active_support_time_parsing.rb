@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Spinel-subset temporal intrinsics: ActiveSupport.parse_db_time /
 # db_now. Sibling of the CRuby/JRuby overlay's
 # ruby_overlay/runtime/active_support_time_parsing.rb, which shadows
@@ -22,27 +23,6 @@
 module ActiveSupport
   # Date-only parse/format live in `active_support_date_parsing.rb`,
   # loaded only when `app_uses_date` (matz/spinel#7334).
-
-  # Rails zone name → IANA identifier. TWIN of the constant in the
-  # CRuby/JRuby overlay's sibling file, which shadows this whole file on
-  # those trees — the two must agree, so extend both together. Names not
-  # listed pass through unchanged, since a valid IANA string works as-is
-  # in TZ. Consumed by main.rb's boot-time ENV["TZ"] pin.
-  RAILS_TZ_TO_IANA = {
-    "UTC" => "UTC",
-    "Eastern Time (US & Canada)" => "America/New_York",
-    "Central Time (US & Canada)" => "America/Chicago",
-    "Mountain Time (US & Canada)" => "America/Denver",
-    "Pacific Time (US & Canada)" => "America/Los_Angeles",
-    "Arizona" => "America/Phoenix",
-    "Hawaii" => "Pacific/Honolulu",
-    "Alaska" => "America/Anchorage",
-    "London" => "Europe/London",
-    "Paris" => "Europe/Paris",
-    "Berlin" => "Europe/Berlin",
-    "Tokyo" => "Asia/Tokyo",
-    "Sydney" => "Australia/Sydney",
-  }.freeze
 
   # ---- THE TEST CLOCK ------------------------------------------------
   #
@@ -69,21 +49,43 @@ module ActiveSupport
     TRAVEL_OFFSET[0]
   end
 
+  # `freeze_time`'s instant, whole seconds since the epoch; 0 = the
+  # clock runs. Rails' `freeze_time` stubs `Time.now` to one value, so
+  # two reads inside the block are EQUAL — an offset alone keeps
+  # ticking between them.
+  FROZEN_AT = [0]
+
   # Whole seconds relative to the real clock. `travel(0)` is Rails'
-  # `travel_back`, which the harness runs after every test.
+  # `travel_back`, which the harness runs after every test; it thaws a
+  # frozen clock too.
   def self.travel(seconds)
     TRAVEL_OFFSET.clear
     TRAVEL_OFFSET << seconds
+    FROZEN_AT.clear
+    FROZEN_AT << 0
+  end
+
+  # Stop the clock at `seconds` (the harness's `freeze_time`).
+  def self.freeze(seconds)
+    FROZEN_AT.clear
+    FROZEN_AT << seconds
+  end
+
+  def self.clock
+    frozen = FROZEN_AT[0]
+    return Time.at(frozen) if frozen != 0
+    Time.now + TRAVEL_OFFSET[0]
   end
 
   def self.now
-    ActiveSupport.present(Time.now + TRAVEL_OFFSET[0])
+    ActiveSupport.present(clock)
   end
 
   # Hydrate the stored UTC instant, then land it in the app's zone —
   # Rails presents every AR temporal value in `config.time_zone`
-  # REGARDLESS of the host's zone, and main.rb has pinned ENV["TZ"] to
-  # that zone before any render, so `getlocal` resolves against it.
+  # REGARDLESS of the host's zone; `ActiveSupport.present` lands it in
+  # that zone, which the boot sets as the runtime's default
+  # (`ActiveSupport.set_default_zone`).
   # Doing the shift HERE rather than at each render site is what makes
   # strftime, iso8601 and pubDate agree without every call site knowing
   # about zones — the same seam the CRuby overlay's twin uses.

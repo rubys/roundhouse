@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "action_view/slots"
 require_relative "action_view/missing_template"
 require_relative "action_view/view_helpers"

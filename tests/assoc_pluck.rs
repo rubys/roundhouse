@@ -52,12 +52,10 @@ fn emit(files: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect();
     let mut app = ingest_app_from_tree(tree).expect("ingest");
     let _ = roundhouse::session::analyze_and_lower(&mut app);
-    // Models go through `emit_lowered_models`; a concern or PORO would
-    // land in `emit_library`. Both, so a test can put its call site in
-    // whichever is natural for the shape it is describing.
-    ruby::emit_lowered_models(&app)
+    // Full spinel emit so a call site in a TEST MODULE is in the tree
+    // too — models-only emit never reaches `app.test_modules`.
+    ruby::emit_spinel(&app)
         .into_iter()
-        .chain(ruby::emit_library(&app))
         .map(|f| (f.path.to_string_lossy().to_string(), f.content))
         .collect()
 }
@@ -75,6 +73,7 @@ fn file_ending(files: &[(String, String)], suffix: &str) -> String {
 const USER: &str = "class User < ApplicationRecord\nend\n";
 const MEMBERSHIP: &str =
     "class Membership < ApplicationRecord\n  belongs_to :room\n  belongs_to :user\nend\n";
+
 
 #[test]
 fn a_hydrated_association_readers_pluck_becomes_a_projection() {
@@ -95,6 +94,40 @@ fn a_hydrated_association_readers_pluck_becomes_a_projection() {
     assert!(
         !room.contains("memberships.pluck"),
         "the pluck must not survive on the Array:\n{room}"
+    );
+}
+
+/// campfire's destroy test plucks on the association from the TEST,
+/// not from a model method — the same Array wall, outside hook bodies.
+#[test]
+fn a_test_body_association_pluck_becomes_a_projection() {
+    let files = emit(&[
+        ("app/models/user.rb", USER),
+        ("app/models/membership.rb", MEMBERSHIP),
+        (
+            "app/models/room.rb",
+            "class Room < ApplicationRecord\n  has_many :memberships\nend\n",
+        ),
+        (
+            "test/controllers/rooms_controller_test.rb",
+            "require \"test_helper\"\n\n\
+             class RoomsControllerTest < ActionDispatch::IntegrationTest\n  \
+               test \"destroy job gets former members\" do\n    \
+                 room = Room.create!(name: \"design\")\n    \
+                 member_ids = room.memberships.pluck(:user_id)\n    \
+                 assert_equal [], member_ids\n  \
+               end\n\
+             end\n",
+        ),
+    ]);
+    let test = file_ending(&files, "rooms_controller_test.rb");
+    assert!(
+        test.contains("map { |__pluck| __pluck.user_id }"),
+        "a test's association pluck is the same Array wall:\n{test}"
+    );
+    assert!(
+        !test.contains("memberships.pluck"),
+        "the pluck must not survive on the Array in a test either:\n{test}"
     );
 }
 

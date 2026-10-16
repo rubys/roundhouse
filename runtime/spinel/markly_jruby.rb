@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # runtime/markly_jruby.rb — JRuby implementation of the markly contract
 # over commonmark-java.
 #

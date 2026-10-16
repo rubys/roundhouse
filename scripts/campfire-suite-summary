@@ -44,8 +44,8 @@
 #                     also records the COMPILER, read from the binary's
 #                     own `--version` — it is the one input to that lane
 #                     nobody here controls.
-#   --stubs FILE      the spliced ledger (default
-#                     scripts/campfire-walk-stubs.rb)
+#   --stubs FILE      the spliced ledger when present (default path
+#                     scripts/campfire-walk-stubs.rb; tip has none)
 #   --no-stubs        the run spliced nothing
 #   --out PATH        where to write (default build/campfire-suite/summary.json)
 

@@ -41,6 +41,10 @@ env:
   # CI selects the latest patch on this MRI line. The local minimum lives in
   # .ruby-version; keep both anchors aligned. Exact repro pins remain separate.
   MRI_RUBY: '3.4'
+  # The next MRI line, exercised by compare-ruby-next as a forward-
+  # compatibility lane. MRI_RUBY stays the supported minimum; once this
+  # line has run green for a while, swap the two.
+  MRI_RUBY_NEXT: '4.0'
   # The Rails apps the /ide/ + /playground/ demos ship (in-browser). Pinned
   # so the page — and any blog post's claims about it — stay stable against
   # upstream churn; bump deliberately. Each bundle embeds the app's LICENSE
@@ -50,8 +54,11 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 90b330024dec3e757c79b6a7e6568f93da8e3148
-  WRITEBOOK_SHA: f3fadd21907ad9b18cb23800d971c2cc25045e2a
+  CAMPFIRE_SHA: edbc779f4dfc9b26c36310881711ddc976a9dfc8
+  # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
+  # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
+  # Pinned like the apps above; bump deliberately.
+  SPINEL_PG_SHA: f48735c91aa8cde258299e1189957972667a0d1f
 
 jobs:
   plan:
@@ -71,7 +78,9 @@ jobs:
       site: ${{ steps.plan.outputs.site }}
       publish: ${{ steps.plan.outputs.publish }}
       spinel-revision: ${{ steps.plan.outputs.spinel-revision }}
+      campfire-latest-revision: ${{ steps.plan.outputs.campfire-latest-revision }}
       spinel-tests: ${{ steps.plan.outputs.spinel-tests }}
+      spinel-framework-shards: ${{ steps.plan.outputs.spinel-framework-shards }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -87,80 +96,6 @@ jobs:
           CI_SPINEL_REVISION: ${{ inputs.spinel_revision }}
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/ci-plan.py plan
-
-  writebook-inventory:
-    needs: plan
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'writebook-inventory') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
-      - name: Fetch pinned Writebook source
-        run: |
-          curl -fsSL "https://codeload.github.com/basecamp/writebook/tar.gz/${WRITEBOOK_SHA}" -o /tmp/writebook.tar.gz
-          mkdir /tmp/writebook
-          tar -xzf /tmp/writebook.tar.gz -C /tmp/writebook --strip-components=1
-      - name: Look for an identical successful PR execution
-        id: reuse
-        if: github.event_name == 'pull_request'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci-reuse.py probe --job writebook-inventory --input /tmp/writebook
-      - name: Build Roundhouse and run inventory
-        id: inventory
-        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
-        env:
-          WRITEBOOK_ROOT: /tmp/writebook
-          WRITEBOOK_INVENTORY_REPORT: writebook-inventory-current.json
-        run: cargo test --locked --release --bin roundhouse --test writebook -- --ignored --nocapture
-      - name: Save complete check report
-        id: report
-        if: always() && (steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true')
-        env:
-          WRITEBOOK_ROOT: /tmp/writebook
-        run: |
-          set +e
-          target/release/roundhouse check --continue "$WRITEBOOK_ROOT" > writebook-check.txt 2>&1
-          status=$?
-          set -e
-          cat writebook-check.txt
-          test "$(grep -c '^roundhouse-check: .* — ' writebook-check.txt)" -eq 1
-          summary=$(grep '^roundhouse-check: .* — ' writebook-check.txt)
-          pattern='^roundhouse-check: .* — ([0-9]+) parse error\(s\), ([0-9]+) error\(s\), [0-9]+ warning\(s\), [0-9]+ gap-attributed note\(s\), [0-9]+ survey gap\(s\)$'
-          [[ "$summary" =~ $pattern ]]
-          expected=0
-          if (( BASH_REMATCH[1] + BASH_REMATCH[2] > 0 )); then expected=1; fi
-          test "$status" -eq "$expected"
-      - name: Upload Writebook reports and baseline
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: writebook-inventory
-          path: |
-            writebook-check.txt
-            writebook-inventory-current.json
-            tests/fixtures/writebook-inventory.json
-      - name: Record actual successful execution
-        id: execution
-        if: success() && steps.reuse.outputs.eligible == 'true' && steps.inventory.outcome == 'success' && steps.report.outcome == 'success'
-        continue-on-error: true
-        run: python3 scripts/ci-reuse.py record --job writebook-inventory --outcome '${{ steps.inventory.outcome }}' --outcome '${{ steps.report.outcome }}'
-      - name: Save execution receipt and reports
-        if: success() && steps.execution.outcome == 'success'
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
-        with:
-          name: ci-executed-writebook-inventory-${{ github.run_attempt }}
-          path: ${{ steps.reuse.outputs.bundle }}
-          retention-days: 7
-          if-no-files-found: error
 
   # -------------------------------------------------------------------
   # Share both fixtures through this run's artifact. First-attempt PRs
@@ -590,7 +525,9 @@ jobs:
       # policy. CRuby binds through FFI, so the library is enough; headers
       # are the compiled Spinel job.
       - name: System libvips for the emitted ruby-vips processor
-        timeout-minutes: 8
+        # libvips42 pulls a large dep tree; slow Azure apt burned 8m on
+        # campfire-conformance in Full validation 37689396098 (libvips42+ffmpeg).
+        timeout-minutes: 20
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42
       # One gem process: three sequential `gem install` steps were paying
@@ -621,9 +558,14 @@ jobs:
       #
       # ruby-vips — pairs with libvips42 above; without the gem the vips
       # loader test dies on `cannot load such file -- vips`.
+      #
+      # markly — `tests/emit_and_run.rs` renders through the real gem on the
+      # CRuby tree (Markly's flag constants, lobsters' Markdowner); without
+      # it the emitted tree's guarded require loads nothing and the test
+      # fails with NameError on Markly.
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
-          gem install --no-document minitest csv rails-html-sanitizer sqlite3 bcrypt rack ruby-vips
+          gem install --no-document minitest csv rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly
           gem install --no-document activerecord -v '~> 8.1.0'
       # Roundsnap's in-repo MRI gem is not a Cargo target. The default
       # `tests/roundsnap_delivery.rs` case already rides the batches below;
@@ -792,7 +734,7 @@ jobs:
             tests/browser_smoke/package-lock.json
             src/emit/typescript/package.rs
       - name: Install harness deps
-        run: npm ci
+        run: $GITHUB_WORKSPACE/scripts/ci-npm ci
         working-directory: tests/browser_smoke
       - name: Install Playwright Chromium (+ system deps)
         run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
@@ -932,7 +874,7 @@ jobs:
           cp wasm/ide/app-src.json  wasm/lib/app-mastodon.json
           printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"roda","label":"Roda + Sequel blog","src":"app-roda.json","open":"app.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"campfire","label":"Campfire","src":"app-campfire.json","open":"app/models/message.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > wasm/lib/apps.json
       - name: Install harness deps (Playwright)
-        run: npm ci
+        run: $GITHUB_WORKSPACE/scripts/ci-npm ci
         working-directory: tests/browser_smoke
       - name: Install Playwright Chromium (+ system deps)
         run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
@@ -995,21 +937,50 @@ jobs:
   # `ar_base` is disabled in-test (b453fcf) pending real-sqlite
   # rewiring of the test_helper.
   spinel-framework:
-    name: spinel-framework (suite)
+    name: spinel-framework (suite, ${{ matrix.shard }})
     # Needs the real-blog fixture: date_columns_spinel overlays it.
     # Advisory unless ci:spinel focus hardens CORE (+ this suite).
     needs: [generate-fixture, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-framework') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
-    outputs: &advisory-outputs
-      execution: ${{ steps.result.outputs.status }}
+    # The plan balances the selected suites over up to three shards by their
+    # recorded durations; each shard reports its own output key, as
+    # spinel-toolchain's do.
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.spinel-framework-shards) }}
+    outputs:
+      shard-0: ${{ steps.result.outputs.shard-0 }}
+      shard-1: ${{ steps.result.outputs.shard-1 }}
+      shard-2: ${{ steps.result.outputs.shard-2 }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 20m: unsharded, the suite took 20-30m (full run 38665931779); a shard
+    # carries about a third. Headroom for cold cache / slow Postgres health
+    # without papering over a hung suite.
+    timeout-minutes: 20
 
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
+    # spinel_pg_db runs the PostgreSQL Db shim against this server.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
     env:
       MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
+      - name: Check out spinel-pg (pinned)
+        if: ${{ contains(matrix.tests, 'spinel_pg_db') }}
+        uses: actions/checkout@v7
+        with:
+          repository: rubys/spinel-pg
+          ref: ${{ env.SPINEL_PG_SHA }}
+          path: spinel-pg
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -1029,15 +1000,31 @@ jobs:
       # Continue after a failing suite without losing its failure status.
       - name: Run selected native framework checks
         env:
-          TESTS: ${{ join(fromJSON(needs.plan.outputs.spinel-tests), ' ') }}
+          TESTS: ${{ join(matrix.tests, ' ') }}
+          # Inputs of spinel_pg_db only; it fails without them.
+          SPINEL_PG_DIR: ${{ github.workspace }}/spinel-pg
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: |
           test -n "$TESTS"
           status=0
           for suite in $TESTS; do
-            cargo test --test "$suite" -- --ignored --nocapture || status=1
+            case "$suite" in
+              param_binds|param_binds_values|param_binds_cleanup)
+                # These suites also contain JRuby tests, run in compare-jruby.
+                cargo test --test "$suite" -- --ignored --nocapture _spinel || status=1
+                ;;
+              *)
+                cargo test --test "$suite" -- --ignored --nocapture || status=1
+                ;;
+            esac
           done
           exit "$status"
-      - *advisory-result
+      - name: Report actual advisory execution
+        id: result
+        if: always()
+        env:
+          STATUS: ${{ job.status }}
+        run: echo "shard-${{ matrix.shard }}=$STATUS" >> "$GITHUB_OUTPUT"
 
   # Campfire conformance — ONCE Campfire's OWN test suite, run against a
   # roundhouse emit of it. The C4 rung of the coverage ladder, and the
@@ -1087,11 +1074,12 @@ jobs:
     # upload cannot skip into a green compact gate (#317).
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-compare') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # 55m: leave room after a slow 20m libvips42 apt for oracle/emit.
+    timeout-minutes: 55
 
     services:
       redis:
-        image: redis
+        image: public.ecr.aws/docker/library/redis
         ports: ['6379:6379']
     env:
       # The oracle's `bundle install` lands inside build/campfire-oracle
@@ -1132,7 +1120,8 @@ jobs:
       # app's own hardening line.
       # CRuby binds libvips through FFI; only compiled Spinel needs headers.
       - name: System libvips
-        timeout-minutes: 8
+        # Same slow-mirror bound as libvips-dev (#590) / campfire-conformance.
+        timeout-minutes: 20
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 sqlite3
       - name: Cache the prepared oracle
@@ -1218,9 +1207,13 @@ jobs:
       - name: System libvips + libsqlite3-dev + libjemalloc-dev
         # libvips-dev pulls ~150 packages; slow Azure apt has burned 8m
         # mid-download (Full validation 37683643149 campfire-smoke).
+        # Cache .deb archives (not dpkg); still run ci-apt-install. Shared
+        # package set with smoke/compare/db-diff so one cache key warms all.
+        # Keep the 20m step budget (#590): cache miss still hits the network.
         timeout-minutes: 20
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev libsqlite3-dev libjemalloc-dev
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
       - name: Fetch pinned once-campfire
         timeout-minutes: 5
         run: |
@@ -1350,7 +1343,7 @@ jobs:
       verify-gen: ${{ steps.result.outputs.verify-gen }}
     services:
       redis:
-        image: redis
+        image: public.ecr.aws/docker/library/redis
         ports: ['6379:6379']
     env:
       BUNDLE_PATH: vendor/bundle
@@ -1374,9 +1367,11 @@ jobs:
         # the producer link set. libvips-dev is ~150 packages — keep the
         # step bound high enough for slow Azure apt (8m was exhausted on
         # Full validation 37683643149 campfire-smoke mid-download).
+        # .deb archive cache via ci-apt-install-cached; #590 timeouts stay.
         timeout-minutes: 20
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
       - name: Fetch pinned once-campfire
         timeout-minutes: 5
         run: |
@@ -1442,7 +1437,8 @@ jobs:
     name: campfire-spinel-db (models)
     needs: [spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-db') && needs.spinel-build.outputs.artifact-id != '' }}
-    outputs: *advisory-outputs
+    outputs: &advisory-outputs
+      execution: ${{ steps.result.outputs.status }}
     runs-on: ubuntu-latest
     # 60m: leave headroom after a slow 20m libvips-dev apt for oracle/emit.
     timeout-minutes: 60
@@ -1450,7 +1446,7 @@ jobs:
     continue-on-error: true
     services:
       redis:
-        image: redis
+        image: public.ecr.aws/docker/library/redis
         ports: ['6379:6379']
     env:
       BUNDLE_PATH: vendor/bundle
@@ -1472,8 +1468,9 @@ jobs:
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: System libvips + libsqlite3-dev + libjemalloc-dev
         timeout-minutes: 20
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
       - name: Fetch pinned once-campfire
         run: |
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
@@ -1497,7 +1494,8 @@ jobs:
     # upload cannot skip into a green compact gate (#317).
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-conformance') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # 55m: libvips42+ffmpeg apt alone can take ~20m on a slow Azure day.
+    timeout-minutes: 55
 
     steps:
       - uses: actions/checkout@v7
@@ -1506,7 +1504,8 @@ jobs:
         with:
           name: roundhouse-debug-bin
           path: roundhouse-debug-bin
-      - name: Stage shared debug roundhouse binary
+      - &stage-roundhouse-debug-bin
+        name: Stage shared debug roundhouse binary
         run: |
           set -euo pipefail
           chmod +x roundhouse-debug-bin/roundhouse
@@ -1609,8 +1608,11 @@ jobs:
       #             previewer.rb`): campfire's own Dockerfile installs it,
       #             and `Message::AttachmentTest` posts a .mov and asserts
       #             the poster frame got attached.
-      - name: Install libvips (ruby-vips binds it through FFI) and ffmpeg
-        timeout-minutes: 8
+      - &campfire-suite-apt
+        name: Install libvips (ruby-vips binds it through FFI) and ffmpeg
+        # Full validation 37689396098: timed out at 8m mid-Get: on Azure apt
+        # (~libvips42 + ffmpeg). Match the 20m libvips-dev budget from #590.
+        timeout-minutes: 20
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 ffmpeg
       #   concurrent-ruby, net-http-persistent, web-push — also from the
@@ -1626,8 +1628,13 @@ jobs:
       #             concurrent-ruby already arrives as sentry-ruby's
       #             dependency; named here so removing sentry-ruby
       #             cannot silently take the pool with it.
-      - name: Install the gems the emitted suite loads
-        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent concurrent-ruby net-http-persistent web-push rails-html-sanitizer --no-document
+      - &campfire-suite-gems
+        name: Install the gems the emitted suite loads
+        # rack: the ruby-family swap of runtime/rack_utils.rb is
+        # `require "rack/utils"`. Without the gem every controller
+        # integration test aborts at load (`cannot load such file --
+        # rack/utils`). campfire-compare already installs it.
+        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent concurrent-ruby net-http-persistent web-push rails-html-sanitizer rack --no-document
       - name: Verify the suite's bcrypt test configuration
         run: ruby tests/campfire_suite_bcrypt.rb
       - name: Fetch once-campfire at the pinned SHA
@@ -1654,6 +1661,10 @@ jobs:
       #
       # Same debug binary as the suite (ROUNDHOUSE_BIN from build-roundhouse), so the
       # compiler is shared rather than paid twice (#317).
+      #
+      # It went 0 -> 2 with the edbc779 pin (WebPush::Connections::Stages'
+      # `(...)` overrides of Net::HTTP's transport hooks) and back to 0
+      # once `lower::known_super_forwarding` spelled those forwards out.
       - name: Enforce the strict-emit ceiling
         env:
           CEILING_ERRORS: 0
@@ -1662,10 +1673,19 @@ jobs:
           test -n "${ROUNDHOUSE_BIN:-}"
           test -x "$ROUNDHOUSE_BIN"
           # Never cargo run: prove the producer binary is the one that emits.
+          status=0
           "$ROUNDHOUSE_BIN" \
             --target spinel /tmp/campfire -o /tmp/campfire-spinel \
-            > /tmp/campfire-strict.log 2>&1
+            > /tmp/campfire-strict.log 2>&1 || status=$?
           errors=$(grep -c 'error\[' /tmp/campfire-strict.log || true)
+          # An ingest abort prints no `error[` line, so a count of zero
+          # with a nonzero exit is that. Counted errors at or below the
+          # ceiling are the pin's remaining gaps, not an abort.
+          if [ "$status" -ne 0 ] && [ "$errors" -eq 0 ]; then
+            tail -5 /tmp/campfire-strict.log
+            echo "::error::campfire strict emit failed (exit $status) without a counted error: ingest stopped before analysis"
+            exit 1
+          fi
           echo "campfire strict emit (spinel, no --allow-unsupported): $errors errors"
           echo "ceiling: $CEILING_ERRORS"
           grep 'error\[' /tmp/campfire-strict.log || true
@@ -1871,6 +1891,59 @@ jobs:
       # THIS commit and whose runner figure is not in yet — same rule
       # as last time.
       #
+      # `edbc779f` (2026-10-09) is upstream main with basecamp/once-campfire
+      # #351 (the pooled push connection is a `Net::HTTP` subclass that
+      # includes `Stages`, so no `extend` is left in app code) on top of
+      # the caching layer (#698/#720: ResponseCache, RecordCache,
+      # FragmentCache, CachedResponses, the WAL checkpointer, header-only
+      # forgery protection with token-free forms, and `rooms.messages_count`
+      # kept by SQLite triggers). Measured locally: ruby lane 552 of 579,
+      # 70 of 86 files; spinel lane 382 of 579, 50 of 86 files (16 do not
+      # link); campfire-compare green on both lanes with no forgiven
+      # divergence; strict emit 2 (see the ceiling above). The floor stays
+      # at the 32b4144 figure until this runner's notice, as before.
+      #
+      # 417/69 -> 550/69 on the notice `301da2b8`'s run emitted (550 of
+      # 578, 69 of 86 files on the runner; 552/70 on the laptop).
+      #
+      # `32b4144b` (2026-10-06) is the Rails main bump (#314, rails
+      # e3d5c569 with the 8.2 defaults live) and the PRs merged before it.
+      # Three shapes it needed: the 8.2 default forgery strategy,
+      # `:header_only` (Sec-Fetch-Site decides before any token, and a
+      # header-less POST passes on plain http — the cable walk's forged
+      # posts now send what a browser sends from another site); Lexxy
+      # rendering through Rails' `ActionText::Editor` adapter, which drops
+      # the `input` attribute; and `Message::Pagination::Page`, a scope
+      # that answers an Array subclass, so `page.first(2)` is Array's.
+      # Measured locally on the ruby lane: 418 of 419, 69 of 70 files;
+      # campfire-compare and the DB differential green; strict emit 0.
+      # The one unpassed test is `RichText#embeds`
+      # (`presentation-preload-introspection`). The floor is left to this
+      # runner's notice.
+      #
+      # `2393f01b` (2026-10-05) is the last upstream main before the next
+      # two shapes outside the subset: `WebPush::Connections`
+      # (`http.extend Stages`, a per-object mixin over Net::HTTP's private
+      # transport) and the response/record/fragment caches on a second
+      # SQLite connection (`PRAGMA data_version`, `ActiveSupport::Cache::
+      # MemoryStore`, `File::LOCK_*`). Strict emit is 0 errors here; the
+      # caches are their own modelling project, tracked separately, and
+      # campfire-latest keeps reporting how far main is past this pin.
+      # Measured locally on the ruby lane: 412 of 414 (405 of 405 at
+      # 90b33002 on the same box), 69 of 70 files. The two unpassed are
+      # new `MessageTest` cases reading preload internals
+      # (`presentation-preload-introspection` in suite-causes.json), and
+      # they turn `message_test` red.
+      #
+      # 412/69 -> 417/69, on the notice `3ab64d40`'s run emitted (the
+      # 32b4144 pin's own tests, plus `RichText#embeds`: the last
+      # `MessageTest` case left fails only on `deferred-preload-timing`).
+      #
+      # 392/66 -> 412/69, on the notice this bump's own run emitted
+      # (`61503a01`: 412 of 414, 69 of 70, 2 skipped). The runner now
+      # agrees with the laptop on files green: the vips loader-policy
+      # skips no longer cost a file.
+      #
       # 391/66 -> 392/66, on the notice `eb2a4d09`'s run emitted (the
       # `to_gid` mint). Files green did not move: the test it turned
       # shares a file with `object-extend`, which is outside the subset
@@ -1878,8 +1951,11 @@ jobs:
       # has no per-object method table — or until upstream takes
       # basecamp/once-campfire#280, #279's twin for this file.
         env:
-          FLOOR_TESTS: 392
-          FLOOR_FILES: 66
+          # Tip Campfire suite floor — 555/74 via hygiene + conditional GET
+          # (strict suite emit, ActiveStorage.paths + timed poster,
+          # NullRelation, fresh_when ETag → 304).
+          FLOOR_TESTS: 555
+          FLOOR_FILES: 74
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
@@ -1958,10 +2034,114 @@ jobs:
           path: /tmp/campfire-suite/summary.json
           if-no-files-found: warn
 
+  # campfire-latest: the same conformance run against basecamp/once-campfire
+  # MAIN as of this run (the planner resolves it once), on the Ruby that
+  # main's own `.ruby-version` names. ADVISORY, and deliberately so: the
+  # blocking job above stays on the pinned CAMPFIRE_SHA, because a moving
+  # input cannot own a ratchet and upstream churn must not turn unrelated
+  # PRs red (the spinel-framework rule). What this job buys is the
+  # same-day signal: every run says how far main is from the pin in gaps,
+  # errors and tests, so a bump starts from a measured list.
+  campfire-latest:
+    needs: [build-roundhouse, plan]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-latest') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
+    outputs: *advisory-outputs
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      CAMPFIRE_LATEST: ${{ needs.plan.outputs.campfire-latest-revision }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - *stage-roundhouse-debug-bin
+      - name: Fetch once-campfire main
+        run: |
+          set -euo pipefail
+          test -n "$CAMPFIRE_LATEST"
+          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_LATEST}" -o /tmp/campfire.tar.gz
+          mkdir -p campfire-latest
+          tar -xzf /tmp/campfire.tar.gz -C campfire-latest --strip-components=1
+          echo "campfire main: $CAMPFIRE_LATEST, Ruby $(cat campfire-latest/.ruby-version)"
+      # `default` reads campfire's own `.ruby-version` from working-directory.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: default
+          working-directory: campfire-latest
+      - *campfire-suite-apt
+      - *campfire-suite-gems
+      - name: Survey the strict emit
+        id: survey
+        run: |
+          set -uo pipefail
+          status=0
+          "$ROUNDHOUSE_BIN" --target spinel --survey campfire-latest -o /tmp/campfire-latest-spinel \
+            > /tmp/campfire-latest-strict.log 2>&1 || status=$?
+          errors=$(grep -c 'error\[' /tmp/campfire-latest-strict.log || true)
+          gaps=$(sed -n 's/.*Survey: \([0-9]*\) ingest gap.*/\1/p' /tmp/campfire-latest-strict.log | head -1)
+          # No survey line means no gap was recorded, but only a run that
+          # finished or stopped at counted errors proves that: a crash with
+          # neither is unknown, and the suite must not run on it.
+          if [ -z "$gaps" ]; then
+            if [ "$status" -ne 0 ] && [ "$errors" -eq 0 ]; then gaps=unknown; else gaps=0; fi
+          fi
+          echo "errors=$errors" >> "$GITHUB_OUTPUT"
+          echo "gaps=$gaps" >> "$GITHUB_OUTPUT"
+          echo "campfire main strict emit: $gaps ingest gap(s), $errors error(s), exit $status"
+          sed -n '/── Survey/,$p' /tmp/campfire-latest-strict.log
+          grep 'error\[' /tmp/campfire-latest-strict.log || true
+      - name: Run campfire's suite against the emit
+        id: suite
+        if: ${{ steps.survey.outputs.gaps == '0' }}
+        run: |
+          scripts/campfire-suite \
+            --tally /tmp/campfire-latest-tally.txt \
+            --fail-log /tmp/campfire-latest-failures.txt \
+            --json /tmp/campfire-latest-suite/summary.json \
+            campfire-latest
+      - name: Report against the pinned floor
+        if: always()
+        env:
+          GAPS: ${{ steps.survey.outputs.gaps }}
+          ERRORS: ${{ steps.survey.outputs.errors }}
+        run: |
+          set -uo pipefail
+          floor=$(awk '/FLOOR_TESTS:/ {print $2; exit}' .github/workflows/ci.yml)
+          if [ -s /tmp/campfire-latest-tally.txt ]; then
+            tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-latest-tally.txt)
+            total=$(awk -F'|' '{t += $4} END {print t+0}' /tmp/campfire-latest-tally.txt)
+            suite="$tests of $total tests green (pinned floor: $floor)"
+          else
+            if [ "${GAPS:-}" = "unknown" ]; then
+              suite="not run: the strict emit failed before a survey (see the step log)"
+            else
+              suite="not run: the emit stops at ${GAPS:-?} ingest gap(s)"
+            fi
+          fi
+          {
+            echo "## Campfire main vs. the pin"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| main | \`${CAMPFIRE_LATEST}\` (Ruby $(cat campfire-latest/.ruby-version 2>/dev/null)) |"
+            echo "| pin | \`${CAMPFIRE_SHA}\` |"
+            echo "| ingest gaps | ${GAPS:-?} |"
+            echo "| strict-emit errors | ${ERRORS:-?} (pin ceiling: 0) |"
+            echo "| suite | $suite |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "::notice::campfire main: ${GAPS:-?} gap(s), ${ERRORS:-?} error(s); suite $suite"
+      - *advisory-result
+
+
   # -------------------------------------------------------------------
   # (toolchain-ruby retired by the smoke consolidation: smoke-ruby's
-  # README § Test runs the same five driver suites from the published
-  # archive. The harness remains a dev-loop tool:
+  # README § Test runs `bundle exec rake test`, which discovers every
+  # test/**/*_test.rb. A fixed list of five drivers is how the views
+  # and broadcasts files shipped without ever running. The harness
+  # remains a dev-loop tool and runs that same rake task:
   # cargo test --test ruby_toolchain -- --ignored.)
   # -------------------------------------------------------------------
   # Spinel-AOT toolchain. Same emit pipeline as toolchain-ruby (lowered
@@ -1990,12 +2170,25 @@ jobs:
   # closes. Running it (vs `if: false`) keeps the model-suite progress
   # visible and catches regressions in the compile path.
   spinel-toolchain:
-    name: spinel-toolchain (suite)
+    name: spinel-toolchain (suite, ${{ matrix.shard }})
     # Tracks matz/spinel master UNPINNED. Advisory unless ci:spinel focus
     # hardens the CORE lane (spinel-advisory=false).
     needs: [generate-fixture, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
-    outputs: *advisory-outputs
+    # Three shards, each taking every third test of the sorted list: each
+    # test is one Spinel build of about the same cost, so count balances
+    # them, and a new test spreads instead of growing a hand-kept catch-all
+    # shard (two such shards reached 25 of 25 minutes). Each shard reports
+    # its own output key (ci-plan.py requires all three), since a matrix's
+    # shared output would let one shard's success hide another's failure.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    outputs:
+      shard-0: ${{ steps.result.outputs.shard-0 }}
+      shard-1: ${{ steps.result.outputs.shard-1 }}
+      shard-2: ${{ steps.result.outputs.shard-2 }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -2031,14 +2224,21 @@ jobs:
           ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
-      - name: cargo test --test spinel_toolchain -- --ignored
-        run: cargo test --test spinel_toolchain -- --ignored --nocapture
+      - name: cargo test --test spinel_toolchain -- --ignored (${{ matrix.shard }})
+        run: |
+          mapfile -t all < <(cargo test --test spinel_toolchain -- --ignored --list --format terse | sed -n 's/: test$//p' | sort)
+          mine=()
+          for i in "${!all[@]}"; do
+            if (( i % 3 == ${{ matrix.shard }} )); then mine+=("${all[$i]}"); fi
+          done
+          test "${#mine[@]}" -gt 0
+          cargo test --test spinel_toolchain -- --ignored --nocapture --exact "${mine[@]}"
       # fixtures/tiny-api, the API-only app (#321): `spin build` of the
       # app entry, HTTP requests to the binary, and the model script
       # compiled natively. Filtered by name, so the ignored test named
       # after an open issue (#163) is not selected.
       - name: cargo test --test tiny_api spinel_gate_ -- --ignored
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.shard == 2 }}
         run: cargo test --test tiny_api spinel_gate_ -- --ignored --nocapture
 
       # On failure, capture spinel's actual generated C for the failing
@@ -2078,10 +2278,15 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: spinel-toolchain-repro
+          name: spinel-toolchain-repro-${{ matrix.shard }}
           path: ci-spinel-repro
           retention-days: 7
-      - *advisory-result
+      - name: Report actual advisory execution
+        id: result
+        if: always()
+        env:
+          STATUS: ${{ job.status }}
+        run: echo "shard-${{ matrix.shard }}=$STATUS" >> "$GITHUB_OUTPUT"
 
   # -------------------------------------------------------------------
   # DOM equivalence: boot Rails + the target server side-by-side and
@@ -2149,6 +2354,8 @@ jobs:
         if: matrix.target == 'swift'
         uses: swift-actions/setup-swift@v2
         with:
+          # Stay on 6.1 while emit caps Hummingbird below 2.27 (2.27+ needs
+          # tools 6.2; on 6.2.1 swift-websocket 1.6.2 fails a lifetime check).
           swift-version: '6.1'
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
@@ -2207,6 +2414,25 @@ jobs:
           bundler-cache: true
           working-directory: ./fixtures/real-blog
       # Not separate jobs: each target's framework-tests and toolchain suites ride the compare job that already installs its toolchain (#273).
+      - name: cargo test --test rust_toolchain controller identity values
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: |
+          if output=$(cargo test --locked --test rust_toolchain real_blog_controller_identity_values_match_rails -- --ignored --nocapture --exact 2>&1); then
+            cargo_status=0
+          else
+            cargo_status=$?
+          fi
+          printf '%s\n' "$output"
+          if [ "$cargo_status" -ne 0 ]; then
+            exit "$cargo_status"
+          fi
+          if ! grep -Fxq 'test real_blog_controller_identity_values_match_rails ... ok' <<< "$output"; then
+            echo '::error::Rust controller identity test did not execute successfully'
+            exit 1
+          fi
+      - name: cargo test --test emit_and_run render json writer on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_rust -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_rust (green subset)
         id: inflector
         if: ${{ !cancelled() && matrix.target == 'rust' }}
@@ -2222,15 +2448,39 @@ jobs:
           name: ci-executed-rust-inflector-${{ github.run_attempt }}
           path: ${{ steps.inflector.outputs.bundle }}
           retention-days: 7
+      - name: cargo test --test json_builder_nested_values on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_rust -- --ignored --nocapture --exact
+      - name: cargo test --test json_builder_nested_values on go
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_go -- --ignored --nocapture --exact
+      - name: cargo test --test json_builder_nested_values on csharp
+        if: ${{ !cancelled() && matrix.target == 'csharp' }}
+        run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_csharp -- --ignored --nocapture --exact
+      - name: cargo test --test truncate_separator on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test truncate_separator truncate_separator_runs_on_rust -- --ignored --nocapture --exact
+      - name: cargo test --test truncate_separator on go
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test truncate_separator truncate_separator_runs_on_go -- --ignored --nocapture --exact
+      - name: cargo test --test truncate_separator on csharp
+        if: ${{ !cancelled() && matrix.target == 'csharp' }}
+        run: cargo test --locked --test truncate_separator truncate_separator_runs_on_csharp -- --ignored --nocapture --exact
       - name: cargo test --test crystal_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'crystal' }}
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
       - name: cargo test --test framework_tests_crystal -- --ignored
         if: ${{ !cancelled() && matrix.target == 'crystal' }}
         run: cargo test --test framework_tests_crystal -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on crystal
+        if: ${{ !cancelled() && matrix.target == 'crystal' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_crystal -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_kotlin
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
         run: cargo test --test framework_tests_kotlin -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on kotlin
+        if: ${{ !cancelled() && matrix.target == 'kotlin' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_kotlin -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_swift
         if: ${{ !cancelled() && matrix.target == 'swift' }}
         run: |
@@ -2238,18 +2488,48 @@ jobs:
           # the libroundhouse just built for the test harness.
           cargo build --bin emit_preview --quiet
           cargo test --test framework_tests_swift -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on swift
+        if: ${{ !cancelled() && matrix.target == 'swift' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_swift -- --ignored --nocapture --exact
       - name: cargo test --test typescript_toolchain real_blog -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on typescript
+        if: ${{ !cancelled() && matrix.target == 'typescript' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_typescript -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_typescript -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --test framework_tests_typescript -- --ignored --nocapture
       - name: cargo test --test elixir_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'elixir' }}
         run: cargo test --test elixir_toolchain -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on elixir
+        if: ${{ !cancelled() && matrix.target == 'elixir' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_elixir -- --ignored --nocapture --exact
+      - name: cargo test --test emit_and_run implicit self on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test emit_and_run model_methods_read_the_record_on_implicit_self_on_rust -- --ignored --nocapture --exact
+      - name: cargo test --test emit_and_run controller params on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test emit_and_run a_controller_reads_params_into_a_local_on_rust -- --ignored --nocapture --exact
+      - name: cargo test --test emit_and_run setup fixture on rust
+        if: ${{ !cancelled() && matrix.target == 'rust' }}
+        run: cargo test --locked --test emit_and_run a_controller_test_reads_the_fixture_its_setup_names_on_rust -- --ignored --nocapture --exact
+      - name: cargo test --test emit_and_run implicit self on typescript
+        if: ${{ !cancelled() && matrix.target == 'typescript' }}
+        run: cargo test --locked --test emit_and_run model_methods_read_the_record_on_implicit_self_on_typescript -- --ignored --nocapture --exact
+      - name: cargo test --test emit_and_run implicit self on go
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test emit_and_run model_methods_read_the_record_on_implicit_self_on_go -- --ignored --nocapture --exact
       - name: cargo test --test python_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'python' }}
         run: cargo test --test python_toolchain -- --ignored --nocapture
+      - name: cargo test --test emit_and_run render json writer on go
+        if: ${{ !cancelled() && matrix.target == 'go' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_go -- --ignored --nocapture --exact
+      - name: cargo test --test emit_and_run render json writer on python
+        if: ${{ !cancelled() && matrix.target == 'python' }}
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_python -- --ignored --nocapture --exact
       - name: Warm the dotnet CLI (first-run config is not concurrency-safe)
         if: ${{ !cancelled() && matrix.target == 'csharp' }}
         env:
@@ -2264,6 +2544,13 @@ jobs:
           DOTNET_NOLOGO: '1'
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         run: cargo test --test csharp_toolchain -- --ignored --nocapture --test-threads=1
+      - name: cargo test --test emit_and_run render json writer on csharp
+        if: ${{ !cancelled() && matrix.target == 'csharp' }}
+        env:
+          DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+          DOTNET_NOLOGO: '1'
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_csharp -- --ignored --nocapture --exact
       - name: scripts/compare ${{ matrix.target }}
         if: ${{ !cancelled() }}
         run: scripts/compare ${{ matrix.target }}
@@ -2340,6 +2627,39 @@ jobs:
         if: ${{ !cancelled() }}
         run: scripts/compare ruby
 
+  # compare-ruby-next: compare-ruby's CRuby runtime gates on the next MRI
+  # line (MRI_RUBY_NEXT). A separate job, not a second setup-ruby inside
+  # compare-ruby, so the two lines run in parallel and a failure names
+  # the Ruby version that broke. The Rails comparison stays on MRI_RUBY.
+  compare-ruby-next:
+    needs: [generate-fixture, plan]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-ruby-next') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.MRI_RUBY_NEXT }}
+          bundler-cache: true
+          working-directory: ./runtime/spinel/scaffold
+      - name: cargo test --test framework_tests_ruby -- --ignored
+        run: cargo test --test framework_tests_ruby -- --ignored --nocapture
+      - name: cargo test --test uuid_key_ruby -- --ignored
+        if: ${{ !cancelled() }}
+        run: cargo test --test uuid_key_ruby -- --ignored --nocapture
+      - name: cargo test --test tiny_api cruby_gate_ -- --ignored
+        if: ${{ !cancelled() }}
+        run: cargo test --test tiny_api cruby_gate_ -- --ignored --nocapture
+
   # compare-jruby: same emitted tree as compare-ruby but served by Puma
   # on the JVM via JRuby with the JDBC db backend (runtime/db.rb =
   # db_jruby.rb). The Rails reference runs under CRuby 3.4 (the default
@@ -2382,7 +2702,7 @@ jobs:
           jruby -S gem install jdbc-sqlite3 --no-document
           jruby tests/support/jdbc_cleanup_failures.rb
           # These shared ownership cases need no Db.bind_* setters.
-          jruby -r ./runtime/spinel/db_jruby -r ./runtime/spinel/test/statement_cache_cases <<'RUBY'
+          jruby -r ./runtime/ruby/active_record/errors -r ./runtime/spinel/db_jruby -r ./runtime/spinel/test/statement_cache_cases <<'RUBY'
           Db.configure(":memory:", pool_size: 1)
           begin
             cases = StatementCacheTest.new
@@ -2394,6 +2714,12 @@ jobs:
             Db.close
           end
           RUBY
+      - name: JRuby parameter bind contract
+        run: |
+          jruby -S gem install jdbc-sqlite3 --no-document
+          jruby tests/param_binds_jruby.rb
+          jruby tests/support/jdbc_value_semantics.rb
+          cargo test --locked --test param_binds_values --test param_binds_cleanup jruby -- --ignored --nocapture
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
@@ -2548,6 +2874,7 @@ jobs:
         if: matrix.target == 'swift'
         uses: swift-actions/setup-swift@v2
         with:
+          # Stay on 6.1 while emit caps Hummingbird below 2.27 (see compare-extra).
           swift-version: '6.1'
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
@@ -2619,7 +2946,7 @@ jobs:
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
-          npm install --no-audit --no-fund
+          "$GITHUB_WORKSPACE/scripts/ci-npm" install --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: Resolve and find successful execution for identical Rust archive inputs
         id: reuse
@@ -2735,7 +3062,7 @@ jobs:
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
-          npm install --no-audit --no-fund
+          "$GITHUB_WORKSPACE/scripts/ci-npm" install --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: scripts/smoke spinel
         id: smoke
@@ -2925,15 +3252,49 @@ jobs:
           docker buildx use campfire-docker-cache
           docker buildx build --load -t campfire "${cache_args[@]}" .
           docker run -d --name campfire -p 3000:3000 campfire
-          for i in $(seq 1 30); do
-            curl -sf -o /dev/null localhost:3000/first_run && break
+          # Wait for /first_run. Bound each probe and dump logs before exit.
+          # After #865 the image must set BINDING=0.0.0.0 (see
+          # scripts/campfire-docker-files); a localhost-only banner means
+          # published ports never reach the process — that is not a slow boot.
+          ready=0
+          last_curl=0
+          for i in $(seq 1 90); do
+            if curl -sf -o /dev/null --max-time 2 localhost:3000/first_run; then
+              ready=1
+              break
+            else
+              last_curl=$?
+            fi
             sleep 1
           done
-          root=$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/)
-          first=$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/first_run)
+          if [ "$ready" != 1 ]; then
+            echo "::error::campfire container did not become ready within 90s (last curl exit ${last_curl})"
+            docker logs campfire || true
+            if docker logs campfire 2>&1 | grep -q 'listening on http://localhost:'; then
+              echo "::error::banner binds localhost — published -p cannot reach it; image needs BINDING=0.0.0.0"
+            fi
+            docker rm -f campfire >/dev/null || true
+            exit 1
+          fi
+          http_code() {
+            local path="$1" code="" attempt
+            for attempt in 1 2 3 4 5; do
+              if code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "localhost:3000$path"); then
+                printf '%s' "$code"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "::error::curl failed for $path after retries"
+            docker logs campfire || true
+            docker rm -f campfire >/dev/null || true
+            exit 1
+          }
+          root=$(http_code /)
+          first=$(http_code /first_run)
           # the sign-in page fetches this; it is a File.binread of a
           # source path the archive has to carry (it once did not)
-          logo=$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/account/logo)
+          logo=$(http_code /account/logo)
           echo "GET / -> $root; GET /first_run -> $first; GET /account/logo -> $logo"
           docker logs campfire
           docker rm -f campfire >/dev/null
@@ -3011,15 +3372,18 @@ jobs:
         # declares image variants), and the package links -lvips.
         # ~150 packages / ~47MB — 8m step timeout failed mid-download on
         # Full validation 37683643149 (slow Azure apt Ign:/Get cycles).
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev libvips-dev
+        # Host .deb archive cache (Docker lane already has BuildKit apt
+        # layers). Same package set as campfire-spinel jobs; #590 timeouts.
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e/campfire
-          npm ci --no-audit --no-fund
+          "$GITHUB_WORKSPACE/scripts/ci-npm" ci --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: scripts/smoke campfire
         id: smoke
@@ -3120,7 +3484,7 @@ jobs:
         run: |
           mkdir -p build/assets/controllers
           # Tailwind CSS.
-          (cd e2e && npm install --no-audit --no-fund)
+          (cd e2e && "$GITHUB_WORKSPACE/scripts/ci-npm" install --no-audit --no-fund)
           printf '@import "tailwindcss";\n@source "%s/fixtures/real-blog/app";\n' "$PWD" \
             > e2e/.tailwind-input.css
           (cd e2e && npx @tailwindcss/cli --input .tailwind-input.css \
@@ -3147,8 +3511,13 @@ jobs:
         run: |
           if [ "$SITE" = true ]; then
             cargo run --release --bin roundhouse -- --site
-          else
+          elif [ -n "$TARGETS" ]; then
             cargo run --release --bin roundhouse -- --archives "$TARGETS"
+          else
+            # Focus/path plans can select build-site with an empty archive
+            # list; never pass '' to --archives (unknown target).
+            echo "No browse archives selected; skipping emit"
+            mkdir -p _site
           fi
 
       # Live SharedWorker blog demo → _site/blog/. Emits real-blog under
@@ -3170,7 +3539,7 @@ jobs:
           DEMO="$(mktemp -d)"
           cargo run --release --quiet --bin emit_preview -- \
             --target typescript --profile worker --out "$DEMO" fixtures/real-blog
-          (cd "$DEMO" && npm install --no-audit --no-fund --silent && npm run build)
+          (cd "$DEMO" && "$GITHUB_WORKSPACE/scripts/ci-npm" install --no-audit --no-fund --silent && npm run build)
           mkdir -p _site/blog
           cp -R "$DEMO"/dist/. _site/blog/
           echo "blog demo files:"; find _site/blog -maxdepth 2 -type f | sort
@@ -3376,7 +3745,7 @@ jobs:
             # page, and without its summary.json here the mirrored page drops
             # the AOT bars, the spinel parity badge and the AOT toolchain
             # provenance — a quieter page that reads as a complete one.
-            for lane in rails rails-int rails-jruby ruby ruby-int jruby spinel; do
+            for lane in rails rails-int rails-jruby ruby ruby-int jruby spinel futamura; do
               mkdir -p "_site/bench/lobsters/$lane"
               for f in summary.json rails.json env.json summary.md; do
                 fetch "$BENCH_URL/$lane/$f" "_site/bench/lobsters/$lane/$f" || true
@@ -3674,9 +4043,15 @@ jobs:
         # Verify the copied download bytes against their producer/test report.
         # Failed validations may publish as repros; mismatched bytes may not.
         run: python3 scripts/ci-archive-evidence.py verify --root _site --report _site/ci/archive-results.json
+      # Per-attempt name: `gh run rerun --failed` re-runs assemble when a
+      # dependency (e.g. smoke) failed, and a second default `github-pages`
+      # artifact makes deploy-pages fail with "Multiple artifacts named
+      # github-pages" (Full validation 38397424326 attempt 2). Pair with
+      # full-ci.yml deploy's artifact_name.
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
+          name: github-pages-${{ github.run_attempt }}
           path: _site
       - name: Report successful assembly
         id: ready
@@ -3687,7 +4062,7 @@ jobs:
     # can still require them. Unselected PR skips must not fail this gate.
     # cancelled() overrides GitHub's implicit success(): evaluate skipped
     # or failed needs, but do not schedule gates after workflow cancellation.
-    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare]
+    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare]
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -3707,7 +4082,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, writebook-inventory, spinel-build, spinel-framework, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, campfire-latest, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, archive-results, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

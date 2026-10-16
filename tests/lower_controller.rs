@@ -100,7 +100,7 @@ fn has_toplevel_terminal_recognizes_respond_to_block() {
     // render table expands it into per-format terminals.
     let empty_block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![],
             block_param: None,
             body: seq(vec![]),
@@ -158,7 +158,7 @@ fn synthesize_implicit_render_is_noop_when_terminal_present() {
 fn lambda(body: Expr) -> Expr {
     Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![],
             block_param: None,
             body,
@@ -282,6 +282,8 @@ fn action(name: &str, body: Expr) -> roundhouse::dialect::Action {
         opt_params: vec![],
         kw_params: vec![],
         kwrest_param: None,
+        rest_param: None,
+        anonymous_formal: None,
         block_param: None,
         body,
         renders: RenderTarget::Inferred,

@@ -236,7 +236,7 @@ fn inline(e: &Expr, save: bool) -> Vec<Expr> {
         id: ClassId(Symbol::from(
             path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
         )),
-        args: vec![],
+        args: vec![].into(),
     };
     let typed = |mut e: Expr, ty: Ty| {
         e.ty = Some(ty);
@@ -247,7 +247,7 @@ fn inline(e: &Expr, save: bool) -> Vec<Expr> {
     };
     let send = |recv: Expr, m: &str| {
         let ty = match m {
-            "first" => Ty::Union { variants: vec![record.clone(), Ty::Nil] },
+            "first" => Ty::Union { variants: vec![record.clone(), Ty::Nil].into() },
             "new" => record.clone(),
             _ => Ty::Bool,
         };
@@ -320,8 +320,8 @@ fn scoped_creation_model(e: &Expr, models: &ModelColumns) -> Option<ClassId> {
         || args.len() != 1 || scalar_pairs(&args[0]).is_none()
         || !match block.as_ref().map(|block| &*block.node) {
             None => true,
-            Some(ExprNode::Lambda { params, rest_param: None, block_param: None, body, .. }) =>
-                params.len() == 1 && !has_block_control_flow(body) && !has_other_local_assignment(body, &params[0]),
+            Some(ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. }) =>
+                params.len() == 1 && extra_params.is_empty() && !has_block_control_flow(body) && !has_other_local_assignment(body, &params[0]),
             _ => false,
         }
     {
@@ -377,7 +377,7 @@ fn has_model_root(e: &Expr, models: &ModelColumns) -> bool {
 fn inline_scoped_creation(e: &Expr, model_id: ClassId) -> Vec<Expr> {
     let span = e.span;
     let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*e.node else { unreachable!() };
-    let record_ty = Ty::Class { id: model_id.clone(), args: vec![] };
+    let record_ty = Ty::Class { id: model_id.clone(), args: vec![].into() };
     let relation_ty = Ty::Relation { of: model_id.clone() };
     let typed = |mut value: Expr, ty: Ty| { value.ty = Some(ty); value };
     let record = || typed(Expr::new(span, ExprNode::Var {
@@ -402,7 +402,7 @@ fn inline_scoped_creation(e: &Expr, model_id: ClassId) -> Vec<Expr> {
     let mut relation = recv.clone();
     seed_model_root(&mut relation, &model_id, &seed, &relation_ty);
     let find = send(relation, "find_by", args.clone(),
-        Ty::Union { variants: vec![record_ty.clone(), Ty::Nil] });
+        Ty::Union { variants: vec![record_ty.clone(), Ty::Nil].into() });
     let (_, scope_pairs) = scope_literals(recv).expect("admitted literal scope");
     let mut pairs = Vec::new();
     for (key, value) in scope_pairs.into_iter().chain(scalar_pairs(&args[0]).expect("admitted literal conditions")) {
@@ -414,10 +414,13 @@ fn inline_scoped_creation(e: &Expr, model_id: ClassId) -> Vec<Expr> {
         entries: pairs.into_iter().map(|(key, value)| {
             (typed(Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: key } }), Ty::Sym), value)
         }).collect(), kwargs: false,
-    }), Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(value_ty) });
+    }), Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(value_ty) });
     let mut initialize = vec![assign(record(), send(model, "new", vec![attributes], record_ty.clone()))];
     if let Some(block) = block {
-        let ExprNode::Lambda { params, body, .. } = &*block.node else { unreachable!() };
+        let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { unreachable!() };
+        if !extra_params.is_empty() {
+            unreachable!()
+        }
         let block_id = super::create_block::find_var_id(body, &params[0]).unwrap_or(VarId(0));
         let block_name = Symbol::from(format!("_find_or_create_block_record_{}", span.start));
         let block_var = typed(Expr::new(span, ExprNode::Var { id: block_id, name: block_name.clone() }), record_ty.clone());

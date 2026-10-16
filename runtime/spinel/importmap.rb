@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Fallback Importmap module. The lowerer-emitted config/importmap.rb
 # (generated per-app from the source's config/importmap.rb) reopens
 # this module and overrides `pins` / `entry` with the app's actual

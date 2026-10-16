@@ -168,6 +168,10 @@ class FocusLabels(unittest.TestCase):
         self.assertFalse(plan["spinel_advisory"])
         self.assertNotIn("campfire-spinel-compare", plan["jobs"])
         self.assertEqual(plan["spinel_tests"], ci.SPINEL_TESTS)
+        # build-site without spinel-smoke still needs a non-empty --archives
+        # list (empty string is an unknown target).
+        self.assertEqual(plan["archives"], ["spinel"])
+        self.assertIn("build-site", plan["required"])
 
     def test_main_spinel_lane_stays_advisory_full_suite(self):
         plan = ci.select([], spinel_lane=True)

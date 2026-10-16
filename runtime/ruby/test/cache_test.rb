@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "test_helper"
 
 # `Rails::Cache#read_str` / `#write_str` — fragment-cache store.

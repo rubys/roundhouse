@@ -239,9 +239,9 @@ fn collect_struct_properties(
         let Some(name) = arguments.next().and_then(|n| symbol_name(&n)) else { continue };
         let Some(ty) = arguments.next().and_then(|n| sorbet_ty(&n, true, &HashMap::new())) else { continue };
         let reader = Ty::Fn {
-            params: Vec::new(),
+            params: Vec::new().into(),
             block: None,
-            ret: Box::new(ty.clone()),
+            ret: std::sync::Arc::new(ty.clone()),
             effects: EffectSet::pure(),
         };
         let class = out.entry(ClassId(Symbol::new(class_name))).or_default();
@@ -252,11 +252,11 @@ fn collect_struct_properties(
                 Ty::Fn {
                     params: vec![Param {
                         name: Symbol::new("value"),
-                        ty: ty.clone(),
+                        ty: ty.clone().into(),
                         kind: ParamKind::Required,
-                    }],
+                    }].into(),
                     block: None,
-                    ret: Box::new(ty),
+                    ret: std::sync::Arc::new(ty),
                     effects: EffectSet::pure(),
                 },
             );
@@ -306,11 +306,11 @@ fn collect_enum_surface(
         }
     }
     let Some(value_ty) = value_ty else { return };
-    let enum_ty = Ty::Class { id: ClassId(Symbol::new(class_name)), args: Vec::new() };
+    let enum_ty = Ty::Class { id: ClassId(Symbol::new(class_name)), args: Vec::new().into() };
     let nullary = |ret: Ty| Ty::Fn {
-        params: Vec::new(),
+        params: Vec::new().into(),
         block: None,
-        ret: Box::new(ret),
+        ret: std::sync::Arc::new(ret),
         effects: EffectSet::pure(),
     };
     let class = out.entry(ClassId(Symbol::new(class_name))).or_default();
@@ -320,15 +320,15 @@ fn collect_enum_surface(
         Ty::Fn {
             params: vec![Param {
                 name: Symbol::new("value"),
-                ty: value_ty,
+                ty: value_ty.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(enum_ty.clone()),
+            ret: std::sync::Arc::new(enum_ty.clone()),
             effects: EffectSet::pure(),
         },
     );
-    class.insert(Symbol::new("values"), nullary(Ty::Array { elem: Box::new(enum_ty) }));
+    class.insert(Symbol::new("values"), nullary(Ty::Array { elem: std::sync::Arc::new(enum_ty) }));
 }
 
 /// The type of a literal in a member's constructor call.
@@ -486,10 +486,10 @@ fn signature_ty(
                     }
                 }
                 if matches!(ty, Ty::Fn { .. }) {
-                    block = Some(Box::new(ty.clone()));
+                    block = Some(std::sync::Arc::new(ty.clone()));
                 }
             }
-            params.push(Param { name: Symbol::new(&name), ty, kind });
+            params.push(Param { name: Symbol::new(&name), ty: ty.into(), kind });
         }
     }
     // A name in the sig that the def does not have means the pairing is
@@ -499,9 +499,9 @@ fn signature_ty(
     }
 
     Some(Ty::Fn {
-        params,
+        params: params.into(),
         block,
-        ret: Box::new(returns?),
+        ret: std::sync::Arc::new(returns?),
         effects: EffectSet::pure(),
     })
 }
@@ -647,7 +647,7 @@ pub(super) fn sorbet_ty(
                 sorbet_ty(&assoc.value(), self_is_instance, aliases)?,
             );
         }
-        return Some(Ty::Record { row: crate::ty::Row { fields, rest: None } });
+        return Some(Ty::Record { row: crate::ty::Row { fields: fields.into(), rest: None } });
     }
     // `[Integer, String]` — a tuple.
     if let Some(array) = node.as_array_node() {
@@ -656,7 +656,7 @@ pub(super) fn sorbet_ty(
             .iter()
             .map(|e| sorbet_ty(&e, self_is_instance, aliases))
             .collect::<Option<_>>()?;
-        return Some(Ty::Tuple { elems });
+        return Some(Ty::Tuple { elems: elems.into() });
     }
     // `(Foo)` around a type is the type.
     if let Some(parens) = node.as_parentheses_node() {
@@ -724,7 +724,7 @@ pub(super) fn sorbet_ty(
             "class_of" => {
                 let argument = index.arguments()?.arguments().iter().next()?;
                 let id = constant_path_name(&argument);
-                (!id.is_empty()).then(|| Ty::Class { id: ClassId(Symbol::new(&id)), args: Vec::new() })
+                (!id.is_empty()).then(|| Ty::Class { id: ClassId(Symbol::new(&id)), args: Vec::new().into() })
             }
             // What `raise` returns: no value.
             "noreturn" => Some(Ty::Bottom),
@@ -747,7 +747,7 @@ pub(super) fn sorbet_ty(
             "nilable" => {
                 let inner =
                     sorbet_ty(&index.arguments()?.arguments().iter().next()?, self_is_instance, aliases)?;
-                Some(Ty::Union { variants: vec![inner, Ty::Nil] })
+                Some(Ty::Union { variants: vec![inner, Ty::Nil].into() })
             }
             "any" => {
                 let variants: Vec<Ty> = index
@@ -756,7 +756,7 @@ pub(super) fn sorbet_ty(
                     .iter()
                     .map(|a| sorbet_ty(&a, self_is_instance, aliases))
                     .collect::<Option<_>>()?;
-                (variants.len() > 1).then_some(Ty::Union { variants })
+                (variants.len() > 1).then_some(Ty::Union { variants: variants.into() })
             }
             _ => None,
         };
@@ -808,7 +808,7 @@ fn sorbet_proc_ty(
                                 String::from_utf8_lossy(key.value_loc()?.as_slice()).into_owned();
                             params.push(Param {
                                 name: Symbol::new(&name),
-                                ty: sorbet_ty(&assoc.value(), self_is_instance, aliases)?,
+                                ty: sorbet_ty(&assoc.value(), self_is_instance, aliases)?.into(),
                                 kind: ParamKind::Required,
                             });
                         }
@@ -824,9 +824,9 @@ fn sorbet_proc_ty(
             }
         }
         Some(Ty::Fn {
-            params,
+            params: params.into(),
             block: None,
-            ret: Box::new(ret.unwrap_or(Ty::Untyped)),
+            ret: std::sync::Arc::new(ret.unwrap_or(Ty::Untyped)),
             effects: EffectSet::default(),
         })
     };
@@ -840,14 +840,14 @@ fn named_ty(name: &str) -> Ty {
         "Integer" => Ty::Int,
         "Float" => Ty::Float,
         "String" => Ty::Str,
-        "Hash" => Ty::Hash { key: Box::new(Ty::Untyped), value: Box::new(Ty::Untyped) },
-        "Array" => Ty::Array { elem: Box::new(Ty::Untyped) },
+        "Hash" => Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
+        "Array" => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
         "Symbol" => Ty::Sym,
         "TrueClass" | "FalseClass" => Ty::Bool,
         "NilClass" => Ty::Nil,
         "Date" => Ty::Date,
         "Time" | "DateTime" | "ActiveSupport::TimeWithZone" => Ty::Time,
-        _ => Ty::Class { id: ClassId(Symbol::new(name)), args: Vec::new() },
+        _ => Ty::Class { id: ClassId(Symbol::new(name)), args: Vec::new().into() },
     }
 }
 
@@ -924,10 +924,10 @@ fn rbs_comment_signature(
         return None;
     }
     if let Some((name, _)) = def_block {
-        let ty = declared_block.into_iter().next().map(|p| p.ty).unwrap_or(Ty::Untyped);
+        let ty = declared_block.into_iter().next().map(|p| p.ty).unwrap_or(Ty::Untyped.into());
         params.push(Param { name: Symbol::new(name), ty, kind: ParamKind::Block });
     }
-    Some(Ty::Fn { params, block, ret, effects })
+    Some(Ty::Fn { params: params.into(), block, ret, effects })
 }
 
 /// The `#: type name = ...` aliases a class or module body declares,

@@ -32,19 +32,26 @@ pub fn apply_dead_default_lowering(app: &mut App, registry: &HashMap<ClassId, Cl
         let class = model.name.clone();
         for item in &mut model.body {
             if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
-                ground_params(&mut method.params, &class, registry);
+                let class_side = method.receiver == crate::dialect::MethodReceiver::Class;
+                ground_params(&mut method.params, &class, class_side, registry);
             }
         }
     }
     for lc in &mut app.library_classes {
         let class = lc.name.clone();
         for method in &mut lc.methods {
-            ground_params(&mut method.params, &class, registry);
+            let class_side = method.receiver == crate::dialect::MethodReceiver::Class;
+            ground_params(&mut method.params, &class, class_side, registry);
         }
     }
 }
 
-fn ground_params(params: &mut [Param], class: &ClassId, registry: &HashMap<ClassId, ClassInfo>) {
+fn ground_params(
+    params: &mut [Param],
+    class: &ClassId,
+    class_side: bool,
+    registry: &HashMap<ClassId, ClassInfo>,
+) {
     if !registry.contains_key(class) {
         return;
     }
@@ -53,7 +60,7 @@ fn ground_params(params: &mut [Param], class: &ClassId, registry: &HashMap<Class
         let ExprNode::Send { recv: None, method, args, block: None, .. } = &*default.node else {
             continue;
         };
-        if !args.is_empty() || resolves(class, method.as_str(), registry, 0) {
+        if !args.is_empty() || resolves(class, method.as_str(), class_side, registry, 0) {
             continue;
         }
         let span = default.span;
@@ -76,9 +83,15 @@ fn ground_params(params: &mut [Param], class: &ClassId, registry: &HashMap<Class
     }
 }
 
+/// A bare name in a default is read on `self`: the instance for an
+/// instance method, the class itself for a class method (`def
+/// open(path = default_path)` under `class << self` calls the class's
+/// own `default_path`, which this pass used to turn into a raise
+/// because it looked among instance methods only).
 fn resolves(
     class: &ClassId,
     name: &str,
+    class_side: bool,
     registry: &HashMap<ClassId, ClassInfo>,
     depth: usize,
 ) -> bool {
@@ -88,16 +101,20 @@ fn resolves(
         return true;
     }
     let Some(info) = registry.get(class) else { return true };
-    if info.instance_methods.keys().any(|m| m.as_str() == name)
-        || info.attributes.fields.keys().any(|f| f.as_str() == name)
-    {
+    let own = if class_side {
+        info.class_methods.keys().any(|m| m.as_str() == name)
+    } else {
+        info.instance_methods.keys().any(|m| m.as_str() == name)
+            || info.attributes.fields.keys().any(|f| f.as_str() == name)
+    };
+    if own {
         return true;
     }
-    if info.includes.iter().any(|m| resolves(m, name, registry, depth + 1)) {
+    if info.includes.iter().any(|m| resolves(m, name, class_side, registry, depth + 1)) {
         return true;
     }
     match &info.parent {
-        Some(parent) => resolves(parent, name, registry, depth + 1),
+        Some(parent) => resolves(parent, name, class_side, registry, depth + 1),
         None => false,
     }
 }

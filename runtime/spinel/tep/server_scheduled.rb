@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::Server::Scheduled -- Falcon-shape fiber-per-connection HTTP
 # server, built on Tep::Scheduler + sp_net non-blocking accept/recv.
 #
@@ -54,7 +55,7 @@ module Tep
       end
 
       def run(port, workers, quiet)
-        sfd = Sock.sphttp_listen(port, workers > 1 ? 1 : 0)
+        sfd = Sock.sphttp_listen_on(Tep::APP.bind_host, port, workers > 1 ? 1 : 0)
         if sfd < 0
           # Loud + nonzero exit: the one plausible cause on a sane host
           # is another process already bound to the port, and silently
@@ -72,7 +73,7 @@ module Tep
           # redirected (not a TTY) C stdio block-buffers, and a banner
           # that only shows up at exit is no banner at all.
           puts Tep.display_name + " (" + RUBY_ENGINE +
-               ") listening on http://0.0.0.0:" + port.to_s +
+               ") listening on http://" + (Tep::APP.bind_host.empty? ? "0.0.0.0" : Tep::APP.bind_host) + ":" + port.to_s +
                ", pid " + Sock.sphttp_getpid.to_s
           puts "  one fiber per connection (TEP_SERVER=fiber); OS workers: " +
                "1, the main thread; processes: " + Tep.processes_desc(workers)
@@ -213,7 +214,7 @@ module Tep
           return false
         end
 
-        req.consume_body_via_scheduler(client)
+        return false unless req.consume_body_via_scheduler(client)
 
         res = Response.new
         begin
@@ -356,10 +357,12 @@ module Tep
         0
       end
 
+      # bytesize, as write_response: a multibyte `msg` would otherwise
+      # announce fewer bytes than are written.
       def self.send_simple(client, status, msg)
         reason = Tep.reason(status)
         head = "HTTP/1.0 " + status.to_s + " " + reason + "\r\n" +
-               "Content-Length: " + msg.length.to_s + "\r\n" +
+               "Content-Length: " + msg.bytesize.to_s + "\r\n" +
                "Connection: close\r\n\r\n" + msg
         Sock.sphttp_write_str(client, head)
         0

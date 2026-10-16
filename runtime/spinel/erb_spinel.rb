@@ -1,13 +1,17 @@
+# frozen_string_literal: true
 # Spinel-only ERB shim. CRuby/JRuby get `ERB::Util` from the stdlib that
 # Rails loads for them; the AOT tree has no stdlib ERB, so the constant
 # resolved to nothing and `ERB::Util.html_escape` raised
 # `undefined method 'html_escape' for unknown` (lobsters Hat#to_html_label,
 # reached from every /u/:username render).
 #
-# Only `html_escape` is provided — the template half of ERB is not
-# something an AOT tree can host (roundhouse compiles the templates), and
-# `Util.url_encode` has no call site in the corpus. Add siblings when one
-# appears rather than guessing at the surface.
+# The template half is spinel's `packages/erb`: `ERB.new(template,
+# trim_mode: "-").result_with_hash(hash)`, the part of ERB a compiled
+# program can run (roundhouse compiles the app's own views). This file
+# requires it and reopens `ERB` as the class the package and CRuby define.
+# The require is not optional: this file defines `ERB`, and a constant the
+# program defines skips the bundled `require "erb"` row in `project.rs`, so
+# without it the package never loads and `ERB.new` is undefined.
 #
 # The escaping itself is delegated, not re-implemented: ActionView's
 # `html_escape` is the same five-entity substitution, it is already the
@@ -22,7 +26,9 @@
 # `runtime/` is on `$LOAD_PATH` — which the emitted Rakefile does
 # (`t.libs << "runtime"`) — handing CRuby the AOT subset instead of
 # the stdlib. See runtime/json_impl.rb for the same rule.
-module ERB
+require "erb"
+
+class ERB
   module Util
     # `to_s` is faithful, not a widening dodge: stdlib ERB::Util is
     # `CGI.escapeHTML(s.to_s)`, and the corpus leans on it — the two

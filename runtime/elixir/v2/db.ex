@@ -41,6 +41,15 @@ defmodule Db do
     Process.get({__MODULE__, :last_rowid}, 0)
   end
 
+  # Rows affected by the most recent `exec` — what Rails'
+  # `Model.delete_all` returns.
+  def changes do
+    case Exqlite.Sqlite3.changes(Roundhouse.Db.conn()) do
+      {:ok, n} -> n
+      n when is_integer(n) -> n
+    end
+  end
+
   # Advance the cursor; true if a row is now current, false at the end.
   def step?(id) do
     case stmt(id) do

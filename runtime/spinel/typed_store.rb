@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # typed_store gem subset (spinel twin of the CRuby overlay's
 # runtime/typed_store.rb, which parses with the real YAML) — the
 # settings column holds a FLAT scalar hash and nothing else in the

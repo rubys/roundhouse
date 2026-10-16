@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Exceptions Rails raises from the request layer, defined so the
 # `rescue_from` clauses that name them resolve. Nothing in the runtime
 # raises either: remote-IP spoof detection and Accept-header MIME

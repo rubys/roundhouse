@@ -20,6 +20,18 @@ use serde::{Deserialize, Serialize};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
+/// Ruby's own top-level names. An RBI that mentions them is patching or
+/// extending the language, not declaring a gem class.
+pub(crate) const RUBY_CORE: &[&str] = &[
+    "BasicObject", "Object", "Module", "Class", "Kernel", "Comparable", "Enumerable", "Enumerator",
+    "Numeric", "Integer", "Float", "Rational", "Complex", "String", "Symbol", "Array", "Hash",
+    "Range", "Regexp", "MatchData", "Struct", "Proc", "Method", "UnboundMethod", "Time", "Date",
+    "DateTime", "IO", "File", "Dir", "Exception", "StandardError", "RuntimeError", "NilClass",
+    "TrueClass", "FalseClass", "Set", "Random", "Process", "Signal", "Math", "Marshal", "GC",
+    "ObjectSpace", "Thread", "Mutex", "Fiber", "Ractor", "Data", "Encoding", "Binding",
+    "BigDecimal", "Pathname", "StringIO", "URI", "JSON", "Logger", "Singleton", "Forwardable",
+];
+
 /// Every gem class or module an RBI declares, by qualified name.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GemBoundary {
@@ -31,11 +43,15 @@ pub struct GemBoundary {
     /// to nest a class) owns nothing beside what it nests.
     #[serde(default)]
     pub namespaces: HashMap<String, BTreeSet<String>>,
+    /// Locked gems required at boot by this app's extensions. An RBI or
+    /// a dependency entry alone does not establish that a gem is loaded.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub loaded: BTreeSet<String>,
 }
 
 impl GemBoundary {
     pub fn is_empty(&self) -> bool {
-        self.classes.is_empty()
+        self.classes.is_empty() && self.loaded.is_empty()
     }
 
     /// Whether `gem`'s RBI accounts for the constant `path`: it defines

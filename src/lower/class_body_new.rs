@@ -306,7 +306,7 @@ fn rewrite(expr: &mut Expr, owner: &str) {
     // Later keyword expansion resolves initialize against this receiver.
     konst.ty = Some(crate::ty::Ty::Class {
         id: crate::ident::ClassId(Symbol::from(owner)),
-        args: Vec::new(),
+        args: Vec::new().into(),
     });
     *recv = Some(konst);
 }

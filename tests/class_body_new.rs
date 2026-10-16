@@ -93,17 +93,18 @@ fn a_class_side_method_body_gets_it_too() {
     );
 }
 
-/// An INSTANCE method's bare `new` is a NoMethodError in Ruby too —
-/// there is nothing there to preserve, and nothing to rewrite.
+/// An instance method's bare `new` is a NoMethodError in Ruby too. The
+/// explicit constructor call still keeps its receiver, while flattened
+/// optional keywords are respelled to match `initialize`.
 #[test]
-fn an_instance_method_is_left_alone() {
+fn an_explicit_constructor_in_an_instance_method_keeps_its_receiver() {
     let src = emitted(
         "class Sound\n  def initialize(name: nil)\n    @name = name\n  end\n\n  \
          def sibling\n    Sound.new(name: \"x\")\n  end\nend\n",
     );
     assert!(
-        src.contains("Sound.new(name: \"x\")") && !src.contains("Sound.new(Sound"),
-        "an explicit constructor stays exactly one constructor:\n{src}"
+        src.contains("Sound.new(\"x\")") && !src.contains("Sound.new(Sound"),
+        "the constructor stays on Sound and its flattened keyword binds positionally:\n{src}"
     );
 }
 

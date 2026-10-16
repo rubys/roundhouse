@@ -14,6 +14,13 @@ class RoundhouseTestCase: XCTestCase {
     var __flash = Flash()
     var __session = Session()
 
+    struct TestResponse {
+        let body: String
+        let status: Int
+    }
+
+    func response() -> TestResponse { TestResponse(body: __body, status: __status) }
+
     override func setUpWithError() throws {
         if !RoundhouseTestSetup.schemaSql.isEmpty {
             Db.setupTestDb(RoundhouseTestSetup.schemaSql)

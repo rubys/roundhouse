@@ -15,7 +15,7 @@ use super::expr::ingest_expr;
 use super::util::{
     class_name_path, collect_comments, constant_id_str, constant_path_of, drain_comments_before,
     find_all_classes_with_nesting, flatten_statements, source_has_blank_line,
-    symbol_list_style, symbol_list_value, symbol_value,
+    symbol_list_style, symbol_list_value, symbol_or_string_value, symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -135,7 +135,21 @@ pub(super) fn ingest_controller_with_nesting(
     drain_comments_before(&mut comments, class.location().start_offset());
     let mut body_items: Vec<ControllerBodyItem> = Vec::new();
     let owner = ClassId(Symbol::from(name_path.join("::")));
+    // Folded into every `around_block_filter` name on this controller so a
+    // parent and child controller each with their own block-form
+    // `around_action` don't synthesize the SAME method name: the
+    // synthesized method is an ordinary Ruby method, and the child's
+    // would otherwise override the parent's instead of coexisting
+    // alongside it through inheritance. Shared with `app::
+    // expand_class_body_macros`'s own block-form `around_action`
+    // lowering (a concern macro's body can hold one too), so the two
+    // agree on one encoding rather than drifting apart.
+    let around_block_owner_ident = around_block_owner_ident(&owner);
     let mut layout = LayoutDecl::Inherit;
+    // Deterministic per-controller numbering for `around_block_filter`'s
+    // synthesized method names — bumped once per successfully LOWERED
+    // (never a refused) block-form `around_action`, in source order.
+    let mut around_block_seq: u32 = 0;
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
         for stmt in flatten_statements(class_body) {
@@ -160,20 +174,172 @@ pub(super) fn ingest_controller_with_nesting(
             // symbol; expand to one `Filter` body item each so every target's
             // ivar assignments seed the actions it guards (the single-target
             // parse only ever captured the first symbol). Block-form filters
-            // (`before_action { ... }`, no symbol target) return `None` here,
-            // fall through to `Unknown`, and round-trip verbatim — analyze
-            // harvests their ivars separately.
-            if let Some(filters) = parse_filter_call(&stmt, file) {
-                for (i, filter) in filters.into_iter().enumerate() {
-                    body_items.push(ControllerBodyItem::Filter {
-                        filter,
-                        leading_comments: if i == 0 {
-                            std::mem::take(&mut leading)
-                        } else {
-                            Vec::new()
-                        },
-                        leading_blank_line: i == 0 && leading_blank,
+            // (`before_action { ... }`, no symbol target) return `Ok(None)`
+            // here, fall through to `Unknown`, and round-trip verbatim —
+            // analyze harvests their ivars separately. A non-literal `only:`/
+            // `except:` is `Err` instead — a located gap (survey) or a strict
+            // error, round-tripped as `Unknown` on the gap path rather than
+            // silently applied to every action (`parse_filter_call`'s doc
+            // comment).
+            match parse_filter_call(&stmt, file) {
+                Ok(Some(filters)) => {
+                    for (i, filter) in filters.into_iter().enumerate() {
+                        body_items.push(ControllerBodyItem::Filter {
+                            filter,
+                            leading_comments: if i == 0 {
+                                std::mem::take(&mut leading)
+                            } else {
+                                Vec::new()
+                            },
+                            leading_blank_line: i == 0 && leading_blank,
+                        });
+                    }
+                    prev_end = Some(stmt.location().end_offset());
+                    continue;
+                }
+                Ok(None) => {}
+                Err(err) if super::survey::is_active() => {
+                    super::survey::record(&err);
+                    let expr = match ingest_expr(&stmt, file) {
+                        Ok(expr) => expr,
+                        Err(err2) if super::survey::is_active() => {
+                            super::survey::record(&err2);
+                            prev_end = Some(stmt.location().end_offset());
+                            continue;
+                        }
+                        Err(err2) => return Err(err2),
+                    };
+                    body_items.push(ControllerBodyItem::Unknown {
+                        expr,
+                        leading_comments: std::mem::take(&mut leading),
+                        leading_blank_line: leading_blank,
                     });
+                    prev_end = Some(stmt.location().end_offset());
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+            // Block-form `around_action(...) { |controller, block| ... }`
+            // — `parse_filter_call` only recognizes a Symbol target, so a
+            // block attached with no leading symbol falls through to
+            // here untouched. Lowered when possible (see
+            // `around_block_filter`'s doc comment); refused shapes
+            // record a survey gap and keep the call whole as `Unknown`,
+            // rather than vanishing with no trace (rubys/roundhouse#778).
+            if let Some(call) = stmt.as_call_node() {
+                if call.receiver().is_none()
+                    && constant_id_str(&call.name()) == "around_action"
+                    && call.block().as_ref().is_some_and(|b| b.as_block_node().is_some())
+                {
+                    let expr = match ingest_expr(&stmt, file) {
+                        Ok(expr) => expr,
+                        Err(err) if super::survey::is_active() => {
+                            super::survey::record(&err);
+                            prev_end = Some(stmt.location().end_offset());
+                            continue;
+                        }
+                        Err(err) => return Err(err),
+                    };
+                    let loc = stmt.location();
+                    let raw_text = std::str::from_utf8(&source[loc.start_offset()..loc.end_offset()])
+                        .unwrap_or("");
+                    match around_block_filter(
+                        &expr,
+                        Some(raw_text),
+                        &around_block_owner_ident,
+                        &mut around_block_seq,
+                    ) {
+                        Some(Ok((filter, action))) => {
+                            body_items.push(ControllerBodyItem::Filter {
+                                filter,
+                                leading_comments: std::mem::take(&mut leading),
+                                leading_blank_line: leading_blank,
+                            });
+                            body_items.push(ControllerBodyItem::Action {
+                                action,
+                                leading_comments: Vec::new(),
+                                leading_blank_line: false,
+                            });
+                            prev_end = Some(stmt.location().end_offset());
+                            continue;
+                        }
+                        Some(Err(reason)) => {
+                            if super::survey::is_active() {
+                                super::survey::record(&IngestError::Unsupported {
+                                    file: file.to_string(),
+                                    message: reason,
+                                });
+                            }
+                            body_items.push(ControllerBodyItem::Unknown {
+                                expr,
+                                leading_comments: std::mem::take(&mut leading),
+                                leading_blank_line: leading_blank,
+                            });
+                            prev_end = Some(stmt.location().end_offset());
+                            continue;
+                        }
+                        None => {
+                            // Not actually this shape (shouldn't happen
+                            // given the raw check above) — keep it
+                            // whole rather than lose it.
+                            body_items.push(ControllerBodyItem::Unknown {
+                                expr,
+                                leading_comments: std::mem::take(&mut leading),
+                                leading_blank_line: leading_blank,
+                            });
+                            prev_end = Some(stmt.location().end_offset());
+                            continue;
+                        }
+                    }
+                }
+            }
+            // `with_options unless: :signed_in? do before_action …; end` —
+            // composed the same way `config/routes.rb`'s `with_options`
+            // is: every receiverless, block-free call inside gets the
+            // options merged into its own (the call's keys win), then is
+            // ingested as if it had been spelled that way. ALL-OR-NOTHING,
+            // same reasoning `expand_class_body_macros` documents for a
+            // concern macro's own body: a with_options block with one
+            // statement this can't compose stays `Unknown`, WHOLE, and
+            // round-trips verbatim — partially composing it would drop
+            // just that one statement's filter silently, the very bug
+            // this fix exists for, so a decline anywhere inside declines
+            // the whole statement rather than the one call. Recorded as a
+            // located survey gap, never a silent drop — see
+            // `ingest_controller_with_options`. `with_options` is in
+            // `CONSUMED_CONTROLLER_MACROS` so a declined block doesn't
+            // ALSO earn the generic "class-body block not recognized"
+            // gap on top of this one's specific reason.
+            if is_with_options_call(&stmt) {
+                let call = stmt.as_call_node().expect("is_with_options_call checked");
+                let expr = match ingest_expr(&stmt, file) {
+                    Ok(expr) => expr,
+                    Err(err) if super::survey::is_active() => {
+                        super::survey::record(&err);
+                        prev_end = Some(stmt.location().end_offset());
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                };
+                match ingest_controller_with_options(&call, &[], file) {
+                    Ok(items) => {
+                        for (i, mut item) in items.into_iter().enumerate() {
+                            if i == 0 {
+                                *item.leading_comments_mut() = std::mem::take(&mut leading);
+                                item.set_leading_blank_line(leading_blank);
+                            }
+                            body_items.push(item);
+                        }
+                    }
+                    Err(err) if super::survey::is_active() => {
+                        super::survey::record(&err);
+                        body_items.push(ControllerBodyItem::Unknown {
+                            expr,
+                            leading_comments: std::mem::take(&mut leading),
+                            leading_blank_line: leading_blank,
+                        });
+                    }
+                    Err(err) => return Err(err),
                 }
                 prev_end = Some(stmt.location().end_offset());
                 continue;
@@ -351,7 +517,25 @@ fn ingest_controller_body_item(
                 message: "controller singleton methods are not supported; finite Concern configuration is expanded separately".to_string(),
             });
         }
-        super::forwarding::reject_entrypoint(&def, file, "controller method")?;
+        // `Action` carries required, optional, `*rest`, keyword,
+        // `**rest`, anonymous `**` / `...` and `&block` formals
+        // (`Action::formal_params`). What it cannot carry is refused
+        // here rather than dropped: a dropped formal emits a `def` the
+        // call sites no longer match.
+        let formals = super::forwarding::parse(&def);
+        if let Some(formal) = formals.unsupported {
+            return Err(IngestError::Unsupported {
+                file: file.to_string(),
+                message: format!("controller method parameter declaration: {}", formal.description()),
+            });
+        }
+        if def.parameters().is_some_and(|pn| pn.posts().iter().next().is_some()) {
+            return Err(IngestError::Unsupported {
+                file: file.to_string(),
+                message: "required parameters after a positional rest on a controller method are not preserved yet"
+                    .to_string(),
+            });
+        }
         let action_name = constant_id_str(&def.name()).to_string();
         let body_expr = match def.body() {
             Some(b) => ingest_expr(&b, file)?,
@@ -378,14 +562,15 @@ fn ingest_controller_body_item(
         // seed their types from call sites — so a body like
         // `query.where(...)` never resolves and the method's return
         // type is lost. Value types are placeholders (`Untyped`); the
-        // real types come from the inferred-params table. Optional /
-        // keyword / rest params need richer modeling and stay
-        // unhandled for now.
+        // real types come from the inferred-params table. The other
+        // kinds follow below; `Action::formal_params` puts them back in
+        // declaration order.
         let mut params = Row::closed();
         let mut opt_params: Vec<(Symbol, Expr)> = Vec::new();
         let mut kw_params: Vec<(Symbol, Option<Expr>)> = Vec::new();
         let mut block_param: Option<Symbol> = None;
         let mut kwrest_param: Option<Symbol> = None;
+        let mut rest_param: Option<Symbol> = None;
         if let Some(pn) = def.parameters() {
             for req in pn.requireds().iter() {
                 if let Some(rp) = req.as_required_parameter_node() {
@@ -395,8 +580,7 @@ fn ingest_controller_body_item(
                 }
             }
             // Optional positionals (`opts = {}`) — keep the name + default
-            // so the emitted signature round-trips. Rest / post params
-            // still need richer modeling and stay unhandled.
+            // so the emitted signature round-trips.
             for opt in pn.optionals().iter() {
                 if let Some(op) = opt.as_optional_parameter_node() {
                     let name = Symbol::from(constant_id_str(&op.name()));
@@ -417,6 +601,14 @@ fn ingest_controller_body_item(
                     let default = ingest_expr(&opt.value(), file)?;
                     kw_params.push((name, Some(default)));
                 }
+            }
+            if let Some(rest) = pn.rest().and_then(|r| r.as_rest_parameter_node()) {
+                rest_param = match rest.name() {
+                    Some(n) => Some(Symbol::from(constant_id_str(&n))),
+                    // An unforwarded `*` (a forwarded one was refused
+                    // above): see `forwarding`'s module doc.
+                    None => formals.anonymous_rest_name.clone(),
+                };
             }
             if let Some(krest) = pn.keyword_rest() {
                 if let Some(krp) = krest.as_keyword_rest_parameter_node() {
@@ -447,6 +639,8 @@ fn ingest_controller_body_item(
                 kw_params,
                 kwrest_param,
                 block_param,
+                rest_param,
+                anonymous_formal: formals.anonymous,
                 body: body_expr,
                 renders,
                 effects: EffectSet::pure(),
@@ -472,8 +666,29 @@ fn ingest_controller_body_item(
                 leading_comments,
             });
         }
+        let expr = ingest_expr(stmt, file)?;
+        // A hand-written `before_action`/`after_action`/`prepend_before_
+        // action` block whose body holds a `next` `restructure_next_in_
+        // block` can't lower to an if/unless would otherwise stay
+        // `Unknown` and be silently dropped at lowering time (`None`
+        // from `lambda_filter_target`, read as "no filter here" rather
+        // than "refused") — strict mode accepted the app and survey mode
+        // never saw it, since this shape carries a block and
+        // `report_unrecognized_controller_macros` only scans the
+        // `block: None` ones. Narrow to exactly that cause (see
+        // `next_restructure_refusal`'s own doc) so this stays a located
+        // diagnostic for the one shape that's actually refused, not a
+        // general unclaimed-block gap.
+        if next_restructure_refusal(&expr) {
+            return Err(IngestError::Unsupported {
+                file: file.to_string(),
+                message: format!(
+                    "`{method}` block holds a `next` that can't be restructured to an if/unless (filter dropped)"
+                ),
+            });
+        }
         return Ok(ControllerBodyItem::Unknown {
-            expr: ingest_expr(stmt, file)?,
+            expr,
             leading_comments,
             leading_blank_line: false,
         });
@@ -485,6 +700,38 @@ fn ingest_controller_body_item(
     })
 }
 
+/// Whether `node` is a scope value [`Filter.only`](crate::dialect::Filter)/
+/// `.except` can actually hold: a literal Symbol or String (Rails reads
+/// either the same way — `only: "show"` scopes identically to `only:
+/// :show`), or an array of only those. A non-literal (a method call, a
+/// constant, a splat, …) can't be read statically: `symbol_list_value`
+/// would quietly return an empty list for one, and an empty `only`/
+/// `except` means "every action" to `before_filter_applies` — the
+/// opposite of refusing a scope this can't read. Rails itself calls the
+/// method and scopes to whatever IT returns; applying the filter to
+/// every action instead is a silent, broader claim than the source
+/// made, which fails open for a `skip_before_action` (CSRF or
+/// authentication gets skipped on actions Rails would still protect).
+fn is_recognized_scope_value(node: &Node<'_>) -> bool {
+    if let Some(arr) = node.as_array_node() {
+        return arr.elements().iter().all(|el| symbol_or_string_value(&el).is_some());
+    }
+    symbol_or_string_value(node).is_some()
+}
+
+/// A `only:`/`except:` value `is_recognized_scope_value` declined —
+/// named the same way every other `IngestError::Unsupported` in this
+/// module is, just without `with_options`'s shared prefix (this fires
+/// for a plain filter call too, not only a composed one).
+fn scope_gap(file: &str, macro_name: &str, key: &str) -> IngestError {
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!(
+            "`{macro_name}` `{key}:` is not a literal Symbol/String or an array of them; the filter is refused rather than silently applied to every action"
+        ),
+    }
+}
+
 /// Recognize a controller filter declaration (`before_action`,
 /// `around_action`, `after_action`, `skip_before_action`) and return one
 /// [`Filter`] per leading symbol target, all sharing the call's `only:` /
@@ -494,19 +741,26 @@ fn ingest_controller_body_item(
 /// the first, hiding their ivar assignments from analyze and their calls
 /// from the emitted dispatch chain.
 ///
-/// Returns `None` for non-filter calls and for filter calls with no symbol
-/// target — notably the block form `before_action { ... }`, which has no
-/// named method to reference. Those fall through to `Unknown`, round-trip
-/// verbatim, and have their ivars harvested directly during analyze.
+/// Returns `Ok(None)` for non-filter calls and for filter calls with no
+/// symbol target — notably the block form `before_action { ... }`, which
+/// has no named method to reference. Those fall through to `Unknown`,
+/// round-trip verbatim, and have their ivars harvested directly during
+/// analyze.
+///
+/// Returns `Err` only for an `only:`/`except:` value
+/// `is_recognized_scope_value` declines — never silently, since an
+/// unreadable scope would otherwise read as "every action" (see that
+/// function's doc comment). Every other unmodeled shape still falls
+/// through to `Ok(None)`, unchanged.
 pub(super) fn parse_filter_call(
     stmt: &Node<'_>,
     file: &str,
-) -> Option<Vec<crate::dialect::Filter>> {
+) -> IngestResult<Option<Vec<crate::dialect::Filter>>> {
     use crate::dialect::{Filter, FilterKind};
 
-    let call = stmt.as_call_node()?;
+    let Some(call) = stmt.as_call_node() else { return Ok(None) };
     if call.receiver().is_some() {
-        return None;
+        return Ok(None);
     }
     let macro_name = constant_id_str(&call.name());
     if macro_name == "protect_from_forgery" || macro_name == "skip_forgery_protection" {
@@ -519,7 +773,7 @@ pub(super) fn parse_filter_call(
         "skip_before_action" => FilterKind::Skip,
         "skip_around_action" => FilterKind::SkipAround,
         "skip_after_action" => FilterKind::SkipAfter,
-        _ => return None,
+        _ => return Ok(None),
     };
     // Rails moves a `prepend_before_action` callback to the head of the
     // WHOLE chain, ahead of inherited filters too — see `Filter::prepend`.
@@ -528,7 +782,7 @@ pub(super) fn parse_filter_call(
     // stay unrecognized rather than risk a wrong-order claim.
     let prepend = macro_name == "prepend_before_action";
 
-    let args = call.arguments()?;
+    let Some(args) = call.arguments() else { return Ok(None) };
 
     let mut targets: Vec<(Symbol, Span)> = Vec::new();
     let mut only: Vec<Symbol> = Vec::new();
@@ -560,10 +814,16 @@ pub(super) fn parse_filter_call(
             let value = assoc.value();
             match key.as_str() {
                 "only" => {
+                    if !is_recognized_scope_value(&value) {
+                        return Err(scope_gap(file, macro_name, "only"));
+                    }
                     only = symbol_list_value(&value);
                     only_style = symbol_list_style(&value);
                 }
                 "except" => {
+                    if !is_recognized_scope_value(&value) {
+                        return Err(scope_gap(file, macro_name, "except"));
+                    }
                     except = symbol_list_value(&value);
                     except_style = symbol_list_style(&value);
                 }
@@ -583,10 +843,10 @@ pub(super) fn parse_filter_call(
     }
 
     if targets.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    Some(
+    Ok(Some(
         targets
             .into_iter()
             .map(|(target, target_span)| Filter {
@@ -606,7 +866,7 @@ pub(super) fn parse_filter_call(
                 prepend,
             })
             .collect(),
-    )
+    ))
 }
 
 /// The framework method both forgery macros name. Rails defines them as
@@ -640,14 +900,19 @@ pub const VERIFY_AUTHENTICITY_TOKEN: &str = "verify_authenticity_token";
 /// (`:exception` 422, `:null_session` empty session, `:reset_session`
 /// wipe). This runtime has one handler — 422 — so every known strategy
 /// registers the same before/skip filter. A `prepend:` or custom
-/// `store:` still returns `None` (unrecognized-macro survey).
+/// `store:` still returns `Ok(None)` (unrecognized-macro survey). An
+/// `only:`/`except:` `is_recognized_scope_value` declines returns `Err`
+/// instead — skipping CSRF verification on every action instead of just
+/// the ones the source named would be the fail-open direction's worst
+/// case, so this refuses rather than guesses.
 fn parse_forgery_macro(
     call: &ruby_prism::CallNode<'_>,
     protect: bool,
     file: &str,
-) -> Option<Vec<crate::dialect::Filter>> {
+) -> IngestResult<Option<Vec<crate::dialect::Filter>>> {
     use crate::dialect::{Filter, FilterKind};
 
+    let macro_name = if protect { "protect_from_forgery" } else { "skip_forgery_protection" };
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
     let mut only_style = crate::expr::ArrayStyle::default();
@@ -659,10 +924,10 @@ fn parse_forgery_macro(
     let mut known_with = true;
 
     for arg in call.arguments().iter().flat_map(|a| a.arguments().iter()) {
-        let kh = arg.as_keyword_hash_node()?;
+        let Some(kh) = arg.as_keyword_hash_node() else { return Ok(None) };
         for el in kh.elements().iter() {
-            let assoc = el.as_assoc_node()?;
-            let key = symbol_value(&assoc.key())?;
+            let Some(assoc) = el.as_assoc_node() else { return Ok(None) };
+            let Some(key) = symbol_value(&assoc.key()) else { return Ok(None) };
             let value = assoc.value();
             match key.as_str() {
                 "with" if protect => {
@@ -672,10 +937,16 @@ fn parse_forgery_macro(
                     );
                 }
                 "only" => {
+                    if !is_recognized_scope_value(&value) {
+                        return Err(scope_gap(file, macro_name, "only"));
+                    }
                     only = symbol_list_value(&value);
                     only_style = symbol_list_style(&value);
                 }
                 "except" => {
+                    if !is_recognized_scope_value(&value) {
+                        return Err(scope_gap(file, macro_name, "except"));
+                    }
                     except = symbol_list_value(&value);
                     except_style = symbol_list_style(&value);
                 }
@@ -683,28 +954,39 @@ fn parse_forgery_macro(
                     if_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str()));
                     if_cond_expr = lambda_body_expr(&value, file);
                     if if_cond.is_none() && if_cond_expr.is_none() {
-                        return None;
+                        return Ok(None);
                     }
                 }
                 "unless" => {
                     unless_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str()));
                     unless_cond_expr = lambda_body_expr(&value, file);
                     if unless_cond.is_none() && unless_cond_expr.is_none() {
-                        return None;
+                        return Ok(None);
                     }
                 }
                 // `skip_forgery_protection`'s own default; nothing to model.
                 "raise" if !protect => {}
-                _ => return None,
+                // The verification strategy is lifted app-wide at ingest
+                // (`read_forgery_verification_strategy` in ingest/app.rs);
+                // the filter itself is the same either way.
+                "using" if protect => {
+                    if !matches!(
+                        symbol_value(&value).as_deref(),
+                        Some("header_only" | "header_or_legacy_token")
+                    ) {
+                        return Ok(None);
+                    }
+                }
+                _ => return Ok(None),
             }
         }
     }
     if protect && !known_with {
-        return None;
+        return Ok(None);
     }
 
     let loc = call.message_loc().unwrap_or_else(|| call.location());
-    Some(vec![Filter {
+    Ok(Some(vec![Filter {
         kind: if protect { FilterKind::Before } else { FilterKind::Skip },
         target: Symbol::from(VERIFY_AUTHENTICITY_TOKEN),
         target_span: Span {
@@ -723,7 +1005,329 @@ fn parse_forgery_macro(
         unless_cond_expr,
         block: None,
         prepend: false,
-    }])
+    }]))
+}
+
+/// `with_options`, receiverless, no receiver qualification — the shape
+/// `ingest_controller_with_options` composes. Checked ahead of time so
+/// the caller can get the `CallNode` back out without re-matching.
+fn is_with_options_call(stmt: &Node<'_>) -> bool {
+    stmt.as_call_node()
+        .is_some_and(|call| call.receiver().is_none() && constant_id_str(&call.name()) == "with_options")
+}
+
+/// One option a controller-body `with_options` block hands to the calls
+/// inside it: the symbol key, the source of its `key: value` pair,
+/// whether the value is a hash literal (the one case `deep_merge` would
+/// combine), and — for an `if:`/`unless:` key only — whether the value is
+/// a shape [`Filter`](crate::dialect::Filter) can carry (a Symbol or a
+/// lambda/proc). Anything else under `if:`/`unless:` (an Array, say)
+/// would reach `parse_filter_call` and have its condition silently
+/// dropped, so it is checked here instead and declined.
+#[derive(Clone)]
+struct MergedFilterOption {
+    key: String,
+    source: String,
+    hash_value: bool,
+    cond_ok: bool,
+}
+
+fn with_options_gap(file: &str, detail: &str) -> IngestError {
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!("with_options: {detail}"),
+    }
+}
+
+/// Whether `node` is a shape `Filter.if_cond`/`unless_cond` (Symbol) or
+/// `.if_cond_expr`/`.unless_cond_expr` (lambda/proc body) can hold —
+/// the same two spellings `parse_filter_call` itself recognizes for
+/// `if:`/`unless:` (see `lambda_body_expr`).
+fn is_recognized_cond_value(node: &Node<'_>) -> bool {
+    if node.as_symbol_node().is_some() || node.as_lambda_node().is_some() {
+        return true;
+    }
+    node.as_call_node().is_some_and(|call| {
+        matches!(constant_id_str(&call.name()), "proc" | "lambda") && call.block().is_some()
+    })
+}
+
+/// The `key: value` pairs of a literal option hash, or `None` when the
+/// hash splats (`**opts`): its keys are then unknown. A non-symbol key is
+/// `None` under `symbol_keys_only`, and otherwise skipped (a call's own
+/// string-keyed pair never collides with a merged symbol key).
+fn literal_filter_option_pairs(
+    node: &Node<'_>,
+    symbol_keys_only: bool,
+) -> Option<Vec<MergedFilterOption>> {
+    let elements = if let Some(hash) = node.as_keyword_hash_node() {
+        hash.elements()
+    } else {
+        node.as_hash_node()?.elements()
+    };
+    let mut pairs = Vec::new();
+    for element in elements.iter() {
+        let assoc = element.as_assoc_node()?;
+        let Some(key) = symbol_value(&assoc.key()) else {
+            if symbol_keys_only {
+                return None;
+            }
+            continue;
+        };
+        let location = assoc.location();
+        let value = assoc.value();
+        pairs.push(MergedFilterOption {
+            cond_ok: !matches!(key.as_str(), "if" | "unless") || is_recognized_cond_value(&value),
+            key,
+            source: String::from_utf8_lossy(location.as_slice()).into_owned(),
+            hash_value: value.as_hash_node().is_some() || value.as_keyword_hash_node().is_some(),
+        });
+    }
+    Some(pairs)
+}
+
+/// `inner` deep-merged over `outer`, as `Hash#deep_merge` orders it: an
+/// inner key replaces the outer one in place, new keys follow. Two hash
+/// values under one key would be merged key by key; that is declined
+/// rather than guessed — same semantics `config/routes.rb`'s
+/// `with_options` composes under (`ingest/routes.rs`).
+fn deep_merge_filter_options(
+    outer: &[MergedFilterOption],
+    inner: Vec<MergedFilterOption>,
+    file: &str,
+) -> IngestResult<Vec<MergedFilterOption>> {
+    let mut merged = outer.to_vec();
+    for option in inner {
+        match merged.iter_mut().find(|o| o.key == option.key) {
+            Some(existing) if existing.hash_value && option.hash_value => {
+                return Err(with_options_gap(
+                    file,
+                    &format!("deep-merging two hashes under `{}:` is not composed", option.key),
+                ));
+            }
+            Some(existing) => *existing = option,
+            None => merged.push(option),
+        }
+    }
+    Ok(merged)
+}
+
+/// `with_options unless: :signed_in? do before_action :reject_paging, if:
+/// :paging? … end` — ActiveSupport's `Object#with_options`. A block
+/// without parameters is `instance_eval`ed on an `OptionMerger`, which
+/// deep-merges the options into the trailing hash of every call it
+/// receives (the call's own keys win) or appends them as keywords when
+/// there is none. Replayed here exactly as `config/routes.rb`'s
+/// `with_options` is (`ingest_with_options` in `ingest/routes.rs`): each
+/// call is re-read with the merged options written into its source,
+/// keeping its byte offsets, and ingested as if it had been spelled that
+/// way — a filter macro through `parse_filter_call`, anything else
+/// through the general controller body item dispatch.
+///
+/// Declined as a located gap (never a silent drop): a block parameter
+/// (`do |o|`), a non-literal or splatted option hash, a child call with
+/// its own block (the block's closure still sees the merger as `self`,
+/// so Rails merges the options into the calls nested in it too — a
+/// fan-out this replay does not model), a receiver-qualified call or a
+/// non-call statement, and a merged `if:`/`unless:` whose value is
+/// neither a Symbol nor a lambda/proc. Nested `with_options` compose.
+///
+/// ALL-OR-NOTHING: unlike `config/routes.rb`'s `with_options` (which
+/// drops just the one route it can't compose and keeps the rest), a
+/// decline anywhere inside — including a nested `with_options` — fails
+/// every statement in THIS call's block, propagated with `?` rather than
+/// caught and skipped per statement. A controller filter that silently
+/// lost its guard because a SIBLING statement in the same block was
+/// unsupported would be the #785 bug again, one level down; the caller
+/// (`ingest_controller_with_nesting`) is the one place this bubbles up
+/// to and turns into a single gap plus a single whole-statement
+/// `Unknown` round-trip — matching `expand_class_body_macros`'s own
+/// ALL-OR-NOTHING reasoning for a concern macro's body.
+fn ingest_controller_with_options(
+    call: &ruby_prism::CallNode<'_>,
+    outer: &[MergedFilterOption],
+    file: &str,
+) -> IngestResult<Vec<ControllerBodyItem>> {
+    let Some(block) = call.block().and_then(|b| b.as_block_node()) else {
+        return Err(with_options_gap(file, "only the block form is composed"));
+    };
+    if block.parameters().is_some() {
+        return Err(with_options_gap(
+            file,
+            "a block with a parameter (`|options|`) is not composed",
+        ));
+    }
+    let args: Vec<Node<'_>> = call
+        .arguments()
+        .map(|a| a.arguments().iter().collect())
+        .unwrap_or_default();
+    let [options] = args.as_slice() else {
+        return Err(with_options_gap(file, "expects exactly one literal option hash"));
+    };
+    let Some(own) = literal_filter_option_pairs(options, true) else {
+        return Err(with_options_gap(
+            file,
+            "options must be a literal hash with symbol keys and no splat",
+        ));
+    };
+    let merged = deep_merge_filter_options(outer, own, file)?;
+    let Some(body) = block.body() else { return Ok(Vec::new()) };
+
+    let mut items = Vec::new();
+    for stmt in flatten_statements(body) {
+        let inner = match stmt.as_call_node() {
+            Some(inner)
+                if inner.receiver().is_none()
+                    && constant_id_str(&inner.name()) == "with_options" =>
+            {
+                ingest_controller_with_options(&inner, &merged, file)?
+            }
+            Some(inner) if inner.receiver().is_none() && inner.block().is_none() => {
+                ingest_with_options_filter_call(&inner, &merged, file)?
+            }
+            Some(inner) if inner.receiver().is_none() => {
+                return Err(with_options_gap(
+                    file,
+                    &format!(
+                        "`{}` with a block is not composed (Rails merges the options into its nested calls too)",
+                        constant_id_str(&inner.name())
+                    ),
+                ));
+            }
+            _ => {
+                return Err(with_options_gap(
+                    file,
+                    "only receiverless calls inside the block are composed",
+                ));
+            }
+        };
+        items.extend(inner);
+    }
+    Ok(items)
+}
+
+/// One call inside a controller-body `with_options` block, re-read with
+/// `options` merged into its trailing hash, then ingested as if it had
+/// been spelled that way — a filter macro through `parse_filter_call`
+/// first (the common case), falling back to the general controller body
+/// item dispatch otherwise (a lambda-target filter, `rescue_from`,
+/// `helper_method`, …).
+fn ingest_with_options_filter_call(
+    call: &ruby_prism::CallNode<'_>,
+    options: &[MergedFilterOption],
+    file: &str,
+) -> IngestResult<Vec<ControllerBodyItem>> {
+    let args: Vec<Node<'_>> = call
+        .arguments()
+        .map(|a| a.arguments().iter().collect())
+        .unwrap_or_default();
+    if let [only] = args.as_slice() {
+        if only.as_lambda_node().is_some() {
+            return Err(with_options_gap(
+                file,
+                "a call whose only argument is a lambda is not composed",
+            ));
+        }
+    }
+    // A braced positional hash (`before_action :a, { if: :b }`) is not
+    // read as options by `parse_filter_call`, so merging into it would
+    // claim a condition that never reaches the filter.
+    if args.last().is_some_and(|a| a.as_hash_node().is_some()) {
+        return Err(with_options_gap(file, "a positional option hash is not composed"));
+    }
+    let trailing = args.last().filter(|a| a.as_keyword_hash_node().is_some());
+    let own = match trailing {
+        Some(hash) => match literal_filter_option_pairs(hash, false) {
+            Some(pairs) => pairs,
+            None => {
+                return Err(with_options_gap(
+                    file,
+                    "a call whose options splat (`**opts`) is not composed",
+                ));
+            }
+        },
+        None => Vec::new(),
+    };
+    let mut added: Vec<&MergedFilterOption> = Vec::new();
+    for option in options {
+        match own.iter().find(|o| o.key == option.key) {
+            Some(existing) if existing.hash_value && option.hash_value => {
+                return Err(with_options_gap(
+                    file,
+                    &format!("deep-merging two hashes under `{}:` is not composed", option.key),
+                ));
+            }
+            Some(_) => {}
+            None => added.push(option),
+        }
+    }
+    // Reject rather than silently drop a merged `if:`/`unless:` guard
+    // `Filter` cannot carry (an Array, say) — checked over the FINAL
+    // per-call set (the call's own values already took precedence
+    // above), so an outer condition the call's own options shadow never
+    // raises.
+    for option in own.iter().chain(added.iter().copied()) {
+        if matches!(option.key.as_str(), "if" | "unless") && !option.cond_ok {
+            return Err(with_options_gap(
+                file,
+                &format!(
+                    "a merged `{}:` that is not a Symbol or a lambda/proc is not composed",
+                    option.key
+                ),
+            ));
+        }
+    }
+
+    // `parse_filter_call`'s `Err` (a merged `only:`/`except:` that is not
+    // a literal Symbol/String or an array of them) propagates with `?`
+    // like every other decline in this function — refusing the WHOLE
+    // with_options statement, not just this one call, same ALL-OR-NOTHING
+    // reasoning as the rest of `ingest_controller_with_options`.
+    let walk = |stmt: Node<'_>| -> IngestResult<Vec<ControllerBodyItem>> {
+        match parse_filter_call(&stmt, file)? {
+            Some(filters) => Ok(filters
+                .into_iter()
+                .map(|filter| ControllerBodyItem::Filter {
+                    filter,
+                    leading_comments: Vec::new(),
+                    leading_blank_line: false,
+                })
+                .collect()),
+            None => Ok(vec![ingest_controller_body_item(&stmt, file, Vec::new())?]),
+        }
+    };
+    if added.is_empty() {
+        return walk(call.as_node());
+    }
+    let added_src = added.iter().map(|o| o.source.as_str()).collect::<Vec<_>>().join(", ");
+    let (offset, text) = match args.last() {
+        Some(last) => (last.location().end_offset(), format!(", {added_src}")),
+        None => match call.closing_loc() {
+            Some(close) => (close.start_offset(), added_src),
+            None => match call.message_loc() {
+                Some(name) => (name.end_offset(), format!(" {added_src}")),
+                None => return Err(with_options_gap(file, "call has no name to merge into")),
+            },
+        },
+    };
+    let location = call.location();
+    let start = location.start_offset();
+    let original = location.as_slice();
+    // Pad to the call's own offset so diagnostics still point into the
+    // controller file; only what follows the insertion point shifts.
+    let mut source = vec![b' '; start];
+    source.extend_from_slice(&original[..offset - start]);
+    source.extend_from_slice(text.as_bytes());
+    source.extend_from_slice(&original[offset - start..]);
+    let result = super::prism::parse(&source, file);
+    let root = result.node();
+    let Some(stmt) = root
+        .as_program_node()
+        .and_then(|p| p.statements().body().iter().next())
+    else {
+        return Err(with_options_gap(file, "merged call did not re-parse"));
+    };
+    walk(stmt)
 }
 
 /// Body expression of a lambda/proc-form filter guard (`-> { … }` /
@@ -758,6 +1362,47 @@ fn lambda_body_expr(node: &Node<'_>, file: &str) -> Option<Expr> {
 /// support the emitted program doesn't have).
 pub(crate) fn is_lambda_filter_macro(method: &str) -> bool {
     matches!(method, "before_action" | "after_action" | "prepend_before_action")
+}
+
+/// The length-prefixed encoding of a controller's qualified name that
+/// `around_block_filter` folds into every synthesized method name it
+/// places on that controller. Each `::` segment is kept as written
+/// (case included) and prefixed with its own length, so the encoding is
+/// one-to-one: neither `Admin::WidgetsController`
+/// (`5Admin_17WidgetsController`) vs a flat `AdminWidgetsController`
+/// (`22AdminWidgetsController`), nor two names that only underscore
+/// alike (`HTMLParser`, `HtmlParser`), can share it.
+///
+/// One function so the two places that need it — this file's own
+/// hand-written block-form `around_action` pass
+/// (`ingest_controller_with_nesting`) and `app::
+/// expand_class_body_macros`'s macro-expanded one — agree on the same
+/// encoding instead of drifting apart.
+pub(super) fn around_block_owner_ident(name: &ClassId) -> String {
+    name.0.as_str().split("::").map(|seg| format!("{}{seg}", seg.len())).collect::<Vec<_>>().join("_")
+}
+
+/// The sequence number `around_block_filter` should start COUNTING UP
+/// FROM for `owner_ident` on this controller — one past the highest
+/// `__rh_around_<owner_ident>_<n>` suffix any EARLIER pass already
+/// placed in `body`. `ingest_controller_with_nesting`'s own hand-written
+/// block-form `around_action` pass always runs first and starts its own
+/// counter at 0; `app::expand_class_body_macros` runs afterward, over
+/// the same controller, for whatever block-form `around_action` a
+/// concern macro's body holds — without this, both passes would start
+/// at 0 independently and could synthesize the SAME name (`__rh_around_
+/// <owner_ident>_1`), one definition silently overriding the other
+/// instead of the two filters coexisting as Rails runs them.
+pub(super) fn next_around_block_seq(body: &[ControllerBodyItem], owner_ident: &str) -> u32 {
+    let prefix = format!("__rh_around_{owner_ident}_");
+    body.iter()
+        .filter_map(|item| match item {
+            ControllerBodyItem::Action { action, .. } => action.name.as_str().strip_prefix(prefix.as_str()),
+            _ => None,
+        })
+        .filter_map(|suffix| suffix.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
 }
 
 /// A recognized lambda/proc/block-target filter, already ingested to
@@ -797,7 +1442,7 @@ impl LambdaFilterTarget {
 /// receiverless `Send` to that name carrying the block, itself a
 /// `Lambda`). The IR-level twin of `lambda_body_expr` above, one stage
 /// later and returning the body rather than re-ingesting it.
-fn ir_lambda_body(e: &Expr) -> Option<Expr> {
+pub(super) fn ir_lambda_body(e: &Expr) -> Option<Expr> {
     match &*e.node {
         ExprNode::Lambda { body, .. } => Some(body.clone()),
         ExprNode::Send { recv: None, method, args, block: Some(b), .. }
@@ -812,7 +1457,7 @@ fn ir_lambda_body(e: &Expr) -> Option<Expr> {
     }
 }
 
-fn ir_symbol(e: &Expr) -> Option<Symbol> {
+pub(super) fn ir_symbol(e: &Expr) -> Option<Symbol> {
     match &*e.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
         _ => None,
@@ -850,6 +1495,153 @@ fn ir_symbol_list(e: &Expr) -> Vec<Symbol> {
 /// just an options hash to the block-form scan, which finds nothing to
 /// use it for and returns `None` for `only`/`except`/`if`/`unless`
 /// harmlessly).
+/// Lower `next unless cond` / `next if cond` followed by the rest of a
+/// block filter's body into `if cond … end` / `unless cond … end`
+/// wrapping that rest — the structured form `process_action` can inline
+/// directly, where the source shape cannot: unmodified, a block-form
+/// filter's `next` is copied into the dispatcher method's own body,
+/// which is not a block or a loop, so `ruby -c` rejects it ("Invalid
+/// next"). Called from the one resolver (`lambda_filter_target`) both a
+/// hand-written `before_action do … end` and a concern macro's
+/// reconstructed block (`ingest::app::block_filter_from_macro_stmt`) go
+/// through, so this covers both without a separate lowering to drift
+/// out of step.
+///
+/// `None` only when a `next` remains that this can't account for — a
+/// bare `next` not guarded by exactly this modifier-if/unless shape, one
+/// carrying a value, or one in the middle of some other expression —
+/// rather than one legitimately nested in a block or loop of its OWN
+/// (`.each do |x| next if x.odd?; … end`, `while … next if … end`):
+/// those survive emission as real Ruby blocks and loops, so a `next`
+/// inside one was always fine and is left untouched.
+fn restructure_next_in_block(body: &Expr) -> Option<Expr> {
+    if !contains_next_outside_loop_or_block(body) {
+        return Some(body.clone());
+    }
+    let stmts: Vec<Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![body.clone()],
+    };
+    let rebuilt = restructure_next_stmts(&stmts)?;
+    Some(match rebuilt.len() {
+        1 => rebuilt.into_iter().next().expect("checked non-empty"),
+        _ => Expr::new(body.span, ExprNode::Seq { exprs: rebuilt }),
+    })
+}
+
+/// `restructure_next_in_block`'s statement-list half: find the first
+/// `next unless`/`next if` guard, recursively restructure everything
+/// after it (which may hold a guard of its own), and wrap that
+/// (restructured) remainder in the equivalent `if`/`unless`. Statements
+/// ahead of the guard are untouched — they always ran unconditionally,
+/// and still do.
+fn restructure_next_stmts(stmts: &[Expr]) -> Option<Vec<Expr>> {
+    for (i, stmt) in stmts.iter().enumerate() {
+        if let Some((cond, is_unless)) = next_guard_cond(stmt) {
+            let rest = restructure_next_stmts(&stmts[i + 1..])?;
+            let rest_expr = match rest.len() {
+                0 => Expr::new(stmt.span, ExprNode::Seq { exprs: vec![] }),
+                1 => rest.into_iter().next().expect("checked non-empty"),
+                _ => Expr::new(stmt.span, ExprNode::Seq { exprs: rest }),
+            };
+            let empty = Expr::new(stmt.span, ExprNode::Seq { exprs: vec![] });
+            let wrapped = if is_unless {
+                // `next unless cond` — the rest runs only when cond holds.
+                ExprNode::If { cond: cond.clone(), then_branch: rest_expr, else_branch: empty }
+            } else {
+                // `next if cond` — the rest runs only when cond does NOT.
+                ExprNode::If { cond: cond.clone(), then_branch: empty, else_branch: rest_expr }
+            };
+            let mut out: Vec<Expr> = stmts[..i].to_vec();
+            out.push(Expr::new(stmt.span, wrapped));
+            return Some(out);
+        }
+        // Any OTHER `next` reachable without crossing into a nested
+        // block/loop is a shape this restructuring does not understand —
+        // refuse rather than let it ride through to invalid Ruby.
+        if contains_next_outside_loop_or_block(stmt) {
+            return None;
+        }
+    }
+    Some(stmts.to_vec())
+}
+
+/// `next unless cond` / `next if cond` as Prism's unless-desugar leaves
+/// it (`ingest::expr`'s `UnlessNode` arm swaps branches, same IR as an
+/// `if` with the condition negated): a modifier-if whose "no else"
+/// branch is the `nil` default and whose other branch is a bare `next`
+/// with no value. Returns the condition and which branch held the
+/// `next` — `true` for `next unless` (the `next` sat in `else_branch`).
+fn next_guard_cond(stmt: &Expr) -> Option<(&Expr, bool)> {
+    let ExprNode::If { cond, then_branch, else_branch } = &*stmt.node else { return None };
+    let is_nil = |e: &Expr| matches!(&*e.node, ExprNode::Lit { value: Literal::Nil });
+    let is_bare_next = |e: &Expr| matches!(&*e.node, ExprNode::Next { value: None });
+    if is_bare_next(then_branch) && is_nil(else_branch) {
+        return Some((cond, false));
+    }
+    if is_nil(then_branch) && is_bare_next(else_branch) {
+        return Some((cond, true));
+    }
+    None
+}
+
+/// Whether `expr` holds a `Next` reachable WITHOUT crossing into a
+/// nested block or loop of its own — the region that, left as `next` in
+/// a block-form filter's body, would be inlined directly into
+/// `process_action`, a plain method with no block or loop to jump
+/// within. A `Next` found only inside a `Lambda` (any block/proc
+/// literal — `.each do |x| … end`) or a `While` (while/until) belongs to
+/// THAT block/loop, which survives emission as a real one, so this does
+/// not descend into either.
+fn contains_next_outside_loop_or_block(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Next { .. } => true,
+        ExprNode::Lambda { .. } | ExprNode::While { .. } => false,
+        _ => {
+            let mut found = false;
+            expr.node.for_each_child(&mut |c| {
+                if !found && contains_next_outside_loop_or_block(c) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
+}
+
+/// True when `expr` is a recognized lambda/proc/block-target filter
+/// macro call (`before_action`/`after_action`/`prepend_before_action`,
+/// with an attached block or a lambda-literal first argument — exactly
+/// what `lambda_filter_target` itself requires to extract a body) whose
+/// ONE reason for refusal is a `next` inside that body
+/// `restructure_next_in_block` can't lower to an `if`/`unless` — never
+/// any other reason `lambda_filter_target` might return `None` for (the
+/// wrong macro name, no block/lambda argument at all, or some other
+/// shape `ir_lambda_body` doesn't recognize). Narrowing to exactly this
+/// one cause is what lets the caller report it specifically, rather than
+/// claim every unclaimed block shape as a gap — a wider ledger entry is
+/// #778's, not this one's.
+///
+/// `pub(super)` (not private): `ingest::app`'s `expand_class_body_macros`
+/// reuses this exact check for the MACRO-expanded path — a concern
+/// macro's own block filter (`block_filter_from_macro_stmt`) refuses the
+/// same shape the same way, and the two call sites agree on what counts
+/// by sharing this one function rather than drifting apart.
+pub(super) fn next_restructure_refusal(expr: &Expr) -> bool {
+    let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
+        return false;
+    };
+    if !is_lambda_filter_macro(method.as_str()) {
+        return false;
+    }
+    let body = match block {
+        Some(b) => ir_lambda_body(b),
+        None => args.first().and_then(ir_lambda_body),
+    };
+    let Some(body) = body else { return false };
+    restructure_next_in_block(&body).is_none()
+}
+
 pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
     let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
         return None;
@@ -865,6 +1657,12 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
             (ir_lambda_body(first)?, &args[1..])
         }
     };
+    // `next` inside this body would otherwise be copied verbatim into
+    // `process_action` — a plain method, not a block or a loop — which
+    // `ruby -c` rejects. Both surface forms funnel through here (a
+    // hand-written `before_action do … end` and a concern macro's
+    // reconstructed block alike), so lowering it once here covers both.
+    let body = restructure_next_in_block(&body)?;
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
     let mut if_cond: Option<Symbol> = None;
@@ -872,6 +1670,17 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
     let mut if_cond_expr: Option<Expr> = None;
     let mut unless_cond_expr: Option<Expr> = None;
     for a in option_args {
+        // A concern macro's `before_action(**kwargs) { ... }` substitutes
+        // the call's options Hash under a `**` splat rather than the
+        // bare trailing Hash literal a hand-written filter uses — unwrap
+        // it the same way `filter_from_send` does, so a macro's expanded
+        // block-form filter (`ingest::app::block_filter_from_macro_stmt`)
+        // carries `only:`/`except:`/`if:`/`unless:` exactly as a
+        // hand-written one would.
+        let a = match &*a.node {
+            ExprNode::KeywordSplat { value } => value,
+            _ => a,
+        };
         let ExprNode::Hash { entries, .. } = &*a.node else { continue };
         for (k, v) in entries {
             let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
@@ -902,6 +1711,392 @@ pub(crate) fn lambda_filter_target(expr: &Expr) -> Option<LambdaFilterTarget> {
         if_cond_expr,
         unless_cond_expr,
     })
+}
+
+/// Lower a block-form `around_action` — the one macro `is_lambda_filter_macro`
+/// deliberately excludes (see its doc comment): a before/after block's body
+/// is inlined as a plain conditional statement, but an around filter has to
+/// run the REST OF THE CHAIN from inside its own body, which that path has
+/// no way to express.
+///
+/// Rails 8.1 calls an arity-2 around block as `instance_exec(controller,
+/// continuation)`: the first param rebinds `self` to the controller (same
+/// as a one-param before/after block already does); the second is a
+/// callable whose bare `.call` resumes the chain — exactly what a NAMED
+/// around filter's own method body does with a bare `yield`
+/// (`build_filter_preamble`'s doc comment: "`around_action :m` — `m` runs
+/// the action by yielding"). So the block becomes exactly that kind of
+/// method: synthesize a private `__rh_around_<controller>_<n>` whose
+/// body is the block's, with the first param's reads rewritten to `self`
+/// (`app::rewrite_var_to_self_ref`, the same helper the macro-expanded
+/// block filters use) and every bare `<continuation>.call` — no args, no
+/// attached block, nothing else done with the name — rewritten to `yield`.
+/// `ensure`/`rescue` in the block body carry over for free: they are
+/// already `BeginRescue` nodes in the ingested IR, same as any other
+/// method body. Registered as an ordinary NAMED `Around` filter
+/// (`target_span` synthetic, same as any filter a lowering synthesizes —
+/// see `Filter::target_span`'s doc comment), it rides the exact dispatch
+/// a hand-written `around_action :method` already does
+/// (`build_filter_preamble` / `synthesize_process_action`), in declaration
+/// order among whatever other filters surround it.
+///
+/// `owner_ident` (the controller's `underscore`d name, `::` folded to
+/// `_`) is folded into the synthesized name alongside `seq`, which only
+/// counts per-controller: without it, a parent controller's
+/// `__rh_around_1` and an unrelated child controller's own
+/// `__rh_around_1` would be the SAME method name, and since the child
+/// inherits the parent's method table, one definition would silently
+/// override the other instead of the two filters coexisting as Rails
+/// runs them.
+///
+/// Returns `None` when `expr` is not a block-form `around_action` call at
+/// all — the caller falls through to its own handling (most commonly: a
+/// Symbol-target form `parse_filter_call` already typed, which never
+/// reaches here).
+///
+/// Returns `Some(Err(reason))` when it IS one, but refused: the
+/// continuation was used for something other than a bare `.call`, the
+/// block takes 3 or more params, or an option can't be represented. The
+/// caller keeps the statement whole (`Unknown`, round-tripped verbatim)
+/// and records `reason` as a survey gap — never silently dropped, which
+/// is the bug this lowering exists to fix (rubys/roundhouse#778).
+///
+/// `raw_text` is the ORIGINAL SOURCE of `expr` (see `sugar_dot_paren_
+/// used`'s doc comment for why it has to be source text, not IR) —
+/// `Some` for a hand-written block in a controller body, where that
+/// text is just the statement's own span. `app::expand_class_body_
+/// macros` calls this a second time for a concern macro's own
+/// block-form `around_action`, after `substitute_params` has already
+/// rebuilt the body from IR with no source text of its own to point
+/// to; it passes `None`, which skips exactly that one check (every
+/// other refusal in this function reads `expr` itself, substituted or
+/// not, so none of them are affected) — the narrow, DOCUMENTED gap
+/// between the two paths: a macro-expanded around whose continuation is
+/// called as `block.()` is accepted here, where the same spelling
+/// written directly in a controller would be refused.
+pub(super) fn around_block_filter(
+    expr: &Expr,
+    raw_text: Option<&str>,
+    owner_ident: &str,
+    seq: &mut u32,
+) -> Option<Result<(crate::dialect::Filter, Action), String>> {
+    use crate::dialect::{Filter, FilterKind};
+
+    // Every refusal below goes through `refuse`: a located survey gap,
+    // with the call kept WHOLE (`Unknown`, round-tripped verbatim) —
+    // never a silent drop, which is the other half of #778's bug (the
+    // SAME shape that previously vanished with no trace at all).
+    let refuse = |reason: String| -> Option<Result<(Filter, Action), String>> { Some(Err(reason)) };
+
+    let ExprNode::Send { recv: None, method, args, block: Some(blk), .. } = &*expr.node else {
+        return None;
+    };
+    if method.as_str() != "around_action" {
+        return None;
+    }
+    let ExprNode::Lambda { params, rest_param, block_param, extra_params, body, .. } = &*blk.node
+    else {
+        return None;
+    };
+    if rest_param.is_some() || block_param.is_some() || !extra_params.is_empty() {
+        return refuse(
+            "around_action block declares a splat, keyword, or block parameter, which this cannot represent as a named filter method".to_string(),
+        );
+    }
+    if params.len() > 2 {
+        return refuse(format!(
+            "around_action block declares {} parameters (only 0, 1, or 2 — controller and continuation — are supported)",
+            params.len()
+        ));
+    }
+
+    // `only:`/`except:`/`if:`/`unless:`, read exactly as faithfully as
+    // `lambda_filter_target` and `app::block_filter_from_macro_stmt` do
+    // for the before/after block forms (see the latter's doc comment for
+    // why this is ALL-OR-NOTHING): any other key, or a shape neither of
+    // those two can already read back, refuses the WHOLE call rather than
+    // silently running it with the wrong scope or guard.
+    let mut only: Vec<Symbol> = Vec::new();
+    let mut except: Vec<Symbol> = Vec::new();
+    let mut if_cond: Option<Symbol> = None;
+    let mut unless_cond: Option<Symbol> = None;
+    let mut if_cond_expr: Option<Expr> = None;
+    let mut unless_cond_expr: Option<Expr> = None;
+    for a in args {
+        let unwrapped = match &*a.node {
+            ExprNode::KeywordSplat { value } => value,
+            _ => a,
+        };
+        let ExprNode::Hash { entries, .. } = &*unwrapped.node else {
+            return refuse(
+                "around_action block takes a non-keyword argument, which this cannot represent".to_string(),
+            );
+        };
+        for (k, v) in entries {
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                return refuse(
+                    "around_action's options hash has a non-Symbol key, which this cannot represent".to_string(),
+                );
+            };
+            match key.as_str() {
+                "only" if super::app::is_symbol_or_symbol_array(v) => only = ir_symbol_list(v),
+                "except" if super::app::is_symbol_or_symbol_array(v) => except = ir_symbol_list(v),
+                "if" if ir_symbol(v).is_some() => if_cond = ir_symbol(v),
+                "if" if zero_param_lambda_body(v).is_some() => if_cond_expr = zero_param_lambda_body(v),
+                "unless" if ir_symbol(v).is_some() => unless_cond = ir_symbol(v),
+                "unless" if zero_param_lambda_body(v).is_some() => {
+                    unless_cond_expr = zero_param_lambda_body(v)
+                }
+                _ => {
+                    return refuse(format!(
+                        "around_action's `{}:` option is not a Symbol/Array-of-Symbols (only/except) or a Symbol/zero-param lambda (if/unless), which this cannot represent",
+                        key.as_str()
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut body = body.clone();
+    let (self_param, cont_param) = match params.as_slice() {
+        [] => (None, None),
+        [one] => (Some(one.clone()), None),
+        [a, b] => (Some(a.clone()), Some(b.clone())),
+        _ => unreachable!("checked above: params.len() <= 2"),
+    };
+
+    if let Some(self_param) = &self_param {
+        if super::app::body_shadows_param(&body, self_param) {
+            return refuse(
+                "around_action block's first parameter is shadowed by a nested block/lambda or reassigned, which this cannot safely rewrite to `self`".to_string(),
+            );
+        }
+    }
+
+    match &cont_param {
+        Some(cont) => {
+            if raw_text.is_some_and(|text| sugar_dot_paren_used(text, cont.as_str())) {
+                return refuse(format!(
+                    "around_action's continuation parameter `{cont}` is invoked as `.()` rather than `.call`, which this does not rewrite"
+                ));
+            }
+            let mut ok = true;
+            rewrite_continuation_calls(&mut body, cont, &mut ok);
+            if !ok {
+                return refuse(format!(
+                    "around_action's continuation parameter `{cont}` is used as something other than a bare `.call` (stored, forwarded, or called with arguments/a block), which this does not rewrite"
+                ));
+            }
+        }
+        None => {
+            // Arity 0 or 1: Rails gives the block no continuation object
+            // at all for that shape, so the only way it can resume the
+            // chain is a literal `yield` already present — which valid
+            // Ruby source can never write inside a block literal
+            // (`yield` outside a `def` is a parse error), so this path
+            // only ever accepts a body that already has one; otherwise
+            // there is no way to tell whether the synthesized method
+            // would ever run the wrapped action, and refusing is safer
+            // than silently making it always halt the chain.
+            if !contains_yield(&body) {
+                return refuse(
+                    "around_action block takes no continuation parameter and never yields, so this cannot tell whether it runs the wrapped action".to_string(),
+                );
+            }
+        }
+    }
+
+    if let Some(self_param) = &self_param {
+        super::app::rewrite_var_to_self_ref(&mut body, self_param);
+    }
+
+    *seq += 1;
+    let name = Symbol::from(format!("__rh_around_{owner_ident}_{seq}"));
+    let filter = Filter {
+        kind: FilterKind::Around,
+        target: name.clone(),
+        target_span: Span::synthetic(),
+        from_concern: None,
+        only,
+        except,
+        only_style: crate::expr::ArrayStyle::default(),
+        except_style: crate::expr::ArrayStyle::default(),
+        if_cond,
+        unless_cond,
+        if_cond_expr,
+        unless_cond_expr,
+        block: None,
+        prepend: false,
+    };
+    let action = Action {
+        name_span: Span::synthetic(),
+        name,
+        params: Row::closed(),
+        opt_params: Vec::new(),
+        kw_params: Vec::new(),
+        kwrest_param: None,
+        block_param: None,
+        rest_param: None,
+        anonymous_formal: None,
+        body,
+        renders: RenderTarget::Inferred,
+        effects: EffectSet::pure(),
+    };
+    Some(Ok((filter, action)))
+}
+
+/// `-> { … }` / `lambda { … }` / `proc { … }` with NO params (and no
+/// rest/keyword/block param) → its body. Stricter than `ir_lambda_body`
+/// (which unwraps regardless of arity): an `if:`/`unless:` guard with a
+/// NAMED param wouldn't be a zero-arg predicate Rails could call the same
+/// way, so this is the check `around_block_filter`'s option validation
+/// needs that `ir_lambda_body` alone doesn't give it.
+fn zero_param_lambda_body(e: &Expr) -> Option<Expr> {
+    fn bare(params: &[Symbol], rest: &Option<Symbol>, blk: &Option<Symbol>, extra: &[crate::dialect::Param]) -> bool {
+        params.is_empty() && rest.is_none() && blk.is_none() && extra.is_empty()
+    }
+    match &*e.node {
+        ExprNode::Lambda { params, rest_param, block_param, extra_params, body, .. }
+            if bare(params, rest_param, block_param, extra_params) =>
+        {
+            Some(body.clone())
+        }
+        ExprNode::Send { recv: None, method, args, block: Some(b), .. }
+            if args.is_empty() && matches!(method.as_str(), "lambda" | "proc") =>
+        {
+            match &*b.node {
+                ExprNode::Lambda { params, rest_param, block_param, extra_params, body, .. }
+                    if bare(params, rest_param, block_param, extra_params) =>
+                {
+                    Some(body.clone())
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `true` when `name` appears in `text` immediately followed (modulo
+/// whitespace) by a bare `.(` with nothing between the dot and the paren
+/// — Ruby's `Proc#call` shorthand, `block.()`. Prism normalizes THAT
+/// call's method name to `call` the same as an explicit `block.call`
+/// (both are `CallNode { name: "call" }`; the only difference prism
+/// retains is `message_loc`, which is `None` for the sugar form and
+/// `Some` for the written-out one), so by the time a call reaches this
+/// IR as a `Send { method: "call", .. }` there is nothing left to tell
+/// the two apart. This scans the ORIGINAL SOURCE TEXT instead,
+/// specifically to keep refusing this one surface spelling, without
+/// teaching the IR a new field only this one caller would ever read.
+fn sugar_dot_paren_used(text: &str, name: &str) -> bool {
+    fn is_ident_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+    let bytes = text.as_bytes();
+    let mut start = 0usize;
+    while let Some(rel) = text.get(start..).and_then(|t| t.find(name)) {
+        let s = start + rel;
+        let e = s + name.len();
+        let before_ok = s == 0 || !is_ident_byte(bytes[s - 1]);
+        let after_ok = e >= bytes.len() || !is_ident_byte(bytes[e]);
+        if before_ok && after_ok {
+            let mut j = e;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'.' {
+                j += 1;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'(' {
+                    return true;
+                }
+            }
+        }
+        start = e;
+    }
+    false
+}
+
+/// `true` if `expr` contains an `ExprNode::Yield` anywhere. See
+/// `around_block_filter`'s 0/1-param arm.
+fn contains_yield(expr: &Expr) -> bool {
+    if matches!(&*expr.node, ExprNode::Yield { .. }) {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |c| {
+        if !found && contains_yield(c) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Rewrite every bare `<name>.call` (no args, no attached block) to
+/// `yield` — the move that turns a block-form around filter's
+/// continuation into the thing a NAMED around filter's method body
+/// already does with its own `yield` (see `around_block_filter`'s doc
+/// comment). Sets `*ok = false`, leaving the tree untouched from that
+/// point down, on any OTHER use of `name`: passed as a plain value,
+/// reassigned, or called with arguments/a block — none of which this can
+/// safely turn into `yield`. A nested block/lambda that redeclares `name`
+/// as its own parameter shadows it; reads inside that nested scope are
+/// left alone (same rule `app::body_shadows_param`/`rewrite_var_to_self_ref`
+/// use for the self-parameter).
+fn rewrite_continuation_calls(expr: &mut Expr, name: &Symbol, ok: &mut bool) {
+    use crate::expr::LValue;
+    match &mut *expr.node {
+        ExprNode::Lambda { params, rest_param, block_param, .. }
+            if params.iter().any(|p| p == name)
+                || rest_param.as_ref() == Some(name)
+                || block_param.as_ref() == Some(name) =>
+        {
+            return;
+        }
+        ExprNode::Assign { target: LValue::Var { name: n, .. }, .. }
+        | ExprNode::OpAssign { target: LValue::Var { name: n, .. }, .. }
+            if n == name =>
+        {
+            *ok = false;
+            return;
+        }
+        ExprNode::MultiAssign { targets, .. }
+            if targets.iter().any(|t| matches!(t, LValue::Var { name: n, .. } if n == name)) =>
+        {
+            *ok = false;
+            return;
+        }
+        ExprNode::Send { recv, method, args, block, .. } => {
+            let bare_call = recv
+                .as_ref()
+                .is_some_and(|r| matches!(&*r.node, ExprNode::Var { name: n, .. } if n == name))
+                && method.as_str() == "call"
+                && args.is_empty()
+                && block.is_none();
+            if bare_call {
+                *expr = Expr::new(expr.span, ExprNode::Yield { args: vec![] });
+                return;
+            }
+            if let Some(r) = recv.as_mut() {
+                rewrite_continuation_calls(r, name, ok);
+            }
+            for a in args.iter_mut() {
+                rewrite_continuation_calls(a, name, ok);
+            }
+            if let Some(b) = block.as_mut() {
+                rewrite_continuation_calls(b, name, ok);
+            }
+            return;
+        }
+        ExprNode::Var { name: n, .. } if n == name => {
+            *ok = false;
+            return;
+        }
+        _ => {}
+    }
+    expr.node.for_each_child_mut(&mut |c| rewrite_continuation_calls(c, name, ok));
 }
 
 /// Resolve the template an action explicitly renders, so the analyzer can

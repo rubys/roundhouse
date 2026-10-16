@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Date-column JSON rewrite for Spinel. Omit-when-unused with the Date
 # package (matz/spinel#7334). Default `as_json` lives in the always-on
 # `active_record_serialization.rb`; this reopen wraps `_as_json_only`

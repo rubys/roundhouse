@@ -1,0 +1,37 @@
+OrderService.new.call(2)
+OrderService.new.call(-1)
+OrderService.new.call(11)
+OrderService.new.pair(1, 2)
+OrderService.new.pair(1, -2)
+OrderService.new.rescued(-1)
+OrderService.new.rescued(1)
+OrderService.new.nested([1, 2])
+OrderService.new.nested([1, -2, 3])
+OrderService.new.unit
+OrderService.new.chain(2)
+OrderService.new.chain(-2)
+OrderService.new.describe(2)
+OrderService.new.describe(-2)
+OrderService.new.fallback(2)
+OrderService.new.fallback(-2)
+OrderService.new.signup("name" => "a")
+OrderService.new.signup({}).failure.errors.to_h
+OrderService.new.signup({}).failure?
+Lookup.new.find(:a)
+Lookup.new.find(:b)
+Lookup.new.find(:b).value!
+Lookup.new.find(:a).value!
+[Lookup.new.find(:a) == Lookup.new.find(:a), Lookup.new.find(:a) == Lookup.new.find(:b), Lookup.new.find(:b).failure, Lookup.new.find(:a).failure]
+[Lookup.new.find(:a).success?, Lookup.new.find(:b).failure?, Lookup.new.find(:a).to_monad.success?, Lookup.new.find(:b).or(5)]
+Lookup.new.find(:a).tee { |v| Lookup.new.find(:b) }
+Lookup.new.find(:b).value_or(7)
+Worker.new.work(2)
+Worker.new.work(-2)
+Worker.new.other(2)
+Worker.new.early(2)
+ChildWorker.new.work(2)
+Worker.new.work(2) { |result| result.value! + 1 }
+OrderService.new.call(1) { |result| result.value! * 10 }
+SplitWorker.new.a(1)
+SplitWorker.new.a(-1)
+SplitWorker.new.b(1)

@@ -67,6 +67,8 @@ pub(crate) fn value_narrowing_coercion(narrowed: &crate::ty::Ty) -> Option<&'sta
         crate::ty::Ty::Bool => Some("as_bool().unwrap()"),
         crate::ty::Ty::Int => Some("as_i64().unwrap()"),
         crate::ty::Ty::Float => Some("as_f64().unwrap()"),
+        crate::ty::Ty::Array { .. } => Some("as_array().unwrap().clone()"),
+        crate::ty::Ty::Hash { .. } => Some("as_object().unwrap().clone()"),
         _ => None,
     }
 }
@@ -183,25 +185,27 @@ pub(crate) fn ty_contains_untyped(ty: &crate::ty::Ty) -> bool {
     }
 }
 
-/// Emit a Case `Pattern` as a Rust `match` arm pattern. The
-/// lowerer-synthesized `synth_index_read`/`synth_index_write` use
-/// `Pattern::Lit { value: Symbol }` against an `&str`-typed
-/// scrutinee — emit as a string-literal pattern. Other shapes fall
-/// through to `_` until they're needed.
-pub(crate) fn emit_case_pattern(p: &crate::expr::Pattern) -> String {
+/// Emit a Case `Pattern` as a Rust `match` arm pattern, or `None` when
+/// there is no faithful form. The lowerer-synthesized
+/// `synth_index_read`/`synth_index_write` use `Pattern::Lit { value:
+/// Symbol }` against an `&str`-typed scrutinee — emit as a
+/// string-literal pattern. Bind is kept for those indexer paths;
+/// nil/float/Expr/`===` shapes (and anything else) stay unsupported
+/// until shared Case→if/elsif lowering lands. `None` is the unsupported
+/// signal — there is no `_` fallthrough.
+pub(crate) fn try_emit_case_pattern(p: &crate::expr::Pattern) -> Option<String> {
     use crate::expr::Pattern;
     match p {
-        Pattern::Wildcard => "_".to_string(),
+        Pattern::Wildcard => Some("_".to_string()),
+        Pattern::Bind { name } => Some(name.as_str().to_string()),
         Pattern::Lit { value } => match value {
-            Literal::Str { value } => format!("{value:?}"),
-            Literal::Sym { value } => format!("{:?}", value.as_str()),
-            Literal::Int { value } => value.to_string(),
-            Literal::Bool { value } => value.to_string(),
-            Literal::Nil => "_".to_string(),
-            _ => "_".to_string(),
+            Literal::Str { value } => Some(format!("{value:?}")),
+            Literal::Sym { value } => Some(format!("{:?}", value.as_str())),
+            Literal::Int { value } => Some(value.to_string()),
+            Literal::Bool { value } => Some(value.to_string()),
+            _ => None,
         },
-        Pattern::Bind { name } => name.as_str().to_string(),
-        _ => "_".to_string(),
+        _ => None,
     }
 }
 

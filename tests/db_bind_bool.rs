@@ -16,18 +16,24 @@ module Java
   end
 end
 Db.module_eval(defn)
+def Db.statement_failed(_stmt, _operation, error); raise error; end
 class JdbcBoolRecorder
   attr_reader :call
   def set_null(index, type); @call = [:null, index, type]; end
   def set_int(index, value); @call = [:int, index, value]; end
 end
-handle = Struct.new(:pstmt).new(JdbcBoolRecorder.new)
+handle = Struct.new(:pstmt, :executed).new(JdbcBoolRecorder.new, false)
 [[false, [:int, 3, 0]], [nil, [:null, 3, 4]], [true, [:int, 3, 1]],
  [nil, [:null, 3, 4]], [false, [:int, 3, 0]]].each do |value, expected|
   Db.bind_bool(handle, 3, value)
   abort handle.pstmt.call.inspect unless handle.pstmt.call == expected
 end
-Db.bind_bool(Struct.new(:pstmt).new(nil), 1, nil)
+begin
+  Db.bind_bool(Struct.new(:pstmt, :executed).new(nil, false), 1, nil)
+  abort "released statement accepted a bind"
+rescue RuntimeError => error
+  raise unless error.message == "statement is not bindable"
+end
 puts "JRuby nullable boolean setter contract passed (no JDBC runtime)"
 "#;
     let output = Command::new("ruby")

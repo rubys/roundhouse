@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Rails-style masked authenticity tokens: one session secret, a
 # per-render one-time pad, XOR + URL-safe Base64. Turbo's
 # `csrf-token` meta and `X-CSRF-Token` header consume the masked

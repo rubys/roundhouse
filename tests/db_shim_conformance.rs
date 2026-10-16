@@ -93,6 +93,16 @@ const SHIMS: &[Shim] = &[
         map_entry: false,
         type_before_name: false,
     },
+    // PostgreSQL over spinel-pg; not yet selected by any target, but it
+    // implements the same contract (tests/spinel_pg_db.rs runs it).
+    Shim {
+        path: "runtime/spinel/db_pg.rb",
+        naming: Naming::Snake,
+        step_pred: "step?",
+        def_forms: &["def self."],
+        map_entry: false,
+        type_before_name: false,
+    },
     // TypeScript ships FOUR backends behind one export shape. Missing
     // three of them is the exact mistake this test exists to catch.
     // Two def forms: the plain `function name(...)` the libsql and
@@ -408,9 +418,39 @@ fn ruby_family_shims_declare_optional_binds() {
     let rbs = read_shim("runtime/ruby/db.rbs");
     for method in ["bind_int_opt", "bind_text_opt", "bind_bool_opt"] {
         assert!(defines_in_rbs(&rbs, method), "missing RBS: {method}");
-        for path in ["runtime/spinel/db.rb", "runtime/spinel/db_cruby.rb", "runtime/spinel/db_jruby.rb"] {
+        for path in [
+            "runtime/spinel/db.rb",
+            "runtime/spinel/db_cruby.rb",
+            "runtime/spinel/db_jruby.rb",
+            "runtime/spinel/db_pg.rb",
+        ] {
             assert!(defines_with(&read_shim(path), method, &["def self."], false, false), "{path}: {method}");
         }
+    }
+}
+
+/// `exec_returning` (roundhouse#91): a write with a RETURNING clause
+/// that answers a handle over the returned rows. Declared once in the
+/// ruby-family contract, so every Ruby-family shim implements it (the
+/// PostgreSQL one natively); a
+/// SQLite without RETURNING (before 3.35) raises rather than being
+/// exempted.
+const RUBY_FAMILY_RETURNING_SHIMS: &[&str] = &[
+    "runtime/spinel/db.rb",
+    "runtime/spinel/db_cruby.rb",
+    "runtime/spinel/db_jruby.rb",
+    "runtime/spinel/db_pg.rb",
+];
+
+#[test]
+fn ruby_family_shims_implement_exec_returning() {
+    let rbs = read_shim("runtime/ruby/db.rbs");
+    assert!(defines_in_rbs(&rbs, "exec_returning"), "missing RBS: exec_returning");
+    for path in RUBY_FAMILY_RETURNING_SHIMS {
+        assert!(
+            defines_with(&read_shim(path), "exec_returning", &["def self."], false, false),
+            "{path}: exec_returning"
+        );
     }
 }
 

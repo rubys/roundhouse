@@ -16,6 +16,10 @@
 //! `If`/`Seq` that is itself a statement (the trailing-`if` spelling
 //! wraps the BoolOp in an If).
 //!
+//! A response call on the left (`render`, `redirect_to`, `head`, the
+//! `redirect_back` pair) is always truthy in Rails, so its `and return`
+//! always returns and its `or return` never does.
+//!
 //! Purely shape-directed; runs on the post-analyze hook
 //! (`apply_post_analyze_lowerings`) with its siblings so every target
 //! consumes the grounded form.
@@ -72,10 +76,24 @@ fn ground_stmt(e: &mut Expr) {
     }
 }
 
+// Not an `If` on the response call: the runtime's answers nil where Rails answers the body, the status or true.
+fn is_response_call(e: &Expr) -> bool {
+    matches!(&*e.node,
+        ExprNode::Send { recv: None, method, block: None, .. }
+            if matches!(method.as_str(), "render" | "redirect_to" | "head" | "redirect_back" | "redirect_back_or_to"))
+}
+
 fn ground(e: &mut Expr) {
     let span = e.span;
     let node = std::mem::replace(&mut *e.node, ExprNode::Seq { exprs: vec![] });
     let ExprNode::BoolOp { op, left, right, .. } = node else { unreachable!() };
+    if is_response_call(&left) {
+        *e = match op {
+            BoolOpKind::And => Expr::new(span, ExprNode::Seq { exprs: vec![left, right] }),
+            BoolOpKind::Or => left,
+        };
+        return;
+    }
     let cond = match op {
         BoolOpKind::And => left,
         BoolOpKind::Or => Expr::new(

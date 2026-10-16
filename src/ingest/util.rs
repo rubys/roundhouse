@@ -148,6 +148,38 @@ pub(super) fn find_all_classes_with_scope<'pr>(
         .collect()
 }
 
+/// The class a file declares, past namespace wrappers. A file such as
+/// `module Catalog; class Item; class Detail < ApplicationRecord …
+/// end; end; end` reopens `Item` only to nest the model. Taking the first
+/// class read it as a reopening of `Item` and left
+/// `Catalog::Item::Detail` a plain nested class with no table. A
+/// class with no superclass whose body holds nothing but class and module
+/// declarations is such a wrapper; its first nested class is meant.
+pub(super) fn primary_class_with_scope<'pr>(
+    node: &Node<'pr>,
+) -> Option<(Vec<String>, ruby_prism::ClassNode<'pr>)> {
+    let mut classes = find_all_classes_with_scope(node).into_iter();
+    let mut primary = classes.next()?;
+    while is_namespace_wrapper(&primary.1) {
+        let inside = primary.1.location();
+        match classes.next() {
+            Some(next) if next.1.location().start_offset() < inside.end_offset() => primary = next,
+            _ => break,
+        }
+    }
+    Some(primary)
+}
+
+fn is_namespace_wrapper(class: &ruby_prism::ClassNode<'_>) -> bool {
+    if class.superclass().is_some() {
+        return false;
+    }
+    let Some(body) = class.body() else { return false };
+    let stmts = flatten_statements(body);
+    stmts.iter().any(|stmt| stmt.as_class_node().is_some())
+        && stmts.iter().all(|stmt| stmt.as_class_node().is_some() || stmt.as_module_node().is_some())
+}
+
 /// `find_all_classes_with_scope`, plus each class's lexical nesting at
 /// its `class` keyword — what `Module.nesting` reports there: the
 /// qualified names of the enclosing `module`/`class` bodies, innermost
@@ -202,6 +234,10 @@ fn collect_classes<'pr, F: FnMut(&[String], &[String], ruby_prism::ClassNode<'pr
         for stmt in s.body().iter() {
             collect_classes(&stmt, scope, nesting, out);
         }
+        return;
+    }
+    if let Some(body) = hoisted_singleton_body(node) {
+        collect_classes(&body, scope, nesting, out);
         return;
     }
     if let Some(m) = node.as_module_node() {
@@ -294,7 +330,57 @@ fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
         for stmt in s.body().iter() {
             collect_modules(&stmt, scope, out);
         }
+        return;
     }
+    if let Some(body) = hoisted_singleton_body(node) {
+        collect_modules(&body, scope, out);
+    }
+}
+
+/// The body of a `class << self` inside a class or module. Ruby puts
+/// the classes and modules declared there on the singleton class
+/// (a namespace keeps helper modules there and its class methods read
+/// them bare). Like the constants such a body writes, they are hoisted
+/// into the enclosing scope. This is a deliberate widening: natively
+/// `Outer::Helper` raises NameError from outside (the constant lives on
+/// the singleton class), while the hoisted declaration is reachable by
+/// that name. Programs that run natively read it bare from the singleton
+/// body, which still works. [`hoisted_name_collision`] refuses the one
+/// case where hoisting would change which declaration a bare read finds.
+fn hoisted_singleton_body<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
+    let sc = node.as_singleton_class_node()?;
+    sc.expression().as_self_node()?;
+    sc.body()
+}
+
+/// The first name that both a `class << self` body in `statements` and
+/// the enclosing body itself declare as a class, module or constant.
+/// Natively the two are different constants (one on the singleton class,
+/// one on the namespace); hoisting merges them, and a bare read in the
+/// singleton body would find the wrong one. The caller refuses.
+pub(super) fn hoisted_name_collision(statements: &[Node<'_>]) -> Option<String> {
+    let declared = |node: &Node<'_>| -> Option<String> {
+        if let Some(c) = node.as_class_node() {
+            return class_name_path(&c).map(|p| p.join("::"));
+        }
+        if let Some(m) = node.as_module_node() {
+            return module_name_path(&m).map(|p| p.join("::"));
+        }
+        node.as_constant_write_node().map(|w| constant_id_str(&w.name()).to_string())
+    };
+    let outer: Vec<String> = statements.iter().filter_map(|s| declared(s)).collect();
+    for stmt in statements {
+        let Some(body) = hoisted_singleton_body(stmt) else { continue };
+        for inner in flatten_statements(body) {
+            if inner.as_constant_write_node().is_some() {
+                continue;
+            }
+            if let Some(name) = declared(&inner).filter(|n| outer.contains(n)) {
+                return Some(name);
+            }
+        }
+    }
+    None
 }
 
 fn module_has_direct_def(m: &ruby_prism::ModuleNode<'_>) -> bool {
@@ -729,12 +815,20 @@ pub(super) fn slice_has_blank_line(bytes: &[u8], from: usize, to: usize) -> bool
 /// through it is qualified to `ActionView::ViewHelpers.<name>` at emit
 /// (`emit::ruby::library::is_framework_view_helper`).
 ///
+/// `ActionView::RecordIdentifier` is the same story for `dom_id` /
+/// `dom_class`: models, presenters and broadcasters mix it in to name a
+/// DOM node, and the calls resolve to the one shared
+/// `ActionView::ViewHelpers.dom_id` / `dom_class` views already use.
+///
 /// Called from BOTH homes that build an include list —
 /// `analyze::model_includes` for models, `ingest::library_class`'s decl
 /// walk for everything else — because the same source line means the
 /// same thing in either.
 pub(crate) fn is_view_helper_marker_include(path: &[&str]) -> bool {
-    matches!(path, ["ActionView", "Helpers", ..] | ["ActiveSupport", "NumberHelper"])
+    matches!(
+        path,
+        ["ActionView", "Helpers", ..] | ["ActionView", "RecordIdentifier"] | ["ActiveSupport", "NumberHelper"]
+    )
 }
 
 /// `ActiveModel::*` (Validations / Conversion / AttributeMethods /
@@ -751,4 +845,24 @@ pub(crate) fn is_view_helper_marker_include(path: &[&str]) -> bool {
 /// no constructor.
 pub(crate) fn is_active_model_marker_include(path: &[&str]) -> bool {
     matches!(path, ["ActiveModel", ..])
+}
+
+/// `ActiveSupport::Concern` in an include list, written as `include`
+/// where the idiom is `extend`. On Rails, including (rather than
+/// extending) `Concern` is a harmless slip: `Module#include` runs
+/// `ActiveSupport::Concern`'s own `append_features`/`included`/
+/// `class_methods` defs as unused INSTANCE methods of the includer,
+/// since nothing ever calls them that way, and the module otherwise
+/// stays a plain module with its own methods untouched. No target
+/// ships `ActiveSupport::Concern`, so recording the include would make
+/// it an unresolved external class the Ruby emit cannot load; dropping
+/// it here is exactly as sound as Rails' own behavior, and cheaper than
+/// giving the misuse a diagnostic location it does not need.
+///
+/// Called from the library-class decl walk only: a module written this
+/// way is a library class (a mailer concern, in the wild), never a
+/// model — models record their includes separately in
+/// `analyze::body_includes`.
+pub(crate) fn is_concern_marker_include(path: &[&str]) -> bool {
+    matches!(path, ["ActiveSupport", "Concern"])
 }

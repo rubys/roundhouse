@@ -58,8 +58,81 @@ fn anonymous_kwrest_param_and_forward_keep_the_native_contract() {
 }
 
 #[test]
-fn mixed_anonymous_keywords_keep_the_existing_unsupported_diagnostic() {
-    for call in ["target(factor: 11, **)", "target(**, factor: 11)", "target(**options, **)"] {
+fn explicit_pairs_before_final_anonymous_forwarding_keep_their_ordered_group() {
+    let source = "class Probe; def relay(path, **); target(kind: :get, path: path, **); end; def target(kind:, path:, **); [kind, path]; end; end";
+    let app = ingest_app_from_tree(tree(&[("app/services/probe.rb", source)])).expect("ingest mixed anonymous forwarding");
+    let class = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "Probe")
+        .expect("Probe class");
+    let relay = class.methods.iter().find(|m| m.name.as_str() == "relay").expect("relay method");
+    let ExprNode::Send { args, .. } = &*relay.body.node else {
+        panic!("expected forwarded call, got {:?}", relay.body.node);
+    };
+    assert_eq!(args.len(), 1, "one logical keyword group: {args:?}");
+    let ExprNode::ForwardKeywordsWithPairs { entries } = &*args[0].node else {
+        panic!("expected ordered keyword-forward group, got {:?}", args[0].node);
+    };
+    let names: Vec<_> = entries
+        .iter()
+        .map(|(key, _)| match &*key.node {
+            ExprNode::Lit { value: roundhouse::expr::Literal::Sym { value } } => value.as_str(),
+            other => panic!("expected static symbol key, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(names, ["kind", "path"]);
+}
+
+#[test]
+fn bare_anonymous_forwarding_does_not_become_a_positional_argument() {
+    use roundhouse::ty::Ty;
+
+    let source = r#"
+class Probe
+  def relay(**)
+    target(**)
+  end
+
+  def relay_missing_position(**)
+    target_with_required(**)
+  end
+
+  def target(value = 7, required:, **)
+    [value, required]
+  end
+
+  def target_with_required(value, required:, **)
+    [value, required]
+  end
+end
+"#;
+    let mut app = ingest_app_from_tree(tree(&[("app/services/probe.rb", source)])).expect("ingest");
+    let mut analyzer = roundhouse::analyze::Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+
+    let target = app
+        .inferred_method_params
+        .get(&(roundhouse::ident::ClassId("Probe".into()), "target".into()))
+        .expect("target call site was collected");
+    assert!(
+        matches!(target.first(), Some(Ty::Var { .. })),
+        "bare ** supplies no positional evidence; the runtime regression verifies the default remains 7: {target:?}"
+    );
+
+    let target_with_required = app
+        .inferred_method_params
+        .get(&(roundhouse::ident::ClassId("Probe".into()), "target_with_required".into()))
+        .expect("required-position call site was collected");
+    assert!(
+        matches!(target_with_required.first(), Some(Ty::Var { .. })),
+        "bare ** must not satisfy the required positional parameter: {target_with_required:?}"
+    );
+}
+
+#[test]
+fn nonfinal_or_dynamic_mixed_anonymous_keyword_forwarding_stays_unsupported() {
+    for call in ["target(**, factor: 11)", "target(**options, **)", "target(factor: 11, **options, **)"] {
         let source = format!("class Probe; def call(options, **); {call}; end; end");
         let parsed = ruby_prism::parse(source.as_bytes());
         assert_eq!(parsed.errors().count(), 0, "legal Ruby control: {source}");
@@ -71,18 +144,44 @@ fn mixed_anonymous_keywords_keep_the_existing_unsupported_diagnostic() {
 }
 
 #[test]
+fn optional_only_keyword_destination_stays_unsupported_without_keyword_rest() {
+    use roundhouse::analyze::diagnose;
+    use roundhouse::diagnostic::DiagnosticKind;
+
+    let source = "class Probe; def self.call(**); target(**); end; def self.target(enabled: true, token: :missing); [enabled, token]; end; end";
+    let mut app = ingest_app_from_tree(tree(&[("app/services/probe.rb", source)])).expect("ingest");
+    let lower = roundhouse::session::analyze_and_lower(&mut app);
+    let errors: Vec<_> = diagnose(&app)
+        .into_iter()
+        .chain(lower)
+        .filter(|d| d.severity == roundhouse::diagnostic::Severity::Error)
+        .collect();
+    assert!(errors.iter().any(|d| matches!(
+        &d.kind,
+        DiagnosticKind::Unsupported { construct, detail, .. }
+            if construct.as_str() == "anonymous keyword forwarding"
+                && detail.contains("flattened keyword parameters")
+    )), "{errors:?}");
+}
+
+#[test]
 fn anonymous_keywords_and_runtime_guards_are_honest_target_boundaries() {
     use roundhouse::diagnostic::{DiagnosticKind, Severity};
     use roundhouse::project::{BuildTarget, target_files};
     for (source, construct) in [
         ("class Probe; def self.call(**); target(**); end; def self.target(factor:); factor; end; end", "anonymous keyword forwarding"),
+        ("class Probe; def self.call(**); target(factor: false, **); end; def self.target(factor:, **); factor; end; end", "anonymous keyword forwarding"),
         ("class Probe; def self.call; defined?(MissingPr197); end; end", "runtime defined? query"),
+        ("class Probe; LOADED = defined?(MissingPr197); end", "runtime defined? query"),
         ("class Probe; def call; defined?(@@missing); end; end", "runtime defined? query"),
         ("class Probe; def call; @@count ||= 11; @@count; end; end", "class variable write"),
         ("class Probe; def call; @@count &&= 11; @@count; end; end", "class variable write"),
         ("class Probe; def call; @@count += 3; @@count; end; end", "class variable write"),
         ("class Probe; def self.call; @@count; end; end", "class variable read"),
         ("class Probe; @@count = nil; end", "class variable write"),
+        ("class Probe; def self.call; $stdout = STDOUT; end; end", "global variable write"),
+        ("class Probe; def self.call; $rh_memo ||= []; end; end", "global variable write"),
+        ("class Probe; def self.call; $rh_count += 1; end; end", "global variable write"),
     ] {
         let mut app = ingest_app_from_tree(tree(&[("app/services/probe.rb", source)])).unwrap();
         roundhouse::session::analyze_and_lower(&mut app);
@@ -92,7 +191,16 @@ fn anonymous_keywords_and_runtime_guards_are_honest_target_boundaries() {
             });
             let gates: Vec<_> = diags.iter().filter(|d| matches!(&d.kind,
                 DiagnosticKind::Unsupported { construct: name, .. } if name.as_str() == construct)).collect();
-            if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+            // Spinel answers `defined?` of a constant path as CRuby does once
+            // the program has loaded (missing constants included), so in a
+            // method body it is not a gate there; in a constant initializer,
+            // which runs while the program loads, and `defined?(@@missing)`
+            // it still is.
+            if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby)
+                || (matches!(target, BuildTarget::Spinel)
+                    && (construct == "anonymous keyword forwarding"
+                        || source.contains("def self.call; defined?(MissingPr197)")))
+            {
                 assert!(gates.is_empty(), "{target:?}: {diags:?}");
             } else {
                 assert!(!gates.is_empty(), "{target:?}: {construct}: {diags:?}");

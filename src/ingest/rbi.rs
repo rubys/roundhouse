@@ -57,12 +57,20 @@ fn rbi_dir<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<PathBuf> {
 
 /// Read the RBIs of the locked gems the analyzer has no model for.
 ///
-/// Rails' own components, the stdlib gems and the tooling gems are
-/// skipped: the first two are already the analyzer's catalog (a second,
-/// partial, description of them would only disagree), and the last never
-/// enters the analysis at all.
-pub fn load_gem_boundary<V: Vfs + ?Sized>(vfs: &V, dir: &Path, lock: &Lockfile) -> GemBoundary {
-    let mut boundary = GemBoundary::default();
+/// Catalogued gems keep their existing surface. Extension-declared native
+/// gems and refused gems are also read, regardless of their census fate:
+/// their RBIs supply precise ownership as well as method signatures.
+pub fn load_gem_boundary<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    lock: &Lockfile,
+    extensions: &crate::extensions::Extensions,
+) -> GemBoundary {
+    let loaded = extensions.lock_gated_requires.iter()
+        .filter(|row| lock.has(&row.gem) && !lock.is_in_repo(&row.gem))
+        .map(|row| row.gem.clone())
+        .collect();
+    let mut boundary = GemBoundary { loaded, ..GemBoundary::default() };
     let Some(root) = rbi_dir(vfs, dir) else { return boundary };
     let Ok(entries) = vfs.read_dir(&root) else { return boundary };
 
@@ -74,7 +82,12 @@ pub fn load_gem_boundary<V: Vfs + ?Sized>(vfs: &V, dir: &Path, lock: &Lockfile) 
         let Some(file) = path.file_name().and_then(|f| f.to_str()) else { continue };
         let Some(stem) = file.strip_suffix(".rbi") else { continue };
         let Some((name, version)) = stem.split_once('@') else { continue };
-        if lock.is_in_repo(name) || !matches!(fate_of(name), GemFate::Unknown | GemFate::Modeled) {
+        let extension_gem = extensions.runtime_gems.iter().any(|row| row.gem == name)
+            || extensions.lock_gated_requires.iter().any(|row| row.gem == name)
+            || extensions.is_rails_dependent(name);
+        if lock.is_in_repo(name)
+            || (!extension_gem && !matches!(fate_of(name), GemFate::Unknown | GemFate::Modeled))
+        {
             continue;
         }
         let Some(locked) = lock.version_of(name) else { continue };
@@ -355,22 +368,22 @@ impl Reader<'_> {
 
 fn untyped_fn() -> Ty {
     Ty::Fn {
-        params: vec![Param { name: Symbol::new("args"), ty: Ty::Untyped, kind: ParamKind::Rest }],
+        params: vec![Param { name: Symbol::new("args"), ty: Ty::Untyped.into(), kind: ParamKind::Rest }].into(),
         block: None,
-        ret: Box::new(Ty::Untyped),
+        ret: std::sync::Arc::new(Ty::Untyped),
         effects: EffectSet::pure(),
     }
 }
 
 fn reader_fn(ret: Ty) -> Ty {
-    Ty::Fn { params: Vec::new(), block: None, ret: Box::new(ret), effects: EffectSet::pure() }
+    Ty::Fn { params: Vec::new().into(), block: None, ret: std::sync::Arc::new(ret), effects: EffectSet::pure() }
 }
 
 fn writer_fn(ty: Ty) -> Ty {
     Ty::Fn {
-        params: vec![Param { name: Symbol::new("value"), ty: ty.clone(), kind: ParamKind::Required }],
+        params: vec![Param { name: Symbol::new("value"), ty: ty.clone().into(), kind: ParamKind::Required }].into(),
         block: None,
-        ret: Box::new(ty),
+        ret: std::sync::Arc::new(ty),
         effects: EffectSet::pure(),
     }
 }
@@ -453,12 +466,12 @@ fn lenient_signature(
             .into_iter()
             .map(|(name, kind)| {
                 let ty = declared.remove(&name).unwrap_or(Ty::Untyped);
-                Param { name: Symbol::new(&name), ty, kind }
+                Param { name: Symbol::new(&name), ty: ty.into(), kind }
             })
             .collect(),
         // A parameter list this reader does not take apart: accept
         // anything rather than assert an arity.
-        None => vec![Param { name: Symbol::new("args"), ty: Ty::Untyped, kind: ParamKind::Rest }],
+        None => vec![Param { name: Symbol::new("args"), ty: Ty::Untyped.into(), kind: ParamKind::Rest }],
     };
-    Ty::Fn { params, block: None, ret: Box::new(ret), effects: EffectSet::pure() }
+    Ty::Fn { params: params.into(), block: None, ret: std::sync::Arc::new(ret), effects: EffectSet::pure() }
 }

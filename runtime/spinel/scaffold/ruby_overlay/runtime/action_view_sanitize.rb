@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `sanitize`, `strip_tags` and `auto_link` — the real ones, on CRuby.
 #
 # The shared runtime (`runtime/ruby/action_view/view_helpers_ext.rb`)
@@ -91,6 +92,14 @@ unless RH_SANITIZER_VENDOR.nil?
       def self.sanitize_allowing(html, tags, attributes)
         return nil if html.nil?
         RH_SAFE_LIST_SANITIZER.sanitize(html.to_s, tags: tags, attributes: attributes).to_s
+      end
+
+      # `sanitize(html, tags:, attributes:)` from a view or helper — the
+      # emit rewrites the keyword call to this one. The view form, so a
+      # safe buffer, as `sanitize` above answers.
+      def self.sanitize_with(html, tags, attributes)
+        return nil if html.nil?
+        SafeString.new(RH_SAFE_LIST_SANITIZER.sanitize(html.to_s, tags: tags, attributes: attributes).to_s)
       end
 
       # `auto_link` — the `rails_autolink` gem (campfire's Gemfile),

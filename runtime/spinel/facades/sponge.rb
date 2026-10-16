@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Sponge façade — lobsters' vendored HTTP client (extras/sponge.rb)
 # drives Net::HTTP, Resolv, IPAddr, and OpenSSL, none of which exist
 # under spinel AOT until the stdlib spin packages land. Every consumer

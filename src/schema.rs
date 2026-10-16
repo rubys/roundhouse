@@ -8,6 +8,8 @@
 //! `nullable` flag decide the `Ty` (and the `T | Nil` unions) every
 //! target ultimately emits.
 
+pub mod generated;
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +53,46 @@ pub struct Column {
     pub nullable: bool,
     pub default: Option<String>,
     pub primary_key: bool,
+    /// The SQL expression and storage mode of a generated column. The
+    /// declared `col_type` remains the column's result type; generated
+    /// columns are not writable by application inserts or updates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<GeneratedColumn>,
+    /// Ingest-only evidence for generated-expression validation. Some
+    /// database types (for example `inet`, PostgreSQL enums, and fixed
+    /// `character`) normalize to `String { limit: None }` or `Text` for
+    /// Roundhouse's ordinary-column typing. `Some(false)` records that
+    /// the original type does not have the portable text semantics
+    /// required by the supported generated-expression grammar. The same
+    /// negative evidence also guards custom-qualified JSON types after
+    /// normalization: their built-in JSON semantics are not proven. `None`
+    /// means the normalized `col_type` is sufficient evidence. This is
+    /// sparse so well-represented ordinary types retain their serialized form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_text_compatible: Option<bool>,
+    /// Ingest-only evidence for generated integer-expression validation.
+    /// Integer-like source types such as `smallint`, `serial`, and types
+    /// with discarded typmods normalize to `ColumnType::Integer`, but are
+    /// not faithful PostgreSQL `int4` results. `Some(false)` retains that
+    /// negative evidence; `None` means the normalized type is sufficient.
+    /// This stays sparse so ordinary integer columns keep their serialized
+    /// form and application typing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_int4_compatible: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GeneratedColumn {
+    /// Source SQL retained from `as:` or `GENERATED ALWAYS AS (...)`.
+    pub expression: String,
+    pub storage: GeneratedColumnStorage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratedColumnStorage {
+    Stored,
+    Virtual,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -67,7 +109,12 @@ pub enum ColumnType {
     DateTime,
     Time,
     Binary,
+    /// `t.json` — retained separately from PostgreSQL `jsonb` for faithful
+    /// schema round-trips; shared model storage remains serialized text.
     Json,
+    /// `t.jsonb` — distinct from `t.json` for faithful PostgreSQL schema
+    /// round-trips. Both JSON variants share serialized-text model storage.
+    Jsonb,
     /// `t.uuid` — a Postgres `uuid` column. SQLite has no uuid type, so
     /// storage is TEXT (the 36-char canonical form); typing is a String.
     /// Not modeled as `String` at ingest so a schema round-trip and a
@@ -81,6 +128,11 @@ pub struct Index {
     pub name: Symbol,
     pub columns: Vec<Symbol>,
     pub unique: bool,
+    /// PostgreSQL's `USING <access_method>`, when present in the source.
+    /// `None` is the database default (btree). The method is retained
+    /// because substituting btree can fail or remove index support for queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub using: Option<String>,
     /// A partial index's predicate, the SQL of `t.index …, where:` (or
     /// of `CREATE INDEX … WHERE` in `structure.sql`) as the source
     /// database's dumper wrote it. On a unique index it decides which

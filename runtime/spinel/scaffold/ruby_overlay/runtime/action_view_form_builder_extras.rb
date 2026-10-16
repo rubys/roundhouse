@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby-only value-dependent FormBuilder attribute helpers.
 #
 # The form_builder macro-inline emits static HTML, but three controls

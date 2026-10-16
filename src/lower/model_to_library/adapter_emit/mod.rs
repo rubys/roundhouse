@@ -35,9 +35,9 @@
 //!   `_columns_sql` — the schema columns as a qualified SELECT list
 //!   `_hydrate_all(sql)` — run a SELECT over `_columns_sql`, typed rows
 
-use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Param};
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, Param};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, Literal};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, TableRef, VarId};
 use crate::lower::arel::{
     ArelOp, ArelVisitor, Assignment, ColRef, ColumnSpec, Delete, Direction, Insert, LimitSpec,
@@ -54,22 +54,24 @@ use exists::{synth_adapter_any, synth_adapter_exists_by_id};
 
 pub(super) fn push_adapter_methods(
     methods: &mut Vec<MethodDef>,
-    owner: &ClassId,
+    model: &Model,
     table: &Table,
     schema: &Schema,
 ) {
+    let owner = &model.name;
     methods.push(synth_adapter_find_by_id(owner, table, schema));
     methods.push(synth_adapter_all(owner, table, schema));
     methods.push(synth_adapter_last(owner, table, schema));
     methods.push(synth_adapter_insert(owner, table, schema));
     methods.push(synth_adapter_update(owner, table, schema));
+    methods.push(synth_adapter_touch(owner, table, schema));
     methods.push(synth_adapter_delete(owner, table, schema));
     methods.push(synth_adapter_count(owner, table, schema));
     methods.push(synth_adapter_any(owner, table, schema));
     methods.push(synth_adapter_exists_by_id(owner, table, schema));
     methods.push(synth_adapter_truncate(owner, table, schema));
     methods.push(synth_delete_all(owner, table));
-    methods.push(synth_adapter_reload(owner, table));
+    methods.push(synth_adapter_reload(model, table));
     methods.push(synth_columns_sql(owner, table));
     methods.push(synth_hydrate_all(owner));
 }
@@ -93,9 +95,9 @@ pub(super) fn synth_find_primary_key_input(owner: &ClassId, table: &Table) -> Me
         "_adapter_find_by_id",
         Ty::Union {
             variants: vec![
-                Ty::Class { id: owner.clone(), args: vec![] },
+                Ty::Class { id: owner.clone(), args: vec![].into() },
                 Ty::Nil,
-            ],
+            ].into(),
         },
         super::nil_lit(),
     )
@@ -182,8 +184,8 @@ fn synth_primary_key_input(
 fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
     let id = Symbol::from("id");
     let key_ty = key_ty(table);
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    let nilable_owner = Ty::Union { variants: vec![owner_ty, Ty::Nil] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+    let nilable_owner = Ty::Union { variants: vec![owner_ty, Ty::Nil].into() };
 
     let op = ArelOp::Select(Select {
         single_record: true, // _adapter_find_by_id — one record or nil
@@ -216,7 +218,7 @@ fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> 
 }
 
 fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
 
     let op = ArelOp::Select(Select {
         single_record: false, // _adapter_all — a collection
@@ -238,7 +240,7 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
         receiver: MethodReceiver::Class,
         params: vec![],
         body: SqliteVisitor.visit(&op, schema, owner),
-        signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(owner_ty) })),
+        signature: Some(fn_sig(vec![], Ty::Array { elem: std::sync::Arc::new(owner_ty) })),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -255,8 +257,8 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
 /// as `_adapter_find_by_id`, so it works for every app (the raw
 /// `ActiveRecord.adapter` is not wired under the Level-3 architecture).
 fn synth_adapter_last(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    let nilable_owner = Ty::Union { variants: vec![owner_ty, Ty::Nil] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+    let nilable_owner = Ty::Union { variants: vec![owner_ty, Ty::Nil].into() };
 
     let op = ArelOp::Select(Select {
         single_record: true, // _adapter_last — one record or nil
@@ -302,7 +304,6 @@ fn synth_adapter_last(owner: &ClassId, table: &Table, schema: &Schema) -> Method
 /// reload comment for the underlying emit issue with
 /// `self.class.<async_method>`.
 fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
-    use crate::expr::{LValue, Literal};
     use crate::schema::ColumnType;
 
     // An integer key is the database's to assign: it stays out of the
@@ -320,7 +321,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     let assignments: Vec<Assignment> = table
         .columns
         .iter()
-        .filter(|c| !c.primary_key || supplied_key.is_some())
+        .filter(|c| c.generated.is_none() && (!c.primary_key || supplied_key.is_some()))
         .map(|c| Assignment {
             column: c.name.clone(),
             value: Value::Runtime {
@@ -330,61 +331,51 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         })
         .collect();
 
-    let op = ArelOp::Insert(Insert {
+    let insert = Insert {
         table: TableRef(table.name.clone()),
         assignments,
         returns_rowid: supplied_key.is_none(),
-    });
-
-    let (body, ret_ty) = match supplied_key {
-        None => (SqliteVisitor.visit(&op, schema, owner), Ty::Int),
-        Some(k) => {
-            let key_ivar = || ivar_ref(&k.name);
-            let mut exprs = Vec::new();
-            // A uuid key left blank is minted here, as the
-            // `gen_random_uuid()` default the Postgres schema declares
-            // would have on insert — SQLite has no such default. A
-            // string key (`id: :string`) is the app's to supply, as in
-            // Rails, where a NULL one fails the NOT NULL constraint.
-            if matches!(k.col_type, ColumnType::Uuid) {
-                let blank = Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Send {
-                        recv: Some(key_ivar()),
-                        method: Symbol::from("=="),
-                        args: vec![arel_lit_str(String::new())],
-                        block: None,
-                        parenthesized: false,
-                    },
-                );
-                let mint = Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Send {
-                        recv: Some(Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Const { path: vec![Symbol::from("SecureRandom")] },
-                        )),
-                        method: Symbol::from("uuid"),
-                        args: vec![],
-                        block: None,
-                        parenthesized: false,
-                    },
-                );
-                exprs.push(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::If {
-                        cond: blank,
-                        then_branch: Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Assign { target: LValue::Ivar { name: k.name.clone() }, value: mint },
-                        ),
-                        else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
-                    },
-                ));
-            }
-            exprs.push(SqliteVisitor.visit(&op, schema, owner));
-            exprs.push(key_ivar());
-            (Expr::new(Span::synthetic(), ExprNode::Seq { exprs }), ty_of_column(&k.col_type))
+    };
+    let op = ArelOp::Insert(insert.clone());
+    let generated: Vec<&crate::schema::Column> =
+        table.columns.iter().filter(|c| c.generated.is_some()).collect();
+    let ret_ty = supplied_key.map(|c| ty_of_column(&c.col_type)).unwrap_or(Ty::Int);
+    let uuid_mint = supplied_key
+        .filter(|c| matches!(c.col_type, ColumnType::Uuid))
+        .map(uuid_key_mint_expr);
+    let body = if generated.is_empty() {
+        // Keep ordinary inserts on their established exec/last-rowid path.
+        let mut exprs = Vec::new();
+        if let Some(mint) = uuid_mint {
+            exprs.push(mint);
+        }
+        exprs.push(SqliteVisitor.visit(&op, schema, owner));
+        if let Some(k) = supplied_key {
+            exprs.push(ivar_ref(&k.name));
+        }
+        if exprs.len() == 1 {
+            exprs.pop().expect("one ordinary insert expression")
+        } else {
+            Expr::new(Span::synthetic(), ExprNode::Seq { exprs })
+        }
+    } else {
+        let returning_key = key_column(table)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| Symbol::from("rowid"));
+        let returning_columns: Vec<Symbol> =
+            generated.iter().map(|c| c.name.clone()).collect();
+        let insert = SqliteVisitor.visit_insert_returning(
+            &insert,
+            schema,
+            &returning_key,
+            key_is_integer(table),
+            &returning_columns,
+        );
+        let hydrated = hydrate_generated_after_insert(table, &generated, insert, &ret_ty);
+        if let Some(mint) = uuid_mint {
+            Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![mint, hydrated] })
+        } else {
+            hydrated
         }
     };
 
@@ -407,6 +398,211 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     }
 }
 
+/// Mint a UUID primary key before insertion when its slot is blank. SQLite
+/// has no `gen_random_uuid()` default, so this mirrors the runtime's existing
+/// client-side UUID behavior for both ordinary and generated-column inserts.
+fn uuid_key_mint_expr(key: &crate::schema::Column) -> Expr {
+    use crate::expr::LValue;
+
+    let blank = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(ivar_ref(&key.name)),
+            method: Symbol::from("=="),
+            args: vec![arel_lit_str(String::new())],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let mint = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const { path: vec![Symbol::from("SecureRandom")] },
+            )),
+            method: Symbol::from("uuid"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: blank,
+            then_branch: Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign { target: LValue::Ivar { name: key.name.clone() }, value: mint },
+            ),
+            else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+        },
+    )
+}
+
+/// After the INSERT has produced its key, read the database-owned generated
+/// values from that statement and fill only storage slots still holding nil.
+/// Reading the key and generated values from one `RETURNING` result avoids a
+/// second database operation before save records the new identity. Explicit
+/// non-nil assignments remain visible through create callbacks; explicit nil
+/// is treated as unset, matching Rails' generated-attribute behavior.
+fn hydrate_generated_after_insert(
+    table: &Table,
+    generated: &[&crate::schema::Column],
+    insert_returning: Expr,
+    key_ty: &Ty,
+) -> Expr {
+    let db = ClassId(Symbol::from("Db"));
+    let inserted_key = Symbol::from("__rh_inserted_key");
+    let stmt = Symbol::from("__rh_generated_stmt");
+    let staged_key = Symbol::from("__rh_returning_key");
+    let staged_values: Vec<Symbol> = generated
+        .iter()
+        .enumerate()
+        .map(|(index, _)| Symbol::from(format!("__rh_generated_value_{index}")))
+        .collect();
+
+    let key_read = if key_is_integer(table) {
+        let mut parsed = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(arel_db_call(
+                    &db,
+                    "column_text",
+                    vec![var_ref(&stmt), arel_lit_int(0)],
+                )),
+                method: Symbol::from("to_i"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        parsed.ty = Some(Ty::Int);
+        parsed
+    } else {
+        let key_read_method = key_column(table)
+            .map(super::schema::column_read_method_for)
+            .unwrap_or("column_int");
+        arel_db_call(&db, key_read_method, vec![var_ref(&stmt), arel_lit_int(0)])
+    };
+    let mut reads = vec![arel_assign(
+        &staged_key,
+        crate::lower::typing::with_ty(key_read, key_ty.clone()),
+    )];
+    for (index, (col, staged)) in generated.iter().zip(&staged_values).enumerate() {
+        let storage = super::schema::col_storage_name(col);
+        let mut is_nil = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(ivar_ref(&storage)),
+                method: Symbol::from("nil?"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        is_nil.ty = Some(Ty::Bool);
+        let value = crate::lower::typing::with_ty(
+            arel_db_call(
+                &db,
+                super::schema::column_read_method_for(col),
+                vec![var_ref(&stmt), arel_lit_int((index + 1) as i64)],
+            ),
+            super::ty_of_column_slot(col),
+        );
+        // Read values into locals first. No generated slot is changed until
+        // every required read and statement finalization has succeeded.
+        reads.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: is_nil,
+                then_branch: arel_assign(staged, value),
+                else_branch: arel_assign(staged, ivar_ref(&storage)),
+            },
+        ));
+    }
+    reads.push(crate::lower::typing::with_ty(var_ref(&staged_key), key_ty.clone()));
+
+    let mut step = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const { path: vec![Symbol::from("Db")] },
+            )),
+            method: Symbol::from("step?"),
+            args: vec![var_ref(&stmt)],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    step.ty = Some(Ty::Bool);
+    let mut missing_row = Expr::new(
+        Span::synthetic(),
+        ExprNode::Raise { value: arel_lit_str(format!(
+            "INSERT ... RETURNING produced no row for `{}`",
+            table.name.as_str(),
+        )) },
+    );
+    missing_row.ty = Some(Ty::Bottom);
+    let mut read_row = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: step,
+            then_branch: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: reads }),
+            else_branch: missing_row,
+        },
+    );
+    read_row.ty = Some(key_ty.clone());
+    let mut finalized_read = Expr::new(
+        Span::synthetic(),
+        ExprNode::BeginRescue {
+            body: read_row,
+            rescues: vec![],
+            else_branch: None,
+            ensure: Some(arel_db_call(&db, "finalize", vec![var_ref(&stmt)])),
+            implicit: false,
+        },
+    );
+    finalized_read.ty = Some(key_ty.clone());
+
+    let mut stmts = vec![
+        arel_assign(&stmt, insert_returning),
+        arel_assign(&inserted_key, finalized_read),
+    ];
+    for (col, staged) in generated.iter().zip(&staged_values) {
+        let storage = super::schema::col_storage_name(col);
+        let mut is_nil = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(ivar_ref(&storage)),
+                method: Symbol::from("nil?"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        is_nil.ty = Some(Ty::Bool);
+        let assign = Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: crate::expr::LValue::Ivar { name: storage },
+                value: var_ref(staged),
+            },
+        );
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: is_nil,
+                then_branch: assign,
+                else_branch: super::nil_lit(),
+            },
+        ));
+    }
+    stmts.push(crate::lower::typing::with_ty(var_ref(&inserted_key), key_ty.clone()));
+    Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts })
+}
+
 /// `def _adapter_update` — instance method; reads ivars + @id.
 /// See `synth_adapter_insert` for the receiver-rationale.
 fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
@@ -414,7 +610,7 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
     let assignments: Vec<Assignment> = table
         .columns
         .iter()
-        .filter(|c| !c.primary_key)
+        .filter(|c| !c.primary_key && c.generated.is_none())
         .map(|c| Assignment {
             column: c.name.clone(),
             value: Value::Runtime {
@@ -423,6 +619,7 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
             },
         })
         .collect();
+    let has_assignments = !assignments.is_empty();
 
     let op = ArelOp::Update(Update {
         table: TableRef(table.name.clone()),
@@ -438,7 +635,63 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         name: Symbol::from("_adapter_update"),
         receiver: MethodReceiver::Instance,
         params: vec![],
-        body: SqliteVisitor.visit(&op, schema, owner),
+        // A model whose only non-key attributes are generated columns has
+        // nothing to write on update. Do not render `UPDATE ... SET WHERE`;
+        // generated values are database-owned and a no-op save stays a no-op.
+        body: if has_assignments {
+            SqliteVisitor.visit(&op, schema, owner)
+        } else {
+            super::nil_lit()
+        },
+        signature: Some(fn_sig(vec![], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+            mutates_self: false,
+            block_param: None,
+    }
+}
+
+/// `def _adapter_touch` — `touch`'s write: `updated_at` alone, as
+/// Rails' `touch` issues it. A full-row `_adapter_update` writes back
+/// every column the record loaded, so a column the database maintains
+/// behind the record — campfire's trigger-kept `rooms.messages_count`,
+/// which a message's `belongs_to :room, touch: true` reaches — is
+/// overwritten with the stale in-memory value. A table without
+/// `updated_at` has nothing to write.
+fn synth_adapter_touch(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
+    let assignments: Vec<Assignment> = table
+        .columns
+        .iter()
+        .filter(|c| c.name.as_str() == "updated_at" && c.generated.is_none())
+        .map(|c| Assignment {
+            column: c.name.clone(),
+            value: Value::Runtime {
+                expr: ivar_ref(&super::schema::col_storage_name(c)),
+                ty: value_type_for_column(c),
+            },
+        })
+        .collect();
+    let has_assignments = !assignments.is_empty();
+    let op = ArelOp::Update(Update {
+        table: TableRef(table.name.clone()),
+        assignments,
+        conditions: Some(eq_id_ivar(table)),
+    });
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("_adapter_touch"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: if has_assignments {
+            SqliteVisitor.visit(&op, schema, owner)
+        } else {
+            super::nil_lit()
+        },
         signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
@@ -508,7 +761,8 @@ fn synth_adapter_count(owner: &ClassId, table: &Table, schema: &Schema) -> Metho
 }
 
 /// `def self.delete_all` — bulk DELETE with ActiveRecord semantics:
-/// rows go, the autoincrement counter stays (`_adapter_truncate` is
+/// rows go, the affected-row count comes back, the autoincrement
+/// counter stays (`_adapter_truncate` is
 /// the sequence-resetting sibling, for test setup). A PUBLIC name —
 /// this per-model override shadows `Base.delete_all`'s
 /// adapter-routing default, so strict targets go Db-direct like every
@@ -537,14 +791,24 @@ fn synth_delete_all(owner: &ClassId, table: &Table) -> MethodDef {
             parenthesized: true,
         },
     );
+    // Rails returns the affected-row count; `Db.changes` reads it off
+    // the `exec` just issued.
+    let changes = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const { path: vec![Symbol::from("Db")] },
+            )),
+            method: Symbol::from("changes"),
+            args: vec![],
+            block: None,
+            parenthesized: true,
+        },
+    );
     let body = Expr::new(
         Span::synthetic(),
-        ExprNode::Seq {
-            exprs: vec![
-                exec,
-                Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
-            ],
-        },
+        ExprNode::Seq { exprs: vec![exec, changes] },
     );
 
     MethodDef {
@@ -556,7 +820,7 @@ fn synth_delete_all(owner: &ClassId, table: &Table) -> MethodDef {
         receiver: MethodReceiver::Class,
         params: vec![],
         body,
-        signature: Some(fn_sig(vec![], Ty::Nil)),
+        signature: Some(fn_sig(vec![], Ty::Int)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -614,13 +878,17 @@ fn synth_adapter_truncate(owner: &ClassId, table: &Table, schema: &Schema) -> Me
 /// reload needs to write into self. Generalizing the visitor with
 /// a "hydrate target = bare ivar / passed-in symbol" option is the
 /// right cleanup once a second use surfaces.
-fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
-    use crate::expr::{ExprNode, LValue, Literal};
+fn synth_adapter_reload(model: &Model, table: &Table) -> MethodDef {
     use crate::span::Span;
 
+    let owner = &model.name;
     let stmt = Symbol::from("stmt");
     let db = ClassId(Symbol::from("Db"));
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+
+    // Rails' `reload` clears the association cache — owned by
+    // associations (same kinds as `assoc_cache_ivar_bindings`).
+    let clear_assoc = super::associations::clear_loaded_flag_assigns(model);
 
     // SQL: "SELECT <cols> FROM <table> WHERE id = " + Db.escape_int(@id) + " LIMIT 1"
     let cols_csv: String = table
@@ -738,8 +1006,9 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
 
     let finalize = arel_db_call(&db, "finalize", vec![var_ref(&stmt)]);
     let self_ref = Expr::new(Span::synthetic(), ExprNode::SelfRef);
-    // stmt = prepare ; [bind_int(stmt, 1, @id)] ; if step? {…} ; finalize ; self
-    let mut body_exprs = vec![stmt_assign];
+    // clear assoc loaded ; stmt = prepare ; [bind] ; if step? {…} ; finalize ; self
+    let mut body_exprs = clear_assoc;
+    body_exprs.push(stmt_assign);
     if let Some(bind) = bind_id {
         body_exprs.push(bind);
     }
@@ -836,8 +1105,8 @@ fn synth_hydrate_all(owner: &ClassId) -> MethodDef {
     let stmt = Symbol::from("stmt");
     let results = Symbol::from("results");
     let db = ClassId(Symbol::from("Db"));
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    let owner_array_ty = Ty::Array { elem: Box::new(owner_ty) };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
+    let owner_array_ty = Ty::Array { elem: std::sync::Arc::new(owner_ty) };
 
     let stmt_assign = arel_assign(&stmt, arel_db_call(&db, "prepare", vec![var_ref(&sql)]));
     // Typed empty literal — same reason as the visitor's multi hydrate
@@ -975,6 +1244,15 @@ use crate::lower::arel::visitor::concat_chain as arel_concat;
 /// shape the primitives always assumed.
 fn key_column(table: &Table) -> Option<&crate::schema::Column> {
     super::primary_key_column(table)
+}
+
+/// The implicit SQLite rowid is integer-valued, as are the integer key
+/// types handled by `last_insert_rowid` on the ordinary insert path.
+fn key_is_integer(table: &Table) -> bool {
+    use crate::schema::ColumnType;
+    key_column(table)
+        .map(|column| matches!(column.col_type, ColumnType::Integer | ColumnType::BigInt))
+        .unwrap_or(true)
 }
 
 fn key_column_name(table: &Table) -> Symbol {

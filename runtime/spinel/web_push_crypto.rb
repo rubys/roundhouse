@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The cryptography of the `web-push` gem (3.0.2, the version campfire
 # locks), ported onto spinel's openssl package: RFC 8291 payload
 # encryption and the RFC 8292 VAPID header. `runtime/spinel/web_push.rb`

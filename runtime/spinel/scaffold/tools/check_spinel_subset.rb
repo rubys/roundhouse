@@ -1,4 +1,5 @@
 #!/usr/bin/env ruby
+# frozen_string_literal: true
 # Linter that enforces the Spinel-subset gradient on this fixture.
 #
 # Walks runtime/, app/, config/ (the production code paths — tests and

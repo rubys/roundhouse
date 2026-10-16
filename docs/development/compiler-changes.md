@@ -21,6 +21,7 @@ without that shared lowering sequence; see [`src/session.rs`](../../src/session.
 | Shared lowering / pass order | `src/lower/mod.rs::POST_ANALYZE_PASS_ORDER` |
 | Target syntax | `src/emit/` |
 | Project assembly / target dispatch | `src/project.rs::target_files` |
+| Gem requires / Gemfile declarations; project extensions | `src/gems.rs`, `src/extensions.rs` |
 | Framework sources / shared transpile driver | `runtime/ruby/`, `src/runtime_loader.rs` |
 | Hand-written target glue | `runtime/<target>/` |
 
@@ -28,6 +29,11 @@ Framework behavior belongs once in `runtime/ruby/` or a shared lowering, not
 as the same special case in several emitters. The runtime loader shares its
 transpile driver through target hooks. New Ruby runtime files also need
 registration in `src/project.rs::spinel_files`.
+
+Every Ruby file under `runtime/ruby/` and `runtime/spinel/` uses
+`# frozen_string_literal: true`. The directive follows an optional shebang
+and precedes generated requires. `tests/runtime_frozen_string_literal.rs`
+checks all runtime Ruby files.
 
 Other entry points: `src/bin/` (CLI/debug tools), `wasm/` (browser compiler),
 `editors/vscode/` (LSP client), `tools/compare/` (standalone differential oracle).

@@ -195,7 +195,65 @@ pub(super) fn try_binary_operator(
             ));
         }
     }
-    if matches!(method, "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*" | "/") {
+    // Int / Int and Int % Int floor in Ruby; Rust's operators truncate.
+    if method == "/" {
+        use crate::emit::shared::div_pow::{classify_div_pow, DivPowCase};
+        if matches!(classify_div_pow(r, &args[0]), DivPowCase::IntFloor) {
+            return Some(crate::emit::rust::shared::int_floor_div_mod(
+                crate::emit::rust::shared::FloorOp::Div,
+                &emit_expr(r),
+                &emit_expr(&args[0]),
+            ));
+        }
+    }
+    if method == "%" {
+        use crate::emit::shared::modulo::{classify_modulo, ModuloCase};
+        if matches!(classify_modulo(r, &args[0]), ModuloCase::IntFloor) {
+            return Some(crate::emit::rust::shared::int_floor_div_mod(
+                crate::emit::rust::shared::FloorOp::Mod,
+                &emit_expr(r),
+                &emit_expr(&args[0]),
+            ));
+        }
+    }
+    // Array `&` / `|`: `Vec` has no such operator (the fall-through
+    // would print `.&(…)`). Collect first occurrences, keeping order.
+    // Same-elem only: mismatched Array element types have no common
+    // `Vec<T>` (and `__rhs.contains(x)` would not type-check). Those
+    // stay as method-call form (`return None`) — not native infix.
+    // `Unknown` (Integer/Bool bitwise, gradual) falls through to native
+    // infix below.
+    if method == "&" || method == "|" {
+        use crate::emit::shared::set_op::{classify_set_op, SetOpCase};
+        use crate::ty::Ty;
+        match classify_set_op(method, r, &args[0]) {
+            SetOpCase::ArrayIntersect { elem } | SetOpCase::ArrayUnion { elem } => {
+                let same_elem = matches!(
+                    args[0].ty.as_ref(),
+                    Some(Ty::Array { elem: r }) if r.as_ref() == elem
+                );
+                if !same_elem {
+                    return None;
+                }
+                let (keep, items) = match method {
+                    "&" => ("__rhs.contains(x) && ", "__lhs.iter()"),
+                    _ => ("", "__lhs.iter().chain(__rhs.iter())"),
+                };
+                let elem_ty = crate::emit::rust::ty::rust_ty(elem);
+                return Some(format!(
+                    "{{ let __lhs = {}; let __rhs = {}; let mut __out: Vec<{elem_ty}> = Vec::new(); \
+                     for x in {items} {{ if {keep}!__out.contains(x) {{ __out.push(x.clone()); }} }} __out }}",
+                    emit_expr(r),
+                    emit_expr(&args[0]),
+                ));
+            }
+            SetOpCase::Unknown => {}
+        }
+    }
+    if matches!(
+        method,
+        "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*" | "/" | "%" | "&" | "|"
+    ) {
         // Binary-op LHS is a primary-demanding position. Without
         // the wrap, `x.len() as i64 < y` parses as the start of a
         // turbofish (`i64<y, …>`). Decide pass stamps the bit;

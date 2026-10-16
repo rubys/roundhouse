@@ -875,13 +875,13 @@ fn rewrite_expr(e: &Expr) -> Expr {
                     });
                 }
             }
-            syn(ExprNode::Send {
+            keep_hint(e, syn(ExprNode::Send {
                 recv: Some(rewrite_expr(r)),
                 method: method.clone(),
                 args: args.iter().map(rewrite_expr).collect(),
                 block: None,
                 parenthesized: true,
-            })
+            }))
         }
         // Recurse through the container variants the runtime bodies use.
         // A `super` call (the constructor's chain to ActiveRecord::Base#
@@ -944,10 +944,10 @@ fn rewrite_expr(e: &Expr) -> Expr {
             left: rewrite_expr(left),
             right: rewrite_expr(right),
         }),
-        ExprNode::Assign { target, value } => syn(ExprNode::Assign {
+        ExprNode::Assign { target, value } => keep_hint(e, syn(ExprNode::Assign {
             target: target.clone(),
             value: rewrite_expr(value),
-        }),
+        })),
         // A bare `return` (return self/nil) in a threaded method returns
         // the updated `record`; `return expr` threads the expr.
         ExprNode::Return { value } => {
@@ -982,7 +982,7 @@ fn rewrite_expr(e: &Expr) -> Expr {
             target_ty: target_ty.clone(),
         }),
         // Recurse into block bodies (a block may read `@ivar`/`self`).
-        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => syn(ExprNode::Lambda { rest_param: rest_param.clone(),
+        ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } => syn(ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_expr(body),
@@ -1134,6 +1134,12 @@ fn has_nested_mutation_or_loop(e: &Expr) -> bool {
 }
 
 // ---- IR builders + walker -------------------------------------------
+
+/// The string-builder tags (`io = String.new`, `io << chunk`) a writer reading `self` comes through here with; without them `local_accumulation` turns the appends into a list `++`.
+fn keep_hint(from: &Expr, mut to: Expr) -> Expr {
+    to.hint = from.hint;
+    to
+}
 
 fn syn(node: ExprNode) -> Expr {
     Expr::new(Span::synthetic(), node)
@@ -1301,6 +1307,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods,
             nullable_columns: Vec::new(),
             origin: None,
@@ -1533,6 +1540,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![init],
             nullable_columns: Vec::new(),
             origin: None,

@@ -426,10 +426,36 @@ fn is_instance_method_of(class_name: &str, method: &str) -> bool {
 }
 
 fn receiver_class_name(r: &Expr) -> Option<String> {
-    match r.ty.as_ref()? {
+    // An ivar reads as `T | nil` until `initialize` assigns it.
+    match r.ty.as_ref()?.peel_nilable() {
         crate::ty::Ty::Class { id, .. } => Some(type_name(id.0.as_str())),
         _ => None,
     }
+}
+
+/// `recv.foo = v` where `recv`'s class defines `foo=` as a method (not an
+/// attribute property): emitted as that method, `FooSet(v)`.
+fn is_writer_method_of(class_name: &str, method: &str) -> bool {
+    let cm = camel(method);
+    let mut cur = Some(class_name.to_string());
+    let mut guard = 0;
+    while let Some(name) = cur {
+        guard += 1;
+        if guard > 32 {
+            break;
+        }
+        let (found, parent) = CLASS_HIERARCHY.with(|h| {
+            h.borrow()
+                .get(&name)
+                .map(|(p, members)| (members.contains(&cm), p.clone()))
+                .unwrap_or((false, None))
+        });
+        if found {
+            return true;
+        }
+        cur = parent;
+    }
+    false
 }
 
 pub(super) fn reset_class_hierarchy() {
@@ -1392,6 +1418,11 @@ fn emit_send(
                     return format!("this.{} = {}", pascal(base), conv);
                 }
             }
+            if let Some(cls) = receiver_class_name(r) {
+                if is_writer_method_of(&cls, method) {
+                    return format!("{}.{}({})", emit_expr(r), pascal(method), args_s[0]);
+                }
+            }
             return format!("{}.{} = {}", emit_expr(r), pascal(base), args_s[0]);
         }
     }
@@ -1540,6 +1571,14 @@ fn emit_send(
     // Zero-arg receiver sends: builtin coercions, then property vs method.
     if let (Some(r), true) = (recv, args.is_empty() && block.is_none()) {
         let rs = emit_expr(r);
+        // The receiver's class defines this method itself (a
+        // CacheControlStore's `empty?`, `max_age`): call it, before the
+        // builtin collection mappings of the same names.
+        if let Some(cls) = receiver_class_name(r) {
+            if is_instance_method_of(&cls, method) {
+                return format!("{rs}.{}()", pascal(method));
+            }
+        }
         match method {
             // A non-nullable value-typed receiver (`long`/`double`/`bool`
             // column) is never nil — emit `false` so C# doesn't warn on an
@@ -1552,6 +1591,16 @@ fn emit_send(
                 return "false".to_string()
             }
             "nil?" => return format!("({rs} == null)"),
+            // HeaderStore#delete's `@keys.pop()` — List has RemoveAt, not Pop.
+            // RemoveAt is void and throws on empty; Ruby returns the element or nil.
+            "pop" if recv_is_array(r) => {
+                let elem = array_elem_ty(r)
+                    .map(|t| csharp_ty(&t))
+                    .unwrap_or_else(|| "object?".to_string());
+                return format!(
+                    "((System.Func<{elem}>)(() => {{ if ({rs}.Count == 0) return default; var _last = {rs}[{rs}.Count - 1]; {rs}.RemoveAt({rs}.Count - 1); return _last; }}))()"
+                );
+            }
             "!" => return format!("!({rs})"),
             "to_s" => return format!("(Convert.ToString({rs}) ?? \"\")"),
             "to_i" => return format!("Convert.ToInt64({rs})"),
@@ -1570,6 +1619,12 @@ fn emit_send(
                     format!("({rs}.Length != 0)")
                 };
             }
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if matches!(
+                r.ty.as_ref(),
+                Some(crate::ty::Ty::Array { elem })
+                    if matches!(**elem, crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym)
+            ) => return format!("({rs}.Count == 0)"),
             "upcase" => return format!("{rs}.ToUpperInvariant()"),
             "downcase" => return format!("{rs}.ToLowerInvariant()"),
             "strip" => return format!("{rs}.Trim()"),
@@ -1835,7 +1890,17 @@ fn emit_if_stmt(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
     if let Some((var, ty)) = narrowing_guard(cond) {
         let patvar = format!("{var}As{}", sanitize_type(&ty));
         let then = rename_word(&emit_stmt(then_branch), &var, &patvar);
-        let head = format!("if ({var} is {ty} {patvar}) {{\n{}\n}}", indent(&then));
+        let test = match ty.as_str() {
+            // Not `is IEnumerable<object?>`: a `List<long>` is not one, so match the non-generic interface.
+            "Array" => format!(
+                "{var} is System.Collections.IList {var}AsIList && new RhArrayView({var}AsIList) is var {patvar}"
+            ),
+            "Hash" => format!(
+                "{var} is System.Collections.IDictionary {var}AsIDictionary && new RhHashView({var}AsIDictionary) is var {patvar}"
+            ),
+            _ => format!("{var} is {ty} {patvar}"),
+        };
+        let head = format!("if ({test}) {{\n{}\n}}", indent(&then));
         if is_empty_branch(else_branch) {
             return head;
         }
@@ -1861,8 +1926,12 @@ fn narrowing_guard(cond: &Expr) -> Option<(String, String)> {
             if let (ExprNode::Var { name, .. }, ExprNode::Const { path }) =
                 (&*r.node, &*args[0].node)
             {
-                if let Some(t) = is_a_cast_type(path.last().map(|s| s.as_str()).unwrap_or("")) {
+                let last = path.last().map(|s| s.as_str()).unwrap_or("");
+                if let Some(t) = is_a_cast_type(last) {
                     return Some((camel(name.as_str()), t));
+                }
+                if matches!(last, "Array" | "Hash") {
+                    return Some((camel(name.as_str()), last.to_string()));
                 }
             }
         }

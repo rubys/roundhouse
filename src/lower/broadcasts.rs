@@ -240,7 +240,7 @@ fn collect_broadcasts_to(out: &mut LoweredBroadcasts, args: &[Expr]) {
     };
     // Accept both lambda and bare-string forms for the channel.
     let (channel, self_param) = match &*stream_arg.node {
-        ExprNode::Lambda { body, params, .. } => {
+        ExprNode::Lambda { body, params, extra_params, .. } if extra_params.is_empty() => {
             (body.clone(), params.first().cloned())
         }
         ExprNode::Lit { value: Literal::Str { .. } } => (stream_arg.clone(), None),
@@ -379,9 +379,8 @@ fn hash_sym_key(k: &Expr) -> Option<Symbol> {
 pub enum Streamable {
     /// A literal segment: `:messages`, `"articles"`.
     Literal(String),
-    /// A record, contributing `<singular>_<id>` with the id read at
-    /// run time.
-    Record { singular: String, id: Expr },
+    /// A record, contributing its runtime GlobalID parameter.
+    Record { record: Expr },
 }
 
 /// Spell a turbo stream name from its streamables — THE convention,
@@ -439,12 +438,13 @@ pub enum Streamable {
 /// appears, and the call sites are not all ours to see — the app's test
 /// helpers are app code.
 ///
-/// The model NAME is a literal rather than `self.class.name`, the same
-/// rule `push_attachable_sgid` and `lower::signed_id` state: it is a
-/// compile-time fact, and baking it keeps the runtime free of
-/// reflection. NOTE the consequence for STI — `Rooms::Closed` mints
-/// `gid://app/Rooms::Closed/3` where Rails mints the same, because
-/// Rails uses the instance's own class too.
+/// The model NAME is a compile-time fact, baked as a literal — except
+/// on an STI base, whose rows belong to subclasses. Rails mints those
+/// with the row's own class (`gid://app/Rooms::Open/3`). Hydration here
+/// is base-classed, so the name dispatches on the `type` column, the
+/// same way `dom_prefix` does: a row loaded through `Room.find` and one
+/// recast by `becomes!` mint the same stream name, and a type naming
+/// no known subclass keeps the base's name.
 pub fn push_to_gid_param(
     methods: &mut Vec<crate::dialect::MethodDef>,
     model: &crate::dialect::Model,
@@ -456,11 +456,7 @@ pub fn push_to_gid_param(
     {
         return;
     }
-    let mut model_lit = Expr::new(
-        crate::span::Span::synthetic(),
-        ExprNode::Lit { value: Literal::Str { value: model.name.0.as_str().to_string() } },
-    );
-    model_lit.ty = Some(crate::ty::Ty::Str);
+    let model_name = gid_model_name(model);
     // `self.id`, NOT `@id`: this method lands on every model INCLUDING
     // the abstract `ApplicationRecord`, and an ivar read there makes
     // the ancestor hold the `@id` slot — the union point that widens
@@ -493,7 +489,7 @@ pub fn push_to_gid_param(
                 ExprNode::Const { path: vec![crate::ident::Symbol::from("GlobalID")] },
             )),
             method: crate::ident::Symbol::from("param"),
-            args: vec![model_lit, id_read],
+            args: vec![model_name, id_read],
             block: None,
             parenthesized: true,
         },
@@ -518,27 +514,61 @@ pub fn push_to_gid_param(
     });
 }
 
-/// `GlobalID.param("Room", <id expr>)` — the runtime mint. The model
-/// name is camelized from the streamable's singular, which is the same
-/// name the record's class carries.
-fn gid_param_call(singular: &str, id: &Expr) -> Expr {
-    let model = crate::naming::camelize(singular);
-    let model_lit = Expr::new(
+pub(crate) fn gid_model_name(model: &Model) -> Expr {
+    let str_lit = |value: &str| {
+        let mut e = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Lit { value: Literal::Str { value: value.to_string() } },
+        );
+        e.ty = Some(crate::ty::Ty::Str);
+        e
+    };
+    let base = model.name.0.as_str();
+    if model.sti_subclass_names.is_empty() {
+        return str_lit(base);
+    }
+    let mut arms: Vec<crate::expr::Arm> = model
+        .sti_subclass_names
+        .iter()
+        .map(|sub| crate::expr::Arm {
+            pattern: crate::expr::Pattern::Lit {
+                value: Literal::Str { value: sub.0.as_str().to_string() },
+            },
+            guard: None,
+            body: str_lit(sub.0.as_str()),
+        })
+        .collect();
+    arms.push(crate::expr::Arm {
+        pattern: crate::expr::Pattern::Wildcard,
+        guard: None,
+        body: str_lit(base),
+    });
+    let mut case = Expr::new(
         crate::span::Span::synthetic(),
-        ExprNode::Lit { value: Literal::Str { value: model } },
+        ExprNode::Case {
+            scrutinee: Expr::new(
+                crate::span::Span::synthetic(),
+                ExprNode::Ivar { name: Symbol::from("type") },
+            ),
+            arms,
+        },
     );
-    let recv = Expr::new(
-        crate::span::Span::synthetic(),
-        ExprNode::Const { path: vec![crate::ident::Symbol::from("GlobalID")] },
-    );
+    case.ty = Some(crate::ty::Ty::Str);
+    case
+}
+
+/// Ask the record for its GlobalID parameter. Besides matching Rails'
+/// `try(:to_gid_param) || to_param`, this preserves the concrete class
+/// name for STI records instead of guessing it from the base singular.
+fn gid_param_call(record: &Expr) -> Expr {
     Expr::new(
         crate::span::Span::synthetic(),
         ExprNode::Send {
-            recv: Some(recv),
-            method: crate::ident::Symbol::from("param"),
-            args: vec![model_lit, id.clone()],
+            recv: Some(record.clone()),
+            method: crate::ident::Symbol::from("to_gid_param"),
+            args: vec![],
             block: None,
-            parenthesized: true,
+            parenthesized: false,
         },
     )
 }
@@ -552,12 +582,12 @@ pub fn stream_name(parts: &[Streamable]) -> Expr {
         }
         match part {
             Streamable::Literal(text) => pending.push_str(text),
-            Streamable::Record { singular, id } => {
+            Streamable::Record { record } => {
                 interp.push(crate::expr::InterpPart::Text {
                     value: std::mem::take(&mut pending),
                 });
                 interp.push(crate::expr::InterpPart::Expr {
-                    expr: gid_param_call(singular, id),
+                    expr: gid_param_call(record),
                 });
             }
         }

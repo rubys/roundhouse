@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Shared by the emitted runtime suite and tests/param_binds.rs, which runs
 # this contract on CRuby and compiles it with Spinel. No app fixture needed.
 class StatementCacheTest

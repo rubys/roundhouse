@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `ActionText::Content#to_json` on spinel — the VALUE half of a rich
 # text's two answers, the way the CRuby overlay's
 # `action_view_safe_buffer.rb` states it: `to_s` RENDERS (through the

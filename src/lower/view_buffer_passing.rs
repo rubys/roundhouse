@@ -224,18 +224,18 @@ fn split(m: &MethodDef, module_path: &[Symbol], acc: &str) -> (MethodDef, Method
         Some(Ty::Fn { params, block, effects, .. }) => {
             let mut ps = vec![crate::ty::Param {
                 name: Symbol::from(acc),
-                ty: Ty::Str,
+                ty: Ty::Str.into(),
                 kind: ParamKind::Required,
             }];
             ps.extend(params.iter().map(|p| crate::ty::Param {
                 name: p.name.clone(),
-                ty: into_param_ty(&p.ty),
+                ty: into_param_ty(&p.ty).into(),
                 kind: ParamKind::Required,
             }));
             Some(Ty::Fn {
-                params: ps,
+                params: ps.into(),
                 block: block.clone(),
-                ret: Box::new(Ty::Nil),
+                ret: std::sync::Arc::new(Ty::Nil),
                 effects: effects.clone(),
             })
         }

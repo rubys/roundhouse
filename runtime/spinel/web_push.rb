@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The `web-push` gem's delivery (3.0.2, campfire's lock) on spinel:
 # `WebPush::Request` as the gem has it, and the `WebPush.deliver` the
 # façade in runtime/gem_facades.rb leaves failing, redefined here to

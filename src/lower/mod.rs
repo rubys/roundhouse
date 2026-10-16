@@ -40,16 +40,21 @@ pub mod library_extras;
 pub mod model_to_library;
 pub mod routes;
 pub mod routes_to_library;
+pub mod segment_pattern;
 pub mod scope_chain;
 pub mod schema_to_library;
 pub mod seeds_to_library;
 pub mod test_module_to_library;
 pub mod create_block;
 pub mod as_json_poro;
+mod as_json_record;
+pub use as_json_writer::WRITER_METHOD as JSON_WRITER_METHOD;
+mod as_json_value;
 pub mod active_model_model;
 pub mod enumerable_ext;
 mod fused;
 pub mod time_calendar;
+pub mod indifferent_access;
 pub mod boolean_cast;
 pub mod where_range_split;
 pub mod params_merge;
@@ -67,6 +72,7 @@ mod perform_all_later;
 pub mod authenticate_by;
 pub mod group_count;
 pub mod bool_fold;
+pub mod friendly_id;
 pub mod generates_token_for;
 pub mod spliced_concern_bodies;
 pub mod unported_rails_subclasses;
@@ -77,23 +83,31 @@ pub mod class_body_new;
 pub mod mocha;
 pub mod webmock;
 pub mod global_id_locate;
+pub mod record_snapshot;
 pub mod array_ordinal;
 pub mod each_with_index;
 pub mod sti_is_a;
 pub mod dead_default;
 pub mod errors_add;
 pub mod errors_full_messages;
+pub mod errors_safe_nav;
+pub mod human_attribute_name;
+pub mod i18n_translate;
 pub mod assoc_attr_key;
 pub mod attachable;
 pub mod attachables_grep;
 pub mod errors_index;
 pub mod job_class_side;
+pub mod job_payload;
 pub mod mailer_class_side;
 pub mod as_json_shape;
 pub mod as_json_writer;
 pub mod as_json_super;
 pub mod parameterize;
 pub mod random_formatter;
+pub mod bigdecimal;
+pub mod range_enumerable;
+pub mod preloader;
 pub mod to_json;
 pub mod number_to_fs;
 pub mod string_inflections;
@@ -103,6 +117,7 @@ pub mod relation_ivar_materialize;
 pub mod records_to_relation_arg;
 pub mod save_without_validation;
 pub mod defined_ivar_memo;
+pub mod defined_const_fold;
 pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;
 pub mod job_test_only;
@@ -127,6 +142,7 @@ pub mod cable_test_case;
 pub mod view_test_case;
 pub mod current_set;
 pub mod update_writer_check;
+pub mod unscope_check;
 pub mod route_format_suffix;
 pub mod route_url_options;
 pub mod route_helper_receiver;
@@ -135,11 +151,14 @@ pub mod symbolize_keys;
 pub mod enum_mapping_keys;
 pub mod exists_conditions;
 pub mod destroy_by;
+pub mod assoc_primary_key;
 pub mod has_one_builder;
 pub mod inquiry;
 pub mod byte_size;
+pub mod numeric_unary;
 pub mod tag_builder;
 pub mod kwsplat;
+pub mod arel_sql_order;
 pub mod literal_append;
 pub mod html_safe;
 pub mod rails_cache;
@@ -161,9 +180,11 @@ pub mod send_file;
 pub mod helper_kwargs;
 pub mod kwrest_forward;
 pub mod column_ops;
+pub mod generated_write_guard;
 pub mod signed_id;
 pub(crate) mod secure_token;
 pub mod rich_text;
+pub mod known_super_forwarding;
 pub mod plain_text_attr;
 pub mod capture_inline;
 pub mod partial_qualify;
@@ -285,6 +306,11 @@ pub(crate) fn residue_diagnostic(
 /// checked by a `debug_assert!` on entry to the pipeline and by the
 /// `post_analyze_pass_order_is_sound` unit test.
 const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
+    // `defined?(Const)` → "constant" / nil when the tree, the lockfile
+    // and config/application.rb decide it, with the guard's dead branch
+    // pruned. First, so every later pass (and the spinel refusal of a
+    // runtime `defined?`) sees only the code that can run.
+    ("defined_const_fold", &[]),
     // Deletes every class extending a Rails base the runtime does not
     // port (`ApplicationMailbox < ActionMailbox::Base`) before any pass
     // ledgers residue for a body that is not going to emit.
@@ -297,13 +323,20 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // ledger residue for (or rewrite inside) code that cannot run.
     ("bool_fold", &[]),
     ("association_new", &["bool_fold"]),
+    // Before every `errors` rewrite, which match an `errors` send as the receiver.
+    ("errors_safe_nav", &["bool_fold"]),
+    // Refuses `**h` into flattened optional keywords while the splat is
+    // still a `KeywordSplat`; `forwarding_keywords` erases it to `h`.
+    ("flattened_keyword_splats", &["bool_fold"]),
     // Preserve native full destinations; ordinary keyword producers
     // rejoin the legacy projection before any argument-rewriting pass.
-    ("forwarding_keywords", &["bool_fold"]),
+    ("forwarding_keywords", &["bool_fold", "flattened_keyword_splats"]),
     // Reads the analyzer's nested request-params types before any pass rewrites the controller bodies that carry them.
     ("params_residue", &["bool_fold"]),
     // After the ledger, which reads the calls this rewrites; before the controller lowering turns `params` into `@params`.
     ("params_permit", &["params_residue"]),
+    // Before the fused rewrites, which key on the plain Hash type this pass leaves on an indifferent hash.
+    ("indifferent_access", &[]),
     // Independent send rewrites: one fused tree walk in
     // `fused::apply_fused_independent_rewrites`. Grouped here so the
     // executed-pass assert stays a straight list match.
@@ -314,6 +347,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("number_to_fs", &[]),
     ("string_inflections", &[]),
     ("to_json", &[]),
+    ("preloader", &[]),
+    ("bigdecimal", &[]),
+    ("range_enumerable", &[]),
     ("csv_generate", &[]),
     ("presence_in", &[]),
     ("enumerable_ext", &[]),
@@ -373,6 +409,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // (`attribute_aliases` keys on `read_attribute`). Extra test
     // constant / inner-class surfaces stay try_guard-only.
     ("try_guard", &[]),
+    // `Model.instantiate(attrs)` / `name.constantize.instantiate(attrs)` —
+    // Rails' raw-attribute rebuild. Keys on `instantiate` and nothing
+    // another pass produces.
+    ("record_snapshot", &[]),
     // After time_calendar (fused earlier): `t.all_month` becomes the Range literal this splits out.
     // Stays sequential: rewrite plus a diagnostic walk that tracks
     // `where`/`find_by` condition position. Fusing the rewrite would
@@ -485,6 +525,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Rewrites nothing, so it has no ordering constraint of its own —
     // it just has to see the final tree.
     ("update_writer_check", &[]),
+    // Read-only: refuses an `unscope` form the runtime cannot honour.
+    ("unscope_check", &[]),
     // `x.inquiry` / `x.<name>?` → equality against the label; total
     // rewrite of a name no other pass produces or consumes.
     ("inquiry", &[]),
@@ -506,6 +548,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("symbolize_keys", &["config_reader"]),
     // No runs_after: it reads the ingested enum tables and rewrites only the key argument.
     ("enum_mapping_keys", &[]),
+    // `-x` / `+x` on a typed Integer or Float → `x * -1` / `x`; local
+    // expression rewrite, no ordering constraints.
+    ("numeric_unary", &[]),
     // `f(**h)` (erased to `f(h)` at ingest) → `f(k: h[:k], …)` when the
     // callee declares explicit keywords. Reads the arg count against the
     // callee's signature, so it must see the argument list as ingested —
@@ -537,7 +582,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // so it has no ordering constraints of its own.
     ("module_mixins", &[]),
     ("transaction_ground", &[]),
-    ("column_ops", &[]),
+    ("generated_write_guard", &[]),
+    ("column_ops", &["generated_write_guard"]),
     // `signed_id(purpose: :avatar)` → the runtime SignedId call, with
     // the model name folded into the purpose. BEFORE `duration`: the
     // `expires_in:` argument this wraps in `.to_i` is an
@@ -558,11 +604,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("normalizes", &["authenticate_by"]),
     ("dead_default", &[]),
     ("errors_add", &[]),
-    // `errors[:field]` -> `ActiveSupport.errors_for(errors, "Field ")`.
-    // AFTER `errors_add`, so a hand-written `errors.add(:field, …)` in
-    // the same body has already baked its humanized prefix — the
-    // projection this pass emits reads that text.
+    // `errors[:field]` -> `error_messages_for("field")`.
     ("errors_index", &["errors_add"]),
+    ("human_attribute_name", &[]),
+    ("i18n_translate", &[]),
     ("create_block", &["secure_password_super"]),
     // `<params>.merge(k: v)` written a method away from the permit
     // chain → `Model.from_params(p)` + per-key setters, hoisted above
@@ -580,7 +625,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // include dropped. Reads only the class's own writer surface and
     // writes only new methods, so no ordering constraints.
     ("active_model_model", &[]),
-    ("update_kwargs", &[]),
+    ("update_kwargs", &["generated_write_guard"]),
     // `record.update!(creator: user)` -> `update!(creator_id: user.id)`.
     // AFTER `update_kwargs`, which INLINES the same shape into typed
     // writer assignments when it can — and a `belongs_to` writer is the
@@ -735,16 +780,24 @@ pub fn apply_post_analyze_lowerings(
     // assert. `push` calls sit adjacent to each pass call below.
     #[cfg(debug_assertions)]
     let mut executed: Vec<&str> = Vec::new();
+    // With ROUNDHOUSE_TIMINGS each pass also prints its time since the
+    // previous one (a fused group's members after its phase line read ~0).
     #[cfg(debug_assertions)]
     macro_rules! ran {
-        ($name:expr) => {
-            executed.push($name)
-        };
+        ($name:expr) => {{
+            executed.push($name);
+            crate::timings::lap(format_args!("post-analyze pass: {}", $name));
+        }};
     }
     #[cfg(not(debug_assertions))]
     macro_rules! ran {
-        ($name:expr) => {};
+        ($name:expr) => {
+            crate::timings::lap(format_args!("post-analyze pass: {}", $name))
+        };
     }
+    crate::timings::lap_start();
+    defined_const_fold::apply_defined_const_fold(app);
+    ran!("defined_const_fold");
     let mut diags = unported_rails_subclasses::apply_unported_rails_subclass_drop(app);
     ran!("unported_rails_subclasses");
     spliced_concern_bodies::apply_spliced_concern_body_prune(app);
@@ -753,12 +806,20 @@ pub fn apply_post_analyze_lowerings(
     ran!("bool_fold");
     association_new::apply_association_new_lowering(app);
     ran!("association_new");
+    errors_safe_nav::apply_errors_safe_nav_lowering(app);
+    ran!("errors_safe_nav");
+    // Before the first `forwarding::apply` erases `**h` into a
+    // positional `h`, after which `f(x, **h)` and `f(x, h)` are one tree.
+    diags.extend(helper_kwargs::refuse_flattened_keyword_splats(app));
+    ran!("flattened_keyword_splats");
     diags.extend(forwarding::apply(app));
     ran!("forwarding_keywords");
     diags.extend(params_residue::apply_params_residue_ledger(app));
     ran!("params_residue");
     params_permit::apply_params_permit_lowering(app);
     ran!("params_permit");
+    indifferent_access::apply_indifferent_access_lowering(app);
+    ran!("indifferent_access");
     crate::timings::phase("post-analyze: fused send rewrites", || {
         fused::apply_fused_independent_rewrites(app);
     });
@@ -769,6 +830,9 @@ pub fn apply_post_analyze_lowerings(
     ran!("number_to_fs");
     ran!("string_inflections");
     ran!("to_json");
+    ran!("preloader");
+    ran!("bigdecimal");
+    ran!("range_enumerable");
     ran!("csv_generate");
     ran!("presence_in");
     ran!("enumerable_ext");
@@ -813,6 +877,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("global_id_locate");
     ran!("assoc_pluck");
     ran!("try_guard");
+    record_snapshot::apply_record_snapshot_lowering(app);
+    ran!("record_snapshot");
     diags.extend(where_range_split::apply_where_range_split(app));
     ran!("where_range_split");
     sti_scope::apply_sti_scope_lowering(app);
@@ -857,6 +923,8 @@ pub fn apply_post_analyze_lowerings(
     // an `update` site.
     update_writer_check::apply_update_writer_check(app);
     ran!("update_writer_check");
+    diags.extend(unscope_check::apply_unscope_check(app));
+    ran!("unscope_check");
     inquiry::apply_inquiry_lowering(app);
     ran!("inquiry");
     has_one_builder::apply_has_one_builder_lowering(app);
@@ -866,6 +934,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("symbolize_keys");
     enum_mapping_keys::apply_enum_mapping_keys(app);
     ran!("enum_mapping_keys");
+    numeric_unary::apply_numeric_unary_lowering(app);
+    ran!("numeric_unary");
     diags.extend(crate::timings::phase("post-analyze: kwsplat", || {
         kwsplat::apply_kwsplat_expansion(app)
     }));
@@ -887,6 +957,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("module_mixins");
     transaction_ground::apply_transaction_grounding(app);
     ran!("transaction_ground");
+    diags.extend(generated_write_guard::apply(app));
+    ran!("generated_write_guard");
     column_ops::apply_column_ops_lowering(app);
     ran!("column_ops");
     signed_id::apply_signed_id_lowering(app);
@@ -911,6 +983,10 @@ pub fn apply_post_analyze_lowerings(
     ran!("errors_add");
     diags.extend(errors_index::apply_errors_index_lowering(app));
     ran!("errors_index");
+    human_attribute_name::apply_human_attribute_name_lowering(app);
+    ran!("human_attribute_name");
+    i18n_translate::apply_i18n_translate_lowering(app);
+    ran!("i18n_translate");
     diags.extend(create_block::apply_create_block_inline(app));
     ran!("create_block");
     diags.extend(params_merge::apply_params_merge_lowering(app));
@@ -957,7 +1033,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("attached_url");
     diags.extend(kwrest_forward::apply_kwrest_forward_lowering(app));
     ran!("kwrest_forward");
-    helper_kwargs::apply_helper_kwarg_positional_lowering(app);
+    diags.extend(helper_kwargs::apply_helper_kwarg_positional_lowering(app));
     ran!("helper_kwargs");
     view_to_library::form_wrapper::preserve_argument_owners(app, registry);
     ran!("form_wrapper_owners");
@@ -1474,7 +1550,7 @@ pub use routes_to_library::{
     lower_routes_to_dispatch_functions, lower_routes_to_library_functions,
     url_options_helper_name,
 };
-pub use schema_to_library::lower_schema_to_library_functions;
+pub use schema_to_library::{lower_schema_module_functions, lower_schema_to_library_functions};
 pub use seeds_to_library::lower_seeds_to_library_functions;
 pub use test_module_to_library::{
     lower_test_module_to_library_class, lower_test_modules_to_library_classes,
@@ -1507,7 +1583,7 @@ pub use controller::{
 };
 pub use controller_test::{
     classify_assert_select, classify_controller_test_send, classify_url_expr,
-    flatten_params_pairs, test_body_stmts, AssertSelectKind, ControllerTestSend, UrlArg,
+    flatten_params_pairs, setup_fixture, test_body_stmts, AssertSelectKind, ControllerTestSend, UrlArg,
     UrlHelperCall,
 };
 pub use fixtures::{
@@ -1564,6 +1640,7 @@ pub fn module_funcs_to_library_class(
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: None,

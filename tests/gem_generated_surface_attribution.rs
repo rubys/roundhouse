@@ -253,7 +253,7 @@ fn failed(receiver: roundhouse::ty::Ty, method: &str) -> Diagnostic {
 fn class(name: &str) -> roundhouse::ty::Ty {
     roundhouse::ty::Ty::Class {
         id: roundhouse::ClassId(name.into()),
-        args: vec![],
+        args: vec![].into(),
     }
 }
 
@@ -296,7 +296,7 @@ fn names_no_declaration_generates_and_unproven_receivers_stay_errors() {
         ),
         (
             Ty::Union {
-                variants: vec![class("WorkflowRecord"), class("Other")],
+                variants: vec![class("WorkflowRecord"), class("Other")].into(),
             },
             "finish!",
         ),
@@ -308,7 +308,7 @@ fn names_no_declaration_generates_and_unproven_receivers_stay_errors() {
     }
     let mut nullable = vec![failed(
         Ty::Union {
-            variants: vec![class("WorkflowRecord"), Ty::Nil],
+            variants: vec![class("WorkflowRecord"), Ty::Nil].into(),
         },
         "finish!",
     )];

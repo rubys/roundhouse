@@ -238,6 +238,12 @@ fn render_block_closure_param(name: &str, block_ty: &Ty) -> String {
     }
 }
 
+/// `def x=` / `def []=` / `attr_writer`: an assignment writer, not a
+/// comparison operator (`==`, `<=`, `>=`, `!=`), which also end in `=`.
+fn is_writer_name(name: &str) -> bool {
+    name.ends_with('=') && !matches!(name, "==" | "!=" | "<=" | ">=" | "===")
+}
+
 fn render_return(m: &MethodDef) -> String {
     // Setter methods (`def x=`, `attr_writer :x`, `attr_accessor :x`)
     // have a Ruby-shape return type of the assigned value, but the
@@ -248,7 +254,7 @@ fn render_return(m: &MethodDef) -> String {
     // without losing reachable behavior. Detected on the original
     // Ruby method name (`m.name`) before sanitize_ident rewrites the
     // trailing `=` to a `set_` prefix.
-    if m.name.as_str().ends_with('=') {
+    if is_writer_name(m.name.as_str()) {
         return String::new();
     }
     match m.signature.as_ref() {
@@ -541,7 +547,7 @@ pub(super) fn emit_instance_method(
     // returning fn, which mangles into `Some(})` when
     // `wrap_last_expression_with_some` operates on the multi-line
     // match's closing brace.
-    let is_setter = m.name.as_str().ends_with('=');
+    let is_setter = is_writer_name(m.name.as_str());
     let body = if !is_init && !is_setter && needs_function_tail_some_wrap(&m.body, return_ty.as_ref()) {
         wrap_last_expression_with_some(&body)
     } else if !is_init && needs_function_tail_self_clone(&m.body, return_ty.as_ref()) {
@@ -580,13 +586,17 @@ pub(super) fn emit_instance_method(
         // Skips the case where the tail is already a block-shaped
         // expression (closes with `}`) since those are statements
         // with no value, or a return statement.
+        // A writer is emitted void (`render_return`) whatever value
+        // its Ruby body ends on, so its tail is a statement too.
         let returns_unit = !is_init
-            && matches!(return_ty.as_ref(), Some(Ty::Nil) | None);
+            && (is_setter || matches!(return_ty.as_ref(), Some(Ty::Nil) | None));
         let needs_unit_terminator = returns_unit
             && i == last_idx
             && !line.trim_end().ends_with(';')
             && !line.trim_end().ends_with('{')
-            && !line.trim_end().ends_with('}');
+            // A writer's tail is a statement even when it closes a
+            // block (`match … { … }` yielding a value).
+            && (is_setter || !line.trim_end().ends_with('}'));
         let needs_terminator = is_init
             && i == last_idx
             && !line.trim_end().ends_with(';')
@@ -762,7 +772,7 @@ fn collect_param_types(m: &MethodDef) -> std::collections::HashMap<String, Ty> {
         return out;
     }
     for (p, sig_p) in m.params.iter().zip(params.iter()) {
-        out.insert(p.name.as_str().to_string(), sig_p.ty.clone());
+        out.insert(p.name.as_str().to_string(), (*sig_p.ty).clone());
     }
     out
 }
@@ -971,11 +981,11 @@ mod tests {
         let block_sig = Ty::Fn {
             params: vec![TyParam {
                 name: Symbol::new("k"),
-                ty: Ty::Str,
+                ty: Ty::Str.into(),
                 kind: ParamKind::Required,
-            }],
+            }].into(),
             block: None,
-            ret: Box::new(Ty::Nil),
+            ret: std::sync::Arc::new(Ty::Nil),
             effects: EffectSet::pure(),
         };
         let callee = MethodDef {
@@ -990,11 +1000,11 @@ mod tests {
             signature: Some(Ty::Fn {
                 params: vec![TyParam {
                     name: Symbol::new("block"),
-                    ty: block_sig.clone(),
+                    ty: block_sig.clone().into(),
                     kind: ParamKind::Block,
-                }],
-                block: Some(Box::new(block_sig)),
-                ret: Box::new(Ty::Nil),
+                }].into(),
+                block: Some(std::sync::Arc::new(block_sig)),
+                ret: std::sync::Arc::new(Ty::Nil),
                 effects: EffectSet::pure(),
             }),
             effects: EffectSet::pure(),
@@ -1040,6 +1050,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: vec![],
+            include_spans: Vec::new(),
             methods: vec![callee, forwarder],
             nullable_columns: Vec::new(),
             origin: None,

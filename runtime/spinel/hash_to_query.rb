@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `Hash#to_query`'s nested grammar and ordering, for the ruby family: a
 # Hash value renders as `outer[inner]=…`, an Array as repeated
 # `key[]=…`, an empty container as nothing, and the strings at each

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Safe-buffer-aware overrides of the shared runtime's escape surface.
 #
 # Must load AFTER runtime/action_controller (whose require chain pulls

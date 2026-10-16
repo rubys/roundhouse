@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Transpiled shape of fixtures/real-blog/app/models/article.rb.
 #
 # Expansion applied (per ruby2js's filter/rails/model.rb, updated

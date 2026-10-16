@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "../test_helper"
 require_relative "../../rails"
 require_relative "../../action_controller/rate_limiter"

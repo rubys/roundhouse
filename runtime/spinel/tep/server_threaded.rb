@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::Server::Threaded -- a green thread per connection.
 #
 # The connection is a `Thread`. spinel's Thread is a green thread on an
@@ -67,7 +68,7 @@ module Tep
       end
 
       def run(port, workers, quiet)
-        sfd = Sock.sphttp_listen(port, workers > 1 ? 1 : 0)
+        sfd = Sock.sphttp_listen_on(Tep::APP.bind_host, port, workers > 1 ? 1 : 0)
         if sfd < 0
           $stderr.puts Tep.display_name + ": cannot bind to port " +
                        port.to_s + " (already in use?)"
@@ -75,7 +76,7 @@ module Tep
         end
         if !quiet
           puts Tep.display_name + " (" + RUBY_ENGINE +
-               ") listening on http://0.0.0.0:" + port.to_s +
+               ") listening on http://" + (Tep::APP.bind_host.empty? ? "0.0.0.0" : Tep::APP.bind_host) + ":" + port.to_s +
                ", pid " + Sock.sphttp_getpid.to_s
           puts "  one green thread per connection; OS workers: " +
                Tep.os_workers_desc + "; processes: " +
@@ -212,7 +213,7 @@ module Tep
           return false
         end
 
-        req.consume_body_via_io(io, client)
+        return false unless req.consume_body_via_io(io, client)
 
         res = Response.new
         begin
@@ -341,10 +342,12 @@ module Tep
         0
       end
 
+      # bytesize, as write_response: a multibyte `msg` would otherwise
+      # announce fewer bytes than are written.
       def self.send_simple(client, status, msg)
         reason = Tep.reason(status)
         head = "HTTP/1.0 " + status.to_s + " " + reason + "\r\n" +
-               "Content-Length: " + msg.length.to_s + "\r\n" +
+               "Content-Length: " + msg.bytesize.to_s + "\r\n" +
                "Connection: close\r\n\r\n" + msg
         Sock.sphttp_write_str(client, head)
         0

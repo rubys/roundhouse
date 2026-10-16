@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Default ActiveRecord JSON entrypoint for the Spinel runtime.
 # Always loaded: date-free apps still need `as_json` → `_as_json_only`
 # (time-aware via shared connection.rb). Date-column rewrite lives in

@@ -102,6 +102,18 @@ pub(super) fn emit_turbo_stream_fragment(
 
     let html = match ts.content {
         None => lit_str(String::new()),
+        // Markup the controller already rendered
+        // (`turbo_stream.append target, @message_html`). turbo-rails'
+        // `render_template` renders a record's partial only when the
+        // content has a `to_partial_path`; anything else goes into the
+        // template as given, marked html_safe, so a String is not
+        // escaped.
+        Some(content)
+            if matches!(content.ty, Some(crate::ty::Ty::Str))
+                || record_name(content).is_some_and(|name| ctx.str_ivars.contains(&name)) =>
+        {
+            rewrite_helpers_in_expr(content, ctx)
+        }
         Some(content) => {
             // Only the render-this-record form. Anything else (a literal
             // string, a nested call) would need the partial machinery a
@@ -128,7 +140,19 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             let (name, channel) = view_stream_from(streamables, ctx)?;
             Some(view_helpers_call("turbo_stream_from", vec![name, channel]))
         }
-        RenderAttrs { attrs } => Some(view_helpers_call("render_attrs", vec![(*attrs).clone()])),
+        // `attrs` is a Hash literal whose VALUES can themselves be a
+        // helper call (the HAML compiler's shortcut-class merge emits
+        // `render_attrs({ class: haml_class("g", k), … })`) — thread it
+        // back through the walk first, so a nested helper reaches its
+        // own `ActionView::ViewHelpers.*` emit instead of surviving as a
+        // bare, unqualified call the Views module has no method for.
+        RenderAttrs { attrs } => {
+            Some(view_helpers_call("render_attrs", vec![rewrite_helpers_in_expr(attrs, ctx)]))
+        }
+        HamlClass { static_classes, value } => Some(view_helpers_call(
+            "haml_class",
+            vec![rewrite_helpers_in_expr(static_classes, ctx), rewrite_helpers_in_expr(value, ctx)],
+        )),
         DomId { record, prefix } => {
             let mut args = vec![(*record).clone()];
             if let Some(p) = prefix {
@@ -159,6 +183,14 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             }
             let truncated = view_helpers_call("truncate", args);
             Some(view_helpers_call("html_escape", vec![truncated]))
+        }
+        WordWrap { text, opts } => {
+            let mut args = vec![lit_str_coerce((*text).clone())];
+            if let Some(o) = opts {
+                args.push((*o).clone());
+            }
+            let wrapped = view_helpers_call("word_wrap", args);
+            Some(view_helpers_call("html_escape", vec![wrapped]))
         }
         ContentForGetter { slot } => Some(view_helpers_call(
             "content_for_get",
@@ -451,8 +483,7 @@ fn view_stream_name(streamables: &[Expr], ctx: &ViewCtx) -> Option<Expr> {
                     return None;
                 }
                 parts.push(Streamable::Record {
-                    singular: name,
-                    id: send(Some(arg.clone()), "id", vec![], None, false),
+                    record: arg.clone(),
                 });
             }
         }

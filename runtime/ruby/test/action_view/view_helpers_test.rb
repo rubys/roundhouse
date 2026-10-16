@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "../test_helper"
 
 # Direct unit tests for `runtime/ruby/action_view/view_helpers.rb`.
@@ -141,6 +142,28 @@ class ViewHelpersTest < Minitest::Test
 
   def test_truncate_custom_omission
     assert_equal "abc[…]", ViewHelpers.truncate("abcdefghij", length: 6, omission: "[…]")
+  end
+
+  # Measured against ActionView 8.1.4. Long unbroken words remain
+  # intact, existing newlines are boundaries, and callers can choose
+  # the inserted break sequence.
+  def test_word_wrap_matches_rails_boundaries_and_options
+    assert_equal "one two\nthree", ViewHelpers.word_wrap("one two three", line_width: 7)
+    assert_equal "123456789", ViewHelpers.word_wrap("123456789", line_width: 4)
+    assert_equal "a|b|c", ViewHelpers.word_wrap("a\nb c", line_width: 2, break_sequence: "|")
+    assert_equal "a|b c", ViewHelpers.word_wrap("a\nb c", line_width: 4, break_sequence: "|")
+    assert_equal "a||b", ViewHelpers.word_wrap("a\n\nb", line_width: 1, break_sequence: "|")
+    assert_equal "één|twee", ViewHelpers.word_wrap("één twee", line_width: 5, break_sequence: "|")
+    assert_equal "1234\\15678\\19", ViewHelpers.word_wrap("1234 5678 9", line_width: 4, break_sequence: "\\1")
+    assert_equal "12345678", ViewHelpers.word_wrap("1234 5678", line_width: 4, break_sequence: "")
+  end
+
+  # Rails raises for zero but returns nil for a negative width. Keep the
+  # shared helper's String contract explicit instead of exposing that
+  # inconsistent edge behavior across targets.
+  def test_word_wrap_rejects_non_positive_widths
+    assert_raises(ArgumentError) { ViewHelpers.word_wrap("text", line_width: 0) }
+    assert_raises(ArgumentError) { ViewHelpers.word_wrap("text", line_width: -1) }
   end
 
   # ── slot store ─────────────────────────────────────────────
@@ -470,4 +493,44 @@ class ViewHelpersTest < Minitest::Test
   # exercised end-to-end via fixtures/real-blog's /articles/new and
   # /articles/1/edit paths through the compare-ruby + compare-ts +
   # compare-rust gates.
+
+  # `haml_class` golden pairs — MEASURED against Haml 7.5.1's own
+  # runtime for the same `.g{ class: … }` shapes (`src/haml.rs`'s
+  # `element` chains an Array-literal `class:` value through repeated
+  # calls instead, one element at a time, so those pairs call
+  # `haml_class` directly the same way the compiler's chain would).
+  def test_haml_class_appends_a_truthy_string
+    assert_equal "g alert", ViewHelpers.haml_class("g", "alert")
+  end
+
+  def test_haml_class_keeps_the_static_classes_for_nil_false_or_empty
+    assert_equal "g", ViewHelpers.haml_class("g", nil)
+    assert_equal "g", ViewHelpers.haml_class("g", false)
+    assert_equal "g", ViewHelpers.haml_class("g", "")
+  end
+
+  def test_haml_class_keeps_the_static_classes_for_a_false_conditional
+    assert_equal "g", ViewHelpers.haml_class("g", ("rtl" if false))
+  end
+
+  def test_haml_class_appends_the_true_branch_of_a_ternary
+    assert_equal "g on", ViewHelpers.haml_class("g", true ? "on" : "off")
+  end
+
+  def test_haml_class_chains_an_array_literal_one_element_at_a_time
+    # `[c && "hot", d && "cold"]` with c true, d false.
+    assert_equal "g hot", ViewHelpers.haml_class(ViewHelpers.haml_class("g", true && "hot"), false && "cold")
+    # Both falsy.
+    assert_equal "g", ViewHelpers.haml_class(ViewHelpers.haml_class("g", false && "hot"), false && "cold")
+  end
+
+  def test_haml_class_dedups_with_first_occurrence_winning
+    assert_equal "z g m", ViewHelpers.haml_class("z g", "m g")
+  end
+
+  def test_haml_class_value_is_escaped_by_render_attrs_not_haml_class
+    merged = ViewHelpers.haml_class("g", %(<&">))
+    assert_equal %(g <&">), merged
+    assert_equal %( class="g &lt;&amp;&quot;&gt;"), ViewHelpers.render_attrs({ class: merged })
+  end
 end

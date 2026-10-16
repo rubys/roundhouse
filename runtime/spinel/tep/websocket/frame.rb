@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::WebSocket::Frame -- single-frame codec.
 #
 # Surface:

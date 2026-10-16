@@ -63,7 +63,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     }
     let span = recv.span;
     let mut secure = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("SecureRandom")] });
-    secure.ty = Some(Ty::Class { id: ClassId(Symbol::from("SecureRandom")), args: vec![] });
+    secure.ty = Some(Ty::Class { id: ClassId(Symbol::from("SecureRandom")), args: vec![].into() });
     *recv = secure;
     // Analyze never saw this send resolve, so the stamp is written
     // here — every name in the list answers a String, which is what

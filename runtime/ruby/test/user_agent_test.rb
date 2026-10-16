@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The `useragent` + `platform_agent` port, user-agent string by
 # user-agent string.
 #

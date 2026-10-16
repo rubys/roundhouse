@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `ActionController::RateLimiting` (actionpack 7.2+), the question behind
 # `rate_limit to: 10, within: 3.minutes`: has this key been seen more
 # than `to` times in the current window?

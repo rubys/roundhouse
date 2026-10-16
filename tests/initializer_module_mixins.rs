@@ -474,3 +474,34 @@ fn an_app_without_mixins_is_untouched() {
     let app = app_from("# nothing here\n", &[]);
     assert!(app.module_mixins.is_empty());
 }
+
+/// campfire's `fragment_cache.rb`: inside `to_prepare`, the store cached
+/// collections read is pointed at the app's bounded store. Recorded at
+/// ingest, kept because `FragmentCache.store` resolves, and written at
+/// the end of boot.rb on both trees, where `FragmentCache` has loaded.
+/// A reader no class defines is dropped and reported, not written.
+#[test]
+fn the_collection_cache_store_reaches_the_end_of_boot() {
+    use roundhouse::project::{target_files, BuildTarget};
+
+    let store = (
+        "app/models/fragment_cache.rb",
+        "class FragmentCache\n  def self.store\n    nil\n  end\nend\n",
+    );
+    let line = "ActionView::PartialRenderer.collection_cache = FragmentCache.store";
+    let app = app_from(&format!("Rails.application.config.to_prepare do\n  {line}\nend\n"), &[store]);
+    let kept = app.collection_cache_store.as_ref().expect("recorded and kept");
+    assert_eq!((kept.receiver.as_str(), kept.reader.as_str()), ("FragmentCache", "store"));
+
+    let fixture = roundhouse::fixtures::real_blog().to_path_buf();
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let files = target_files(&app, &fixture, target).expect("target files");
+        let boot = &files.iter().find(|(p, _)| p.ends_with("boot.rb")).expect("boot.rb").1;
+        let at = boot.find(line).unwrap_or_else(|| panic!("never reached boot.rb:\n{boot}"));
+        let models_at = boot.find("app/models").expect("models load");
+        assert!(at > models_at, "the store's class must load first");
+    }
+
+    let missing = app_from(&format!("{line}\n"), &[]);
+    assert!(missing.collection_cache_store.is_none(), "an unresolvable reader is dropped");
+}

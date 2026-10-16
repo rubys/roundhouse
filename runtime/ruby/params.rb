@@ -1,9 +1,10 @@
+# frozen_string_literal: true
 # Narrowing accessors for the recursive request-params tree.
 #
-# `Roundhouse::ParamValue` is `String | Hash[String, ParamValue] |
-# Array[ParamValue]`, realized per target (Crystal alias, TS union,
-# rust `serde_json::Value`, Go `any`). Until now that per-target file
-# carried a TYPE AND NO OPERATIONS, so every consumer had to narrow at
+# `Roundhouse::ParamValue` is `String | Integer | Float | bool | nil |
+# Hash[String, ParamValue] | Array[ParamValue]`, realized per target
+# (Crystal alias, TS union, rust `serde_json::Value`, Go `any`). Until
+# now that per-target file carried a TYPE AND NO OPERATIONS, so every consumer had to narrow at
 # its own call site with `is_a?` — and each emitter recognized that as
 # an IDIOM (a type test in `If`-condition position returning the
 # narrowed value) rather than modeling the type test itself.
@@ -83,15 +84,136 @@ module Params
   # IS a plain Hash here, and `require` on one reaches Kernel's private
   # method — "private method 'require' called for an instance of Hash",
   # which is how this gap announced itself in four tests.
+  #
+  # "Blank" is Rails' `require` test, `value.present? || value == false`:
+  # nil, a whitespace-only string, and an EMPTY hash or array raise too.
+  # The empty hash is the one that matters: ParamsWrapper wraps a JSON
+  # body with nothing to wrap (an empty body, `{}`, only keys the model
+  # lacks) as `key => {}`, and Rails 8.1 answers that with 400 rather
+  # than letting the action run on no parameters.
   def self.require_key(params, key)
-    value = params.fetch(key, "")
-    if value.is_a?(String) && value.empty?
-      raise(ActionController::ParameterMissing.new(key))
-    end
     unless params.key?(key)
       raise(ActionController::ParameterMissing.new(key))
     end
+    value = params.fetch(key, "")
+    if value != false && ActiveSupport.blank?(value)
+      raise(ActionController::ParameterMissing.new(key))
+    end
     value
+  end
+
+  # Rails' ParamsWrapper, the per-request half (the compiler decided the
+  # rest: whether this controller wraps, the key, the keys copied). When
+  # the request's body is JSON and `params` has no `key` yet, the BODY
+  # params - never the query string or the path - are copied under
+  # `key`: only `include` when `use_include`, else every key but
+  # `exclude` and Rails' own `authenticity_token _method utf8`. The
+  # top-level keys stay where they are, as in Rails.
+  def self.wrap(params, request, key, use_include, include, exclude)
+    # A controller driven without a request (a test calling
+    # `process_action` directly) has no body to wrap.
+    return params if request.nil?
+    return params if params.key?(key)
+    content_type = request.env.fetch("CONTENT_TYPE", "").to_s
+    return params if content_type.empty?
+    begin
+      return params unless Mime::Type.lookup(content_type).to_sym == :json
+    rescue Mime::Type::InvalidMimeType
+      return params
+    end
+    body = request.request_parameters
+    wrapped = {}
+    if use_include
+      i = 0
+      while i < include.length
+        name = include[i]
+        wrapped[name] = body.fetch(name, "") if body.key?(name)
+        i = i + 1
+      end
+    else
+      body.each do |name, value|
+        next if exclude.include?(name)
+        next if name == "authenticity_token" || name == "_method" || name == "utf8"
+        wrapped[name] = value
+      end
+    end
+    params[key] = wrapped
+    params
+  end
+
+  # `params.expect(key => [fields])`'s refusal, answered before the
+  # typed factory reads the resource: `params` back unchanged, or
+  # `ParameterMissing` (400 when the app does not rescue it). Rails
+  # refuses unless the value is a Hash holding at least one permitted
+  # key with the kind of value its filter takes: a scalar under a scalar
+  # key (`:title`), an array of scalars under `tags: []`, a hash under
+  # `settings: [:theme]` or `settings: {}`, an array under
+  # `items: [[:name]]`. A missing key, nil, "", {}, a scalar, an array,
+  # and a hash of only unpermitted or mistyped keys all raise.
+  def self.expect_present(params, key, fields, scalar_array_fields, hash_fields, array_fields)
+    value = params.fetch(key, "")
+    if value.is_a?(Hash)
+      i = 0
+      while i < fields.length
+        field = fields[i]
+        if value.key?(field)
+          inner = value.fetch(field, "")
+          return params unless inner.is_a?(Hash) || inner.is_a?(Array)
+        end
+        i = i + 1
+      end
+      i = 0
+      while i < scalar_array_fields.length
+        field = scalar_array_fields[i]
+        if value.key?(field)
+          inner = value.fetch(field, "")
+          return params if inner.is_a?(Array) && Params.scalars_only(inner)
+        end
+        i = i + 1
+      end
+      i = 0
+      while i < hash_fields.length
+        field = hash_fields[i]
+        return params if value.key?(field) && value.fetch(field, "").is_a?(Hash)
+        i = i + 1
+      end
+      i = 0
+      while i < array_fields.length
+        field = array_fields[i]
+        return params if value.key?(field) && value.fetch(field, "").is_a?(Array)
+        i = i + 1
+      end
+    end
+    raise(ActionController::ParameterMissing.new(key))
+  end
+
+  # Does `items` hold only scalars - what `tags: []` permits?
+  def self.scalars_only(items)
+    i = 0
+    while i < items.length
+      item = items[i]
+      return false if item.is_a?(Hash) || item.is_a?(Array)
+      i = i + 1
+    end
+    true
+  end
+
+  # `params.require(key).permit(...)`'s refusal. Laxer than `expect`, as
+  # in Rails, whose `require` passes on a value that is `present?` or
+  # `false`: a blank one (missing, nil, a whitespace-only string, an empty
+  # array or hash) raises `ParameterMissing`; a hash of only unpermitted
+  # keys passes (the permit then yields nothing); any other value reaches
+  # `permit`, which only a hash has, so the request is a 500 there and here.
+  def self.require_present(params, key)
+    value = params.fetch(key, "")
+    if value.is_a?(Hash)
+      raise(ActionController::ParameterMissing.new(key)) if value.empty?
+      return params
+    end
+    if value != false && ActiveSupport.blank?(value)
+      raise(ActionController::ParameterMissing.new(key))
+    end
+    raise(NoMethodError.new("undefined method 'permit' for #{key}: not a Hash"))
   end
 
   # One key of a top-level `params.permit(:a, :b)` — the Rails 8

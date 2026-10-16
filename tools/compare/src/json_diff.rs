@@ -245,10 +245,10 @@ fn snippet(s: &str) -> String {
 ///    millisecond precision so byte-compare succeeds.
 /// 2. **Absolute-URL host strip.** Rails renders self-links as
 ///    `http://localhost:4000/articles/1.json`; roundhouse renders
-///    them as `/articles/1.json` (the lowerer emits path-only,
-///    on purpose — host plumbing is per-request and per-deployment
-///    noise the same way CSRF tokens are per-session noise on the
-///    HTML side). Both normalize to the path form.
+///    them on its own server's authority (`http://localhost:3000/…`),
+///    and older emits rendered the bare path. The authority is
+///    per-deployment noise the same way CSRF tokens are per-session
+///    noise on the HTML side, so both normalize to the path form.
 ///
 /// Conservatively narrow on both: each pass only fires on strings
 /// that match its specific shape, so unrelated text passes

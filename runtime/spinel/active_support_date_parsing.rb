@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Date-only ActiveSupport intrinsics for Spinel. Loaded only with the
 # bounded Date package (`app_uses_date`) — Campfire and other date-free
 # apps must not see `Date` / `Date?` in the always-on time-parsing seam
@@ -97,12 +98,12 @@ module ActiveSupport
     date_months_since(d, -12 * n)
   end
 
-  def self.date_beginning_of_week(d)
-    date_from_civil(civil_days(d.year, d.month, d.day) - (d.wday + 6) % 7)
+  def self.date_beginning_of_week(d, start = 1)
+    date_from_civil(civil_days(d.year, d.month, d.day) - (d.wday + 7 - start) % 7)
   end
 
-  def self.date_end_of_week(d)
-    date_days_since(date_beginning_of_week(d), 6)
+  def self.date_end_of_week(d, start = 1)
+    date_days_since(date_beginning_of_week(d, start), 6)
   end
 
   def self.date_next_week(d)
@@ -149,5 +150,15 @@ module ActiveSupport
 
   def self.date_future?(d, current)
     civil_days(d.year, d.month, d.day) > civil_days(current.year, current.month, current.day)
+  end
+end
+
+# Here, not in relation.rb: a date-free Spinel app cannot name `parse_db_date`.
+module ActiveRecord
+  class Relation
+    def cast_schema_date(value)
+      ActiveSupport.parse_db_date(value)
+    end
+    private :cast_schema_date
   end
 end

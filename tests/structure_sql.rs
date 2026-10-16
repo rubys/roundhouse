@@ -82,6 +82,10 @@ CREATE UNIQUE INDEX index_widgets_on_name ON public.widgets USING btree (name);
 
 CREATE INDEX index_widgets_on_company_id ON public.widgets USING btree (company_id);
 
+CREATE INDEX index_widgets_on_metadata ON public.widgets USING GIN (metadata);
+
+CREATE INDEX index_widgets_on_custom_method ON public.widgets USING "Odd""Method" (company_id);
+
 CREATE INDEX index_widgets_on_lower_name ON public.widgets USING btree (lower(name));
 
 ALTER TABLE ONLY public.companies
@@ -147,7 +151,7 @@ fn ingests_tables_columns_indexes_fk_and_pk() {
     assert_eq!(col(widgets, "status").col_type, ColumnType::String { limit: None });
     assert_eq!(col(widgets, "price").col_type, ColumnType::Decimal { precision: None, scale: None });
     assert_eq!(col(widgets, "published_at").col_type, ColumnType::DateTime);
-    assert_eq!(col(widgets, "metadata").col_type, ColumnType::Json);
+    assert_eq!(col(widgets, "metadata").col_type, ColumnType::Jsonb);
     assert_eq!(col(widgets, "external_id").col_type, ColumnType::Uuid);
     assert_eq!(col(widgets, "company_id").col_type, ColumnType::BigInt);
     assert!(!col(widgets, "company_id").nullable);
@@ -164,7 +168,30 @@ fn ingests_tables_columns_indexes_fk_and_pk() {
     // `handle_create_index`'s doc comment).
     assert!(widgets.indexes.iter().any(|i| i.name.as_str() == "index_widgets_on_name" && i.unique));
     assert!(widgets.indexes.iter().any(|i| i.name.as_str() == "index_widgets_on_company_id" && !i.unique));
+    assert_eq!(
+        widgets.indexes.iter().find(|i| i.name.as_str() == "index_widgets_on_name").unwrap().using.as_deref(),
+        Some("btree")
+    );
+    assert_eq!(
+        widgets.indexes.iter().find(|i| i.name.as_str() == "index_widgets_on_metadata").unwrap().using.as_deref(),
+        Some("gin")
+    );
+    assert_eq!(
+        widgets.indexes.iter().find(|i| i.name.as_str() == "index_widgets_on_custom_method").unwrap().using.as_deref(),
+        Some("Odd\"Method")
+    );
     assert!(!widgets.indexes.iter().any(|i| i.name.as_str() == "index_widgets_on_lower_name"));
+
+    let postgres_ddl = roundhouse::emit::shared::schema_sql::render_schema_statements_for(
+        &schema,
+        roundhouse::emit::shared::schema_sql::Dialect::Postgres,
+    ).expect("PostgreSQL DDL");
+    assert!(postgres_ddl.iter().any(|s| s.contains(
+        "CREATE INDEX IF NOT EXISTS \"index_widgets_on_metadata\" ON \"widgets\" USING \"gin\" (\"metadata\")"
+    )), "{postgres_ddl:?}");
+    assert!(postgres_ddl.iter().any(|s| s.contains(
+        "CREATE INDEX IF NOT EXISTS \"index_widgets_on_custom_method\" ON \"widgets\" USING \"Odd\"\"Method\" (\"company_id\")"
+    )), "{postgres_ddl:?}");
 
     // Foreign key.
     let fk = widgets.foreign_keys.first().expect("one foreign key");
@@ -192,6 +219,43 @@ fn strict_mode_aborts_on_the_first_gap() {
     assert!(
         msg.contains("unsupported type") || msg.contains("not modeled"),
         "expected a gap message, got: {msg}"
+    );
+}
+
+#[test]
+fn index_access_methods_allow_comments_at_keyword_boundaries() {
+    let sql = r#"
+CREATE TABLE widgets (payload jsonb);
+CREATE INDEX index_before_using_comment ON widgets/* before USING */ USING gin (payload);
+CREATE INDEX index_between_using_comment ON widgets USING/* before method */ gin (payload);
+CREATE INDEX index_after_method_comment ON widgets USING gin/* after method */ (payload);
+CREATE INDEX index_line_after_method_comment ON widgets USING gin -- after method
+    (payload);
+CREATE INDEX index_quoted_method_boundary ON widgets USING"gin"(payload);
+"#;
+    let schema = ingest_structure_sql(sql.as_bytes(), "db/structure.sql").expect("commented index DDL");
+    let indexes = &schema.tables[&Symbol::from("widgets")].indexes;
+    for name in [
+        "index_before_using_comment",
+        "index_between_using_comment",
+        "index_after_method_comment",
+        "index_line_after_method_comment",
+        "index_quoted_method_boundary",
+    ] {
+        let index = indexes.iter().find(|index| index.name.as_str() == name).unwrap_or_else(|| {
+            panic!("missing index {name}: {indexes:?}")
+        });
+        assert_eq!(index.using.as_deref(), Some("gin"), "{name}");
+    }
+}
+
+#[test]
+fn index_access_method_keyword_requires_a_token_boundary() {
+    let sql = b"CREATE TABLE widgets (payload jsonb);\nCREATE INDEX malformed ON widgets USINGgin (payload);";
+    let error = ingest_structure_sql(sql, "db/structure.sql").unwrap_err();
+    assert!(
+        error.to_string().contains("CREATE INDEX clause before the column list is not modeled"),
+        "{error}"
     );
 }
 

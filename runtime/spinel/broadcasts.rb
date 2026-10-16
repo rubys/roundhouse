@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Broadcasts — in-memory log of Turbo Stream fragments produced by
 # model after_*_commit hooks. The log is the test-visible contract;
 # transport (WebSocket fan-out) is the live-server contract,

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Markdowner façade — lobsters' CommonMark renderer (app/models/
 # markdowner.rb) walks a Markly DOM tree with a recursive block-driving
 # helper: `walk_text_nodes` forwards its `&block` through

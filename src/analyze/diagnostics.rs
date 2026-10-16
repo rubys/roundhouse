@@ -9,11 +9,44 @@ use crate::ide::render_ty;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ty::Ty;
-use crate::ident::Symbol;
+use crate::ident::{ClassId, Symbol};
+use std::collections::HashMap;
 
-use super::PreloadCoverage;
+use super::{ClassInfo, PreloadCoverage};
 use super::preload;
 
+
+/// A project extension's attribute macros (`crate::extensions`) make the
+/// attributes they name gradual, so a dispatch on the DSL's value object
+/// does not fail at every call site. No target lowers the macro call
+/// itself, though: the emitted model drops it, and the attribute reads
+/// back as its storage type. So the declaration is the refusal, one error
+/// at the root of what used to be a cascade, rather than a clean check
+/// over a program that would not run.
+fn attribute_macro_refusals(app: &App) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    if app.extensions.attribute_macros.is_empty() {
+        return out;
+    }
+    for model in &app.models {
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            let ExprNode::Send { recv: None, method, .. } = &*expr.node else { continue };
+            if app.extensions.attribute_macro(method.as_str()).is_some() {
+                out.push(Diagnostic::unsupported(
+                    expr.span,
+                    None,
+                    method.as_str(),
+                    format!(
+                        "attribute macro on `{}` from a project extension: its attributes read untyped, and no target lowers the call",
+                        model.name.0.as_str()
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
 
 /// Walk an analyzed `App` collecting every position where typing failed
 /// in a way that matters for downstream typed emission. Does not modify
@@ -42,10 +75,12 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // Only validated synthesized Alba serializers, with per-constructor
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));
+    out.extend(crate::gems::extension_gem_refusals(app, None));
     // graphql-ruby object types: their bodies, and each `null: false`
     // field's resolved value.
     out.extend(super::graphql::diagnose(app, diagnose_expr));
     out.extend(super::enum_raw_input::diagnose(app));
+    out.extend(super::data::diagnose(app));
     // Rubydex's unresolved constants emit refusal stubs. Collect those
     // annotations from support methods/defaults/constants as well, so
     // an emitted raise cannot be hidden by the library diagnostic policy.
@@ -72,9 +107,20 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         if matches!(&expr.diagnostic,
             Some(DiagnosticKind::Unsupported { .. }))
         {
-            if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic {
+            if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic
+                && construct.as_str() != crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
+            {
                 out.push(Diagnostic::unsupported(expr.span, target.clone(), construct.as_str(), detail.clone()));
             }
+        }
+        // Not dropped with the policy's other misses: the typer stamps it only in place of an Object-extension refusal.
+        if let Some(kind @ DiagnosticKind::SendDispatchFailed { method, recv_ty }) = &expr.diagnostic {
+            out.push(Diagnostic {
+                span: expr.span,
+                severity: Diagnostic::default_severity(kind),
+                kind: kind.clone(),
+                message: format!("no known method `{}` on {}", method.as_str(), render_ty(recv_ty)),
+            });
         }
         expr.node.for_each_child(&mut |child| collect_constants(child, out));
     }
@@ -104,6 +150,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
             }
         }
     }
+    out.extend(attribute_macro_refusals(app));
     // A filter's return value is Rails' to discard (`around_action
     // :switch_locale` → `I18n.with_locale(locale, &action)`): nothing
     // escapes from its tail, so an `untyped` there is not a gradual
@@ -153,6 +200,14 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // ivar channel.
     let (preload_diags, coverage) = preload::missing_preload_report(app);
     out.extend(preload_diags);
+    let refused_gem_sites: std::collections::HashSet<_> = out.iter().filter_map(|diagnostic| {
+        matches!(&diagnostic.kind, DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == "gem_requires_rails").then_some(diagnostic.span)
+    }).collect();
+    out.retain(|diagnostic| !matches!(&diagnostic.kind,
+        DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == "constant" && refused_gem_sites.contains(&diagnostic.span)
+    ));
 
     // Collapse diagnostics that render to the same place with the same
     // text — same start position, same kind, same message. Method chains
@@ -179,6 +234,104 @@ fn is_unknown_ty(ty: Option<&Ty>) -> bool {
         Some(Ty::Var { .. }) => true,
         _ => false,
     }
+}
+
+/// A send whose explicit receiver the analysis could not type.
+pub struct UnknownReceiverSend {
+    pub span: crate::span::Span,
+    pub method: Symbol,
+    /// The receiver is the gradual escape (`T.unsafe`, RBS `untyped`)
+    /// rather than an unresolved type.
+    pub gradual: bool,
+    /// The receiver's type is known, but the send resolved to nothing on
+    /// it: what `diagnose` reports as `send_dispatch_failed` in a model
+    /// or controller body, and nothing reports elsewhere.
+    pub known_receiver: bool,
+}
+
+/// Every send, in every emitted body, whose explicit receiver is
+/// unknown or gradual, or known without the send resolving, and which
+/// carries no diagnostic of its own.
+///
+/// Nothing checks such a send: no method table is consulted, so a
+/// misspelled or unimplemented method passes. `diagnose` reports the
+/// unresolved receiver only in model and controller bodies, and not at
+/// all for a gradual one, so in a library class the send is silent. A
+/// drop in errors that only moves sends here is a reclassification, not
+/// progress; `check` prints the count beside the error total.
+///
+/// A receiver whose type names a class the registry does not hold
+/// (`#: (Missing::AccessControl)`) is unknown, not known: there is no
+/// method table to check it against.
+/// True when `method` is registered on the receiver's class (either
+/// side), walking parents and includes. A registered method that returns
+/// `Ty::Var` still counts as resolved for the unknown-receiver ledger.
+fn method_registered_on(
+    classes: &HashMap<ClassId, ClassInfo>,
+    ty: Option<&Ty>,
+    method: &Symbol,
+) -> bool {
+    match ty {
+        Some(Ty::Union { variants }) => {
+            !variants.is_empty()
+                && variants
+                    .iter()
+                    .all(|v| method_registered_on(classes, Some(v), method))
+        }
+        Some(Ty::Class { id, .. }) => {
+            let mut current = Some(id);
+            for _ in 0..32 {
+                let Some(cid) = current else { break };
+                let Some(class) = classes.get(cid) else { break };
+                if class.instance_methods.contains_key(method)
+                    || class.class_methods.contains_key(method)
+                {
+                    return true;
+                }
+                if class
+                    .includes
+                    .iter()
+                    .any(|m| classes.get(m).is_some_and(|inc| {
+                        inc.instance_methods.contains_key(method)
+                            || inc.class_methods.contains_key(method)
+                    }))
+                {
+                    return true;
+                }
+                current = class.parent.as_ref();
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+pub fn unknown_receiver_sends(app: &App, classes: &HashMap<ClassId, ClassInfo>) -> Vec<UnknownReceiverSend> {
+    fn visit(expr: &Expr, classes: &HashMap<ClassId, ClassInfo>, out: &mut Vec<UnknownReceiverSend>) {
+        if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
+            let gradual = matches!(r.ty, Some(Ty::Untyped));
+            let unknown = is_unknown_ty(r.ty.as_ref())
+                || matches!(&r.ty, Some(Ty::Class { id, .. }) if !classes.contains_key(id));
+            // Dispatch evidence, not return shape: a known method that
+            // answers `Ty::Var` is still checked.
+            let known_receiver = !gradual
+                && !unknown
+                && is_unknown_ty(expr.ty.as_ref())
+                && !method_registered_on(classes, r.ty.as_ref(), method);
+            if (gradual || known_receiver || unknown)
+                && expr.diagnostic.is_none()
+                && !expr.span.is_synthetic()
+            {
+                out.push(UnknownReceiverSend { span: expr.span, method: method.clone(), gradual, known_receiver });
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, classes, out));
+    }
+    let mut out = Vec::new();
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, classes, &mut out));
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|s| seen.insert((s.span.file, s.span.start, s.span.end, s.method.clone())));
+    out
 }
 
 /// Short label for what shape of expression resolved to `Untyped`.
@@ -290,13 +443,21 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             DiagnosticKind::UndefinedFilterTarget { .. } => Diagnostic::stub_text(kind),
             // Produced by `graphql::diagnose` as a returned list.
             DiagnosticKind::GraphqlNullableField { .. } => Diagnostic::stub_text(kind),
+            // Produced by `ingest::initializer_ledger` as a returned list.
+            DiagnosticKind::UnconsumedInitializer { .. } => Diagnostic::stub_text(kind),
         };
-        out.push(Diagnostic {
-            span: expr.span,
-            kind: kind.clone(),
-            severity: Diagnostic::default_severity(kind),
-            message,
-        });
+        if !matches!(
+            kind,
+            DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
+        ) {
+            out.push(Diagnostic {
+                span: expr.span,
+                kind: kind.clone(),
+                severity: Diagnostic::default_severity(kind),
+                message,
+            });
+        }
     }
 
     // RBS-declared `untyped` reaches this site. Emit a GradualUntyped
@@ -312,6 +473,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         && !matches!(
             &*expr.node,
             ExprNode::Seq { .. } | ExprNode::ForwardArgs | ExprNode::ForwardKeywords
+                | ExprNode::ForwardKeywordsWithPairs { .. }
         )
     {
         let kind = DiagnosticKind::GradualUntyped {
@@ -540,6 +702,12 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             if let Some(v) = value { diagnose_expr(v, out); }
         }
         ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => diagnose_expr(value, out),
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                diagnose_expr(key, out);
+                diagnose_expr(value, out);
+            }
+        }
         ExprNode::MultiAssign { targets, value } => {
             diagnose_expr(value, out);
             for target in targets {

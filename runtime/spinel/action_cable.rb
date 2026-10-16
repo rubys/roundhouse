@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActionCable — the spinel-subset sibling of the CRuby overlay's
 # `ruby_overlay/runtime/action_cable.rb`.
 #
@@ -186,12 +187,12 @@ module ActionCable
         if entry[:action] == :message
           out << entry[:payload].to_s
         else
-          out << JSON.generate(Broadcasts.render_fragment(
+          out << JsonBuilder.escape_html_entities(JSON.generate(Broadcasts.render_fragment(
             action: entry[:action],
             target: entry[:target],
             html: entry[:html],
             attributes: entry[:attributes].to_s,
-          ))
+          )))
         end
       end
       out
@@ -234,24 +235,19 @@ module ActionCable
     SERVER
   end
 
-  # Render a raw-publish payload to JSON object text.
+  # Render a raw-publish payload to JSON text, as Rails does: Action
+  # Cable encodes the payload with ActiveSupport::JSON, so a String,
+  # a Symbol, nil, a Float or a nested Hash or Array is written as JSON
+  # (not with `to_s`), and `<`, `>` and `&` inside strings come out as
+  # `\u003c`, `\u003e`, `\u0026`. `JSON.generate` walks the value
+  # whatever it holds; `escape_html_entities` adds Rails' escapes. The
+  # CRuby overlay's transport writes the same text (`Registry.deliver`).
   #
-  # Integer-valued because that is the whole surface an ingested app has
-  # asked for so far (campfire's two call sites are `{room_id: <id>}` and
-  # `{roomId: <id>}`). Widening it is a monomorphization decision, not a
-  # cast: give the emitter one element type per container and it stays a
-  # struct field; make it a bag and every target pays.
+  # The payload was Integer-valued only (`value.to_s`), which is what
+  # campfire's two call sites need; a terminal relayed over a channel
+  # broadcasts String output, which came out as invalid JSON (#619).
   def self.payload_json(payload)
-    out = "{"
-    first = true
-    payload.each do |key, value|
-      if !first
-        out = out + ","
-      end
-      first = false
-      out = out + JSON.generate(key.to_s) + ":" + value.to_s
-    end
-    out + "}"
+    JsonBuilder.escape_html_entities(JSON.generate(payload))
   end
 
   module Channel
@@ -286,6 +282,44 @@ module ActionCable
       nil
     end
     # <<< generated: cable-channels
+
+    # THE ACTION A `message` FRAME NAMES, run on the channel it was sent
+    # to. Rails' `Channel::Base#perform_action` finds the method by
+    # reflection (`action_methods`, `public_send`); a strict target has
+    # neither, so the set is decided at build time instead.
+    #
+    # GENERATED, between the markers, by `project::apply_cable_actions`:
+    # one arm per channel class, most derived first so a subclass is not
+    # answered by its parent's arm, and inside it one arm per action
+    # method - Rails' `action_methods`: the public methods the channel
+    # and its app ancestors and mixins define, less `Channel::Base`'s
+    # own. Private methods, the framework's methods and anything a
+    # client might spell are simply not arms, so the wire cannot widen
+    # the set (the rule `build` above follows for channel names).
+    #
+    # Rails' calling rule is decided per arm: a method of arity exactly
+    # 1 is passed `data`, anything else is called with no arguments
+    # (`def refresh`, `def redraw(_data = {})`), and one that cannot be
+    # called with none raises the ArgumentError Rails raises.
+    #
+    # true when an arm ran, false for an action the channel does not
+    # answer - the caller logs that, as Rails does.
+    # >>> generated: cable-actions
+    def self.perform(channel, action, data)
+      false
+    end
+    # <<< generated: cable-actions
+
+    # `(data["action"].presence || :receive)`, as a String: a frame
+    # without an action, or with an empty one, is `receive`.
+    def self.action_name(data)
+      action = data["action"]
+      if action.nil?
+        return "receive"
+      end
+      text = action.to_s
+      text.length == 0 ? "receive" : text
+    end
 
     class Base
       # A channel is an ORDINARY OBJECT with no transport in it: it is
@@ -490,6 +524,20 @@ module ActionCable
 
       def rejected?
         @rejected
+      end
+
+      # Rails' `perform_action`: the client's `perform("start", {...})`.
+      # `data` is the frame's decoded `data` object with its JSON types
+      # kept - `false` stays false, a number stays a number - and its
+      # `"action"` key still in it, as Rails hands it over. A rejected
+      # subscription and an action the channel does not answer run
+      # nothing and are logged.
+      def perform_action(data)
+        action = ActionCable::Channel.action_name(data)
+        if @rejected || !ActionCable::Channel.perform(self, action, data)
+          warn "[cable] Unable to process " + self.class.to_s + "#" + action
+        end
+        nil
       end
 
       # `RoomChannel` -> `"room"`; `Turbo::StreamsChannel` ->

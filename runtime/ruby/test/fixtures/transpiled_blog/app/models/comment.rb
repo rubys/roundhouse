@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Transpiled shape of fixtures/real-blog/app/models/comment.rb.
 
 class Comment < ApplicationRecord

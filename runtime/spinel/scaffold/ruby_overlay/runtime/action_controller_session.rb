@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby overlay session codec (`from_cookie` / `to_cookie`). CSRF
 # minting lives in `runtime/ruby/action_controller/authenticity_token.rb`.
 #

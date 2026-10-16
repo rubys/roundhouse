@@ -404,6 +404,7 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let jobs = &ci["jobs"];
+    assert!(jobs.get("writebook-inventory").is_none());
     assert_eq!(jobs["unit"]["needs"].as_str(), Some("generate-fixture"));
     assert_eq!(jobs["generate-fixture"]["needs"].as_str(), Some("plan"));
     assert!(jobs["generate-fixture"].get("if").is_none());
@@ -412,7 +413,6 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
         "build-roundhouse",
         "build-wasm",
         "spinel-build",
-        "writebook-inventory",
     ] {
         assert_eq!(jobs[name]["needs"].as_str(), Some("plan"), "{name}");
     }
@@ -422,6 +422,7 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
         "compare",
         "compare-extra",
         "compare-ruby",
+        "compare-ruby-next",
         "compare-jruby",
     ] {
         assert_eq!(
@@ -434,12 +435,12 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
         "build-roundhouse",
         "build-wasm",
         "spinel-build",
-        "writebook-inventory",
         "store-check",
         "browser-smoke-typescript",
         "compare",
         "compare-extra",
         "compare-ruby",
+        "compare-ruby-next",
         "compare-jruby",
     ] {
         assert_eq!(
@@ -581,6 +582,16 @@ fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
             .iter()
             .filter_map(|step| step["run"].as_str())
             .collect();
+        let suite_gems = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Install the gems the emitted suite loads"))
+            .and_then(|step| step["run"].as_str());
+        if let Some(run) = suite_gems {
+            assert!(
+                run.split_whitespace().any(|w| w == "rack"),
+                "{job_name} must install rack: ruby-family rack_utils.rb is require \"rack/utils\""
+            );
+        }
         for run in &runs {
             for line in run.lines() {
                 let trimmed = line.trim();
@@ -611,6 +622,106 @@ fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
             .lines()
             .any(|l| !l.trim().starts_with('#') && l.contains("cargo run"))
     );
+}
+
+/// The strict-emit ceiling counts `error[` lines. An ingest abort prints
+/// none and exits nonzero, so the step must fail on the exit status too;
+/// a clean emit inside the ceiling must still pass.
+#[test]
+#[cfg(unix)]
+fn strict_emit_ceiling_fails_an_ingest_abort_that_prints_no_error_line() {
+    use std::os::unix::fs::PermissionsExt;
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let run = ci["jobs"]["campfire-conformance"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Enforce the strict-emit ceiling"))
+        .and_then(|step| step["run"].as_str())
+        .expect("strict-emit ceiling")
+        .to_owned();
+    let dir = std::env::temp_dir().join(format!("roundhouse-ceiling-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let step = |bin_body: &str, ceiling: &str| {
+        let bin = dir.join("roundhouse");
+        fs::write(&bin, format!("#!/bin/sh\n{bin_body}\n")).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        std::process::Command::new("bash")
+            .args(["-c", &run])
+            .env("ROUNDHOUSE_BIN", &bin)
+            .env("CEILING_ERRORS", ceiling)
+            .output()
+            .unwrap()
+    };
+    let aborted = step(
+        "echo 'roundhouse: ingest app: unsupported construct in app/models/x.rb'; exit 1",
+        "0",
+    );
+    assert!(!aborted.status.success(), "an ingest abort passed the ceiling");
+    assert!(String::from_utf8_lossy(&aborted.stdout).contains("ingest stopped before analysis"));
+    let clean = step("echo 'roundhouse: emitted 3 files'; exit 0", "0");
+    assert!(clean.status.success(), "{}", String::from_utf8_lossy(&clean.stdout));
+    let at_ceiling = step("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1", "2");
+    assert!(
+        at_ceiling.status.success(),
+        "a counted error at the ceiling must pass: {}",
+        String::from_utf8_lossy(&at_ceiling.stdout)
+    );
+    let over = step("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1", "0");
+    assert!(!over.status.success(), "an error over the ceiling passed");
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// campfire-latest's survey: a recorded gap count wins; no survey line
+/// after a run that finished or stopped at counted errors is zero gaps;
+/// a crash with neither is `unknown`, which keeps the suite from running.
+#[test]
+#[cfg(unix)]
+fn campfire_latest_survey_tells_zero_gaps_from_an_unknown_result() {
+    use std::os::unix::fs::PermissionsExt;
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let job = &ci["jobs"]["campfire-latest"];
+    let steps = job["steps"].as_sequence().unwrap();
+    let run = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("survey"))
+        .and_then(|step| step["run"].as_str())
+        .expect("survey step")
+        .to_owned();
+    let suite_if = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("suite"))
+        .and_then(|step| step["if"].as_str())
+        .expect("suite step condition");
+    assert_eq!(suite_if, "${{ steps.survey.outputs.gaps == '0' }}");
+    let dir = std::env::temp_dir().join(format!("roundhouse-survey-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let gaps = |bin_body: &str| {
+        let bin = dir.join("roundhouse");
+        fs::write(&bin, format!("#!/bin/sh\n{bin_body}\n")).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let out = dir.join("output");
+        fs::write(&out, "").unwrap();
+        let status = std::process::Command::new("bash")
+            .args(["-c", &run])
+            .env("ROUNDHOUSE_BIN", &bin)
+            .env("GITHUB_OUTPUT", &out)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the survey step itself never fails");
+        fs::read_to_string(&out)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("gaps=").map(str::to_owned))
+            .expect("gaps output")
+    };
+    assert_eq!(gaps("echo '── Survey: 2 ingest gap(s), 2 distinct kind(s) ──'; exit 1"), "2");
+    assert_eq!(gaps("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1"), "0");
+    assert_eq!(gaps("echo 'emitted 3 files'; exit 0"), "0");
+    assert_eq!(gaps("echo 'thread main panicked'; exit 101"), "unknown");
+    fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -711,6 +822,38 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
         Some("${{ fromJSON(needs.plan.outputs.compare) }}")
     );
     assert_eq!(jobs["compare"]["steps"], jobs["compare-extra"]["steps"]);
+    let compare_steps = jobs["compare"]["steps"].as_sequence().unwrap();
+    let controller_identity = compare_steps
+        .iter()
+        .find(|step| {
+            step["name"].as_str()
+                == Some("cargo test --test rust_toolchain controller identity values")
+        })
+        .expect("the selected Rust compare lane executes controller identity values");
+    assert_eq!(
+        controller_identity["if"].as_str(),
+        Some("${{ !cancelled() && matrix.target == 'rust' }}")
+    );
+    let identity_run = controller_identity["run"].as_str().unwrap();
+    let cargo_command = concat!(
+        "cargo test --locked --test rust_toolchain ",
+        "real_blog_controller_identity_values_match_rails -- --ignored --nocapture --exact"
+    );
+    assert!(
+        identity_run.contains(&format!("if output=$({cargo_command} 2>&1); then")),
+        "the required Rust toolchain command and exact filter must be preserved:\n{identity_run}"
+    );
+    let success_check =
+        "grep -Fxq 'test real_blog_controller_identity_values_match_rails ... ok' <<< \"$output\"";
+    assert!(
+        identity_run.contains(success_check),
+        "the selected outer test must produce its exact success line:\n{identity_run}"
+    );
+    assert!(
+        controller_identity["continue-on-error"].is_null()
+            || controller_identity["continue-on-error"].as_bool() == Some(false),
+        "the Rust controller identity regression must be required"
+    );
     assert_eq!(
         jobs["compare-extra"]["strategy"]["max-parallel"].as_u64(),
         Some(7)
@@ -843,6 +986,80 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
     assert_eq!(ci["permissions"]["contents"].as_str(), Some("read"));
     assert!(ci["permissions"].get("pages").is_none());
     assert!(ci["permissions"].get("id-token").is_none());
+}
+
+/// Verifies the required Rust identity step needs execution and preserves Cargo failures.
+#[cfg(unix)]
+#[test]
+fn rust_identity_ci_guard_requires_execution_and_propagates_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let step = ci["jobs"]["compare"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["name"].as_str()
+                == Some("cargo test --test rust_toolchain controller identity values")
+        })
+        .unwrap();
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "rust-identity-ci-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).unwrap();
+    let cargo = root.join("cargo");
+    fs::write(
+        &cargo,
+        r#"#!/bin/sh
+printf '<%s>\n' "$@" >> "$CARGO_LOG"
+case "$CARGO_MODE" in
+  success) printf '%s\n' 'test real_blog_controller_identity_values_match_rails ... ok'; exit 0 ;;
+  zero_match) printf '%s\n' 'running 0 tests'; exit 0 ;;
+  forged_success_on_failure) printf '%s\n' 'test real_blog_controller_identity_values_match_rails ... ok'; exit 37 ;;
+  *) exit 64 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let cargo_args = "<test>\n<--locked>\n<--test>\n<rust_toolchain>\n<real_blog_controller_identity_values_match_rails>\n<-->\n<--ignored>\n<--nocapture>\n<--exact>\n";
+    for (mode, expected_status) in [
+        ("success", 0),
+        ("zero_match", 1),
+        ("forged_success_on_failure", 37),
+    ] {
+        let log = root.join("cargo.log");
+        fs::write(&log, "").unwrap();
+        let result = Command::new("bash")
+            .args(["-e", "-o", "pipefail", "-c", step["run"].as_str().unwrap()])
+            .env("CARGO_LOG", &log)
+            .env("CARGO_MODE", mode)
+            .env("CARGO_TERM_COLOR", "always")
+            .env(
+                "PATH",
+                format!("{}:{}", root.display(), std::env::var("PATH").unwrap()),
+            )
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.code(),
+            Some(expected_status),
+            "{mode}: {result:?}"
+        );
+        assert_eq!(fs::read_to_string(log).unwrap(), cargo_args);
+    }
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -1025,6 +1242,16 @@ fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
             false,
             "test --test fails -- --ignored --nocapture\ntest --test survivor -- --ignored --nocapture\n",
         ),
+        (
+            "param_binds param_binds_values param_binds_cleanup framework_tests_spinel",
+            true,
+            concat!(
+                "test --test param_binds -- --ignored --nocapture _spinel\n",
+                "test --test param_binds_values -- --ignored --nocapture _spinel\n",
+                "test --test param_binds_cleanup -- --ignored --nocapture _spinel\n",
+                "test --test framework_tests_spinel -- --ignored --nocapture\n",
+            ),
+        ),
         ("", false, ""),
     ] {
         let log = root.join("cargo.log");
@@ -1043,6 +1270,50 @@ fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
         assert_eq!(fs::read_to_string(log).unwrap(), expected_log);
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+/// The PostgreSQL Db gate runs in the native framework loop: the job has
+/// a PostgreSQL service, checks spinel-pg out at a pinned commit only when
+/// the plan selects the gate, and hands both to the loop step.
+#[test]
+fn framework_loop_supplies_postgres_and_pinned_spinel_pg_to_the_pg_gate() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let sha = ci["env"]["SPINEL_PG_SHA"].as_str().unwrap();
+    assert!(
+        sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
+        "SPINEL_PG_SHA must be a full commit sha: {sha}"
+    );
+    let job = &ci["jobs"]["spinel-framework"];
+    let service = &job["services"]["postgres"];
+    assert!(service["image"].as_str().unwrap().starts_with("postgres:"));
+    assert_eq!(service["ports"][0].as_str(), Some("5432:5432"));
+    assert!(service["options"].as_str().unwrap().contains("pg_isready"));
+    let steps = job["steps"].as_sequence().unwrap();
+    let checkout = steps
+        .iter()
+        .find(|step| step["with"]["repository"].as_str() == Some("rubys/spinel-pg"))
+        .expect("spinel-pg checkout");
+    assert_eq!(
+        checkout["with"]["ref"].as_str(),
+        Some("${{ env.SPINEL_PG_SHA }}")
+    );
+    assert_eq!(checkout["with"]["path"].as_str(), Some("spinel-pg"));
+    assert!(checkout["if"].as_str().unwrap().contains("'spinel_pg_db'"));
+    let run = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Run selected native framework checks"))
+        .unwrap();
+    assert_eq!(
+        run["env"]["SPINEL_PG_DIR"].as_str(),
+        Some("${{ github.workspace }}/spinel-pg")
+    );
+    assert!(
+        run["env"]["DATABASE_URL"]
+            .as_str()
+            .unwrap()
+            .contains("@127.0.0.1:5432/")
+    );
 }
 
 #[test]
@@ -1141,6 +1412,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
         })
         .unwrap();
     assert!(verify < pages);
+    assert_eq!(
+        steps[pages]["with"]["name"].as_str(),
+        Some("github-pages-${{ github.run_attempt }}"),
+        "per-attempt Pages artifact avoids duplicate github-pages on rerun --failed"
+    );
     assert!(
         jobs["ci-summary"]["needs"]
             .as_sequence()
@@ -1208,6 +1484,11 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
     );
     assert!(deploy.get("continue-on-error").is_none());
     assert_eq!(deploy["permissions"]["pages"].as_str(), Some("write"));
+    assert_eq!(
+        deploy["permissions"]["actions"].as_str(),
+        Some("read"),
+        "deploy artifact resolver lists this run's github-pages-* uploads"
+    );
     let deploy_text = serde_yaml_ng::to_string(deploy).unwrap();
     assert!(
         !deploy_text.contains("VALIDATED_SHA"),
@@ -1217,9 +1498,32 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
         !deploy_text.contains("Refuse to publish a superseded main snapshot"),
         "main advancing mid-run must not starve github-pages"
     );
+    let deploy_steps = deploy["steps"].as_sequence().unwrap();
+    let resolve = deploy_steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Resolve Pages artifact"))
+        .expect("deploy-only rerun needs attempt fallback resolution");
+    let resolve_run = resolve["run"].as_str().unwrap();
+    assert!(
+        resolve_run.contains("github-pages-$n"),
+        "resolver must walk github-pages-N attempt names"
+    );
+    assert!(
+        resolve_run.contains("--paginate"),
+        "artifact list must paginate (Full val exceeds default page size)"
+    );
+    let deploy_pages = deploy_steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/deploy-pages@"))
+        })
+        .expect("deploy-pages step");
     assert_eq!(
-        deploy["steps"][0]["uses"].as_str(),
-        Some("actions/deploy-pages@v5")
+        deploy_pages["with"]["artifact_name"].as_str(),
+        Some("${{ steps.pages-artifact.outputs.name }}"),
+        "deploy must consume the resolved per-attempt assemble-site Pages artifact"
     );
 }
 

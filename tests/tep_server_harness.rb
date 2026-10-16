@@ -94,6 +94,13 @@ end
 # What the threaded server waits on between recvs.
 class ReadyIO
   def wait_readable(_t) = self
+  def close; end
+end
+
+# Blocking body drains use a timed IO wrapper too. The scripted fd is
+# not a real descriptor; supply the same readiness stub as Threaded.
+class << IO
+  def for_fd(_fd, autoclose: false) = ReadyIO.new
 end
 
 class RecordingApp
@@ -145,17 +152,18 @@ end
 def serve(server, bytes, **wire)
   Sock.wire = Wire.new(bytes, **wire)
   APP.reset
+  keep_alive = nil
   begin
-    SERVERS.fetch(server).call(7)
+    keep_alive = SERVERS.fetch(server).call(7)
     raised = nil
   rescue StandardError => e
     raised = e
   end
   status = Sock.wire.out[/\AHTTP\/1\.\d (\d{3})/, 1].to_i
-  [status, Sock.wire.recvs, APP.bodies, raised]
+  [status, Sock.wire.recvs, APP.bodies, raised, keep_alive]
 end
 
-def describe(status, recvs, bodies, raised)
+def describe(status, recvs, bodies, raised, _keep_alive = nil)
   return "raised #{raised.class}: #{raised.message}" if raised
 
   sizes = bodies.map(&:bytesize)

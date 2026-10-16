@@ -177,6 +177,20 @@ Jbuilder deliberately bypasses the seam: a `.json.jbuilder` source is
 already Ruby, so `src/ingest/app.rs` dispatches it separately to
 `src/ingest/jbuilder.rs` with no compile step.
 
+### Markdown templates
+
+`*.md.erb` templates use the ERB handler and the `md` format.
+The lowerer names their methods `<action>_md`, separate from their HTML siblings.
+An explicit `render formats: :md` or a request format of `md` selects the Markdown template.
+The response uses `text/markdown; charset=utf-8`.
+
+A YAML header remains ordinary template text. The compiler does not parse or remove it.
+ERB expressions in the header and body use normal HTML escaping.
+Expressions marked `html_safe` and literal template text remain unchanged.
+
+The Markdown regression in [`tests/emit_and_run.rs`](../../tests/emit_and_run.rs)
+checks both render paths and the HTML sibling against emitted Ruby.
+
 ## Key files
 
 | File | What it does |

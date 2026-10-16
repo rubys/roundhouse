@@ -1,0 +1,55 @@
+UserContract.new | {"name" => "a", "age" => "3"}
+UserContract.new | {}
+UserContract.new | {name: "sym", age: 2}
+UserContract.new | {"name" => "s", :name => "y", "age" => 1}
+UserContract.new | {"name" => "", "age" => "0", "nick" => 5, "ok" => "maybe", "ids" => ["x"], "meta" => "s", "addr" => {}, "tags" => [{}, "q"]}
+UserContract.new | {"name" => 1, "age" => "x", "ids" => "1", "addr" => "s", "tags" => "t"}
+UserContract.new | {"name" => nil, "age" => nil, "nick" => nil, "ok" => nil, "ids" => nil, "addr" => nil, "tags" => nil}
+UserContract.new | {"name" => "a", "age" => 1.5, "nick" => "", "ok" => "on", "ids" => ["1", 2, ""], "meta" => {"x" => 1}, "addr" => {"city" => "M", "zip" => "", "junk" => 1}, "tags" => [{"t" => "x", "u" => 2}], "junk" => 1}
+UserContract.new | {"name" => "a", "age" => 1, "nick" => "toolongnick", "score" => "1.5", "price" => "2.50", "born" => "2026-01-02", "kind" => "admin", "email" => "a@b", "count" => "12", "pair" => [1, 2], "level" => "5", "range" => "2"}
+UserContract.new | {"name" => "a", "age" => 1, "nick" => "x", "score" => "x", "price" => "", "born" => "nope", "kind" => "root", "email" => "ab", "count" => "z", "pair" => [1], "level" => "10", "range" => "7"}
+UserContract.new | {"name" => "a", "age" => 1, "price" => "x", "born" => "", "score" => "", "count" => nil, "level" => "0", "email" => nil, "addr" => {"city" => ""}}
+UserContract.new | {"name" => "a", "age" => 1, "ok" => "false", "pair" => "", "ids" => "", "addr" => ""}
+UserContract.new | nil
+UserContract.new | [["name", "a"]]
+EventContract.new | {"id" => 1, "index" => {"fields" => ["a"], "object_ids" => ["1", 2]}}
+EventContract.new | {"id" => "1", "on" => "2026-02-03", "ratio" => 1, "amount" => "1.25", "index" => {}}
+EventContract.new | {"id" => 1, "on" => "x", "ratio" => 1.5, "amount" => "x", "index" => "s"}
+EventContract.new | {:id => 2, :index => {:fields => "a"}}
+EventContract.new | {}
+StrictContract.new | {a: 1, b: nil}
+StrictContract.new | {"a" => 1}
+StrictContract.new | {a: "1", b: 2}
+ChildContract.new | {"b" => "x"}
+ChildContract.new | {"a" => "1", "b" => "x"}
+ParentContract.new | {"a" => "1", "b" => "x"}
+Users::SignupContract.new | {}
+Users::SignupContract.new | {"login" => "", "age" => "x"}
+Users::SignupContract.new | {"login" => "abcd", "age" => "1", "tags" => "x"}
+Users::SignupContract.new | {"login" => 5, "age" => 1}
+Users::GuestContract.new | {"login" => "x"}
+Users::GuestContract.new | {}
+Standalone::Item | {"sku" => "a", "qty" => "2"}
+Standalone::Item | {"qty" => "0"}
+TypedContract.new | {"n" => "12", "i" => 1, "on" => "2026-01-02", "qty" => "3", "ratio" => "1.5", "label" => 5, "device" => "mobile", "state" => "new", "flag" => true, "at" => nil, "items" => [{"id" => "1"}], "codes" => ["a"], "pairs" => [[1, 2]], "order" => {"lines" => [{"sku" => "x"}], "note" => ""}}
+TypedContract.new | {"n" => "x", "i" => 0, "on" => "x", "qty" => "x", "ratio" => "x", "label" => nil, "device" => "tv", "state" => "old", "flag" => "true", "at" => 1, "items" => [], "codes" => [1], "pairs" => [[1], "x"], "order" => {"lines" => [{}, "x"]}}
+TypedContract.new | {"n" => nil, "i" => "1", "on" => "", "qty" => "", "ratio" => "", "device" => "", "flag" => nil, "items" => "x", "codes" => "x", "order" => {}}
+TypedContract.new | {"qty" => nil, "ratio" => nil, "device" => 1, "items" => [{"id" => ""}, 3]}
+TypedContract.new | {}
+ChainContract.new | {v: nil}
+ChainContract.new | {v: 1, c: {n: "1", x: 1}, f: {k: "a", z: 1}}
+ChainContract.new | {v: 1, c: "s", f: {}}
+ChainContract.new | {v: 1, c: nil, f: nil}
+ChainContract.new | {}
+RulesContract.new | {"name" => "a"}
+RulesContract.new | {"name" => "Ab", "nick" => "long"}
+RulesContract.new | {"name" => "", "a" => "1", "b" => "1"}
+RulesContract.new | {"name" => "ok", "a" => "0", "b" => "0"}
+RulesContract.new | {"name" => "ok", "a" => "x", "b" => "1"}
+RulesContract.new | {"name" => "ok", "addr" => {"city" => "Moscow"}}
+RulesContract.new | {"name" => "ok", "a" => 7, "b" => 9, "nick" => nil}
+RulesContract.new | {"a" => "1"}
+Users::SignupContract.new | {"login" => "adm", "age" => 1}
+Users::SignupContract.new | {"login" => "zzz", "age" => 1}
+Users::SignupContract.new | {"login" => "hsh", "age" => 1}
+RulesContract.new | {"name" => "ok", "nick" => "hsh"}

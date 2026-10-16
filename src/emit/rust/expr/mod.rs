@@ -76,7 +76,7 @@ pub(super) fn mark_local_var_ty(name: &str, ty: crate::ty::Ty) {
 /// the same `.clone().unwrap()` Option-unwrap fires for `params =
 /// match_pattern(...)` locals as for function params declared
 /// `Option<T>` in RBS.
-fn var_decl_ty(name: &str) -> Option<crate::ty::Ty> {
+pub(super) fn var_decl_ty(name: &str) -> Option<crate::ty::Ty> {
     param_ty(name).or_else(|| local_var_ty(name))
 }
 
@@ -1028,11 +1028,20 @@ fn emit_expr_inner(e: &Expr) -> String {
                         // takes the read-only `.iter().flatten()` chain
                         // below; the mutating no-clone path applies only
                         // to the plain-Vec `.iter_mut()` case.
-                        let was_option = matches!(
-                            r.ty.as_ref(),
-                            Some(crate::ty::Ty::Union { variants })
-                                if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
-                        );
+                        let is_option = |t: &crate::ty::Ty| {
+                            matches!(t, crate::ty::Ty::Union { variants }
+                                if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil)))
+                        };
+                        // An ivar read can carry `| nil` while its field is
+                        // a plain `Vec`; the field table is the authority.
+                        let field_ty = match &*r.node {
+                            ExprNode::Ivar { name } => ivar_field_ty(name.as_str()),
+                            _ => None,
+                        };
+                        let was_option = match field_ty {
+                            Some(t) => is_option(&t),
+                            None => r.ty.as_ref().is_some_and(is_option),
+                        };
                         // A block that mutates its element (calls a
                         // `mutates_self` method on the param — the
                         // `_preload_<assoc>` distribute loop) must
@@ -1069,8 +1078,12 @@ fn emit_expr_inner(e: &Expr) -> String {
                         // the read-only `parts << ...` framework Ruby.
                         let iter_chain = if was_option {
                             ".iter().flatten()"
-                        } else {
+                        } else if recv_mutated || !matches!(&*r.node, ExprNode::Ivar { .. }) {
                             ".iter_mut()"
+                        } else {
+                            // A field read in a `&self` method can't be
+                            // borrowed mutably; the block only reads it.
+                            ".iter()"
                         };
                         return format!("{recv_s}{iter_chain}.for_each({closure})");
                     }
@@ -1125,6 +1138,9 @@ fn emit_expr_inner(e: &Expr) -> String {
                             );
                             let iter_chain = if was_option {
                                 ".iter().flatten()"
+                            } else if matches!(&*r.node, ExprNode::Ivar { .. }) {
+                                // `into_iter` would move the field out of `self`, which the method only borrows.
+                                ".iter().cloned()"
                             } else {
                                 ".into_iter()"
                             };
@@ -1331,7 +1347,7 @@ pub(super) fn arg_hash_var_local_ty(arg: &Expr) -> Option<(crate::ty::Ty, crate:
         _ => return None,
     };
     match local_var_ty(&name)? {
-        crate::ty::Ty::Hash { key, value } => Some((*key, *value)),
+        crate::ty::Ty::Hash { key, value } => Some((std::sync::Arc::unwrap_or_clone(key), std::sync::Arc::unwrap_or_clone(value))),
         _ => None,
     }
 }
@@ -1349,7 +1365,7 @@ pub(super) fn recv_var_back_propagated_hash_kv(recv: &Expr) -> Option<(crate::ty
         return None;
     }
     match local_var_ty(&name)? {
-        crate::ty::Ty::Hash { key, value } => Some((*key, *value)),
+        crate::ty::Ty::Hash { key, value } => Some((std::sync::Arc::unwrap_or_clone(key), std::sync::Arc::unwrap_or_clone(value))),
         _ => None,
     }
 }

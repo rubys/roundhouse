@@ -9,6 +9,8 @@
 //! validation target for the lowering pipeline; per-target emitter
 //! migrations (TS / Rust / …) are deferred.
 
+use std::path::Path;
+
 use roundhouse::emit::{ruby, EmittedFile};
 use roundhouse::ingest::ingest_app;
 
@@ -143,23 +145,23 @@ fn article_renders_validate_with_inline_checks() {
     // docs/archive/rust-migration-plan.md) — no helper-call into the
     // Validations runtime module. Error messages become string-literal
     // constants; the type-erased `value: untyped` channel is gone.
-    // The Ruby emitter uses postfix-modifier form for single-line
-    // if's, so the assertion matches the natural output shape.
+    // Each message is pushed with the error Rails records for it.
     assert!(
-        src.contains(r#"errors << "Title can't be blank" if @title.nil?"#),
+        src.contains("self.errors << \"Title can't be blank\"\n      self.error_details << ActiveRecord::ErrorDetail.new(\"title\", \"blank\", \"can't be blank\", \"Title can't be blank\", true, true)"),
         "{src}",
     );
     assert!(
-        src.contains(r#"errors << "Body can't be blank" if @body.nil?"#),
+        src.contains("self.errors << \"Body can't be blank\"\n      self.error_details << ActiveRecord::ErrorDetail.new(\"body\", \"blank\", \"can't be blank\", \"Body can't be blank\", true, true)"),
         "{src}",
     );
-    // Length is now also inline (third slice of Phase 2.5(a)).
-    // Expansion: `unless @body.nil?; len = ...; errors << "..." if len < N; end`.
-    // Message matches Rails' full_messages: humanized attribute +
-    // "characters" suffix (see model_to_library::validations::humanize).
+    // Length is inline. A nil body fails the minimum (Rails does not
+    // skip it); a present body compares `len`. Message matches Rails'
+    // full_messages: humanized attribute + "characters" suffix
+    // (see model_to_library::validations::humanize). Attributed push
+    // pairs each message with `error_attributes`.
     assert!(
         src.contains(
-            r#"errors << "Body is too short (minimum is 10 characters)" if len < 10"#
+            r#"errors << "Body is too short (minimum is 10 characters)""#
         ),
         "{src}",
     );
@@ -534,18 +536,11 @@ fn schema_emits_create_index_lines_for_table_indexes() {
     );
 }
 
+/// Not dropped: Rails' SQLite schema carries the constraint and its adapter turns `foreign_keys` on, so a row naming a missing parent raises `InvalidForeignKey` there.
 #[test]
-fn schema_drops_foreign_key_constraints() {
-    // Real-blog has `add_foreign_key "comments", "articles"` — but the
-    // spinel runtime models relationships at the app layer (e.g.
-    // belongs_to lowers to `Article.find_by(id: @article_id)`), so the
-    // DB-level constraint is dropped per yagni-on-round-trip:
-    // structural compile-equivalence, not source-equivalence.
+fn schema_keeps_foreign_key_constraints() {
     let src = lowered_real_blog_schema();
-    assert!(
-        !src.contains("FOREIGN KEY") && !src.contains("REFERENCES"),
-        "spinel schema should not emit FK constraints; got:\n{src}",
-    );
+    assert!(src.contains("FOREIGN KEY (article_id) REFERENCES articles (id)"), "{src}");
 }
 
 #[test]
@@ -840,7 +835,9 @@ fn controllers_article_params_lowers_to_typed_factory() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("ArticleParams.from_raw(@params)"),
+        // The ruby family hands the factory `@params` behind
+        // `expect`'s refusal (ParameterMissing → 400, as Rails).
+        src.contains(r#"ArticleParams.from_raw(Params.expect_present(@params, "article", ["title", "body"], [], [], []))"#),
         "expected typed-factory lowering; got:\n{src}",
     );
     assert!(
@@ -1165,7 +1162,7 @@ fn controllers_params_helper_body_is_from_raw_call() {
         .split("def article_params").nth(1).unwrap()
         .split("end").next().unwrap();
     assert!(
-        body.contains("ArticleParams.from_raw(@params)"),
+        body.contains(r#"ArticleParams.from_raw(Params.expect_present(@params, "article", ["title", "body"], [], [], []))"#),
         "expected typed-factory body; got:\n{body}",
     );
     assert!(
@@ -1509,6 +1506,29 @@ fn lowered_article_partial_truncate_wrapped_in_html_escape() {
 }
 
 #[test]
+fn lowered_view_word_wrap_routes_to_shared_runtime_and_escapes_output() {
+    let mut app = ingest_app(roundhouse::fixtures::real_blog()).expect("ingest real-blog");
+    let view = roundhouse::ingest::view::ingest_view(
+        "<%= word_wrap(\"one two three\", line_width: 7, break_sequence: \"|\") %>\n<%= word_wrap(article.body) %>\n",
+        Path::new("articles/word_wrap.html.erb"),
+        "app/views/articles/word_wrap.html.erb",
+    )
+    .expect("ingest word_wrap view");
+    app.views.push(view);
+
+    let files = ruby::emit_lowered_views(&app);
+    let src = find(&files, "app/views/articles/word_wrap.rb");
+    assert!(
+        src.contains("ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.word_wrap(\"one two three\", line_width: 7, break_sequence: \"|\"))"),
+        "expected a qualified shared helper call with normal interpolation escaping; got:\n{src}",
+    );
+    assert!(
+        src.contains("ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.word_wrap(article.body.to_s))"),
+        "expected nullable word_wrap text to be coerced to String; got:\n{src}",
+    );
+}
+
+#[test]
 fn lowered_article_partial_link_to_record_uses_singular_path_helper() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_article.rb");
@@ -1732,15 +1752,14 @@ fn lowered_form_partial_form_builder_methods() {
     );
     // `form.text_field :title, class: [...]` → inline `<input
     // type="text" name="article[title]" id="article_title"<value_attr>
-    // class="<simplified>">`. Class-array collapse + html_escape on
-    // the simplified literal land in the StringInterp.
+    // class="<class_names>">`.
     assert!(
         src.contains("name=\\\"article[title]\\\" id=\\\"article_title\\\""),
         "expected inline text_field name/id; got:\n{src}",
     );
     assert!(
-        src.contains("\"block shadow-sm rounded-md border px-3 py-2 mt-2 w-full border-gray-400 focus:outline-blue-600\""),
-        "expected class-array collapsed to base + first hash key; got:\n{src}",
+        src.contains("block shadow-sm rounded-md border px-3 py-2 mt-2 w-full#{if "),
+        "expected the class array to pick its classes per field at render time; got:\n{src}",
     );
     // `form.textarea :body, rows: 4, ...` → inline
     // `<textarea name="article[body]" id="article_body" rows="4"

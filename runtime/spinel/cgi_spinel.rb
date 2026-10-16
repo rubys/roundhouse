@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Spinel-only CGI reopen. `require "cgi"` reaches spinel's bundled
 # package (matz/spinel#4812, merged 2026-09-22 as fc714b2c); this file
 # adds the ONE method that package does not carry.

@@ -126,7 +126,7 @@ pub fn apply_route_url_options_lowering(app: &mut App) {
 /// the generator builds takes every slot.
 pub(crate) fn helper_path_params(app: &App) -> std::collections::HashMap<String, Vec<String>> {
     let mut out: std::collections::HashMap<String, Vec<String>> = Default::default();
-    for route in super::routes::flatten_routes(app) {
+    for route in super::routes::flatten_routes_for_helpers(app) {
         if !route.named {
             continue;
         }
@@ -226,7 +226,7 @@ fn spread_options_local(arg: &Expr, index: usize, names: &[String]) -> Option<Ve
                 parenthesized: true,
             },
         );
-        e.ty = Some(crate::ty::Ty::Union { variants: vec![(**value).clone(), crate::ty::Ty::Nil] });
+        e.ty = Some(crate::ty::Ty::Union { variants: vec![(**value).clone(), crate::ty::Ty::Nil].into() });
         e
     };
     let mut out: Vec<Expr> = names[index..].iter().map(|n| read(n)).collect();
@@ -326,8 +326,19 @@ fn strip_host_options(
     expr: &mut Expr,
     helpers: &std::collections::HashSet<String>,
 ) -> Option<(String, Expr, Option<Expr>)> {
-    let ExprNode::Send { recv: None, method, args, block: None, .. } = &mut *expr.node else {
+    let ExprNode::Send { recv, method, args, block: None, .. } = &mut *expr.node else {
         return None;
+    };
+    // The explicit `Rails.application.routes.url_helpers.x_url(…)` chain
+    // (a model, a mailer, a plain class, or a controller that spells it
+    // out) is the same helper. Only its `only_path: true` form is
+    // finished here: the chain's `host:` grounding belongs to
+    // `emit::ruby::library::rewrite_url_helpers_absolute`, which needs
+    // the keys this pass would remove.
+    let chained = match recv {
+        None => false,
+        Some(r) if crate::lower::controller_to_library::rewrites::is_rails_url_helpers_chain(r) => true,
+        Some(_) => return None,
     };
     if !helpers.contains(method.as_str()) {
         return None;
@@ -336,6 +347,14 @@ fn strip_host_options(
     let ExprNode::Hash { entries, kwargs: true } = &mut *last.node else {
         return None;
     };
+    if chained
+        && !entries.iter().any(|(k, v)| {
+            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "only_path")
+                && matches!(&*v.node, ExprNode::Lit { value: Literal::Bool { value: true } })
+        })
+    {
+        return None;
+    }
     // Read the two that BUILD a host before dropping them: on the `_url`
     // spelling they are not dropped at all — they ARE the host half, and
     // this is the last place that knows the caller named one.
@@ -370,9 +389,13 @@ fn strip_host_options(
     // `_path` is done: the seven describe a host it does not render.
     let stem = method.as_str().strip_suffix("_url")?;
     // `x_url(…, only_path: true)` is Rails asking the URL spelling for
-    // a path, which is the `_path` helper — the strip above already
-    // made it one.
+    // a path, which is the `_path` helper: rename it to that. The strip
+    // alone left a `_url` name, and the controller and view lowerers
+    // ground every `_url` send as an absolute URL on the request's
+    // host, so `widget_url(w, only_path: true)` rendered
+    // `http://example.org/widgets/1` where Rails renders `/widgets/1`.
     if only_path {
+        *method = Symbol::from(format!("{stem}_path"));
         return None;
     }
     // `x_url(…, host: h)` names the host EXPLICITLY, and dropping it

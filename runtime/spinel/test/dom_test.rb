@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Unit tests for the `Dom` selector stub in test_helper.rb — the
 # substrate `assert_select` lowers to.
 #

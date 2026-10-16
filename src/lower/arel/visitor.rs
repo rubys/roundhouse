@@ -190,6 +190,46 @@ pub trait ArelVisitor {
 /// produces.
 pub struct SqliteVisitor;
 
+impl SqliteVisitor {
+    /// Execute an insert that returns selected columns from that same
+    /// statement. Generated-column persistence uses this to hydrate the
+    /// database-owned values without a second, post-commit SELECT.
+    pub(crate) fn visit_insert_returning(
+        &self,
+        ins: &Insert,
+        schema: &Schema,
+        returning_key: &Symbol,
+        key_is_integer: bool,
+        returning_columns: &[Symbol],
+    ) -> Expr {
+        let key_ident = crate::naming::sql_ident(returning_key.as_str());
+        // Spinel snapshots SQLite integer cells through sqlite3_column_int
+        // (32-bit). Return integer keys as text so the shared result capture
+        // does not truncate them before the adapter parses them back.
+        let key_projection = if key_is_integer {
+            format!("CAST({key_ident} AS TEXT)")
+        } else {
+            key_ident
+        };
+        let mut projection = vec![key_projection];
+        projection.extend(
+            returning_columns
+                .iter()
+                .map(|column| crate::naming::sql_ident(column.as_str())),
+        );
+        let projection = projection.join(", ");
+        let sql = concat_chain(vec![
+            insert_sql(ins, schema),
+            lit_str(format!(" RETURNING {projection}")),
+        ]);
+        db_call(
+            &ClassId(Symbol::from(DB_MOD)),
+            "exec_returning",
+            vec![sql],
+        )
+    }
+}
+
 impl ArelVisitor for SqliteVisitor {
     fn visit(&self, op: &ArelOp, schema: &Schema, owner: &ClassId) -> Expr {
         match op {
@@ -312,9 +352,9 @@ fn emit_multi_hydrate(
     // the Crystal emit's empty-array default (`[] of String`) would
     // mismatch the appended instances.
     let owner_array_ty = crate::ty::Ty::Array {
-        elem: Box::new(crate::ty::Ty::Class {
+        elem: std::sync::Arc::new(crate::ty::Ty::Class {
             id: owner.clone(),
-            args: vec![],
+            args: vec![].into(),
         }),
     };
     let results_init = assign_var(
@@ -431,13 +471,13 @@ fn push_preload_stmts(
     out.push(assign_var(&pstmt, db_call(&db, "prepare", vec![sql])));
 
     // loaded = [] (typed Array<Target> so the `<<` push types cleanly)
-    let elem_ty = Ty::Class { id: directive.target_class.clone(), args: vec![] };
+    let elem_ty = Ty::Class { id: directive.target_class.clone(), args: vec![].into() };
     let loaded_init = crate::lower::typing::with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
         ),
-        Ty::Array { elem: Box::new(elem_ty) },
+        Ty::Array { elem: std::sync::Arc::new(elem_ty) },
     );
     out.push(assign_var(&loaded, loaded_init));
 
@@ -510,7 +550,7 @@ fn push_preload_stmts(
             Span::synthetic(),
             ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
         ),
-        Ty::Array { elem: Box::new(Ty::Class { id: directive.target_class.clone(), args: vec![] }) },
+        Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: directive.target_class.clone(), args: vec![].into() }) },
     );
     let setter = format!("_preload_{}", assoc);
     let each_block = block1(
@@ -563,9 +603,9 @@ fn push_planned_distribute(
     let stop = Symbol::from(format!("__{}_stop", assoc));
     let group = Symbol::from(format!("__{}_group", assoc));
 
-    let int_array = || Ty::Array { elem: Box::new(Ty::Int) };
-    let target_ty = || Ty::Class { id: directive.target_class.clone(), args: vec![] };
-    let target_array = || Ty::Array { elem: Box::new(target_ty()) };
+    let int_array = || Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
+    let target_ty = || Ty::Class { id: directive.target_class.clone(), args: vec![].into() };
+    let target_array = || Ty::Array { elem: std::sync::Arc::new(target_ty()) };
     let int_var = |name: &Symbol| with_ty(var_ref(name), Ty::Int);
     let typed_send = |recv: Expr, method: &str, args: Vec<Expr>, ty: Ty| {
         with_ty(send_to(recv, method, args, false), ty)
@@ -681,7 +721,7 @@ fn emit_pluck(sel: &Select, table: &Table, col: &super::ir::ColRef, param: bool)
                 Span::synthetic(),
                 ExprNode::Array { elements: vec![], style: ArrayStyle::Brackets },
             ),
-            crate::ty::Ty::Array { elem: Box::new(elem_ty) },
+            crate::ty::Ty::Array { elem: std::sync::Arc::new(elem_ty) },
         ),
     );
 
@@ -760,8 +800,8 @@ fn emit_group_count(
     let key_read = crate::lower::model_to_library::schema::column_read_method_for(column);
     let key_ty = crate::lower::model_to_library::ty_of_column_slot(column);
     let hash_ty = crate::ty::Ty::Hash {
-        key: Box::new(key_ty),
-        value: Box::new(crate::ty::Ty::Int),
+        key: std::sync::Arc::new(key_ty),
+        value: std::sync::Arc::new(crate::ty::Ty::Int),
     };
     let read_id = next_read_id();
 
@@ -877,35 +917,49 @@ fn emit_exists(sel: &Select, table: &Table, param: bool) -> Expr {
 // ---------------------------------------------------------------------------
 
 fn visit_insert(ins: &Insert, schema: &Schema) -> Expr {
-    let _ = lookup_table(schema, &ins.table.0); // validates table exists; not consumed beyond that
     let db = ClassId(Symbol::from(DB_MOD));
-
-    let cols_csv = ins
-        .assignments
-        .iter()
-        .map(|a| crate::naming::sql_ident(a.column.as_str()))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let mut segments: Vec<Expr> = vec![lit_str(format!(
-        "INSERT INTO {} ({}) VALUES (",
-        crate::naming::sql_ident(ins.table.0.as_str()),
-        cols_csv
-    ))];
-    for (idx, a) in ins.assignments.iter().enumerate() {
-        if idx > 0 {
-            segments.push(lit_str(", ".to_string()));
-        }
-        segments.push(escape_value(&db, &a.value));
-    }
-    segments.push(lit_str(")".to_string()));
-
-    let exec_call = db_call(&db, "exec", vec![concat_chain(segments)]);
+    let sql = insert_sql(ins, schema);
+    let exec_call = db_call(&db, "exec", vec![sql]);
     if !ins.returns_rowid {
         return exec_call;
     }
     let last_id = db_call(&db, "last_insert_rowid", vec![]);
     seq(vec![exec_call, last_id])
+}
+
+/// Compose the INSERT statement before the visitor chooses `exec` or
+/// `exec_returning`. Keeping value escaping here ensures both paths retain
+/// the same inline, schema-ordered write semantics.
+fn insert_sql(ins: &Insert, schema: &Schema) -> Expr {
+    let _ = lookup_table(schema, &ins.table.0); // validates table exists; not consumed beyond that
+    let db = ClassId(Symbol::from(DB_MOD));
+    let sql = if ins.assignments.is_empty() {
+        lit_str(format!(
+            "INSERT INTO {} DEFAULT VALUES",
+            crate::naming::sql_ident(ins.table.0.as_str())
+        ))
+    } else {
+        let cols_csv = ins
+            .assignments
+            .iter()
+            .map(|a| crate::naming::sql_ident(a.column.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut segments = vec![lit_str(format!(
+            "INSERT INTO {} ({}) VALUES (",
+            crate::naming::sql_ident(ins.table.0.as_str()),
+            cols_csv
+        ))];
+        for (idx, a) in ins.assignments.iter().enumerate() {
+            if idx > 0 {
+                segments.push(lit_str(", ".to_string()));
+            }
+            segments.push(escape_value(&db, &a.value));
+        }
+        segments.push(lit_str(")".to_string()));
+        concat_chain(segments)
+    };
+    sql
 }
 
 fn visit_update(upd: &Update, schema: &Schema) -> Expr {
@@ -1218,7 +1272,7 @@ fn send_to(recv: Expr, method: &str, args: Vec<Expr>, parenthesized: bool) -> Ex
 fn block1(param: &str, body: Expr) -> Expr {
     Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { rest_param: None,
+        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
             params: vec![Symbol::from(param)],
             block_param: None,
             body,
@@ -1347,6 +1401,7 @@ mod tests {
     use indexmap::IndexMap;
 
     // Two-column "articles" table: id (Int), title (Str).
+    /// Creates the articles schema and model identifier used by Arel visitor tests.
     fn fixture_schema() -> (Schema, ClassId) {
         let mut tables = IndexMap::new();
         tables.insert(
@@ -1360,6 +1415,9 @@ mod tests {
                         nullable: false,
                         default: None,
                         primary_key: true,
+                        generated: None,
+                        generated_text_compatible: None,
+                        generated_int4_compatible: None,
                     },
                     Column {
                         name: Symbol::from("title"),
@@ -1367,6 +1425,9 @@ mod tests {
                         nullable: false,
                         default: None,
                         primary_key: false,
+                        generated: None,
+                        generated_text_compatible: None,
+                        generated_int4_compatible: None,
                     },
                 ],
                 indexes: vec![],
@@ -1552,6 +1613,35 @@ mod tests {
         // exec ; last_insert_rowid
         assert_eq!(outer_kind(&body), "seq");
         assert_eq!(seq_len(&body), 2);
+    }
+
+    #[test]
+    fn insert_without_assignments_uses_default_values() {
+        let (schema, owner) = fixture_schema();
+        for returns_rowid in [false, true] {
+            let op = ArelOp::Insert(Insert {
+                table: TableRef(Symbol::from("articles")),
+                assignments: vec![],
+                returns_rowid,
+            });
+            let body = SqliteVisitor.visit(&op, &schema, &owner);
+            let exec = if returns_rowid {
+                let ExprNode::Seq { exprs } = body.node.as_ref() else {
+                    panic!("insert must return the last row id");
+                };
+                assert_eq!(exprs.len(), 2);
+                &exprs[0]
+            } else {
+                &body
+            };
+            let ExprNode::Send { method, args, .. } = exec.node.as_ref() else {
+                panic!("insert must execute SQL");
+            };
+            assert_eq!(method.as_str(), "exec");
+            assert!(matches!(args[0].node.as_ref(),
+                ExprNode::Lit { value: Literal::Str { value } }
+                    if value == "INSERT INTO articles DEFAULT VALUES"));
+        }
     }
 
     #[test]

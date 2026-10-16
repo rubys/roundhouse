@@ -106,7 +106,7 @@ fn inline_parts(e: &Expr) -> Option<(Vec<(Symbol, Expr)>, &'static str)> {
                 };
                 out.push((value.clone(), now(e.span)));
             }
-            Some((out, "touch"))
+            Some((out, "touch_written"))
         }
         _ => None,
     }
@@ -219,10 +219,11 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
                     variants: vec![
                         recv_ty.unwrap_or(Ty::Bool),
                         Ty::Nil,
-                    ],
+                    ]
+                    .into(),
                 })
             } else {
-                Some(Ty::Union { variants: vec![Ty::Bool, Ty::Nil] })
+                Some(Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() })
             };
         }
     }

@@ -300,7 +300,12 @@ fn length_validation_emits_with_options_object() {
         body: vec![ModelBodyItem::Validation {
             validation: Validation {
                 attribute: Symbol::from("body"),
-                rules: vec![ValidationRule::Length { min: Some(10), max: None }],
+                rules: vec![ValidationRule::Length {
+                    min: Some(10),
+                    max: None,
+                    message: None,
+                    allow_nil: None,
+                }],
             },
             leading_comments: vec![],
             leading_blank_line: false,
@@ -414,6 +419,8 @@ fn controller_new_action_is_reserved_word_escaped() {
                 opt_params: vec![],
                 kw_params: vec![],
                 kwrest_param: None,
+                rest_param: None,
+                anonymous_formal: None,
                 block_param: None,
                 body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
                 renders: RenderTarget::Inferred,

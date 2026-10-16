@@ -79,6 +79,10 @@ use std::collections::{HashMap, HashSet};
 const ENGINE_MOUNTED_HELPERS: &[&str] = &[
     "rails_blob_path",
     "rails_blob_url",
+    "rails_storage_proxy_path",
+    "rails_storage_proxy_url",
+    "rails_storage_redirect_path",
+    "rails_storage_redirect_url",
     "rails_representation_path",
     "rails_representation_url",
 ];
@@ -90,7 +94,7 @@ fn is_helper_shaped(name: &Symbol) -> bool {
 /// Every name a call can use and reach a real `RouteHelpers` method.
 pub(crate) fn answered_names(app: &App) -> HashSet<Symbol> {
     let mut out: HashSet<Symbol> = ENGINE_MOUNTED_HELPERS.iter().map(|n| Symbol::from(*n)).collect();
-    for route in crate::lower::routes::flatten_routes(app) {
+    for route in crate::lower::routes::flatten_routes_for_helpers(app) {
         if !route.named || route.as_name.is_empty() {
             continue;
         }
@@ -229,6 +233,7 @@ mod tests {
             parent: None,
             parent_span: Default::default(),
             includes: Vec::new(),
+            include_spans: Vec::new(),
             methods,
             nullable_columns: Vec::new(),
             origin: None,

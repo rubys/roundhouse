@@ -157,7 +157,10 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
     match rule {
         ValidationRule::Presence => out.push(Check::Presence),
         ValidationRule::Absence => out.push(Check::Absence),
-        ValidationRule::Length { min, max, message } => {
+        // `allow_nil` is not a `Check`. This fan-out is only read by
+        // `tests/lower_validations.rs`. The emitted `validate` body is
+        // `inline_length_check`, which is where nil is decided.
+        ValidationRule::Length { min, max, message, allow_nil: _ } => {
             if let Some(n) = min {
                 out.push(Check::MinLength { n: *n, message: message.clone() });
             }

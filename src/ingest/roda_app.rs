@@ -136,6 +136,7 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
         class_attr_defaults: indexmap::IndexMap::new(),
         lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
+        i18n: Default::default(),
     });
     let models_dir = dir.join("models");
     if vfs.is_dir(&models_dir) {
@@ -354,6 +355,7 @@ fn ingest_roda_class(source: &[u8], file: &str, app: &mut App) -> IngestResult<S
             parent: None,
             parent_span: Default::default(),
             includes: Vec::new(),
+            include_spans: Vec::new(),
             methods: helper_methods,
             nullable_columns: Vec::new(),
             origin: None,
@@ -1004,6 +1006,8 @@ fn action_item(name: Symbol, body: Expr) -> ControllerBodyItem {
             kw_params: Vec::new(),
             kwrest_param: None,
             block_param: None,
+            rest_param: None,
+            anonymous_formal: None,
             body,
             renders,
             effects: EffectSet::pure(),

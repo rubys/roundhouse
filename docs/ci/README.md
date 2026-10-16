@@ -24,13 +24,22 @@ advisory jobs and the scheduled Full cycle for the multi-target ledger.
 | **Draft or ready**, no special label | Path-selected coverage on the Ruby floor |
 | **Draft or ready** + `ci:spinel` | Ruby floor plus the **CORE** Spinel lane (required for that run) |
 | **Draft or ready** + focus label(s) | Ruby floor plus **only** the selected focus lanes (required) |
-| **Draft or ready** + `ci:full` | Full validation (all targets, WASM, Writebook, Spinel); extras stay advisory |
-| **Push to canonical `main`** | Ruby floor plus the full Spinel suite (advisory); extra-language SDKs wait for the schedule |
+| **Draft or ready** + `ci:full` | Full validation (all targets, WASM, Spinel); extras stay advisory |
+| **Push to canonical `main`** | Ruby floor plus the full Spinel suite (advisory except `campfire-archive-build`) and `campfire-latest` (advisory); extra-language SDKs wait for the schedule |
 | **Scheduled / manual Full validation** | Full validation (the extra-language ledger and publication cycle) |
 
 PRs without a special label run a Ruby floor: fixture preparation, unit
-tests, Store analysis, the CRuby comparison against Rails, and Campfire
-conformance/comparison. Four unit shards cover all package test targets in
+tests, Store analysis, the CRuby comparison against Rails (on `MRI_RUBY`, the
+supported minimum, with its runtime gates repeated on `MRI_RUBY_NEXT` in
+`compare-ruby-next`), and Campfire
+conformance/comparison. Campfire conformance is pinned (`CAMPFIRE_SHA`)
+and blocking; `campfire-latest` runs the same suite against
+basecamp/once-campfire `main` on that app's own Ruby after every merge to
+`main`, on Full, and for unknown changed inputs on non-PR runs (never in
+a pull request's plan), advisory. It always
+surveys the strict emit and reports ingest gaps and strict-emit errors; it
+runs the suite, and reports tests against the pinned floor, only when the
+survey finds no ingest gap. Four unit shards cover all package test targets in
 bounded batches; ignored integrations need selected toolchain lanes.
 Shard 0 of `unit` also runs each `gems/roundsnap/test/*_test.rb` in its own
 MRI process (`ruby -Ilib:test "$file"`): extra positional arguments are ARGV,
@@ -50,12 +59,11 @@ failures must match the plain Ruby lane on the same app, MRI, gems and
 compiler; the plain lane's existing conformance floor still applies.
 The standalone `campfire-roundsnap` script remains a boot-only local smoke.
 Framework and toolchain suites also run inside comparison jobs, not
-necessarily as standalone checks.
-**Spinel is not part of `BASE`.**
+necessarily as standalone checks. **Spinel is not part of `BASE`.**
 
 That floor is the merge claim for ordinary analyzer, lowerer, and runtime
 work: the Ruby shape runs, and Campfire still matches Rails. Crystal, Go,
-Swift, Kotlin, C#, Elixir, Python, Rust, TypeScript, WASM, and Writebook do
+Swift, Kotlin, C#, Elixir, Python, Rust, TypeScript, and WASM do
 **not** start on that path unless the diff owns them or a maintainer applies
 `ci:full`. When path ownership or Full selects the seven extras, their
 `compare-extra` / `smoke-extra` jobs are **advisory** (visible, not
@@ -110,7 +118,7 @@ so fix rounds only queue the lanes under repair — and those lanes are
 **Narrow semantics:** with any focus label set and `ci:full` **not** set, the
 plan is the Ruby floor (`BASE`) plus only the selected focus lanes. Path
 ownership does not expand the plan. Unrelated extras / WASM / rust·ts
-`compare` / Writebook / full Spinel11 stay off. `ci:full` still wins as the
+`compare` / full Spinel11 stay off. `ci:full` still wins as the
 full ledger (extras remain advisory there).
 
 **Rust vs TypeScript:** selecting one no longer forces both `compare` matrix
@@ -144,8 +152,8 @@ prompt.
 
 Pushes to canonical `main` run the Ruby floor plus the full Spinel suite
 and cancel a superseded SHA on the same ref. They do **not** run Crystal,
-Go, Swift, Kotlin, C#, Elixir, Python, Rust, TypeScript, WASM, Writebook,
-or the extra-language smoke matrix. Extra-target red is follow-up work on
+Go, Swift, Kotlin, C#, Elixir, Python, Rust, TypeScript, WASM, or the
+extra-language smoke matrix. Extra-target red is follow-up work on
 the four-hour scheduled Full validation cycle, not a merge gate for later
 Ruby PRs. That schedule remains the extra-language ledger, publication
 path, and floating-pin catch-up.
@@ -159,7 +167,7 @@ path, and floating-pin catch-up.
 - **JRuby fix rounds:** `ci:jruby` — `compare-jruby` + smoke jruby, required.
 - **Spinel-focused CI:** apply `ci:spinel` on a draft or ready PR. Runs the
   Ruby floor plus the CORE Spinel lane as **required**; skips Crystal/Go/… SDKs,
-  WASM, Writebook, and the heavy Campfire Spinel suite. Prefer this over
+  WASM and the heavy Campfire Spinel suite. Prefer this over
   `ci:full` when only the native/Ruby-family lane matters. Multiple focus
   labels union on `BASE`.
 - **More coverage:** ask a maintainer to apply `ci:full` to a ready or draft PR. The

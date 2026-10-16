@@ -1,0 +1,2 @@
+class VirtualPerson < ApplicationRecord
+end

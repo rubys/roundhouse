@@ -300,6 +300,18 @@ pub fn flatten_params_pairs<'a>(
     pairs
 }
 
+/// The `@<ivar> = <fixture>(:<label>)` a setup assigns, as (fixture, label).
+pub fn setup_fixture(setup: &Expr, ivar: &Symbol, fixture_names: &[Symbol]) -> Option<(Symbol, String)> {
+    let value = test_body_stmts(setup).into_iter().rev().find_map(|stmt| match &*stmt.node {
+        ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } if name == ivar => Some(value),
+        _ => None,
+    })?;
+    let ExprNode::Send { recv: None, method, args, .. } = &*value.node else { return None };
+    let [arg] = args.as_slice() else { return None };
+    let ExprNode::Lit { value: Literal::Sym { value: label } } = &*arg.node else { return None };
+    fixture_names.contains(method).then(|| (method.clone(), label.to_string()))
+}
+
 /// Flatten a test body into a statement sequence. If the body is a
 /// single `Seq`, unwrap it; otherwise return it as a singleton.
 /// Matches the convention that Rails test bodies are always Seq at

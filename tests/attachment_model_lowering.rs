@@ -16,6 +16,10 @@ fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
 const SCHEMA: &str = r#"ActiveRecord::Schema.define do
   create_table "docs", force: :cascade do |t|
     t.string "name"
+    t.bigint "author_id"
+  end
+  create_table "authors", force: :cascade do |t|
+    t.string "email"
   end
   create_table "active_storage_attachments", force: :cascade do |t|
     t.string "name", null: false
@@ -85,7 +89,11 @@ fn on_load_active_storage_attachment_include_reaches_model() {
         ("db/schema.rb", SCHEMA),
         (
             "app/models/doc.rb",
-            "class Doc < ApplicationRecord\nend\n",
+            "class Doc < ApplicationRecord\n  belongs_to :author\nend\n",
+        ),
+        (
+            "app/models/author.rb",
+            "class Author < ApplicationRecord\nend\n",
         ),
         (
             "app/models/concerns/doc/uploads.rb",
@@ -93,6 +101,7 @@ fn on_load_active_storage_attachment_include_reaches_model() {
   extend ActiveSupport::Concern
   included do
     has_many_attached :uploads
+    delegate :email, to: :author
   end
 end
 "#,
@@ -117,5 +126,38 @@ end
     assert!(
         src.contains("AttachedMany.new"),
         "on_load include must splice has_many_attached onto Doc:\n{src}"
+    );
+    assert!(
+        src.contains("def email\n    self.author.email\n  end"),
+        "a delegate added by the late on_load concern splice must be expanded:\n{src}"
+    );
+}
+
+#[test]
+fn a_private_delegate_in_an_included_block_is_rejected_at_ingest() {
+    let error = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/doc.rb",
+            "class Doc < ApplicationRecord\n  belongs_to :author\n  include Doc::PrivateEmail\nend\n",
+        ),
+        (
+            "app/models/concerns/doc/private_email.rb",
+            r#"module Doc::PrivateEmail
+  extend ActiveSupport::Concern
+  included do
+    private
+    delegate :email, to: :author
+  end
+end
+"#,
+        ),
+    ]))
+    .expect_err("private concern delegates are not modeled");
+    assert!(
+        error
+            .to_string()
+            .contains("conditional or dynamic visibility declarations are not modeled"),
+        "unexpected ingest error: {error}"
     );
 }

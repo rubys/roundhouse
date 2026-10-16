@@ -98,6 +98,15 @@ fn transpile_inner(json_in: &str) -> String {
         Err(e) => return error_json(&format!("invalid input JSON: {e}")),
     };
 
+    // Futamura's output is the app's own tree with specializations
+    // spliced in, so it keeps the source map (the CLI walks the app dir).
+    let futamura_tree: Option<Vec<(String, String)>> = (input.language == "futamura").then(|| {
+        let mut files: Vec<(String, String)> =
+            input.src.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files
+    });
+
     let tree: HashMap<PathBuf, Vec<u8>> = input
         .src
         .into_iter()
@@ -132,14 +141,22 @@ fn transpile_inner(json_in: &str) -> String {
     let mut analyzer = Analyzer::new(&app);
     let lower_diags = if is_roda {
         Vec::new()
-    } else {
+    } else if futamura_tree.is_some() {
+        // Futamura needs the types but none of the lowerings: those
+        // rewrite into the runtime's vocabulary, and its specializations
+        // call Rails (same split as bin/roundhouse).
         analyzer.analyze(&mut app);
+        Vec::new()
+    } else {
+        roundhouse::lower::i18n_translate::with_plan_cache(|| {
+            analyzer.analyze(&mut app);
 
-        // Same post-analyze shared lowerings as the CLI transpile driver
-        // (bin/roundhouse): the playground emits from the same IR the CLI
-        // does. Residue joins the diagnostics below; synthetic spans drop
-        // out in the existing filter.
-        roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry())
+            // Same post-analyze shared lowerings as the CLI transpile driver
+            // (bin/roundhouse): the playground emits from the same IR the CLI
+            // does. Residue joins the diagnostics below; synthetic spans drop
+            // out in the existing filter.
+            roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry())
+        })
     };
 
     // Analyzer diagnostics + gap-attributed coverage notes (Info severity),
@@ -201,6 +218,25 @@ fn transpile_inner(json_in: &str) -> String {
             })
         })
         .collect();
+
+    if let Some(mut files) = futamura_tree {
+        if let Err(e) = roundhouse::emit::futamura::specialize(&app, &mut files) {
+            return error_json(&format!("futamura: {e}"));
+        }
+        let out = TranspileOutput {
+            language: &input.language,
+            files: files
+                .into_iter()
+                .map(|(path, content)| EmittedFile { path, content })
+                .collect(),
+            diagnostics,
+            inferred_types,
+        };
+        let json = serde_json::to_string(&out)
+            .unwrap_or_else(|e| error_json(&format!("serialize: {e}")));
+        LAST_GOOD.with(|l| *l.borrow_mut() = Some(Analysis { app, analyzer, gaps }));
+        return json;
+    }
 
     let emitted = match input.language.as_str() {
         "typescript" | "ts" => match input.profile.as_deref() {

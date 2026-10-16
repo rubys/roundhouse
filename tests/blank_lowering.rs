@@ -209,6 +209,38 @@ end
     assert_eq!(diags[0].code(), "blank_unlowered");
 }
 
+/// `def label(name = nil)` called only with an untyped argument has no
+/// call-site evidence (the argument's own type is still an inference
+/// var, filtered out before it reaches `param_ty_with_default`), so the
+/// `nil` default alone must not pin the parameter to `Ty::Nil` — that
+/// would fold `name.presence` away to a bare `nil` silently, as if the
+/// caller's value could never matter.
+#[test]
+fn nil_default_with_no_call_site_evidence_keeps_the_runtime_predicate() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Util
+  def label(name = nil)
+    name.presence || "none"
+  end
+
+  def call(thing)
+    label(thing)
+  end
+end
+"#,
+    );
+    assert!(
+        out.contains("ActiveSupport.presence(name)"),
+        "a nil default with no call-site evidence must not fold to a bare nil:\n{out}"
+    );
+    assert!(
+        !out.contains("nil || \"none\""),
+        "presence must not be grounded to nil:\n{out}"
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
 #[test]
 fn own_predicate_class_keeps_dispatch() {
     let (out, diags) = lower_and_emit(

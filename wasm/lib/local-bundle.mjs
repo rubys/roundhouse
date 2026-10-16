@@ -19,7 +19,7 @@
 // `fromEntries` is the common tail both feed, and the seam the verifier
 // drives directly with synthetic {path, text} pairs.
 
-import { WALK_DIRS, SINGLE_FILES, SOURCE_EXT, wantsPath } from "./bundle-rules.mjs";
+import { ALL_WALK_DIRS, SINGLE_FILES, wantsPath } from "./bundle-rules.mjs";
 
 // Assemble the bundle from already-filtered, root-relative entries.
 export function fromEntries(name, entries) {
@@ -64,12 +64,12 @@ export async function fromDirectoryHandle(root) {
     for await (const [name, h] of dir.entries()) {
       const rel = prefix ? `${prefix}/${name}` : name;
       if (h.kind === "directory") await walk(h, rel);
-      else if (SOURCE_EXT.test(name)) {
+      else if (wantsPath(rel)) {
         entries.push({ path: rel, text: await (await h.getFile()).text() });
       }
     }
   }
-  for (const sub of WALK_DIRS) {
+  for (const sub of ALL_WALK_DIRS) {
     const d = await dirAt(root, sub.split("/"));
     if (d) await walk(d, sub);
   }

@@ -34,11 +34,40 @@ use crate::span::Span;
 
 /// Drop the mixins this tree cannot perform, reporting each one.
 pub fn apply_module_mixins_lowering(app: &mut App) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    // `ActionView::PartialRenderer.collection_cache = Store.reader`: kept
+    // when the store's reader resolves at boot (`Rails.cache`, or a class
+    // method an ingested class defines), dropped and reported otherwise,
+    // at a mixin's standing: an assignment naming a missing reader would
+    // be a NoMethodError that takes boot down.
+    if let Some(store) = app.collection_cache_store.take() {
+        let known = (store.receiver.as_str() == "Rails" && store.reader.as_str() == "cache")
+            || defines_class_method(app, &store.receiver, &store.reader);
+        if known {
+            app.collection_cache_store = Some(store);
+        } else {
+            let mut d = Diagnostic::unsupported(
+                Span::synthetic(),
+                None,
+                "initializer collection_cache",
+                format!(
+                    "`ActionView::PartialRenderer.collection_cache = {}.{}` was dropped: \
+                     no class in this tree defines `{}.{}`. Cached collections read \
+                     and write `Rails.cache` instead.",
+                    store.receiver.as_str(),
+                    store.reader.as_str(),
+                    store.receiver.as_str(),
+                    store.reader.as_str(),
+                ),
+            );
+            d.severity = crate::diagnostic::Severity::Warning;
+            diags.push(d);
+        }
+    }
     if app.module_mixins.is_empty() && app.initializer_filters.is_empty() {
-        return Vec::new();
+        return diags;
     }
 
-    let mut diags = Vec::new();
     let mixins = std::mem::take(&mut app.module_mixins);
     let mut kept = Vec::new();
 
@@ -134,6 +163,15 @@ pub fn apply_module_mixins_lowering(app: &mut App) -> Vec<Diagnostic> {
     diags
 }
 
+/// Whether the ingested class or model `name` defines the class method
+/// `method` (`def self.store`).
+fn defines_class_method(app: &App, name: &Symbol, method: &Symbol) -> bool {
+    let is_class_method = |m: &crate::dialect::MethodDef| {
+        m.name == *method && matches!(m.receiver, crate::dialect::MethodReceiver::Class)
+    };
+    app.library_classes.iter().any(|lc| lc.name.0 == *name && lc.methods.iter().any(is_class_method))
+}
+
 /// Whether the ingested module `name` defines an instance method
 /// `method` — itself, or through a module it includes (one level: a
 /// concern including a concern is the depth campfire's guard has).
@@ -184,11 +222,20 @@ fn module_defines(app: &App, name: &Symbol, method: &Symbol) -> bool {
 /// `web_push_persistent_request_test` asserts the socket opens to that
 /// address and never to the endpoint's host, through the prepended
 /// `perform`.
-const RUNTIME_MIXIN_TARGETS: [&str; 4] = [
+///
+/// `JbuilderTemplate` (runtime/spinel/action_controller_fragment_caching.rb)
+/// is Jbuilder's template class as far as its fragment cache: the
+/// `_read_fragment_cache` / `_write_fragment_cache` pair `json.cache!`
+/// goes through. campfire prepends `BoundedJbuilderFragments` onto it
+/// to keep JSON fragments in its bounded store; the suite's
+/// `fragment_rendering_test` reads them back as cache hits through the
+/// prepended pair.
+const RUNTIME_MIXIN_TARGETS: [&str; 5] = [
     "Turbo::StreamsChannel",
     "ActiveStorage::DirectUploadsController",
     "ActiveStorage::DiskController",
     "WebPush::Request",
+    "JbuilderTemplate",
 ];
 
 /// The runtime controllers whose `process_action` asks

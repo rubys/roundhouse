@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActiveRecord::ConnectionNotEstablished — named by `rescue_from
 # ActiveRecord::ConnectionNotEstablished` (lobsters answers it with a
 # plain-text 500). Nothing here raises it: the emitted `Db` opens its

@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::analyze::{diagnose, Analyzer, Severity};
+use crate::analyze::{diagnose, Analyzer, Diagnostic, DiagnosticKind, Severity};
 use crate::ingest::{ingest_app, survey, IngestError};
 
 /// `roundhouse lsp`: serve the read-only Language Server over stdio
@@ -99,23 +99,55 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
     let mut fixture: Option<String> = None;
+    let mut list_unknown_sends = false;
+    let mut inventory_path: Option<String> = None;
+    // Default on with `--continue`: the punch list alone is not a peel
+    // worklist. `--no-hotspots` opts out; `--hotspots` forces it on in
+    // strict mode too.
+    let mut hotspots: Option<bool> = None;
 
-    for arg in args {
+    let mut args = args.iter().peekable();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "Usage: roundhouse check [--continue|--strict] [APP]\n\n\
+                    "Usage: roundhouse check [--continue|--strict] [--unknown-sends]\n\
+                     \x20                  [--inventory PATH] [--hotspots|--no-hotspots] [APP]\n\n\
                      Analyze the Rails app at APP (default {default_app}) and print the\n\
                      diagnostics; exit 1 on parse or type errors.\n\n\
                      Options:\n\
                        --continue   Record unsupported constructs as a punch list and keep\n\
-                                    going (also ROUNDHOUSE_INGEST_SURVEY=1).\n\
-                       --strict     Abort at the first unsupported construct (default)."
+                                    going (also ROUNDHOUSE_INGEST_SURVEY=1). Prints a ranked\n\
+                                    hotspot report unless --no-hotspots.\n\
+                       --strict     Abort at the first unsupported construct (default).\n\
+                       --unknown-sends\n\
+                                    List each send on an unknown or gradual receiver (always\n\
+                                    counted in the summary; never an error).\n\
+                       --inventory PATH\n\
+                                    Write a machine-readable JSON inventory (diagnostics,\n\
+                                    survey gaps, ranked hotspots) to PATH.\n\
+                       --hotspots   Print the ranked error/survey hotspot report (default\n\
+                                    on with --continue).\n\
+                       --no-hotspots\n\
+                                    Suppress the hotspot report."
                 );
                 return ExitCode::SUCCESS;
             }
+            "--unknown-sends" => list_unknown_sends = true,
             "--continue" => continue_on_error = true,
             "--strict" => continue_on_error = false,
+            "--hotspots" => hotspots = Some(true),
+            "--no-hotspots" => hotspots = Some(false),
+            "--inventory" => {
+                let Some(path) = args.next() else {
+                    eprintln!("roundhouse-check: --inventory requires a PATH argument");
+                    return ExitCode::from(2);
+                };
+                inventory_path = Some(path.to_string());
+            }
+            other if other.starts_with("--inventory=") => {
+                inventory_path = Some(other["--inventory=".len()..].to_string());
+            }
             other if other.starts_with("--") => {
                 eprintln!("roundhouse-check: unknown flag {other}");
                 return ExitCode::from(2);
@@ -129,6 +161,7 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
             }
         }
     }
+    let show_hotspots = hotspots.unwrap_or(continue_on_error);
 
     let fixture = fixture.unwrap_or_else(|| default_app.to_string());
     let path = Path::new(&fixture);
@@ -187,7 +220,8 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    crate::timings::phase("analyze", || Analyzer::new(&app).analyze(&mut app));
+    let mut analyzer = Analyzer::new(&app);
+    crate::timings::phase("analyze", || analyzer.analyze(&mut app));
     let mut diags = crate::timings::phase("diagnose", || diagnose(&app));
     // Survey mode: diagnostics that trace back to a recorded ingest gap
     // are the tool's coverage problem, not the app's — downgrade them to
@@ -199,6 +233,7 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     }
     // Likewise a dispatch on a gem the analyzer does not model — the
     // census below names the gems, this labels the diagnostics.
+    crate::analyze::attribution::attribute_initializer_constants(&mut diags, &app);
     crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
     let census = app.gem_lock.as_ref().map(crate::gems::GemCensus::of);
 
@@ -210,9 +245,25 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     let mut had_output = false;
     // Parse diagnostics lead — earliest phase, and usually the root
     // cause of any downstream analyze noise on the recovered AST.
+    // The initializer ledger (a warning per boot statement no recognizer
+    // reads) collapses to a count unless `--continue` asks for the list.
+    let is_ledger = |d: &Diagnostic| matches!(d.kind, DiagnosticKind::UnconsumedInitializer { .. });
+    let ledger_count = parse_diags.iter().filter(|d| is_ledger(d)).count();
     for d in &parse_diags {
+        if is_ledger(d) && !continue_on_error {
+            continue;
+        }
         eprintln!("{}", d.render(&app.sources));
         had_output = true;
+    }
+    if ledger_count > 0 && !continue_on_error {
+        eprintln!(
+            "{ledger_count} unconsumed initializer statement(s) (warnings) — rerun with --continue to list them"
+        );
+        had_output = true;
+    }
+    if ledger_count > 0 && continue_on_error {
+        eprint!("{}", crate::ingest::initializer_ledger::render_summary(&parse_diags));
     }
     for d in &diags {
         eprintln!("{}", d.render(&app.sources));
@@ -222,6 +273,34 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     if !survey_errors.is_empty() {
         print_survey_report(&survey_errors);
         had_output = true;
+    }
+
+    let inventory = crate::check_report::build(
+        &fixture,
+        path,
+        &app.sources,
+        &parse_diags,
+        &diags,
+        &survey_errors,
+        census.as_ref(),
+    );
+    if show_hotspots {
+        eprint!("{}", crate::check_report::render_hotspots(&inventory));
+        had_output = true;
+    }
+    if let Some(out_path) = &inventory_path {
+        match serde_json::to_string_pretty(&inventory) {
+            Ok(json) => {
+                if let Err(err) = std::fs::write(out_path, format!("{json}\n")) {
+                    eprintln!("roundhouse-check: failed to write --inventory {out_path}: {err}");
+                    return ExitCode::from(2);
+                }
+            }
+            Err(err) => {
+                eprintln!("roundhouse-check: failed to serialize inventory: {err}");
+                return ExitCode::from(2);
+            }
+        }
     }
 
     if had_output {
@@ -255,6 +334,44 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     if let Some(coverage) = crate::analyze::graphql::coverage(&app) {
         eprintln!("roundhouse-check: {}", coverage.summary());
     }
+    // Sends nothing checked, beside the error total: an error that goes
+    // away by becoming one of these was reclassified, not fixed.
+    // A known receiver's unresolved send is already an error where
+    // `diagnose` covers the body; only the uncovered sites count here.
+    let diagnosed: std::collections::HashSet<_> =
+        diags.iter().map(|d| (d.span.file, d.span.start, d.span.end)).collect();
+    let unknown_sends: Vec<_> = crate::analyze::unknown_receiver_sends(&app, analyzer.class_registry())
+        .into_iter()
+        .filter(|s| !(s.known_receiver && diagnosed.contains(&(s.span.file, s.span.start, s.span.end))))
+        .collect();
+    if list_unknown_sends {
+        for send in &unknown_sends {
+            let message = if send.known_receiver {
+                format!("send `{}` resolves to no method on its known receiver and is unchecked", send.method.as_str())
+            } else {
+                let what = if send.gradual { "a gradual (untyped)" } else { "an unknown" };
+                format!("send `{}` on {what} receiver is unchecked", send.method.as_str())
+            };
+            let d = crate::diagnostic::Diagnostic {
+                span: send.span,
+                kind: crate::diagnostic::DiagnosticKind::UnresolvedType {
+                    expr_kind: crate::ident::Symbol::from("unknown receiver"),
+                    name: Some(send.method.clone()),
+                },
+                severity: Severity::Info,
+                message,
+            };
+            eprintln!("{}", d.render(&app.sources));
+        }
+    }
+    let gradual = unknown_sends.iter().filter(|s| s.gradual).count();
+    let known = unknown_sends.iter().filter(|s| s.known_receiver).count();
+    eprintln!(
+        "roundhouse-check: {} send(s) on unknown receivers, {} on gradual receivers, {} unresolved on known receivers (unchecked, not errors)",
+        unknown_sends.len() - gradual - known,
+        gradual,
+        known,
+    );
     eprintln!(
         "roundhouse-check: {} — {} parse error(s), {} error(s), {} warning(s), {} gap-attributed note(s), {} survey gap(s)",
         fixture,

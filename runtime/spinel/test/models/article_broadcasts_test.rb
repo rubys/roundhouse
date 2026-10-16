@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Minitest-shaped: this is a CRuby-only framework test, quarantined
 # out of the spin shape by `project.rs::spin_shape` (it is not a spin
 # test program and gets no snapshot). It therefore loads its own
@@ -8,7 +9,7 @@ require_relative "../test_helper"
 require "models/article"
 require "models/article_params"
 require "models/comment"
-require "broadcasts"
+# `Broadcasts` comes in through `test_helper`'s boot chain, as in `broadcasts_test.rb`.
 
 class ArticleBroadcastsTest < Minitest::Test
   def setup
@@ -32,19 +33,18 @@ class ArticleBroadcastsTest < Minitest::Test
     article = Article.new(title: "Initial", body: "Some body content here.")
     article.save
     Broadcasts.reset_log!
-    # `Article#update` is the strong-params-typed variant: takes an
-    # `ArticleParams`, not a Hash. Build it the way the controller does —
-    # `from_raw` off a request-shaped hash — so this exercises the same
-    # path as `@article.update(article_params)`. Rails-idiom Hash kwargs
-    # would route to `synth_update`'s Hash-shape variant, which the
-    # typed lowering doesn't emit when strong params are present.
+    # The strong-params-typed writer is `update_from_article_params`:
+    # it takes an `ArticleParams`, not a Hash. Build it the way the
+    # controller does — `from_raw` off a request-shaped hash — so this
+    # exercises the same path as
+    # `@article.update_from_article_params(article_params)`.
     #
-    # `body` is absent from the hash, so `update` must leave it alone
+    # `body` is absent from the hash, so the update must leave it alone
     # (Rails assigns only the keys the request carried). That partial
     # update is the point: the params class tracks which fields were
     # provided, and a blank `""` is NOT the same as an absent key.
     p = ArticleParams.from_raw({ "article" => { "title" => "Renamed" } })
-    article.update(p)
+    article.update_from_article_params(p)
     assert_equal "Some body content here.", article.body
     entries = Broadcasts.log.select { |e| e[:stream] == "articles" }
     assert_equal 1, entries.length

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # HtmlEncoder façade — lobsters' extras/html_encoder.rb wraps the
 # `htmlentities` gem (`HTML_ENTITIES = HTMLEntities.new` at module
 # scope, `HTML_ENTITIES.encode(string, type)`). The gem is a CRuby

@@ -1,0 +1,20 @@
+module ActionDispatch
+  module Http
+    class Headers
+      CGI_VARIABLES: Array[String]
+      HTTP_HEADER: Regexp
+
+      @env: Hash[String, untyped]
+
+      def initialize: (Hash[String, untyped] env) -> void
+      def []: (String | Symbol key) -> String?
+      def key?: (String | Symbol key) -> bool
+      def include?: (String | Symbol key) -> bool
+      def fetch: (String | Symbol key, *untyped defaults) -> untyped
+      def each: () ?{ (String, untyped) -> void } -> untyped
+      def map: () ?{ (String, untyped) -> untyped } -> untyped
+      def self.env_name: (String | Symbol key) -> String
+      def self.authorization: (Hash[String, untyped] env) -> String?
+    end
+  end
+end

@@ -35,7 +35,7 @@ fn boundary() -> GemBoundary {
     .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
     .collect();
     let lock = Lockfile::parse(LOCK);
-    load_gem_boundary(&tree_vfs(tree), std::path::Path::new(""), &lock)
+    load_gem_boundary(&tree_vfs(tree), std::path::Path::new(""), &lock, &Default::default())
 }
 
 fn tree_vfs(tree: HashMap<PathBuf, Vec<u8>>) -> impl Vfs {

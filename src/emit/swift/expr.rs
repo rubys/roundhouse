@@ -213,7 +213,16 @@ pub(super) fn throws_lookup(type_name: &str, method_camel: &str) -> bool {
 }
 
 fn is_error_class_name(name: &str) -> bool {
-    ERROR_CLASSES.with(|m| m.borrow().contains(name))
+    let mut cur = name.to_string();
+    loop {
+        if ERROR_CLASSES.with(|m| m.borrow().contains(&cur)) {
+            return true;
+        }
+        match CLASS_PARENTS.with(|m| m.borrow().get(&cur).cloned()) {
+            Some(p) => cur = p,
+            None => return false,
+        }
+    }
 }
 
 /// Ruby's `Module#<` family. `RecordNotFound < StandardError` is a
@@ -566,7 +575,8 @@ fn block_body_throws(e: &Expr) -> bool {
 }
 
 fn is_known_instance_method(recv: &Expr, method: &str) -> bool {
-    let Some(crate::ty::Ty::Class { id, .. }) = recv.ty.as_ref() else {
+    // An ivar reads as `T | nil` until `initialize` assigns it.
+    let Some(crate::ty::Ty::Class { id, .. }) = recv.ty.as_ref().map(|t| t.peel_nilable()) else {
         return false;
     };
     let cls = super::naming::type_name(id.0.as_str());
@@ -1330,7 +1340,10 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         // the enclosing branch's nil-guard proved it non-nil.
         ExprNode::Ivar { name } => {
             let n = camel(name.as_str());
-            if NONNULL_PROPS.with(|s| s.borrow().contains(&n)) {
+            // A parameter of the same name (`head(status)` reading
+            // `@status`) shadows the bare property.
+            let n = if is_param(name.as_str()) { format!("self.{n}") } else { n };
+            if NONNULL_PROPS.with(|s| s.borrow().contains(&camel(name.as_str()))) {
                 format!("{n}!")
             } else {
                 n
@@ -1377,6 +1390,15 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
                         emit_expr(f)
                     );
                 }
+            }
+            // `("rtl" if false)` in value position: no else branch, a
+            // literal then-branch — Swift's `if` can't be an argument,
+            // and the missing branch is Ruby's nil.
+            if is_empty_branch(else_branch)
+                && matches!(&*then_branch.node, ExprNode::Lit { value } if !matches!(value, Literal::Nil))
+                && matches!(e.ty.as_ref(), Some(t) if !matches!(t, crate::ty::Ty::Nil))
+            {
+                return format!("({} ? {} : nil)", emit_expr(cond), emit_expr(then_branch));
             }
             emit_if(cond, then_branch, else_branch)
         }
@@ -1534,6 +1556,13 @@ fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
         .iter()
         .map(|(k, v)| format!("{}: {}", emit_expr(k), emit_expr(v)))
         .collect();
+    // Every value nil (`{"X-Empty" => nil}`): there is no element type to
+    // pin, and `Any?` would refuse the `[String: String?]` the literal is
+    // passed as. Swift infers it from that context instead.
+    if matches!(e.ty.as_ref(), Some(crate::ty::Ty::Hash { value, .. }) if matches!(**value, crate::ty::Ty::Nil))
+    {
+        return format!("[{}]", pairs.join(", "));
+    }
     format!("([{}] as {dict_ty})", pairs.join(", "))
 }
 
@@ -1602,8 +1631,20 @@ fn emit_string_interp(parts: &[InterpPart]) -> String {
 
 fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
     let l = emit_expr(left);
-    let r = group_try_rhs(&emit_expr(right));
+    // Swift does not narrow across `||`: past `x == nil`, the right operand reads `x!`.
+    let r = match (op, nil_checked_local(left)) {
+        (BoolOpKind::Or, Some(n)) if !rebinds(right, &n) => group_try_rhs(&with_narrowed_local(&n, right)),
+        _ => group_try_rhs(&emit_expr(right)),
+    };
     match op {
+        // `true && "hot"` is a value, not a Bool: the right operand when
+        // the left holds, else the left's `false`.
+        BoolOpKind::And
+            if matches!(left.ty.as_ref(), Some(crate::ty::Ty::Bool))
+                && right.ty.as_ref().is_some_and(|t| !matches!(t, crate::ty::Ty::Bool)) =>
+        {
+            format!("({l} ? ({r} as Any?) : (false as Any?))")
+        }
         BoolOpKind::And => format!("{l} && {r}"),
         // `||` is logical-or for Bool results, but Ruby's `x || default`
         // nil-coalescing idiom maps to Swift's `??` when the result
@@ -2022,6 +2063,36 @@ fn reassigned_nil_guard(stmt: &Expr) -> Option<(String, String)> {
     };
     let line = format!("if {n} == nil{more} {{\n{}\n}}", indent(&emit_expr(then_branch)));
     Some((n, line))
+}
+
+/// Does `e` bind the local `name` again (a block parameter, an assignment)? A read of that one is not the checked local.
+fn rebinds(e: &Expr, name: &str) -> bool {
+    let binds = match &*e.node {
+        ExprNode::Lambda { params, rest_param, .. } => {
+            params.iter().chain(rest_param.iter()).any(|p| camel(p.as_str()) == name)
+        }
+        _ => false,
+    };
+    binds || writes_local(e, name) || children(e).into_iter().any(|c| rebinds(c, name))
+}
+
+/// The optional local `x` of an `x.nil?` check.
+fn nil_checked_local(e: &Expr) -> Option<String> {
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node else {
+        return None;
+    };
+    if method.as_str() != "nil?" || !args.is_empty() {
+        return None;
+    }
+    let ExprNode::Var { name, .. } = &*r.node else {
+        return None;
+    };
+    let optionalish = matches!(
+        r.ty.as_ref(),
+        Some(crate::ty::Ty::Union { variants })
+            if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+    );
+    optionalish.then(|| camel(name.as_str()))
 }
 
 /// Emit `e` with the local `name` read force-unwrapped.
@@ -2515,6 +2586,45 @@ fn group_try_rhs(rhs: &str) -> String {
     }
 }
 
+/// `equal?` on a class instance is Swift `===`. Value types (Hash →
+/// Dictionary, String, numbers) have no reference identity; those
+/// calls stay methods.
+fn swift_reference_equal(r: &Expr) -> bool {
+    use crate::ty::Ty;
+    match r.ty.as_ref().map(|t| t.peel_nilable()) {
+        Some(Ty::Class { id, .. }) => !matches!(
+            id.0.as_str(),
+            "Hash"
+                | "Array"
+                | "String"
+                | "Integer"
+                | "Float"
+                | "Symbol"
+                | "Regexp"
+                | "TrueClass"
+                | "FalseClass"
+                | "NilClass"
+                | "Numeric"
+                | "Time"
+                | "Date"
+        ),
+        Some(
+            Ty::Hash { .. }
+            | Ty::Array { .. }
+            | Ty::Str
+            | Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Sym
+            | Ty::Nil
+            | Ty::Time,
+        ) => false,
+        // Absent or `Untyped` is `Any?` in Swift, and `===` does not
+        // typecheck on that. Only a proven class reference qualifies.
+        _ => false,
+    }
+}
+
 /// Render a Ruby send as a Swift call, property access, or primitive operation.
 fn emit_send(
     recv: Option<&Expr>,
@@ -2538,6 +2648,7 @@ fn emit_send(
             }
         }
     }
+
 
     // Temporal writer intrinsic: `ActiveSupport.db_now` — current UTC time
     // in Rails' exact storage form ("YYYY-MM-DD HH:MM:SS.ffffff").
@@ -2658,9 +2769,26 @@ fn emit_send(
     if let (Some(r), 1) = (recv, args.len()) {
         if method.ends_with('=') && !matches!(method, "==" | "!=" | "<=" | ">=") {
             let base = &method[..method.len() - 1];
+            // A custom writer (`def foo=(v)`) is a method (`fooSet`) on the
+            // receiver's class or an ancestor, not a property to assign.
+            if is_known_instance_method(r, method) {
+                return format!("{}.{}({})", emit_expr(r), camel(method), args_s[0]);
+            }
             let sn = camel(base);
             let val = coerce_for_prop_assign(r, &sn, &args[0], args_s[0].clone());
             return format!("{}.{sn} = {}", emit_expr(r), val);
+        }
+    }
+
+    // `equal?` is object identity. Swift renames `?` to `Pred`, and no
+    // class defines `equalPred`. `===` is reference identity, and it
+    // only typechecks on class instances — a Hash is a Dictionary
+    // (value type) and stays a call.
+    if method == "equal?" && args.len() == 1 {
+        if let Some(r) = recv {
+            if swift_reference_equal(r) && swift_reference_equal(&args[0]) {
+                return format!("(({}) === ({}))", emit_expr(r), args_s[0]);
+            }
         }
     }
 
@@ -2874,6 +3002,13 @@ fn emit_send(
         // below, which still sees the real `method`.
         let coercible = if is_known_instance_method(r, method) { "\0" } else { method };
         match coercible {
+            // `arr.pop` (HeaderStore#delete) drops the last element.
+            "pop" if array_elem_ty(r).is_some() => return format!("{rs}.removeLast()"),
+            // A receiver that is statically nil (a Void call: `assert_nil
+            // controller.head(:no_content)`) is evaluated, and is nil.
+            "nil?" if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Nil)) => {
+                return format!("({{ _ = {rs}; return true }}())")
+            }
             "nil?" => return format!("({rs} == nil)"),
             // `to_s`: identity on a String; plain interpolation for
             // provably-scalar receivers; the RhString.s unwrapper for
@@ -2898,6 +3033,11 @@ fn emit_send(
             "to_f" => return format!("Double(\"\\({rs})\")!"),
             "empty?" => return format!("{rs}.isEmpty"),
             "any?" => return format!("!{rs}.isEmpty"),
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if matches!(
+                array_elem_ty(r),
+                Some(crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Float | crate::ty::Ty::Sym)
+            ) => return format!("{rs}.isEmpty"),
             "length" | "size" => return format!("{rs}.count"),
             "upcase" => return format!("{rs}.uppercased()"),
             "downcase" => return format!("{rs}.lowercased()"),
@@ -3060,5 +3200,134 @@ fn emit_send(
                 .unwrap_or("");
             format!("{try_kw}{name}({})", emit_call_args(recv, method, args))
         }
+    }
+}
+
+#[cfg(test)]
+mod equal_identity_tests {
+    use super::*;
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::{ClassId, Symbol, VarId};
+    use crate::span::Span;
+    use crate::ty::Ty;
+
+    fn var(name: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from(name) },
+        )
+    }
+
+    fn send(recv: Expr, method: &str, arg: Expr) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from(method),
+                args: vec![arg],
+                block: None,
+                parenthesized: true,
+            },
+        )
+    }
+
+    fn header_store(name: &str) -> Expr {
+        let mut recv = var(name);
+        recv.ty = Some(Ty::Class {
+            id: ClassId(Symbol::from("ActionController::HeaderStore")),
+            args: vec![].into(),
+        });
+        recv
+    }
+
+    #[test]
+    fn equal_on_a_class_is_reference_identity() {
+        let out = emit_expr(&send(header_store("store"), "equal?", header_store("result")));
+        assert_eq!(out, "((store) === (result))");
+    }
+
+    #[test]
+    fn equal_on_an_untyped_operand_stays_a_call() {
+        let out = emit_expr(&send(header_store("store"), "equal?", var("result")));
+        assert!(out.contains("equalPred"), "{out}");
+        assert!(!out.contains("==="), "{out}");
+    }
+
+    #[test]
+    fn equal_on_a_hash_stays_a_call() {
+        let mut recv = var("attrs");
+        recv.ty = Some(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) });
+        let out = emit_expr(&send(recv, "equal?", var("sentinel")));
+        assert!(out.contains("equalPred"), "{out}");
+        assert!(!out.contains("==="), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod nil_or_narrowing_tests {
+    use super::*;
+    use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode};
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+    use crate::ty::Ty;
+
+    fn optional_str(name: &str) -> Expr {
+        let mut e = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: Symbol::from(name) });
+        e.ty = Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
+        e
+    }
+
+    fn call(recv: Expr, method: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args: vec![], block: None, parenthesized: false },
+        )
+    }
+
+    fn or(left: Expr, right: Expr) -> Expr {
+        let mut e = Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp { op: BoolOpKind::Or, surface: BoolOpSurface::Symbol, left, right },
+        );
+        e.ty = Some(Ty::Bool);
+        e
+    }
+
+    #[test]
+    fn the_right_of_a_nil_check_reads_the_local_unwrapped() {
+        let mut stripped = call(optional_str("vary"), "strip");
+        stripped.ty = Some(Ty::Str);
+        let out = emit_expr(&or(call(optional_str("vary"), "nil?"), call(stripped, "empty?")));
+        assert!(out.contains("vary!.trimmingCharacters"), "{out}");
+        assert!(out.starts_with("(vary == nil) ||"), "{out}");
+    }
+
+    #[test]
+    fn a_block_parameter_of_the_same_name_is_not_the_checked_local() {
+        let mut lambda = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                params: vec![Symbol::from("vary")],
+                rest_param: None,
+                extra_params: vec![],
+                block_param: None,
+                body: call(optional_str("vary"), "empty?"),
+                block_style: Default::default(),
+            },
+        );
+        lambda.ty = Some(Ty::Bool);
+        let mut any = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(optional_str("list")), method: Symbol::from("any?"), args: vec![], block: Some(lambda), parenthesized: false },
+        );
+        any.ty = Some(Ty::Bool);
+        let out = emit_expr(&or(call(optional_str("vary"), "nil?"), any));
+        assert!(!out.contains("vary!"), "{out}");
+    }
+
+    #[test]
+    fn a_left_that_is_not_a_nil_check_leaves_the_right_alone() {
+        let out = emit_expr(&or(call(optional_str("a"), "empty?"), call(optional_str("vary"), "empty?")));
+        assert!(!out.contains("vary!"), "{out}");
     }
 }

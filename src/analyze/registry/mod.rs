@@ -22,9 +22,9 @@ use crate::ty::Ty;
 /// registrations (both once defined this inline).
 pub(in crate::analyze) fn block_fn(block_ty: &Ty, ret: Ty) -> Ty {
     Ty::Fn {
-        params: vec![],
-        block: Some(Box::new(block_ty.clone())),
-        ret: Box::new(ret),
+        params: vec![].into(),
+        block: Some(std::sync::Arc::new(block_ty.clone())),
+        ret: std::sync::Arc::new(ret),
         effects: EffectSet::default(),
     }
 }

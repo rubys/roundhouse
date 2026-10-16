@@ -301,23 +301,33 @@ fn a_method_from_an_included_app_module_resolves_the_field() {
 
 /// A module computed at load time (`include Resolvers.for(:post)`), or
 /// one the app does not define, may hold the method: a field with none
-/// in sight is skipped, not reported as missing on the record.
+/// in sight is skipped, not reported as missing on the record. The
+/// computed form is never added to `includes` at all (it's replayed as
+/// an unknown call instead), so it reports nothing; the named-but-
+/// unresolved form is a real `include` refusal — #58 gave it a location,
+/// so it now surfaces here as the one diagnostic in this file, with
+/// `headline`/`title` still skipped rather than reported missing.
 #[test]
 fn an_include_out_of_sight_makes_unanswered_fields_skipped() {
-    for include in [
-        "include Resolvers.for(:post)",
-        "include SomeGem::PostFields",
+    for (include, expect_diagnostic) in [
+        ("include Resolvers.for(:post)", false),
+        ("include SomeGem::PostFields", true),
     ] {
         let post = format!(
             "module Types\n  class PostType < BaseObject\n    {include}\n\n    \
              field :headline, String, null: false\n    field :title, String, null: false\n  end\nend\n"
         );
         let app = analyzed(&[("app/graphql/types/post_type.rb", &post)]);
-        assert!(
-            graphql_diagnostics(&app).is_empty(),
-            "{include}: {:?}",
-            graphql_diagnostics(&app)
-        );
+        let found = graphql_diagnostics(&app);
+        if expect_diagnostic {
+            assert_eq!(found.len(), 1, "{include}: {found:?}");
+            assert!(
+                found[0].1.contains("Types::PostType includes unresolved SomeGem::PostFields"),
+                "{include}: {found:?}"
+            );
+        } else {
+            assert!(found.is_empty(), "{include}: {found:?}");
+        }
         let post_type = app
             .graphql_types
             .iter()

@@ -32,33 +32,20 @@ roundhouse --target LANG [-o OUT] [INPUT] [--survey] [--allow-unsupported]
   files a previous run left behind are not removed, so regenerate into
   a clean directory when the app has lost files.
 
-## Test folders
+## Configuration
 
-Roundhouse reads every `.rb` file recursively from these folders by default:
+An optional [`roundhouse.yml`](roundhouse-yml.md) at the app root adds
+test folders (`test_paths`) and lists project extensions (`extensions`)
+that describe gems and class-body DSLs Roundhouse does not know.
+`check` and the editor read the same file, so their diagnostics match
+what transpile sees.
 
-- `test/models`
-- `test/controllers`
-- `test/helpers`
-- `test/channels`
-- `test/lib`
-
-The app root can contain a `roundhouse.yml` file that adds folders:
-
-```yaml
-test_paths:
-  - test/unit
-  - quality/specs
-```
-
-`test_paths` adds folders. It does not replace the default folders. Each
-value must name a literal directory relative to the app root. Roundhouse
-does not expand globs, environment variables, or `~`. A configuration
-error stops ingestion.
-Roundhouse rejects a configured path with a symbolic link. It does not
-follow symbolic links below selected folders.
-
-Roundhouse reads `test/test_helper.rb`, `test/test_helpers/`, and
-`test/fixtures/` outside this folder list.
+A [`gems.yml`](roundhouse-yml.md#gemsyml) supplies facts for gem RBI
+selection. It also controls native gem loads in `ruby` and `jruby`
+projects. The facts can pin and require a locked gem at boot or declare
+a gem when `app/` names it. They can also refuse a gem that loads Rails.
+Constants from a refused gem stay errors, including constants known
+through an RBI.
 
 Transpilation is the analysis from [`check.md`](check.md) followed by
 lowering and emit. It requires zero analysis errors and a runtime for
@@ -136,6 +123,18 @@ marked in the output, and the punch list is the inventory. What they
 produce is a survey, not a deployable; a stubbed action renders
 nothing useful.
 
+Boot code gets its own ledger. A statement in `config/initializers/`, in
+an engine class body or in `config/application.rb` that no ingest
+recognizer reads is dropped from the compiled app, so each one is
+reported as `warning[unconsumed_initializer]` with its file and line
+(never an error: the ledger is a warning, and it is not counted as an
+ingest gap). A normal run prints one count line; `--survey` and
+`--allow-unsupported` list every statement, and `--survey` ends with an
+"Initializer ledger" section grouped by statement. Statements that
+provably do nothing in a compiled app (`config.filter_parameters += […]`,
+`config.action_dispatch.cookies_serializer = …`) are not reported; the
+list and its reasons live in `src/ingest/initializer_ledger.rs`.
+
 Before either flag, the `wont_lower` question is worth asking: which
 constructs in this app have no lowering for this target at all. The
 MCP server's [`wont_lower` tool](mcp.md) answers it per target without
@@ -156,9 +155,10 @@ What does NOT come out is sorbet-runtime. An app that annotates with
 it transpiles to a tree that does not need it at run time: a `sig` is
 read (see [`check.md`](check.md)) and then dropped, along with
 `extend T::Sig`, `abstract!` and the rest of the annotations;
-`T.let` / `T.must` / `T.cast` and their siblings become the value they
-wrap; `T.type_alias` constants go with the signatures that were their
-only reader. The two constructs that are class GENERATORS rather than
+`T.let` / `T.cast` and their siblings become the value they
+wrap, and `T.must` becomes the nil check sorbet-runtime makes;
+`T.type_alias` constants go with the signatures that were their only
+reader. The two constructs that are class GENERATORS rather than
 annotations are lowered into the plain Ruby they stand for — a
 `T::Struct` into readers plus the keyword constructor it generates
 (and `==`, where it included `ActsAsComparable`), a `T::Enum` into its
@@ -190,7 +190,7 @@ Emitted code is meant to be read. Method names, file layout and the
 order of things follow the Ruby they came from; the runtime library is
 a few files of ordinary code in the target language, not a framework.
 The emitted tests come from the default test folders and any additional
-folders in `roundhouse.yml`.
+folders in [`roundhouse.yml`](roundhouse-yml.md#test_paths).
 
 ## Regenerating
 

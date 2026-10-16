@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Tep::WebSocket::Driver -- Faye-shape state machine + event dispatch.
 #
 # Constructed AFTER the handshake completes, before the recv loop

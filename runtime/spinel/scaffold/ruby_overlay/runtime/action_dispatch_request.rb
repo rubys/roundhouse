@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # CRuby-only ActionDispatch::Request over the CGI env.
 #
 # The request-object surface controllers and filters reach
@@ -14,6 +15,8 @@
 # write scratch keys into it (`exception_notifier.exception_data`),
 # which the real ENV object would reject for non-String values.
 require "stringio"
+require_relative "action_dispatch/headers"
+require_relative "action_dispatch/request_path_parameters"
 
 module ActionDispatch
   # `ActionDispatch::TestRequest.create(env)` — see the twin in
@@ -30,10 +33,16 @@ module ActionDispatch
   class Request
     attr_reader :env
     attr_accessor :params
+    # The body's params alone - see the twin in
+    # runtime/ruby/action_dispatch/request.rb.
+    attr_accessor :request_parameters
+    attr_reader :path_parameters
 
     def initialize(env, params = {})
       @env = env
       @params = params
+      @request_parameters = {}
+      @path_parameters = RequestPathParameters.new({})
       @session_options = {}
     end
 
@@ -46,8 +55,31 @@ module ActionDispatch
       @session_options[:skip] == true
     end
 
+    # `request.headers["Accept-Encoding"]` — the shared
+    # `ActionDispatch::Http::Headers` over this request's env.
+    def headers
+      ActionDispatch::Http::Headers.new(env)
+    end
+
     def [](key)
       @params[key.to_s]
+    end
+
+    # `request.filtered_parameters` - see the twin in
+    # runtime/ruby/action_dispatch/request.rb.
+    def filtered_parameters
+      all = {}
+      @params.each { |k, v| all[k] = v }
+      @path_parameters.to_h.each { |k, v| all[k] = v }
+      ActiveSupport::ParameterFilter.new(Rails.application.config_filter_parameters).filter(all)
+    end
+
+    def authorization
+      ActionDispatch::Http::Headers.authorization(@env)
+    end
+
+    def path_parameters=(values)
+      @path_parameters = RequestPathParameters.new(values)
     end
 
     def request_method
@@ -56,6 +88,11 @@ module ActionDispatch
 
     def get? = request_method == "GET"
     def post? = request_method == "POST"
+    # Do not route `put?` through `request_method` — that helper upcases,
+    # while Rack/Rails compare the raw env value to literal `"PUT"` (so
+    # `"put"` must stay false). Shared `runtime/ruby` `put?` is likewise
+    # case-sensitive on `@request_method` (no upcase on assign).
+    def put? = @env["REQUEST_METHOD"] == "PUT"
     # Rails' "is this a safe request" idiom is `request.get? ||
     # request.head?`, and campfire writes exactly that in
     # `BlockBannedRequests#safe_request?`. This overlay is the Request
@@ -108,15 +145,34 @@ module ActionDispatch
     # X-Forwarded-Proto, which Rack honors unconfigured.
     def ssl?
       return true if @env["HTTPS"] == "on"
-      @env["HTTP_X_FORWARDED_PROTO"].to_s.split(",").first.to_s.strip.downcase == "https"
+      forwarded = @env["HTTP_X_FORWARDED_PROTO"].to_s.split(",").first.to_s.strip.downcase
+      return forwarded == "https" unless forwarded.empty?
+      @env["rack.url_scheme"].to_s.downcase == "https"
     end
 
     def protocol
       ssl? ? "https://" : "http://"
     end
 
+    # Twin of the shared class's: the port from the Host header, nil at
+    # the scheme's standard one (campfire's default_url_options).
+    def optional_port
+      h = host
+      sep = h.rindex(":")
+      return nil if sep.nil? || h.end_with?("]")
+      port = h[(sep + 1)..].to_i
+      return nil if port == 0 || port == (ssl? ? 443 : 80)
+      port
+    end
+
+    # Without the scheme's standard port, as the shared twin's: Rails'
+    # `host_with_port` writes no `:443`/`:80`, and the CSRF check
+    # compares this with an Origin a browser serializes the same way.
     def base_url
-      "#{protocol}#{host}"
+      h = host
+      default = ssl? ? ":443" : ":80"
+      h = h[0, h.length - default.length] if h.end_with?(default)
+      "#{protocol}#{h}"
     end
 
     def remote_ip
@@ -166,6 +222,10 @@ module ActionDispatch
 
     def xhr?
       @env["HTTP_X_REQUESTED_WITH"] == "XMLHttpRequest"
+    end
+
+    def inertia?
+      !@env["HTTP_X_INERTIA"].to_s.empty?
     end
 
     # Query-string params only (Rails' GET-vs-POST split); lobsters'

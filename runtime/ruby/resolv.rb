@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Resolv — the one method of Ruby's resolver the corpus reaches, and it
 # exists here for the same reason `ipaddr.rb` does: the ruby family has
 # the stdlib's and the strict targets have nothing at all.

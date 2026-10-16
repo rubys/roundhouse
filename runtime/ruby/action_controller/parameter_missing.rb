@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActionController::ParameterMissing — raised by `Params.require_key`
 # when a required parameter is absent or blank, and RESCUED by app code
 # as a normal path (a controller turns it into a 400 rather than letting
@@ -31,6 +32,20 @@ module ActionController
   class UnpermittedParameters < StandardError
   end
 
+  # Raised by app code to answer 400; the dispatchers rescue it beside `ParameterMissing`, as Rails' rescue_responses do.
+  class BadRequest < StandardError
+    def initialize(msg = "ActionController::BadRequest")
+      super(msg)
+    end
+  end
+
+  # Raised by app code to answer 422; the dispatchers map it the way Rails' rescue_responses do.
+  class InvalidAuthenticityToken < StandardError
+    def initialize(msg = "ActionController::InvalidAuthenticityToken")
+      super(msg)
+    end
+  end
+
   class UnknownFormat < StandardError
   end
 
@@ -51,5 +66,16 @@ module ActionController
     def failures
       @failures
     end
+  end
+end
+
+# Raised by the emitted `process_action` when a route names an action
+# the controller does not define (no method here or on an ancestor, and
+# no template). Rails raises it from `AbstractController::Base#process`
+# before the callback chain and outside `rescue_from`, and
+# `ActionDispatch::ExceptionWrapper` maps it to 404; the ruby-family and
+# spinel dispatchers rescue it beside `ActionController::RoutingError`.
+module AbstractController
+  class ActionNotFound < StandardError
   end
 end

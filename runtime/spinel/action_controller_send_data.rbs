@@ -1,0 +1,9 @@
+module ActionController
+  class Base
+    def send_data: (String data, ?type: String, ?disposition: String, ?filename: String?) -> void
+    def self.content_disposition: (String disp, String filename) -> String
+    def self.content_disposition_ascii: (String name) -> String
+    def self.content_disposition_utf8: (String name) -> String
+    def self.content_disposition_plain?: (Integer b) -> bool
+  end
+end

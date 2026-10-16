@@ -95,6 +95,10 @@ pub struct ParamsSpec {
     /// off `<Model>.create(<helper>)`, so nothing has to be threaded
     /// from the pass that decided it.
     pub wants_to_attrs: bool,
+    /// Some call site reads `<helper>.as_json` — synthesize `as_json`,
+    /// Rails' `Parameters#as_json`: the permitted values, String-keyed
+    /// (the class's `to_h`). Demand-gated like `wants_to_attrs`.
+    pub wants_as_json: bool,
     /// Controllers whose bodies declared this exact permit list, in
     /// source order. Two controllers permitting the same fields share
     /// one class (campfire's `FirstRunsController` and `UsersController`
@@ -128,9 +132,45 @@ pub struct ParamsSpec {
 #[derive(Clone, Debug, Default)]
 pub struct ParamsSpecs {
     specs: Vec<ParamsSpec>,
+    /// Names of `has_one` / `has_many` associations declared with a
+    /// `primary_key:` other than `id` (see [`Self::mark_keyed_associations`]).
+    keyed_assocs: std::collections::HashSet<Symbol>,
+    /// Resources a model is named after (with a table), so the model
+    /// lowering gives it the typed `update_from_<x>` variants. `None`
+    /// until [`Self::mark_model_resources`] is told the models: a caller
+    /// that lowers controllers without them keeps every rename.
+    model_resources: Option<std::collections::HashSet<Symbol>>,
 }
 
 impl ParamsSpecs {
+    /// Record which resources name a model with a table: only those get
+    /// the typed update variants (`model_to_library`'s
+    /// `push_update_typed_variants`). An empty model list leaves the
+    /// set unknown.
+    pub fn mark_model_resources(
+        &mut self,
+        models: &[crate::dialect::Model],
+        schema: Option<&crate::schema::Schema>,
+    ) {
+        let Some(schema) = schema else { return };
+        if models.is_empty() {
+            return;
+        }
+        self.model_resources = Some(
+            models
+                .iter()
+                .filter(|m| schema.tables.contains_key(&m.table.0))
+                .map(|m| Symbol::from(crate::naming::snake_case(m.name.0.as_str())))
+                .collect(),
+        );
+    }
+
+    /// Whether some model defines `spec`'s typed update variants (true
+    /// when the models are not known).
+    pub fn has_typed_update(&self, spec: &ParamsSpec) -> bool {
+        self.model_resources.as_ref().is_none_or(|set| set.contains(&spec.resource))
+    }
+
     pub fn iter(&self) -> std::slice::Iter<'_, ParamsSpec> {
         self.specs.iter()
     }
@@ -171,6 +211,27 @@ impl ParamsSpecs {
     /// `scan_create_demand` matches them — `snake_case(Model) ==
     /// resource` — so `:user` finds `User` and a list permitting
     /// `:avatar` on it types that field as a file.
+    /// Record the association names whose foreign key matches an owner
+    /// column other than `id` (`primary_key:`). The parent-ivar rewrite
+    /// (`@article.comments.build` -> `Comment.new(article_id:
+    /// @article.id)`) derives the foreign key from the ivar's name and
+    /// reads `.id`, which is wrong for these, so it declines them and
+    /// the typed association seed (which reads the declaration) handles
+    /// the call instead.
+    pub fn mark_keyed_associations(&mut self, models: &[crate::dialect::Model]) {
+        for model in models {
+            for assoc in model.associations() {
+                if crate::lower::assoc_primary_key::custom_primary_key(assoc).is_some() {
+                    self.keyed_assocs.insert(assoc.name().clone());
+                }
+            }
+        }
+    }
+
+    pub fn is_keyed_assoc(&self, name: &Symbol) -> bool {
+        self.keyed_assocs.contains(name)
+    }
+
     pub fn mark_file_fields(&mut self, models: &[crate::dialect::Model]) {
         for spec in &mut self.specs {
             let Some(model) = models
@@ -194,7 +255,7 @@ impl ParamsSpecs {
 /// request carried none).
 fn field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
     if spec.file_fields.contains(field) {
-        Ty::Union { variants: vec![uploaded_file_ty(), Ty::Nil] }
+        Ty::Union { variants: vec![uploaded_file_ty(), Ty::Nil].into() }
     } else {
         Ty::Str
     }
@@ -205,7 +266,7 @@ pub(crate) fn uploaded_file_class() -> ClassId {
 }
 
 fn uploaded_file_ty() -> Ty {
-    Ty::Class { id: uploaded_file_class(), args: vec![] }
+    Ty::Class { id: uploaded_file_class(), args: vec![].into() }
 }
 
 /// The two reads a field takes off a params hash — was it provided,
@@ -268,7 +329,7 @@ pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
         }
     }
     assign_class_ids(&mut specs);
-    let mut specs = ParamsSpecs { specs };
+    let mut specs = ParamsSpecs { specs, ..Default::default() };
     scan_create_demand(controllers, &mut specs);
     specs
 }
@@ -284,6 +345,7 @@ pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
 fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut demand: Vec<(ClassId, bool)> = Vec::new();
     let mut to_attrs: Vec<ClassId> = Vec::new();
+    let mut as_json: Vec<ClassId> = Vec::new();
     // Read-only for the whole walk; the two demand lists are applied
     // after it, which is what keeps this a shared borrow.
     let specs_ro: &ParamsSpecs = specs;
@@ -307,6 +369,13 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                 if method.as_str() == "to_attrs" && args.is_empty() {
                     if let Some(class) = params_source_class(recv, &helper_classes, specs_ro) {
                         to_attrs.push(class);
+                    }
+                    return;
+                }
+                // `<params-source>.as_json`: Rails' `Parameters#as_json`.
+                if method.as_str() == "as_json" && args.is_empty() {
+                    if let Some(class) = params_source_class(recv, &helper_classes, specs_ro) {
+                        as_json.push(class);
                     }
                     return;
                 }
@@ -350,6 +419,11 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
             spec.wants_to_attrs = true;
         }
     }
+    for class_id in as_json {
+        if let Some(spec) = specs.specs.iter_mut().find(|s| s.class_id == class_id) {
+            spec.wants_as_json = true;
+        }
+    }
 }
 
 fn walk_all<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
@@ -373,11 +447,14 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 wants_create: false,
                 wants_create_bang: false,
                 wants_to_attrs: false,
+                wants_as_json: false,
                 declaring: Vec::new(),
                 is_canonical: true,
                 file_fields: std::collections::BTreeSet::new(),
             })
             .collect(),
+        keyed_assocs: Default::default(),
+        model_resources: None,
     }
 }
 
@@ -421,6 +498,7 @@ fn record(
                 wants_create: false,
                 wants_create_bang: false,
                 wants_to_attrs: false,
+                wants_as_json: false,
                 declaring: vec![controller.clone()],
                 is_canonical: false,
                 file_fields: std::collections::BTreeSet::new(),
@@ -449,7 +527,8 @@ fn collect_from_expr(
             }
         }
     }
-    if let Some((resource, fields, nested)) = match_permit_call_full(expr) {
+    let found = match_reverse_merge(expr).or_else(|| match_permit_call_full(expr));
+    if let Some((resource, fields, nested)) = found {
         warn_nested_keys(&resource, &nested, controller, expr.span);
         record(resource, fields, controller, expr.span, Wants::default(), index, specs);
         // Stop here. The merge form (`permit(...).merge(k: v)`) matched
@@ -611,14 +690,21 @@ pub fn model_update_name(spec: &ParamsSpec, bang: bool) -> Symbol {
 
 /// First permit list in `expr`, in the same pre-order the collector
 /// uses — the way a `<resource>_params` helper body names its spec.
-pub fn first_permit_in(expr: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
+pub fn first_permit_in(body: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
+    first_permit_at(body)
+}
+
+fn first_permit_at(expr: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
+    if let Some((resource, fields, _)) = match_reverse_merge(expr) {
+        return Some((resource, fields));
+    }
     if let Some(found) = match_permit_call(expr) {
         return Some(found);
     }
     let mut found = None;
     walk_children(expr, &mut |c| {
         if found.is_none() {
-            found = first_permit_in(c);
+            found = first_permit_at(c);
         }
     });
     found
@@ -691,11 +777,11 @@ fn rewrite_tail(e: &Expr, spec: &ParamsSpec) -> Expr {
         // `reading(request.body) { |body| … }` — the helper's value is
         // the BLOCK's, so the rewrite belongs inside it.
         ExprNode::Send { recv, method, args, block: Some(b), parenthesized } => {
-            let ExprNode::Lambda { rest_param, params, block_param, body, block_style } = &*b.node else {
+            let ExprNode::Lambda { rest_param, extra_params, params, block_param, body, block_style } = &*b.node else {
                 return e.clone();
             };
             let new_block = Expr {
-                node: Box::new(ExprNode::Lambda { rest_param: rest_param.clone(),
+                node: Box::new(ExprNode::Lambda { rest_param: rest_param.clone(), extra_params: extra_params.clone(),
                     params: params.clone(),
                     block_param: block_param.clone(),
                     body: rewrite_tail(body, spec),
@@ -768,7 +854,7 @@ fn build_params_object(
 ) -> Expr {
     use crate::lower::typing::with_ty;
     let span = at.span;
-    let owner_ty = Ty::Class { id: spec.class_id.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: spec.class_id.clone(), args: vec![].into() };
     let local = Symbol::from("__params");
     let var = || {
         with_ty(
@@ -777,8 +863,8 @@ fn build_params_object(
         )
     };
     let param_value_ty =
-        Ty::Class { id: ClassId(Symbol::from("Roundhouse::ParamValue")), args: vec![] };
-    let raw_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(param_value_ty) };
+        Ty::Class { id: ClassId(Symbol::from("Roundhouse::ParamValue")), args: vec![].into() };
+    let raw_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(param_value_ty) };
     let ivar_params = || {
         with_ty(
             Expr::new(span, ExprNode::Ivar { name: Symbol::from("params") }),
@@ -837,6 +923,78 @@ fn build_params_object(
     }
     stmts.push(var());
     with_ty(Expr::new(span, ExprNode::Seq { exprs: stmts }), owner_ty)
+}
+
+/// Each method's name with the type of the value its typed body
+/// answers (its last statement's).
+pub(super) fn helper_answers(methods: &[MethodDef]) -> std::collections::HashMap<Symbol, Option<Ty>> {
+    methods.iter().map(|m| (m.name.clone(), body_tail(&m.body).ty.clone())).collect()
+}
+
+/// `record.update(x)` / `update!(x)` where `x` is TYPED as a params
+/// class no model has a typed update variant for (#856): Rails' `update`
+/// takes the attribute Hash, which is `x.to_attrs`. Runs on a typed
+/// body, so a helper that answers a Hash (`permitted.to_h.except(:k)`)
+/// is left as written, and the class is the one the call site holds
+/// (a controller-qualified list, not the resource's canonical one).
+/// Each class read this way is added to `wanted`.
+///
+/// `answers` is each of the controller's own methods' typed body value
+/// ([`helper_answers`]): a call to one of them counts only when its body
+/// answers the params class, whatever its signature declares.
+pub(super) fn hand_update_the_attrs(
+    body: &mut Expr,
+    specs: &ParamsSpecs,
+    answers: &std::collections::HashMap<Symbol, Option<Ty>>,
+    wanted: &mut std::collections::BTreeSet<ClassId>,
+) {
+    body.node.for_each_child_mut(&mut |c| hand_update_the_attrs(c, specs, answers, wanted));
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *body.node else {
+        return;
+    };
+    // `Model.new(x)` / `create(x)` / `create!(x)` take the attribute Hash
+    // too. The typed factories are reached by name before typing
+    // (`rewrite_model_new_to_from_params`), so one left here holds the
+    // params object some other way: a local (`attrs = <permit
+    // chain>.reverse_merge(...)`) or the statements a defaults merge
+    // lowers to.
+    let constructs = matches!(method.as_str(), "new" | "create" | "create!")
+        && matches!(&*recv.node, ExprNode::Const { .. });
+    let updates = matches!(method.as_str(), "update" | "update!");
+    if !(constructs || updates) || args.len() != 1 {
+        return;
+    }
+    let Some(Ty::Class { id, .. }) = args[0].ty.as_ref() else { return };
+    let Some(spec) = specs.by_class(id) else { return };
+    if let ExprNode::Send { recv, method: helper, args: helper_args, block: None, .. } = &*args[0].node {
+        let own = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) && helper_args.is_empty();
+        if own {
+            if let Some(answer) = answers.get(helper) {
+                if !matches!(answer, Some(Ty::Class { id: a, .. }) if a == id) {
+                    return;
+                }
+            }
+        }
+    }
+    if updates && specs.has_typed_update(spec) {
+        return;
+    }
+    let class_id = spec.class_id.clone();
+    let value = std::mem::replace(&mut args[0], expr(ExprNode::Lit { value: Literal::Nil }, None));
+    let span = value.span;
+    let mut attrs = expr(
+        ExprNode::Send {
+            recv: Some(value),
+            method: Symbol::from("to_attrs"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+        Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }),
+    );
+    attrs.span = span;
+    args[0] = attrs;
+    wanted.insert(class_id);
 }
 
 pub fn helper_spec_map<'a, 'b, I>(
@@ -965,6 +1123,40 @@ fn match_permit_call_full(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<Symbo
     }
 
     None
+}
+
+/// Form 4: `{ field: expr, … }.merge(<permit-chain>)`, ingest's spelling
+/// of `<permit-chain>.reverse_merge(field: expr, …)`. The defaults' keys
+/// join the fields as Form 3's do. The rewrite is a statement Seq, like
+/// Form 3's, so it stands wherever Form 3's does: a params helper's tail,
+/// a local's value (`attrs = <chain>.reverse_merge(...)`) or a call's
+/// argument.
+fn match_reverse_merge(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<Symbol>)> {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
+        return None;
+    };
+    if method.as_str() != "merge" || args.len() != 1 {
+        return None;
+    }
+    let ExprNode::Hash { entries, .. } = &*recv.node else { return None };
+    let (resource, mut fields, nested) = match_permit_call_full(&args[0])?;
+    for (k, _) in entries {
+        let k = sym_of(k)?;
+        if !fields.contains(&k) {
+            fields.push(k);
+        }
+    }
+    Some((resource, fields, nested))
+}
+
+/// The expression a body returns: the last statement, through nested Seqs
+/// and an explicit `return`.
+fn body_tail(body: &Expr) -> &Expr {
+    match &*body.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => body_tail(&exprs[exprs.len() - 1]),
+        ExprNode::Return { value } => body_tail(value),
+        _ => body,
+    }
 }
 
 /// Match `params.require(:resource)` — returns the resource symbol on
@@ -1189,6 +1381,9 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
     methods.push(synth_from_raw(spec));
     methods.push(synth_index_read(spec));
     methods.push(synth_to_h(spec));
+    if spec.wants_as_json {
+        methods.push(synth_as_json(&spec.class_id));
+    }
     if spec.wants_to_attrs {
         methods.push(synth_to_attrs(&spec.class_id, &spec.fields));
     }
@@ -1208,6 +1403,7 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
         parent: None,
         parent_span: Default::default(),
         includes: Vec::new(),
+        include_spans: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
         origin: Some(LibraryClassOrigin::ResourceParams {
@@ -1392,7 +1588,7 @@ fn synth_except(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     }
     stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
     let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts });
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -1483,13 +1679,13 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
 
     let param_value_ty = Ty::Class {
         id: ClassId(Symbol::from("Roundhouse::ParamValue")),
-        args: vec![],
+        args: vec![].into(),
     };
     let hash_ty = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(param_value_ty),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(param_value_ty),
     };
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
 
     let str_lit = |v: &str| with_ty(
         Expr::new(
@@ -1623,13 +1819,13 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
 /// `""` — the same distinction `<field>_provided` was introduced for.
 /// Writing it would overwrite a column default on create, which is the
 /// data loss the presence slots were added to stop.
-fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+pub(super) fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     use crate::lower::typing::with_ty;
     let attrs = Symbol::from("attrs");
     // The declared type is `initialize`'s parameter type verbatim: this
     // hash is built to be handed straight to it, and a narrower element
     // type would need a widening conversion at every call site.
-    let hash_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
     let attrs_var = || {
         with_ty(
             Expr::new(
@@ -1768,16 +1964,26 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
         })
         .collect();
 
-    let body = expr(
-        ExprNode::Case {
-            scrutinee: expr(
-                ExprNode::Var { id: VarId(0), name: key.clone() },
-                Some(Ty::Sym),
-            ),
-            arms,
-        },
-        Some(Ty::Untyped),
-    );
+    // A `case` with zero arms has no `when` clause at all, which is a
+    // Ruby syntax error — reachable here whenever every permitted key is
+    // non-scalar (`permit(widget_ids: [])`, nothing else) and so `fields`
+    // drops to empty (see `tests/params_all_non_scalar_keys.rs`). `key`
+    // is then unused; the body is just `nil`, same signature, same
+    // `Ty::Untyped` result.
+    let body = if arms.is_empty() {
+        expr(ExprNode::Lit { value: Literal::Nil }, Some(Ty::Untyped))
+    } else {
+        expr(
+            ExprNode::Case {
+                scrutinee: expr(
+                    ExprNode::Var { id: VarId(0), name: key.clone() },
+                    Some(Ty::Sym),
+                ),
+                arms,
+            },
+            Some(Ty::Untyped),
+        )
+    };
 
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -1858,8 +2064,8 @@ fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
         })
         .collect();
     let hash_ty = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(Ty::Str),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(Ty::Str),
     };
     let hash = Expr {
         span: Span::synthetic(),
@@ -1891,18 +2097,51 @@ fn synth_to_h(spec: &ParamsSpec) -> MethodDef {
     }
 }
 
+/// `def as_json; to_h; end` — Rails' `Parameters#as_json` is the
+/// permitted values as a String-keyed Hash, which `to_h` already is.
+fn synth_as_json(owner: &ClassId) -> MethodDef {
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) };
+    let body = expr(
+        ExprNode::Send {
+            recv: Some(expr(ExprNode::SelfRef, Some(Ty::Class { id: owner.clone(), args: vec![].into() }))),
+            method: Symbol::from("to_h"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+        Some(hash_ty.clone()),
+    );
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("as_json"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], hash_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
 fn fn_sig(params: Vec<(Symbol, Ty)>, ret: Ty) -> Ty {
     Ty::Fn {
         params: params
             .into_iter()
             .map(|(name, ty)| crate::ty::Param {
                 name,
-                ty,
+                ty: ty.into(),
                 kind: crate::ty::ParamKind::Required,
             })
             .collect(),
         block: None,
-        ret: Box::new(ret),
+        ret: std::sync::Arc::new(ret),
         effects: crate::effect::EffectSet::pure(),
     }
 }
@@ -1933,7 +2172,15 @@ pub fn params_class_info(lc: &LibraryClass) -> crate::analyze::ClassInfo {
 /// `specs` carries the (resource, class_id) mapping; expressions whose
 /// resource isn't in `specs` (shouldn't happen — we collected from
 /// these same bodies) fall through unchanged.
-pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs) -> Expr {
+///
+/// `guard` (the tree raises `ParameterMissing`, see
+/// `FormatBreadth::raises_param_missing`) hands the factory
+/// `Params.expect_present(@params, …)` / `Params.require_present(@params,
+/// …)` instead of `@params`: Rails refuses a missing or malformed
+/// resource there, and the two forms refuse differently, which the shared
+/// `<Resource>Params` class cannot know - so the check sits at the call.
+pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs, guard: bool) -> Expr {
+    let tail = body_tail(expr);
     map_expr(expr, &|e| {
         // `<permit-chain>.compact` — DROP the `.compact`. Rails' version
         // removes nil-valued keys, and a presence-aware `from_raw`
@@ -1945,7 +2192,8 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs) -> Expr {
             if method.as_str() == "compact" && args.is_empty() {
                 if let Some((resource, fields)) = match_permit_call(recv) {
                     if let Some(spec) = specs.find(&resource, &fields) {
-                        return Some(build_from_raw_call(&spec.class_id, e.span));
+                        let arg = factory_arg(recv, guard, e.span);
+                        return Some(build_from_raw_call(&spec.class_id, e.span, arg));
                     }
                 }
             }
@@ -1960,13 +2208,81 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs) -> Expr {
                 let (resource, fields) = match_permit_call(e)?;
                 let spec = specs.find(&resource, &fields)?;
                 let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
-                return Some(build_from_raw_merge(&spec.class_id, entries, e.span));
+                let arg = factory_arg(recv, guard, e.span);
+                return Some(build_from_raw_merge(&spec.class_id, entries, e.span, arg));
             }
+        }
+        // Reverse-merge form (Form 4). Under an explicit `return` at the
+        // body's tail the statements replace the `return`, which moves
+        // onto the final `_p`.
+        let defaults = |e: &Expr| -> Option<Expr> {
+            let (resource, fields, _) = match_reverse_merge(e)?;
+            let ExprNode::Send { recv: Some(recv), args, .. } = &*e.node else { unreachable!() };
+            let ExprNode::Hash { entries, .. } = &*recv.node else { unreachable!() };
+            let (_, permitted) = match_permit_call(&args[0])?;
+            let spec = specs.find(&resource, &fields)?;
+            let arg = factory_arg(&args[0], guard, e.span);
+            Some(build_from_raw_defaults(&spec.class_id, entries, &permitted, e.span, arg))
+        };
+        if let ExprNode::Return { value } = &*e.node {
+            if std::ptr::eq(value, tail) {
+                if let Some(seq) = defaults(value) {
+                    let ExprNode::Seq { mut exprs } = *seq.node else { unreachable!() };
+                    let last = exprs.pop().expect("from_raw Seq ends in `_p`");
+                    exprs.push(Expr::new(e.span, ExprNode::Return { value: last }));
+                    return Some(Expr::new(e.span, ExprNode::Seq { exprs }));
+                }
+            }
+        }
+        if let Some(seq) = defaults(e) {
+            return Some(seq);
         }
         let (resource, fields) = match_permit_call(e)?;
         let spec = specs.find(&resource, &fields)?;
-        Some(build_from_raw_call(&spec.class_id, e.span))
+        Some(build_from_raw_call(&spec.class_id, e.span, factory_arg(e, guard, e.span)))
     })
+}
+
+/// `<chain>.reverse_merge(k: v)`: [`build_from_raw_merge`], except that a
+/// key the chain permits keeps the request's value when one was provided
+/// (`_p.k = v unless _p.k_provided`). A key it does not permit never
+/// comes from the request in Rails, so it is always assigned.
+fn build_from_raw_defaults(
+    class_id: &ClassId,
+    entries: &[(Expr, Expr)],
+    permitted: &[Symbol],
+    span: Span,
+    arg: Expr,
+) -> Expr {
+    let ExprNode::Seq { exprs } = *build_from_raw_merge(class_id, entries, span, arg).node else {
+        unreachable!("build_from_raw_merge returns a Seq")
+    };
+    // `_p = from_raw(...)`, then a (value, flag) setter pair per Symbol
+    // key in entry order, then `_p`.
+    let mut setters = exprs[1..exprs.len() - 1].chunks(2);
+    let mut out = vec![exprs[0].clone()];
+    for (k, _) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: name } } = &*k.node else { continue };
+        let pair = Expr::new(span, ExprNode::Seq { exprs: setters.next().unwrap().to_vec() });
+        if !permitted.contains(name) {
+            out.push(pair);
+            continue;
+        }
+        let send = |recv: Expr, method: Symbol| {
+            Expr::new(span, ExprNode::Send { recv: Some(recv), method, args: vec![], block: None, parenthesized: false })
+        };
+        let p = Expr::new(span, ExprNode::Var { id: VarId(0), name: Symbol::from("_p") });
+        out.push(Expr::new(
+            span,
+            ExprNode::If {
+                cond: send(send(p, provided_field(name)), Symbol::from("!")),
+                then_branch: pair,
+                else_branch: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+            },
+        ));
+    }
+    out.push(exprs[exprs.len() - 1].clone());
+    Expr::new(span, ExprNode::Seq { exprs: out })
 }
 
 /// `<chain>.merge(k: v)` → `_p = <Class>.from_raw(@params); _p.k = v;
@@ -1980,13 +2296,13 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs) -> Expr {
 /// never mentioned it. (The `<field>=` writer can't do this itself —
 /// emitters collapse an `AttributeWriter` into a plain field and drop
 /// its body, so every producer sets the flag explicitly.)
-fn build_from_raw_merge(class_id: &ClassId, entries: &[(Expr, Expr)], span: Span) -> Expr {
+fn build_from_raw_merge(class_id: &ClassId, entries: &[(Expr, Expr)], span: Span, arg: Expr) -> Expr {
     let p = |()| Expr::new(span, ExprNode::Var { id: VarId(0), name: Symbol::from("_p") });
     let mut stmts = vec![Expr::new(
         span,
         ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: Symbol::from("_p") },
-            value: build_from_raw_call(class_id, span),
+            value: build_from_raw_call(class_id, span, arg),
         },
     )];
     for (k, v) in entries {
@@ -1997,7 +2313,7 @@ fn build_from_raw_merge(class_id: &ClassId, entries: &[(Expr, Expr)], span: Span
             span,
             ExprNode::Assign {
                 target: LValue::Attr { recv: p(()), name: name.clone() },
-                value: v.clone(),
+                value: param_string_literal(v).unwrap_or_else(|| v.clone()),
             },
         ));
         stmts.push(Expr::new(
@@ -2012,7 +2328,153 @@ fn build_from_raw_merge(class_id: &ClassId, entries: &[(Expr, Expr)], span: Span
     Expr::new(span, ExprNode::Seq { exprs: stmts })
 }
 
-fn build_from_raw_call(class_id: &ClassId, span: Span) -> Expr {
+/// A literal merged value as the String a request would carry for it:
+/// every field of a `<Resource>Params` is a String (the model's typed
+/// factory casts it as it casts the request's), so `status: 0` is
+/// `"0"`, `role: :owner` is `"owner"`. A literal of another type in a
+/// String field is a type error on a strict target, and Spinel
+/// miscompiles it. Any other value is left as written.
+fn param_string_literal(v: &Expr) -> Option<Expr> {
+    let text = match &*v.node {
+        ExprNode::Lit { value: Literal::Int { value } } => value.to_string(),
+        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+        ExprNode::Lit { value: Literal::Bool { value } } => value.to_string(),
+        _ => return None,
+    };
+    Some(crate::lower::typing::with_ty(
+        Expr::new(v.span, ExprNode::Lit { value: Literal::Str { value: text } }),
+        Ty::Str,
+    ))
+}
+
+/// The factory's argument for the permit chain `chain`: `@params`, or,
+/// under `guard`, `@params` behind the refusal its source form makes in
+/// Rails - `Params.expect_present(@params, "<r>", ...)` with the filter's
+/// keys by kind ([`ExpectKeys`]) for `params.expect(r: [...])`,
+/// `Params.require_present(@params, "<r>")` for
+/// `params.require(:r).permit(...)`. A `.merge(...)` on top refuses as
+/// the chain it extends.
+fn factory_arg(chain: &Expr, guard: bool, span: Span) -> Expr {
+    let params_ivar = Expr::new(span, ExprNode::Ivar { name: Symbol::from("params") });
+    if !guard {
+        return params_ivar;
+    }
+    let str_lit = |v: &str| Expr::new(span, ExprNode::Lit { value: Literal::Str { value: v.to_string() } });
+    let params_call = |method: &str, args: Vec<Expr>| Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Params")] })),
+            method: Symbol::from(method),
+            args,
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let mut node = chain;
+    loop {
+        let ExprNode::Send { recv: Some(recv), method, args, .. } = &*node.node else {
+            return params_ivar;
+        };
+        match method.as_str() {
+            "merge" => node = recv,
+            "expect" if is_bare_params(recv) && args.len() == 1 => {
+                let ExprNode::Hash { entries, .. } = &*args[0].node else { return params_ivar };
+                let [(k, v)] = entries.as_slice() else { return params_ivar };
+                let ExprNode::Array { elements, .. } = &*v.node else { return params_ivar };
+                let (Some(resource), Some(keys)) = (sym_of(k), expect_keys(elements)) else {
+                    return params_ivar;
+                };
+                return params_call("expect_present", expect_present_args(params_ivar, str_lit(resource.as_str()), &keys));
+            }
+            "permit" => {
+                let Some((resource, ())) = match_require_chain(recv) else { return params_ivar };
+                // `params.expect(r: [...])`, respelled by `rewrite_params`.
+                if node.decisions & crate::expr::FROM_PARAMS_EXPECT != 0 {
+                    let elements = match args.as_slice() {
+                        [single] => match &*single.node {
+                            ExprNode::Array { elements, .. } => elements.as_slice(),
+                            _ => args.as_slice(),
+                        },
+                        _ => args.as_slice(),
+                    };
+                    let Some(keys) = expect_keys(elements) else { return params_ivar };
+                    return params_call("expect_present", expect_present_args(params_ivar, str_lit(resource.as_str()), &keys));
+                }
+                return params_call("require_present", vec![params_ivar, str_lit(resource.as_str())]);
+            }
+            _ => return params_ivar,
+        }
+    }
+}
+
+/// An `expect` filter's keys by the value each accepts, as Rails'
+/// `expect` decides whether the resource holds anything permitted:
+/// `title` a scalar, `tags: []` an array of scalars, `settings: [:theme]`
+/// or `settings: {}` a hash, `items: [[:name]]` an array (of hashes).
+/// Separate from the record-field split ([`collect_permit_args`]), which
+/// only needs to know which keys are not scalars.
+#[derive(Default)]
+struct ExpectKeys {
+    scalars: Vec<Symbol>,
+    scalar_arrays: Vec<Symbol>,
+    hashes: Vec<Symbol>,
+    arrays: Vec<Symbol>,
+}
+
+fn expect_keys(elements: &[Expr]) -> Option<ExpectKeys> {
+    let mut keys = ExpectKeys::default();
+    for (i, el) in elements.iter().enumerate() {
+        if let Some(s) = sym_of(el) {
+            keys.scalars.push(s);
+            continue;
+        }
+        // Only the last element may be the keyword hash, as in
+        // [`sym_list`].
+        let ExprNode::Hash { entries, .. } = &*el.node else { return None };
+        if i + 1 != elements.len() || entries.is_empty() {
+            return None;
+        }
+        for (k, v) in entries {
+            let key = sym_of(k)?;
+            match &*v.node {
+                ExprNode::Hash { .. } => keys.hashes.push(key),
+                ExprNode::Array { elements, .. } => match elements.first().map(|e| &*e.node) {
+                    None => keys.scalar_arrays.push(key),
+                    Some(ExprNode::Array { .. }) => keys.arrays.push(key),
+                    Some(_) => keys.hashes.push(key),
+                },
+                _ => return None,
+            }
+        }
+    }
+    Some(keys)
+}
+
+/// `Params.expect_present(@params, "<r>", scalars, scalar_arrays, hashes,
+/// arrays)`'s arguments.
+fn expect_present_args(params_ivar: Expr, resource: Expr, keys: &ExpectKeys) -> Vec<Expr> {
+    let span = params_ivar.span;
+    let str_array = |items: &[Symbol]| Expr::new(
+        span,
+        ExprNode::Array {
+            elements: items
+                .iter()
+                .map(|s| Expr::new(span, ExprNode::Lit { value: Literal::Str { value: s.as_str().to_string() } }))
+                .collect(),
+            style: crate::expr::ArrayStyle::default(),
+        },
+    );
+    vec![
+        params_ivar,
+        resource,
+        str_array(&keys.scalars),
+        str_array(&keys.scalar_arrays),
+        str_array(&keys.hashes),
+        str_array(&keys.arrays),
+    ]
+}
+
+fn build_from_raw_call(class_id: &ClassId, span: Span, arg: Expr) -> Expr {
     let class_const = Expr::new(
         span,
         ExprNode::Const { path: vec![class_id.0.clone()] },
@@ -2020,13 +2482,12 @@ fn build_from_raw_call(class_id: &ClassId, span: Span) -> Expr {
     // `@params` directly — the synthesized `from_raw` dives into the
     // nested resource key itself (`sub = params.fetch("<resource>", {})`),
     // so the call site doesn't need a `.require(:r).to_h` chain.
-    let params_ivar = Expr::new(span, ExprNode::Ivar { name: Symbol::from("params") });
     Expr::new(
         span,
         ExprNode::Send {
             recv: Some(class_const),
             method: Symbol::from("from_raw"),
-            args: vec![params_ivar],
+            args: vec![arg],
             block: None,
             parenthesized: true,
         },

@@ -599,13 +599,26 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     let mut all_app_classes: Vec<crate::dialect::LibraryClass> =
-        Vec::with_capacity(model_lcs.len() + view_lcs.len() + controller_lcs.len() + fixture_lcs.len() + test_lcs.len() + test_inner_lcs.len());
+        Vec::with_capacity(model_lcs.len() + view_lcs.len() + jbuilder_lcs.len() + controller_lcs.len() + fixture_lcs.len() + test_lcs.len() + test_inner_lcs.len());
     all_app_classes.extend(model_lcs.iter().cloned());
     all_app_classes.extend(view_lcs.iter().cloned());
+    // jbuilder views call into the runtime too
+    // (`ViewHelpers.url_for_path` for a `_url`, `JsonBuilder.*`); a
+    // method only they reach was shaken out, and `/articles.json`
+    // answered 500.
+    all_app_classes.extend(jbuilder_lcs.iter().cloned());
     all_app_classes.extend(controller_lcs.iter().cloned());
     all_app_classes.extend(fixture_lcs.iter().cloned());
     all_app_classes.extend(test_lcs.iter().cloned());
     all_app_classes.extend(test_inner_lcs.iter().cloned());
+    // Send-site shapes for every class this emit knows: see
+    // `expr::set_class_shapes`.
+    expr::set_class_shapes(
+        all_app_classes
+            .iter()
+            .chain(runtime_seed_classes.iter())
+            .map(|c| (c, instance_field_names(c))),
+    );
 
     // Reuse the runtime parse from the async-expansion step above
     // (`typescript_units` parses + emits in one step; the expansion-
@@ -1637,6 +1650,25 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     Ok(printer::render_decl(&js_library_class(class)?))
 }
 
+/// The instance field names `js_library_class` declares for `class`:
+/// its attribute readers and the ivars its instance methods assign.
+fn instance_field_names(class: &crate::dialect::LibraryClass) -> std::collections::HashSet<String> {
+    use crate::dialect::{AccessorKind, MethodReceiver};
+    let mut names = std::collections::HashSet::new();
+    let mut ivars: indexmap::IndexMap<String, Ty> = indexmap::IndexMap::new();
+    for m in &class.methods {
+        if !matches!(m.receiver, MethodReceiver::Instance) {
+            continue;
+        }
+        if matches!(m.kind, AccessorKind::AttributeReader) && m.params.is_empty() {
+            names.insert(m.name.as_str().to_string());
+        }
+        collect_ivar_assignments(&m.body, &mut ivars);
+    }
+    names.extend(ivars.into_keys());
+    names
+}
+
 pub(super) fn js_library_class(
     class: &crate::dialect::LibraryClass,
 ) -> Result<js_ast::JsDecl, String> {
@@ -1806,7 +1838,7 @@ pub(super) fn js_library_class(
     // Hardcoded for the small known set rather than threading the
     // parent's field list through emit_library_class; expand when a
     // new framework parent surface materializes.
-    const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "persisted", "destroyed"];
+    const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "error_details", "persisted", "destroyed"];
     for (name, ty, is_static, from_ivar, span) in &fields {
         // ivar-derived fields on a derived class get `declare` —
         // the constructor body's `this.x = ...` (or a parent
@@ -1895,7 +1927,13 @@ pub(super) fn js_library_class(
             // sites lower to `===`, indexing lowers to `[]`, etc.
             // Skipping keeps the file syntactically valid; the
             // bodies remain readable in the source `.rb`.
-            !matches!(
+            //
+            // `HeaderStore#[]` / `#[]=` are the exception: the store
+            // is a class, not a JS object, and call sites on it go
+            // through `.get` / `.set` (see `is_framework_class_recv`).
+            // Those two methods are renamed in `js_class_member`.
+            (class_name == "HeaderStore" && matches!(m.name.as_str(), "[]" | "[]="))
+                || !matches!(
                 m.name.as_str(),
                 "[]" | "[]=" | "==" | "!=" | "<=>" | "<" | ">" | "<=" | ">="
                     | "<<" | ">>" | "+" | "-" | "*" | "/" | "%" | "**"
@@ -2186,7 +2224,7 @@ fn js_class_member(
                     m.params.len(),
                 ));
             }
-            let tys = non_block.iter().map(|p| p.ty.clone()).collect();
+            let tys = non_block.iter().map(|p| (*p.ty).clone()).collect();
             let optionals = non_block
                 .iter()
                 .map(|p| {
@@ -2345,7 +2383,14 @@ fn js_class_member(
     }
 
     let raw_name = m.name.as_str();
-    let mname = crate::emit::typescript::library::sanitize_identifier(raw_name);
+    // `HeaderStore#[]` / `#[]=` are emitted as `get` / `set`. The
+    // names aren't legal TS methods, and the call sites on that class
+    // already dispatch to those two names.
+    let mname = match raw_name {
+        "[]" => "get".to_string(),
+        "[]=" => "set".to_string(),
+        _ => crate::emit::typescript::library::sanitize_identifier(raw_name),
+    };
     let is_constructor =
         raw_name == "initialize" && matches!(m.receiver, MethodReceiver::Instance);
 
@@ -2445,7 +2490,7 @@ pub(super) fn js_library_function(
                         func.params.len(),
                     ));
                 }
-                let tys = non_block.iter().map(|p| p.ty.clone()).collect();
+                let tys = non_block.iter().map(|p| (*p.ty).clone()).collect();
                 let optionals = non_block
                     .iter()
                     .map(|p| {
@@ -2720,6 +2765,12 @@ fn collect_ivar_assignments(
             }
         }
         ExprNode::Cast { value, .. } => collect_ivar_assignments(value, out),
+        ExprNode::ForwardKeywordsWithPairs { entries } => {
+            for (key, value) in entries {
+                collect_ivar_assignments(key, out);
+                collect_ivar_assignments(value, out);
+            }
+        }
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }

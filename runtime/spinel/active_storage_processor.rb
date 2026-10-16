@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # The image processor's swap point — `ActiveStorage::Processor
 # .transform`, which `VariantWithRecord#processed` hands the original's
 # bytes to. The shared definition (runtime/ruby/active_storage.rb)

@@ -120,9 +120,9 @@ fn initialize_is_left_alone() {
     assert!(rbs.contains("def initialize: () -> untyped"), "{rbs}");
 }
 
-// A rest slot collects every trailing argument, but `collect_send_sites`
-// records argument types BY POSITION — the slot under `*streams` only
-// ever sees the FIRST vararg of any call.
+// A rest slot collects every trailing argument: its element is what all of
+// them were observed as, not the first vararg alone (`collect_send_sites`
+// records them by position, past the slot's own).
 const REST: &str = r#"
 class Silencer
   def self.silence(*streams)
@@ -136,9 +136,29 @@ end
 "#;
 
 #[test]
-fn a_rest_slot_is_not_declared_from_its_first_vararg() {
+fn a_rest_slot_is_declared_from_every_vararg() {
     let rbs = sidecars(REST);
-    assert!(rbs.contains("def self.silence: (*untyped streams) -> Integer"), "{rbs}");
+    assert!(rbs.contains("def self.silence: (*(Integer | String) streams) -> Integer"), "{rbs}");
+}
+
+// A `*list` spread at the call lands its elements wherever its length
+// puts them, so it says nothing about the slot.
+const SPREAD: &str = r#"
+class Silencer
+  def self.silence(*streams)
+    streams.length
+  end
+
+  def self.call(list)
+    silence(*list)
+  end
+end
+"#;
+
+#[test]
+fn a_spread_call_leaves_the_rest_slot_untyped() {
+    let rbs = sidecars(SPREAD);
+    assert!(rbs.contains("def self.silence: (*untyped streams)"), "{rbs}");
 }
 
 // `String | untyped` IS `untyped`. Rendering the members alongside the

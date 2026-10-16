@@ -211,6 +211,7 @@ thread_local! {
         RefCell::new(HashMap::new());
     static NEXT_STMT_ID: Cell<i64> = const { Cell::new(0) };
     static LAST_INSERT_ROWID: Cell<i64> = const { Cell::new(0) };
+    static CHANGES: Cell<i64> = const { Cell::new(0) };
 }
 
 /// `Db` namespace — the lowerer (`src/lower/model_to_library/
@@ -230,6 +231,7 @@ impl Db {
         with_conn(|conn| {
             conn.execute_batch(sql).expect("Db::exec");
             LAST_INSERT_ROWID.with(|c| c.set(conn.last_insert_rowid()));
+            CHANGES.with(|c| c.set(conn.changes() as i64));
         });
     }
 
@@ -418,6 +420,12 @@ impl Db {
     /// Last-row-id from the most recent `exec`. SQLite-specific.
     pub fn last_insert_rowid() -> i64 {
         LAST_INSERT_ROWID.with(|c| c.get())
+    }
+
+    /// Rows affected by the most recent `exec` — what Rails'
+    /// `Model.delete_all` returns.
+    pub fn changes() -> i64 {
+        CHANGES.with(|c| c.get())
     }
 
     /// SQL-quote a string literal. Single quotes doubled per SQLite's

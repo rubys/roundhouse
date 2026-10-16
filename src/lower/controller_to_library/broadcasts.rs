@@ -215,9 +215,9 @@ fn payload(
     )))
 }
 
-/// `target: :shared_rooms` → `"shared_rooms"`; `target: [@room, :list]`
-/// → `"list_room_#{@room.id}"` (Rails' `dom_id(record, prefix)`, prefix
-/// first).
+/// `target: :shared_rooms` → `"shared_rooms"`; record DOM targets use
+/// `ViewHelpers.dom_id` at runtime so its persisted-record branch is
+/// preserved (`new_article`, not `article_0`, for an unsaved record).
 fn dom_target(value: &Expr, span: Span) -> Option<Expr> {
     match &*value.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(lit_str(value.as_str(), span)),
@@ -226,57 +226,75 @@ fn dom_target(value: &Expr, span: Span) -> Option<Expr> {
         // — an id the app spells itself. Already a String; nothing to
         // resolve, and rebuilding it would only be a chance to differ.
         ExprNode::StringInterp { .. } => Some(value.clone()),
+        // `target: helpers.dom_id(record[, :prefix])` (or a bare
+        // `dom_id(…)`). Keep this as the runtime helper call: lowering
+        // it to dom_prefix/dom_record_key interpolation loses Rails'
+        // `new_record?` behavior for unsaved records.
+        ExprNode::Send { recv, method, args, block: None, .. }
+            if method.as_str() == "dom_id"
+                && (1..=2).contains(&args.len())
+                && recv.as_ref().is_none_or(|r| matches!(&*r.node,
+                    ExprNode::Send { recv: None, method: h, args: a, block: None, .. }
+                        if h.as_str() == "helpers" && a.is_empty())) =>
+        {
+            let record = &args[0];
+            record_singular(record)
+                .or_else(|| decline(span, "target: dom_id receiver is not a nameable record"))?;
+            let suffix = args.get(1);
+            let suffix = match suffix {
+                Some(value) => {
+                    let text = literal_text(value)
+                        .or_else(|| decline(span, "target: dom_id prefix is not a literal"))?;
+                    Some(lit_sym(&text, span))
+                }
+                None => None,
+            };
+            Some(runtime_dom_id(record.clone(), suffix, span))
+        }
         ExprNode::Array { elements, .. } => {
             let [record, prefix] = elements.as_slice() else {
                 return decline(span, "target: array is not [record, prefix]");
             };
             let prefix = literal_text(prefix)
                 .or_else(|| decline(span, "target: prefix is not a literal"))?;
-            // `record_singular` still gates (only a nameable record
-            // qualifies); the STRING comes from the synthesized
-            // identity methods, so STI prefixes and `to_key`-keyed
-            // rows spell what the pages spell — the same correction
-            // model_to_library/broadcasts.rs carries.
             record_singular(record)
                 .or_else(|| decline(span, "target: record is not a nameable record"))?;
-            Some(Expr::new(
-                span,
-                ExprNode::StringInterp {
-                    parts: vec![
-                        crate::expr::InterpPart::Text { value: format!("{prefix}_") },
-                        crate::expr::InterpPart::Expr {
-                            expr: dom_identity_call(record.clone(), "dom_prefix"),
-                        },
-                        crate::expr::InterpPart::Text { value: "_".to_string() },
-                        crate::expr::InterpPart::Expr {
-                            expr: dom_identity_call(record.clone(), "dom_record_key"),
-                        },
-                    ],
-                },
-            ))
+            Some(runtime_dom_id(record.clone(), Some(lit_sym(&prefix, span)), span))
         }
         _ => decline(span, "target: is not a literal or [record, prefix]"),
     }
 }
 
-/// `"#{record.dom_prefix()}_#{record.dom_record_key()}"` — the
-/// per-record DOM id, through the synthesized identity methods (see
-/// the note above).
+/// The per-record DOM id, preserving the runtime helper's unsaved case.
 fn record_dom_id(_singular: &str, record: &Expr, span: Span) -> Expr {
-    Expr::new(
+    runtime_dom_id(record.clone(), None, span)
+}
+
+/// Call the shared Rails-shaped helper instead of spelling the saved
+/// identity directly. `dom_id` owns the unsaved-record case, including
+/// the distinct prefixed form (`prefix_model`, not `prefix_new_model`).
+fn runtime_dom_id(record: Expr, suffix: Option<Expr>, span: Span) -> Expr {
+    let mut args = vec![record];
+    if let Some(suffix) = suffix {
+        args.push(suffix);
+    }
+    let mut out = Expr::new(
         span,
-        ExprNode::StringInterp {
-            parts: vec![
-                crate::expr::InterpPart::Expr {
-                    expr: dom_identity_call(record.clone(), "dom_prefix"),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                span,
+                ExprNode::Const {
+                    path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
                 },
-                crate::expr::InterpPart::Text { value: "_".to_string() },
-                crate::expr::InterpPart::Expr {
-                    expr: dom_identity_call(record.clone(), "dom_record_key"),
-                },
-            ],
+            )),
+            method: Symbol::from("dom_id"),
+            args,
+            block: None,
+            parenthesized: true,
         },
-    )
+    );
+    out.ty = Some(Ty::Str);
+    out
 }
 
 /// `ViewHelpers.broadcast_render(ViewHelpers.begin_broadcast_render,
@@ -341,30 +359,15 @@ fn wrap_broadcast_render(html: Expr) -> Expr {
     call
 }
 
-/// A parenthesized zero-arg call to a synthesized dom-identity method
-/// (`dom_prefix` / `dom_record_key`).
-fn dom_identity_call(recv: Expr, name: &str) -> Expr {
-    Expr::new(
-        crate::span::Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(recv),
-            method: Symbol::from(name),
-            args: vec![],
-            block: None,
-            parenthesized: true,
-        },
-    )
-}
-
 /// One streamable argument. A literal is its own text; anything the
 /// analyzer typed as a model is that record.
 fn streamable(arg: &Expr) -> Option<Streamable> {
     if let Some(text) = literal_text(arg) {
         return Some(Streamable::Literal(text));
     }
+    record_singular(arg)?;
     Some(Streamable::Record {
-        singular: record_singular(arg)?,
-        id: read_id(arg.clone(), arg.span),
+        record: arg.clone(),
     })
 }
 
@@ -406,19 +409,6 @@ fn record_singular(e: &Expr) -> Option<String> {
         }
         _ => None,
     }
-}
-
-fn read_id(recv: Expr, span: Span) -> Expr {
-    Expr::new(
-        span,
-        ExprNode::Send {
-            recv: Some(recv),
-            method: Symbol::from("id"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    )
 }
 
 #[derive(Clone, Copy)]

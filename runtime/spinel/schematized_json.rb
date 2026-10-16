@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # ActiveModel::SchematizedJson subset — the JSON twin of
 # `runtime/typed_store.rb`, and deliberately in the same place for the
 # same reason.

@@ -1,0 +1,77 @@
+name: Install apt packages with cached .deb archives
+description: >
+  Restore apt download archives, run scripts/ci-apt-install so dpkg state
+  stays correct, then save archives when the primary cache key missed.
+inputs:
+  packages:
+    description: Space-separated apt package names
+    required: true
+outputs:
+  cache-hit:
+    description: Exact actions/cache hit for today's primary key
+    value: ${{ steps.cache.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Apt .deb cache key
+      id: key
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        # shellcheck source=/dev/null
+        . /etc/os-release
+        pkgs=$(printf '%s\n' $PACKAGES | sed '/^$/d' | sort -u | paste -sd' ' -)
+        hash=$(printf '%s' "$pkgs" | sha256sum | awk '{ print substr($1, 1, 16) }')
+        arch=$(uname -m)
+        bucket=$(date -u +%Y%m%d)
+        dir="$RUNNER_TEMP/apt-archives"
+        mkdir -p "$dir"
+        {
+          echo "packages=$pkgs"
+          echo "dir=$dir"
+          echo "key=apt-debs-${ID}-${VERSION_ID}-${arch}-${hash}-${bucket}-v1"
+          echo "prefix=apt-debs-${ID}-${VERSION_ID}-${arch}-${hash}-"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore apt .deb archives
+      id: cache
+      continue-on-error: true
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.key.outputs.dir }}
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: |
+          ${{ steps.key.outputs.prefix }}
+
+    - name: Install apt packages
+      id: install
+      shell: bash
+      env:
+        PACKAGES: ${{ steps.key.outputs.packages }}
+        APT_ARCHIVE_DIR: ${{ steps.key.outputs.dir }}
+      run: |
+        set -euo pipefail
+        "$GITHUB_WORKSPACE/scripts/ci-apt-archives" prepare "$APT_ARCHIVE_DIR"
+        # Package names are caller-controlled (workflow literals).
+        # shellcheck disable=SC2086
+        "$GITHUB_WORKSPACE/scripts/ci-apt-install" $PACKAGES
+        # Harvest is cache-only; a disk/permission miss must not fail install,
+        # and must not save a stale/partial archive dir under today's key.
+        if "$GITHUB_WORKSPACE/scripts/ci-apt-archives" harvest "$APT_ARCHIVE_DIR"; then
+          echo "harvested=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::apt archive harvest failed; cache will not be saved"
+          echo "harvested=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Save apt .deb archives
+      # Exact hit already holds today's archives. Prefix hits and misses save
+      # only when harvest refreshed the archive dir.
+      if: steps.cache.outputs.cache-hit != 'true' && steps.install.outputs.harvested == 'true'
+      continue-on-error: true
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ steps.key.outputs.dir }}
+        key: ${{ steps.key.outputs.key }}

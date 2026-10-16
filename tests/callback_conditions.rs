@@ -77,9 +77,9 @@ fn a_symbol_unless_condition_negates_the_predicate() {
     let src = emitted();
     // `before_save :shout, unless: :loud?` → a negated guard around the
     // call (the method names alone appear as definitions on main too).
-    assert!(src.contains("if !(loud?)"), "the unless guard must negate the predicate:\n{src}");
+    assert!(src.contains("if !(self.loud?)"), "the unless guard must negate the predicate:\n{src}");
     // `before_destroy :noop, if: :frozen?` → guarded by the predicate.
-    assert!(src.contains("if frozen?"), "{src}");
+    assert!(src.contains("if self.frozen?"), "{src}");
 }
 
 /// A lambda/proc condition with parameters, several statements, a

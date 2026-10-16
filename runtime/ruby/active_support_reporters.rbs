@@ -1,0 +1,145 @@
+module ActiveSupport
+  def self.error_reporter: () -> ErrorReporter
+  def self.error_reporter=: (ErrorReporter reporter) -> ErrorReporter
+  def self.event_reporter: () -> EventReporter
+  def self.event_reporter=: (EventReporter reporter) -> EventReporter
+  def self.filter_parameters: () -> Array[untyped]
+  def self.filter_parameters=: (Array[untyped] filters) -> Array[untyped]
+
+  class ParameterFilter
+    FILTERED: String
+
+    @mask: untyped
+    @no_filters: bool
+    @regexps: Array[::Regexp]
+    @deep_regexps: Array[::Regexp]
+    @blocks: Array[untyped]
+
+    def initialize: (?Array[untyped] filters, ?mask: untyped) -> void
+    def filter: (Hash[untyped, untyped] params) -> Hash[untyped, untyped]
+    def filter_param: (untyped key, untyped value) -> untyped
+    def filter_hash: (Hash[untyped, untyped] params, String? full_parent_key, Hash[untyped, untyped]? original_params) -> Hash[untyped, untyped]
+    def value_for_key: (untyped key, untyped value, String? full_parent_key, Hash[untyped, untyped]? original_params) -> untyped
+  end
+
+  module ExecutionContext
+    class Record
+      @store: Hash[Symbol, untyped]
+      @stack: Array[Hash[Symbol, untyped]]
+
+      def initialize: () -> void
+      def store: () -> Hash[Symbol, untyped]
+      def push: () -> ::ActiveSupport::ExecutionContext::Record
+      def pop: () -> ::ActiveSupport::ExecutionContext::Record
+      def flush: () -> ::ActiveSupport::ExecutionContext::Record
+    end
+
+    def self.nestable: () -> bool
+    def self.nestable=: (bool value) -> bool
+    def self.after_change: () { () -> untyped } -> Array[untyped]
+    def self.after_change_callbacks: () -> Array[untyped]
+    def self.changed: () -> Array[untyped]
+    def self.set: (**untyped options) ?{ () -> untyped } -> untyped
+    def self.[]=: (untyped key, untyped value) -> untyped
+    def self.to_h: () -> Hash[Symbol, untyped]
+    def self.push: () -> untyped
+    def self.pop: () -> untyped
+    def self.clear: () -> nil
+    def self.flush: () -> ::ActiveSupport::ExecutionContext::Record
+    def self.record: () -> ::ActiveSupport::ExecutionContext::Record
+  end
+
+  class TagStack
+    EMPTY_TAGS: Hash[Symbol, untyped]
+
+    def self.tags: () -> Hash[Symbol, untyped]
+    def self.with_tags: (Array[untyped] args, Hash[Symbol, untyped] kwargs) { () -> untyped } -> untyped
+    def self.resolve_tags: (Array[untyped] args, Hash[Symbol, untyped] kwargs) -> Hash[Symbol, untyped]
+  end
+
+  class EventContext
+    EMPTY_CONTEXT: Hash[Symbol, untyped]
+
+    def self.context: () -> Hash[Symbol, untyped]
+    def self.set_context: (Hash[untyped, untyped] context_hash) -> Hash[Symbol, untyped]
+    def self.clear: () -> Hash[Symbol, untyped]
+  end
+
+  class EventReporter
+    @subscribers: Array[Hash[Symbol, untyped]]
+    @debug_mode: bool
+    @raise_on_error: bool
+    @payload_filter: ParameterFilter?
+
+    def self.context_store: () -> untyped
+    def self.context_store=: (untyped store) -> untyped
+    def self.filter_parameters: () -> Array[untyped]?
+    def self.filter_parameters=: (Array[untyped]? filters) -> Array[untyped]?
+
+    def initialize: (*untyped subscribers, ?raise_on_error: bool) -> void
+    def raise_on_error=: (bool value) -> bool
+    def debug_mode=: (bool value) -> bool
+    def subscribers: () -> Array[Hash[Symbol, untyped]]
+    def subscribe: (untyped subscriber) ?{ (Hash[Symbol, untyped] event) -> untyped } -> Array[Hash[Symbol, untyped]]
+    def unsubscribe: (untyped subscriber) -> Array[Hash[Symbol, untyped]]
+    def notify: (untyped name_or_object, ?untyped payload, ?caller_depth: Integer, ?filter_payload: bool, **untyped kwargs) -> nil
+    def with_debug: () { () -> untyped } -> untyped
+    def debug_mode?: () -> bool?
+    def debug: (untyped name_or_object, ?untyped payload, ?caller_depth: Integer, ?filter_payload: bool, **untyped kwargs) ?{ () -> Hash[untyped, untyped] } -> nil
+    def tagged: (*untyped args, **untyped kwargs) { () -> untyped } -> untyped
+    def set_context: (Hash[untyped, untyped] context) -> Hash[Symbol, untyped]
+    def clear_context: () -> Hash[Symbol, untyped]
+    def context: () -> Hash[Symbol, untyped]
+    def reload_payload_filter: () -> ParameterFilter
+    def deliver: (untyped name_or_object, untyped payload, Hash[untyped, untyped] kwargs, bool filter_payload, Integer depth) -> nil
+    def payload_filter: () -> ParameterFilter
+    def effective_filter_parameters: () -> Array[untyped]
+    def resolve_name: (untyped name_or_object) -> String?
+    def resolve_payload: (untyped name_or_object, untyped payload, Hash[untyped, untyped] kwargs, bool filter) -> untyped
+    def symbolize: (Hash[untyped, untyped] hash) -> Hash[Symbol, untyped]
+    def handle_unexpected_args: (untyped name_or_object, untyped payload, Hash[untyped, untyped] kwargs) -> nil
+  end
+
+  class ErrorReporter
+    SEVERITIES: Array[Symbol]
+    DEFAULT_SOURCE: String
+    DEFAULT_RESCUE: Array[untyped]
+    REPORTED: Hash[Integer, bool]
+
+    class UnexpectedError < ::Exception
+    end
+
+    class ErrorContextMiddlewareStack
+      @stack: Array[untyped]
+
+      def initialize: (*untyped middlewares) -> void
+      def use: (untyped middleware) -> Array[untyped]
+      def execute: (::Exception error, handled: bool, severity: Symbol, context: Hash[Symbol, untyped], source: String) -> Hash[Symbol, untyped]
+    end
+
+    @subscribers: Array[untyped]
+    @logger: untyped
+    @debug_mode: bool
+    @context_middlewares: ::ActiveSupport::ErrorReporter::ErrorContextMiddlewareStack
+
+    def initialize: (*untyped subscribers, ?logger: untyped) -> void
+    def logger: () -> untyped
+    def logger=: (untyped logger) -> untyped
+    def debug_mode: () -> bool
+    def debug_mode=: (bool value) -> bool
+    def handle: (*untyped error_classes, ?severity: Symbol, ?context: Hash[untyped, untyped], ?fallback: untyped, ?source: String) { () -> untyped } -> untyped
+    def record: (*untyped error_classes, ?severity: Symbol, ?context: Hash[untyped, untyped], ?source: String) { () -> untyped } -> untyped
+    def unexpected: (::Exception | String error, ?severity: Symbol, ?context: Hash[untyped, untyped], ?source: String) -> nil
+    def subscribe: (untyped subscriber) -> Array[untyped]
+    def unsubscribe: (untyped subscriber) -> Array[untyped]
+    def disable: (untyped subscriber) { () -> untyped } -> untyped
+    def set_context: (**untyped context) ?{ () -> untyped } -> untyped
+    def add_middleware: (untyped middleware) -> Array[untyped]
+    def report: (untyped error, ?handled: bool, ?severity: Symbol, ?context: Hash[untyped, untyped]?, ?source: String) -> nil
+    def log_unsubscribed: (::Exception error, Symbol severity) -> nil
+    def deep_dup: (untyped value) -> untyped
+    def disabled_for_thread: () -> Array[untyped]?
+    def disabled_subscribers: () -> Array[untyped]
+    def ensure_backtrace: (::Exception error) -> nil
+  end
+end

@@ -8,6 +8,14 @@ module ActionController
   class UnpermittedParameters < StandardError
   end
 
+  class BadRequest < StandardError
+    def initialize: (?String msg) -> void
+  end
+
+  class InvalidAuthenticityToken < StandardError
+    def initialize: (?String msg) -> void
+  end
+
   class UnknownFormat < StandardError
   end
 
@@ -15,5 +23,10 @@ module ActionController
     @failures: Array[String]
     def initialize: (String message, ?Array[String] failures) -> void
     def failures: () -> Array[String]
+  end
+end
+
+module AbstractController
+  class ActionNotFound < StandardError
   end
 end

@@ -205,7 +205,7 @@ fn push_becomes_from(app: &mut App, bases: &HashMap<ClassId, ClassId>, recast: &
         }
         let source = Symbol::from("source");
         let record = Symbol::from("record");
-        let sub_ty = Ty::Class { id: lc.name.clone(), args: vec![] };
+        let sub_ty = Ty::Class { id: lc.name.clone(), args: vec![].into() };
         let mut body: Vec<Expr> = vec![Expr::new(
             Span::synthetic(),
             ExprNode::Assign {
@@ -290,7 +290,7 @@ fn push_becomes_from(app: &mut App, bases: &HashMap<ClassId, ClassId>, recast: &
             params: vec![Param::positional(source.clone())],
             body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: body }),
             signature: Some(crate::lower::typing::fn_sig(
-                vec![(source, Ty::Class { id: base.clone(), args: vec![] })],
+                vec![(source, Ty::Class { id: base.clone(), args: vec![].into() })],
                 sub_ty,
             )),
             effects: crate::effect::EffectSet::default(),
@@ -376,7 +376,18 @@ fn no_arg_send(recv: Expr, method: &str) -> Expr {
 /// this one.
 pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
     let mut out = HashMap::new();
-    let model_named = |id: &ClassId| app.models.iter().find(|m| &m.name == id);
+    // Name -> the FIRST model / library class of that name, the same
+    // element the linear `find`s this replaced answered. Indexed once:
+    // a scan per parent hop is |classes|^2 on a large app.
+    let mut models_by_name: HashMap<&ClassId, &crate::dialect::Model> = HashMap::new();
+    for m in &app.models {
+        models_by_name.entry(&m.name).or_insert(m);
+    }
+    let mut lc_parent: HashMap<&ClassId, &Option<ClassId>> = HashMap::new();
+    for other in &app.library_classes {
+        lc_parent.entry(&other.name).or_insert(&other.parent);
+    }
+    let model_named = |id: &ClassId| models_by_name.get(id).copied();
     for lc in &app.library_classes {
         let mut cursor = lc.parent.clone();
         let mut hops = 0;
@@ -397,11 +408,7 @@ pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
                 }
                 break;
             }
-            cursor = app
-                .library_classes
-                .iter()
-                .find(|other| other.name == parent)
-                .and_then(|other| other.parent.clone());
+            cursor = lc_parent.get(&parent).and_then(|p| (*p).clone());
             hops += 1;
         }
     }
@@ -499,7 +506,7 @@ fn rewrite_becomes(
     bases: &HashMap<ClassId, ClassId>,
     recast: &mut HashSet<ClassId>,
 ) -> bool {
-    let ExprNode::Send { recv: Some(_), method, args, block, .. } = &*expr.node else {
+    let ExprNode::Send { method, args, block, .. } = &*expr.node else {
         return false;
     };
     if method.as_str() != "becomes!" || args.len() != 1 || block.is_some() {
@@ -513,7 +520,9 @@ fn rewrite_becomes(
     let span = expr.span;
     let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
     let ExprNode::Send { recv, .. } = node else { unreachable!() };
-    let source = recv.expect("checked above");
+    // Implicit self — campfire's `Room#destroy_later` writes
+    // `becomes!(Rooms::Closed)` on the record itself.
+    let source = recv.unwrap_or_else(|| Expr::new(span, ExprNode::SelfRef));
     recast.insert(named.clone());
     *expr = Expr::new(
         span,

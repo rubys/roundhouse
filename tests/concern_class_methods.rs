@@ -277,7 +277,7 @@ end
             assert_eq!(return_type(&app, "Consumer", "size"), Ty::Int);
             for class in ["Reading", "Packet"] {
                 let expected = Ty::Class {
-                    id: roundhouse::ClassId(roundhouse::Symbol::new(class)), args: vec![],
+                    id: roundhouse::ClassId(roundhouse::Symbol::new(class)), args: vec![].into(),
                 };
                 assert_eq!(return_type(&app, class, "build"), expected);
                 let lc = app.library_classes.iter().find(|c| c.name.0.as_str() == class).unwrap();
@@ -285,7 +285,7 @@ end
                 let Some(Ty::Fn { ret, .. }) = &build.signature else { panic!("factory signature") };
                 assert_eq!(**ret, expected, "signature must be concrete, not SelfInstance");
                 assert_eq!(return_type(&app, class, "fixed"), Ty::Class {
-                    id: roundhouse::ClassId(roundhouse::Symbol::new("Reading")), args: vec![],
+                    id: roundhouse::ClassId(roundhouse::Symbol::new("Reading")), args: vec![].into(),
                 });
             }
         }
@@ -319,7 +319,7 @@ fn an_includers_own_factory_and_constructor_win() {
     let reading = READING.replace("end\n", "  def self.build(**fields)\n    Packet.new(size: 31).freeze\n  end\nend\n");
     let app = factory_app("app/services/factory.rb", &format!("{reading}{PACKET}"), "", "");
     assert_eq!(return_type(&app, "Reading", "build"), Ty::Class {
-        id: roundhouse::ClassId(roundhouse::Symbol::new("Packet")), args: vec![],
+        id: roundhouse::ClassId(roundhouse::Symbol::new("Packet")), args: vec![].into(),
     });
     let reading = app.library_classes.iter().find(|c| c.name.0.as_str() == "Reading").unwrap();
     assert_eq!(reading.methods.iter().filter(|m| m.name.as_str() == "build").count(), 1);
@@ -327,7 +327,7 @@ fn an_includers_own_factory_and_constructor_win() {
     let packet = PACKET.replace("end\n", "  def self.new(**fields)\n    Reading.new(label: \"custom\")\n  end\nend\n");
     let app = factory_app("app/services/factory.rb", &format!("{READING}{packet}"), "", "");
     assert_eq!(return_type(&app, "Packet", "build"), Ty::Class {
-        id: roundhouse::ClassId(roundhouse::Symbol::new("Reading")), args: vec![],
+        id: roundhouse::ClassId(roundhouse::Symbol::new("Reading")), args: vec![].into(),
     });
 }
 

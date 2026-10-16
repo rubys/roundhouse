@@ -23,11 +23,11 @@ use super::super::emit_expr;
 pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Option<Vec<crate::ty::Ty>> {
     use crate::ty::Ty;
     let hash_str_untyped = || Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(Ty::Untyped),
     };
     let str_opt = || Ty::Union {
-        variants: vec![Ty::Str, Ty::Nil],
+        variants: vec![Ty::Str, Ty::Nil].into(),
     };
     match (class, method) {
         ("Db", "prepare") => Some(vec![Ty::Str]),
@@ -49,14 +49,15 @@ pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Opti
         ("Db", "column_text_opt") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "column_bool_opt") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "escape_string_opt") => {
-            Some(vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil] }])
+            Some(vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }])
         }
-        ("Db", "escape_int_opt") => Some(vec![Ty::Union { variants: vec![Ty::Int, Ty::Nil] }]),
+        ("Db", "escape_int_opt") => Some(vec![Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }]),
         ("Db", "escape_float_opt") => {
-            Some(vec![Ty::Union { variants: vec![Ty::Float, Ty::Nil] }])
+            Some(vec![Ty::Union { variants: vec![Ty::Float, Ty::Nil].into() }])
         }
-        ("Db", "escape_bool_opt") => Some(vec![Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }]),
+        ("Db", "escape_bool_opt") => Some(vec![Ty::Union { variants: vec![Ty::Bool, Ty::Nil].into() }]),
         ("Db", "last_insert_rowid") => Some(vec![]),
+        ("Db", "changes") => Some(vec![]),
         // `Broadcasts::method(HashMap<String, Value>)` — the lowerer
         // emits kwargs as a HashMap; the runtime shim accepts that
         // shape and pulls named fields out.
@@ -107,8 +108,8 @@ pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Opti
 pub(super) fn controller_shim_method_param_ty(method: &str, idx: usize) -> Option<crate::ty::Ty> {
     use crate::ty::Ty;
     let hash_str_untyped = || Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(Ty::Untyped),
+        key: std::sync::Arc::new(Ty::Str),
+        value: std::sync::Arc::new(Ty::Untyped),
     };
     match (method, idx) {
         ("render_with", 1) => Some(hash_str_untyped()),
@@ -291,7 +292,11 @@ pub(super) fn dispatch_method_by_recv_ty(
         raw_recv_s
     };
     match recv_ty {
-        Some(Ty::Array { .. }) => match method {
+        Some(Ty::Array { elem }) => match method {
+            // An element that is never nil or false makes `none?` mean no elements at all
+            "none?" if args.is_empty() && matches!(**elem, Ty::Str | Ty::Int | Ty::Float | Ty::Sym) => {
+                Some(format!("{recv_s}.is_empty()"))
+            }
             "size" | "length" | "count" if args.is_empty() => {
                 // The `as i64` cast makes this non-primary. The
                 // decide pass stamps `NEEDS_PARENS` on this Send
@@ -314,6 +319,26 @@ pub(super) fn dispatch_method_by_recv_ty(
             "sort" if args.is_empty() => Some(format!(
                 "{{ let mut __v = {recv_s}.clone(); __v.sort(); __v }}"
             )),
+            // Not `Vec::join` alone: it joins only strings, where Ruby's `join` writes each element's `to_s`, nil as "".
+            "join" if args.len() <= 1 && !matches!(**elem, Ty::Str) => {
+                let sep = args_s.first().cloned().unwrap_or_else(|| "\"\"".to_string());
+                let to_s = match &**elem {
+                    Ty::Int | Ty::Bool => "v.to_string()",
+                    Ty::Nil => "String::new()",
+                    // Only a `map` result: a runtime Array declared `Array[String?]` is a `Vec<String>` in Rust.
+                    Ty::Union { variants }
+                        if matches!(&*recv.node, ExprNode::Send { method, .. } if matches!(method.as_str(), "map" | "collect"))
+                            && variants.len() == 2
+                            && variants.iter().any(|v| matches!(v, Ty::Nil))
+                            && variants.iter().any(|v| matches!(v, Ty::Str)) =>
+                    {
+                        "v.clone().unwrap_or_default()"
+                    }
+                    // Not Float: `f64`'s `to_string` writes 1.0 as "1", so it stays a build error rather than a wrong string.
+                    _ => return Some(format!("{recv_s}.join({sep})")),
+                };
+                Some(format!("{recv_s}.iter().map(|v| {to_s}).collect::<Vec<String>>().join(&{sep})"))
+            }
             "join" if args.is_empty() => Some(format!("{recv_s}.join(\"\")")),
             "join" if args.len() == 1 => Some(format!("{recv_s}.join({})", args_s[0])),
             // `arr.include?(x)` — Ruby's Array membership test. Rust's
@@ -334,7 +359,7 @@ pub(super) fn dispatch_method_by_recv_ty(
                 // `as i64` cast — non-primary. Decide pass stamps
                 // `NEEDS_PARENS` on this Send for chained-recv use;
                 // consumer wraps. Arg/let-RHS positions stay bare.
-                Some(format!("{recv_s}.len() as i64"))
+                Some(format!("{recv_s}.chars().count() as i64"))
             }
             // `str.to_i` → Ruby semantics: parse leading digits, 0 on
             // parse failure / non-numeric input. Rust's `parse::<i64>`

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # `redirect_back_or_to(fallback)` — back to the Referer when it names
 # this site, else to `fallback`. Rails' default refuses another host
 # (`allow_other_host` follows raise_on_open_redirects, on for new apps);

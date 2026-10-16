@@ -1,6 +1,7 @@
 //! ActiveJob class-side entries (`lower::job_class_side`) + the
 //! url_helpers include marker — both upstream-lobsters idioms.
 
+use roundhouse::emit::ruby::emit_library;
 use roundhouse::ingest::ingest_app_from_tree;
 
 fn app_from(files: Vec<(&str, &str)>) -> roundhouse::App {
@@ -35,8 +36,7 @@ fn job_classes_gain_inline_class_side_entries() {
             .methods
             .iter()
             .find(|m| {
-                m.name.as_str() == name
-                    && m.receiver == roundhouse::dialect::MethodReceiver::Class
+                m.name.as_str() == name && m.receiver == roundhouse::dialect::MethodReceiver::Class
             })
             .unwrap_or_else(|| panic!("`{name}` class-side entry not synthesized"))
     };
@@ -83,17 +83,29 @@ fn a_set_chain_folds_and_a_kept_set_is_synthesized() {
     ]);
     let diags = roundhouse::lower::job_class_side::apply_job_class_side(&mut app);
     let class = |n: &str| {
-        app.library_classes.iter().find(|lc| lc.name.0.as_str() == n).expect(n)
+        app.library_classes
+            .iter()
+            .find(|lc| lc.name.0.as_str() == n)
+            .expect(n)
     };
-    let go = class("Caller").methods.iter().find(|m| m.name.as_str() == "go").unwrap();
+    let go = class("Caller")
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "go")
+        .unwrap();
     let body = format!("{:?}", go.body);
     assert!(!body.contains("\"set\""), "the chain folds: {body}");
     assert!(
-        diags.iter().any(|d| d.message.contains("dropped under inline")),
+        diags
+            .iter()
+            .any(|d| d.message.contains("dropped under inline")),
         "dropped set-options must be ledgered: {diags:?}"
     );
     assert!(
-        !class("NotifyJob").methods.iter().any(|m| m.name.as_str() == "set"),
+        !class("NotifyJob")
+            .methods
+            .iter()
+            .any(|m| m.name.as_str() == "set"),
         "a folded chain leaves no `set` behind"
     );
     let set = class("OtherJob")
@@ -105,7 +117,8 @@ fn a_set_chain_folds_and_a_kept_set_is_synthesized() {
     assert!(
         matches!(&set.signature, Some(roundhouse::ty::Ty::Fn { ret, .. })
             if matches!(**ret, roundhouse::ty::Ty::Untyped)),
-        "`set` is typed untyped, not as an instance: {:?}", set.signature
+        "`set` is typed untyped, not as an instance: {:?}",
+        set.signature
     );
 }
 
@@ -128,7 +141,9 @@ fn kwarg_perform_stays_unwrapped_on_the_residue_ledger() {
         .find(|lc| lc.name.0.as_str() == "KwJob")
         .expect("ingested");
     assert!(
-        !kw.methods.iter().any(|m| m.name.as_str() == "perform_later"),
+        !kw.methods
+            .iter()
+            .any(|m| m.name.as_str() == "perform_later"),
         "kwarg perform must not gain a positional wrapper"
     );
     assert!(
@@ -153,8 +168,266 @@ fn url_helpers_include_records_the_route_helpers_marker() {
         .find(|lc| lc.name.0.as_str() == "Routes")
         .expect("Routes ingested");
     assert!(
-        routes.includes.iter().any(|i| i.0.as_str() == "RouteHelpers"),
+        routes
+            .includes
+            .iter()
+            .any(|i| i.0.as_str() == "RouteHelpers"),
         "url_helpers include records the RouteHelpers marker: {:?}",
         routes.includes
+    );
+}
+
+#[test]
+fn singleton_class_includes_are_ledgered_until_emission_support_exists() {
+    let app = app_from(vec![(
+        "extras/extensions.rb",
+        "class ExtensionTarget\n  class << self\n    include ConstantMixin\n    send(:include, DynamicMixin)\n    public_send(:include, OtherMixin)\n  end\nend\n",
+    )]);
+    let target = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "ExtensionTarget")
+        .expect("ExtensionTarget ingested");
+    let retained = format!("{:?}", target.unknown_calls);
+    for mixin in ["ConstantMixin", "DynamicMixin", "OtherMixin"] {
+        assert!(
+            retained.contains(mixin),
+            "singleton-class extension `{mixin}` must remain in the class body: {retained}"
+        );
+    }
+    assert!(
+        !retained.contains("\"include\""),
+        "singleton-class include operations normalize to class-side extensions: {retained}"
+    );
+
+    let (files, diagnostics) = roundhouse::emit::diagnostics::scope(|| emit_library(&app));
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("is not modelled and is dropped")),
+        "class-side extensions that the Ruby emitter cannot preserve must remain visible as a gap: {diagnostics:#?}"
+    );
+    let output = files
+        .iter()
+        .map(|file| file.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !output.contains("extend ConstantMixin"),
+        "do not claim runtime support until class-side extensions survive emission: {output}"
+    );
+}
+
+#[test]
+fn a_sidekiq_worker_without_a_positional_perform_keeps_its_include_and_errors() {
+    let mut app = app_from(vec![
+        (
+            "app/workers/keyword_worker.rb",
+            "class KeywordWorker\n  include Sidekiq::Job\n  sidekiq_options retry: 3\n\n  def perform(title:)\n    title\n  end\nend\n",
+        ),
+        (
+            "app/models/caller.rb",
+            "class Caller\n  def self.go\n    KeywordWorker.perform_in(5, title: \"x\")\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::lower::job_class_side::apply_job_class_side(&mut app);
+
+    let worker = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "KeywordWorker")
+        .expect("app/workers ingests as a library class");
+    assert!(
+        worker.includes.iter().any(|inc| inc.0.as_str() == "Sidekiq::Job"),
+        "the include is kept on an unwrapped worker"
+    );
+    assert!(
+        !worker.methods.iter().any(|m| m.name.as_str() == "perform_async"),
+        "no wrapper for a keyword perform"
+    );
+    assert!(
+        diags.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error),
+        "an unwrapped worker is an error: {diags:?}"
+    );
+    let body = format!("{:?}", app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Caller").unwrap().methods);
+    assert!(body.contains("perform_in"), "perform_in is not folded for an unwrapped worker: {body}");
+}
+
+#[test]
+fn a_sidekiq_worker_with_a_rest_perform_is_not_wrapped() {
+    let mut app = app_from(vec![(
+        "app/workers/rest_worker.rb",
+        "class RestWorker\n  include Sidekiq::Job\n\n  def perform(first, *rest)\n    first\n  end\nend\n",
+    )]);
+    let diags = roundhouse::lower::job_class_side::apply_job_class_side(&mut app);
+    let worker = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "RestWorker").unwrap();
+    assert!(
+        !worker.methods.iter().any(|m| m.name.as_str() == "perform_async"),
+        "a wrapper would pass the rest as one Array"
+    );
+    assert!(
+        diags.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error),
+        "an unwrapped worker is an error: {diags:?}"
+    );
+}
+
+#[test]
+fn a_sidekiq_workers_own_perform_in_is_not_folded() {
+    let mut app = app_from(vec![
+        (
+            "app/workers/timed_worker.rb",
+            "class TimedWorker\n  include Sidekiq::Job\n\n  def self.perform_in(delay, title)\n    perform_async(title)\n  end\n\n  def perform(title)\n    title\n  end\nend\n",
+        ),
+        (
+            "app/models/caller.rb",
+            "class Caller\n  def self.go\n    TimedWorker.perform_in(5, \"x\")\n  end\nend\n",
+        ),
+    ]);
+    let _ = roundhouse::lower::job_class_side::apply_job_class_side(&mut app);
+    let body = format!("{:?}", app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Caller").unwrap().methods);
+    assert!(body.contains("perform_in"), "the worker's own perform_in is called: {body}");
+}
+
+/// An abstract Sidekiq worker with no `perform` anywhere in its own
+/// chain isn't an entry point: its `include` and `sidekiq_options` are
+/// stripped quietly — no wrapper, no diagnostic — exactly like a
+/// wrapped worker's wiring is stripped. A concrete subclass that
+/// defines its own positional `perform` is still wrapped as today.
+#[test]
+fn an_abstract_worker_with_no_perform_is_stripped_quietly() {
+    let mut app = app_from(vec![
+        (
+            "app/workers/base_worker.rb",
+            "class BaseWorker\n  include Sidekiq::Worker\n  sidekiq_options queue: 'x'\n\n  private\n\n  def helper\n    1\n  end\nend\n",
+        ),
+        (
+            "app/workers/concrete_worker.rb",
+            "class ConcreteWorker < BaseWorker\n  def perform(id)\n    id\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::lower::job_class_side::apply_job_class_side(&mut app);
+    assert!(
+        diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "an abstract base with no perform anywhere must report nothing: {diags:?}"
+    );
+
+    let base = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "BaseWorker").expect("ingested");
+    assert!(
+        !base.includes.iter().any(|inc| inc.0.as_str() == "Sidekiq::Worker"),
+        "the abstract base's Sidekiq include is stripped: {:?}",
+        base.includes
+    );
+    assert!(
+        base.methods.iter().any(|m| m.name.as_str() == "helper"),
+        "the base's own methods are untouched"
+    );
+
+    let concrete = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "ConcreteWorker").expect("ingested");
+    assert!(
+        concrete.methods.iter().any(|m| {
+            m.name.as_str() == "perform_async" && m.receiver == roundhouse::dialect::MethodReceiver::Class
+        }),
+        "the concrete subclass is still wrapped: {:?}",
+        concrete.methods
+    );
+}
+
+/// A worker with no `perform` of its own, but one provided by an
+/// included module, is NOT an abstract base: library classes never get
+/// concern methods spliced into `methods` the way models and
+/// controllers do, so the mixin's `perform` is invisible to a walk of
+/// `methods` alone. Before `workers_with_any_perform` learned to look
+/// at `includes`, this read as "no perform anywhere" and was silently
+/// stripped — a regression from main, where it was refused loudly.
+/// `workers_with_positional_perform` still doesn't resolve mixin
+/// methods (unchanged in this fix), so this keeps taking the existing
+/// "without a positional perform" refusal, exactly as on main.
+#[test]
+fn a_worker_whose_perform_comes_from_a_mixin_is_refused_not_stripped() {
+    let mut app = app_from(vec![
+        (
+            "app/workers/performable.rb",
+            "module Performable\n  def perform(id)\n    id\n  end\nend\n",
+        ),
+        (
+            "app/workers/mixin_worker.rb",
+            "class MixinWorker\n  include Sidekiq::Worker\n  include Performable\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::lower::job_class_side::apply_job_class_side(&mut app);
+    assert!(
+        diags.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error
+            && d.message.contains("Sidekiq worker without a positional perform")),
+        "a mixin-provided perform must not be silently accepted as wrapped, nor silently stripped: {diags:?}"
+    );
+    let worker = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "MixinWorker").expect("ingested");
+    assert!(
+        worker.includes.iter().any(|inc| inc.0.as_str() == "Sidekiq::Worker"),
+        "a refused worker keeps its Sidekiq include, as on main: {:?}",
+        worker.includes
+    );
+    assert!(
+        !worker.methods.iter().any(|m| m.name.as_str() == "perform_async"),
+        "no wrapper is generated for a refused worker"
+    );
+}
+
+/// The same, for a worker that includes a module this app never
+/// ingested (an external/unresolved name). Whether it provides
+/// `perform` can't be answered, so it's conservative: refused loudly
+/// like the mixin case above, never silently stripped.
+#[test]
+fn a_worker_including_an_unresolved_module_is_refused_not_stripped() {
+    let mut app = app_from(vec![(
+        "app/workers/external_worker.rb",
+        "class ExternalWorker\n  include Sidekiq::Worker\n  include SomeGem::Performable\nend\n",
+    )]);
+    let diags = roundhouse::lower::job_class_side::apply_job_class_side(&mut app);
+    assert!(
+        diags.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error
+            && d.message.contains("Sidekiq worker without a positional perform")),
+        "an unresolved include must be treated conservatively, not as proof there's no perform: {diags:?}"
+    );
+    let worker = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "ExternalWorker").expect("ingested");
+    assert!(
+        worker.includes.iter().any(|inc| inc.0.as_str() == "Sidekiq::Worker"),
+        "a refused worker keeps its Sidekiq include, as on main: {:?}",
+        worker.includes
+    );
+    assert!(
+        !worker.methods.iter().any(|m| m.name.as_str() == "perform_async"),
+        "no wrapper is generated for a refused worker"
+    );
+}
+
+/// A worker whose superclass is outside `library_classes` (a gem base,
+/// or any parent ingest never recorded) is the same shape: whether that
+/// parent provides `perform` can't be answered, so refuse loudly rather
+/// than strip Sidekiq wiring as if the worker were abstract.
+#[test]
+fn a_worker_with_an_unresolved_superclass_is_refused_not_stripped() {
+    let mut app = app_from(vec![(
+        "app/workers/inherited_worker.rb",
+        "class InheritedWorker < SomeGem::BaseWorker\n  include Sidekiq::Worker\nend\n",
+    )]);
+    let diags = roundhouse::lower::job_class_side::apply_job_class_side(&mut app);
+    assert!(
+        diags.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error
+            && d.message.contains("Sidekiq worker without a positional perform")),
+        "an unresolved superclass must be treated conservatively, not as proof there's no perform: {diags:?}"
+    );
+    let worker = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "InheritedWorker")
+        .expect("ingested");
+    assert!(
+        worker.includes.iter().any(|inc| inc.0.as_str() == "Sidekiq::Worker"),
+        "a refused worker keeps its Sidekiq include, as on main: {:?}",
+        worker.includes
+    );
+    assert!(
+        !worker.methods.iter().any(|m| m.name.as_str() == "perform_async"),
+        "no wrapper is generated for a refused worker"
     );
 }

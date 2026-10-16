@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Minitest-shaped, like hash_to_query_test.rb: a CRuby run of the ruby
 # family's `ActiveStorage::Previewer.poster` reopen
 # (runtime/active_storage_previewer.rb over the shared
@@ -36,13 +37,24 @@ class ActiveStoragePreviewerTest < Minitest::Test
     end
   end
 
+  def test_a_videos_dimensions_come_from_ffprobe
+    skip "ffmpeg not installed" unless FFMPEG
+    with_clip do |path|
+      assert_equal [32, 24], ActiveStorage::Previewer.video_dimensions(File.binread(path))
+    end
+    assert_equal [0, 0], ActiveStorage::Previewer.video_dimensions("not a video")
+  end
+
   def test_a_file_that_is_not_a_video_raises_rather_than_answering_bytes
+    # path must be bound before skip: otherwise `ensure` turns a skip
+    # (ffmpeg absent) into TypeError from File.exist?(nil).
+    path = nil
     skip "ffmpeg not installed" unless FFMPEG
     path = File.join(Dir.tmpdir, "roundhouse-previewer-#{$$}.txt")
     File.write(path, "not a video")
-    e = assert_raises(RuntimeError) { ActiveStorage::Previewer.poster(path) }
+    e = assert_raises(ActiveStorage::PreviewError) { ActiveStorage::Previewer.poster(path) }
     assert_match(/could not draw a poster/, e.message)
   ensure
-    File.delete(path) if File.exist?(path)
+    File.delete(path) if path && File.exist?(path)
   end
 end

@@ -382,7 +382,9 @@ pub(super) fn rewrite_render_to_views(
                             // plain: v.as_json_str, content_type:
                             // "application/json"`, the writer's text.
                             "json" => {
-                                body = Some((json_render_encode(v), Some("application/json")))
+                                // Not encoded again: Rails' json renderer sends a String as it is (`json.to_json unless json.kind_of?(String)`); `json_render_encode`'s other callers encode one.
+                                let encoded = if matches!(v.ty.as_ref(), Some(Ty::Str)) { v.clone() } else { json_render_body(v) };
+                                body = Some((encoded, Some("application/json")))
                             }
                             // The flattener's dispatch marker, read by
                             // `render_kwargs_have_format` above.
@@ -485,6 +487,26 @@ pub(super) fn rewrite_render_to_views(
             // implicit render's js arm — same qualified-stem rule.
             let is_js = render_kwargs_have_format(args, "js");
             let is_json = render_kwargs_have_format(args, "json");
+            // Mastodon's `custom_css#show`: `resolve_formats_only_render`
+            // plants the same `format:` marker for a resolvable
+            // `content_type:`, so this reads the same way `svg` does.
+            let is_css = render_kwargs_have_format(args, "css");
+            // Unlike `svg`/`js`/`json`, a css-marked render isn't
+            // guaranteed a `_css`-suffixed template: `render
+            // content_type: :css` names no template at all, and an
+            // action can answer it with its ONLY (format-agnostic)
+            // template — a bare `show.erb`, ingested as the `html`
+            // view — the same way a feed format falls back to a
+            // format-agnostic template below. `css_qualified` gates
+            // the contract-stem and final dispatch the same way
+            // `feed_qualified` already does, so a controller with no
+            // `show.css.erb` sibling gets its one template (with
+            // `content_type: "text/css"` still set) instead of a
+            // `MissingTemplate` raise for a template that was never
+            // going to exist (CodeRabbit 4277530506).
+            let css_qualified = is_css
+                && view_ivars.contains_key(&(render_module.clone(), format!("{}_css", view_method.as_str())));
+            let is_md = render_kwargs_have_format(args, "md");
             // A feed branch (`format.rss { render action: "stories" }`):
             // the format-qualified template (`stories.rss.builder` →
             // `stories_rss`) when there is one, else a format-AGNOSTIC
@@ -503,8 +525,12 @@ pub(super) fn rewrite_render_to_views(
                 format!("{}_turbo_stream", view_method.as_str())
             } else if is_svg {
                 format!("{}_svg", view_method.as_str())
+            } else if css_qualified {
+                format!("{}_css", view_method.as_str())
             } else if is_js {
                 format!("{}_js", view_method.as_str())
+            } else if is_md {
+                format!("{}_md", view_method.as_str())
             } else if is_json {
                 // Same reason the two above are qualified: the contract
                 // is keyed by the FORMAT-QUALIFIED stem. Asking for the
@@ -532,7 +558,7 @@ pub(super) fn rewrite_render_to_views(
             // that is right there. Same trap the `svg` note above
             // describes, entered from the other side.
             let mut json_only = false;
-            if contract.is_none() && !is_json && !is_turbo_stream && !is_svg {
+            if contract.is_none() && !is_json && !is_turbo_stream && !is_svg && !is_css && !is_md {
                 let json_stem = format!("{}_json", view_method.as_str());
                 if let Some(c) = view_ivars.get(&(render_module.clone(), json_stem)) {
                     contract = Some(c);
@@ -578,7 +604,7 @@ pub(super) fn rewrite_render_to_views(
             let mut subclass_hook: Option<Symbol> = None;
             if contract.is_none() {
                 let mut stems: Vec<(String, bool)> = vec![(contract_stem.clone(), false)];
-                if !is_json && !is_turbo_stream && !is_svg {
+                if !is_json && !is_turbo_stream && !is_svg && !is_css && !is_md {
                     stems.push((format!("{}_json", view_method.as_str()), true));
                 }
                 'stems: for (stem, via_json_only) in stems {
@@ -657,10 +683,31 @@ pub(super) fn rewrite_render_to_views(
                         Symbol::from(format!("{}_svg", view_method.as_str())),
                         Some(crate::lower::controller::body::mime_for_format("svg")),
                     )
+                } else if is_css {
+                    // Mastodon's `custom_css#show` — same shape as
+                    // `svg`, but the view method is the qualified one
+                    // only when `show.css.erb` actually exists
+                    // (`css_qualified`); otherwise the action's only
+                    // (format-agnostic) template answers, same as
+                    // `feed_fmt` below falls back for rss/atom/xml.
+                    // The MIME is `text/css` either way — that's the
+                    // whole point of `render content_type: :css` with
+                    // no template name.
+                    let m = if css_qualified {
+                        Symbol::from(format!("{}_css", view_method.as_str()))
+                    } else {
+                        view_method
+                    };
+                    (m, Some(crate::lower::controller::body::mime_for_format("css")))
                 } else if is_js {
                     (
                         Symbol::from(format!("{}_js", view_method.as_str())),
                         Some(crate::lower::controller::body::mime_for_format("js")),
+                    )
+                } else if is_md {
+                    (
+                        Symbol::from(format!("{}_md", view_method.as_str())),
+                        Some(crate::lower::controller::body::mime_for_format("md")),
                     )
                 } else if let Some(f) = feed_fmt {
                     // The feed's MIME either way; the method is the
@@ -842,8 +889,9 @@ fn strip_format_kwarg(arg: &Expr) -> Option<Expr> {
 /// expects ONE kwargs hash, not multiple.
 /// `ActionController::JsonRender.encode(<value>)` — the runtime JSON
 /// encoder behind inline `render json: <expr>` whose value neither
-/// `as_json_poro` nor the primitive-collection path handles. CRuby answers it via
-/// the overlay (as_json-aware recursive encode); a strict target whose
+/// `as_json_poro` nor the primitive-collection path handles. The ruby family
+/// answers it via runtime/spinel/action_controller_json_render.rb
+/// (as_json-aware recursive encode); a strict target whose
 /// app reaches this call surfaces an unresolved-constant gap loudly
 /// rather than silently rendering html.
 /// `ActionView::ViewHelpers.html_escape(<body>)` — the `render html:`
@@ -893,9 +941,29 @@ fn html_escape_call(value: &Expr) -> Expr {
     )
 }
 
+/// `json_render_encode`, with a value that may be a String at run time sent as it is (`JsonRender.body`).
+fn json_render_body(value: &Expr) -> Expr {
+    let mut encoded = json_render_encode(value);
+    if may_be_str(value.ty.as_ref())
+        && let ExprNode::Send { method, .. } = &mut *encoded.node
+        && method.as_str() == "encode"
+    {
+        *method = Symbol::from("body");
+    }
+    encoded
+}
+
+fn may_be_str(ty: Option<&Ty>) -> bool {
+    match ty {
+        None | Some(Ty::Str | Ty::Untyped | Ty::Var { .. }) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| may_be_str(Some(v))),
+        _ => false,
+    }
+}
+
 /// Select the bundled JSON encoder for proven primitive collections; retain
 /// Rails serialization for values requiring custom hooks or temporal conversion.
-fn json_render_encode(value: &Expr) -> Expr {
+pub(super) fn json_render_encode(value: &Expr) -> Expr {
     // JSON's bundled encoder already handles primitive collections on every
     // target. Keep values that need Rails' as_json hooks (including nested
     // models and Time) on the existing serializer path.
@@ -917,7 +985,7 @@ fn json_render_encode(value: &Expr) -> Expr {
         ExprNode::Send {
             recv: Some(recv),
             method: Symbol::from(if primitive_collection { "generate" } else { "encode" }),
-            args: vec![value.clone()],
+            args: vec![if primitive_collection { crate::lower::to_json::finite_floats(value.clone()) } else { value.clone() }],
             block: None,
             parenthesized: true,
         },
@@ -1139,6 +1207,12 @@ pub(super) fn rewrite_assoc_through_parent_typed(
         let ExprNode::Ivar { name: parent_name } = &*inner_recv.node else {
             return None;
         };
+        // The foreign key below comes from the ivar's name and the
+        // parent's value from `.id`; an association keyed on another
+        // owner column (`primary_key:`) needs the declaration instead.
+        if params_specs.is_keyed_assoc(assoc_method) {
+            return None;
+        }
         let model_class = crate::naming::singularize_camelize(assoc_method.as_str());
         let fk = format!("{}_id", parent_name.as_str());
         Some(match kind {
@@ -1715,6 +1789,14 @@ pub(super) fn rewrite_update_to_typed_variant(
             return None;
         }
         let spec = match_params_helper(&args[0], &helper_specs, params_specs)?;
+        // The variant exists only on the model the resource is named
+        // after. With none (a record wrapped under another key), the
+        // call stays Rails' `update` / `update!`; once the body is typed,
+        // `params::hand_update_the_attrs` gives it the attribute Hash
+        // when the argument turns out to be the params object (#856).
+        if !params_specs.has_typed_update(spec) {
+            return None;
+        }
         Some(Expr::new(
             e.span,
             ExprNode::Send {
@@ -1755,7 +1837,8 @@ pub(super) fn rewrite_destroy_bang(expr: &Expr) -> Expr {
     })
 }
 
-/// `request.format.html?` → `self.request_format == :html`, and
+/// `request.format.html?` → `self.request_format == :html`,
+/// `request.format.to_s` → its Mime string, and
 /// `request.format = :html` → `self.request_format = :html`.
 ///
 /// Rails' `request.format` is a `Mime::Type` whose predicates answer
@@ -1790,6 +1873,35 @@ pub(super) fn rewrite_request_format(expr: &Expr) -> Expr {
         )
     }
     map_expr(expr, &|e| match &*e.node {
+        // `request.format.to_s` — the negotiated Mime::Type's string
+        // (`"text/html"`), which campfire folds into its cache keys.
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if args.is_empty() && method.as_str() == "to_s" && is_request_format(r) =>
+        {
+            let lookup = Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        e.span,
+                        ExprNode::Const { path: vec![Symbol::from("Mime"), Symbol::from("Type")] },
+                    )),
+                    method: Symbol::from("lookup_by_extension"),
+                    args: vec![request_format(e.span)],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(lookup),
+                    method: Symbol::from("to_s"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            ))
+        }
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
             if args.is_empty() && method.as_str().ends_with('?') && is_request_format(r) =>
         {
@@ -2122,16 +2234,17 @@ pub(super) fn rewrite_redirect_to(
     })
 }
 
-/// `render(:show, …, location: @article)` — Rails' POST-201 idiom.
+/// `render(:show, …, location: @article)` or
+/// `head :created, location: @article` — Rails' POST-201 idioms.
 /// The kwarg value is a polymorphic record reference; rewrite to
 /// `RouteHelpers.<singular>_path(@x.id)` so the runtime's
-/// `render(body, location: <string>)` sees a path string. Mirrors
-/// the `redirect_to @x` polymorphic rewrite below; runs over render
+/// response location handling sees a path string. Mirrors the
+/// `redirect_to @x` polymorphic rewrite below; runs over render/head
 /// Sends specifically (not redirect_to, which has its own pass).
-pub(super) fn rewrite_render_location_kwarg(expr: &Expr) -> Expr {
+pub(super) fn rewrite_response_location_kwarg(expr: &Expr) -> Expr {
     map_expr(expr, &|e| match &*e.node {
         ExprNode::Send { recv: None, method, args, block, parenthesized }
-            if method.as_str() == "render" && !args.is_empty() =>
+            if (method.as_str() == "render" || method.as_str() == "head") && !args.is_empty() =>
         {
             let new_args: Vec<Expr> = args
                 .iter()
@@ -2253,7 +2366,7 @@ fn polymorphic_path(ivar_name: &Symbol, span: Span) -> Expr {
 /// The `Rails.application.routes.url_helpers` receiver chain — Rails'
 /// spelling for reaching a path helper from somewhere with no helper
 /// mixin (a model, a job, a test body).
-fn is_rails_url_helpers_chain(e: &Expr) -> bool {
+pub(crate) fn is_rails_url_helpers_chain(e: &Expr) -> bool {
     let mut node = &*e.node;
     for step in ["url_helpers", "routes", "application"] {
         let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = node else {
@@ -2306,6 +2419,36 @@ pub fn rewrite_route_helpers(
     shadowed: &HashSet<Symbol>,
     id_segments: &std::collections::HashMap<String, Vec<bool>>,
 ) -> Expr {
+    rewrite_route_helpers_with(expr, shadowed, id_segments, false)
+}
+
+/// `rewrite_route_helpers` for a CONTROLLER body, where a `_url` helper
+/// answers an absolute URL: `articles_url` →
+/// `url_from_path(RouteHelpers.articles_path)`. `ActionController::Base
+/// #url_from_path` (runtime/ruby/action_controller/base.rb) builds it
+/// the way Rails' `url_for` does — the request's protocol, host and
+/// optional port, each overridden by the controller's own
+/// `default_url_options`. The helper runs on `self`, which is what lets
+/// an app's `default_url_options` override reach it.
+///
+/// Folding onto the bare path, as test bodies still do, made
+/// `render plain: articles_url` answer `/articles` where Rails answers
+/// `http://www.example.com/articles`, and `head :created, location:
+/// message_url(@message)` a relative Location.
+pub fn rewrite_controller_route_helpers(
+    expr: &Expr,
+    shadowed: &HashSet<Symbol>,
+    id_segments: &std::collections::HashMap<String, Vec<bool>>,
+) -> Expr {
+    rewrite_route_helpers_with(expr, shadowed, id_segments, true)
+}
+
+fn rewrite_route_helpers_with(
+    expr: &Expr,
+    shadowed: &HashSet<Symbol>,
+    id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    absolute_urls: bool,
+) -> Expr {
     let expr = &strip_url_helpers_receiver(expr);
     map_expr(expr, &|e| match &*e.node {
         // `controller_path` is ActionController::Base's underscored
@@ -2320,9 +2463,10 @@ pub fn rewrite_route_helpers(
                 && !shadowed.contains(method) =>
         {
             // `RouteHelpers` only emits `_path` helpers — Rails'
-            // `_url` form differs by host prefix, which we don't
-            // model. Fold `_url` onto its `_path` twin so test/
-            // controller bodies that use the URL form resolve.
+            // `_url` form differs by host prefix. Dispatch `_url` onto
+            // its `_path` twin; a controller body then adds the host
+            // half (`to_url` below), and a test body keeps the path,
+            // which its harness resolves against the session's host.
             let raw = method.as_str();
             let dispatch_method = if let Some(stem) = raw.strip_suffix("_url") {
                 Symbol::from(format!("{stem}_path"))
@@ -2399,7 +2543,7 @@ pub fn rewrite_route_helpers(
                             },
                         )
                     } else {
-                        rewrite_route_helpers(arg, shadowed, id_segments)
+                        rewrite_route_helpers_with(arg, shadowed, id_segments, absolute_urls)
                     }
                 })
                 .collect();
@@ -2411,17 +2555,36 @@ pub fn rewrite_route_helpers(
                     args: projected_args,
                     block: block
                         .as_ref()
-                        .map(|b| rewrite_route_helpers(b, shadowed, id_segments)),
+                        .map(|b| rewrite_route_helpers_with(b, shadowed, id_segments, absolute_urls)),
                     parenthesized: *parenthesized,
                 },
             );
-            let Some(i) = splat_at else { return Some(call) };
-            let splat = rewrite_route_helpers(
+            // The path, with its query suffix when the call carried one;
+            // a controller's `_url` then takes the host half on top.
+            let absolute = absolute_urls && raw.ends_with("_url");
+            let to_url = |path: Expr| {
+                if !absolute {
+                    return path;
+                }
+                Expr::new(
+                    e.span,
+                    ExprNode::Send {
+                        recv: None,
+                        method: Symbol::from("url_from_path"),
+                        args: vec![path],
+                        block: None,
+                        parenthesized: true,
+                    },
+                )
+            };
+            let Some(i) = splat_at else { return Some(to_url(call)) };
+            let splat = rewrite_route_helpers_with(
                 route_helper_query_splat_value(&args_all[i]),
                 shadowed,
                 id_segments,
+                absolute_urls,
             );
-            Some(Expr::new(
+            Some(to_url(Expr::new(
                 e.span,
                 ExprNode::Send {
                     recv: Some(call),
@@ -2439,7 +2602,7 @@ pub fn rewrite_route_helpers(
                     block: None,
                     parenthesized: false,
                 },
-            ))
+            )))
         }
         _ => None,
     })
@@ -2618,7 +2781,7 @@ fn project_arg(a: &Expr) -> Expr {
 /// An Integer-typed value under a query key the helper types
 /// `String?` — every key but `id` / `*_id` (Integer segments) and
 /// `format`.
-fn int_in_query_slot(k: &Expr, v: &Expr) -> bool {
+pub(crate) fn int_in_query_slot(k: &Expr, v: &Expr) -> bool {
     let ExprNode::Lit { value: crate::expr::Literal::Sym { value: key } } = &*k.node else {
         return false;
     };
@@ -2646,7 +2809,7 @@ fn arg_carries_a_model(a: &Expr) -> bool {
     }
 }
 
-fn to_s_of(a: Expr) -> Expr {
+pub(crate) fn to_s_of(a: Expr) -> Expr {
     Expr::new(
         a.span,
         ExprNode::Send {
@@ -2713,7 +2876,7 @@ pub(crate) fn typed_exception_const(segments: &[&str], span: Span) -> Expr {
     let mut expr = const_path(segments, span);
     expr.ty = Some(crate::ty::Ty::Class {
         id: crate::ident::ClassId(Symbol::from(name)),
-        args: vec![],
+        args: vec![].into(),
     });
     expr
 }
@@ -2885,7 +3048,7 @@ fn params_require_permit(resource: Symbol, fields: Vec<Symbol>, span: Span) -> E
             style: ArrayStyle::Brackets,
         },
     );
-    Expr::new(
+    let mut permit = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(require_call),
@@ -2894,7 +3057,11 @@ fn params_require_permit(resource: Symbol, fields: Vec<Symbol>, span: Span) -> E
             block: None,
             parenthesized: true,
         },
-    )
+    );
+    // Remember the source form: `expect` and `require.permit` refuse a
+    // malformed request differently (see `FROM_PARAMS_EXPECT`).
+    permit.decisions |= crate::expr::FROM_PARAMS_EXPECT;
+    permit
 }
 
 fn nil_expr(span: Span) -> Expr {

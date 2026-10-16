@@ -15,7 +15,11 @@ use crate::expr::Expr;
 use crate::ty::Ty;
 
 pub enum DivPowCase {
-    /// Int/Int or Float/Float — emit natively per target.
+    /// Int / Int — Ruby floors (`-7 / 2 == -4`). Truncating or
+    /// true-division targets emit a floor form for `/`; `**` still
+    /// uses the integer-power path (treat like [`Numeric`]).
+    IntFloor,
+    /// Float / Float — emit natively per target.
     Numeric,
     /// Int/Float or Float/Int — Rust and Go need explicit casts;
     /// other targets auto-coerce.
@@ -44,7 +48,8 @@ pub fn classify_div_pow(lhs: &Expr, rhs: &Expr) -> DivPowCase {
     }
 
     match (lhs_ty, rhs_ty) {
-        (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float) => DivPowCase::Numeric,
+        (Ty::Int, Ty::Int) => DivPowCase::IntFloor,
+        (Ty::Float, Ty::Float) => DivPowCase::Numeric,
         (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int) => DivPowCase::NumericPromote,
         (l, r) if super::operand::is_number(l) && super::operand::is_number(r) => {
             DivPowCase::NumericPromote
@@ -85,10 +90,10 @@ mod tests {
     }
 
     #[test]
-    fn int_over_int_is_numeric() {
+    fn int_over_int_is_int_floor() {
         assert!(matches!(
             classify_div_pow(&int_lit(10), &int_lit(2)),
-            DivPowCase::Numeric
+            DivPowCase::IntFloor
         ));
     }
 
@@ -129,7 +134,7 @@ mod tests {
 
     #[test]
     fn array_over_array_is_incompatible() {
-        let arr = Ty::Array { elem: Box::new(Ty::Int) };
+        let arr = Ty::Array { elem: std::sync::Arc::new(Ty::Int) };
         let l = var_typed("a", arr.clone());
         let r = var_typed("b", arr);
         assert!(matches!(classify_div_pow(&l, &r), DivPowCase::Incompatible));

@@ -1,24 +1,109 @@
 module ActiveRecord
-  # Raised by `Base.find` when no row matches the given id.
-  class RecordNotFound < StandardError
+  class ActiveRecordError < StandardError
     def initialize: (?String message) -> void
+  end
+
+  class StatementInvalid < ActiveRecordError
+    def initialize: (?String message) -> void
+  end
+
+  class WrappedDatabaseException < StatementInvalid
+    def initialize: (?String message) -> void
+  end
+
+  class InvalidForeignKey < WrappedDatabaseException
+    def initialize: (?String message) -> void
+  end
+
+  class NotNullViolation < StatementInvalid
+    def initialize: (?String message) -> void
+  end
+
+  class CheckViolation < StatementInvalid
+    def initialize: (?String message) -> void
+  end
+
+  class ExclusionViolation < StatementInvalid
+    def initialize: (?String message) -> void
+  end
+
+  class RangeError < StatementInvalid
+    def initialize: (?String message) -> void
+  end
+
+  class TransactionRollbackError < StatementInvalid
+    def initialize: (?String message) -> void
+  end
+
+  class SerializationFailure < TransactionRollbackError
+    def initialize: (?String message) -> void
+  end
+
+  class Deadlocked < TransactionRollbackError
+    def initialize: (?String message) -> void
+  end
+
+  class QueryAborted < StatementInvalid
+    def initialize: (?String message) -> void
+  end
+
+  class LockWaitTimeout < StatementInvalid
+    def initialize: (?String message) -> void
+  end
+
+  class StatementTimeout < QueryAborted
+    def initialize: (?String message) -> void
+  end
+
+  class QueryCanceled < QueryAborted
+    def initialize: (?String message) -> void
+  end
+
+  class ReadOnlyError < ActiveRecordError
+    def initialize: (?String message) -> void
+  end
+
+  # Raised by `Base.find` when no row matches the given id.
+  class RecordNotFound < ActiveRecordError
+    # `id` is the value passed to `find`: a String from params, an
+    # Integer or a Float (the inputs `find` accepts), or an Array for
+    # `find([...])`; nil for `find_by!` and the other bang finders. A
+    # flat union with `nil`, not `untyped`: Crystal renders `untyped` as
+    # `String`, which a nil does not fit.
+    def model: () -> String?
+    def primary_key: () -> String?
+    def id: () -> (String | Integer | Float | Array[String | Integer | Float] | nil)
+    def initialize: (?String message, ?String? model, ?String? primary_key, ?(String | Integer | Float | Array[String | Integer | Float] | nil) id) -> void
   end
 
   # Raised when a value exceeds its column's declared limit.
-  class ValueTooLong < StandardError
+  class ValueTooLong < StatementInvalid
     def initialize: (?String message) -> void
   end
 
-  # Raised when an INSERT/UPDATE trips a unique index. Defined so a
-  # `rescue ActiveRecord::RecordNotUnique` clause resolves; see the .rb
-  # for why the adapters do not raise it yet.
-  class RecordNotUnique < StandardError
+  # Raised when an INSERT/UPDATE trips a unique index.
+  class RecordNotUnique < WrappedDatabaseException
+    def initialize: (?String message) -> void
+  end
+
+  # Raised by `Relation#sole` / `find_sole_by` when more than one
+  # record matches.
+  class SoleRecordExceeded < ActiveRecordError
+    def initialize: (?String message) -> void
+  end
+
+  class RecordNotSaved < ActiveRecordError
+    def record: () -> Base?
+    def initialize: (?String message, ?Base? record) -> void
+  end
+
+  class ReadOnlyRecord < ActiveRecordError
     def initialize: (?String message) -> void
   end
 
   # Raised by `Base#save!` when validation fails. `record` is the
   # invalid model; `attr_reader :record` lowers to a getter at ingest.
-  class RecordInvalid < StandardError
+  class RecordInvalid < ActiveRecordError
     def record: () -> Base
     def initialize: (Base record) -> void
   end
