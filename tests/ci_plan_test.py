@@ -600,6 +600,22 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertNotIn("param_binds", ci.select([path])["spinel_tests"])
 
+    def test_sponge_random_selects_native_regression_for_its_inputs_and_full_runs(self):
+        suite = "sponge_random"
+        for path in [
+            "tests/sponge_random.rs",
+            "runtime/spinel/facades/sponge.rb",
+            "runtime/spinel/facades/sponge.rbs",
+            "runtime/spinel/secure_random_stub.rb",
+            "runtime/spinel/secure_random_stub.rbs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn(suite, plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
+        self.assertIn(suite, ci.select([], full=True)["spinel_tests"])
+
     def test_json_types_spinel_owns_schema_and_runtime_inputs(self):
         suite = "postgres_json_types_spinel"
         paths = [
