@@ -1635,6 +1635,14 @@ fn lowered_form_partial_form_with_inline_expansion() {
         "ViewHelpers.form_with runtime call should be retired; got:\n{src}",
     );
     assert!(
+        src.contains("ActionView::ViewHelpers.enter_form_with"),
+        "expected the form site to enter ViewHelpers.enter_form_with; got:\n{src}",
+    );
+    assert!(
+        !src.contains("ActionView::Base"),
+        "the lowered site must not name ActionView::Base; got:\n{src}",
+    );
+    assert!(
         !src.contains("FormBuilder.new"),
         "FormBuilder constructor should be retired; got:\n{src}",
     );
@@ -1945,6 +1953,14 @@ fn lowered_show_view_form_with_nested_array_model_dispatches_form_builder() {
     assert!(
         !src.contains("ViewHelpers.form_with"),
         "ViewHelpers.form_with runtime call should be retired; got:\n{src}",
+    );
+    assert!(
+        src.contains("ActionView::ViewHelpers.enter_form_with"),
+        "expected the form site to enter ViewHelpers.enter_form_with; got:\n{src}",
+    );
+    assert!(
+        !src.contains("ActionView::Base"),
+        "the lowered site must not name ActionView::Base; got:\n{src}",
     );
     assert!(
         !src.contains("FormBuilder.new"),

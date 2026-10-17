@@ -88,7 +88,10 @@ const TS_TARGET: TargetEmit = TargetEmit {
 fn ts_wrap_namespace(_namespace: &str, body: &str) -> String {
     // TS resolves namespaces through imports + treeshake's qualified
     // class registry; the per-file body emits flat at module top.
-    body.to_string()
+    // Constants still run at load, before `class` declarations, so a
+    // value that constructs a class in this file has to follow that
+    // class (`new ControllerConfig()`). Same split Python uses.
+    move_class_constants_after_classes(body)
 }
 
 fn ts_format_import(name: &str, source: &str) -> String {
@@ -1864,13 +1867,12 @@ fn py_format_constant(name: &str, value: &Expr) -> String {
 /// names a class in this file; leave the rest ahead of the class. A
 /// file with no class (module mode) is left as emitted.
 fn py_wrap_namespace(_namespace: &str, body: &str) -> String {
-    let class_at = if body.starts_with("class ") {
-        0
-    } else {
-        match body.find("\nclass ") {
-            Some(i) => i + 1,
-            None => return body.to_string(),
-        }
+    move_class_constants_after_classes(body)
+}
+
+fn move_class_constants_after_classes(body: &str) -> String {
+    let Some(class_at) = first_class_offset(body) else {
+        return body.to_string();
     };
     if class_at == 0 {
         return body.to_string();
@@ -1903,13 +1905,33 @@ fn py_wrap_namespace(_namespace: &str, body: &str) -> String {
     out
 }
 
+/// Index of the first `class` / `export class` declaration. `None`
+/// when the file has no class. Zero when the body starts with one
+/// (no leading constants to move).
+fn first_class_offset(body: &str) -> Option<usize> {
+    let mut at = 0;
+    for line in body.split_inclusive('\n') {
+        if class_decl_rest(line).is_some() {
+            return Some(at);
+        }
+        at += line.len();
+    }
+    None
+}
+
+fn class_decl_rest(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    rest.strip_prefix("class ")
+}
+
 /// Top-level and nested `class Name` declarations in an emitted Python
-/// body. Indentation does not matter: a constant that constructs a
-/// nested class still has to follow that class.
+/// or TypeScript body. Indentation does not matter: a constant that
+/// constructs a nested class still has to follow that class.
 fn python_class_names(body: &str) -> Vec<String> {
     let mut names = Vec::new();
     for line in body.lines() {
-        let Some(rest) = line.trim_start().strip_prefix("class ") else {
+        let Some(rest) = class_decl_rest(line) else {
             continue;
         };
         let name: String = rest

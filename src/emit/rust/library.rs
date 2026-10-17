@@ -904,6 +904,9 @@ fn rust_ty_for_constant_key(e: &Expr) -> String {
 }
 
 fn rust_ty_for_constant(e: &Expr) -> String {
+    if let Some(name) = constructor_const_name(e) {
+        return name;
+    }
     match &*e.node {
         ExprNode::Lit { value: Literal::Int { .. } } => "i64".to_string(),
         ExprNode::Lit { value: Literal::Float { .. } } => "f64".to_string(),
@@ -912,6 +915,23 @@ fn rust_ty_for_constant(e: &Expr) -> String {
         ExprNode::Lit { value: Literal::Sym { .. } } => "&'static str".to_string(),
         _ => "&'static str".to_string(),
     }
+}
+
+/// `ControllerConfig.new` in a module constant. A static initializer
+/// can call it inside `LazyLock::new`; leaving the send as a comment
+/// made the slot `Vec<&'static str>` and the reader no longer
+/// returned `ControllerConfig`.
+fn constructor_const_name(e: &Expr) -> Option<String> {
+    let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*e.node else {
+        return None;
+    };
+    if method.as_str() != "new" || !args.is_empty() || block.is_some() {
+        return None;
+    }
+    let ExprNode::Const { path } = &*recv.node else {
+        return None;
+    };
+    path.last().map(|s| s.as_str().to_string()).filter(|s| !s.is_empty())
 }
 
 /// Render a constant key (Hash) as a Rust expression. Symbol keys
@@ -926,6 +946,9 @@ fn render_constant_key(e: &Expr) -> String {
 }
 
 fn render_constant_value(e: &Expr) -> String {
+    if let Some(name) = constructor_const_name(e) {
+        return format!("{name}::new()");
+    }
     match &*e.node {
         ExprNode::Lit { value: Literal::Int { value } } => format!("{value}_i64"),
         ExprNode::Lit { value: Literal::Float { value } } => {

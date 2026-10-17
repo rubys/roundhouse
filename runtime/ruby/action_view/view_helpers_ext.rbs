@@ -2,6 +2,7 @@
 module ActionView
   module ViewHelpers
     type number_option_value = String | Integer | Float | Rational | Symbol | bool | Regexp | nil | Hash[Symbol, String | Hash[Symbol, String]]
+    def self.enter_form_with: () -> nil
     def self.content_security_policy_nonce: () -> String
     def self.csp_policy_for_test=: (bool present) -> bool
     def self.csp_meta_tag: () -> String

@@ -1418,6 +1418,14 @@ pub(crate) fn insert_framework_stubs(
         Symbol::from("csrf_token_hidden_input"),
         fn_sig(vec![], Ty::Str),
     );
+    // The form site calls this before its markup. Nil here; the
+    // ruby-family reopen enters `ActionView::Base#form_with`. A
+    // direct `ActionView::Base` send in the expansion is untyped
+    // residue once emitters shorten that path to `Base`.
+    vh.class_methods.insert(
+        Symbol::from("enter_form_with"),
+        fn_sig(vec![], Ty::Nil),
+    );
     vh.class_methods.insert(
         Symbol::from("method_override_input"),
         fn_sig(vec![(Symbol::from("method"), Ty::Sym)], Ty::Str),
@@ -1487,12 +1495,11 @@ pub(crate) fn insert_framework_stubs(
     // resolve through the same key.
     classes.insert(ClassId(Symbol::from("ActionView::ViewHelpers")), vh);
 
-    // `ActionView::Base.new.form_with` is the cache-observable entry
-    // planted at each expanded form site (`observe_form_with_entry`).
-    // The method returns nil; the markup is the expansion that
-    // follows. `.new` already types as an instance of the receiver.
-    // Without this stub the zero-arg call stays `Ty::Var`, and the
-    // lowered real-blog residual is no longer zero.
+    // `ActionView::Base#form_with` is the instance method the
+    // ruby-family `enter_form_with` calls. The lowered site itself
+    // calls `ViewHelpers.enter_form_with` (stubbed above). `.new`
+    // already types as an instance of the receiver. Without this
+    // stub a direct zero-arg `form_with` stays `Ty::Var`.
     let mut av_base = crate::analyze::ClassInfo::default();
     av_base.instance_methods.insert(
         Symbol::from("form_with"),

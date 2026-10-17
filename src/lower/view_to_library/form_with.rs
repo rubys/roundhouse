@@ -94,19 +94,19 @@ pub(super) fn emit_form_tag_inline(args: &[Expr], block: &Expr, ctx: &ViewCtx) -
     out
 }
 
-/// `ActionView::Base.new.form_with` — the view-context entry a template
+/// `ViewHelpers.enter_form_with` — the view-context entry a template
 /// `form_with` site makes before its macro-expanded markup. Placed in
 /// the expansion itself, so a `<% cache %>` hit that skips the body
-/// skips the call too. See `runtime/ruby/action_view/base.rb`.
+/// skips the call too.
+///
+/// The ruby family implements that helper by calling
+/// `ActionView::Base#form_with` (`view_helpers_ext.rb`), which is what
+/// `any_instance.expects(:form_with)` counts. The universal body is
+/// nil. Strict emitters shorten `ActionView::Base` to `Base`, and that
+/// name is `ActiveRecord::Base` or not in scope in a view file, so the
+/// lowered site must not name it.
 fn observe_form_with_entry() -> Expr {
-    let base = Expr::new(
-        Span::synthetic(),
-        ExprNode::Const {
-            path: vec![Symbol::from("ActionView"), Symbol::from("Base")],
-        },
-    );
-    let instance = send(Some(base), "new", Vec::new(), None, false);
-    send(Some(instance), "form_with", Vec::new(), None, false)
+    view_helpers_call("enter_form_with", Vec::new())
 }
 
 /// `<%= form_with url: …, method: :delete, id: … %>` with NO block.

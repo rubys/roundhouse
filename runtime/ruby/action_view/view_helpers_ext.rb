@@ -11,6 +11,15 @@ require_relative "../action_view_number_helper"
 
 module ActionView
   module ViewHelpers
+    # The universal `enter_form_with` is nil. Here the same method
+    # enters `ActionView::Base#form_with`, the instance method
+    # `any_instance.expects(:form_with)` counts. A strict target does
+    # not compile this file: naming `Base` from a view collides with
+    # `ActiveRecord::Base` once the namespace is stripped.
+    def self.enter_form_with
+      ActionView::Base.new.form_with
+    end
+
     # `content_security_policy_nonce` — the per-request CSP script
     # nonce Rails interpolates into `<script nonce=…>`. No app in the
     # corpus sets a nonce generator (campfire's policy is hash-based,

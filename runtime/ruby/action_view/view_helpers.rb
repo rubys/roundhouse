@@ -1155,6 +1155,17 @@ module ActionView
     # tokens, CSP nonces) so they live in one runtime file rather than
     # being baked into every form_with call site at lower time.
 
+    # A template `form_with` site calls this when the site runs, and a
+    # fragment-cache hit skips it with the rest of the expansion. The
+    # markup stays the macro expansion. This body is nil so a strict
+    # target never has to name `ActionView::Base` (emitters shorten
+    # that path to `Base`, which collides with `ActiveRecord::Base` or
+    # is simply not in the view's scope). The ruby-family reopen in
+    # `view_helpers_ext.rb` enters `ActionView::Base#form_with`.
+    def self.enter_form_with
+      nil
+    end
+
     # Rails injects an authenticity_token hidden input as the first
     # child of every form_with-rendered form (after the optional
     # _method override). The value rides `form_authenticity_token` —

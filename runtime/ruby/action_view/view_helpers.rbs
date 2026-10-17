@@ -217,6 +217,8 @@ module ActionView
     # Small typed-scalar helpers callable from macro-inlined form_with
     # expansions. See view_helpers.rb for the runtime/macro split
     # rationale.
+    # See view_helpers.rb. The ruby-family body is in view_helpers_ext.
+    def self.enter_form_with: () -> nil
     def self.csrf_token_hidden_input: () -> String
     def self.cache_scope: () -> String
     def self.begin_broadcast_render: () -> String
