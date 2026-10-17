@@ -202,12 +202,20 @@ fn controller_config_slot_matches_the_emitted_class() {
         go_body.contains("NewActionControllerControllerConfig()"),
         "go slot does not call the emitted constructor:\n{go_body}"
     );
+    assert!(
+        go_body.contains("*ActionControllerControllerConfig"),
+        "go slot type is not the emitted struct:\n{go_body}"
+    );
 
     let crystal = roundhouse::runtime_loader::crystal_units(|_, classes| classes).expect("crystal");
     let crystal_body = unit_named(&crystal, "action_controller_base.cr");
     let class_at = crystal_body.find("class ControllerConfig").expect("crystal class");
     let slot_at = crystal_body.find("CONTROLLER_CONFIG_SLOT").expect("crystal slot");
     assert!(class_at < slot_at, "crystal constructs ControllerConfig before the class:\n{crystal_body}");
+    assert!(
+        crystal_body.contains("ActionController::ControllerConfig.new"),
+        "crystal slot is outside the module and needs the qualified name:\n{crystal_body}"
+    );
 
     let csharp = roundhouse::runtime_loader::csharp_units(|_, classes| classes).expect("csharp");
     let csharp_body = unit_named(&csharp, "ActionControllerBase.cs");

@@ -120,7 +120,14 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
             // interface has an empty method set in Go, so method
             // calls through the slot would fail to resolve; the
             // interface value itself already has reference semantics.
-            let name = id.0.as_str().replace("::", "");
+            // A constant typed from `Leaf.new` carries the bare leaf.
+            // The struct in this file is the qualified id.
+            let raw = id.0.as_str();
+            let name = if raw.contains("::") {
+                raw.replace("::", "")
+            } else {
+                super::expr::mapped_constructor(raw).unwrap_or_else(|| raw.to_string())
+            };
             if is_go_interface_class(id.0.as_str()) {
                 name
             } else {

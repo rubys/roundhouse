@@ -33,8 +33,8 @@ mod ty;
 
 // Entry points consumed by `runtime_loader::crystal_units`. Crystal-
 // side `TargetEmit` plugs these into the shared transpile driver.
-pub use expr::emit_expr_for_runtime;
-pub use library::{emit_library_class, emit_module};
+pub use expr::{clear_constructors, emit_expr_for_runtime, with_qualified_constructors};
+pub use library::{emit_library_class, emit_module, prepare_constructors};
 
 /// Emit a single `MethodDef` as Crystal source (trailing newline
 /// included). Used by the runtime-extraction pipeline.

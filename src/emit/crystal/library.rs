@@ -163,6 +163,31 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     Ok(out)
 }
 
+/// Bare `Leaf` in a file-level constant. Crystal nests the class in
+/// `module Owner`, so the constant has to name `Owner::Leaf`. Only a
+/// unique leaf that is not already the full id is recorded.
+pub fn prepare_constructors(classes: &[LibraryClass]) {
+    let mut by_leaf: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for class in classes {
+        let raw = class.name.0.as_str();
+        let leaf = raw.rsplit("::").next().unwrap_or(raw).to_string();
+        by_leaf.entry(leaf).or_default().push(raw.to_string());
+    }
+    let map = by_leaf
+        .into_iter()
+        .filter_map(|(leaf, full)| {
+            let [only] = full.as_slice() else { return None };
+            if only == &leaf {
+                None
+            } else {
+                Some((leaf, only.clone()))
+            }
+        })
+        .collect();
+    super::expr::set_constructors(map);
+}
+
 /// Public emit entry — for Library mode (one or more classes per file).
 /// Used by `runtime_loader::crystal_units` for `Library`-mode runtime
 /// files. Returns a single class declaration; the loader concatenates

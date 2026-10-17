@@ -3999,6 +3999,13 @@ pub fn clear_constructors() {
     CONSTRUCTORS.with(|c| c.borrow_mut().clear());
 }
 
+/// Struct name for a bare class id, when this file has exactly one
+/// class with that leaf and the struct name is the qualified id with
+/// `::` removed.
+pub(super) fn mapped_constructor(leaf: &str) -> Option<String> {
+    CONSTRUCTORS.with(|c| c.borrow().get(leaf).cloned())
+}
+
 fn constructor_type_name(path: &[crate::ident::Symbol]) -> String {
     let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("");
     if path.len() != 1 {

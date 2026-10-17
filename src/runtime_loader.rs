@@ -172,7 +172,15 @@ fn crystal_format_import(_name: &str, source: &str) -> String {
 /// Crystal: top-level constant `NAME = VALUE` (no `const` keyword,
 /// no statement terminator).
 fn crystal_format_constant(name: &str, value: &Expr) -> String {
-    format!("{name} = {}", crate::emit::crystal::emit_expr_for_runtime(value))
+    // The constant sits outside `module ActionController`, so a bare
+    // `ControllerConfig` does not see the class nested in that module.
+    // Qualify only while rendering the initializer.
+    crate::emit::crystal::with_qualified_constructors(|| {
+        format!(
+            "{name} = {}",
+            crate::emit::crystal::emit_expr_for_runtime(value)
+        )
+    })
 }
 
 const RUST_TARGET: TargetEmit = TargetEmit {
@@ -834,8 +842,12 @@ where
             let constants = parse_module_constant_exprs(entry.rb_src)
                 .unwrap_or_default();
             crate::emit::go::clear_constructors();
+            crate::emit::crystal::clear_constructors();
             if entry.out_path.ends_with(".go") {
                 crate::emit::go::prepare_constructors(&classes);
+            }
+            if entry.out_path.ends_with(".cr") {
+                crate::emit::crystal::prepare_constructors(&classes);
             }
             let mut body = String::new();
             for (name, value) in &constants {

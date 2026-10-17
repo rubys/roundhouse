@@ -25,6 +25,43 @@ thread_local! {
     /// duration of the index-reader body. `emit_method` toggles this
     /// flag on entry to a method named `[]` and clears on exit.
     static SUPPRESS_IVAR_NOT_NIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Bare `ControllerConfig` in a file-level constant. The class is
+    /// nested in `module ActionController`, so the initializer has to
+    /// name `ActionController::ControllerConfig`. Method bodies stay
+    /// bare: qualifying them inside that module looks up a nested
+    /// `ActionController::ActionController`.
+    static QUALIFY_CONSTRUCTORS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CONSTRUCTORS: std::cell::RefCell<std::collections::HashMap<String, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+pub fn set_constructors(map: std::collections::HashMap<String, String>) {
+    CONSTRUCTORS.with(|c| *c.borrow_mut() = map);
+}
+
+pub fn clear_constructors() {
+    CONSTRUCTORS.with(|c| c.borrow_mut().clear());
+}
+
+pub fn with_qualified_constructors<R>(f: impl FnOnce() -> R) -> R {
+    QUALIFY_CONSTRUCTORS.with(|c| c.set(true));
+    let _guard = QualifyGuard;
+    f()
+}
+
+struct QualifyGuard;
+
+impl Drop for QualifyGuard {
+    fn drop(&mut self) {
+        QUALIFY_CONSTRUCTORS.with(|c| c.set(false));
+    }
+}
+
+fn qualified_constructor(leaf: &str) -> Option<String> {
+    if !QUALIFY_CONSTRUCTORS.with(|c| c.get()) {
+        return None;
+    }
+    CONSTRUCTORS.with(|c| c.borrow().get(leaf).cloned())
 }
 
 pub(super) fn with_suppressed_ivar_not_nil<F, R>(f: F) -> R
@@ -359,6 +396,9 @@ fn emit_node(n: &ExprNode) -> String {
                 return format!("::{joined}");
             }
             if path.len() == 1 {
+                if let Some(qualified) = qualified_constructor(first) {
+                    return qualified;
+                }
                 if let Some(replacement) = rewrite_stdlib_const(first) {
                     return replacement.to_string();
                 }
