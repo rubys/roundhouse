@@ -19,6 +19,10 @@
 # turned into a class) and raises DeserializationError for a row that is
 # gone, as Rails does.
 #
+# `sidekiq?` says whether the app is on `queue_adapter :sidekiq` with a
+# payload job, so the tree pushes jobs to Redis (`runtime/sidekiq_push.rb`)
+# and carries a real Redis client; the server logs where at boot.
+#
 # Dispatch is a `case` over the class name, never `constantize`, for
 # the reason the locator gives: a class computed from a wire string is
 # a shape this pipeline will not emit.
@@ -29,6 +33,10 @@ module JobRegistry
   end
 
   def self.discards_deserialization_error(job_class)
+    false
+  end
+
+  def self.sidekiq?
     false
   end
   # <<< generated: job-registry
@@ -46,6 +54,9 @@ module ActiveJob
   # `ActiveRecord::TransactionHooks` (below); held payloads are queued at COMMIT and
   # dropped at ROLLBACK. Rails 8.1's default for the setting is false,
   # and a job that keeps it so is queued at once, as before.
+  #
+  # Under `queue_adapter :sidekiq` the held jobs are Sidekiq pushes,
+  # kept in `SidekiqPush.held` and pushed or dropped at the same edges.
   #
   # Per thread, because the transaction is: each request thread holds
   # its own connection lease. Only the outermost transaction counts: a
@@ -85,13 +96,13 @@ module ActiveJob
     while held.length > 0
       enqueue_payload(held.shift)
     end
-    nil
+    SidekiqPush.flush_held
   end
 
   def self.transaction_rolled_back
     Thread.current[:aj_in_transaction] = false
     __held_until_commit.clear
-    nil
+    SidekiqPush.drop_held
   end
 
   # The drain's payload arm (`ActiveJob.drain` in the shared runtime and

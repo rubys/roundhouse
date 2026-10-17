@@ -83,7 +83,7 @@ use super::app::{
     extract_time_formats, extract_variable_content_type_exclusions,
     extract_video_preview_arguments, extract_video_previewer_replacement,
     extract_vips_loader_policy, forgery_strategy_line, kaminari_default_per_page,
-    load_defaults_version, raise_on_missing_line, read_rb_files, wrap_parameters_line,
+    load_defaults_version, queue_adapter_line, raise_on_missing_line, read_rb_files, wrap_parameters_line,
     FilterParametersLine, InflectEffect, VideoPreviewArgsExtract, FRAMEWORK_CONFIG_KEYS,
 };
 use super::util::{
@@ -285,6 +285,14 @@ const RECOGNIZERS: &[Recognizer] = &[
         origins: INIT_APP,
         levels: ANY,
         reads: |p| code_lines(p.text).any(|l| wrap_parameters_line(l).is_some()),
+    },
+    Recognizer {
+        name: "queue_adapter :sidekiq (config.active_job.queue_adapter =)",
+        origins: INIT_APP,
+        levels: ANY,
+        reads: |p| {
+            code_lines(p.text).any(|l| queue_adapter_line(l).flatten().as_deref() == Some("sidekiq"))
+        },
     },
     Recognizer {
         name: "forgery_protection_verification_strategy",

@@ -869,6 +869,8 @@ Broadcasts.set_transport(Cable::Transport.new)
 # reaches this line keeps the inline behaviour rather than dropping work
 # into an Array nobody reads.
 ActiveJob.register_drain
+# Under queue_adapter :sidekiq jobs go to Redis instead; say where.
+SidekiqPush.announce if JobRegistry.sidekiq?
 Thread.new do
   Main.job_loop
 end

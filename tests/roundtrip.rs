@@ -175,6 +175,7 @@ fn tiny_blog_round_trips() {
         global_id_locate_signed_models: std::collections::BTreeSet::new(),
         unreachable_views: std::collections::BTreeSet::new(),
         job_plans: Vec::new(),
+        queue_adapter: None,
         attachable_unsigned_models: Vec::new(),
         pending_attachment_on_load: Vec::new(),
         load_hook_class_macros: Vec::new(),

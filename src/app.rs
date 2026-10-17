@@ -261,6 +261,16 @@ pub struct App {
     /// `project::apply_job_registry`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub job_plans: Vec<crate::lower::job_payload::JobPlan>,
+    /// The ActiveJob queue adapter the app configures, as a name
+    /// (`config.active_job.queue_adapter = :sidekiq` gives `"sidekiq"`).
+    /// Read at ingest from `config/application.rb`, then
+    /// `config/environments/production.rb`, then `config/initializers`,
+    /// the last setting winning; `None` when nothing sets it or the last
+    /// setting isn't a literal. Only `"sidekiq"` changes what is emitted
+    /// (jobs are pushed to Redis on the Ruby family); any other adapter
+    /// keeps the in-process queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_adapter: Option<String>,
     /// Model names whose attachment sgid the app resolves even when
     /// its SIGNATURE fails — campfire's `%w[ User ]`, read by
     /// [`crate::ingest::on_load_reopen`] from the `from_node` reopen
@@ -896,6 +906,7 @@ impl App {
             global_id_locate_models: BTreeSet::new(),
             global_id_locate_signed_models: BTreeSet::new(),
             job_plans: Vec::new(),
+            queue_adapter: None,
             attachable_unsigned_models: Vec::new(),
             pending_attachment_on_load: Vec::new(),
             load_hook_class_macros: Vec::new(),

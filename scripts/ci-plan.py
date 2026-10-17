@@ -100,7 +100,19 @@ SPINEL_TESTS = [
     "hash_to_query_symbol_keys_spinel",
     "storage_proxy_path_spinel",
     "filter_block_params_spinel",
+    "sidekiq_push",
 ]
+# Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
+# driver loads beside it.
+SIDEKIQ_PUSH_INPUTS = {
+    "runtime/ruby/active_job.rb",
+    "runtime/spinel/active_job_serialization.rb",
+    "runtime/spinel/global_id_locator.rb",
+    "runtime/spinel/base64.rb",
+    "runtime/spinel/sidekiq_push.rb",
+    "runtime/spinel/sidekiq_redis.rb",
+    "runtime/spinel/job_registry.rb",
+}
 # Seconds each suite took in spinel-framework (main run 38936441376, its
 # test binary's compile included), for balancing its shards; a suite not
 # listed counts as one Spinel build.
@@ -137,6 +149,7 @@ SPINEL_TEST_SECONDS = {
             "spinel_param_builder",
             "rails_compat_vectors_spinel",
             "active_job_payload",
+            "sidekiq_push",
         ],
         5,
     ),
@@ -462,6 +475,8 @@ def native_coverage(path):
         suites.update(owned_tests)
     if path in ACTIVE_JOB_PAYLOAD_INPUTS or path.startswith("tests/active_job_payload/"):
         suites.add("active_job_payload")
+    if path in SIDEKIQ_PUSH_INPUTS or path.startswith("tests/sidekiq_push/"):
+        suites.add("sidekiq_push")
     if (
         path.startswith(("tests/rails_compat/", "tests/params_vectors/"))
         or path == "tests/rails_compat_vectors.rb"

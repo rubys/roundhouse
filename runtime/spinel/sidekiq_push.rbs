@@ -1,0 +1,32 @@
+# Typing for runtime/spinel/sidekiq_push.rb.
+module SidekiqPush
+  DEFAULT_URL: String
+  URL: Array[String]
+  URL_PID: Array[Integer]
+  RECORDING: Array[bool]
+  RECORDED: Array[String]
+
+  class HeldPush
+    def initialize: (String job_class, String queue, Float at, String aj_json) -> void
+    def job_class: () -> String
+    def queue: () -> String
+    def at: () -> Float
+    def aj_json: () -> String
+  end
+
+  def self.enqueue: (String job_class, String queue, Float at, String aj_json) -> nil
+  def self.enqueue_after_commit: (String job_class, String queue, Float at, String aj_json) -> nil
+  def self.held: () -> Array[SidekiqPush::HeldPush]
+  def self.flush_held: () -> nil
+  def self.drop_held: () -> nil
+  def self.push: (String queue, String json) -> nil
+  def self.schedule: (Float at, String json) -> nil
+  def self.now_ms: () -> Integer
+  def self.url: () -> String
+  def self.resolve_url: () -> String
+  def self.redacted_url: (String value) -> String
+  def self.announce: () -> nil
+  def self.start_recording: () -> nil
+  def self.stop_recording: () -> nil
+  def self.recorded: () -> Array[String]
+end

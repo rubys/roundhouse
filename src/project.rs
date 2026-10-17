@@ -3258,6 +3258,12 @@ fn ruby_family_runtime_files(
     // superclasses is a `TypeError: superclass mismatch` at REQUIRE
     // time — campfire's suite went 219/240 to 0/240, every file dying
     // on the same line.
+    let sidekiq = needs_redis(app);
+    let sidekiq_client = if sidekiq {
+        crate::runtime_files::read_to_string(SIDEKIQ_REDIS_CLIENT)?
+    } else {
+        String::new()
+    };
     for (path, content) in files.iter_mut() {
         if path == "runtime/ipaddr.rb" {
             *content = IPADDR_STDLIB.to_string();
@@ -3361,6 +3367,11 @@ fn ruby_family_runtime_files(
         // it. The spinel file re-renders because it has no alias.
         if path == "runtime/secure_random_stub.rb" {
             *content = SECURE_RANDOM_STUB_REOPEN.to_string();
+        }
+        // `SidekiqRedis`: the real connection, over the redis-rb gem, for
+        // a tree on queue_adapter :sidekiq (`needs_redis`).
+        if path == "runtime/sidekiq_redis.rb" && sidekiq {
+            *content = sidekiq_client.clone();
         }
         // `TcpSocketStub`: the table as written, and `TCPSocket.open`
         // reopened to consult it — the seam the strict client asks from
@@ -4604,11 +4615,34 @@ fn apply_database_pragmas(files: &mut [(String, String)], app: &App) {
 /// `App::job_plans`. A span replace between markers, like
 /// `apply_global_id_locate`; an app with no payload jobs keeps a
 /// registry whose `perform` answers false.
+/// Whether a tree pushes jobs to Redis: the app is on `queue_adapter
+/// :sidekiq` and has at least one payload job (`lower::job_payload`). An
+/// app on `:sidekiq` whose jobs all keep their Proc, or that has no
+/// ActiveJob jobs at all (Mastodon's are native Sidekiq workers), gets
+/// no Redis client and no dependency.
+pub(crate) fn needs_redis(app: &App) -> bool {
+    app.queue_adapter.as_deref() == Some("sidekiq") && app.job_plans.iter().any(|p| p.is_payload())
+}
+
+/// The `JobRegistry.sidekiq?` body `apply_job_registry` writes for a tree
+/// that [`needs_redis`]. `spin_shape` keys the Redis package on it, since
+/// it sees files, not the `App`.
+const SIDEKIQ_REGISTRY_FLAG: &str = "  def self.sidekiq?\n    true\n  end\n";
+
+/// The real Redis connection for a tree on `:sidekiq`, swapped in for the
+/// raising façade at `runtime/sidekiq_redis.rb` on every Ruby-family lane.
+const SIDEKIQ_REDIS_CLIENT: &str = "runtime/spinel/sidekiq/sidekiq_redis.rb";
+
 fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "  # >>> generated: job-registry\n";
     const TAIL: &str = "  # <<< generated: job-registry\n";
+    let flag = if needs_redis(app) {
+        SIDEKIQ_REGISTRY_FLAG.to_string()
+    } else {
+        "  def self.sidekiq?\n    false\n  end\n".to_string()
+    };
     let generated = format!(
-        "{HEAD}{}{TAIL}",
+        "{HEAD}{}\n{flag}{TAIL}",
         crate::lower::job_payload::registry_source(&app.job_plans)
     );
     for (path, content) in files.iter_mut() {
@@ -6391,6 +6425,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         files.push(("sig/runtime/active_job_serialization.rbs".to_string(), rbs));
     }
 
+    // Sidekiq pushes (queue_adapter :sidekiq): the envelope writer and
+    // the Redis façade. `spin_shape` drops the façade's sidecar when it
+    // swaps in the real client, whose surface is inferred.
+    for name in ["sidekiq_push", "sidekiq_redis"] {
+        let src = format!("runtime/spinel/{name}.rbs");
+        let rbs = crate::runtime_files::read_to_string(&src).map_err(|e| format!("read {src}: {e}"))?;
+        files.push((format!("sig/runtime/{name}.rbs"), rbs));
+    }
+
     // Duration sidecar — pins @seconds Integer so ago/from_now stay
     // Time-typed under AOT inference (an untyped @seconds widens the
     // temporal arithmetic to poly against the Time-typed C return).
@@ -7773,6 +7816,16 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>, app: &App) -> Res
             needed.push(&row.gem);
         }
     }
+    // redis-rb, for a tree on queue_adapter :sidekiq. Its demand is the
+    // generated registry's flag, not a constant in app/: the client that
+    // names `Redis` is the runtime's own `sidekiq_redis.rb`.
+    if files
+        .iter()
+        .any(|(p, c)| p == "runtime/job_registry.rb" && c.contains(SIDEKIQ_REGISTRY_FLAG))
+        && !needed.contains(&"redis")
+    {
+        needed.push("redis");
+    }
     let gated = lock_gated_requires(app);
     if needed.is_empty() && gated.is_empty() {
         return Ok(());
@@ -9131,6 +9184,25 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         files.retain(|(p, _)| p != "runtime/nokogiri_facade.rbs" && p != "runtime/nokogiri_spinel.rbs");
     }
 
+    // redis: the same swap, for a tree on queue_adapter :sidekiq with a
+    // payload job (`needs_redis`, recorded as the registry's `sidekiq?`).
+    // `runtime/sidekiq_redis.rb` becomes the real connection over
+    // spinel-redis, and the manifest gains the package. Every other tree
+    // keeps the raising façade and no dependency.
+    let needs_redis = files
+        .iter()
+        .any(|(p, c)| p == "runtime/job_registry.rb" && c.contains(SIDEKIQ_REGISTRY_FLAG));
+    if needs_redis {
+        let client = crate::runtime_files::read_to_string(SIDEKIQ_REDIS_CLIENT)?;
+        let facade = files
+            .iter_mut()
+            .find(|(p, _)| p == "runtime/sidekiq_redis.rb")
+            .ok_or("spin_shape: the app is on queue_adapter :sidekiq but runtime/sidekiq_redis.rb \
+                    is not in the spinel file set")?;
+        facade.1 = client;
+        files.retain(|(p, _)| p != "runtime/sidekiq_redis.rbs");
+    }
+
     // commonmarker: no façade to swap (Markdowner's own façade stands aside
     // when the app's Markdowner names Commonmarker and Nokogiri — see
     // `Facade::lifted_by_constants`), only the package to declare: the
@@ -9258,6 +9330,19 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              commonmarker = { git = \"https://github.com/rubys/spinel-commonmarker\", ref = \"v0.1.0\" }\n",
         );
     }
+    if needs_redis {
+        if !manifest.lines().any(|l| l.trim() == "[dependencies]") {
+            manifest.push_str("\n[dependencies]\n");
+        }
+        manifest.push_str(
+            "# Redis, for queue_adapter :sidekiq: jobs are pushed in Sidekiq's\n\
+             # format for a Sidekiq process to run. spinel-redis, pure Ruby over\n\
+             # sp_net. Git form, pinned to a tag because `ref` takes a branch\n\
+             # or tag, never a SHA; 0.2.0 carries the url:, AUTH, zadd and\n\
+             # pipelined this push needs, and the index lists only 0.1.0.\n\
+             redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.2.0\" }\n",
+        );
+    }
     files.push(("spin.toml".to_string(), manifest));
     files.push((
         "bin/blog.rb".to_string(),
@@ -9383,7 +9468,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             for (from, to) in dep_patches {
                 makefile.1 = makefile.1.replacen(from, to, 1);
             }
-        } else if needs_bcrypt || needs_vips || needs_rqrcode || needs_nokogiri || needs_commonmarker {
+        } else if needs_bcrypt || needs_vips || needs_rqrcode || needs_nokogiri || needs_commonmarker || needs_redis {
             return Err(
                 "spin_shape: Makefile dep-patch anchors not found (scaffold \
                  Makefile changed?) and this tree carries a package"

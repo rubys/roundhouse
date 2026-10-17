@@ -224,6 +224,8 @@ mod config_require_relative;
 mod defined_const_fold;
 #[path = "emit_and_run/job_payload.rs"]
 mod job_payload;
+#[path = "emit_and_run/sidekiq_push.rs"]
+mod sidekiq_adapter;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {

@@ -225,6 +225,12 @@ require_relative "runtime/active_job"
 # ActiveJob payload codecs: after the module and its DeserializationError,
 # and after global_id_locator, whose URI parser the record reader uses.
 require_relative "runtime/active_job_serialization"
+# Sidekiq pushes for an app on queue_adapter :sidekiq: the Redis
+# connection (a raising façade unless the tree is on :sidekiq), then the
+# envelope and the after-commit hold. Before job_registry, whose COMMIT
+# and ROLLBACK edges flush and drop the held pushes.
+require_relative "runtime/sidekiq_redis"
+require_relative "runtime/sidekiq_push"
 # The app's payload jobs (generated), and the drain's payload arm.
 require_relative "runtime/job_registry"
 # Per-request state per THREAD -- reopens Current, the view slots, the
