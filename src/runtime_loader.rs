@@ -65,6 +65,9 @@ pub struct TargetEmit {
     /// requires explicit `module X ... end` wrapping for refs of the
     /// form `X::Y` to resolve.
     pub wrap_namespace: fn(namespace: &str, body: &str) -> String,
+    /// Name bare constructors before this file's constants are rendered.
+    /// `None` for targets whose class names already match the leaf.
+    pub prepare_classes: Option<fn(&[LibraryClass])>,
     /// Text inserted after the generated-file header comment and before
     /// any imports. Python uses it for `from __future__ import
     /// annotations` so cross-file type annotations (e.g. `errors.py`'s
@@ -82,6 +85,7 @@ const TS_TARGET: TargetEmit = TargetEmit {
     format_constant: ts_format_constant,
     format_module_ivar: None,
     wrap_namespace: ts_wrap_namespace,
+    prepare_classes: None,
     module_prelude: "",
 };
 
@@ -112,6 +116,7 @@ const CRYSTAL_TARGET: TargetEmit = TargetEmit {
     format_constant: crystal_format_constant,
     format_module_ivar: None,
     wrap_namespace: crystal_wrap_namespace,
+    prepare_classes: Some(crystal_prepare_classes),
     module_prelude: "",
 };
 
@@ -171,6 +176,14 @@ fn crystal_format_import(_name: &str, source: &str) -> String {
 
 /// Crystal: top-level constant `NAME = VALUE` (no `const` keyword,
 /// no statement terminator).
+fn crystal_prepare_classes(classes: &[LibraryClass]) {
+    crate::emit::crystal::prepare_constructors(classes);
+}
+
+fn go_prepare_classes(classes: &[LibraryClass]) {
+    crate::emit::go::prepare_constructors(classes);
+}
+
 fn crystal_format_constant(name: &str, value: &Expr) -> String {
     // The constant sits outside `module ActionController`, so a bare
     // `ControllerConfig` does not see the class nested in that module.
@@ -190,6 +203,7 @@ const RUST_TARGET: TargetEmit = TargetEmit {
     format_constant: crate::emit::rust::library::format_constant,
     format_module_ivar: None,
     wrap_namespace: rust_wrap_namespace,
+    prepare_classes: None,
     module_prelude: "",
 };
 
@@ -843,11 +857,8 @@ where
                 .unwrap_or_default();
             crate::emit::go::clear_constructors();
             crate::emit::crystal::clear_constructors();
-            if entry.out_path.ends_with(".go") {
-                crate::emit::go::prepare_constructors(&classes);
-            }
-            if entry.out_path.ends_with(".cr") {
-                crate::emit::crystal::prepare_constructors(&classes);
+            if let Some(prepare) = target.prepare_classes {
+                prepare(&classes);
             }
             let mut body = String::new();
             for (name, value) in &constants {
@@ -938,6 +949,7 @@ const KOTLIN_TARGET: TargetEmit = TargetEmit {
     format_constant: kotlin_format_constant,
     format_module_ivar: None,
     wrap_namespace: kotlin_wrap_namespace,
+    prepare_classes: None,
     // Every runtime file declares the shared package up front.
     module_prelude: "package roundhouse\n\n",
 };
@@ -1144,6 +1156,7 @@ const CSHARP_TARGET: TargetEmit = TargetEmit {
     format_constant: csharp_format_constant,
     format_module_ivar: None,
     wrap_namespace: csharp_wrap_namespace,
+    prepare_classes: None,
     // Each runtime file opens with the usings + file-scoped namespace. The
     // `using static` brings the shared `RuntimeConstants` members into bare
     // scope (C# has no top-level constant — see `csharp_format_constant`).
@@ -1297,6 +1310,7 @@ const SWIFT_TARGET: TargetEmit = TargetEmit {
     format_constant: swift_format_constant,
     format_module_ivar: None,
     wrap_namespace: swift_wrap_namespace,
+    prepare_classes: None,
     // No package decl in Swift; Foundation covers the string/format APIs
     // the transpiled runtime leans on (replacingOccurrences, …).
     module_prelude: "import Foundation\n\n",
@@ -1440,6 +1454,7 @@ const GO_TARGET: TargetEmit = TargetEmit {
     format_constant: go_format_constant_thunk,
     format_module_ivar: Some(go_format_module_ivar_thunk),
     wrap_namespace: go_wrap_namespace,
+    prepare_classes: Some(go_prepare_classes),
     module_prelude: "",
 };
 
@@ -1604,6 +1619,7 @@ const ELIXIR_TARGET: TargetEmit = TargetEmit {
     // same way TS/Crystal/Rust opt out here.
     format_module_ivar: None,
     wrap_namespace: elixir_wrap_namespace,
+    prepare_classes: None,
     module_prelude: "",
 };
 
@@ -1852,6 +1868,7 @@ const PYTHON_TARGET: TargetEmit = TargetEmit {
     // hand-written holder, same opt-out as TS/Crystal/Rust.
     format_module_ivar: None,
     wrap_namespace: py_wrap_namespace,
+    prepare_classes: None,
     module_prelude: "from __future__ import annotations\n\n",
 };
 

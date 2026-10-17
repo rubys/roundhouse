@@ -203,8 +203,12 @@ fn controller_config_slot_matches_the_emitted_class() {
         "go slot does not call the emitted constructor:\n{go_body}"
     );
     assert!(
-        go_body.contains("*ActionControllerControllerConfig"),
+        go_body.contains("[]*ActionControllerControllerConfig{"),
         "go slot type is not the emitted struct:\n{go_body}"
+    );
+    assert!(
+        go_body.contains("[]string{"),
+        "go url-root slot is not a string slice:\n{go_body}"
     );
 
     let crystal = roundhouse::runtime_loader::crystal_units(|_, classes| classes).expect("crystal");

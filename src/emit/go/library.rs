@@ -21,8 +21,6 @@
 //! primitives. Per-param Tys come from the method's `signature:
 //! Option<Ty::Fn>` when present.
 
-use std::collections::HashMap;
-
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::Expr;
 use crate::ident::Symbol;
@@ -814,23 +812,7 @@ fn sanitize_type_name(name: &str) -> String {
 /// this file's class id is `Owner::Leaf` and no other class shares
 /// that leaf.
 pub fn prepare_constructors(classes: &[LibraryClass]) {
-    let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
-    for class in classes {
-        let raw = class.name.0.as_str();
-        let leaf = raw.rsplit("::").next().unwrap_or(raw).to_string();
-        by_leaf
-            .entry(leaf)
-            .or_default()
-            .push(sanitize_type_name(raw));
-    }
-    let map = by_leaf
-        .into_iter()
-        .filter_map(|(leaf, full)| {
-            let [only] = full.as_slice() else { return None };
-            if only == &leaf { None } else { Some((leaf, only.clone())) }
-        })
-        .collect();
-    super::expr::set_constructors(map);
+    super::expr::set_constructors(crate::emit::unique_leaf_names(classes, sanitize_type_name));
 }
 
 /// Resolve the parent class as the type name to embed (`*Parent`) on

@@ -445,6 +445,13 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                     return format!("[]{elem_ty}{{{}}}", parts.join(", "));
                 }
             }
+            // Module constants are parsed without a type. A slot of
+            // string literals or of one class's `.new` still has to
+            // be that element type: indexing `[]interface{}` cannot
+            // return `string` or `*ActionControllerControllerConfig`.
+            if let Some(elem_ty) = untyped_array_elem(elements) {
+                return format!("[]{elem_ty}{{{}}}", parts.join(", "));
+            }
             format!("[]interface{{}}{{{}}}", parts.join(", "))
         }
         ExprNode::BoolOp { op, left, right, .. } => {
@@ -4004,6 +4011,44 @@ pub fn clear_constructors() {
 /// `::` removed.
 pub(super) fn mapped_constructor(leaf: &str) -> Option<String> {
     CONSTRUCTORS.with(|c| c.borrow().get(leaf).cloned())
+}
+
+/// Element type for an untyped array literal, when every element is
+/// the same concrete shape. `None` leaves the `[]interface{}` default.
+fn untyped_array_elem(elements: &[Expr]) -> Option<String> {
+    if elements.is_empty() {
+        return None;
+    }
+    if elements.iter().all(|el| matches!(&*el.node, ExprNode::Lit { value: Literal::Str { .. } })) {
+        return Some("string".to_string());
+    }
+    let mut elem = None;
+    for el in elements {
+        let name = constructor_elem(el)?;
+        match &elem {
+            None => elem = Some(name),
+            Some(prev) if prev == &name => {}
+            Some(_) => return None,
+        }
+    }
+    elem.map(|name| format!("*{name}"))
+}
+
+fn constructor_elem(el: &Expr) -> Option<String> {
+    let ExprNode::Send { recv: Some(recv), method, args, .. } = &*el.node else {
+        return None;
+    };
+    if method.as_str() != "new" || !args.is_empty() {
+        return None;
+    }
+    let ExprNode::Const { path } = &*recv.node else { return None };
+    if path.last().map(|s| s.as_str()) == Some("String") {
+        return None;
+    }
+    if path.first().map(|s| s.as_str()) == Some("Views") {
+        return None;
+    }
+    Some(constructor_type_name(path))
 }
 
 fn constructor_type_name(path: &[crate::ident::Symbol]) -> String {
