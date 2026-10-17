@@ -879,14 +879,33 @@ fn format_hash_constant(name: &str, entries: &[(Expr, Expr)]) -> String {
 }
 
 fn format_array_constant(name: &str, elements: &[Expr]) -> String {
-    let (elem_ty, items): (String, Vec<String>) = if elements.is_empty() {
-        ("&'static str".to_string(), Vec::new())
+    // Read-only string tables stay `&'static str`. A `*_SLOT` of
+    // strings is written with index assign, so it has to own `String`.
+    let owned_string_slot = name.ends_with("_SLOT")
+        && !elements.is_empty()
+        && elements.iter().all(|e| {
+            matches!(&*e.node, ExprNode::Lit { value: Literal::Str { .. } })
+        });
+    let elem_ty = if elements.is_empty() {
+        "&'static str".to_string()
+    } else if owned_string_slot {
+        "String".to_string()
     } else {
-        let rendered: Vec<(String, String)> = elements.iter().map(array_const_element).collect();
-        let ty = rendered[0].0.clone();
-        let items = rendered.into_iter().map(|(_, item)| item).collect();
-        (ty, items)
+        rust_ty_for_constant(&elements[0])
     };
+    let items: Vec<String> = elements
+        .iter()
+        .map(|e| {
+            if owned_string_slot {
+                let ExprNode::Lit { value: Literal::Str { value } } = &*e.node else {
+                    unreachable!("owned string slot is all string literals");
+                };
+                format!("{value:?}.to_string()")
+            } else {
+                render_constant_value(e)
+            }
+        })
+        .collect();
     let items_s = items.join(", ");
     format!(
         "static {name}: std::sync::LazyLock<std::sync::Mutex<Vec<{elem_ty}>>> = \
@@ -918,19 +937,6 @@ fn rust_ty_for_constant(e: &Expr) -> String {
         ExprNode::Lit { value: Literal::Sym { .. } } => "&'static str".to_string(),
         _ => "&'static str".to_string(),
     }
-}
-
-/// Element type and initializer for one array-constant item.
-/// A string literal is an owned `String`: the slot is written later
-/// with `SLOT[0] = value`, and `&'static str` cannot store that.
-fn array_const_element(e: &Expr) -> (String, String) {
-    if let Some(name) = constructor_const_name(e) {
-        return (name.clone(), format!("{name}::new()"));
-    }
-    if let ExprNode::Lit { value: Literal::Str { value } } = &*e.node {
-        return ("String".to_string(), format!("{value:?}.to_string()"));
-    }
-    (rust_ty_for_constant(e), render_constant_value(e))
 }
 
 /// `ControllerConfig.new` in a module constant. A static initializer

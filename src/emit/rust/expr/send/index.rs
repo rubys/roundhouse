@@ -399,8 +399,12 @@ pub(super) fn try_recv_typed_method(
                 } else {
                     super::super::emit_send_recv(r)
                 };
-                // A string slot is `Vec<String>`. The param arrives as
-                // `&str`; `to_string` is identity on an owned String.
+                // A mutable string slot is `Vec<String>` (`RELATIVE_URL_ROOT_SLOT`).
+                // Hash inserts already own their values with the same
+                // `({raw}).to_string()` copy: the RHS may be `&str` or
+                // `String`, and either way the slot stores a new `String`.
+                // Read-only string tables stay `&'static str` and are not
+                // written through this arm.
                 let rhs = emit_expr(&args[1]);
                 let rhs = if matches!(
                     recv_ty,

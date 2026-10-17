@@ -67,9 +67,14 @@ fn rust_form_site_calls_view_helpers_not_base() {
         !controller.contains("TODO rust2 const value"),
         "ControllerConfig slot fell through:\n{controller}"
     );
-    // The config object is cloned out of its slot. The root itself
-    // has to live in a string slot so the write replaces the element
-    // the next read clones.
+}
+
+/// Rust clones `CONTROLLER_CONFIG_SLOT[0]`. The url root is a string
+/// slot so the write replaces the element the next read clones.
+#[test]
+fn rust_relative_url_root_writes_the_shared_slot() {
+    let dir = emitted_tree(BuildTarget::Rust);
+    let controller = fs::read_to_string(dir.join("src/action_controller_base.rs")).expect("controller");
     assert!(
         controller.contains("RELATIVE_URL_ROOT_SLOT.lock().unwrap()[(0_i64) as usize] ="),
         "relative_url_root= does not write the shared slot:\n{controller}"
@@ -78,6 +83,19 @@ fn rust_form_site_calls_view_helpers_not_base() {
         controller.contains("static RELATIVE_URL_ROOT_SLOT: std::sync::LazyLock<std::sync::Mutex<Vec<String>>>"),
         "url root slot is not an owned String:\n{controller}"
     );
+    let sources = files_under(&dir.join("src"), ".rs");
+    for (path, text) in &sources {
+        for line in text.lines() {
+            if !line.contains("Mutex<Vec<String>>") {
+                continue;
+            }
+            assert!(
+                line.contains("_SLOT:"),
+                "{} owns a string array that is not a slot:\n{line}",
+                path.display()
+            );
+        }
+    }
 }
 
 /// `cargo check` is the compare failure (`cannot find type Base`).
