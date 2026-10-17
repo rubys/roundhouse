@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/active_model_attributes.rs"]
+mod active_model_attributes;
 #[path = "emit_and_run/discard.rs"]
 mod discard;
 #[path = "emit_and_run/pay_exceptions.rs"]

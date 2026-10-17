@@ -20,6 +20,7 @@ module ActiveSupport
   def self.rfc2822: (Time? t) -> String?
   def self.parse_time: (String str) -> Time
   def self.zone_parse: (String str) -> Time?
+  def self.cast_datetime: (untyped value) -> Time?
   def self.parse_fields: (String str, bool in_zone) -> Time?
   def self.build_time: (bool in_zone, Integer year, Integer mon, Integer mday, String? hour_s, String? min_s, String? sec_s, String? frac, String? zone) -> Time
 end

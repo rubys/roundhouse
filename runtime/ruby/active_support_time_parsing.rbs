@@ -48,4 +48,7 @@ module ActiveSupport
   def self.parse_time: (String str) -> Time
 
   def self.zone_parse: (String str) -> Time?
+
+  # `attribute :x, :datetime`: ActiveModel::Type::DateTime#cast.
+  def self.cast_datetime: (untyped value) -> Time?
 end
