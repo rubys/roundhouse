@@ -833,6 +833,10 @@ where
             // both currently-supported targets accept the form.
             let constants = parse_module_constant_exprs(entry.rb_src)
                 .unwrap_or_default();
+            crate::emit::go::clear_constructors();
+            if entry.out_path.ends_with(".go") {
+                crate::emit::go::prepare_constructors(&classes);
+            }
             let mut body = String::new();
             for (name, value) in &constants {
                 body.push_str(&format!(

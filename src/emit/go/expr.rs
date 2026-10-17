@@ -1966,11 +1966,7 @@ pub(super) fn emit_send(
                     .map(|s| s.as_str() == "Views")
                     .unwrap_or(false);
                 if !is_view_module {
-                    let class_name = path
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join("");
+                    let class_name = constructor_type_name(path);
                     return format!("New{class_name}({})", args_s.join(", "));
                 }
             }
@@ -3986,6 +3982,34 @@ thread_local! {
 
 pub(super) fn set_nullable_columns(cols: Vec<(String, String)>) {
     NULLABLE_COLUMNS.with(|c| *c.borrow_mut() = cols);
+}
+
+thread_local! {
+    /// Bare `ControllerConfig.new` in a module constant. The struct is
+    /// `ActionControllerControllerConfig` (`::` stripped from the
+    /// qualified class id). A unique leaf maps to that struct name.
+    static CONSTRUCTORS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+pub fn set_constructors(map: HashMap<String, String>) {
+    CONSTRUCTORS.with(|c| *c.borrow_mut() = map);
+}
+
+pub fn clear_constructors() {
+    CONSTRUCTORS.with(|c| c.borrow_mut().clear());
+}
+
+fn constructor_type_name(path: &[crate::ident::Symbol]) -> String {
+    let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("");
+    if path.len() != 1 {
+        return joined;
+    }
+    CONSTRUCTORS.with(|c| {
+        c.borrow()
+            .get(path[0].as_str())
+            .cloned()
+            .unwrap_or(joined)
+    })
 }
 
 thread_local! {

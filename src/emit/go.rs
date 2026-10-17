@@ -1128,7 +1128,8 @@ fn emit_imports(out: &mut String, imports: &[String]) {
 // emitted shape without going through the GO_RUNTIME wiring — that
 // keeps shape coverage decoupled from "is this file currently in
 // the v2/ overlay" gating.
-pub use library::{emit_library_class, emit_library_class_with_registry};
+pub use library::{emit_library_class, emit_library_class_with_registry, prepare_constructors};
+pub use expr::{clear_constructors};
 pub(crate) use library::{emit_module, format_constant, format_module_ivar};
 
 /// (Model, column) pairs the schema declares nullable, with the Go

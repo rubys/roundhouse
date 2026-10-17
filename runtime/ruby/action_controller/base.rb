@@ -85,10 +85,7 @@ module ActionController
     end
   end
 
-  # Fully qualified so a target that names the class from the whole
-  # path (`ActionController` + `ControllerConfig`) finds the same type
-  # the constant constructs.
-  CONTROLLER_CONFIG_SLOT = [ActionController::ControllerConfig.new]
+  CONTROLLER_CONFIG_SLOT = [ControllerConfig.new]
 
   def self.controller_config
     CONTROLLER_CONFIG_SLOT[0]
@@ -1091,13 +1088,6 @@ module ActionController
     # `config` methods cannot share this file.
     def config
       ActionController.controller_config
-    end
-
-    # Same slot as `ActionController.controller_config`. Strict targets
-    # import `Base` and do not have a value named `ActionController`,
-    # so the framework test writes through this class method.
-    def self.url_root_config
-      CONTROLLER_CONFIG_SLOT[0]
     end
 
     # `importmap.to_json(resolver: helpers)`. The map's paths are
