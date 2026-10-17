@@ -26,7 +26,6 @@ module ActionController
   def self.csrf_token_valid?: (String given, String expected) -> bool
 
   class ControllerConfig
-    @relative_url_root: String
     def initialize: () -> void
     def relative_url_root: () -> String
     def relative_url_root=: (String value) -> String

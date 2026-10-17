@@ -246,6 +246,17 @@ class ActionControllerBaseTest < Minitest::Test
   # the indirection — drift in either the constant or the resolver
   # surfaces as a wrong code coming back from `resolve_status`.
 
+  def test_relative_url_root_written_on_the_class_is_read_on_an_instance
+    # `Base.config` is the reopen in controller_config.rb. This file's
+    # own reader is `controller_config`; an instance reads it back
+    # through `Base#config`.
+    previous = ActionController.controller_config.relative_url_root
+    ActionController.controller_config.relative_url_root = "/camp"
+    assert_equal "/camp", TestController.new.config.relative_url_root
+  ensure
+    ActionController.controller_config.relative_url_root = previous
+  end
+
   def test_resolve_status_covers_every_symbol_used_in_real_blog
     expectations = {
       ok: 200, created: 201, no_content: 204, see_other: 303,

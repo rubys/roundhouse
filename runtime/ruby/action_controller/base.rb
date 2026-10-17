@@ -60,21 +60,28 @@ module ActionController
     given.length > 0 && given == expected
   end
 
-  # `ApplicationController.config.relative_url_root`. One object for
+  # `ApplicationController.config.relative_url_root`. One value for
   # the process: `Rails.application` is not the controller, and a
   # test assigns the class reader then an instance reads it back.
+  #
+  # The string lives in a slot, not an ivar. A strict emitter that
+  # returns `CONTROLLER_CONFIG_SLOT[0]` by clone would apply
+  # `relative_url_root=` to that temporary, and the next read would
+  # still see "". Index assign replaces the slot element, which is
+  # the same store `FORGERY_SLOT` uses.
+  RELATIVE_URL_ROOT_SLOT = [""]
+
   class ControllerConfig
     def initialize
-      @relative_url_root = +""
     end
 
     def relative_url_root
-      @relative_url_root
+      RELATIVE_URL_ROOT_SLOT[0]
     end
 
     def relative_url_root=(value)
-      @relative_url_root = value
-      @relative_url_root
+      RELATIVE_URL_ROOT_SLOT[0] = value
+      RELATIVE_URL_ROOT_SLOT[0]
     end
   end
 

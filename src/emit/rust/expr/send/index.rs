@@ -399,10 +399,21 @@ pub(super) fn try_recv_typed_method(
                 } else {
                     super::super::emit_send_recv(r)
                 };
+                // A string slot is `Vec<String>`. The param arrives as
+                // `&str`; `to_string` is identity on an owned String.
+                let rhs = emit_expr(&args[1]);
+                let rhs = if matches!(
+                    recv_ty,
+                    Some(crate::ty::Ty::Array { elem })
+                        if matches!(elem.as_ref(), crate::ty::Ty::Str)
+                ) {
+                    format!("({rhs}).to_string()")
+                } else {
+                    rhs
+                };
                 return Some(format!(
-                    "{recv_s}[({}) as usize] = {}",
+                    "{recv_s}[({}) as usize] = {rhs}",
                     emit_expr(&args[0]),
-                    emit_expr(&args[1]),
                 ));
             }
             return Some(format!("{}[{}] = {}", emit_expr(r), emit_expr(&args[0]), emit_expr(&args[1])));

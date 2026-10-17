@@ -67,6 +67,17 @@ fn rust_form_site_calls_view_helpers_not_base() {
         !controller.contains("TODO rust2 const value"),
         "ControllerConfig slot fell through:\n{controller}"
     );
+    // The config object is cloned out of its slot. The root itself
+    // has to live in a string slot so the write replaces the element
+    // the next read clones.
+    assert!(
+        controller.contains("RELATIVE_URL_ROOT_SLOT.lock().unwrap()[(0_i64) as usize] ="),
+        "relative_url_root= does not write the shared slot:\n{controller}"
+    );
+    assert!(
+        controller.contains("static RELATIVE_URL_ROOT_SLOT: std::sync::LazyLock<std::sync::Mutex<Vec<String>>>"),
+        "url root slot is not an owned String:\n{controller}"
+    );
 }
 
 /// `cargo check` is the compare failure (`cannot find type Base`).
