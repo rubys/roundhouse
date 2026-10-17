@@ -363,26 +363,6 @@ module ActiveRecord
   # walked only into the ruby-family trees, and active_record.rb
   # requires it AFTER base.rb so the reopen sees the real class.
   class Base
-    # A pending includes group (`ActiveRecord::PendingPreload`).
-    # `Relation#load_records` runs includes itself unless the relation
-    # called `skip_preloading!`, and then nothing is pending. A record
-    # that was handed a group runs it on the first association read.
-    # Every emitted association reader (and `<assoc>_loaded?`) starts
-    # with `_await_preload` (lower::deferred_preload); on a record with
-    # nothing pending it is one nil check.
-    def _pend_preload(pending)
-      @__pending_preload = pending
-      nil
-    end
-
-    def _await_preload
-      pending = @__pending_preload
-      return nil if pending.nil?
-      @__pending_preload = nil
-      pending.run
-      nil
-    end
-
     # Keep public input intact until schema-selected normalization, then raise
     # the same RecordNotFound for an invalid key or an absent record.
     # Reject nil before a key-typed adapter can coerce it to a real

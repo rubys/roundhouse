@@ -66,9 +66,6 @@ module ActiveRecord
   end
 
   class Base
-    @__pending_preload: PendingPreload?
-    def _pend_preload: (PendingPreload pending) -> nil
-    def _await_preload: () -> nil
     # Request values stay intact until the schema-selected scalar adapter.
     def self.find: (Integer | Float | String | nil id) -> Base
     def self.find_by!: (Hash[String | Symbol, untyped] conditions) -> Base

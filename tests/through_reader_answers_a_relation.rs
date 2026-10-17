@@ -120,10 +120,9 @@ fn the_through_reader_has_no_array_returning_guard() {
         !body.contains("return @upvoted_stories_cache"),
         "the cache guard answers an Array from a Relation-typed reader:\n{body}"
     );
-    // One statement, and it is the relation — after the ruby family's
-    // wait on a pending preload (`lower::deferred_preload`), which fills
-    // the cache `preloaded` reads.
-    let body = body.trim().strip_prefix("_await_preload").unwrap_or(body.trim()).trim();
+    // One statement, and it is the relation. The cache `preloaded` reads
+    // is filled by the preload writer, not by a guard in this body.
+    let body = body.trim();
     assert!(body.starts_with("ActiveRecord::Relation.new(Story)"), "{body}");
     assert_eq!(body.lines().count(), 1, "one return path:\n{body}");
 }

@@ -356,11 +356,6 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // that same cache and would have nothing to prepend itself to if it
     // ran first.
     library::apply_belongs_to_memoization(&mut lcs, app);
-    // Every association reader waits on a pending preload group
-    // (`lower::deferred_preload`) before its `@<name>_loaded` guard.
-    // `Relation#load_records` already ran includes unless the relation
-    // called `skip_preloading!`, so the wait is a nil check on that path.
-    crate::lower::deferred_preload::apply(&mut lcs, app);
     // A has_many cache is made on first read rather than at construction,
     // and the constructor's `attrs = {}` default is one shared frozen Hash
     // (`lower::lazy_model_state`) — nine Arrays and a Hash per hydrated

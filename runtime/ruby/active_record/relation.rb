@@ -3,33 +3,6 @@
 require_relative "../inflector"
 
 module ActiveRecord
-  # A group's includes, run once if a record was handed one.
-  #
-  # `load_records` runs recorded includes when the rows arrive, which is
-  # Rails' contract: `includes(...).to_a` finishes the batch loads, and a
-  # later read of those associations issues nothing. Campfire's message
-  # pages call `skip_preloading!` before `first`/`last`, then
-  # `preload_associations` on only the rendered rows, so those records
-  # are not handed this object and their associations stay unloaded.
-  #
-  # A record that does carry one runs it on the first association read
-  # (`_await_preload`), for the whole group, once.
-  class PendingPreload
-    def initialize(model, records, specs)
-      @model = model
-      @records = records
-      @specs = specs
-      @done = false
-    end
-
-    def run
-      return nil if @done
-      @done = true
-      @model.preload_associations(@records, @specs)
-      nil
-    end
-  end
-
   # A lazy, chainable query builder — the metaprogramming-free analog of
   # ActiveRecord::Relation. Lowered model code drives it: `scope`s become
   # class methods that take/return a Relation, associations return one,
@@ -1111,6 +1084,7 @@ module ActiveRecord
     # straight from the statement (`_hydrate_all`) — the positions are
     # fixed at compile time, so no String-keyed Hash per row. An
     # explicit `select` can project anything, and keeps the Hash path.
+    # Recorded `includes` run here unless `skip_preloading!` is set.
     def load_records
       return [] if @null
       records = if @select_sql.nil?

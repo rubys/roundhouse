@@ -1,15 +1,4 @@
 module ActiveRecord
-  # Same model handle and include list types as Relation (the Spinel
-  # tree widens `Base` here as it does there).
-  class PendingPreload
-    @model: Base
-    @records: Array[Base]
-    @specs: Array[Symbol | Hash[Symbol, Symbol]]
-    @done: bool
-    def initialize: (Base model, Array[Base] records, Array[Symbol | Hash[Symbol, Symbol]] specs) -> void
-    def run: () -> nil
-  end
-
   # Lazy chainable query builder. Chain methods return `self` (typed as
   # Relation); terminals execute and return rows / scalars. Loaded
   # records are `Base` as an interim (same as first/take) — not
