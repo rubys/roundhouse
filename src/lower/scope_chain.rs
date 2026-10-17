@@ -291,6 +291,7 @@ pub fn scope_variant_name(name: &Symbol, k: usize, subset: &[&Param]) -> Symbol 
 pub struct UserMethodReturns {
     pub instance: HashMap<Symbol, Option<ClassId>>,
     pub class: HashMap<(ClassId, Symbol), ClassId>,
+    pub class_methods: HashSet<(ClassId, Symbol)>,
     /// Scopes whose body answers something OTHER than a relation (see
     /// [`non_relation_scopes`]). A call to one ends the chain's model.
     pub non_relation_scopes: HashSet<(ClassId, Symbol)>,
@@ -309,6 +310,7 @@ pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
         for item in &m.body {
             let ModelBodyItem::Method { method, .. } = item else { continue };
             if method.receiver == crate::dialect::MethodReceiver::Class {
+                reg.class_methods.insert((m.name.clone(), method.name.clone()));
                 if let Some(target) = relation_return_model(&method.body, &model_ids) {
                     reg.class.insert((m.name.clone(), method.name.clone()), target);
                 }
@@ -327,6 +329,16 @@ pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
                     }
                 })
                 .or_insert(Some(target));
+        }
+    }
+    for model in models {
+        let mut parent = model.parent.as_ref();
+        for _ in 0..32 {
+            let Some(ancestor) = parent.and_then(|id| models.iter().find(|m| m.name == *id)) else { break };
+            for method in ancestor.methods().filter(|m| m.receiver == crate::dialect::MethodReceiver::Class) {
+                reg.class_methods.insert((model.name.clone(), method.name.clone()));
+            }
+            parent = ancestor.parent.as_ref();
         }
     }
     reg.non_relation_scopes = non_relation_scopes(models, &model_ids);
@@ -3871,6 +3883,13 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     let keeps = ctx.scope_keeps_relation(&m, &method);
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return keeps.then_some(m);
+                }
+                if matches!(method.as_str(), "pluck" | "pick")
+                    && ctx.user_returns.class_methods.contains(&(m.clone(), method.clone()))
+                {
+                    let returns = ctx.user_returns.class.get(&(m.clone(), method.clone())).cloned();
+                    *expr = put(span, Some(r), method, args, block, parenthesized);
+                    return returns;
                 }
                 if is_relation_chain_method(method.as_str())
                     || method.as_str() == "all"

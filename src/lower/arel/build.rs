@@ -105,7 +105,13 @@ pub fn try_build_arel_with_assocs(
         // `Room.where(type: "Rooms::Open").pluck(:id)` from `sti_scope`.
         "pluck" | "ids" => {
             let (op, owner) = try_chain_recv(recv, schema, registry, assocs)?;
-            return apply_pluck(op, method, args, schema).map(|op| (op, owner));
+            if matches!(&*recv.node, ExprNode::Const { .. })
+                && ClassInfo::source_class_method(registry, &owner, method)
+            {
+                return None;
+            }
+            let primary_key = registry.get(&owner).and_then(|class| class.primary_key.as_ref());
+            return apply_pluck(op, method, args, schema, primary_key).map(|op| (op, owner));
         }
         // `count` LAYERED on a chain. The base arm already answers
         // `Model.count`; without this arm `Model.where(…).count`
@@ -296,6 +302,7 @@ fn apply_pluck(
     method: &Symbol,
     args: &[Expr],
     schema: &Schema,
+    primary_key: Option<&Symbol>,
 ) -> Option<ArelOp> {
     let mut sel = match op {
         ArelOp::Select(s) => s,
@@ -314,6 +321,13 @@ fn apply_pluck(
         _ => return None,
     };
     let table = schema.tables.get(&sel.table.0)?;
+    let column = if column.as_str() == "id" {
+        primary_key.cloned().or_else(|| {
+            table.columns.iter().find(|col| col.primary_key).map(|col| col.name.clone())
+        }).unwrap_or(column)
+    } else {
+        column
+    };
     if !table.columns.iter().any(|c| c.name == column) {
         return None;
     }

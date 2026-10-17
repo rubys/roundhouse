@@ -160,6 +160,10 @@ mod class_side_default;
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]
 mod controller_response_body;
+#[path = "emit_and_run/relation_projections.rs"]
+mod relation_projections;
+#[path = "emit_and_run/pluck_projection_semantics.rs"]
+mod pluck_projection_semantics;
 #[path = "emit_and_run/response_redirect.rs"]
 mod response_redirect;
 #[path = "emit_and_run/constructor_unrelated_mutations.rs"]

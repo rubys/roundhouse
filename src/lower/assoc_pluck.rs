@@ -132,21 +132,24 @@ fn rewrite(expr: &mut Expr, materialized: &std::collections::HashSet<Symbol>) {
     rewrite_node(expr, materialized);
 }
 
-pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::HashSet<Symbol>) {
-    let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*expr.node else {
-        return;
-    };
+pub(crate) fn reader_columns(
+    recv: &Expr,
+    method: &Symbol,
+    args: &[Expr],
+    block: Option<&Expr>,
+    materialized: &std::collections::HashSet<Symbol>,
+) -> Option<Vec<Symbol>> {
     if method.as_str() != "pluck" || block.is_some() || args.is_empty() {
-        return;
+        return None;
     }
     // Symbol arguments only. `pluck(:"table.col")` and the string form
     // name a column through SQL rather than through a reader, and
     // nothing answers those on a materialized row.
     let mut cols: Vec<Symbol> = Vec::new();
     for a in args {
-        let ExprNode::Lit { value: Literal::Sym { value } } = &*a.node else { return };
+        let ExprNode::Lit { value: Literal::Sym { value } } = &*a.node else { return None };
         if value.as_str().contains('.') {
-            return;
+            return None;
         }
         cols.push(value.clone());
     }
@@ -182,7 +185,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
         &recv.ty,
         Some(crate::ty::Ty::Relation { .. }) | Some(crate::ty::Ty::Class { .. })
     ) {
-        return;
+        return None;
     }
     // A LOCAL or parameter that may hold an Array — typed `Array[…]`, or
     // a union with an Array in it — is the other way a record Array
@@ -202,9 +205,9 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
             _ => false,
         };
     if !var_array {
-        let ExprNode::Send { method: reader, .. } = &*recv.node else { return };
+        let ExprNode::Send { method: reader, .. } = &*recv.node else { return None };
         if !materialized.contains(reader) {
-            return;
+            return None;
         }
     }
     // A Const root is `Model.where(…).pluck(:id)`, arel's inlined
@@ -212,9 +215,14 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
     // association name, so this should not trigger — and if it ever
     // does, the SELECT wins.
     if const_rooted(recv) {
-        return;
+        return None;
     }
+    Some(cols)
+}
 
+pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::HashSet<Symbol>) {
+    let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*expr.node else { return };
+    let Some(cols) = reader_columns(recv, method, args, block.as_ref(), materialized) else { return };
     let span = expr.span;
     let var = Symbol::from("__pluck");
     // The row a block sees is the receiver's element; one column's
@@ -223,11 +231,15 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
         Some(crate::ty::Ty::Array { elem }) => Some((**elem).clone()),
         _ => None,
     };
-    let col_ty = match (&expr.ty, cols.len()) {
-        (Some(crate::ty::Ty::Array { elem }), 1) => Some((**elem).clone()),
-        _ => None,
+    let col_types = match (&expr.ty, cols.len()) {
+        (Some(crate::ty::Ty::Array { elem }), 1) => vec![Some((**elem).clone())],
+        (Some(crate::ty::Ty::Array { elem }), _) => match elem.as_ref() {
+            crate::ty::Ty::Tuple { elems } => elems.iter().cloned().map(Some).collect(),
+            _ => vec![None; cols.len()],
+        },
+        _ => vec![None; cols.len()],
     };
-    let read = |col: &Symbol| {
+    let read = |(index, col): (usize, &Symbol)| {
         let mut row = Expr::new(
             span,
             ExprNode::Var { id: crate::ident::VarId(0), name: var.clone() },
@@ -243,7 +255,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
                 parenthesized: false,
             },
         );
-        send.ty = col_ty.clone();
+        send.ty = col_types.get(index).cloned().flatten();
         send
     };
     // Rails answers an Array of VALUES for one column and an Array of
@@ -251,16 +263,20 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
     // reading one or the other. The single-column form is the whole of
     // the corpus; the multi-column arm is here because getting it wrong
     // would be silent.
-    let body = if cols.len() == 1 {
-        read(&cols[0])
+    let mut body = if cols.len() == 1 {
+        read((0, &cols[0]))
     } else {
         Expr::new(
             span,
             ExprNode::Array {
-                elements: cols.iter().map(read).collect(),
+                elements: cols.iter().enumerate().map(read).collect(),
                 style: Default::default(),
             },
         )
+    };
+    body.ty = match &expr.ty {
+        Some(crate::ty::Ty::Array { elem }) => Some(elem.as_ref().clone()),
+        _ => None,
     };
 
     let block = Expr::new(

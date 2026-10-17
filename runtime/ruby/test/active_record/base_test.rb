@@ -138,6 +138,40 @@ class BaseTest < Minitest::Test
     Db.close
   end
 
+  def test_pluck_projects_multiple_columns_in_argument_order
+    first = Item.new
+    first.title = "First"
+    first.save!
+    second = Item.new
+    second.title = "Second"
+    second.save!
+    relation = Item.where(nil).order(:id)
+
+    assert_equal [[first.id, "First"], [second.id, "Second"]], relation.pluck(:id, :title)
+    assert_equal [["First", first.id], ["Second", second.id]], relation.pluck("title", "id")
+    assert_equal [[first.id, first.id], [second.id, second.id]], relation.pluck(:id, :id)
+    assert_equal ["First", "Second"], relation.pluck(:title)
+    assert_equal [first.id, second.id], relation.to_a.map(&:id)
+  end
+
+  def test_pick_projects_multiple_columns_without_changing_the_limit
+    first = Item.new
+    first.title = "First"
+    first.save!
+    second = Item.new
+    second.title = "Second"
+    second.save!
+    relation = Item.where(nil).order(:id).limit(2)
+
+    assert_equal [first.id, "First"], relation.pick(:id, :title)
+    assert_equal "First", relation.pick(:title)
+    assert_equal [first.id, second.id], relation.to_a.map(&:id)
+    assert_equal [], Item.where(id: []).pluck(:id, :title)
+    assert_nil Item.where(id: []).pick(:id, :title)
+    assert_equal [], Item.where(id: -1).pluck(:id, :title)
+    assert_nil Item.where(id: -1).pick(:id, :title)
+  end
+
   # ── persistence-state predicates ────────────────────────────
 
   def test_new_record_starts_unpersisted

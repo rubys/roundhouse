@@ -1335,7 +1335,7 @@ fn build_methods_with_finder_inputs(
 ///     `def parsed_url; … URI.parse …; end`; keeping the bare
 ///     `@parsed_url` reader left the ivar untyped/unread and Spinel's
 ///     strict emit failed with `error[ivar_unresolved]`.
-///   * Column / association / scope synthesizers still win over a
+///   * Column writers / association / scope synthesizers still win over a
 ///     duplicate body name. A later source-level `delegate` may replace
 ///     an earlier real method, but only when that method was already
 ///     selected from the model body; generated framework methods are not
@@ -1354,9 +1354,8 @@ fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
             let incoming_is_real = matches!(method.kind, AccessorKind::Method);
             // Only bare-ivar attr_* halves (attr_accessor/reader/writer
             // synth, which carry no signature) yield to a later real
-            // `def`. Schema column AttributeReaders are also bare
-            // `@col` reads for scalar columns, but they stamp a
-            // signature — keep those winning (documented above).
+            // `def`. Schema column writers carry a signature and keep
+            // their storage casts.
             let existing_is_attr_half = existing.signature.is_none()
                 && match existing.kind {
                     AccessorKind::AttributeReader => {

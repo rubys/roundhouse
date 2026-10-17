@@ -178,6 +178,7 @@ pub struct ClassInfo {
     pub constants: HashMap<Symbol, Ty>,
     /// If this class maps to a database table, which one.
     pub table: Option<crate::ident::TableRef>,
+    pub primary_key: Option<Symbol>,
     /// Instance-state shape (columns + attr_accessor).
     pub attributes: Row,
     /// Attributes of `attributes` that the app's own `def` replaces. A
@@ -186,6 +187,9 @@ pub struct ClassInfo {
     pub overridden_attributes: std::collections::HashSet<Symbol>,
     /// Methods callable on the class itself: `Post.all`, `Post.find(id)`.
     pub class_methods: HashMap<Symbol, Ty>,
+    /// Catalog entries and source methods can have the same gradual
+    /// return type, so a call-site refinement needs their provenance.
+    pub source_class_methods: std::collections::HashSet<Symbol>,
     /// Source declares its own class-side `new`, whose result need not be self.
     pub declares_constructor: bool,
     /// Which of `class_methods` had their return type inferred FROM a
@@ -288,6 +292,20 @@ pub struct ClassInfo {
 }
 
 impl ClassInfo {
+    pub(crate) fn source_class_method(
+        classes: &HashMap<ClassId, ClassInfo>, model: &ClassId, method: &Symbol,
+    ) -> bool {
+        let mut current = Some(model);
+        for _ in 0..32 {
+            let Some(class) = current.and_then(|id| classes.get(id)) else { return false };
+            if class.source_class_methods.contains(method) {
+                return true;
+            }
+            current = class.parent.as_ref();
+        }
+        false
+    }
+
     /// Whether `name` is one of this model's real SCHEMA TABLE columns.
     /// `attributes` is built once, straight off `Schema::tables` (see
     /// `ingest::model::row_from_table`), never merged with method-only
@@ -348,6 +366,7 @@ pub(crate) fn lexical_class<T>(
 /// without cloning.
 pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
+    materialized_associations: Option<&'a std::collections::HashSet<Symbol>>,
     const_resolver: Option<std::sync::Arc<ConstResolver>>,
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
     data_factories: Option<&'a HashMap<crate::span::Span, Ty>>,
@@ -482,7 +501,12 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, class_factories: None, inquirers: None, i18n: None, helper_modules: None }
+        Self { classes, materialized_associations: None, const_resolver: None, typed_constants: None, data_factories: None, class_factories: None, inquirers: None, i18n: None, helper_modules: None }
+    }
+
+    pub(crate) fn with_materialized_associations(mut self, names: &'a std::collections::HashSet<Symbol>) -> Self {
+        self.materialized_associations = Some(names);
+        self
     }
 
     pub(crate) fn with_i18n(mut self, catalog: &'a crate::i18n::Catalog, helper_modules: &'a std::collections::HashSet<ClassId>) -> Self {
@@ -1905,6 +1929,12 @@ impl<'a> BodyTyper<'a> {
                     && let Some(ty) = hash.ty.as_ref().and_then(|h| crate::analyze::indifferent::reverse_merged(defaults, h))
                 {
                     return ty;
+                }
+                if let (Some(receiver), Some(materialized)) = (recv.as_ref(), self.materialized_associations)
+                    && let Some(columns) = crate::lower::assoc_pluck::reader_columns(receiver, method, args, block.as_ref(), materialized)
+                    && let Some(projected) = receiver.ty.as_ref().and_then(|ty| self.reader_projection(ty, &columns))
+                {
+                    return projected;
                 }
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
                     && recv_ty.as_ref().is_some_and(instance_shaped);

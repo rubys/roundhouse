@@ -58,7 +58,7 @@ impl<'a> BodyTyper<'a> {
     /// The class-side registration in `analyze/mod.rs` types these
     /// `Array<Untyped>` because "column type unknowable from the name
     /// alone" — true of the METHOD, false of the CALL. Here the column
-    /// is a Symbol literal and the model is known, so the schema
+    /// is a literal Symbol or String and the model is known, so the schema
     /// answers: `sessions.pluck(:ip_address)` is `Array[Str]`, not an
     /// open var.
     ///
@@ -70,10 +70,8 @@ impl<'a> BodyTyper<'a> {
     /// strict target cannot compile ([[feedback_types_are_performance_
     /// avoid_bags]]).
     ///
-    /// MULTI-COLUMN `pluck(:a, :b)` is not claimed: Rails answers an
-    /// Array of tuples, which is `Ty::Array<Ty::Array<...>>` only if
-    /// the columns share a type. The registered `Array<Untyped>`
-    /// stands for that form.
+    /// Multiple columns produce a tuple in argument order, preserving
+    /// each column's type even when the columns have different types.
     fn column_projection(
         &self,
         model: &ClassId,
@@ -83,18 +81,76 @@ impl<'a> BodyTyper<'a> {
         if !matches!(method.as_str(), "pluck" | "pick") {
             return None;
         }
-        let [arg] = args else { return None };
-        let ExprNode::Lit { value: crate::expr::Literal::Sym { value: col } } = &*arg.node else {
+        if args.is_empty() {
             return None;
-        };
+        }
+        if super::ClassInfo::source_class_method(self.classes(), model, method) {
+            return None;
+        }
         let cls = self.classes().get(model)?;
-        let col_ty = cls.instance_methods.get(col)?.clone();
+        let columns = args
+            .iter()
+            .map(|arg| {
+                let name = match &*arg.node {
+                    ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value.clone(),
+                    ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Symbol::from(value.as_str()),
+                    _ => return None,
+                };
+                let name = if name.as_str() == "id" {
+                    cls.primary_key.as_ref().unwrap_or(&name)
+                } else {
+                    &name
+                };
+                if cls.attributes.fields.is_empty() {
+                    cls.instance_methods.get(name).cloned()
+                } else {
+                    cls.attributes.fields.get(name).cloned()
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let col_ty = if columns.len() == 1 {
+            columns.into_iter().next()?
+        } else {
+            Ty::Tuple { elems: columns.into() }
+        };
         Some(match method.as_str() {
             // `pick` is `pluck(...).first` — the column value, or nil
             // when the relation is empty.
             "pick" => Ty::Union { variants: vec![col_ty, Ty::Nil].into() },
             _ => Ty::Array { elem: std::sync::Arc::new(col_ty) },
         })
+    }
+
+    pub(super) fn reader_projection(&self, recv: &Ty, columns: &[Symbol]) -> Option<Ty> {
+        let id = match recv {
+            Ty::Array { elem } => match elem.as_ref() {
+                Ty::Class { id, .. } => id,
+                _ => return None,
+            },
+            Ty::Relation { of } => of,
+            Ty::Union { variants } => {
+                let projected = variants.iter().map(|ty| self.reader_projection(ty, columns))
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(union_many(projected));
+            }
+            _ => return None,
+        };
+        let fields = columns.iter().map(|name| {
+            let mut current = Some(id);
+            for _ in 0..32 {
+                let class = self.classes().get(current?)?;
+                if let Some(ty) = class.instance_methods.get(name) {
+                    return Some(match ty {
+                        Ty::Fn { ret, .. } => ret.as_ref().clone(),
+                        value => value.clone(),
+                    });
+                }
+                current = class.parent.as_ref();
+            }
+            None
+        }).collect::<Option<Vec<_>>>()?;
+        let elem = if fields.len() == 1 { fields.into_iter().next()? } else { Ty::Tuple { elems: fields.into() } };
+        Some(Ty::Array { elem: std::sync::Arc::new(elem) })
     }
 
     /// Rails' per-column dynamic finders (`find_by_<attr>`,
@@ -1636,6 +1692,12 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     if !instance_side && let Some(ty) = cls.class_methods.get(method) {
+                        if cls.table.is_some()
+                            && matches!(ty, Ty::Array { elem } if matches!(elem.as_ref(), Ty::Untyped))
+                            && let Some(projected) = self.column_projection(id, method, call_args)
+                        {
+                            return projected;
+                        }
                         return unwrap_fn_ret(&subst(ty));
                     }
                     if let Some(ty) = cls.instance_methods.get(method) {

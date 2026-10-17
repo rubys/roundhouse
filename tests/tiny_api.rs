@@ -635,6 +635,46 @@ raise "Integer < above" if 61 < duration
 puts "DURATION COMPARISONS OK"
 "#;
 
+const RELATION_PROJECTIONS: &str = r#"
+widget = Widget.new(name: "gear")
+raise "save failed" unless widget.save
+relation = ActiveRecord::Relation.new(Widget).order(:id).limit(2)
+raise "row projection" unless relation.pluck(:name, :status) == [["gear", 0]]
+raise "first row" unless relation.pick(:status, :name) == [0, "gear"]
+raise "single column" unless relation.pluck(:name) == ["gear"]
+raise "duplicate columns" unless relation.pluck(:name, :name) == [["gear", "gear"]]
+raise "projection leaked" unless relation.to_a.first.name == "gear"
+empty = ActiveRecord::Relation.new(Widget).where(name: "missing")
+raise "empty rows" unless empty.pluck(:name, :status) == []
+raise "empty pick" unless empty.pick(:name, :status).nil?
+puts "RELATION PROJECTIONS OK"
+"#;
+
+#[test]
+#[ignore = "requires CRuby + scaffold bundle"]
+fn cruby_gate_relation_projects_multiple_columns() {
+    let (output, scratch) = run_on_cruby("relation-projections", RELATION_PROJECTIONS);
+    assert_ran(&output, &scratch, "RELATION PROJECTIONS OK");
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn spinel_gate_relation_projects_multiple_columns() {
+    let scratch = emit_spinel("relation-projections");
+    let contract = format!(
+        "require_relative \"boot\"\nDb.configure(\":memory:\")\n\
+         Schema.statements.each {{ |sql| Db.exec(sql) }}\n\
+         ActiveRecord.adapter = SqliteAdapter\n{RELATION_PROJECTIONS}"
+    );
+    std::fs::write(scratch.join("contract.rb"), contract).expect("write contract.rb");
+    let spinel = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+    compile(&scratch, &spinel, &["contract.rb", "--rbs", ".", "-o", "contract"]);
+    let output = Command::new(scratch.join("contract"))
+        .current_dir(&scratch).env("SPINEL_GC_STRESS", "1")
+        .output().expect("run contract");
+    assert_ran(&output, &scratch, "RELATION PROJECTIONS OK");
+}
+
 #[test]
 fn numeric_duration_comparisons_match_rails() {
     let rails = Command::new("ruby")

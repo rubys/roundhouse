@@ -96,7 +96,9 @@ pub(super) fn push_schema_methods(
     );
     let mut demanded: Option<std::rc::Rc<std::collections::HashSet<Symbol>>> = None;
     for col in &table.columns {
-        methods.push(synth_attr_reader(owner, col, model));
+        if !super::associations::model_defines_instance_method(model, &col.name) {
+            methods.push(synth_attr_reader(owner, col, model));
+        }
         if model.enums.contains_key(&col.name) {
             methods.push(synth_enum_storage_writer(owner, col));
         }
@@ -231,10 +233,13 @@ pub(super) fn push_schema_methods(
         });
     }
 
-    // def self.primary_key — emitted ONLY when the model overrode
+    // def self.primary_key — emitted ONLY when the model or schema overrode
     // Rails' default, so the runtime Base's `"id"` answers for everyone
     // else and no target pays a per-model method for the common case.
-    if let Some(pk) = &model.primary_key {
+    let primary_key = model.primary_key.as_ref().or_else(|| {
+        table.columns.iter().find(|col| col.primary_key && col.name.as_str() != "id").map(|col| &col.name)
+    });
+    if let Some(pk) = primary_key {
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
@@ -256,7 +261,7 @@ pub(super) fn push_schema_methods(
 
     // String/UUID keys must not use Base's Integer finder cast. Derive
     // this from the key column, not an example value or the caller's ID.
-    let key_name = model.primary_key.as_ref().map_or("id", |k| k.as_str());
+    let key_name = primary_key.map_or("id", |k| k.as_str());
     if table.columns.iter().any(|c| c.name.as_str() == key_name && ty_of_column(&c.col_type) == Ty::Str) {
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,

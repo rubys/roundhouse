@@ -2003,8 +2003,8 @@ module ActiveRecord
       " WHERE #{@model.primary_key} IN (#{inner})"
     end
 
-    # `pluck(:col)` — a single column projected to an Array of its raw
-    # values (strings as stored; callers coerce).
+    # `pluck(*cols)` projects raw values, with an Array per row when
+    # more than one column is requested.
     #
     # THE PROJECTION IS RESTORED, and that is not housekeeping. `pluck`
     # is a TERMINAL: Rails builds it a query of its own and leaves the
@@ -2015,23 +2015,42 @@ module ActiveRecord
     # `Rooms::Direct.find_or_create_for` does exactly that: `find_for`
     # plucks the user ids, then hands the SAME relation to `grant_to`,
     # which built memberships for user 0.
-    def pluck(col)
+    def pluck(*cols)
       return [] if @null
+      columns = cols.length == 0 ? @model.schema_columns : cols
+      projections = []
+      columns.each_with_index do |col, index|
+        name = sql_ident(col)
+        name = @model.primary_key.to_s if name == "id"
+        name = "#{@table}.#{name}" unless name.include?(".")
+        projections << "#{name} AS v#{index}"
+      end
       prior = @select_sql
-      @select_sql = "#{@table}.#{col} AS v"
-      rows = ActiveRecord.adapter.select_rows(bound_sql)
-      @select_sql = prior
-      rows.map { |row| row["v"] }
+      begin
+        @select_sql = projections.join(", ")
+        rows = ActiveRecord.adapter.select_rows(bound_sql)
+      ensure
+        @select_sql = prior
+      end
+      return rows.map { |row| row["v0"] } if columns.length == 1
+      rows.map do |row|
+        values = []
+        columns.each_with_index { |_col, index| values << row["v#{index}"] }
+        values
+      end
     end
 
-    # `pick(col)` — Rails' `limit(1).pluck(col).first`: the single value
-    # from the first row, or nil when the relation matches nothing.
+    # `pick(*cols)` — Rails' `limit(1).pluck(*cols).first`: a value or
+    # row from the first result, or nil when the relation matches nothing.
     # Lobsters reads every Keystore counter through it.
-    def pick(col)
+    def pick(*cols)
       prior = @limit
-      @limit = 1
-      rows = pluck(col)
-      @limit = prior
+      begin
+        @limit = 1
+        rows = pluck(*cols)
+      ensure
+        @limit = prior
+      end
       rows.length == 0 ? nil : rows[0]
     end
 
