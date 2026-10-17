@@ -176,6 +176,15 @@ not add generic class-object/Relation support to strict targets.
 | Concerns | `include`d modules with `included do` filter blocks | + `class_methods`, concern-defined actions and helpers |
 | Auth and request | — | `Current` attributes, `authenticate_by`, signed/global ids, `has_secure_password` sessions; `request.headers` (`[]`, `fetch`, `key?`, case-insensitive HTTP and Rack names), `request.authorization` (including Rack and legacy authorization env keys), route-only `request.path_parameters`, and HTTP Token/Bearer and Basic auth helpers |
 
+A concern's filter macro can call a macro from another concern the
+controller includes, directly, transitively or through a parent controller,
+as Ruby resolves the call on the controller. Each call binds its own
+parameters and locals, and an assignment rebinds only its own name. Filters
+keep the concern that declares them. A nested call to a name that another
+concern or the controller also defines, a cycle, an argument that still
+reads a variable, or a callback that writes a macro's binding leaves the
+whole macro call unexpanded, recorded as a survey gap.
+
 The Spinel dispatcher forwards incoming request headers into the request's
 Rack env (`HTTP_*`, plus unprefixed `CONTENT_TYPE` and `CONTENT_LENGTH`).
 Token and Bearer schemes are matched case-insensitively. This covers the

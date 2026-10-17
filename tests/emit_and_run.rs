@@ -49,6 +49,8 @@ mod relation_fork_contract;
 mod relation_fork;
 #[path = "emit_and_run/controller_sibling_classes.rs"]
 mod controller_sibling_classes;
+#[path = "emit_and_run/sibling_concern_filter_macros.rs"]
+mod sibling_concern_filter_macros;
 #[path = "emit_and_run/i18n_locales.rs"]
 mod i18n_locales;
 #[path = "emit_and_run/i18n_runtime.rs"]

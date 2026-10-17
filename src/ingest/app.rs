@@ -3929,7 +3929,7 @@ fn report_unrecognized_controller_macros(app: &App) {
             // `stored_options_init`'s writer/reader split is one; a
             // macro whose body held a BLOCK-FORM
             // `around_action` that `controller::around_block_filter`
-            // recognized but refused (`app::expand_macro_filters`'
+            // recognized but refused (`app::FilterMacroExpander`'s
             // `AroundRefusal`) is the other — the same exemption a
             // hand-written `around_action { ... }` refusal already gets
             // just above (`NAMED_CLAIMED_CONTROLLER_BLOCKS`), extended
@@ -4124,48 +4124,23 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
                     continue;
                 }
             }
-            // A keyword shape that can't be bound (see `substitute_params`) refuses the macro, like any other
-            // statement that isn't filter DSL.
-            let Some(body) = substitute_params(&macro_def, args) else {
-                survey::record(&IngestError::Unsupported {
-                    file: format!("{}", controller.name.0.as_str()),
-                    message: format!(
-                        "class-body macro not expanded: `{}` from {} holds a statement that is not filter DSL",
-                        method.as_str(),
-                        module.0.as_str()
-                    ),
-                });
-                expanded.push(item);
-                continue;
+            let mut expander = FilterMacroExpander {
+                resolvable: &surface.includes,
+                macros: &macros,
+                shadowed: &shadowed_macros,
+                owner_ident: &around_block_owner_ident,
+                around_seq: &mut around_block_seq,
+                stack: Vec::new(),
+                remaining_statements: MAX_MACRO_EXPANSION_STATEMENTS,
+                remaining_cost: MAX_MACRO_EXPANSION_COST,
+                out: Vec::new(),
             };
-            let Some(body) = expand_nested_filter_macros(
-                &body,
-                &module,
-                &macros,
-                &shadowed_macros,
-                &mut Vec::new(),
-            )
-            else {
-                survey::record(&IngestError::Unsupported {
-                    file: format!("{}", controller.name.0.as_str()),
-                    message: format!(
-                        "class-body macro not expanded: `{}` from {} holds a statement that is not filter DSL",
-                        method.as_str(),
-                        module.0.as_str()
-                    ),
-                });
-                expanded.push(item);
-                continue;
+            let expansion = match expander.expand(&module, &macro_def, args) {
+                Ok(()) if expander.out.is_empty() => Err(MacroExpansionRefusal::NotFilterDsl),
+                Ok(()) => Ok(expander.out),
+                Err(refusal) => Err(refusal),
             };
-            let param_names: Vec<crate::Symbol> =
-                macro_def.params.iter().map(|p| p.name.clone()).collect();
-            match expand_macro_filters(
-                &body,
-                &module,
-                &param_names,
-                &around_block_owner_ident,
-                &mut around_block_seq,
-            ) {
+            match expansion {
                 Ok(items) => {
                     let mut comments = leading_comments.clone();
                     let mut blank = *leading_blank_line;
@@ -4280,81 +4255,400 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
     Ok(())
 }
 
-/// Inline same-concern class-method calls inside a filter macro before
-/// interpreting its body. Rails concerns commonly compose a macro from
-/// another macro (`require_unauthenticated_access` calls
-/// `allow_unauthenticated_access`, then adds its own redirect filter).
-/// Each nested call is substituted with the same literal-argument rules as
-/// the outer call; unknown calls, cycles, or non-filter statements remain a
-/// fail-closed refusal in `expand_macro_filters`.
-fn expand_nested_filter_macros(
-    body: &crate::expr::Expr,
-    module: &crate::ident::ClassId,
-    macros: &HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
-    shadowed: &std::collections::HashSet<crate::ident::Symbol>,
-    stack: &mut Vec<crate::ident::Symbol>,
-) -> Option<crate::expr::Expr> {
-    use crate::expr::{Expr, ExprNode};
+/// The most statements one controller-body macro call may interpret,
+/// nested invocations included.
+const MAX_MACRO_EXPANSION_STATEMENTS: usize = 4096;
+/// The most nested macro invocations one call may stack.
+const MAX_MACRO_EXPANSION_DEPTH: usize = 32;
+/// How much bound value one controller-body macro call may copy into its
+/// statements, counted by `macro_value_cost`. Nested calls can hand a value
+/// on twice per level (`inner [x, x]`), so without this the copies can grow
+/// exponentially with the depth limit above.
+const MAX_MACRO_EXPANSION_COST: usize = 1 << 20;
 
-    const MAX_EXPANSION_STATEMENTS: usize = 4096;
-
-    fn expand_statements(
-        body: &Expr,
-        module: &crate::ident::ClassId,
-        macros: &HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
-        shadowed: &std::collections::HashSet<crate::ident::Symbol>,
-        stack: &mut Vec<crate::ident::Symbol>,
-        remaining: &mut usize,
-    ) -> Option<Vec<Expr>> {
-        let statements: Vec<&Expr> = match &*body.node {
-            ExprNode::Seq { exprs } => exprs.iter().collect(),
-            _ => vec![body],
-        };
-        let mut out = Vec::new();
-        for statement in statements {
-            if *remaining == 0 {
-                return None;
-            }
-            *remaining -= 1;
-            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*statement.node
-            else {
-                out.push(statement.clone());
-                continue;
-            };
-            let Some(def) = macros
-                .get(module)
-                .and_then(|methods| methods.iter().find(|candidate| &candidate.name == method))
-            else {
-                out.push(statement.clone());
-                continue;
-            };
-            // A call in a class method runs with the including controller
-            // as `self`; another concern or the controller itself may
-            // override this name. Inlining the lexical concern's version
-            // would change Ruby's lookup result, so refuse the whole macro.
-            if shadowed.contains(method) || stack.len() >= 32 || stack.contains(method) {
-                return None;
-            }
-            stack.push(method.clone());
-            let Some(nested) = substitute_params(def, args) else {
-                stack.pop();
-                return None;
-            };
-            let expanded =
-                expand_statements(&nested, module, macros, shadowed, stack, remaining);
-            stack.pop();
-            out.extend(expanded?);
-        }
-        Some(out)
-    }
-
-    let mut remaining = MAX_EXPANSION_STATEMENTS;
-    let exprs = expand_statements(body, module, macros, shadowed, stack, &mut remaining)?;
-    Some(Expr::new(body.span, ExprNode::Seq { exprs }))
+/// Interprets one filter macro call at compile time, with its nested macro
+/// calls. Rails concerns commonly compose a macro from another macro: in
+/// the same concern (`require_unauthenticated_access` calls
+/// `allow_unauthenticated_access`, then adds its own redirect filter), or
+/// in a sibling concern the controller also includes
+/// (`allow_unauthenticated_access` calls an Authorization concern's
+/// `allow_unauthorized_access`). Ruby runs a class method with the
+/// including controller as `self`, so a nested call resolves on the
+/// controller class, not in the concern that wrote it. The lookup here
+/// does the same: the defining concern first, then every concern the
+/// controller includes, directly, transitively or through a parent
+/// controller (`resolvable`, `ControllerConcernSurface::includes`).
+///
+/// The caller puts every name that more than one of those concerns
+/// defines, or that the controller ancestry defines itself, in
+/// `shadowed`, so any definition found here is the one Ruby would call.
+/// A nested call to a shadowed name refuses the whole macro, as do cycles
+/// and the expansion limits above.
+///
+/// Every invocation has its own bindings, as every Ruby method call has
+/// its own locals. A parameter starts as a binding and an assignment
+/// replaces it, so `sunset = sunset&.to_date&.httpdate` changes `sunset`
+/// and nothing else, even when another parameter received the same value.
+/// A statement reads the bindings when it is reached: a nested call's
+/// arguments take the caller's values at that point, and the inner
+/// invocation never sees the caller's names, so its `actions = :destroy`
+/// cannot rescope the caller's `only: actions`.
+///
+/// Filters keep the concern whose body declares them (`from_concern`).
+/// Values are copied into callbacks when they register, so anything that
+/// would change a copied value later refuses the macro: a local
+/// assignment after the invocation registered a filter (as before), or a
+/// callback that writes a bound name or writes through one.
+struct FilterMacroExpander<'a> {
+    resolvable: &'a [crate::ident::ClassId],
+    macros: &'a HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
+    shadowed: &'a std::collections::HashSet<crate::ident::Symbol>,
+    owner_ident: &'a str,
+    around_seq: &'a mut u32,
+    stack: Vec<crate::ident::Symbol>,
+    remaining_statements: usize,
+    remaining_cost: usize,
+    out: Vec<MacroFilterItem>,
 }
 
-/// The macro's body with its parameters replaced by the call's
-/// arguments. Positional binding, which is all these macros need: the
+/// One invocation's bindings: parameters, then locals as they are assigned.
+type MacroBindings = Vec<(crate::ident::Symbol, crate::expr::Expr)>;
+
+impl<'a> FilterMacroExpander<'a> {
+    fn expand(
+        &mut self,
+        module: &crate::ident::ClassId,
+        macro_def: &crate::dialect::MethodDef,
+        args: &[crate::expr::Expr],
+    ) -> Result<(), MacroExpansionRefusal> {
+        if self.stack.len() >= MAX_MACRO_EXPANSION_DEPTH || self.stack.contains(&macro_def.name) {
+            return Err(MacroExpansionRefusal::NotFilterDsl);
+        }
+        self.stack.push(macro_def.name.clone());
+        let result = self.expand_body(module, macro_def, args);
+        self.stack.pop();
+        result
+    }
+
+    fn expand_body(
+        &mut self,
+        module: &crate::ident::ClassId,
+        macro_def: &crate::dialect::MethodDef,
+        args: &[crate::expr::Expr],
+    ) -> Result<(), MacroExpansionRefusal> {
+        use crate::expr::{ExprNode, LValue};
+
+        // A keyword shape that can't be bound (see `bind_macro_params`)
+        // refuses the macro, like any other statement that isn't filter DSL.
+        let (mut bindings, skip_first) =
+            bind_macro_params(macro_def, args).ok_or(MacroExpansionRefusal::NotFilterDsl)?;
+        let statements = match &*macro_def.body.node {
+            ExprNode::Seq { exprs } => exprs.as_slice(),
+            _ => std::slice::from_ref(&macro_def.body),
+        };
+        let mut seen_filter = false;
+        for stmt in statements.iter().skip(usize::from(skip_first)) {
+            self.remaining_statements = self
+                .remaining_statements
+                .checked_sub(1)
+                .ok_or(MacroExpansionRefusal::NotFilterDsl)?;
+            // A plain local, folded to a literal (never executed at
+            // runtime: the Spinel target has no `to_datetime`/`httpdate`
+            // to call). A local that doesn't reduce to a literal is a gap,
+            // same as any other statement that isn't filter DSL.
+            if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*stmt.node {
+                if seen_filter {
+                    return Err(MacroExpansionRefusal::NotFilterDsl);
+                }
+                let value = self.bind(value, &bindings)?;
+                let value = fold_local_value(&value).ok_or(MacroExpansionRefusal::NotFilterDsl)?;
+                match bindings.iter_mut().find(|(bound, _)| *bound == *name) {
+                    Some((_, prior)) => *prior = value,
+                    None => bindings.push((name.clone(), value)),
+                }
+                continue;
+            }
+            if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*stmt.node {
+                if let Some((owner, nested)) = self.lookup(module, method) {
+                    if self.shadowed.contains(method) {
+                        return Err(MacroExpansionRefusal::NotFilterDsl);
+                    }
+                    let args = args
+                        .iter()
+                        .map(|arg| self.bind(arg, &bindings))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    // Ruby passes values. An argument that still reads a
+                    // variable (a lambda's own parameter, or a name this
+                    // invocation never bound) has none to pass here.
+                    if args.iter().any(reads_var) {
+                        return Err(MacroExpansionRefusal::NotFilterDsl);
+                    }
+                    let registered = self.out.len();
+                    self.expand(owner, nested, &args)?;
+                    seen_filter |= self.out.len() != registered;
+                    continue;
+                }
+            }
+            let candidate = self.bind(stmt, &bindings)?;
+            if let Some(filters) = filter_from_send(&candidate, module) {
+                self.out.extend(filters.into_iter().map(MacroFilterItem::Filter));
+                seen_filter = true;
+                continue;
+            }
+            // `block_filter_from_macro_stmt` doesn't itself check whether the
+            // block's `next` (if any) can be restructured — that's
+            // `lambda_filter_target`'s job, reached only later at lowering
+            // time, by which point `block_filter_from_macro_stmt` has
+            // already succeeded at reconstructing the block and this macro
+            // would otherwise be accepted as expanded with no gap recorded
+            // at all. Catch that one cause here, BEFORE accepting the
+            // block, narrowly, so it refuses with a located message instead
+            // of silently riding through as a successfully expanded filter.
+            if let ExprNode::Send { recv: None, method, block: Some(_), .. } = &*candidate.node {
+                if super::controller::is_lambda_filter_macro(method.as_str())
+                    && super::controller::next_restructure_refusal(&candidate)
+                {
+                    return Err(MacroExpansionRefusal::NextRestructure { method: method.clone() });
+                }
+                // `around_action`'s block form is excluded from `is_lambda_
+                // filter_macro` on purpose (see its doc comment): a
+                // before/after block inlines as a plain conditional
+                // statement, but an around has to run the rest of the
+                // filter chain from inside its own body, which that path
+                // can't express. `controller::around_block_filter` is the
+                // ONE lowering for that shape, reused here rather than
+                // duplicated — same refusals, same synthesized-method
+                // machinery, just reached through a macro's (already
+                // bound) body instead of a controller's own source.
+                // `raw_text: None`: this statement came from the macro's
+                // IR, not from source text in THIS file, so the one check
+                // that reads source text (the `.()` sugar spelling — see
+                // `around_block_filter`'s doc comment) is skipped.
+                if method.as_str() == "around_action" {
+                    match super::controller::around_block_filter(
+                        &candidate,
+                        None,
+                        self.owner_ident,
+                        self.around_seq,
+                    ) {
+                        Some(Ok((filter, action))) => {
+                            self.out.push(MacroFilterItem::Around(filter, action));
+                            seen_filter = true;
+                            continue;
+                        }
+                        Some(Err(reason)) => return Err(MacroExpansionRefusal::AroundRefusal(reason)),
+                        // Not actually this shape (shouldn't happen given the
+                        // `method.as_str() == "around_action"` check above) —
+                        // fall through to the generic refusal rather than
+                        // silently drop the statement.
+                        None => return Err(MacroExpansionRefusal::NotFilterDsl),
+                    }
+                }
+            }
+            if let Some(block) = block_filter_from_macro_stmt(&candidate) {
+                self.out.push(MacroFilterItem::Block(block));
+                seen_filter = true;
+                continue;
+            }
+            return Err(MacroExpansionRefusal::NotFilterDsl);
+        }
+        Ok(())
+    }
+
+    /// The definition a receiverless call in `module`'s macro body reaches:
+    /// the defining concern first, then the controller's other concerns.
+    fn lookup<'b>(
+        &self,
+        module: &'b crate::ident::ClassId,
+        method: &crate::ident::Symbol,
+    ) -> Option<(&'b crate::ident::ClassId, &'b crate::dialect::MethodDef)>
+    where
+        'a: 'b,
+    {
+        let macros: &'a HashMap<_, Vec<crate::dialect::MethodDef>> = self.macros;
+        let resolvable: &'a [crate::ident::ClassId] = self.resolvable;
+        std::iter::once(module).chain(resolvable.iter()).find_map(|candidate| {
+            macros
+                .get(candidate)
+                .and_then(|methods| methods.iter().find(|m| &m.name == method))
+                .map(|def| (candidate, def))
+        })
+    }
+
+    /// `expr` with this invocation's bindings substituted for its reads,
+    /// then literal Hash reads folded (`options[:if]` once `options` is a
+    /// literal Hash).
+    fn bind(
+        &mut self,
+        expr: &crate::expr::Expr,
+        bindings: &[(crate::ident::Symbol, crate::expr::Expr)],
+    ) -> Result<crate::expr::Expr, MacroExpansionRefusal> {
+        let mut expr = expr.clone();
+        if !substitute_macro_bindings(&mut expr, bindings, &mut Vec::new(), &mut self.remaining_cost) {
+            return Err(MacroExpansionRefusal::NotFilterDsl);
+        }
+        fold_literal_hash_reads(&mut expr);
+        Ok(expr)
+    }
+}
+
+/// Replace every read of a bound name with its value. A lambda parameter
+/// or a `Let` of the same name hides the binding inside its own scope, as
+/// in Ruby, so `->(enabled) { enabled }` keeps reading its parameter.
+/// Returns false once the copies would exceed `remaining_cost`.
+fn substitute_macro_bindings(
+    expr: &mut crate::expr::Expr,
+    bindings: &[(crate::ident::Symbol, crate::expr::Expr)],
+    hidden: &mut Vec<crate::ident::Symbol>,
+    remaining_cost: &mut usize,
+) -> bool {
+    use crate::expr::ExprNode;
+    match &mut *expr.node {
+        ExprNode::Var { name, .. } => {
+            let name: &crate::ident::Symbol = name;
+            if hidden.contains(name) {
+                return true;
+            }
+            let Some((_, value)) = bindings.iter().rev().find(|(bound, _)| bound == name) else {
+                return true;
+            };
+            let Some(remaining) = remaining_cost.checked_sub(macro_value_cost(value)) else {
+                return false;
+            };
+            *remaining_cost = remaining;
+            *expr = value.clone();
+            true
+        }
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
+            let mark = hidden.len();
+            hidden.extend(params.iter().cloned());
+            hidden.extend(rest_param.iter().cloned());
+            hidden.extend(extra_params.iter().map(|param| param.name.clone()));
+            hidden.extend(block_param.iter().cloned());
+            // The body runs later, when the callback fires. A write to a
+            // bound name from there would change what Ruby's closure
+            // shares, and a copied value cannot follow it.
+            let writes = extra_params.iter().any(|param| {
+                param.default.as_ref().is_some_and(|default| writes_macro_binding(default, bindings, hidden))
+            }) || writes_macro_binding(body, bindings, hidden);
+            let mut ok = !writes;
+            for param in extra_params.iter_mut() {
+                if let Some(default) = &mut param.default {
+                    ok = ok && substitute_macro_bindings(default, bindings, hidden, remaining_cost);
+                }
+            }
+            ok = ok && substitute_macro_bindings(body, bindings, hidden, remaining_cost);
+            hidden.truncate(mark);
+            ok
+        }
+        ExprNode::Let { name, value, body, .. } => {
+            if !substitute_macro_bindings(value, bindings, hidden, remaining_cost) {
+                return false;
+            }
+            hidden.push(name.clone());
+            let ok = substitute_macro_bindings(body, bindings, hidden, remaining_cost);
+            hidden.pop();
+            ok
+        }
+        _ => {
+            let mut ok = true;
+            expr.node.for_each_child_mut(&mut |child| {
+                ok = ok && substitute_macro_bindings(child, bindings, hidden, remaining_cost);
+            });
+            ok
+        }
+    }
+}
+
+/// A write to a bound name, or through one (`state[:key] = ...`,
+/// `config.flag = ...`), anywhere in `expr` outside a scope that hides it.
+fn writes_macro_binding(
+    expr: &crate::expr::Expr,
+    bindings: &[(crate::ident::Symbol, crate::expr::Expr)],
+    hidden: &mut Vec<crate::ident::Symbol>,
+) -> bool {
+    use crate::expr::{ExprNode, LValue};
+    let bound = |name: &crate::ident::Symbol, hidden: &[crate::ident::Symbol]| {
+        !hidden.contains(name) && bindings.iter().any(|(bound, _)| bound == name)
+    };
+    let writes = |target: &LValue, hidden: &[crate::ident::Symbol]| match target {
+        LValue::Var { name, .. } => bound(name, hidden),
+        LValue::Attr { recv, .. } | LValue::Index { recv, .. } => {
+            matches!(&*recv.node, ExprNode::Var { name, .. } if bound(name, hidden))
+        }
+        _ => false,
+    };
+    match &*expr.node {
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
+            let mark = hidden.len();
+            hidden.extend(params.iter().cloned());
+            hidden.extend(rest_param.iter().cloned());
+            hidden.extend(extra_params.iter().map(|param| param.name.clone()));
+            hidden.extend(block_param.iter().cloned());
+            let found = extra_params.iter().any(|param| {
+                param.default.as_ref().is_some_and(|default| writes_macro_binding(default, bindings, hidden))
+            }) || writes_macro_binding(body, bindings, hidden);
+            hidden.truncate(mark);
+            return found;
+        }
+        ExprNode::Let { name, value, body, .. } => {
+            if writes_macro_binding(value, bindings, hidden) {
+                return true;
+            }
+            hidden.push(name.clone());
+            let found = writes_macro_binding(body, bindings, hidden);
+            hidden.pop();
+            return found;
+        }
+        ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } if writes(target, hidden) => {
+            return true;
+        }
+        ExprNode::MultiAssign { targets, .. } if targets.iter().any(|target| writes(target, hidden)) => {
+            return true;
+        }
+        // Ingest keeps `state[:key] = v` and `config.flag = v` as calls to
+        // the `[]=` and `flag=` writers.
+        ExprNode::Send { recv: Some(recv), method, .. }
+            if method.as_str().ends_with('=')
+                && !matches!(method.as_str(), "==" | "===" | "!=" | "<=" | ">=")
+                && matches!(&*recv.node, ExprNode::Var { name, .. } if bound(name, hidden)) =>
+        {
+            return true;
+        }
+        _ => {}
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |child| found = found || writes_macro_binding(child, bindings, hidden));
+    found
+}
+
+/// What copying `expr` into a statement costs against
+/// `MAX_MACRO_EXPANSION_COST`: one per node, plus the bytes of its string
+/// and symbol literals.
+fn macro_value_cost(expr: &crate::expr::Expr) -> usize {
+    use crate::expr::{ExprNode, Literal};
+    let text = match &*expr.node {
+        ExprNode::Lit { value: Literal::Str { value } } => value.len(),
+        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().len(),
+        _ => 0,
+    };
+    let mut cost = 1 + text;
+    expr.node.for_each_child(&mut |child| cost = cost.saturating_add(macro_value_cost(child)));
+    cost
+}
+
+/// Any variable read at all, including a lambda's own parameter.
+fn reads_var(expr: &crate::expr::Expr) -> bool {
+    if matches!(&*expr.node, crate::expr::ExprNode::Var { .. }) {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |child| found = found || reads_var(child));
+    found
+}
+
+/// A macro's parameters bound to the call's arguments
+/// (`bind_macro_params`). Positional binding, which is all these macros need: the
 /// `**options` a concern macro forwards binds its trailing value. Consume
 /// any call-site keyword producer before substituting that value into
 /// the body; an argument marker is not part of the options Hash itself.
@@ -4438,31 +4732,24 @@ fn method_stores_keyword_rest(method: &crate::dialect::MethodDef) -> bool {
         if matches!(&*value.node, ExprNode::Var { name, .. } if name == &param.name))
 }
 
-fn substitute_params(
+/// The bindings a macro call starts its invocation with, and whether the
+/// body's first statement was the `extract_options!` idiom already applied
+/// here (the caller skips it).
+fn bind_macro_params(
     macro_def: &crate::dialect::MethodDef,
     args: &[crate::expr::Expr],
-) -> Option<crate::expr::Expr> {
+) -> Option<(MacroBindings, bool)> {
     use crate::expr::ExprNode;
-
-    fn replace(expr: &mut crate::expr::Expr, bindings: &[(crate::ident::Symbol, crate::expr::Expr)]) {
-        if let ExprNode::Var { name, .. } = &*expr.node {
-            if let Some((_, value)) = bindings.iter().find(|(n, _)| n == name) {
-                *expr = value.clone();
-                return;
-            }
-        }
-        expr.node.for_each_child_mut(&mut |child| replace(child, bindings));
-    }
 
     let span = macro_def.body.span;
     // `options = actions.extract_options!` on the `*actions` parameter:
     // the trailing Hash of the call is the options, everything before it
-    // the actions. Bound here because after substitution the receiver is
-    // an Array literal and `actions` below must not still hold the Hash.
-    let mut body = macro_def.body.clone();
+    // the actions. Bound here because the receiver is bound to an Array
+    // literal and `actions` below must not still hold the Hash.
+    let mut skip_first = false;
     let mut extracted: Vec<(crate::ident::Symbol, crate::expr::Expr)> = Vec::new();
     if let (ExprNode::Seq { exprs }, Some((rest_index, rest))) = (
-        &mut *body.node,
+        &*macro_def.body.node,
         macro_def.params.iter().enumerate().find(|(_, p)| p.rest),
     ) {
         let taken = match exprs.first().map(|e| &*e.node) {
@@ -4498,7 +4785,7 @@ fn substitute_params(
             .collect::<Option<Vec<_>>>()
             .map(|groups| groups.concat());
         if let (Some(options_name), Some(mut positional)) = (taken, spread) {
-            exprs.remove(0);
+            skip_first = true;
             let options = match positional.last().map(|a| match &*a.node {
                 ExprNode::KeywordSplat { value } => matches!(&*value.node, ExprNode::Hash { .. }),
                 ExprNode::Hash { .. } => true,
@@ -4589,9 +4876,7 @@ fn substitute_params(
         .filter(|(n, _)| !bindings.iter().any(|(b, _)| b == n))
         .collect();
     bindings.extend(extra);
-    replace(&mut body, &bindings);
-    fold_literal_hash_reads(&mut body);
-    Some(body)
+    Some((bindings, skip_first))
 }
 
 /// True for the call-site expression that supplies keyword arguments —
@@ -4606,7 +4891,7 @@ fn is_keyword_producer(e: &crate::expr::Expr) -> bool {
     )
 }
 
-/// `substitute_params`'s binding when the macro declares at least one
+/// `bind_macro_params`'s binding when the macro declares at least one
 /// NAMED keyword parameter (kept honest or flattened — see
 /// `has_named_keyword`'s comment at the call site). Binds the way Ruby
 /// does: positionals from the call's positional args (required,
@@ -4665,7 +4950,7 @@ fn bind_params_by_name(
     // binding it to a single param slot would guess (and the resulting
     // body would read `headers['Deprecation'] = *dates`, which isn't
     // what Ruby assigns). Refuse rather than guess; the only splat this
-    // function spreads is the literal-array one `substitute_params`
+    // function spreads is the literal-array one `bind_macro_params`
     // already handles for the `extract_options!` rest, above.
     if positional_args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. })) {
         return None;
@@ -4982,51 +5267,7 @@ enum MacroFilterItem {
     Around(crate::dialect::Filter, crate::dialect::Action),
 }
 
-/// Every statement of a (parameter-substituted) macro body, expanded to a
-/// `MacroFilterItem`, or `None` if any statement is neither a Symbol-target
-/// filter nor a recognized block-form one — the all-or-nothing contract
-/// `expand_class_body_macros` relies on to decide whether to expand the
-/// whole macro or keep it whole and ledgered.
-///
-/// A PREFIX of plain-local assignments (`stamp = "@#{date.to_datetime.to_i}"`,
-/// `sunset = sunset&.to_date&.httpdate` — the latter reassigning, and so
-/// shadowing, a bound parameter of the same name) is folded away before any
-/// statement is tried as a filter: each is evaluated with
-/// `fold_local_value` against the locals already folded, and the result —
-/// always a LITERAL, never executed at runtime (this crate's Spinel target
-/// has no `to_datetime`/`httpdate` to call) — both drops the statement and
-/// extends the environment later statements (including the filter's own
-/// block body, via `substitute_locals`) read it back from. Two
-/// environments, not one: `by_name` for a genuinely new local (`stamp` is
-/// never a parameter, so its `Var` reads survive substitution untouched);
-/// `by_span` for one that shadows a parameter (`sunset` IS one, so
-/// `substitute_params` already replaced every read of it, body-wide, with
-/// a clone of the call's value — carrying that clone's span — before this
-/// function ever ran; see `by_span`'s own doc at its declaration). Which
-/// case applies is decided by `param_names` — the macro's OWN declared
-/// parameter names, threaded in from the call site's `macro_def` — never
-/// by shape alone: a local's value can reach a parameter's literal clone
-/// mid-expression (`stamp`'s `date.to_datetime.to_i` does, for the date
-/// parameter) without the ASSIGNMENT itself reassigning that parameter,
-/// and `by_span` must stay empty for that local or a later, unrelated
-/// read sharing the same span (`date` read again in the filter body)
-/// would be wrongly rewritten to `stamp`'s value instead of its own. The
-/// first statement that is not a plain-local assignment is tried as the
-/// filter the existing two branches already read, with every local folded
-/// so far substituted in first; anything after it — another local
-/// assignment or not — hits the same `return None` an unrecognized
-/// statement always has, since neither branch accepts an `Assign`. A
-/// local whose value cannot be reduced to a literal (an unknown method, a
-/// non-literal date) refuses the whole macro the same way, rather than
-/// leave the free variable for
-/// `filter_from_send`/`block_filter_from_macro_stmt` to choke on.
-///
-/// A macro with no such prefix (every macro this crate recognized before
-/// this environment existed) never populates either environment, so every
-/// statement is tried exactly as before — `substitute_locals` is not even
-/// called — which is what keeps #680's and afc2462f's expansions
-/// byte-identical.
-/// Why `expand_macro_filters` refused a macro body. `expand_class_body_
+/// Why `FilterMacroExpander` refused a macro body. `expand_class_body_
 /// macros` reads this to pick the right message: `NextRestructure` is
 /// narrow enough to name the actual reason (and, unlike every other
 /// refusal here, to hard-fail strict mode — see its call site), while
@@ -5058,197 +5299,11 @@ enum MacroExpansionRefusal {
     NotFilterDsl,
 }
 
-fn expand_macro_filters(
-    body: &crate::expr::Expr,
-    module: &crate::ident::ClassId,
-    param_names: &[crate::Symbol],
-    owner_ident: &str,
-    around_seq: &mut u32,
-) -> Result<Vec<MacroFilterItem>, MacroExpansionRefusal> {
-    use crate::expr::{ExprNode, LValue};
-
-    let mut out = Vec::new();
-    let statements: Vec<&crate::expr::Expr> = match &*body.node {
-        ExprNode::Seq { exprs } => exprs.iter().collect(),
-        _ => vec![body],
-    };
-    let mut by_name: Vec<(crate::Symbol, crate::expr::Expr)> = Vec::new();
-    // A local that REASSIGNS a macro parameter (`sunset = sunset&.…`)
-    // shadows the bound value — but `substitute_params` already replaced
-    // every read of that parameter, body-wide, with a CLONE of its
-    // call-site value, before this function ever runs (and must keep
-    // doing so unmodified — see this function's own doc). A clone keeps
-    // its original's span, and two DISTINCT source literals never share
-    // one, so every surviving occurrence of "a read of the shadowed
-    // parameter" in a LATER statement is identifiable by span alone:
-    // `const_fold_expr` records the span of every `Lit` leaf it folds
-    // through, and the ones gathered while folding a reassignment's
-    // value are exactly the parameter's pre-fold occurrences, wherever
-    // they still appear. `by_name` alone (a `Var` named `sunset`) finds
-    // nothing there, because there is no `Var` left to find.
-    let mut by_span: Vec<(crate::span::Span, crate::expr::Expr)> = Vec::new();
-    let mut seen_filter = false;
-    for stmt in statements {
-        if !seen_filter {
-            if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*stmt.node {
-                let mut consumed_spans = Vec::new();
-                match fold_local_value(value, &by_name, &mut consumed_spans) {
-                    Some(lit) => {
-                        by_name.retain(|(n, _)| n != name);
-                        by_name.push((name.clone(), lit.clone()));
-                        // Only a local that REASSIGNS a macro parameter
-                        // (its name is one of `param_names`) has anything
-                        // to find by span: `substitute_params` replaced
-                        // every read of THAT parameter, body-wide, with a
-                        // clone of its call-site value before this
-                        // function ever ran, so matching by span finds
-                        // those surviving clones. A plain new local
-                        // (`stamp`, never a parameter) binds by name only
-                        // — its value's `consumed_spans` are some OTHER
-                        // read's literal (e.g. `date`'s), and registering
-                        // them here would wrongly rewrite that other
-                        // read's later occurrences to `stamp`'s value.
-                        if param_names.contains(name) {
-                            for span in consumed_spans {
-                                by_span.retain(|(s, _)| *s != span);
-                                by_span.push((span, lit.clone()));
-                            }
-                        }
-                        continue;
-                    }
-                    // A local that doesn't reduce to a literal is a gap,
-                    // same as any other statement that isn't filter DSL:
-                    // refuse the whole macro rather than leave it a free
-                    // variable downstream.
-                    None => return Err(MacroExpansionRefusal::NotFilterDsl),
-                }
-            }
-        }
-        let substituted;
-        let candidate: &crate::expr::Expr = if by_name.is_empty() && by_span.is_empty() {
-            stmt
-        } else {
-            substituted = {
-                let mut s = stmt.clone();
-                substitute_locals(&mut s, &by_name, &by_span);
-                s
-            };
-            &substituted
-        };
-        if let Some(filters) = filter_from_send(candidate, module) {
-            out.extend(filters.into_iter().map(MacroFilterItem::Filter));
-            seen_filter = true;
-            continue;
-        }
-        // `block_filter_from_macro_stmt` doesn't itself check whether the
-        // block's `next` (if any) can be restructured — that's
-        // `lambda_filter_target`'s job, reached only later at lowering
-        // time, by which point `block_filter_from_macro_stmt` has
-        // already succeeded at reconstructing the block and this macro
-        // would otherwise be accepted as expanded with no gap recorded
-        // at all. Catch that one cause here, BEFORE accepting the
-        // block, narrowly, so it refuses with a located message instead
-        // of silently riding through as a successfully expanded filter.
-        if let ExprNode::Send { recv: None, method, block: Some(_), .. } = &*candidate.node {
-            if super::controller::is_lambda_filter_macro(method.as_str())
-                && super::controller::next_restructure_refusal(candidate)
-            {
-                return Err(MacroExpansionRefusal::NextRestructure { method: method.clone() });
-            }
-            // `around_action`'s block form is excluded from `is_lambda_
-            // filter_macro` on purpose (see its doc comment): a
-            // before/after block inlines as a plain conditional
-            // statement, but an around has to run the rest of the
-            // filter chain from inside its own body, which that path
-            // can't express. `controller::around_block_filter` is the
-            // ONE lowering for that shape, reused here rather than
-            // duplicated — same refusals, same synthesized-method
-            // machinery, just reached through a macro's (already
-            // parameter-substituted) body instead of a controller's own
-            // source. `raw_text: None`: this statement came from the
-            // macro's IR, not from source text in THIS file, so the one
-            // check that reads source text (the `.()` sugar spelling —
-            // see `around_block_filter`'s doc comment) is skipped.
-            if method.as_str() == "around_action" {
-                match super::controller::around_block_filter(candidate, None, owner_ident, around_seq)
-                {
-                    Some(Ok((filter, action))) => {
-                        out.push(MacroFilterItem::Around(filter, action));
-                        seen_filter = true;
-                        continue;
-                    }
-                    Some(Err(reason)) => return Err(MacroExpansionRefusal::AroundRefusal(reason)),
-                    // Not actually this shape (shouldn't happen given the
-                    // `method.as_str() == "around_action"` check above) —
-                    // fall through to the generic refusal rather than
-                    // silently drop the statement.
-                    None => return Err(MacroExpansionRefusal::NotFilterDsl),
-                }
-            }
-        }
-        if let Some(block) = block_filter_from_macro_stmt(candidate) {
-            out.push(MacroFilterItem::Block(block));
-            seen_filter = true;
-            continue;
-        }
-        return Err(MacroExpansionRefusal::NotFilterDsl);
-    }
-    if out.is_empty() { Err(MacroExpansionRefusal::NotFilterDsl) } else { Ok(out) }
-}
-
-/// Replace every `Var` read in `expr` naming one of `by_name`'s locals,
-/// and every `Lit` whose span is one of `by_span`'s, with the literal it
-/// folded to — the same blind, scope-unaware full-tree rewrite
-/// `substitute_params::replace` already does for macro parameters, run a
-/// second time for the locals `expand_macro_filters` folds on top of
-/// that substitution. Safe for the same reason `replace` is: `by_name`'s
-/// names are the macro body's own locals, not ones a nested block could
-/// re-declare out from under it in any of the shapes this crate expands
-/// (a reused block-param name would shadow correctly in real Ruby and
-/// wrongly here, same pre-existing caveat `rewrite_var_to_self_ref`
-/// documents); `by_span`'s spans each identify one SOURCE location — two
-/// distinct ones never collide, and two clones of the same one (which is
-/// exactly what a shadowed parameter's surviving occurrences are) always
-/// do.
-fn substitute_locals(
-    expr: &mut crate::expr::Expr,
-    by_name: &[(crate::Symbol, crate::expr::Expr)],
-    by_span: &[(crate::span::Span, crate::expr::Expr)],
-) {
-    use crate::expr::ExprNode;
-    match &*expr.node {
-        ExprNode::Var { name, .. } => {
-            if let Some((_, value)) = by_name.iter().rev().find(|(n, _)| n == name) {
-                *expr = value.clone();
-                return;
-            }
-        }
-        ExprNode::Lit { .. } => {
-            if let Some((_, value)) = by_span.iter().rev().find(|(s, _)| *s == expr.span) {
-                *expr = value.clone();
-                return;
-            }
-        }
-        _ => {}
-    }
-    expr.node.for_each_child_mut(&mut |c| substitute_locals(c, by_name, by_span));
-}
-
-/// A local assignment's value, folded to a literal against the locals
-/// already bound in `by_name` — `None` if any part of it cannot be
-/// reduced, which `expand_macro_filters` reads as "refuse the macro".
-/// Every `Lit` leaf the fold passes through (its own value, or one
-/// reached via a chained method call) is appended to `consumed_spans` —
-/// see `by_span`'s doc at its declaration in `expand_macro_filters` for
-/// why that identifies a shadowed parameter's other occurrences.
-fn fold_local_value(
-    value: &crate::expr::Expr,
-    by_name: &[(crate::Symbol, crate::expr::Expr)],
-    consumed_spans: &mut Vec<crate::span::Span>,
-) -> Option<crate::expr::Expr> {
-    let mut scratch: Vec<(crate::Symbol, FoldedValue)> =
-        by_name.iter().map(|(n, e)| (n.clone(), FoldedValue::Lit(e.clone()))).collect();
-    match const_fold_expr(value, &mut scratch, consumed_spans)? {
+/// A local assignment's value, already bound (`FilterMacroExpander::bind`),
+/// folded to a literal — `None` if any part of it cannot be reduced, which
+/// the expander reads as "refuse the macro".
+fn fold_local_value(value: &crate::expr::Expr) -> Option<crate::expr::Expr> {
+    match const_fold_expr(value, &mut Vec::new())? {
         FoldedValue::Lit(e) => Some(e),
         // `.to_datetime`/`.to_date` with no following `.to_i`/`.httpdate`
         // to finish the chain: not a value this macro-folding DSL
@@ -5256,6 +5311,10 @@ fn fold_local_value(
         FoldedValue::DateTimeStr(_) | FoldedValue::DateStr(_) => None,
     }
 }
+
+/// The longest string `const_fold_expr` builds. Interpolation can double a
+/// value at every nested invocation, so a fold has to stop somewhere.
+const MAX_FOLDED_STRING_BYTES: usize = 64 * 1024;
 
 /// An intermediate result of folding a macro-local's value at compile
 /// time. `Lit` is a real, emittable Ruby literal; the other two variants
@@ -5288,30 +5347,33 @@ impl FoldedValue {
     }
 }
 
-/// Reduce `expr` to a `FoldedValue` at compile time, reading `env` (both
-/// the macro's folded locals and, mid-expression, the safe-navigation
-/// temps `&.` desugars to — see `ingest::expr`'s `__safe_nav<pos>`
-/// locals) for `Var` reads, and pushing new ones for `Assign`. Only the
-/// shapes `fold_local_value`'s two callers actually need are modeled —
+/// Reduce `expr` to a `FoldedValue` at compile time. The macro's own
+/// bindings are already substituted; `env` holds only the
+/// safe-navigation temps `&.` desugars to mid-expression (see
+/// `ingest::expr`'s `__safe_nav<pos>` locals), read for `Var` and pushed
+/// for `Assign`. Only the shapes macro locals actually need are modeled —
 /// everything else is a refusal, never a guess, so a date-folding mistake
 /// is a missed expansion rather than a wrong `Deprecation`/`Sunset`
 /// header value.
-///
-/// Every `Lit` leaf reached — whether written directly in the macro
-/// source or substituted in for a parameter read — appends its span to
-/// `consumed_spans`; see `by_span`'s doc at its declaration in
-/// `expand_macro_filters` for why.
 fn const_fold_expr(
     expr: &crate::expr::Expr,
     env: &mut Vec<(crate::Symbol, FoldedValue)>,
-    consumed_spans: &mut Vec<crate::span::Span>,
 ) -> Option<FoldedValue> {
     use crate::expr::{BoolOpKind, ExprNode, LValue};
 
     match &*expr.node {
-        ExprNode::Lit { .. } => {
-            consumed_spans.push(expr.span);
-            Some(FoldedValue::Lit(expr.clone()))
+        ExprNode::Lit { .. } => Some(FoldedValue::Lit(expr.clone())),
+        // `actions = [:index, :show]`: an Array of literals is a literal.
+        ExprNode::Array { elements, style } => {
+            let mut folded = Vec::with_capacity(elements.len());
+            for element in elements {
+                let FoldedValue::Lit(element) = const_fold_expr(element, env)? else { return None };
+                folded.push(element);
+            }
+            Some(FoldedValue::Lit(crate::expr::Expr::new(
+                expr.span,
+                ExprNode::Array { elements: folded, style: style.clone() },
+            )))
         }
         ExprNode::Var { name, .. } => {
             env.iter().rev().find(|(n, _)| n == name).map(|(_, v)| v.clone())
@@ -5322,7 +5384,7 @@ fn const_fold_expr(
                 match part {
                     crate::expr::InterpPart::Text { value } => out.push_str(value),
                     crate::expr::InterpPart::Expr { expr } => {
-                        let FoldedValue::Lit(lit) = const_fold_expr(expr, env, consumed_spans)? else {
+                        let FoldedValue::Lit(lit) = const_fold_expr(expr, env)? else {
                             // An interpolated `.to_date`/`.to_datetime`
                             // with no finishing call — not a string this
                             // DSL can render.
@@ -5330,6 +5392,9 @@ fn const_fold_expr(
                         };
                         out.push_str(&literal_to_s(&lit)?);
                     }
+                }
+                if out.len() > MAX_FOLDED_STRING_BYTES {
+                    return None;
                 }
             }
             Some(FoldedValue::Lit(crate::expr::Expr::new(
@@ -5344,23 +5409,23 @@ fn const_fold_expr(
         // call never ran; short-circuit the same way here rather than
         // fold into a call on nil.
         ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } => {
-            let l = const_fold_expr(left, env, consumed_spans)?;
+            let l = const_fold_expr(left, env)?;
             if !l.is_truthy() {
                 return Some(l);
             }
-            const_fold_expr(right, env, consumed_spans)
+            const_fold_expr(right, env)
         }
         // The safe-nav temp's own binding (`__safe_nav17 = <recv>`):
         // fold the value and extend the SCRATCH env the same way a
         // macro local extends the persistent one, so the paired read a
         // few nodes over resolves.
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
-            let v = const_fold_expr(value, env, consumed_spans)?;
+            let v = const_fold_expr(value, env)?;
             env.push((name.clone(), v.clone()));
             Some(v)
         }
         ExprNode::Send { recv: Some(recv), method, args, block: None, .. } if args.is_empty() => {
-            let recv = const_fold_expr(recv, env, consumed_spans)?;
+            let recv = const_fold_expr(recv, env)?;
             fold_date_method(&recv, method.as_str(), expr.span)
         }
         _ => None,
@@ -5506,7 +5571,7 @@ fn format_httpdate(y: i64, m: u32, d: u32) -> String {
 /// end
 /// ```
 ///
-/// After `substitute_params`, `value` is a literal or a `Lambda` — never a
+/// After macro binding, `value` is a literal or a `Lambda` — never a
 /// free variable — so `value.respond_to?(:call)` is statically decidable.
 /// Folding it collapses the ternary to one branch; when that branch is the
 /// `instance_exec` one, inlining a zero-param, control-flow-free lambda's
@@ -5804,7 +5869,7 @@ fn fold_literal_if(expr: &mut crate::expr::Expr) {
         return;
     };
     // Ruby's only two falsy values: `nil` is what a folded-away `sunset:`
-    // local leaves behind in `… if sunset` once `expand_macro_filters`
+    // local leaves behind in `… if sunset` once `FilterMacroExpander`
     // has substituted the literal in — a guard that never had an `unless`
     // counterpart to confuse it with.
     let truthy = match &*cond.node {

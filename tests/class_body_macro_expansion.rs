@@ -1710,3 +1710,396 @@ end
         "refused carrier must keep its class methods on the module"
     );
 }
+
+// A filter macro composed across two concerns. Ruby runs a concern's class
+// method with the including controller as `self`, so the nested
+// `allow_unauthorized_access` resolves on the controller, which has it from
+// Authorization, not from Authentication, whose macro calls it.
+
+const SIBLING_AUTHENTICATION: &str = r#"
+module Authentication
+  extend ActiveSupport::Concern
+
+  included do
+    before_action :require_authentication
+  end
+
+  class_methods do
+    def require_unauthenticated_access(**options)
+      allow_unauthenticated_access **options
+      before_action :redirect_authenticated_user, **options
+    end
+
+    def allow_unauthenticated_access(**options)
+      skip_before_action :require_authentication, **options
+      before_action :resume_session, **options
+      allow_unauthorized_access **options
+    end
+  end
+
+  private
+    def require_authentication
+      head :unauthorized
+    end
+    def resume_session
+      @resumed = true
+    end
+    def redirect_authenticated_user
+      @redirected = true
+    end
+end
+"#;
+
+const SIBLING_AUTHORIZATION: &str = r#"
+module Authorization
+  extend ActiveSupport::Concern
+
+  included do
+    before_action :ensure_can_access_account
+  end
+
+  class_methods do
+    def allow_unauthorized_access(**options)
+      skip_before_action :ensure_can_access_account, **options
+    end
+  end
+
+  private
+    def ensure_can_access_account
+      @authorized = true
+    end
+end
+"#;
+
+/// Ingest `files` with the survey active, returning the app and its gaps.
+fn sibling_app(files: &[(&str, &str)]) -> (App, Vec<roundhouse::ingest::IngestError>) {
+    let tree = files
+        .iter()
+        .map(|(path, source)| (std::path::PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+    roundhouse::ingest::survey::activate();
+    let result = ingest_app_from_tree(tree);
+    let gaps = roundhouse::ingest::survey::drain();
+    (result.expect("ingest"), gaps)
+}
+
+/// ThingsController's filters as `(kind, target, only, except, concern)`.
+fn filters_with_origin(app: &App) -> Vec<(FilterKind, String, Vec<String>, Vec<String>, String)> {
+    let controller = app
+        .controllers
+        .iter()
+        .find(|c| c.name.0.as_str() == "ThingsController")
+        .expect("ThingsController ingested");
+    controller
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ControllerBodyItem::Filter { filter, .. } => Some((
+                filter.kind.clone(),
+                filter.target.as_str().to_string(),
+                filter.only.iter().map(|s| s.as_str().to_string()).collect(),
+                filter.except.iter().map(|s| s.as_str().to_string()).collect(),
+                filter.from_concern.as_ref().map(|c| c.0.as_str().to_string()).unwrap_or_default(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn keeps_macro_call(app: &App, macro_name: &str) -> bool {
+    let controller = app
+        .controllers
+        .iter()
+        .find(|c| c.name.0.as_str() == "ThingsController")
+        .expect("ThingsController ingested");
+    controller.body.iter().any(|item| matches!(
+        item,
+        ControllerBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, roundhouse::expr::ExprNode::Send { method, .. }
+                if method.as_str() == macro_name)
+    ))
+}
+
+fn names_unexpanded_macro(gaps: &[roundhouse::ingest::IngestError], macro_name: &str) -> bool {
+    gaps.iter().any(|gap| {
+        gap.to_string()
+            .contains(&format!("class-body macro not expanded: `{macro_name}`"))
+    })
+}
+
+#[test]
+fn a_nested_filter_macro_resolves_in_a_sibling_concern() {
+    let application = "class ApplicationController < ActionController::Base\n  include Authentication\n  include Authorization\nend\n";
+    let shapes: [(&str, Vec<String>, Vec<String>); 3] = [
+        ("", vec![], vec![]),
+        (" only: :show", vec!["show".into()], vec![]),
+        (" except: :destroy", vec![], vec!["destroy".into()]),
+    ];
+    for macro_name in ["allow_unauthenticated_access", "require_unauthenticated_access"] {
+        for (options, only, except) in &shapes {
+            let controller = format!(
+                "class ThingsController < ApplicationController\n  {macro_name}{options}\n  def show\n  end\n  def destroy\n  end\nend\n"
+            );
+            let (app, gaps) = sibling_app(&[
+                ("app/controllers/concerns/authentication.rb", SIBLING_AUTHENTICATION),
+                ("app/controllers/concerns/authorization.rb", SIBLING_AUTHORIZATION),
+                ("app/controllers/application_controller.rb", application),
+                ("app/controllers/things_controller.rb", &controller),
+            ]);
+            let filter = |kind: FilterKind, target: &str, concern: &str| {
+                (kind, target.to_string(), only.clone(), except.clone(), concern.to_string())
+            };
+            let mut expected = vec![
+                filter(FilterKind::Skip, "require_authentication", "Authentication"),
+                filter(FilterKind::Before, "resume_session", "Authentication"),
+                filter(FilterKind::Skip, "ensure_can_access_account", "Authorization"),
+            ];
+            if macro_name == "require_unauthenticated_access" {
+                expected.push(filter(FilterKind::Before, "redirect_authenticated_user", "Authentication"));
+            }
+            assert_eq!(
+                filters_with_origin(&app),
+                expected,
+                "`{macro_name}{options}` must expand in callback order, keep its scope, \
+                 and attribute each filter to the concern that declares it"
+            );
+            assert!(!keeps_macro_call(&app, macro_name), "`{macro_name}{options}` was left unexpanded");
+            assert!(!names_unexpanded_macro(&gaps, macro_name), "{gaps:?}");
+        }
+    }
+}
+
+#[test]
+fn a_nested_filter_macro_resolves_in_a_concern_a_parent_controller_includes() {
+    let (app, gaps) = sibling_app(&[
+        ("app/controllers/concerns/authentication.rb", SIBLING_AUTHENTICATION),
+        ("app/controllers/concerns/authorization.rb", SIBLING_AUTHORIZATION),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  include Authorization\nend\n",
+        ),
+        (
+            "app/controllers/signed_controller.rb",
+            "class SignedController < ApplicationController\n  include Authentication\nend\n",
+        ),
+        (
+            "app/controllers/things_controller.rb",
+            "class ThingsController < SignedController\n  require_unauthenticated_access except: :destroy\n  def show\n  end\n  def destroy\n  end\nend\n",
+        ),
+    ]);
+    let except = vec!["destroy".to_string()];
+    assert_eq!(
+        filters_with_origin(&app),
+        vec![
+            (FilterKind::Skip, "require_authentication".into(), vec![], except.clone(), "Authentication".into()),
+            (FilterKind::Before, "resume_session".into(), vec![], except.clone(), "Authentication".into()),
+            (FilterKind::Skip, "ensure_can_access_account".into(), vec![], except.clone(), "Authorization".into()),
+            (FilterKind::Before, "redirect_authenticated_user".into(), vec![], except, "Authentication".into()),
+        ]
+    );
+    assert!(!names_unexpanded_macro(&gaps, "require_unauthenticated_access"), "{gaps:?}");
+}
+
+/// Each case leaves the nested call to a lookup the compiler cannot settle
+/// as Ruby would, so the whole macro stays a recorded gap and nothing is
+/// half-expanded.
+#[test]
+fn a_sibling_concern_macro_is_refused_when_ruby_could_resolve_it_elsewhere() {
+    let both = "class ApplicationController < ActionController::Base\n  include Authentication\n  include Authorization\nend\n";
+    let open_policy = "module OpenPolicy\n  extend ActiveSupport::Concern\n  class_methods do\n    def allow_unauthorized_access(**options)\n      before_action :ensure_can_access_account, **options\n    end\n  end\nend\n";
+    let overriding = "class ApplicationController < ActionController::Base\n  include Authentication\n  include Authorization\n  def self.allow_unauthorized_access(**options)\n    before_action :ensure_can_access_account, **options\n  end\nend\n";
+    let cyclic_authorization = SIBLING_AUTHORIZATION.replace(
+        "skip_before_action :ensure_can_access_account, **options",
+        "allow_unauthenticated_access **options",
+    );
+    let cases: Vec<(&str, Vec<(&str, &str)>)> = vec![
+        (
+            "two included concerns define the nested macro",
+            vec![
+                ("app/controllers/concerns/open_policy.rb", open_policy),
+                (
+                    "app/controllers/application_controller.rb",
+                    "class ApplicationController < ActionController::Base\n  include Authentication\n  include Authorization\n  include OpenPolicy\nend\n",
+                ),
+            ],
+        ),
+        (
+            "the controller ancestry overrides the nested macro",
+            vec![("app/controllers/application_controller.rb", overriding)],
+        ),
+        (
+            "the concern that defines the nested macro is not included",
+            vec![(
+                "app/controllers/application_controller.rb",
+                "class ApplicationController < ActionController::Base\n  include Authentication\nend\n",
+            )],
+        ),
+        (
+            "the nested macros call each other across concerns",
+            vec![
+                ("app/controllers/concerns/authorization.rb", cyclic_authorization.as_str()),
+                ("app/controllers/application_controller.rb", both),
+            ],
+        ),
+    ];
+    for (case, overrides) in cases {
+        let mut files = vec![
+            ("app/controllers/concerns/authentication.rb", SIBLING_AUTHENTICATION),
+            ("app/controllers/concerns/authorization.rb", SIBLING_AUTHORIZATION),
+            (
+                "app/controllers/things_controller.rb",
+                "class ThingsController < ApplicationController\n  require_unauthenticated_access only: :show\n  def show\n  end\nend\n",
+            ),
+        ];
+        for (path, source) in overrides {
+            files.retain(|(existing, _)| *existing != path);
+            files.push((path, source));
+        }
+        let (app, gaps) = sibling_app(&files);
+        assert!(filters_with_origin(&app).is_empty(), "{case}: nothing may be half-expanded: {:?}", filters_with_origin(&app));
+        assert!(keeps_macro_call(&app, "require_unauthenticated_access"), "{case}: the call must stay whole");
+        assert!(names_unexpanded_macro(&gaps, "require_unauthenticated_access"), "{case}: the gap must be recorded: {gaps:?}");
+    }
+}
+
+// Every Ruby method call has its own local variables, so a nested macro's
+// `actions` is not its caller's `actions`.
+
+const ANONYMOUS_AUTHENTICATION: &str = r#"
+module Authentication
+  extend ActiveSupport::Concern
+  included do
+    before_action :require_authentication
+  end
+  class_methods do
+    def allow_anonymous
+      actions = :show
+      allow_unauthorized_access
+      skip_before_action :require_authentication, only: actions
+    end
+  end
+  private
+    def require_authentication
+      head :unauthorized
+    end
+end
+"#;
+
+const SCOPED_AUTHORIZATION: &str = r#"
+module Authorization
+  extend ActiveSupport::Concern
+  included do
+    before_action :ensure_can_access_account
+  end
+  class_methods do
+    def allow_unauthorized_access
+      actions = :destroy
+      skip_before_action :ensure_can_access_account, only: actions
+    end
+  end
+  private
+    def ensure_can_access_account
+      @authorized = true
+    end
+end
+"#;
+
+const BOTH_CONCERNS: &str =
+    "class ApplicationController < ActionController::Base\n  include Authentication\n  include Authorization\nend\n";
+
+const ANONYMOUS_THINGS: &str =
+    "class ThingsController < ApplicationController\n  allow_anonymous\n  def show\n  end\n  def destroy\n  end\nend\n";
+
+#[test]
+fn nested_filter_macro_locals_belong_to_their_own_invocation() {
+    let (app, gaps) = sibling_app(&[
+        ("app/controllers/concerns/authentication.rb", ANONYMOUS_AUTHENTICATION),
+        ("app/controllers/concerns/authorization.rb", SCOPED_AUTHORIZATION),
+        ("app/controllers/application_controller.rb", BOTH_CONCERNS),
+        ("app/controllers/things_controller.rb", ANONYMOUS_THINGS),
+    ]);
+    assert_eq!(
+        filters_with_origin(&app),
+        vec![
+            (FilterKind::Skip, "ensure_can_access_account".into(), vec!["destroy".into()], vec![], "Authorization".into()),
+            (FilterKind::Skip, "require_authentication".into(), vec!["show".into()], vec![], "Authentication".into()),
+        ],
+        "the inner `actions = :destroy` must not rescope the outer skip, which would \
+         let an anonymous request reach `destroy`"
+    );
+    assert!(!names_unexpanded_macro(&gaps, "allow_anonymous"), "{gaps:?}");
+}
+
+#[test]
+fn a_caller_local_passed_to_a_nested_macro_keeps_the_caller_value() {
+    // The inner `actions = :destroy` shares the name of the caller local
+    // the argument carries in; the argument must still read the caller's.
+    let authentication = ANONYMOUS_AUTHENTICATION.replace(
+        "      allow_unauthorized_access\n",
+        "      allow_unauthorized_access only: actions\n",
+    );
+    let authorization = SCOPED_AUTHORIZATION.replace(
+        "    def allow_unauthorized_access\n      actions = :destroy\n      skip_before_action :ensure_can_access_account, only: actions\n",
+        "    def allow_unauthorized_access(**options)\n      actions = :destroy\n      skip_before_action :ensure_can_access_account, **options\n      before_action :audit_access, only: actions\n",
+    );
+    assert!(authorization.contains("audit_access"));
+    let (app, gaps) = sibling_app(&[
+        ("app/controllers/concerns/authentication.rb", &authentication),
+        ("app/controllers/concerns/authorization.rb", &authorization),
+        ("app/controllers/application_controller.rb", BOTH_CONCERNS),
+        ("app/controllers/things_controller.rb", ANONYMOUS_THINGS),
+    ]);
+    assert_eq!(
+        filters_with_origin(&app),
+        vec![
+            (FilterKind::Skip, "ensure_can_access_account".into(), vec!["show".into()], vec![], "Authorization".into()),
+            (FilterKind::Before, "audit_access".into(), vec!["destroy".into()], vec![], "Authorization".into()),
+            (FilterKind::Skip, "require_authentication".into(), vec!["show".into()], vec![], "Authentication".into()),
+        ]
+    );
+    assert!(!names_unexpanded_macro(&gaps, "allow_anonymous"), "{gaps:?}");
+}
+
+/// A nested call's argument that does not fold to a literal, and a
+/// parameter rebinding that does not fold. Each stays a recorded gap
+/// rather than expanding with the wrong scope.
+#[test]
+fn macro_bindings_that_cannot_be_followed_refuse_the_macro() {
+    let cases = [
+        (
+            "a nested call's argument reads a local that does not fold",
+            ANONYMOUS_AUTHENTICATION.replace(
+                "      actions = :show\n      allow_unauthorized_access\n",
+                "      actions = anonymous_actions\n      allow_unauthorized_access only: actions\n",
+            ),
+            SCOPED_AUTHORIZATION.replace(
+                "    def allow_unauthorized_access\n      actions = :destroy\n      skip_before_action :ensure_can_access_account, only: actions\n",
+                "    def allow_unauthorized_access(**options)\n      skip_before_action :ensure_can_access_account, **options\n",
+            ),
+            ANONYMOUS_THINGS.to_string(),
+        ),
+        (
+            "a caller reassigns its parameter before a nested call",
+            ANONYMOUS_AUTHENTICATION.replace(
+                "    def allow_anonymous\n      actions = :show\n      allow_unauthorized_access\n",
+                "    def allow_anonymous(**options)\n      options = options.merge(only: :show)\n      allow_unauthorized_access **options\n",
+            ).replace("only: actions", "**options"),
+            SCOPED_AUTHORIZATION.replace(
+                "    def allow_unauthorized_access\n      actions = :destroy\n      skip_before_action :ensure_can_access_account, only: actions\n",
+                "    def allow_unauthorized_access(**options)\n      skip_before_action :ensure_can_access_account, **options\n",
+            ),
+            ANONYMOUS_THINGS.replace("allow_anonymous", "allow_anonymous only: :destroy"),
+        ),
+    ];
+    for (case, authentication, authorization, things) in cases {
+        let (app, gaps) = sibling_app(&[
+            ("app/controllers/concerns/authentication.rb", &authentication),
+            ("app/controllers/concerns/authorization.rb", &authorization),
+            ("app/controllers/application_controller.rb", BOTH_CONCERNS),
+            ("app/controllers/things_controller.rb", &things),
+        ]);
+        assert!(filters_with_origin(&app).is_empty(), "{case}: {:?}", filters_with_origin(&app));
+        assert!(keeps_macro_call(&app, "allow_anonymous"), "{case}: the call must stay whole");
+        assert!(names_unexpanded_macro(&gaps, "allow_anonymous"), "{case}: {gaps:?}");
+    }
+}
