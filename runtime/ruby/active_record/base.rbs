@@ -229,6 +229,11 @@ module ActiveRecord
     # the trailing assignment.
     def mark_persisted!: () -> void
 
+    # cache_key / cache_version / cache_key_with_version — see base.rb.
+    def cache_key: () -> String
+    def cache_version: () -> String?
+    def cache_key_with_version: () -> String
+
     # Class-level CRUD — delegate to the adapter. Returns Base
     # nominally; per-target emit can refine to the actual subclass
     # via cast at the call site (RBS's `instance` / `self` self-type

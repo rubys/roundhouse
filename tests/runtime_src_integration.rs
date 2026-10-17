@@ -1083,7 +1083,15 @@ fn every_runtime_method_body_concretely_typed() {
     // `mail`'s opts, whatever the action put there (a String, an Array,
     // nil), as ActionMailer's `Mail::Message` normalizes them (+5 in
     // action_mailer.rb).
-    const CEILING: usize = 781;
+    // MEASURED 789 on 2026-10-17 (jbuilder-cache-key-parity, +8 over
+    // 781): the new `cache_key`/`cache_version`/`cache_key_with_version`
+    // on both Relation and Base. Base's `cache_version` reads
+    // `self[:updated_at]` rather than the bare per-model `updated_at`
+    // reader — the escape `fill_timestamps` already uses on the write
+    // side — because Base itself cannot resolve a concrete column's
+    // type; see that method's own comment for why `[]`'s declared `Str`
+    // is an accepted approximation, not the real runtime value.
+    const CEILING: usize = 789;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

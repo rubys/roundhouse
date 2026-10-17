@@ -6817,6 +6817,7 @@ pub(crate) fn instantiate_return_kind(
         },
         ReturnKind::ArrayOfSym => Ty::Array { elem: std::sync::Arc::new(Ty::Sym) },
         ReturnKind::Str => Ty::Str,
+        ReturnKind::StrOrNil => Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
         ReturnKind::ClassRef(path) => Ty::Class {
             id: ClassId(Symbol::from(path)),
             args: vec![].into(),

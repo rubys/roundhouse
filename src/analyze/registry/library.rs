@@ -432,6 +432,7 @@ fn ar_instance_ty(kind: crate::catalog::ReturnKind) -> Option<Ty> {
         ReturnKind::IntOrNil => Some(Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
         ReturnKind::Bool => Some(Ty::Bool),
         ReturnKind::Str => Some(Ty::Str),
+        ReturnKind::StrOrNil => Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
         ReturnKind::HashSymStr => {
             Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Str) })
         }

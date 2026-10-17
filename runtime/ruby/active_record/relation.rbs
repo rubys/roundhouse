@@ -178,6 +178,17 @@ module ActiveRecord
     def preloaded: (untyped records, bool loaded) -> Relation
     def klass: () -> Class
 
+    # Collection cache key (see relation.rb for why it is not Rails'
+    # digest). Declared ivars so Bar A seeds them from the memoizing
+    # `||=` first-write rather than freezing on `initialize`'s absence.
+    @cache_keys: Hash[String, String]?
+    @cache_versions: Hash[String, String]?
+    def cache_key: (?(String | Symbol) timestamp_column) -> String
+    def cache_version: (?(String | Symbol) timestamp_column) -> String
+    def compute_cache_version: (String timestamp_column) -> String
+    def cache_key_with_version: () -> String
+    def fnv1a_hex: (String str) -> String
+
     def to_a: () -> Array[Base]
     def load_records: () -> Array[Base]
     def loaded_records: () -> Array[Base]

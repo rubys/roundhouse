@@ -758,6 +758,84 @@ module ActiveRecord
       @destroyed = false
     end
 
+    # ---- cache_key / cache_version / cache_key_with_version ---------
+    #
+    # Rails' `ActiveRecord::Integration` (`active_record/integration.rb`):
+    # a single record's half of the same fragment-cache key Relation's
+    # `cache_key_with_version` (`relation.rb`) answers for a collection.
+    # A jbuilder `cache!` key naming one record — `json.cache!([
+    # current_account, @widget]) do … end`, `current_account` a
+    # `helper_method` answering a record — calls this the same way an
+    # app controller or view does, and `cache!`'s `key` is a plain
+    # positional parameter (jbuilder 2.15.1's `jbuilder_template.rb`),
+    # so it is evaluated whether or not the controller is caching.
+    #
+    # Exact Rails parity except the timestamp rendering (see below):
+    # `id` and `table_name` are real facts here, not a digest over SQL
+    # text the way Relation's collection key has to approximate, so
+    # there is nothing to trade off on the key/version SHAPE itself —
+    # only on how the updated_at TIMESTAMP inside it is written.
+    #
+    # Rails always takes the `cache_versioning = true` shape (the
+    # default since Rails 5.2; this runtime never models it as
+    # configurable), under which `cache_key` carries no timestamp at
+    # all and `cache_version` carries it alone:
+    #   new record       cache_key "<table>/new",   cache_version nil
+    #   saved record      cache_key "<table>/<id>",
+    #                      cache_version "<updated_at>" (nil without an
+    #                      updated_at column)
+    #   cache_key_with_version   "<key>-<version>", or just <key> when
+    #                      <version> is nil (an unsaved record, or no
+    #                      updated_at column)
+    def cache_key
+      tbl = self.class.table_name
+      return "#{tbl}/new" if new_record?
+      rid = id
+      "#{tbl}/#{rid}"
+    end
+
+    # Reads `updated_at` through `self[:updated_at]`, not the bare
+    # per-model-synthesized `updated_at` reader: that reader is not a
+    # method Base itself declares (every concrete model synthesizes its
+    # own), so a bare call from Base's OWN body has no declared return
+    # type to seed from and came back an unresolved type variable — the
+    # hand-RBS-typed surface this file is held to requires every
+    # sub-expression resolve to SOME type, concrete or the declared
+    # gradual escape, never an unresolved `Ty::Var`
+    # (`every_runtime_method_body_is_fully_typed`,
+    # `inference_on_spinel_blog_runtime_with_rbs`'s zero-untyped
+    # ceiling).
+    #
+    # `[]` is the established escape for exactly this (`fill_timestamps`
+    # below writes `self[:updated_at] = now` for the identical reason,
+    # the write side of this same problem). Base's own `[]` is typed
+    # `Str` in the catalog — a known, already-accepted approximation
+    # ("Imprecise for non-string columns (`article[:id]` is actually
+    # Int), but matches the existing declared shape", `catalog/mod.rs`)
+    # for the STATIC type only: the CONCRETE per-model `[]` the lowerer
+    # synthesizes (`model_to_library/schema.rs`) answers the REAL column
+    # value through a `case` on the attribute name, declared `Untyped`
+    # there — so `self[:updated_at]` is the real `updated_at` value,
+    # genuinely, dispatched dynamically; `Str` only describes what Base
+    # itself can promise about a call it cannot resolve concretely.
+    #
+    # `updated_at.to_i` (epoch seconds), not Rails' `to_fs(:usec)`
+    # microsecond string — the same tradeoff `Relation#cache_version`
+    # documents: a cache key only needs the SAME string back for the
+    # same row, and `to_i` already changes on every write (the
+    # database's own timestamp precision floor is never finer than a
+    # roundhouse record needs to invalidate a stale fragment).
+    def cache_version
+      return nil unless has_attribute?(:updated_at)
+      ts = self[:updated_at]
+      ts.nil? ? nil : ts.to_i.to_s
+    end
+
+    def cache_key_with_version
+      version = cache_version
+      version.nil? ? cache_key : "#{cache_key}-#{version}"
+    end
+
     # ---- Class-level CRUD -------------------------------------------
 
     def self.all

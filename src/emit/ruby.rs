@@ -804,6 +804,29 @@ pub fn emit_lowered_jbuilder_views(app: &App) -> Vec<EmittedFile> {
         .flat_map(|v| {
             let mut lc = crate::lower::lower_jbuilder_to_library_class(v, app);
             library::apply_zoned_json_time_lowering(std::slice::from_mut(&mut lc), app);
+            // A jbuilder view is a module function exactly like an ERB
+            // one (`Views::<X>.<template>_json`, no controller
+            // instance), but unlike ERB views this tree never ran
+            // `apply_helper_lowering` on it — `emit_library_class_decls`
+            // (the ERB/model/controller path) is the only caller. A
+            // bare `helper_method`-marked call (Devise's `current_user`,
+            // an app's own `helper_method :platform`) stayed unrewritten
+            // and raised `NameError`/`NoMethodError` at the first render
+            // that reached it. Invisible for most jbuilder views because
+            // nothing in them typically calls one, and invisible inside
+            // `json.cache! key do … end` before roundhouse 981ce8e30
+            // specifically because the pre-981ce8e3 transparent `cache!`
+            // handling dropped the key expression on the floor rather
+            // than lowering it — so a key like `[current_user,
+            // @widgets]` was never even reached. 981ce8e30's whole-
+            // template `cache!` (`walk_cached_template`) lowers the key
+            // for real, which is what exposed the gap. Run per-view, on
+            // this view's own one-method slice, matching
+            // `apply_zoned_json_time_lowering` just above — jbuilder
+            // views are emitted and merged into `app.library_classes`
+            // nowhere else, so there is no bulk slice to share this
+            // pass with.
+            library::apply_helper_lowering(std::slice::from_mut(&mut lc), app);
             let out_path = jbuilder_view_output_path(v.name.as_str());
             library::emit_library_class_pair(&lc, app, out_path)
         })
