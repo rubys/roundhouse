@@ -327,7 +327,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // rewrite controller bodies + register the class with the typer.
     let mut params_specs = self::params::collect_specs(controllers);
     params_specs.mark_file_fields(models);
-    params_specs.mark_keyed_associations(models);
+    params_specs.mark_associations(models);
     params_specs.mark_model_resources(models, schema);
     let params_lcs = self::params::synthesize_params_classes(&params_specs);
 

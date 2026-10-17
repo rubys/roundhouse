@@ -44,7 +44,7 @@
 //! so per-target collapsers can group / fold (see
 //! `project_specialization_strategy.md`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::dialect::{
     AccessorKind, Controller, LibraryClass, LibraryClassOrigin, MethodDef,
@@ -132,14 +132,41 @@ pub struct ParamsSpec {
 #[derive(Clone, Debug, Default)]
 pub struct ParamsSpecs {
     specs: Vec<ParamsSpec>,
-    /// Names of `has_one` / `has_many` associations declared with a
-    /// `primary_key:` other than `id` (see [`Self::mark_keyed_associations`]).
-    keyed_assocs: std::collections::HashSet<Symbol>,
+    /// Every `has_one` / `has_many` declaration, by association name
+    /// (see [`Self::mark_associations`]).
+    associations: HashMap<Symbol, Vec<DeclaredAssoc>>,
+    /// Each model's superclass, so a subclass finds the associations it
+    /// inherits.
+    model_parents: HashMap<ClassId, ClassId>,
     /// Resources a model is named after (with a table), so the model
     /// lowering gives it the typed `update_from_<x>` variants. `None`
     /// until [`Self::mark_model_resources`] is told the models: a caller
     /// that lowers controllers without them keeps every rename.
     model_resources: Option<std::collections::HashSet<Symbol>>,
+}
+
+/// One `has_one` / `has_many` declaration, as the parent-ivar rewrite
+/// reads it (see [`ParamsSpecs::mark_associations`]).
+#[derive(Clone, Debug)]
+struct DeclaredAssoc {
+    owner: ClassId,
+    target: ClassId,
+    foreign_key: Symbol,
+    /// Whether `<target>.new(<foreign_key> => parent.id)` is what Rails
+    /// builds through it.
+    reproducible: bool,
+}
+
+/// What `@<parent>.<assoc>` resolves to for the parent-ivar rewrite.
+pub enum AssocTarget {
+    /// The declared class and foreign key.
+    Declared { target: ClassId, foreign_key: Symbol },
+    /// Declared, but not reproducible by the rewrite, or declared
+    /// differently on several models when the parent's class is not
+    /// known.
+    Unreproducible,
+    /// No model declares it.
+    Undeclared,
 }
 
 impl ParamsSpecs {
@@ -206,32 +233,96 @@ impl ParamsSpecs {
             .find(|s| &s.resource == resource && s.is_canonical)
     }
 
+    /// Record every `has_one` / `has_many` declaration, so the
+    /// parent-ivar rewrite (`@article.comments.build` ->
+    /// `Comment.new(article_id: @article.id)`) builds the declared
+    /// class with the declared foreign key — `has_many :remarks,
+    /// class_name: "Comment", foreign_key: :post_id` is not `Remark`
+    /// keyed on `<ivar>_id`.
+    ///
+    /// A declaration the rewrite's `<Target>.new(fk => parent.id)`
+    /// cannot reproduce is recorded as such, and the rewrite declines
+    /// it: a custom `primary_key:` (the fk matches another owner
+    /// column), `through:`, `as:` (the rows are keyed by the type
+    /// column too), and a scope that does more than order or eager-load
+    /// (Rails builds with its `where` values; see
+    /// `scope_chain::scope_is_build_neutral`). A scope lambda taking the
+    /// owner is dropped at ingest, so it reads as no scope here. A
+    /// `has_one` is never a collection proxy, so `.build` / `.find` on
+    /// its reader is not an association call either.
+    pub fn mark_associations(&mut self, models: &[crate::dialect::Model]) {
+        use crate::dialect::Association;
+        for model in models {
+            if let Some(parent) = &model.parent {
+                self.model_parents.insert(model.name.clone(), parent.clone());
+            }
+            for assoc in model.associations() {
+                let reproducible = match assoc {
+                    Association::HasMany { through, as_interface, scope, .. } => {
+                        through.is_none()
+                            && as_interface.is_none()
+                            && scope
+                                .as_ref()
+                                .is_none_or(crate::lower::scope_chain::scope_is_build_neutral)
+                            && crate::lower::assoc_primary_key::custom_primary_key(assoc)
+                                .is_none()
+                    }
+                    Association::HasOne { .. } => false,
+                    _ => continue,
+                };
+                let (Association::HasMany { target, foreign_key, .. }
+                | Association::HasOne { target, foreign_key, .. }) = assoc
+                else {
+                    continue;
+                };
+                self.associations.entry(assoc.name().clone()).or_default().push(DeclaredAssoc {
+                    owner: model.name.clone(),
+                    target: target.clone(),
+                    foreign_key: foreign_key.clone(),
+                    reproducible,
+                });
+            }
+        }
+    }
+
+    /// What `<parent>.<assoc>` builds and finds through, given the
+    /// parent's class when the analyzer typed it: the declaration on
+    /// that class or the nearest superclass declaring it, else the one
+    /// every declarer of that name agrees on. The ivar's name says
+    /// nothing about its class (`@post` may hold an Article), so a name
+    /// declared differently on several models, with no class to choose
+    /// by, is not guessed at.
+    pub fn assoc_target(&self, assoc: &Symbol, owner: Option<&ClassId>) -> AssocTarget {
+        let Some(decls) = self.associations.get(assoc) else {
+            return AssocTarget::Undeclared;
+        };
+        let inherited = std::iter::successors(owner, |class| self.model_parents.get(*class))
+            .take(self.model_parents.len() + 1)
+            .find_map(|class| decls.iter().find(|d| &d.owner == class));
+        let decl = inherited.or_else(|| {
+            let first = decls.first()?;
+            decls
+                .iter()
+                .all(|d| {
+                    (&d.target, &d.foreign_key, d.reproducible)
+                        == (&first.target, &first.foreign_key, first.reproducible)
+                })
+                .then_some(first)
+        });
+        match decl {
+            Some(d) if d.reproducible => AssocTarget::Declared {
+                target: d.target.clone(),
+                foreign_key: d.foreign_key.clone(),
+            },
+            _ => AssocTarget::Unreproducible,
+        }
+    }
+
     /// Mark each spec's `has_one_attached` fields (see
     /// `ParamsSpec::file_fields`). The resource names its model the way
     /// `scan_create_demand` matches them — `snake_case(Model) ==
     /// resource` — so `:user` finds `User` and a list permitting
     /// `:avatar` on it types that field as a file.
-    /// Record the association names whose foreign key matches an owner
-    /// column other than `id` (`primary_key:`). The parent-ivar rewrite
-    /// (`@article.comments.build` -> `Comment.new(article_id:
-    /// @article.id)`) derives the foreign key from the ivar's name and
-    /// reads `.id`, which is wrong for these, so it declines them and
-    /// the typed association seed (which reads the declaration) handles
-    /// the call instead.
-    pub fn mark_keyed_associations(&mut self, models: &[crate::dialect::Model]) {
-        for model in models {
-            for assoc in model.associations() {
-                if crate::lower::assoc_primary_key::custom_primary_key(assoc).is_some() {
-                    self.keyed_assocs.insert(assoc.name().clone());
-                }
-            }
-        }
-    }
-
-    pub fn is_keyed_assoc(&self, name: &Symbol) -> bool {
-        self.keyed_assocs.contains(name)
-    }
-
     pub fn mark_file_fields(&mut self, models: &[crate::dialect::Model]) {
         for spec in &mut self.specs {
             let Some(model) = models
@@ -453,7 +544,8 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 file_fields: std::collections::BTreeSet::new(),
             })
             .collect(),
-        keyed_assocs: Default::default(),
+        associations: Default::default(),
+        model_parents: Default::default(),
         model_resources: None,
     }
 }

@@ -1424,6 +1424,38 @@ pub(crate) fn scope_is_row_preserving(scope: &Expr) -> bool {
     walk(scope)
 }
 
+/// Does this association-scope lambda leave what `build` makes, and
+/// which row `find(id)` returns, as they would be without it?
+///
+/// Rails builds through an association with the scope's `where`
+/// equalities and `create_with` values, and finds within its rows.
+/// Ordering, eager loading, `references` and `readonly` touch neither,
+/// so this admits them on top of [`scope_is_row_preserving`]'s eager
+/// loads: `order` decides what `.first` means, not which row an id
+/// names. Anything else declines, as there.
+pub(crate) fn scope_is_build_neutral(scope: &Expr) -> bool {
+    fn walk(e: &Expr) -> bool {
+        match &*e.node {
+            ExprNode::Send { recv, method, .. } => {
+                matches!(
+                    method.as_str(),
+                    "order"
+                        | "reorder"
+                        | "includes"
+                        | "preload"
+                        | "eager_load"
+                        | "readonly"
+                        | "references"
+                ) && recv.as_ref().is_none_or(|r| walk(r))
+            }
+            // The chain root a receiver-less lambda body lowers to.
+            ExprNode::SelfRef => true,
+            _ => false,
+        }
+    }
+    walk(scope)
+}
+
 /// Rails' `association_primary_key` for a `belongs_to`: the declaration's
 /// `primary_key:`, else the target model's own primary key, else `id`.
 pub(crate) fn association_primary_key(

@@ -12,7 +12,7 @@ use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
 
-use super::params::{ParamsSpec, ParamsSpecs};
+use super::params::{AssocTarget, ParamsSpec, ParamsSpecs};
 use super::util::{map_expr, map_expr_mut};
 
 // ---------------------------------------------------------------------------
@@ -1123,16 +1123,21 @@ fn merge_or_append_kwarg(args: &mut Vec<Expr>, key: &str, value: &str, span: Spa
 //   @x = @parent.<assoc>.build(<args>)
 //   ─────────────────────────────────────────────────────────────────
 //   attrs = <args>.to_h
-//   attrs[:<parent>_id] = @parent.id
-//   @x = <Singular>.new(attrs)
+//   attrs[:<foreign_key>] = @parent.id
+//   @x = <Target>.new(attrs)
 //
 //   @x = @parent.<assoc>.find(<args>)
 //   ─────────────────────────────────────────────────────────────────
-//   @x = <Singular>.find(<args>)
-//   if @x.<parent>_id != @parent.id
+//   @x = <Target>.find(<args>)
+//   if @x.<foreign_key> != @parent.id
 //     head(:not_found)
 //     return
 //   end
+//
+// <Target> and <foreign_key> are the declaration's class and foreign
+// key. An association no model declares keeps the name-derived form
+// (`<Singular>`, `<parent>_id`); one declared in a way this cannot
+// reproduce is left as written.
 //
 // One Assign expands to a Seq of multiple Exprs — the outer Seq the
 // emitter walks for line-per-statement output flattens implicitly.
@@ -1207,14 +1212,26 @@ pub(super) fn rewrite_assoc_through_parent_typed(
         let ExprNode::Ivar { name: parent_name } = &*inner_recv.node else {
             return None;
         };
-        // The foreign key below comes from the ivar's name and the
-        // parent's value from `.id`; an association keyed on another
-        // owner column (`primary_key:`) needs the declaration instead.
-        if params_specs.is_keyed_assoc(assoc_method) {
-            return None;
-        }
-        let model_class = crate::naming::singularize_camelize(assoc_method.as_str());
-        let fk = format!("{}_id", parent_name.as_str());
+        // The class and foreign key come from the declaration
+        // (`class_name:`, `foreign_key:`) on the parent's analyzed class,
+        // the parent's value from `.id`. A declaration that expansion
+        // cannot reproduce (`primary_key:`, `through:`, `as:`, a scope
+        // that changes what is built) is declined, and the typed
+        // association seed handles or refuses the call instead.
+        let owner = match inner_recv.ty.clone().map(Ty::strip_nil) {
+            Some(Ty::Class { id, .. }) => Some(id),
+            _ => None,
+        };
+        let (model_class, fk) = match params_specs.assoc_target(assoc_method, owner.as_ref()) {
+            AssocTarget::Declared { target, foreign_key } => {
+                (target.0.as_str().to_string(), foreign_key.as_str().to_string())
+            }
+            AssocTarget::Unreproducible => return None,
+            AssocTarget::Undeclared => (
+                crate::naming::singularize_camelize(assoc_method.as_str()),
+                format!("{}_id", parent_name.as_str()),
+            ),
+        };
         Some(match kind {
             AssocKind::Build => {
                 let lhs = lhs.expect("checked above");
@@ -1222,6 +1239,9 @@ pub(super) fn rewrite_assoc_through_parent_typed(
                     return Some(expand_build_bare(&model_class, &fk, parent_name, lhs, e.span));
                 }
                 if let Some(spec) = match_params_helper(&outer_args[0], &helper_specs, params_specs) {
+                    if !has_typed_factory(&model_class, spec) {
+                        return None;
+                    }
                     return Some(expand_build_typed(
                         &model_class,
                         &fk,
@@ -1240,6 +1260,9 @@ pub(super) fn rewrite_assoc_through_parent_typed(
             AssocKind::Create { bang } => {
                 let lhs = lhs.expect("checked above");
                 let spec = match_params_helper(&outer_args[0], &helper_specs, params_specs)?;
+                if !has_typed_factory(&model_class, spec) {
+                    return None;
+                }
                 expand_create_typed(
                     &model_class,
                     &fk,
@@ -1290,7 +1313,7 @@ pub(super) fn rewrite_assoc_through_parent_typed(
                         value: Expr::new(
                             e.span,
                             ExprNode::Send {
-                                recv: Some(const_path(&[&model_class], e.span)),
+                                recv: Some(model_const(&model_class, e.span)),
                                 method: Symbol::from("find_by"),
                                 args: vec![Expr::new(
                                     e.span,
@@ -1350,6 +1373,14 @@ fn match_params_helper<'a>(
     helper_specs.get(method).copied()
 }
 
+/// Whether `<model_class>.<factory>` exists for this params class: the
+/// model lowerer synthesizes the typed factories only on the model a
+/// list's resource names, so `has_many :comments, class_name:
+/// "Feedback"` building from `comment_params` has none to call.
+fn has_typed_factory(model_class: &str, spec: &ParamsSpec) -> bool {
+    crate::naming::snake_case(model_class) == spec.resource.as_str()
+}
+
 enum AssocKind {
     Build,
     /// `@parent.<assoc>.create!(<params>)` — `Build` plus the save it
@@ -1382,7 +1413,7 @@ pub(super) fn expand_build_typed(
     let from_params_call = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(const_path(&[model_class], span)),
+            recv: Some(model_const(model_class, span)),
             method: factory,
             args: vec![arg.clone()],
             block: None,
@@ -1472,7 +1503,7 @@ fn expand_build_bare(
     let new_call = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(const_path(&[model_class], span)),
+            recv: Some(model_const(model_class, span)),
             method: Symbol::from("new"),
             args: vec![],
             block: None,
@@ -1564,7 +1595,7 @@ pub(super) fn expand_build(
     let new_call = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(const_path(&[model_class], span)),
+            recv: Some(model_const(model_class, span)),
             method: Symbol::from("new"),
             args: vec![attrs_var],
             block: None,
@@ -1597,7 +1628,7 @@ pub(super) fn expand_find(
     let find_call = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(const_path(&[model_class], span)),
+            recv: Some(model_const(model_class, span)),
             method: Symbol::from("find"),
             args: vec![arg.clone()],
             block: None,
@@ -2873,6 +2904,12 @@ pub(crate) fn const_path(segments: &[&str], span: Span) -> Expr {
             path: segments.iter().map(|s| Symbol::from(*s)).collect(),
         },
     )
+}
+
+/// A model class as a constant, one path segment per `::`-separated
+/// name (`class_name: "Push::Subscription"`).
+fn model_const(model_class: &str, span: Span) -> Expr {
+    const_path(&model_class.split("::").collect::<Vec<_>>(), span)
 }
 
 /// Like `const_path`, but stamps `Ty::Class` so the emit-time
