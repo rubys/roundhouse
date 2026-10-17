@@ -3,18 +3,17 @@
 require_relative "../inflector"
 
 module ActiveRecord
-  # A Relation's `includes`/`preload`, deferred until a record asks.
+  # A group's includes, run once if a record was handed one.
   #
-  # `load_records` used to batch-load every included association the
-  # moment the rows arrived. On a page whose records only feed a cached
-  # collection (campfire's room page: 40 messages, their rich text,
-  # creators, boosts and attachments), the cache key needs each record's
-  # id and updated_at, and on a hit nothing reads an association at all:
-  # the batch loads were most of the page's database time. Now each record
-  # carries this object, and the first association read on any of them
-  # (an emitted reader calls `_await_preload`) runs the same batched
-  # preload for the whole group, once. A miss issues the same queries as
-  # before, later; a hit issues none of them.
+  # `load_records` runs recorded includes when the rows arrive, which is
+  # Rails' contract: `includes(...).to_a` finishes the batch loads, and a
+  # later read of those associations issues nothing. Campfire's message
+  # pages call `skip_preloading!` before `first`/`last`, then
+  # `preload_associations` on only the rendered rows, so those records
+  # are not handed this object and their associations stay unloaded.
+  #
+  # A record that does carry one runs it on the first association read
+  # (`_await_preload`), for the whole group, once.
   class PendingPreload
     def initialize(model, records, specs)
       @model = model
@@ -1121,8 +1120,7 @@ module ActiveRecord
         rows.map { |row| @model.instantiate(row) }
       end
       if @includes.length > 0 && !@skip_preloading && records.length > 0
-        pending = ActiveRecord::PendingPreload.new(@model, records, @includes.dup)
-        records.each { |record| record._pend_preload(pending) }
+        @model.preload_associations(records, @includes.dup)
       end
       records
     end

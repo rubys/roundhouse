@@ -1,16 +1,14 @@
-//! Deferred `includes`/`preload` for the ruby family: every association
-//! reader waits on its record's pending preload before reading its cache.
+//! Association readers wait on a pending preload before reading cache.
 //!
-//! `ActiveRecord::Relation#load_records` no longer batch-loads a
-//! relation's included associations when the rows arrive; it hands each
-//! record an `ActiveRecord::PendingPreload` for the group
-//! (runtime/ruby/active_record/relation.rb). The first association read
-//! on any record of the group runs that preload, for all of them, once.
-//! On campfire's room page the 40 messages only feed a cached collection
-//! whose key needs ids and updated_at, so on a hit no association is read
-//! and the rich text, creator, boost and attachment loads never run.
+//! `ActiveRecord::Relation#load_records` batch-loads included associations
+//! when the rows arrive, unless the relation called `skip_preloading!`.
+//! That flag is how campfire's message page stays lazy: the page loads
+//! without the includes, then `preload_associations` fills only the
+//! rendered rows. A record from an ordinary `includes(...).to_a` has
+//! nothing pending, because the load already ran.
 //!
-//! This pass is the reader half: an instance method of a model whose
+//! This pass is the reader half for a record that was handed an
+//! `ActiveRecord::PendingPreload`: an instance method of a model whose
 //! first statement reads an association's loaded flag (`@<assoc>_loaded`,
 //! `@__rich_text_<attr>_loaded`, ... — the guard `apply_preload_lowering`
 //! and the rich-text lowering put on every reader, and the body of

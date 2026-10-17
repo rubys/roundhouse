@@ -3636,7 +3636,9 @@ fn concern_class_attribute_macros_are_fully_typed() {
 /// `reorder`, `skip_preloading!` and `preload_associations`, the three
 /// Relation methods campfire's message paging (basecamp/once-campfire#292)
 /// leans on. Preloading is observed by deleting the parts after loading:
-/// only a widget whose parts were preloaded still sees them.
+/// only a widget whose parts were preloaded still sees them. An
+/// `includes` load that did not skip runs the batch before that delete,
+/// so both widgets still see their parts.
 fn relation_paging_hooks_app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
@@ -3661,10 +3663,12 @@ end
     relation = Widget.includes(:parts).order(:name)
     widgets = relation.skip_preloading!.to_a
     relation.preload_associations(widgets.first(1))
+    eager = Widget.includes(:parts).order(:name).to_a
     Part.delete_all
     counts = widgets.map { |w| w.parts.size }.join(",")
+    eager_counts = eager.map { |w| w.parts.size }.join(",")
 
-    render plain: "#{reordered}|#{counts}"
+    render plain: "#{reordered}|#{counts}|#{eager_counts}"
   end
 end
 "##)
@@ -3679,7 +3683,7 @@ Part.create!(widget: alpha, label: "a1")
 Part.create!(widget: beta, label: "b1")
 controller = WidgetsController.new
 controller.process_action(:index)
-raise "paging hooks: #{controller.body}" unless controller.body == "beta,alpha|1,0"
+raise "paging hooks: #{controller.body}" unless controller.body == "beta,alpha|1,0|1,1"
 puts "relation paging hooks passed"
 "##
 }
