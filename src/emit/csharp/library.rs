@@ -261,7 +261,8 @@ pub fn emit_module_constant(name: &str, value: &Expr) -> String {
             (format!("Dictionary<string, {vty}>"), format!("new() {{ {} }}", pairs.join(", ")))
         }
         ExprNode::Array { elements, .. } if !elements.is_empty() => {
-            let ety = homogeneous_lit_type(elements.iter());
+            let ety = constructor_element_type(elements)
+                .unwrap_or_else(|| homogeneous_lit_type(elements.iter()).to_string());
             let els: Vec<String> = elements.iter().map(emit_expr).collect();
             (format!("List<{ety}>"), format!("new() {{ {} }}", els.join(", ")))
         }
@@ -293,6 +294,31 @@ fn homogeneous_lit_type<'a>(mut elems: impl Iterator<Item = &'a Expr>) -> &'stat
     match elems.next().and_then(kind) {
         Some(first) if elems.all(|e| kind(e) == Some(first)) => first,
         _ => "object?",
+    }
+}
+
+/// `ControllerConfig.new` in a module constant. A `List<object?>` makes
+/// the reader fail to convert back to the class.
+fn constructor_element_type(elements: &[Expr]) -> Option<String> {
+    let name_of = |e: &Expr| -> Option<String> {
+        let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*e.node else {
+            return None;
+        };
+        if method.as_str() != "new" || !args.is_empty() || block.is_some() {
+            return None;
+        }
+        let ExprNode::Const { path } = &*recv.node else {
+            return None;
+        };
+        let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        let name = type_name(&joined);
+        if name.is_empty() { None } else { Some(name) }
+    };
+    let first = name_of(elements.first()?)?;
+    if elements.iter().all(|e| name_of(e).as_deref() == Some(first.as_str())) {
+        Some(first)
+    } else {
+        None
     }
 }
 

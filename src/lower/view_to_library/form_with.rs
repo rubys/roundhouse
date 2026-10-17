@@ -1479,7 +1479,7 @@ mod tests {
         let out = emit_form_with_blockless(&args, &ctx).expect("url-only form_with lowers");
         let text = emitted_text(&out);
         assert!(text.contains("<form action="), "{text}");
-        assert!(text.contains("<form_with>"), "{text}");
+        assert!(text.contains("<enter_form_with>"), "{text}");
         assert!(text.contains("method_override_input"), "{text}");
         assert!(text.contains("csrf_token_hidden_input"), "{text}");
     }

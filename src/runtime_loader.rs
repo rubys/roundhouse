@@ -127,8 +127,12 @@ const CRYSTAL_TARGET: TargetEmit = TargetEmit {
 /// module, so we re-wrap them via `module Namespace ... end` and
 /// concatenate the (already-wrapped) class bodies after.
 fn crystal_wrap_namespace(namespace: &str, body: &str) -> String {
+    // A constant that constructs a class in this file has to follow
+    // that class. Crystal runs the initializer while loading the
+    // module, before a later `class` exists.
+    let body = move_class_constants_after_classes(body);
     if namespace.is_empty() {
-        return body.to_string();
+        return body;
     }
     let first_seg = namespace.split("::").next().unwrap_or(namespace);
     let already_wraps = body

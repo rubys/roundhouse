@@ -111,6 +111,15 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
         // mutation-threaded bodies touch (via the `__field__` /
         // `__struct_put__` bridges — session's `@data` has no attr).
         let fields = struct_fields(class);
+        // `new` returns `%Module{}`. An empty `initialize` has no
+        // fields, and Elixir still needs `defstruct` or that literal
+        // cannot expand.
+        if fields.is_empty()
+            && class.methods.iter().any(|m| m.name.as_str() == "initialize")
+        {
+            writeln!(out, "  defstruct []").unwrap();
+            out.push('\n');
+        }
         if !fields.is_empty() {
             // Framework-internal list fields (the AR `errors` collection,
             // has_many `_cache`s) must default to `[]`, not `nil`: a fresh

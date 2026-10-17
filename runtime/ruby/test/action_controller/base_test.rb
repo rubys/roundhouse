@@ -247,14 +247,14 @@ class ActionControllerBaseTest < Minitest::Test
   # surfaces as a wrong code coming back from `resolve_status`.
 
   def test_relative_url_root_written_on_the_class_is_read_on_an_instance
-    # `Base.config` is the reopen in controller_config.rb. This file's
-    # own reader is `controller_config`; an instance reads it back
-    # through `Base#config`.
-    previous = ActionController.controller_config.relative_url_root
-    ActionController.controller_config.relative_url_root = "/camp"
+    # `Base.config` lives in controller_config.rb. The module reader
+    # `ActionController.controller_config` is not an imported name on
+    # strict targets; `Base.url_root_config` is the same slot. A write
+    # there must show up on an instance: a clone of
+    # `CONTROLLER_CONFIG_SLOT[0]` would leave the read at "".
+    ActionController::Base.url_root_config.relative_url_root = "/camp"
     assert_equal "/camp", TestController.new.config.relative_url_root
-  ensure
-    ActionController.controller_config.relative_url_root = previous
+    ActionController::Base.url_root_config.relative_url_root = ""
   end
 
   def test_resolve_status_covers_every_symbol_used_in_real_blog

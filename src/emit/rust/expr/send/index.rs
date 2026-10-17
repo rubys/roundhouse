@@ -111,6 +111,10 @@ pub(super) fn try_recv_typed_method(
             // Ty is Ty::Int. HashMap indexing keeps the bare form
             // (HashMap<K, V> indexes by &K, the user-supplied key
             // is already the right type).
+            let const_slot = matches!(
+                &*r.node,
+                ExprNode::Const { path } if path.last().is_some_and(|n| n.as_str().ends_with("_SLOT"))
+            );
             if let Some(crate::ty::Ty::Array { elem }) = recv_ty {
                 if matches!(arg_ty, Some(crate::ty::Ty::Int)) {
                     let suffix = if is_copy_ty(elem) { "" } else { ".clone()" };
@@ -125,6 +129,18 @@ pub(super) fn try_recv_typed_method(
                         suffix
                     ));
                 }
+            } else if const_slot && matches!(arg_ty, Some(crate::ty::Ty::Int)) {
+                // A class-valued slot is still `LazyLock<Mutex<Vec<T>>>`.
+                // Its const ref can be typed as the element class, which
+                // would otherwise call `get_index` on the lock.
+                let recv_s = format!(
+                    "{}.lock().unwrap()",
+                    super::super::emit_send_recv(r)
+                );
+                return Some(format!(
+                    "{recv_s}[({}) as usize].clone()",
+                    emit_expr(&args[0]),
+                ));
             }
             // Ty::Class recv routing. Flash / Session expose `[]` via
             // a `.get(k)` method (the framework runtime's HWIA-shape

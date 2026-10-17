@@ -177,3 +177,57 @@ fn typescript_form_site_typechecks() {
         String::from_utf8_lossy(&tsc.stderr)
     );
 }
+
+fn unit_named<'a>(units: &'a [roundhouse::runtime_loader::RuntimeUnit], suffix: &str) -> &'a str {
+    units
+        .iter()
+        .find(|u| u.out_path.to_string_lossy().ends_with(suffix))
+        .unwrap_or_else(|| panic!("missing {suffix}"))
+        .content
+        .as_str()
+}
+
+/// The config slot constructs `ControllerConfig`. Each target has to
+/// name the class it actually emitted, and the class has to exist
+/// before that initializer runs.
+#[test]
+fn controller_config_slot_matches_the_emitted_class() {
+    let go = roundhouse::runtime_loader::go_units(|_, classes| classes).expect("go");
+    let go_body = unit_named(&go, "action_controller_base.go");
+    assert!(
+        go_body.contains("func NewActionControllerControllerConfig"),
+        "go dropped the config class:\n{go_body}"
+    );
+    assert!(
+        go_body.contains("NewActionControllerControllerConfig()"),
+        "go slot does not call the emitted constructor:\n{go_body}"
+    );
+
+    let crystal = roundhouse::runtime_loader::crystal_units(|_, classes| classes).expect("crystal");
+    let crystal_body = unit_named(&crystal, "action_controller_base.cr");
+    let class_at = crystal_body.find("class ControllerConfig").expect("crystal class");
+    let slot_at = crystal_body.find("CONTROLLER_CONFIG_SLOT").expect("crystal slot");
+    assert!(class_at < slot_at, "crystal constructs ControllerConfig before the class:\n{crystal_body}");
+
+    let csharp = roundhouse::runtime_loader::csharp_units(|_, classes| classes).expect("csharp");
+    let csharp_body = unit_named(&csharp, "ActionControllerBase.cs");
+    assert!(
+        csharp_body.contains("List<ControllerConfig>"),
+        "csharp slot is not a ControllerConfig list:\n{csharp_body}"
+    );
+
+    let elixir = roundhouse::runtime_loader::elixir_units(|_, classes| classes).expect("elixir");
+    let elixir_body = unit_named(&elixir, "action_controller_base.ex");
+    let module_at = elixir_body
+        .find("defmodule ActionController.ControllerConfig do")
+        .expect("elixir module");
+    let struct_at = elixir_body[module_at..]
+        .find("defstruct []")
+        .map(|i| module_at + i)
+        .expect("empty ControllerConfig needs defstruct");
+    let new_at = elixir_body[module_at..]
+        .find("def new(")
+        .map(|i| module_at + i)
+        .expect("constructor");
+    assert!(struct_at < new_at, "defstruct follows new:\n{elixir_body}");
+}
