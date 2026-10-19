@@ -167,6 +167,7 @@ impl Names<'_> {
             if let Some(resolved) = self.resolved(span, &written) {
                 *path = resolved.0.as_str().split("::").map(Symbol::from).collect();
             }
+            arg.decisions |= crate::expr::RESOLVED_MIXIN;
         }
     }
 }

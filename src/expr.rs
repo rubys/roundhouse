@@ -107,6 +107,12 @@ pub const INHERITED_VISIBILITY: u64 = 1 << 20;
 /// `iso8601`; the other targets keep their time-format mapping.
 pub const GROUNDED_TIME_FORMAT: u64 = 1 << 21;
 
+/// `written_names` has applied Rubydex to this mixin path. The stored
+/// spelling is the answer, including when Rubydex left a short name
+/// because the reference is top-level. Absent on a per-file ingest,
+/// which never ran that pass.
+pub const RESOLVED_MIXIN: u64 = 1 << 22;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

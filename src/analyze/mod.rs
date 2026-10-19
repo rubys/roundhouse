@@ -752,13 +752,14 @@ impl Analyzer {
                 // (or, for `lock!`, `reload` — Rails' `lock!` calls `reload`):
                 // BodyTyper prefers the model's own table, so a self seed
                 // would hide the source override's harvested return.
-                let ret = if matches!(entry.name, "reload" | "lock!") {
+                    let ret = if matches!(entry.name, "reload" | "lock!") {
+                    let classes = source_class_names(app);
                     let inherited = |name: &str| {
                         model
                             .parent
                             .as_ref()
                             .is_some_and(|parent| source_instance_method(app, parent, name))
-                            || model_includes(model)
+                            || model_includes_in(model, &classes)
                                 .iter()
                                 .any(|include| source_instance_method(app, include, name))
                     };
@@ -7707,8 +7708,33 @@ pub(crate) fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
     body_includes(&model.body)
 }
 
+/// `model_includes` with relative mixin paths resolved from the model.
+pub(crate) fn model_includes_in(
+    model: &crate::dialect::Model,
+    classes: &HashMap<ClassId, ()>,
+) -> Vec<ClassId> {
+    body_includes_in(&model.name, &model.body, classes)
+}
+
 /// The `include X` mixins a class body (a model's, or a concern's) names.
 pub(crate) fn body_includes(body: &[ModelBodyItem]) -> Vec<ClassId> {
+    includes_from_body(body, None)
+}
+
+/// Same walk as `body_includes`, with relative mixin paths resolved from
+/// `owner` the way Ruby binds them.
+pub(crate) fn body_includes_in(
+    owner: &ClassId,
+    body: &[ModelBodyItem],
+    classes: &HashMap<ClassId, ()>,
+) -> Vec<ClassId> {
+    includes_from_body(body, Some((owner, classes)))
+}
+
+fn includes_from_body(
+    body: &[ModelBodyItem],
+    resolve: Option<(&ClassId, &HashMap<ClassId, ()>)>,
+) -> Vec<ClassId> {
     let mut out = Vec::new();
     for item in body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
@@ -7718,7 +7744,6 @@ pub(crate) fn body_includes(body: &[ModelBodyItem]) -> Vec<ClassId> {
         }
         for arg in args {
             if let ExprNode::Const { path } = &*arg.node {
-                let id = mixin_path_id(path);
                 // Framework MARKER mixins — `ActiveModel::*`,
                 // `ActionView::Helpers::*` — drop here, in the single
                 // shared home feeding every MODEL's `lc.includes`,
@@ -7726,6 +7751,15 @@ pub(crate) fn body_includes(body: &[ModelBodyItem]) -> Vec<ClassId> {
                 // intact. See `is_framework_marker_include` for what
                 // supplies each family instead; the library-class twin
                 // calls the same predicate from ingest's decl walk.
+                let id = match resolve {
+                    Some((owner, classes)) => mixin_target(
+                        owner,
+                        path,
+                        arg.decisions & crate::expr::RESOLVED_MIXIN != 0,
+                        classes,
+                    ),
+                    None => mixin_path_id(path),
+                };
                 let segs: Vec<&str> = id.0.as_str().split("::").collect();
                 if crate::ingest::util::is_active_model_marker_include(&segs)
                     || crate::ingest::util::is_view_helper_marker_include(&segs)
@@ -7737,6 +7771,14 @@ pub(crate) fn body_includes(body: &[ModelBodyItem]) -> Vec<ClassId> {
         }
     }
     out
+}
+
+fn source_class_names(app: &App) -> HashMap<ClassId, ()> {
+    app.models
+        .iter()
+        .map(|model| (model.name.clone(), ()))
+        .chain(app.library_classes.iter().map(|class| (class.name.clone(), ())))
+        .collect()
 }
 
 /// Whether an application-defined instance method is available on a source
@@ -7752,14 +7794,46 @@ pub(crate) fn source_class_method(app: &App, owner: &ClassId, name: &str) -> boo
     source_method(app, owner, name, crate::dialect::MethodReceiver::Class)
 }
 
+/// A mixin path as Ruby binds it. A rooted path, and a path
+/// `written_names` already resolved, stay as stored. A per-file ingest
+/// still has the source spelling (`Concerns::Reloading`, or `Helpers`
+/// while a nearer `Helpers` is also registered), so that one is resolved
+/// from the owner's scope.
+fn mixin_target(
+    owner: &ClassId,
+    path: &[crate::ident::Symbol],
+    resolved: bool,
+    classes: &HashMap<ClassId, ()>,
+) -> ClassId {
+    let rooted = path.first().is_some_and(|head| head.as_str().is_empty());
+    let written = mixin_path_id(path);
+    if rooted || resolved {
+        return written;
+    }
+    body::lexical_class(&written, owner.0.as_str(), classes).unwrap_or(written)
+}
+
+/// A stored superclass or library-class include. Registered names are
+/// Rubydex's answer (or a real class id). An unregistered relative name
+/// is resolved from `scope`.
+fn stored_target(scope: &ClassId, written: &ClassId, classes: &HashMap<ClassId, ()>) -> ClassId {
+    if classes.contains_key(written) {
+        written.clone()
+    } else {
+        body::lexical_class(written, scope.0.as_str(), classes).unwrap_or_else(|| written.clone())
+    }
+}
+
 fn source_method(app: &App, owner: &ClassId, name: &str, side: crate::dialect::MethodReceiver) -> bool {
     use crate::dialect::MethodReceiver::Instance;
+    let classes = source_class_names(app);
     fn lookup(
         app: &App,
         owner: &ClassId,
         name: &str,
         side: crate::dialect::MethodReceiver,
         seen: &mut BTreeSet<ClassId>,
+        classes: &HashMap<ClassId, ()>,
     ) -> bool {
         if !seen.insert(owner.clone()) {
             return false;
@@ -7769,21 +7843,25 @@ fn source_method(app: &App, owner: &ClassId, name: &str, side: crate::dialect::M
             if model.methods().any(|method| method.receiver == side && method.name.as_str() == name) {
                 return true;
             }
-            return model.parent.as_ref().is_some_and(|parent| lookup(app, parent, name, side, seen))
-                || (walk_includes
-                    && model_includes(model).iter().any(|include| lookup(app, include, name, side, seen)));
+            return model.parent.as_ref().is_some_and(|parent| {
+                lookup(app, &stored_target(owner, parent, classes), name, side, seen, classes)
+            }) || (walk_includes
+                && model_includes_in(model, classes)
+                    .iter()
+                    .any(|include| lookup(app, include, name, side, seen, classes)));
         }
-        app.library_classes
-            .iter()
-            .filter(|class| &class.name == owner)
-            .any(|class| {
-                class.methods.iter().any(|method| method.receiver == side && method.name.as_str() == name)
-                    || class.parent.as_ref().is_some_and(|parent| lookup(app, parent, name, side, seen))
-                    || (walk_includes
-                        && class.includes.iter().any(|include| lookup(app, include, name, side, seen)))
-            })
+        app.library_classes.iter().filter(|class| &class.name == owner).any(|class| {
+            class.methods.iter().any(|method| method.receiver == side && method.name.as_str() == name)
+                || class.parent.as_ref().is_some_and(|parent| {
+                    lookup(app, &stored_target(owner, parent, classes), name, side, seen, classes)
+                })
+                || (walk_includes
+                    && class.includes.iter().any(|include| {
+                        lookup(app, &stored_target(owner, include, classes), name, side, seen, classes)
+                    }))
+        })
     }
-    lookup(app, owner, name, side, &mut BTreeSet::new())
+    lookup(app, owner, name, side, &mut BTreeSet::new(), &classes)
 }
 
 /// `**{k: v, …}.merge(h)`, `h` a `Hash[Symbol, V]` and the literal's

@@ -64,35 +64,10 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
 
 /// Source overrides, including those on ApplicationRecord or a mixin,
 /// may return a different object. Do not interpose a self-returning wrapper.
+/// `lock!` calls `reload`, so an override of either one answers the source.
 fn record_return_overridden(app: &App, class: &ClassId, method: &str) -> bool {
-    let mut pending = vec![class.clone()];
-    let mut seen = BTreeSet::new();
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id.clone()) { continue; }
-        let relevant = |m: &MethodDef| m.receiver == MethodReceiver::Instance
-            && (m.name.as_str() == method || (method == "lock!" && m.name.as_str() == "reload"));
-        if let Some(model) = app.models.iter().find(|m| m.name == id) {
-            if model.methods().any(relevant) { return true; }
-            // Ingest stored parents and includes as Rubydex resolved them.
-            pending.extend(model.parent.iter().cloned());
-            for item in &model.body {
-                let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
-                let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
-                if method.as_str() != "include" { continue; }
-                for arg in args {
-                    if let ExprNode::Const { path } = &*arg.node {
-                        pending.push(crate::analyze::mixin_path_id(path));
-                    }
-                }
-            }
-        }
-        if let Some(lc) = app.library_classes.iter().find(|lc| lc.name == id) {
-            if lc.methods.iter().any(relevant) { return true; }
-            pending.extend(lc.parent.iter().cloned());
-            pending.extend(lc.includes.iter().cloned());
-        }
-    }
-    false
+    crate::analyze::source_instance_method(app, class, method)
+        || (method == "lock!" && crate::analyze::source_instance_method(app, class, "reload"))
 }
 
 /// Lower library classes for Ruby and emit their source/RBS file pairs, grouping
