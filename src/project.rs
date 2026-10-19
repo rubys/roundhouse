@@ -579,6 +579,21 @@ fn widen_spinel_base_on_sigs(src: &str) -> String {
     widened
 }
 
+/// Spinel has no unboxed `Array[HashConfig]`. An RBS that claims one is
+/// misread at call sites as a String, so `with_temporary_connection`
+/// refuses the element (`sp_HashConfig *`). Roundhouse keeps the
+/// precise array type for Bar A/B; only the Spinel tree widens it.
+pub fn widen_spinel_hash_config_arrays(files: &mut [(String, String)]) {
+    const NARROW: &str = "Array[ActiveRecord::DatabaseConfigurations::HashConfig]";
+    const WIDE: &str = "Array[untyped]";
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with(".rbs") || !content.contains(NARROW) {
+            continue;
+        }
+        *content = content.replace(NARROW, WIDE);
+    }
+}
+
 pub fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<(), String> {
     let idx = files
         .iter()
@@ -2070,6 +2085,7 @@ fn target_files_inner(
         BuildTarget::Futamura => futamura_files(fixture),
         BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture, param_binds).and_then(|(mut files, _)| {
             spinel_relation_model_handle(&mut files)?;
+            widen_spinel_hash_config_arrays(&mut files);
             spin_shape(files)
         }),
         // The ruby family gets the bundled-library requires too: the
@@ -5609,6 +5625,7 @@ pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, Strin
     // requires the library, so `spin_shape` running it again is inert.
     let (mut files, _) = spinel_files_with_source_markers(app, fixture, param_binds)?;
     spinel_relation_model_handle(&mut files)?;
+    widen_spinel_hash_config_arrays(&mut files);
 
     write_bundled_requires(&mut files);
     Ok(files)
@@ -11466,6 +11483,39 @@ mod tests {
             .map(|(p, _)| p.as_str())
             .collect();
         assert!(marked.is_empty(), "ruby tree carries spinel markers: {marked:?}");
+    }
+
+    /// DatabaseTasks keeps `Array[HashConfig]` for Roundhouse; Spinel
+    /// emit must widen those to `Array[untyped]` or call sites see a
+    /// String and refuse `with_temporary_connection`.
+    #[test]
+    fn spinel_emit_widens_hash_config_arrays_to_untyped() {
+        let fixture = Path::new("fixtures/tiny-blog");
+        if !fixture.is_dir() {
+            eprintln!("skip: fixtures/tiny-blog absent");
+            return;
+        }
+        let app = crate::ingest::ingest_app(fixture).expect("ingest tiny-blog");
+        let files = spinel_base_files(&app, fixture).expect("spinel base files");
+        let tasks = files
+            .iter()
+            .find(|(p, _)| p.ends_with("active_record/tasks.rbs"))
+            .map(|(_, c)| c.as_str())
+            .expect("tasks.rbs in spinel tree");
+        assert!(
+            !tasks.contains("Array[ActiveRecord::DatabaseConfigurations::HashConfig]"),
+            "Spinel must not keep Array[HashConfig]: {tasks}"
+        );
+        assert!(
+            tasks.contains("def self.configs_for: (String env_name) -> Array[untyped]"),
+            "Spinel must widen configs_for to Array[untyped]: {tasks}"
+        );
+        assert!(
+            tasks.contains(
+                "def self.with_temporary_connection: (ActiveRecord::DatabaseConfigurations::HashConfig db_config)"
+            ),
+            "Spinel must keep HashConfig on with_temporary_connection: {tasks}"
+        );
     }
 
     /// Shared relation.rbs types `initialize` / terminals as `Base` for

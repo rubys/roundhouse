@@ -111,6 +111,13 @@ module ActiveRecord
         loader
       end
 
+      # Spinel cannot represent `Array[HashConfig]` (an array of objects
+      # has no unboxed form). An emitted RBS that still claims that shape
+      # turns the return into a String at call sites, and
+      # `with_temporary_connection` refuses the element. The Spinel tree
+      # widens those signatures to `Array[untyped]` in
+      # `project::widen_spinel_hash_config_arrays`. Each pushed value is
+      # still a HashConfig.
       def self.replace_configs(configs)
         @configs = configs
         nil
