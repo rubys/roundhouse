@@ -229,6 +229,29 @@ class Room::MessagesCountTasksTest < ActiveSupport::TestCase
     end
   end
 
+  test "a uuid primary key does not load or record the schema version" do
+    config = configuration("test")
+    File.write(@schema, <<~RUBY)
+      ActiveRecord::Schema[8.2].define(version: 2020_01_01_000000) do
+        create_table :rooms, id: :uuid, force: true do |t|
+          t.integer :messages_count, default: 0, null: false
+        end
+      end
+    RUBY
+
+    @tasks.with_temporary_connection(config) do |connection|
+      refused = false
+      begin
+        @tasks.load_schema(config)
+      rescue RuntimeError => e
+        refused = e.message.include?("unsupported schema statement")
+      end
+      raise "uuid primary key was accepted" unless refused
+      raise "uuid primary key created rooms" if connection.data_source_exists?("rooms")
+      raise "uuid primary key recorded a version" if connection.data_source_exists?("schema_migrations")
+    end
+  end
+
   test "migrate repairs rebuilt message tables and repeats repair with no new migration" do
     config = configuration("test")
     File.write(File.join(@migrations, "20261008000100_change_counter_task_message_column.rb"), <<~RUBY)

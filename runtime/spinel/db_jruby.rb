@@ -285,6 +285,7 @@ module Db
       return result
     end
     conn = nil
+    lease_all = nil
     @mutex.synchronize do
       while @free.empty?
         if @missing_connections > 0
@@ -294,6 +295,7 @@ module Db
         end
       end
       conn = @free.pop
+      lease_all = @all
     end
     Fiber[:db_handle] = conn
     Fiber[:db_owner] = Thread.current
@@ -306,20 +308,27 @@ module Db
       raise
     ensure
       cleanup_error = nil
+      closed = conn.raw.is_closed
       begin
-        release_open_statements(conn)
+        release_open_statements(conn) unless closed
       rescue StandardError => e
         cleanup_error = e
       ensure
         Fiber[:db_handle] = nil
         Fiber[:db_owner] = nil
         begin
-          if conn.open_statements.empty?
+          # `Db.close` inside the lease closes `conn` and `configure`
+          # replaces `@all`. Pushing that handle onto the new `@free`
+          # would make the next checkout a closed JDBC connection.
+          same_pool = !closed && !lease_all.nil? && !@all.nil? && @all.equal?(lease_all)
+          if same_pool && conn.open_statements.empty?
             @mutex.synchronize do
-              @free.push(conn)
-              @cv.signal
+              if !conn.raw.is_closed && !@free.nil? && !@all.nil? && @all.equal?(lease_all)
+                @free.push(conn)
+                @cv.signal
+              end
             end
-          else
+          elsif same_pool
             quarantine_connection(conn)
           end
         rescue StandardError => e

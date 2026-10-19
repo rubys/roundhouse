@@ -67,7 +67,16 @@ module ActiveRecord
         header = lines[index].to_s.strip
         name = table_name_from(header)
         cols = []
-        cols << "id integer PRIMARY KEY" unless header.include?("id: false")
+        id_kind = "integer"
+        at = header.index("id:")
+        id_kind = token_at(header[at + 3, header.length].to_s.strip) unless at.nil?
+        if id_kind == "false"
+          # no id column
+        elsif id_kind == "integer" || id_kind == "bigint" || id_kind == "primary_key"
+          cols << "id integer PRIMARY KEY"
+        else
+          raise "unsupported schema statement: #{header}"
+        end
         index += 1
         while index < lines.length
           line = lines[index].to_s.strip
