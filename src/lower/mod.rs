@@ -962,6 +962,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("send_file");
     html_safe::apply_html_safe_lowering(app);
     ran!("html_safe");
+    diags.extend(crate::ingest::rake_tasks::gap_diagnostics(app));
     diags.extend(module_mixins::apply_module_mixins_lowering(app));
     ran!("module_mixins");
     transaction_ground::apply_transaction_grounding(app);

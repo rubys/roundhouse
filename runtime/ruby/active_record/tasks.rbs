@@ -1,11 +1,3 @@
-class Dir
-  def self.mktmpdir: (?String prefix) -> String
-end
-
-module FileUtils
-  def self.remove_entry: (String path) -> nil
-end
-
 module Rake
   class Task
     def self.define: (String name, Array[String] prerequisites, String kind) -> Task
@@ -27,10 +19,6 @@ module ActiveRecord
   def self.dump_schema_after_migration=: (bool value) -> bool
 
   module Tasks
-    class TmpDir
-      def self.mktmpdir: (String prefix) -> String
-    end
-
     class SeedLoader
       def load_seed: () -> nil
     end

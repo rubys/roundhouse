@@ -1,25 +1,34 @@
 //! `lib/tasks/*.rake` that prepend a hook onto
 //! `ActiveRecord::Tasks::DatabaseTasks`.
 //!
-//! Campfire's `room_messages_count.rake` is the shape: a module of
-//! `load_schema` / `migrate` wrappers, prepended onto the singleton,
-//! plus one namespaced task. The generated file is required from the
-//! shared runtime so the prepend is in the ancestor chain at boot on
-//! every Ruby-family target, including Spinel. Anything else in that
-//! directory is named and left out — a warning, not a pretend task.
+//! The file is kept when the AST is that shape: a module whose
+//! `load_schema` / `migrate` call `super`, prepended onto the
+//! DatabaseTasks singleton, plus a namespaced task. The generated file
+//! copies those method and task bodies. The one rewrite is
+//! `singleton_class.prepend`, which Spinel does not put in the ancestor
+//! chain, into `class << self; prepend`. `...` on those two methods is
+//! expanded to the signatures DatabaseTasks actually has, because Spinel
+//! refuses full forwarding. Anything else is named and left out.
 
 use std::path::Path;
 
+use ruby_prism::Node;
+
+use crate::app::App;
+use crate::diagnostic::{Diagnostic, Severity};
+use crate::span::Span;
 use crate::vfs::Vfs;
+
+struct Task {
+    name: String,
+    prerequisite: String,
+    body: String,
+}
 
 struct Hook {
     module_name: String,
-    wraps_load_schema: bool,
-    wraps_migrate: bool,
-    repair: String,
-    ensure_receiver: String,
-    task_name: Option<String>,
-    task_prerequisite: Option<String>,
+    module_source: String,
+    tasks: Vec<Task>,
 }
 
 pub(crate) fn ingest<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> (Option<String>, Vec<String>) {
@@ -43,12 +52,12 @@ pub(crate) fn ingest<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> (Option<String>, V
             .display()
             .to_string();
         let Ok(text) = vfs.read_to_string(&entry) else {
-            gaps.push(rel);
+            gaps.push(format!("`{rel}` was left out of boot: it could not be read"));
             continue;
         };
-        match parse(&text) {
-            Some(hook) => hooks.push(hook),
-            None => gaps.push(rel),
+        match classify(&text) {
+            Ok(hook) => hooks.push(hook),
+            Err(reason) => gaps.push(format!("`{rel}` was left out of boot: {reason}")),
         }
     }
     if hooks.is_empty() {
@@ -57,183 +66,295 @@ pub(crate) fn ingest<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> (Option<String>, V
     (Some(render(&hooks)), gaps)
 }
 
-fn parse(text: &str) -> Option<Hook> {
-    if !text.contains("singleton_class.prepend") && !text.contains("singleton_class.prepend(") {
-        return None;
-    }
-    let module_name = capture_module(text)?;
-    if !ident(&module_name) {
-        return None;
-    }
-    let wraps_load_schema = text.contains("def load_schema");
-    let wraps_migrate = text.contains("def migrate");
-    if !wraps_load_schema && !wraps_migrate {
-        return None;
-    }
-    let repair = capture_def_name(text, "repair")?;
-    let ensure_receiver = capture_ensure(text)?;
-    if !const_path(&ensure_receiver) {
-        return None;
-    }
-    let (task_name, task_prerequisite) = capture_task(text);
-    Some(Hook {
-        module_name,
-        wraps_load_schema,
-        wraps_migrate,
-        repair,
-        ensure_receiver,
-        task_name,
-        task_prerequisite,
-    })
+/// Warnings for `.rake` files this pass did not install. Not mixins:
+/// a Resque file is not an `include` that failed to resolve.
+pub(crate) fn gap_diagnostics(app: &App) -> Vec<Diagnostic> {
+    app.rake_task_gaps
+        .iter()
+        .map(|message| {
+            let mut d = Diagnostic::unsupported(Span::synthetic(), None, "rake task", message.clone());
+            d.severity = Severity::Warning;
+            d
+        })
+        .collect()
 }
 
-fn capture_module(text: &str) -> Option<String> {
-    for line in text.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("module ") else { continue };
-        let Some(name) = rest.split_whitespace().next() else { continue };
-        if ident(name) {
-            return Some(name.to_string());
+fn classify(text: &str) -> Result<Hook, String> {
+    let parsed = ruby_prism::parse(text.as_bytes());
+    let root = parsed.node();
+    let Some(program) = root.as_program_node() else {
+        return Err("it is not a Ruby program".into());
+    };
+    let stmts = super::util::flatten_statements(program.statements().as_node());
+
+    let mut prepended = Vec::new();
+    let mut tasks = Vec::new();
+    for stmt in &stmts {
+        let Some(call) = stmt.as_call_node() else { continue };
+        if let Some(name) = prepended_module(&call, text) {
+            prepended.push(name);
+        }
+        if super::util::constant_id_str(&call.name()) == "namespace" {
+            if let Some(ns) = first_symbol(&call) {
+                tasks.extend(tasks_in(&call, text, &ns));
+            }
         }
     }
-    None
+    let [module_name] = prepended.as_slice() else {
+        return Err(outline(&stmts, text));
+    };
+    let module = stmts.iter().find_map(|stmt| {
+        let module = stmt.as_module_node()?;
+        let name = super::app::constant_text(&module.constant_path(), text)?;
+        (name == *module_name).then_some(module)
+    });
+    let Some(module) = module else {
+        return Err(format!(
+            "it prepends `{module_name}`, which this file does not define"
+        ));
+    };
+    let module_source = module_source(&module, text)?;
+    if tasks.is_empty() {
+        return Err(format!(
+            "it prepends `{module_name}` but defines no namespaced Rake task"
+        ));
+    }
+    Ok(Hook { module_name: module_name.clone(), module_source, tasks })
 }
 
-fn capture_def_name(text: &str, prefix: &str) -> Option<String> {
-    for line in text.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("def ") else { continue };
-        let Some(name) = rest.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next() else {
+fn outline(stmts: &[Node<'_>], src: &str) -> String {
+    let mut bits = Vec::new();
+    for stmt in stmts {
+        if let Some(module) = stmt.as_module_node() {
+            if let Some(name) = super::app::constant_text(&module.constant_path(), src) {
+                bits.push(format!("module {name}"));
+            }
+            continue;
+        }
+        let Some(call) = stmt.as_call_node() else { continue };
+        let name = super::util::constant_id_str(&call.name());
+        if name == "namespace" {
+            match first_symbol(&call) {
+                Some(ns) => bits.push(format!("namespace :{ns}")),
+                None => bits.push("namespace".into()),
+            }
+        } else if name == "prepend" {
+            bits.push("prepend".into());
+        } else if !name.is_empty() {
+            bits.push(name.to_string());
+        }
+    }
+    if bits.is_empty() {
+        "it does not prepend onto ActiveRecord::Tasks::DatabaseTasks".into()
+    } else {
+        format!(
+            "it has {} and does not prepend onto ActiveRecord::Tasks::DatabaseTasks",
+            bits.join(", ")
+        )
+    }
+}
+
+fn prepended_module(call: &ruby_prism::CallNode<'_>, src: &str) -> Option<String> {
+    if super::util::constant_id_str(&call.name()) != "prepend" {
+        return None;
+    }
+    let recv = call.receiver()?.as_call_node()?;
+    if super::util::constant_id_str(&recv.name()) != "singleton_class" {
+        return None;
+    }
+    let base = recv.receiver()?;
+    if super::app::constant_text(&base, src).as_deref()
+        != Some("ActiveRecord::Tasks::DatabaseTasks")
+    {
+        return None;
+    }
+    let args: Vec<_> = call.arguments()?.arguments().iter().collect();
+    let [arg] = args.as_slice() else { return None };
+    super::app::constant_text(arg, src)
+}
+
+fn module_source(module: &ruby_prism::ModuleNode<'_>, src: &str) -> Result<String, String> {
+    let name = super::app::constant_text(&module.constant_path(), src)
+        .ok_or_else(|| "its module name is not a constant".to_string())?;
+    let body = module.body().ok_or_else(|| format!("module {name} is empty"))?;
+    let mut saw_wrapper = false;
+    let mut parts = Vec::new();
+    for stmt in super::util::flatten_statements(body) {
+        if let Some(def) = stmt.as_def_node() {
+            let dname = def_name(&def);
+            if dname == "load_schema" || dname == "migrate" {
+                if !calls_super(&stmt) {
+                    return Err(format!("`{dname}` does not call super"));
+                }
+                saw_wrapper = true;
+                if forwards(&def, src) {
+                    parts.push(expanded_def(&def, src, &dname));
+                } else {
+                    parts.push(slice(src, &stmt).to_string());
+                }
+                continue;
+            }
+            if forwards(&def, src) {
+                return Err(format!(
+                    "`{dname}` uses argument forwarding, which this runtime does not rewrite"
+                ));
+            }
+        }
+        parts.push(slice(src, &stmt).to_string());
+    }
+    if !saw_wrapper {
+        return Err(format!(
+            "module {name} does not wrap load_schema or migrate"
+        ));
+    }
+    let body = parts
+        .iter()
+        .map(|part| indent(part, 2))
+        .collect::<String>();
+    Ok(format!("module {name}\n{body}end\n"))
+}
+
+fn expanded_def(def: &ruby_prism::DefNode<'_>, src: &str, name: &str) -> String {
+    let sig = if name == "load_schema" {
+        "def load_schema(db_config, format = \"\", file = \"\")"
+    } else {
+        "def migrate(version = \"\")"
+    };
+    let body = def.body().map(|node| slice(src, &node)).unwrap_or("");
+    format!("{sig}\n{body}\nend")
+}
+
+fn tasks_in(namespace: &ruby_prism::CallNode<'_>, src: &str, ns: &str) -> Vec<Task> {
+    let Some(block) = namespace.block().and_then(|node| node.as_block_node()) else {
+        return Vec::new();
+    };
+    let Some(body) = block.body() else { return Vec::new() };
+    let mut out = Vec::new();
+    for stmt in super::util::flatten_statements(body) {
+        let Some(call) = stmt.as_call_node() else { continue };
+        if super::util::constant_id_str(&call.name()) != "task" {
+            continue;
+        }
+        let Some((task, prereq)) = task_pair(&call) else { continue };
+        let Some(block) = call.block().and_then(|node| node.as_block_node()) else {
             continue;
         };
-        if name.starts_with(prefix) && ident_method(name) {
-            return Some(name.to_string());
+        let body = block.body().map(|node| slice(src, &node)).unwrap_or("").to_string();
+        if body.trim().is_empty() {
+            continue;
+        }
+        out.push(Task { name: format!("{ns}:{task}"), prerequisite: prereq, body });
+    }
+    out
+}
+
+fn task_pair(call: &ruby_prism::CallNode<'_>) -> Option<(String, String)> {
+    let args = call.arguments()?;
+    for arg in args.arguments().iter() {
+        let hash = arg.as_keyword_hash_node()?;
+        for element in hash.elements().iter() {
+            let pair = element.as_assoc_node()?;
+            let name = super::util::symbol_value(&pair.key())?;
+            let prereq = super::util::symbol_value(&pair.value())?;
+            if ident_method(&name) && ident_method(&prereq) {
+                return Some((name, prereq));
+            }
         }
     }
     None
 }
 
-fn capture_ensure(text: &str) -> Option<String> {
-    let at = text.find(".ensure!")?;
-    let bytes = text.as_bytes();
-    let mut start = at;
-    while start > 0 {
-        let ch = bytes[start - 1] as char;
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == ':' {
-            start -= 1;
-        } else {
-            break;
-        }
-    }
-    let name = &text[start..at];
-    let name = name.trim_start_matches(':');
-    if const_path(name) { Some(name.to_string()) } else { None }
+fn first_symbol(call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    let args = call.arguments()?;
+    let first = args.arguments().iter().next()?;
+    let name = super::util::symbol_value(&first)?;
+    ident_method(&name).then_some(name)
 }
 
-fn capture_task(text: &str) -> (Option<String>, Option<String>) {
-    let mut namespace = None;
-    let mut task = None;
-    let mut prereq = None;
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("namespace :") {
-            if let Some(name) = rest.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next() {
-                if !name.is_empty() {
-                    namespace = Some(name.to_string());
-                }
-            }
+fn calls_super(node: &Node<'_>) -> bool {
+    struct Seen(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Seen {
+        fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'pr>) {
+            self.0 = true;
+            ruby_prism::visit_super_node(self, node);
         }
-        if let Some(rest) = line.strip_prefix("task ") {
-            // `task ensure: :environment` or `task ensure: :environment do`
-            let rest = rest.trim();
-            let Some((name, after)) = rest.split_once(':') else { continue };
-            let name = name.trim().trim_start_matches(':');
-            let after = after.trim().trim_start_matches(':');
-            let pre = after.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or("");
-            if ident_method(name) && ident_method(pre) {
-                task = Some(name.to_string());
-                prereq = Some(pre.to_string());
-            }
+        fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'pr>) {
+            self.0 = true;
+            ruby_prism::visit_forwarding_super_node(self, node);
         }
     }
-    let full = match (namespace, task) {
-        (Some(ns), Some(task)) => Some(format!("{ns}:{task}")),
-        _ => None,
-    };
-    (full, prereq)
+    let mut seen = Seen(false);
+    ruby_prism::Visit::visit(&mut seen, node);
+    seen.0
+}
+
+fn forwards(def: &ruby_prism::DefNode<'_>, src: &str) -> bool {
+    let Some(params) = def.parameters() else { return false };
+    let loc = params.location();
+    src[loc.start_offset()..loc.end_offset()].contains("...")
+}
+
+fn def_name(def: &ruby_prism::DefNode<'_>) -> String {
+    String::from_utf8_lossy(def.name().as_slice()).into_owned()
+}
+
+fn slice<'a>(src: &'a str, node: &Node<'_>) -> &'a str {
+    let loc = node.location();
+    &src[loc.start_offset()..loc.end_offset()]
+}
+
+fn indent(src: &str, spaces: usize) -> String {
+    let pad = " ".repeat(spaces);
+    let mut out = String::new();
+    for line in src.lines() {
+        if line.trim().is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&pad);
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn render(hooks: &[Hook]) -> String {
     let mut out = String::from("# frozen_string_literal: true\n");
     for hook in hooks {
-        out.push_str(&render_hook(hook));
+        out.push_str(&hook.module_source);
+        out.push_str("\nmodule ActiveRecord\n  module Tasks\n    module DatabaseTasks\n      class << self\n        prepend ");
+        out.push_str(&hook.module_name);
+        out.push_str("\n      end\n    end\n  end\nend\n\n");
     }
-    out.push_str("module AppRakeTasks\n");
-    out.push_str("  def self.install!\n");
+    out.push_str("module AppRakeTasks\n  def self.install!\n");
     for hook in hooks {
-        if let (Some(name), Some(pre)) = (&hook.task_name, &hook.task_prerequisite) {
+        for task in &hook.tasks {
             out.push_str(&format!(
-                "    Rake::Task.define(\"{name}\", [\"{pre}\"], \"{name}\")\n"
+                "    Rake::Task.define(\"{name}\", [\"{pre}\"], \"{name}\")\n",
+                name = task.name,
+                pre = task.prerequisite
             ));
         }
     }
-    out.push_str("    nil\n  end\n\n");
-    out.push_str("  def self.run(name)\n    case name\n");
+    out.push_str("    nil\n  end\n\n  def self.run(name)\n    case name\n");
     for hook in hooks {
-        if let Some(name) = &hook.task_name {
-            out.push_str(&format!(
-                "    when \"{name}\"\n      ActiveRecord::Base.connection_pool.with_connection do |connection|\n        {recv}.ensure!(connection)\n      end\n",
-                recv = hook.ensure_receiver
-            ));
+        for task in &hook.tasks {
+            out.push_str(&format!("    when \"{}\"\n", task.name));
+            out.push_str(&indent(&task.body, 6));
         }
     }
     out.push_str("    end\n    nil\n  end\nend\n");
     out
 }
 
-fn render_hook(hook: &Hook) -> String {
-    let mut body = format!("module {}\n", hook.module_name);
-    if hook.wraps_load_schema {
-        body.push_str(&format!(
-            "  def load_schema(db_config, format = \"\", file = \"\")\n    result = super(db_config, format, file)\n    {repair}\n    result\n  end\n\n",
-            repair = hook.repair
-        ));
-    }
-    if hook.wraps_migrate {
-        body.push_str(&format!(
-            "  def migrate(version = \"\")\n    result = super(version)\n    {repair}\n    result\n  end\n\n",
-            repair = hook.repair
-        ));
-    }
-    body.push_str(&format!(
-        "  def {repair}\n    migration_connection_pool.with_connection do |connection|\n      {recv}.ensure!(connection)\n    end\n  end\nend\n\n",
-        repair = hook.repair,
-        recv = hook.ensure_receiver
-    ));
-    body.push_str("module ActiveRecord\n  module Tasks\n    module DatabaseTasks\n      class << self\n        prepend ");
-    body.push_str(&hook.module_name);
-    body.push_str("\n      end\n    end\n  end\nend\n\n");
-    body
-}
-
-fn ident(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_uppercase() => chars.all(|c| c.is_ascii_alphanumeric() || c == '_'),
-        _ => false,
-    }
-}
-
 fn ident_method(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => chars.all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+            chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
         _ => false,
     }
-}
-
-fn const_path(name: &str) -> bool {
-    !name.is_empty() && name.split("::").all(ident)
 }
 
 #[cfg(test)]
@@ -270,17 +391,48 @@ end
 "#;
 
     #[test]
-    fn campfire_counter_rake_becomes_a_singleton_prepend() {
-        let source = render(&[parse(CAMPFIRE).expect("hook")]);
+    fn campfire_counter_rake_keeps_the_method_bodies() {
+        let source = render(&[classify(CAMPFIRE).expect("hook")]);
         assert!(source.contains("class << self\n        prepend RoomMessagesCountDatabaseTasks"));
-        assert!(source.contains("Room::MessagesCount.ensure!(connection)"));
-        assert!(source.contains("Rake::Task.define(\"room_messages_count:ensure\", [\"environment\"], \"room_messages_count:ensure\")"));
+        assert!(source.contains("super.tap { repair_room_messages_count }"));
+        assert!(source.contains("def repair_room_messages_count"));
+        assert!(source.contains("migration_connection_pool.with_connection"));
+        assert!(source.contains(
+            "Rake::Task.define(\"room_messages_count:ensure\", [\"environment\"], \"room_messages_count:ensure\")"
+        ));
+        assert!(source.contains("def load_schema(db_config, format = \"\", file = \"\")"));
         assert!(!source.contains("..."));
+        assert!(!source.contains("singleton_class.prepend"));
         assert!(!source.contains("require \"rake\""));
     }
 
     #[test]
-    fn a_resque_rake_file_is_not_a_database_hook() {
-        assert!(parse("namespace :resque do\n  task :setup\nend\n").is_none());
+    fn a_resque_rake_file_is_described_rather_than_called_a_hook() {
+        let Err(reason) = classify("namespace :resque do\n  task :setup\nend\n") else {
+            panic!("resque file was treated as a hook");
+        };
+        assert!(reason.contains("namespace :resque"), "{reason}");
+        assert!(reason.contains("does not prepend onto ActiveRecord::Tasks::DatabaseTasks"));
+    }
+
+    #[test]
+    fn a_wrapper_that_does_not_call_super_is_not_rewritten() {
+        let src = r#"
+module NotAHook
+  def load_schema(db_config)
+    db_config
+  end
+end
+ActiveRecord::Tasks::DatabaseTasks.singleton_class.prepend(NotAHook)
+namespace :widgets do
+  task prepare: :environment do
+    widgets
+  end
+end
+"#;
+        let Err(reason) = classify(src) else {
+            panic!("a wrapper that does not call super was treated as a hook");
+        };
+        assert!(reason.contains("`load_schema` does not call super"), "{reason}");
     }
 }

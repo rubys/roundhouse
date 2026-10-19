@@ -79,7 +79,7 @@ pub mod sql_functions;
 pub mod structure_sql;
 pub mod survey;
 pub mod test;
-mod rake_tasks;
+pub(crate) mod rake_tasks;
 pub mod util;
 pub mod view;
 pub mod vite;

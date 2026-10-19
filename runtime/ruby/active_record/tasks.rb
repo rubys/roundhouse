@@ -12,32 +12,10 @@
 # The schema and migration readers accept the dump subset those tasks
 # write (create_table, change_column) and raise on anything else, so a
 # statement we do not run cannot look applied.
-
-class Dir
-  def self.mktmpdir(prefix = "d")
-    ActiveRecord::Tasks::TmpDir.mktmpdir(prefix)
-  end
-end
-
-module FileUtils
-  def self.remove_entry(path)
-    return nil unless File.exist?(path)
-    if File.directory?(path)
-      names = Dir.entries(path)
-      i = 0
-      while i < names.length
-        name = names[i].to_s
-        i += 1
-        next if name == "." || name == ".."
-        remove_entry(File.join(path, name))
-      end
-      Dir.rmdir(path)
-    else
-      File.delete(path)
-    end
-    nil
-  end
-end
+#
+# `Dir.mktmpdir` and `FileUtils.remove_entry` stay the stdlib (and
+# Spinel's packages). This file is on the ActiveRecord boot path, so a
+# reopen here would replace the block form those libraries already have.
 
 module Rake
   class Task
@@ -138,22 +116,6 @@ module ActiveRecord
   end
 
   module Tasks
-    class TmpDir
-      def self.mktmpdir(prefix)
-        n = @seq
-        n = 0 if n.nil?
-        n += 1
-        path = "/tmp/#{prefix}-#{n}"
-        while File.exist?(path)
-          n += 1
-          path = "/tmp/#{prefix}-#{n}"
-        end
-        @seq = n
-        Dir.mkdir(path)
-        path
-      end
-    end
-
     # The object `seed_loader=` stores. Rails only requires `load_seed`.
     class SeedLoader
       def load_seed

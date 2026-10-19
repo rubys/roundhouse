@@ -387,7 +387,7 @@ pub struct App {
     /// `lib/tasks` prepends onto `ActiveRecord::Tasks::DatabaseTasks`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rake_tasks_source: Option<String>,
-    /// `.rake` files that are not that hook. Warnings, not installed tasks.
+    /// Why a `.rake` file was not installed. The sentence is the warning.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rake_task_gaps: Vec<String>,
     /// `X.before_action :m[, only: …]` registered by a

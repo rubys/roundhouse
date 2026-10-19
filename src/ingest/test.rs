@@ -117,13 +117,31 @@ fn collect_preamble(root: &Node<'_>, file: &str) -> IngestResult<Vec<Expr>> {
         if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() || is_require(&stmt) {
             continue;
         }
-        let text = std::str::from_utf8(stmt.location().as_slice()).unwrap_or("");
-        if !text.contains("load_tasks") {
+        if !statement_calls_load_tasks(&stmt) {
             continue;
         }
         out.push(ingest_expr(&stmt, file)?);
     }
     Ok(out)
+}
+
+/// The call `load_tasks`, wherever it sits in the statement
+/// (`Rails.application.load_tasks unless ...`). A string that happens
+/// to contain the letters is not the call.
+fn statement_calls_load_tasks(stmt: &Node<'_>) -> bool {
+    struct Find(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Find {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if super::util::constant_id_str(&node.name()) == "load_tasks" {
+                self.0 = true;
+                return;
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+    let mut find = Find(false);
+    ruby_prism::Visit::visit(&mut find, stmt);
+    find.0
 }
 
 fn is_require(stmt: &Node<'_>) -> bool {
