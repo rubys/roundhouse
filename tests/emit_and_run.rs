@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/active_model_attributes.rs"]
+mod active_model_attributes;
 #[path = "emit_and_run/date_calendar_duration.rs"]
 mod date_calendar_duration;
 #[path = "emit_and_run/branch_local_join.rs"]
@@ -170,6 +172,10 @@ mod class_side_default;
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]
 mod controller_response_body;
+#[path = "emit_and_run/relation_projections.rs"]
+mod relation_projections;
+#[path = "emit_and_run/pluck_projection_semantics.rs"]
+mod pluck_projection_semantics;
 #[path = "emit_and_run/response_redirect.rs"]
 mod response_redirect;
 #[path = "emit_and_run/constructor_unrelated_mutations.rs"]
@@ -248,6 +254,8 @@ mod job_payload;
 mod sidekiq_adapter;
 #[path = "emit_and_run/silent_lowerings.rs"]
 mod silent_lowerings;
+#[path = "emit_and_run/validates_options.rs"]
+mod validates_options;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {
@@ -15949,6 +15957,419 @@ raise "nil receiver" unless Presenter.label(nil).nil?
 "#,
         );
     run.assert_passes();
+}
+
+#[test]
+fn render_inertia_always_prop_survives_a_partial_reload() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/show\", to: \"pages#show\"\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def show
+    render inertia: "pages/show", props: {
+      n: 1,
+      kept: InertiaRails.always { "yes" }
+    }
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "always is present when the partial reload did not ask for it" do
+    get "/pages/show", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/show",
+      "X-Inertia-Partial-Data" => "n"
+    }
+    assert_response :success
+    assert_equal({ "n" => 1, "kept" => "yes" }, response.parsed_body["props"])
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn render_inertia_computed_props_answer_json_and_html() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/computed\", to: \"pages#computed\"\n  get \"/pages/local\", to: \"pages#local\"\n  get \"/pages/bad\", to: \"pages#bad\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def computed
+    @stamp = "from-ivar"
+    @article = Article.find_by!(title: "Getting Started with Rails")
+    render inertia: "pages/computed", props: computed_props
+  end
+
+  def local
+    props = { title: "from-local", n: 2 }
+    render inertia: "pages/local", props: props
+  end
+
+  def bad
+    render inertia: "pages/bad", props: "nope"
+  end
+
+  private
+    def computed_props
+      {
+        title: "from-method",
+        n: 1,
+        label: -> { @stamp },
+        secret: InertiaRails.optional { "opt" },
+        stats: InertiaRails.defer { { total: 3 } },
+        kept: InertiaRails.always { "yes" },
+        when: Time.utc(2026, 10, 19, 11, 22, 0),
+        row: { article: @article },
+        rows: [@article]
+      }
+    end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "a method hash evaluates lambdas and defers the rest" do
+    get "/pages/computed", headers: { "X-Inertia" => "true" }
+    assert_response :success
+    page = response.parsed_body
+    assert_equal "from-method", page["props"]["title"]
+    assert_equal 1, page["props"]["n"]
+    assert_equal "from-ivar", page["props"]["label"]
+    assert_equal "yes", page["props"]["kept"]
+    assert_equal "2026-10-19T11:22:00.000Z", page["props"]["when"]
+    assert_equal "Getting Started with Rails", page["props"]["row"]["article"]["title"]
+    assert_equal "Getting Started with Rails", page["props"]["rows"][0]["title"]
+    assert_nil page["props"]["secret"]
+    assert_nil page["props"]["stats"]
+    assert_equal({ "default" => ["stats"] }, page["deferredProps"])
+  end
+
+  test "a partial reload evaluates the requested optional and deferred props" do
+    get "/pages/computed", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/computed",
+      "X-Inertia-Partial-Data" => "secret,stats"
+    }
+    assert_response :success
+    assert_equal({ "secret" => "opt", "stats" => { "total" => 3 }, "kept" => "yes" }, response.parsed_body["props"])
+    assert_nil response.parsed_body["deferredProps"]
+  end
+
+  test "a local hash is the page props" do
+    get "/pages/local"
+    assert_response :success
+    assert_includes response.body, %("title":"from-local")
+    assert_includes response.body, %("n":2)
+  end
+
+  test "a partial reload keeps the requested prop and an always prop" do
+    get "/pages/computed", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/computed",
+      "X-Inertia-Partial-Data" => "n"
+    }
+    assert_response :success
+    assert_equal({ "n" => 1, "kept" => "yes" }, response.parsed_body["props"])
+  end
+
+  test "a non-hash is not an empty page" do
+    assert_raises(TypeError) do
+      get "/pages/bad", headers: { "X-Inertia" => "true" }
+    end
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn render_inertia_computed_component_answers_json_and_partial_reload() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/constant\", to: \"pages#constant\"\n  get \"/pages/named\", to: \"pages#named\"\n  get \"/pages/joined\", to: \"pages#joined\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  PAGE = "pages/from-constant"
+
+  def constant
+    render inertia: PAGE, props: { title: "c", n: 1 }
+  end
+
+  def named
+    render inertia: page_name, props: { title: "m", n: 2 }
+  end
+
+  def joined
+    render inertia: "pages/" + action_name, props: { title: "j", n: 3 }
+  end
+
+  private
+    def page_name
+      "pages/from-method"
+    end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "a constant is the component" do
+    get "/pages/constant", headers: { "X-Inertia" => "true" }
+    assert_response :success
+    assert_equal "pages/from-constant", response.parsed_body["component"]
+    assert_equal({ "title" => "c", "n" => 1 }, response.parsed_body["props"])
+  end
+
+  test "a method is the component and a partial reload matches that name" do
+    get "/pages/named", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/from-method",
+      "X-Inertia-Partial-Data" => "n"
+    }
+    assert_response :success
+    assert_equal "pages/from-method", response.parsed_body["component"]
+    assert_equal({ "n" => 2 }, response.parsed_body["props"])
+  end
+
+  test "a joined name is the component" do
+    get "/pages/joined"
+    assert_response :success
+    assert_includes response.body, %("component":"pages/joined")
+    assert_includes response.body, %("title":"j")
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn inertia_clear_history_reaches_the_next_visit_once() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/show\", to: \"pages#show\"\n  delete \"/pages\", to: \"pages#destroy\"\n  delete \"/pages/keep\", to: \"pages#keep\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.version = \"v1\"\n  config.always_include_errors_hash = true\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def show
+    render inertia: "pages/show", props: { title: "kept" }
+  end
+
+  def destroy
+    redirect_to "/pages/show", inertia: { errors: { base: ["gone"] }, clear_history: true }
+  end
+
+  def keep
+    redirect_to "/pages/show", inertia: { clear_history: false }
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  INERTIA = { "X-Inertia" => "true", "X-Inertia-Version" => "v1" }
+
+  test "clear_history is on the next visit and then gone" do
+    delete "/pages", headers: INERTIA
+    assert_response 303
+    assert_redirected_to "/pages/show"
+    get "/pages/show", headers: INERTIA
+    assert_equal true, response.parsed_body["clearHistory"]
+    assert_equal({ "base" => ["gone"] }, response.parsed_body["props"]["errors"])
+    get "/pages/show", headers: INERTIA
+    assert_equal false, response.parsed_body["clearHistory"]
+    assert_equal({}, response.parsed_body["props"]["errors"])
+  end
+
+  test "a stale version keeps clear_history for the full-page reload" do
+    delete "/pages", headers: INERTIA
+    get "/pages/show", headers: { "X-Inertia" => "true", "X-Inertia-Version" => "v0" }
+    assert_response 409
+    get "/pages/show"
+    assert_includes response.body, %("clearHistory":true)
+    get "/pages/show"
+    assert_includes response.body, %("clearHistory":false)
+  end
+
+  test "a false flag does not clear history" do
+    delete "/pages/keep", headers: INERTIA
+    assert_response 303
+    get "/pages/show", headers: INERTIA
+    assert_equal false, response.parsed_body["clearHistory"]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn inertia_preserve_fragment_reaches_the_next_visit_once() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/show\", to: \"pages#show\"\n  patch \"/pages\", to: \"pages#update\"\n  patch \"/pages/drop\", to: \"pages#drop\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.version = \"v1\"\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def show
+    render inertia: "pages/show", props: { title: "kept" }
+  end
+
+  def update
+    redirect_to "/pages/show", inertia: { preserve_fragment: true }
+  end
+
+  def drop
+    redirect_to "/pages/show", inertia: { preserve_fragment: false }
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  INERTIA = { "X-Inertia" => "true", "X-Inertia-Version" => "v1" }
+
+  test "preserve_fragment is on the next visit and then gone" do
+    patch "/pages", headers: INERTIA
+    assert_response 303
+    get "/pages/show", headers: INERTIA
+    assert_equal true, response.parsed_body["preserveFragment"]
+    get "/pages/show", headers: INERTIA
+    assert_nil response.parsed_body["preserveFragment"]
+  end
+
+  test "a stale version keeps preserve_fragment for the full-page reload" do
+    patch "/pages", headers: INERTIA
+    get "/pages/show", headers: { "X-Inertia" => "true", "X-Inertia-Version" => "v0" }
+    assert_response 409
+    get "/pages/show"
+    assert_includes response.body, %("preserveFragment":true)
+    get "/pages/show"
+    refute_includes response.body, "preserveFragment"
+  end
+
+  test "a false flag does not preserve the fragment" do
+    patch "/pages/drop", headers: INERTIA
+    assert_response 303
+    get "/pages/show", headers: INERTIA
+    assert_nil response.parsed_body["preserveFragment"]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn inertia_location_is_a_conflict_for_an_inertia_visit() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/away\", to: \"pages#away\"\n  get \"/pages/away_break\", to: \"pages#away_break\"\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def away
+    inertia_location "https://example.com/away"
+  end
+
+  def away_break
+    inertia_location "https://example.com/away\r\nSet-Cookie: x=1"
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "an Inertia visit is a 409 with the external url" do
+    get "/pages/away", headers: { "X-Inertia" => "true" }
+    assert_response 409
+    assert_equal "https://example.com/away", response.headers["X-Inertia-Location"]
+  end
+
+  test "a normal visit redirects to the external url" do
+    get "/pages/away"
+    assert_response 302
+    assert_equal "https://example.com/away", response.headers["Location"]
+  end
+
+  test "a line break is removed before either location is written" do
+    get "/pages/away_break", headers: { "X-Inertia" => "true" }
+    assert_response 409
+    assert_equal "https://example.com/awaySet-Cookie: x=1", response.headers["X-Inertia-Location"]
+    get "/pages/away_break"
+    assert_response 302
+    assert_equal "https://example.com/awaySet-Cookie: x=1", response.headers["Location"]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
 }
 
 #[test]

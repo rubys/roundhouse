@@ -180,6 +180,7 @@ pub struct ClassInfo {
     pub constants: HashMap<Symbol, Ty>,
     /// If this class maps to a database table, which one.
     pub table: Option<crate::ident::TableRef>,
+    pub primary_key: Option<Symbol>,
     /// Instance-state shape (columns + attr_accessor).
     pub attributes: Row,
     /// Attributes of `attributes` that the app's own `def` replaces. A
@@ -188,6 +189,9 @@ pub struct ClassInfo {
     pub overridden_attributes: std::collections::HashSet<Symbol>,
     /// Methods callable on the class itself: `Post.all`, `Post.find(id)`.
     pub class_methods: HashMap<Symbol, Ty>,
+    /// Catalog entries and source methods can have the same gradual
+    /// return type, so a call-site refinement needs their provenance.
+    pub source_class_methods: std::collections::HashSet<Symbol>,
     /// Source declares its own class-side `new`, whose result need not be self.
     pub declares_constructor: bool,
     /// Which of `class_methods` had their return type inferred FROM a
@@ -290,6 +294,20 @@ pub struct ClassInfo {
 }
 
 impl ClassInfo {
+    pub(crate) fn source_class_method(
+        classes: &HashMap<ClassId, ClassInfo>, model: &ClassId, method: &Symbol,
+    ) -> bool {
+        let mut current = Some(model);
+        for _ in 0..32 {
+            let Some(class) = current.and_then(|id| classes.get(id)) else { return false };
+            if class.source_class_methods.contains(method) {
+                return true;
+            }
+            current = class.parent.as_ref();
+        }
+        false
+    }
+
     /// Whether `name` is one of this model's real SCHEMA TABLE columns.
     /// `attributes` is built once, straight off `Schema::tables` (see
     /// `ingest::model::row_from_table`), never merged with method-only
@@ -350,6 +368,7 @@ pub(crate) fn lexical_class<T>(
 /// without cloning.
 pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
+    materialized_associations: Option<&'a std::collections::HashSet<Symbol>>,
     const_resolver: Option<std::sync::Arc<ConstResolver>>,
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
     data_factories: Option<&'a HashMap<crate::span::Span, Ty>>,
@@ -485,7 +504,23 @@ impl<'a> BodyTyper<'a> {
     }
 
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, const_resolver: None, typed_constants: None, data_factories: None, class_factories: None, inquirers: None, i18n: None, helper_modules: None, open_classes: None }
+        Self {
+            classes,
+            materialized_associations: None,
+            const_resolver: None,
+            typed_constants: None,
+            data_factories: None,
+            class_factories: None,
+            inquirers: None,
+            i18n: None,
+            helper_modules: None,
+            open_classes: None,
+        }
+    }
+
+    pub(crate) fn with_materialized_associations(mut self, names: &'a std::collections::HashSet<Symbol>) -> Self {
+        self.materialized_associations = Some(names);
+        self
     }
 
     pub(crate) fn with_open_classes(mut self, open: &'a crate::analyze::open_classes::OpenClasses) -> Self {
@@ -1924,6 +1959,12 @@ impl<'a> BodyTyper<'a> {
                 {
                     return ty;
                 }
+                if let (Some(receiver), Some(materialized)) = (recv.as_ref(), self.materialized_associations)
+                    && let Some(columns) = super::assoc_pluck::reader_columns(receiver, method, args, block.as_ref(), materialized)
+                    && let Some(projected) = receiver.ty.as_ref().and_then(|ty| self.reader_projection(ty, &columns))
+                {
+                    return projected;
+                }
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
                     && recv_ty.as_ref().is_some_and(instance_shaped);
                 let mut dispatched =
@@ -2482,6 +2523,7 @@ impl<'a> BodyTyper<'a> {
                     // scripts/campfire-db-differential runs statement by
                     // statement (`user = User.find(id)` in a begin,
                     // `user.messages.create!` below).
+                    let mut flow_exported = std::collections::HashSet::new();
                     if matches!(&*e.node,
                         ExprNode::If { .. } | ExprNode::Case { .. } | ExprNode::While { .. }
                             | ExprNode::BeginRescue { .. } | ExprNode::BoolOp { .. })
@@ -2491,6 +2533,7 @@ impl<'a> BodyTyper<'a> {
                         if flow_locals(e, &local_ctx.local_bindings, &mut flowed, &mut unknown) {
                             for (name, ty) in flowed {
                                 if !unknown.contains(&name) {
+                                    flow_exported.insert(name.clone());
                                     local_ctx.local_bindings.insert(name, ty);
                                 }
                             }
@@ -2754,14 +2797,16 @@ impl<'a> BodyTyper<'a> {
                     // diverging-then narrowing below so that block can
                     // further tighten the now-bound local to non-nil on
                     // the fall-through path. A Var/Bottom RHS is skipped so
-                    // a good prior binding isn't clobbered.
+                    // a good prior binding isn't clobbered, and so is a name
+                    // [`flow_locals`] already joined: its answer includes the
+                    // branches' own writes and what the condition proved.
                     if let ExprNode::If { cond, .. } | ExprNode::While { cond, .. } =
                         &*e.node
                     {
                         let mut cond_assigns: HashMap<Symbol, Ty> = HashMap::new();
                         collect_var_assignments_into(cond, &mut cond_assigns);
                         for (name, ty) in cond_assigns {
-                            if ty.is_open() {
+                            if ty.is_open() || flow_exported.contains(&name) {
                                 continue;
                             }
                             local_ctx.local_bindings.insert(name, ty);
@@ -3404,13 +3449,20 @@ fn flow_locals(
             let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|_| None));
             let mut paths = Vec::new();
             for (branch, then_side) in [(then_branch, true), (else_branch, false)] {
-                let narrowed = match &pred {
+                let mut narrowed = match &pred {
                     Some(p) => narrowing::narrow_locals(p, then_side, &|name| {
                         flowed.get(name).or_else(|| bound.get(name)).cloned()
                     }),
                     None => HashMap::new(),
                 };
+                // A name written before the branch (in the condition
+                // itself: `return if !(story = find_story)`) holds what
+                // the condition proved about that write on this side.
                 let mut path = flowed.clone();
+                narrowed.retain(|name, ty| match path.get_mut(name) {
+                    Some(written) => { *written = ty.clone(); false }
+                    None => true,
+                });
                 if flow(branch, &mut path, unknown) { paths.push((path, narrowed)); }
             }
             match join(paths, bound) {

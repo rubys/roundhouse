@@ -24,6 +24,7 @@
 //! Each of those comes when a fixture forces it.
 
 mod alba;
+pub(crate) mod assoc_pluck;
 mod enum_raw_input;
 mod body;
 mod class_configuration;
@@ -92,6 +93,7 @@ use crate::ty::{ParamKind, Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
+    materialized_associations: std::collections::HashSet<Symbol>,
     /// Inferred parameter types per (class, method). Empty after
     /// `Analyzer::new`; populated by `unify_params_from_call_sites`
     /// during the fixpoint loop in `analyze`. Consulted when seeding
@@ -267,18 +269,24 @@ impl Analyzer {
             let mut cls = ClassInfo::default();
             cls.table = Some(model.table.clone());
             cls.attributes = model.attributes.clone();
+            cls.primary_key = model.primary_key.clone().or_else(|| app.schema.tables.get(&model.table.0)
+                .and_then(|table| table.columns.iter().find(|column| column.primary_key))
+                .map(|column| column.name.clone()));
             // The key's type as the schema declares it (#90): the
             // attribute row already carries it under the key column's
             // name — `id`, or the column `create_table primary_key:`
             // named — and `ids` / `id` follow it rather than assuming
             // an integer. No key in the row (a schema-less test model)
             // keeps Rails' default.
-            let key_ty = app
-                .schema
-                .tables
-                .get(&model.table.0)
-                .and_then(|t| t.columns.iter().find(|c| c.primary_key))
-                .and_then(|c| model.attributes.fields.get(&c.name).cloned())
+            // `ids` selects `primary_key`, which may be a column the schema
+            // did not flag (`id: false` plus `self.primary_key = "identifier"`).
+            // The attribute row is that column's type. A missing key stays
+            // Rails' integer default. An `id` column registered below still
+            // overwrites the instance reader when that column exists.
+            let key_ty = cls
+                .primary_key
+                .as_ref()
+                .and_then(|name| model.attributes.fields.get(name).cloned())
                 .unwrap_or(Ty::Int);
 
             // AR class-method signatures sourced from the shared
@@ -1134,6 +1142,9 @@ impl Analyzer {
             .chain(app.library_classes.iter()
                 .flat_map(|class| class.methods.iter().map(move |method| (&class.name, method))))
         {
+            if method.receiver == crate::dialect::MethodReceiver::Class {
+                classes.entry(id.clone()).or_default().source_class_methods.insert(method.name.clone());
+            }
             if method.receiver == crate::dialect::MethodReceiver::Class
                 && method.name.as_str() == "new"
             {
@@ -1196,6 +1207,7 @@ impl Analyzer {
             .collect();
 
         Self {
+            materialized_associations: crate::lower::assoc_pluck::materialized_assoc_names(app),
             classes,
             inferred_params: HashMap::new(),
             declared_signatures: app
@@ -1229,6 +1241,7 @@ impl Analyzer {
     /// Cheap — just a struct with a reference.
     fn body_typer(&self) -> BodyTyper<'_> {
         let typer = BodyTyper::new(&self.classes)
+            .with_materialized_associations(&self.materialized_associations)
             .with_inquirers(&self.inquirers)
             .with_i18n(&self.i18n, &self.helper_modules)
             .with_open_classes(&self.open_classes)
@@ -4559,10 +4572,8 @@ impl Analyzer {
                 continue;
             }
             let seeded = if param.rest && !param.keyword && !param.forwarding {
-                match rest_element(observed.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default()) {
-                    Ty::Untyped => None,
-                    elem => Some(Ty::Array { elem: std::sync::Arc::new(elem) }),
-                }
+                let elem = rest_element(observed.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default());
+                Some(Ty::Array { elem: std::sync::Arc::new(elem) })
             } else {
                 param_ty_with_default(observed.and_then(|v| v.get(i)).cloned(), param)
             };

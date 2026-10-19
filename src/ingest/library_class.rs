@@ -2407,8 +2407,7 @@ fn walk_decl_body_with_visibility<'pr>(
             let receiver = if mode.is_class_side() { MethodReceiver::Class } else { MethodReceiver::Instance };
             if let Some((to, from)) = to.zip(from) {
                 if let Some(source) = out.methods.iter().rposition(|method| method.name.as_str() == from && method.receiver == receiver) {
-                    let mut copy = out.methods[source].clone();
-                    copy.name = Symbol::from(to.as_str());
+                    let mut copy = copy_aliased_method(&out.methods[source], to.as_str());
                     copy.name_span = Span {
                         file: super::sources::file_id(file),
                         start: alias.location().start_offset() as u32,
@@ -2710,8 +2709,7 @@ fn walk_decl_body_with_visibility<'pr>(
                     {
                         let (to, source) =
                             alias_source(&call, &out.methods, mode.is_class_side()).unwrap();
-                        let mut copy = out.methods[source].clone();
-                        copy.name = Symbol::from(to.as_str());
+                        let mut copy = copy_aliased_method(&out.methods[source], to.as_str());
                         copy.name_span = Span {
                             file: super::sources::file_id(file),
                             start: call.location().start_offset() as u32,
@@ -2984,6 +2982,17 @@ pub(super) fn alias_source(
     let source =
         methods.iter().rposition(|m| m.name.as_str() == from.as_str() && m.receiver == receiver)?;
     Some((to.clone(), source))
+}
+
+/// The method an `alias` or `alias_method` copies: `source` under
+/// `new_name`. Callers keep their own rules for which definition is
+/// eligible, and for the alias span and visibility. A body that calls
+/// `super` is still copied; model ingest refuses that case first,
+/// because a renamed copy would reach its own super method.
+pub(crate) fn copy_aliased_method(source: &MethodDef, new_name: &str) -> MethodDef {
+    let mut copy = source.clone();
+    copy.name = Symbol::from(new_name);
+    copy
 }
 
 /// Synthesize `def <name>; @<name>; end` (instance receiver) or

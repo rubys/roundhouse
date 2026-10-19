@@ -865,8 +865,8 @@ fn apply_alias_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {
             });
             continue;
         };
-        let mut aliased = old;
-        aliased.name = new_name;
+        let mut aliased =
+            crate::ingest::library_class::copy_aliased_method(&old, new_name.as_str());
         aliased.name_span = crate::span::Span::synthetic();
         methods.push(aliased);
     }

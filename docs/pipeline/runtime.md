@@ -968,6 +968,37 @@ the constant `true` against a non-nilable type — a correct fold of an
 incorrect type, which signed every visitor in and stopped the join-code
 page from 404ing. A lie the type system can act on is worse than a gap.
 
+### `ActiveModel::Attributes` writers raise where Rails would guess
+
+`ingest::active_model_attributes` gives each `attribute :name, :type`
+(`:string`, `:integer`, `:boolean`, `:datetime`) a reader and a casting
+writer. Three answers differ from Rails on purpose, each by raising:
+
+- An `:integer` writer given a value that is not nil, a boolean, an
+  Integer, a Float or a String raises `TypeError`; Rails calls `to_i`
+  and answers nil when it is missing (a Symbol) or the epoch (a Time).
+- A `:datetime` writer given a value that is neither a String nor a
+  Time keeps it on the CRuby and JRuby trees, as Rails does, and raises
+  `TypeError` on Spinel's.
+- Spinel's `ActiveSupport.cast_datetime` reads only ISO 8601 (a date,
+  an optional `HH:MM[:SS[.ffffff]]`, and a `Z` or `±HH[:]MM` zone after
+  the seconds). Any other non-empty string raises `ArgumentError`; Rails
+  falls back to `Date._parse`, which reads `"Oct 14 2026"` and answers
+  nil for `"garbage"`. The CRuby and JRuby trees run Rails' algorithm.
+
+A zoneless string is UTC only when `config.time_zone` is `"UTC"`. Rails'
+`is_utc?` is `Time.zone_default.name == "UTC"`, and `GMT`, `Etc/UTC`,
+`Etc/GMT`, and `Etc/UCT` are not that name, so Rails reads them with
+`Time.local`. The process zone stays the host's: boot does not pin
+`ENV["TZ"]` to `config.time_zone`.
+
+The four casts live in the ruby-family and Spinel runtime
+(`cast_string`, `cast_integer`, and `cast_boolean` in
+`runtime/ruby/active_support_ext.rb`, `cast_datetime` beside
+`parse_time`). A strict target does not load that runtime, so it
+reports each call rather than emitting a writer that names a method
+it does not have.
+
 ### `list.many?` becomes `ActiveSupport.many?(list)`
 
 Another `Enumerable` core_ext reopen the transpiled runtimes cannot host

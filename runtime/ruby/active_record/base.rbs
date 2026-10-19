@@ -116,6 +116,7 @@ module ActiveRecord
     # the app's keys and no wider.
     def id: () -> Integer
     def id=: (Integer) -> Integer
+    def _primary_key_value: () -> Integer
     def to_param: () -> String
 
     # Error message accumulator populated by the lowerer-emitted

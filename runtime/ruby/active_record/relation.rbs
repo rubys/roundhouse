@@ -293,8 +293,8 @@ module ActiveRecord
     # lowerer monomorphizing per call site from the schema.
     # `ids` is Array[Integer] for integer-key apps; string/uuid apps
     # widen it via `project::widen_key_contract` (#310).
-    def pluck: (String | Symbol col) -> Array[untyped]
-    def pick: (String | Symbol col) -> untyped
+    def pluck: (*(String | Symbol) cols) -> Array[untyped]
+    def pick: (*(String | Symbol) cols) -> untyped
     def ids: () -> Array[Integer]
     def find: (Integer | Float | String | Array[Integer | Float | String] | nil id) -> untyped
     def find_primary_key: (Integer | Float | String | Array[Integer | Float | String] | nil id) -> (Base | Array[Base])

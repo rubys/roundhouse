@@ -1103,7 +1103,19 @@ fn every_runtime_method_body_concretely_typed() {
     // `finish = range[1]` is already gradual, so `cursor < @html.length`
     // is too (+1 in action_text.rb). `cursor` used to read as Integer from
     // its `0` seed, narrower than the code allows.
-    const CEILING: usize = 794;
+    // MEASURED 798 on 2026-10-19: that site plus the four computed Inertia
+    // prop reads. A computed prop value is whatever the helper put in the
+    // hash. `apply_inertia_prop` reads that untyped value for
+    // `is_a?(InertiaRails::Prop)`, for `is_a?(Proc)`, and again to encode
+    // a plain value (+3 in action_controller/inertia.rb). `inertia_exec`
+    // calls Kernel#instance_exec; the block result is untyped, so that
+    // send stays (+1). Down from 808 on the 793 base: the props hash is
+    // `Hash[String | Symbol, untyped]` (the walk's key reads dropped), the
+    // stored proc and the controller are typed, encoding happens inside
+    // `inertia_exec` (no separate `inertia_prop_json` read), and
+    // `instance_exec` is abstract instead of a `super` wrapper. Session
+    // flag reads are not gradual sites. The four sites stay.
+    const CEILING: usize = 798;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

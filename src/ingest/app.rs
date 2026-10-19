@@ -2141,6 +2141,9 @@ end
     // Before the concern splices: they read `library_classes`, and this
     // turns `Current`'s metaprogrammed surface into real methods first.
     super::current_attributes::lower_current_attributes(&mut app);
+    // `attribute :x, :type` under `include ActiveModel::Attributes` -> real
+    // casting accessors, before anything reads the class's methods.
+    super::active_model_attributes::lower_active_model_attributes(&mut app);
     super::thread_mattr::lower_thread_mattr(&mut app);
     // Alba declarations become ordinary property-reading methods before
     // inference; validate complete original resource bodies, not just IR.

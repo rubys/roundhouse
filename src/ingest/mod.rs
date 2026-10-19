@@ -49,6 +49,7 @@ pub mod generated_helpers;
 pub mod jbuilder;
 pub mod library_class;
 pub mod channel_callbacks;
+mod active_model_attributes;
 pub mod current_attributes;
 pub mod delegate;
 mod acts_as_votable;

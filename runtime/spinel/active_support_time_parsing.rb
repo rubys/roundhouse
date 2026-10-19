@@ -271,4 +271,38 @@ module ActiveSupport
     shifted = t - offset
     in_zone ? ActiveSupport.present(shifted) : shifted.getlocal(offset)
   end
+
+  # ActiveModel::Type::DateTime#cast, for an `attribute :x, :datetime` writer.
+  # A subset of the strings Rails reads (ISO 8601 date, optional time, a zone only after seconds); any other string raises rather than read as a different instant.
+  def self.cast_datetime(value)
+    return nil if value.nil?
+    return value if value.is_a?(Time)
+    raise TypeError, "can't cast #{value.class} to a datetime" unless value.is_a?(String)
+    return nil if value.empty?
+    m = /\A(\d{4})-(\d\d)-(\d\d)(?:[T ](\d\d):(\d\d)(?::(\d\d)(?:\.(\d{1,6}))?(Z|[-+]\d\d:?\d\d)?)?)?\z/.match(value)
+    raise ArgumentError, "unsupported datetime format: #{value.inspect}" if m.nil?
+    year = m[1].to_i
+    mon = m[2].to_i
+    mday = m[3].to_i
+    hour = m[4] ? m[4].to_i : 0
+    min = m[5] ? m[5].to_i : 0
+    sec = m[6] ? m[6].to_i : 0
+    usec = m[7] ? "#{m[7]}000000"[0, 6].to_i : 0
+    raise ArgumentError, "unsupported datetime format: #{value.inspect}" if mon < 1 || mon > 12
+    days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mon - 1]
+    days = 29 if mon == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    raise ArgumentError, "unsupported datetime format: #{value.inspect}" if mday < 1 || mday > days || hour > 23 || min > 59 || sec > 59
+    zone = m[8]
+    # Rails' `is_utc?` is `Time.zone_default.name == "UTC"`. `GMT`, `Etc/UTC`, `Etc/GMT`, and `Etc/UCT` are not that name, so they take `Time.local` (the host zone). Boot does not pin `ENV["TZ"]`.
+    if zone.nil?
+      return Time.utc(year, mon, mday, hour, min, sec, usec) if Rails.application.config_time_zone == "UTC"
+      return Time.local(year, mon, mday, hour, min, sec, usec)
+    end
+    t = Time.utc(year, mon, mday, hour, min, sec, usec)
+    return t if zone == "Z"
+    digits = zone.delete(":")
+    offset = digits[1, 2].to_i * 3600 + digits[3, 2].to_i * 60
+    offset = -offset if digits[0] == "-"
+    (t - offset).getlocal(offset)
+  end
 end

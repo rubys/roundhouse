@@ -5491,17 +5491,196 @@ fn inertia_share_and_render_inertia_analyze_without_errors_or_survey_gaps() {
 }
 
 #[test]
-fn render_inertia_with_a_computed_component_is_a_survey_gap() {
+fn render_inertia_always_prop_is_not_a_survey_gap() {
     let mut files = INERTIA_APP.to_vec();
     files[5] = (
         "app/controllers/widgets_controller.rb",
-        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/\" + action_name\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { kept: InertiaRails.always { \"yes\" } }\n  end\nend\n",
+    );
+    let (errors, gaps) = inertia_check(&files);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(gaps.is_empty(), "{gaps:#?}");
+}
+
+#[test]
+fn inertia_full_page_redirect_stays_a_survey_gap() {
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def show\n    redirect_to \"https://example.com\", inertia: { full_page: true }\n  end\nend\n",
     );
     let (_, gaps) = inertia_check(&files);
     assert!(
-        gaps.iter().any(|g| g.contains("`render inertia:` with a component that is not a String literal")),
+        gaps.iter().any(|g| g.contains("redirect option other than `errors:`, `clear_history:`, or `preserve_fragment:`")),
         "{gaps:#?}"
     );
+}
+
+#[test]
+fn inertia_once_merge_and_lazy_props_stay_survey_gaps() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { row: InertiaRails.once { 1 } }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { row: InertiaRails.merge { 1 } }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { row: InertiaRails.lazy { 1 } }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/index\", props: { row: InertiaRails.scroll { 1 } }\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (_, gaps) = inertia_check(&files);
+        assert!(
+            gaps.iter().any(|g| g.contains("prop type other than `optional`/`defer`/`always`")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+}
+
+#[test]
+fn render_inertia_with_computed_props_has_no_survey_gap() {
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        r#"class WidgetsController < ApplicationController
+  def index
+    render inertia: "widgets/index", props: index_props
+  end
+
+  def show
+    props = { name: "local" }
+    render inertia: "widgets/show", props: props
+  end
+
+  def merged
+    render inertia: "widgets/merged", props: index_props.merge(extra: 1)
+  end
+
+  private
+    def index_props
+      {
+        name: "from-method",
+        secret: InertiaRails.optional { "opt" },
+        stats: InertiaRails.defer { 1 },
+        kept: InertiaRails.always { "yes" }
+      }
+    end
+end
+"#,
+    );
+    let (errors, gaps) = inertia_check(&files);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(
+        !gaps.iter().any(|g| g.contains("props:")),
+        "{gaps:#?}"
+    );
+}
+
+#[test]
+fn render_inertia_with_a_computed_component_has_no_survey_gap() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/\" + action_name\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  PAGE = \"widgets/index\"\n  def index\n    render inertia: PAGE\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: page_name\n  end\n  def page_name\n    \"widgets/index\"\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (errors, gaps) = inertia_check(&files);
+        assert!(errors.is_empty(), "{source}\n{errors:#?}");
+        assert!(
+            !gaps.iter().any(|g| g.contains("component")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+}
+
+#[test]
+fn render_inertia_true_or_a_hash_stays_a_survey_gap() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: true\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: { title: \"x\" }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: nil\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (_, gaps) = inertia_check(&files);
+        assert!(
+            gaps.iter().any(|g| g.contains("component that is not a String or a String expression")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+}
+
+#[test]
+fn inertia_clear_history_redirect_is_not_a_survey_gap() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def destroy\n    redirect_to \"/widgets\", inertia: { clear_history: true }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def update\n    redirect_to \"/widgets\", inertia: { errors: { name: [\"bad\"] }, clear_history: false }\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (errors, gaps) = inertia_check(&files);
+        assert!(errors.is_empty(), "{source}\n{errors:#?}");
+        assert!(
+            !gaps.iter().any(|g| g.contains("redirect option")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def update\n    redirect_to \"/widgets\", inertia: { flash: \"no\" }\n  end\nend\n",
+    );
+    let (_, gaps) = inertia_check(&files);
+    assert!(
+        gaps.iter().any(|g| g.contains("`inertia:` redirect option other than `errors:`, `clear_history:`, or `preserve_fragment:`")),
+        "{gaps:#?}"
+    );
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def destroy\n    redirect_to \"/widgets\", inertia: { clear_history: \"yes\" }\n  end\nend\n",
+    );
+    let (_, gaps) = inertia_check(&files);
+    assert!(
+        gaps.iter().any(|g| g.contains("`clear_history:` that is not `true` or `false`")),
+        "{gaps:#?}"
+    );
+}
+
+#[test]
+fn inertia_preserve_fragment_redirect_is_not_a_survey_gap() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def update\n    redirect_to \"/widgets\", inertia: { preserve_fragment: true }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def update\n    redirect_to \"/widgets\", inertia: { preserve_fragment: false }\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (errors, gaps) = inertia_check(&files);
+        assert!(errors.is_empty(), "{source}\n{errors:#?}");
+        assert!(
+            !gaps.iter().any(|g| g.contains("redirect option")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def update\n    redirect_to \"/widgets\", inertia: { preserve_fragment: \"yes\" }\n  end\nend\n",
+    );
+    let (_, gaps) = inertia_check(&files);
+    assert!(
+        gaps.iter().any(|g| g.contains("`preserve_fragment:` that is not `true` or `false`")),
+        "{gaps:#?}"
+    );
+}
+
+#[test]
+fn inertia_location_is_a_controller_method() {
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def show\n    inertia_location \"https://example.com/away\"\n  end\nend\n",
+    );
+    let (errors, gaps) = inertia_check(&files);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(gaps.is_empty(), "{gaps:#?}");
 }
 
 #[test]

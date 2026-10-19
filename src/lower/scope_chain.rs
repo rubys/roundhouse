@@ -291,6 +291,13 @@ pub fn scope_variant_name(name: &Symbol, k: usize, subset: &[&Param]) -> Symbol 
 pub struct UserMethodReturns {
     pub instance: HashMap<Symbol, Option<ClassId>>,
     pub class: HashMap<(ClassId, Symbol), ClassId>,
+    /// Class methods defined on that model itself. Ancestors stay on
+    /// the ancestor: [`UserMethodReturns::defines_class_method`] walks
+    /// [`Self::parents`], the same question `ClassInfo::source_class_method`
+    /// answers for the typer. Copying every ancestor method onto each
+    /// descendant made the two indexes disagree about who defined it.
+    pub class_methods: HashSet<(ClassId, Symbol)>,
+    pub parents: HashMap<ClassId, ClassId>,
     /// Scopes whose body answers something OTHER than a relation (see
     /// [`non_relation_scopes`]). A call to one ends the chain's model.
     pub non_relation_scopes: HashSet<(ClassId, Symbol)>,
@@ -299,6 +306,19 @@ pub struct UserMethodReturns {
 impl UserMethodReturns {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A source `def self.<method>` on `model` or one of its parents.
+    pub fn defines_class_method(&self, model: &ClassId, method: &Symbol) -> bool {
+        let mut current = Some(model);
+        for _ in 0..32 {
+            let Some(id) = current else { return false };
+            if self.class_methods.contains(&(id.clone(), method.clone())) {
+                return true;
+            }
+            current = self.parents.get(id);
+        }
+        false
     }
 }
 
@@ -309,6 +329,7 @@ pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
         for item in &m.body {
             let ModelBodyItem::Method { method, .. } = item else { continue };
             if method.receiver == crate::dialect::MethodReceiver::Class {
+                reg.class_methods.insert((m.name.clone(), method.name.clone()));
                 if let Some(target) = relation_return_model(&method.body, &model_ids) {
                     reg.class.insert((m.name.clone(), method.name.clone()), target);
                 }
@@ -327,6 +348,11 @@ pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
                     }
                 })
                 .or_insert(Some(target));
+        }
+    }
+    for model in models {
+        if let Some(parent) = &model.parent {
+            reg.parents.insert(model.name.clone(), parent.clone());
         }
     }
     reg.non_relation_scopes = non_relation_scopes(models, &model_ids);
@@ -2806,8 +2832,10 @@ fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span
 /// root and re-rooting those would move work out from under it —
 /// `Comment.count` is an inlined `SELECT COUNT(*)`, not a Relation.
 ///
-/// `pluck` and `ids` have no such home: they were left as a call on
-/// the class, which no class answers.
+/// `pluck`, `pick`, and `ids` have no such home: they were left as a
+/// call on the class, which no class answers. `pick` is delegated the
+/// same way as `pluck`. A source `def self.pick` is left on the class
+/// before this list is consulted.
 ///
 /// `destroy_by` / `delete_by` join them for exactly that reason. Both
 /// are `where` + a write, the arel pass claims neither at a Const root,
@@ -2818,7 +2846,9 @@ fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span
 ///
 /// `maximum` / `minimum` likewise: `Base` defines neither, and the arel
 /// pass leaves them to `Relation`'s SQL extrema.
-const CLASS_ROOT_TERMINALS: &[&str] = &["pluck", "ids", "destroy_by", "delete_by", "maximum", "minimum"];
+const CLASS_ROOT_TERMINALS: &[&str] = &[
+    "pluck", "pick", "ids", "destroy_by", "delete_by", "maximum", "minimum",
+];
 
 /// Relation TERMINALS our runtime implements — a seeded association
 /// chain may end in one (`@story.merged_stories.ids`). Deliberately
@@ -4178,6 +4208,13 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     let keeps = ctx.scope_keeps_relation(&m, &method);
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return keeps.then_some(m);
+                }
+                if matches!(method.as_str(), "pluck" | "pick")
+                    && ctx.user_returns.defines_class_method(&m, &method)
+                {
+                    let returns = ctx.user_returns.class.get(&(m.clone(), method.clone())).cloned();
+                    *expr = put(span, Some(r), method, args, block, parenthesized);
+                    return returns;
                 }
                 if is_relation_chain_method(method.as_str())
                     || method.as_str() == "all"
