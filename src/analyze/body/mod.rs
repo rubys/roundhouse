@@ -2523,6 +2523,7 @@ impl<'a> BodyTyper<'a> {
                     // scripts/campfire-db-differential runs statement by
                     // statement (`user = User.find(id)` in a begin,
                     // `user.messages.create!` below).
+                    let mut flow_exported = std::collections::HashSet::new();
                     if matches!(&*e.node,
                         ExprNode::If { .. } | ExprNode::Case { .. } | ExprNode::While { .. }
                             | ExprNode::BeginRescue { .. } | ExprNode::BoolOp { .. })
@@ -2532,6 +2533,7 @@ impl<'a> BodyTyper<'a> {
                         if flow_locals(e, &local_ctx.local_bindings, &mut flowed, &mut unknown) {
                             for (name, ty) in flowed {
                                 if !unknown.contains(&name) {
+                                    flow_exported.insert(name.clone());
                                     local_ctx.local_bindings.insert(name, ty);
                                 }
                             }
@@ -2795,14 +2797,16 @@ impl<'a> BodyTyper<'a> {
                     // diverging-then narrowing below so that block can
                     // further tighten the now-bound local to non-nil on
                     // the fall-through path. A Var/Bottom RHS is skipped so
-                    // a good prior binding isn't clobbered.
+                    // a good prior binding isn't clobbered, and so is a name
+                    // [`flow_locals`] already joined: its answer includes the
+                    // branches' own writes and what the condition proved.
                     if let ExprNode::If { cond, .. } | ExprNode::While { cond, .. } =
                         &*e.node
                     {
                         let mut cond_assigns: HashMap<Symbol, Ty> = HashMap::new();
                         collect_var_assignments_into(cond, &mut cond_assigns);
                         for (name, ty) in cond_assigns {
-                            if ty.is_open() {
+                            if ty.is_open() || flow_exported.contains(&name) {
                                 continue;
                             }
                             local_ctx.local_bindings.insert(name, ty);
@@ -3445,13 +3449,20 @@ fn flow_locals(
             let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|_| None));
             let mut paths = Vec::new();
             for (branch, then_side) in [(then_branch, true), (else_branch, false)] {
-                let narrowed = match &pred {
+                let mut narrowed = match &pred {
                     Some(p) => narrowing::narrow_locals(p, then_side, &|name| {
                         flowed.get(name).or_else(|| bound.get(name)).cloned()
                     }),
                     None => HashMap::new(),
                 };
+                // A name written before the branch (in the condition
+                // itself: `return if !(story = find_story)`) holds what
+                // the condition proved about that write on this side.
                 let mut path = flowed.clone();
+                narrowed.retain(|name, ty| match path.get_mut(name) {
+                    Some(written) => { *written = ty.clone(); false }
+                    None => true,
+                });
                 if flow(branch, &mut path, unknown) { paths.push((path, narrowed)); }
             }
             match join(paths, bound) {
