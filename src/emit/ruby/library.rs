@@ -7592,11 +7592,22 @@ fn emit_library_class_decl_inner(
     // macro calls: those initializers must run after all collected methods.
     // A `Data.define` block is source too: its `@ivar` writes and
     // constants run in the order that the block gives them.
-    let replayed_in_place: Vec<&Expr> = lc
+    let mut replayed_in_place: Vec<&Expr> = lc
         .unknown_calls
         .iter()
         .filter(|call| call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 && !call.span.is_synthetic())
         .collect();
+    // A block that assigns a constant defines it when the call runs, so the
+    // call has to keep its place among the constants and methods.
+    for call in &lc.unknown_calls {
+        if call.span.is_synthetic() || !constant_defining_class_call(app, classes, lc, call) {
+            continue;
+        }
+        if replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, call)) {
+            continue;
+        }
+        replayed_in_place.push(call);
+    }
     let ordered_body = (lc.origin.is_none() || lc.data_define().is_some())
         && (lc.has_source_ivar_initializers() || !replayed_in_place.is_empty())
         && !app.controllers.iter().any(|controller| controller.name == lc.name);
@@ -8178,7 +8189,7 @@ fn emit_library_class_decl_inner(
             // A payload job's `queue_as` and `discard_on
             // ActiveJob::DeserializationError` are not dropped: the plan
             // carries them (`lower::job_payload`).
-            if call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 && ordered_body {
+            if ordered_body && replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, call)) {
                 continue;
             }
             let listed = own.iter().any(|c| std::ptr::eq(*c, call))
@@ -8187,9 +8198,8 @@ fn emit_library_class_decl_inner(
             if listed {
                 continue;
             }
-            // `setup do |t| LABEL = t.option(…) end` defines LABEL on this
-            // class when the call runs. The read is typed from that write;
-            // dropping the call leaves the constant uninitialized.
+            // Source order is unavailable here (a controller body). The call
+            // still has to run or the constant it writes does not exist.
             if constant_defining_class_call(app, classes, lc, call) {
                 replayed.push(call);
                 continue;
@@ -8975,28 +8985,26 @@ fn block_assigns_bare_constant(call: &Expr) -> bool {
 }
 
 fn singleton_method_visible(app: &App, classes: &[LibraryClass], start: &ClassId, method: &Symbol) -> bool {
+    let defines = |m: &MethodDef| m.receiver == MethodReceiver::Class && m.name == *method;
     let mut current = Some(start.clone());
     let mut seen = BTreeSet::new();
     while let Some(id) = current {
         if !seen.insert(id.clone()) {
             return false;
         }
-        let defines = |m: &MethodDef| m.receiver == MethodReceiver::Class && m.name == *method;
-        if let Some(lc) = classes.iter().find(|lc| lc.name == id) {
-            if lc.methods.iter().any(defines) {
-                return true;
-            }
-            current = lc.parent.clone();
+        let fragments: Vec<&LibraryClass> = classes.iter().filter(|lc| lc.name == id).collect();
+        if fragments.iter().any(|lc| lc.methods.iter().any(defines)) {
+            return true;
+        }
+        if let Some(parent) = fragments.iter().find_map(|lc| lc.parent.clone()) {
+            current = Some(parent);
             continue;
         }
-        if let Some(model) = app.models.iter().find(|model| model.name == id) {
-            if model.methods().any(defines) {
-                return true;
-            }
-            current = model.parent.clone();
-            continue;
+        let models: Vec<_> = app.models.iter().filter(|model| model.name == id).collect();
+        if models.iter().any(|model| model.methods().any(defines)) {
+            return true;
         }
-        return false;
+        current = models.iter().find_map(|model| model.parent.clone());
     }
     false
 }
