@@ -411,7 +411,7 @@ fn is_nested_def(expr: &Expr) -> bool {
 
 fn sole_extend_local(body: &Expr, name: &Symbol) -> bool {
     let mut writes = 0u32;
-    let mut reads = 0u32;
+    let reads = std::cell::Cell::new(0u32);
     let mut extend_reads = 0u32;
     let mut foreign = false;
     let total = extend_reads_of(body, name);
@@ -428,15 +428,21 @@ fn sole_extend_local(body: &Expr, name: &Symbol) -> bool {
                 extend_reads += 1;
             }
             if var_is(e, name) {
-                reads += 1;
+                reads.set(reads.get() + 1);
             }
         },
         &mut |e| {
             if is_plain_assign_to(e, name) || is_other_write(e, name) {
                 foreign = true;
             }
+            // A read in a scope that does not extend still uses the
+            // local. Deleting the assignment would leave a NameError.
+            if var_is(e, name) {
+                reads.set(reads.get() + 1);
+            }
         },
     );
+    let reads = reads.get();
     !foreign && writes == 1 && reads > 0 && reads == extend_reads
 }
 
@@ -824,13 +830,20 @@ fn explode_receiver(recv: &Expr, helpers: &[Factory]) -> Option<Built> {
         return None;
     }
     let mut body = value_of(&factory.body).clone();
-    for (name, value) in &bound {
-        subst_name(&mut body, name, value);
-    }
+    // Qualify and rename the tap parameter before the caller's
+    // arguments are spliced in. Otherwise an argument named `box`, or
+    // a bare constant that matches the helper, is rewritten too.
     if !factory.constants.is_empty() {
         qualify(&mut body, &factory.owner, &factory.constants);
     }
-    explode_expr(&body)
+    let mut built = explode_expr(&body)?;
+    for (name, value) in &bound {
+        subst_name(&mut built.new_call, name, value);
+        for set in &mut built.sets {
+            subst_name(set, name, value);
+        }
+    }
+    Some(built)
 }
 
 fn explode_expr(expr: &Expr) -> Option<Built> {

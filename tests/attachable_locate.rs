@@ -334,6 +334,34 @@ fn an_extend_through_a_helper_call_argument_stays_unsupported() {
     );
 }
 
+/// A read of the module local outside the extend still needs the
+/// assignment. Deleting it would raise `NameError`.
+#[test]
+fn a_module_local_read_outside_the_extend_stays_unsupported() {
+    assert_extend_stub(
+        "test_other_read",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"other read\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    one.extend(failing).ping\n    assert_kind_of Module, failing if false\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// The caller's argument is not the tap parameter. `opened(box)` must
+/// set `note` from that local, not from the new object.
+#[test]
+fn a_helper_argument_keeps_its_name_when_the_tap_parameter_matches() {
+    let (_diags, test) = box_extend_app(
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  include OpenHelper\n  test \"named argument\" do\n    failing = Module.new { def begin_transport = :closed }\n    box = \"kept\"\n    assert_equal :closed, opened(box).extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+    assert!(
+        test.contains(".note = box"),
+        "the setter keeps the caller's local:\n{test}"
+    );
+    assert!(
+        !test.contains(".note = __rh_extend_object"),
+        "the setter does not receive the new object:\n{test}"
+    );
+    assert!(test.contains(".extend("), "this shape still extends:\n{test}");
+}
+
 /// `one.n += one.extend(mod).delta` reads `n` before the extend.
 #[test]
 fn an_extend_on_the_right_of_op_assign_stays_unsupported() {
