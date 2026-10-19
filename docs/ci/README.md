@@ -93,6 +93,10 @@ The test jobs download its exact artifact ID, including on failed-job reruns.
 They retain the fixture, Ruby gems, system libraries, and Rust toolchain needed
 by test bodies, but do not rebuild the workspace.
 
+The unit producer uses `opt-level=0` for the `roundhouse` package.
+Dependencies stay optimized. Local test defaults and production profiles
+stay unchanged.
+
 Each job checks the source SHA, archive digest, workspace paths, case identities,
 and ignored states before execution. The four hash partitions must be disjoint
 and cover every active case. An empty combined suite or incomplete inventory
@@ -100,8 +104,13 @@ fails the job. Build artifacts are shared; test results are never reused.
 
 Producer and consumer workspace paths stay identical because existing tests
 embed source and executable paths. Test binaries retain embedded backtrace line
-data. The producer runs documentation tests once, then explicitly rebuilds
-`emit_preview` in the unoptimized dev profile for the nine-target bench gate.
+data. Documentation tests use the same CI package override, so they reuse
+the producer's library build.
+
+`store-check` builds `emit_preview` with the unoptimized `dev` profile and
+runs the nine-target bench gate. The steps run even when Store analysis
+reuses a prior result. They reuse the Store library build when it exists.
+The bench gate stays required but does not delay the test archive.
 
 The producer and every unit shard remain required. Per-attempt timing, resource,
 coverage, and test-result artifacts retain failure evidence without matrix
