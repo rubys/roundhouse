@@ -377,6 +377,12 @@ module Db
   end
 
   def self.close
+    # Same as db_cruby.rb. This shim's live handle is the fiber lease.
+    # Schema switch closes that checkout too: leaving it set makes the
+    # next statement keep using the JDBC connection we just closed.
+    Fiber[:db_handle] = nil
+    Fiber[:db_owner] = nil
+    Fiber[:db_txn_pin] = false
     return if @all.nil?
     error = nil
     @all.each do |conn|

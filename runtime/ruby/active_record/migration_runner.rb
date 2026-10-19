@@ -57,13 +57,16 @@ module ActiveRecord
       end
 
       def self.apply_pending(target)
-        ensure_schema_migrations
         files = migration_files
-        # The dump is not implemented. Raising after a rewrite would
-        # leave the table rebuilt, its triggers gone, and the version
-        # recorded, while `super.tap { repair }` never reaches the repair.
-        if dump_schema_after_migration && pending?(files, target)
-          raise "schema dump after migration is not supported"
+        # Refuse before any write. Creating schema_migrations first would
+        # make initialize_database skip the dump, and the raise would
+        # leave that empty table behind. A rewrite would also drop
+        # triggers before `super.tap { repair }` runs.
+        if pending?(files, target)
+          if dump_schema_after_migration
+            raise "schema dump after migration is not supported"
+          end
+          ensure_schema_migrations
         end
         i = 0
         while i < files.length
@@ -94,6 +97,7 @@ module ActiveRecord
       end
 
       def self.version_recorded?(version)
+        return false unless ActiveRecord::Base.connection.data_source_exists?("schema_migrations")
         quoted = ActiveRecord::Base.connection.quote(version)
         stmt = Db.prepare("SELECT version FROM schema_migrations WHERE version = #{quoted}")
         found = Db.step?(stmt)

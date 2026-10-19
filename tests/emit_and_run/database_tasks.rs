@@ -200,6 +200,35 @@ class Room::MessagesCountTasksTest < ActiveSupport::TestCase
     end
   end
 
+  test "refusing a schema dump does not create schema_migrations" do
+    config = configuration("test")
+    File.write(File.join(@migrations, "20261008000100_change_counter_task_message_column.rb"), <<~RUBY)
+      class ChangeCounterTaskMessageColumn < ActiveRecord::Migration[8.2]
+        def change
+          change_column :messages, :client_message_id, :text
+        end
+      end
+    RUBY
+    ActiveRecord.dump_schema_after_migration = true
+
+    @tasks.with_temporary_connection(config) do |connection|
+      # The process database has no task config. migrate must not
+      # invent schema_migrations before it refuses the dump, or a
+      # later prepare treats the empty table as an initialized database.
+      @tasks.instance_variable_set(:@current, nil)
+      refused = false
+      begin
+        @tasks.migrate
+      rescue RuntimeError => e
+        refused = e.message.include?("schema dump after migration is not supported")
+      end
+      raise "migrate did not refuse the dump" unless refused
+      raise "refused migrate created schema_migrations" if connection.data_source_exists?("schema_migrations")
+      @tasks.load_schema(config)
+      raise "schema load skipped after the refusal" unless connection.data_source_exists?("rooms")
+    end
+  end
+
   test "migrate repairs rebuilt message tables and repeats repair with no new migration" do
     config = configuration("test")
     File.write(File.join(@migrations, "20261008000100_change_counter_task_message_column.rb"), <<~RUBY)
