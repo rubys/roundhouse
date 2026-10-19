@@ -7592,22 +7592,19 @@ fn emit_library_class_decl_inner(
     // macro calls: those initializers must run after all collected methods.
     // A `Data.define` block is source too: its `@ivar` writes and
     // constants run in the order that the block gives them.
-    let mut replayed_in_place: Vec<&Expr> = lc
+    let replayed_in_place: Vec<&Expr> = lc
         .unknown_calls
         .iter()
         .filter(|call| call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 && !call.span.is_synthetic())
         .collect();
-    // A block that assigns a constant defines it when the call runs, so the
-    // call has to keep its place among the constants and methods.
-    for call in &lc.unknown_calls {
-        if call.span.is_synthetic() || !constant_defining_class_call(app, classes, lc, call) {
-            continue;
-        }
-        if replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, call)) {
-            continue;
-        }
-        replayed_in_place.push(call);
-    }
+    // Kept out of `replayed_in_place`: that list is what turns on
+    // source-ordered bodies, and a constant write must not move includes
+    // or a gem DSL. The call is span-sorted into the constant list below.
+    let constant_calls: Vec<&Expr> = lc
+        .unknown_calls
+        .iter()
+        .filter(|call| !call.span.is_synthetic() && constant_defining_class_call(app, classes, lc, call))
+        .collect();
     let ordered_body = (lc.origin.is_none() || lc.data_define().is_some())
         && (lc.has_source_ivar_initializers() || !replayed_in_place.is_empty())
         && !app.controllers.iter().any(|controller| controller.name == lc.name);
@@ -7769,6 +7766,9 @@ fn emit_library_class_decl_inner(
     if ordered_body {
         body.extend(replayed_in_place.iter().map(|call| (call.span.start, BodyItem::Initializer(call))));
     }
+    body.extend(constant_calls.iter().filter(|call| {
+        !replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, **call))
+    }).map(|call| (call.span.start, BodyItem::Initializer(call))));
     // Concern-spliced and other foreign-file methods keep foreign
     // `name_span` offsets; interleave only same-file declarations.
     let body_file = lc.class_ivar_initializers.iter().find_map(|init| {
@@ -8114,7 +8114,9 @@ fn emit_library_class_decl_inner(
         for (_, item) in items {
             match item {
                 BodyItem::Constant(i, _) => render_constants(s, &[*i]),
-                BodyItem::Initializer(expr) if ordered_body => {
+                BodyItem::Initializer(expr) if ordered_body
+                    || constant_calls.iter().any(|call| std::ptr::eq(*call, *expr)) =>
+                {
                     nested.borrow_mut().write_expr(s, depth, lc, expr);
                     for line in super::emit_expr(&top_level(expr)).lines() {
                         writeln!(s, "{body_pad}{line}").unwrap();
@@ -8177,31 +8179,30 @@ fn emit_library_class_decl_inner(
     // after it (`app_extension_calls`); every other call stays dropped.
     // Preserved external-gem `include`s are emitted separately and filtered
     // out of both the foreign replay list and the dropped-call reports.
+    let in_body = |call: &&Expr| {
+        constant_calls.iter().any(|kept| std::ptr::eq(*kept, *call))
+            || (ordered_body && replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, *call)))
+    };
     let replayed: Vec<&Expr> = if replays_foreign_class_body(lc, app, classes) {
         lc.unknown_calls
             .iter()
-            .filter(|call| !is_preserved_external_include(call))
+            .filter(|call| !is_preserved_external_include(call) && !in_body(call))
             .collect()
     } else {
         let own = app_extension_calls(lc, app, classes);
         let mut replayed = own.clone();
+        replayed.retain(|call| !in_body(call));
         for call in &lc.unknown_calls {
             // A payload job's `queue_as` and `discard_on
             // ActiveJob::DeserializationError` are not dropped: the plan
             // carries them (`lower::job_payload`).
-            if ordered_body && replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, call)) {
+            if in_body(&call) {
                 continue;
             }
             let listed = own.iter().any(|c| std::ptr::eq(*c, call))
                 || is_preserved_external_include(call)
                 || crate::lower::job_payload::modelled_class_body_call(app, lc, call);
             if listed {
-                continue;
-            }
-            // Source order is unavailable here (a controller body). The call
-            // still has to run or the constant it writes does not exist.
-            if constant_defining_class_call(app, classes, lc, call) {
-                replayed.push(call);
                 continue;
             }
             report_dropped_class_body_call(lc, call);
@@ -8967,7 +8968,7 @@ fn constant_defining_class_call(app: &App, classes: &[LibraryClass], lc: &Librar
         return false;
     }
     let ExprNode::Send { recv: None, method, .. } = &*call.node else { return false };
-    block_assigns_bare_constant(call) && singleton_method_visible(app, classes, &lc.name, method)
+    block_assigns_bare_constant(call) && singleton_method_visible(app, classes, lc, method)
 }
 
 fn block_assigns_bare_constant(call: &Expr) -> bool {
@@ -8984,27 +8985,30 @@ fn block_assigns_bare_constant(call: &Expr) -> bool {
     })
 }
 
-fn singleton_method_visible(app: &App, classes: &[LibraryClass], start: &ClassId, method: &Symbol) -> bool {
+/// This fragment's own class methods, then ancestors. Another reopen of
+/// the same class is a different file and is not loaded above this call.
+fn singleton_method_visible(app: &App, classes: &[LibraryClass], lc: &LibraryClass, method: &Symbol) -> bool {
     let defines = |m: &MethodDef| m.receiver == MethodReceiver::Class && m.name == *method;
-    let mut current = Some(start.clone());
+    if lc.methods.iter().any(defines) {
+        return true;
+    }
+    let mut current = lc.parent.clone();
     let mut seen = BTreeSet::new();
+    seen.insert(lc.name.clone());
     while let Some(id) = current {
         if !seen.insert(id.clone()) {
             return false;
         }
-        let fragments: Vec<&LibraryClass> = classes.iter().filter(|lc| lc.name == id).collect();
-        if fragments.iter().any(|lc| lc.methods.iter().any(defines)) {
+        if classes.iter().any(|class| class.name == id && class.methods.iter().any(defines))
+            || app.models.iter().any(|model| model.name == id && model.methods().any(defines))
+        {
             return true;
         }
-        if let Some(parent) = fragments.iter().find_map(|lc| lc.parent.clone()) {
-            current = Some(parent);
-            continue;
-        }
-        let models: Vec<_> = app.models.iter().filter(|model| model.name == id).collect();
-        if models.iter().any(|model| model.methods().any(defines)) {
-            return true;
-        }
-        current = models.iter().find_map(|model| model.parent.clone());
+        current = classes
+            .iter()
+            .find(|class| class.name == id)
+            .and_then(|class| class.parent.clone())
+            .or_else(|| app.models.iter().find(|model| model.name == id).and_then(|model| model.parent.clone()));
     }
     false
 }
