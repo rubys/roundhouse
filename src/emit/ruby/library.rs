@@ -7747,6 +7747,7 @@ fn emit_library_class_decl_inner(
         Constant(usize, &'a Expr),
         Initializer(&'a Expr),
         Call(&'a Expr),
+        Include(&'a ClassId),
         Method(&'a MethodDef),
     }
     let mut body: Vec<_> = eager.iter().map(|&i| {
@@ -7782,15 +7783,45 @@ fn emit_library_class_decl_inner(
         .then_some(init.span.file)
     }).or_else(|| replayed_in_place.first().map(|call| call.span.file))
         .or_else(|| constant_calls.first().map(|call| call.span.file));
-    // A method written above the call has to exist when the block runs.
-    // Only that file's methods move; `ordered_body` stays off so includes
-    // are not pulled forward with them.
-    let method_with_call = |m: &MethodDef| {
+    // A method written in this file has to exist when the block runs.
+    // A hooked include that belongs between two of those methods moves
+    // with them: leaving it for the later method loop writes it after
+    // every method the call already pulled forward.
+    let same_file_method = |m: &MethodDef| {
         !ordered_body
             && !constant_calls.is_empty()
             && !m.name_span.is_synthetic()
             && constant_calls.first().is_some_and(|call| m.name_span.file == call.span.file)
     };
+    let mut positioned: Vec<(usize, &ClassId)> = Vec::new();
+    if !ordered_body {
+        for inc in &lc.includes {
+            let floor = positioned.last().map(|(at, _)| *at);
+            if let Some(at) = hooked_include_position(lc, inc, app, classes).max(floor) {
+                positioned.push((at, inc));
+            }
+        }
+    }
+    let mut method_moves = vec![false; lc.methods.len()];
+    let mut include_moves = vec![false; positioned.len()];
+    for (index, method) in lc.methods.iter().enumerate() {
+        let blocked = positioned.iter().enumerate().any(|(slot, (at, _))| *at < index && !include_moves[slot]);
+        if same_file_method(method) && !blocked {
+            method_moves[index] = true;
+            for (slot, (at, _)) in positioned.iter().enumerate() {
+                if *at == index {
+                    include_moves[slot] = true;
+                }
+            }
+        }
+    }
+    if lc.methods.iter().enumerate().all(|(index, _)| method_moves[index]) {
+        for (slot, (at, _)) in positioned.iter().enumerate() {
+            if *at >= lc.methods.len() {
+                include_moves[slot] = true;
+            }
+        }
+    }
     let method_in_ordered_body = |m: &MethodDef| {
         ordered_body
             && !m.name_span.is_synthetic()
@@ -7804,12 +7835,20 @@ fn emit_library_class_decl_inner(
                 .map(|m| (m.name_span.start, BodyItem::Method(m))),
         );
     }
-    body.extend(
-        lc.methods
-            .iter()
-            .filter(|m| method_with_call(m))
-            .map(|m| (m.name_span.start, BodyItem::Method(m))),
-    );
+    // The include shares the following method's offset and is pushed
+    // first, so a stable sort keeps it ahead of that method.
+    for (slot, (at, inc)) in positioned.iter().enumerate() {
+        if !include_moves[slot] {
+            continue;
+        }
+        let start = lc.methods.get(*at).map(|m| m.name_span.start).unwrap_or_else(|| {
+            lc.methods.last().map(|m| m.name_span.start.saturating_add(1)).unwrap_or(0)
+        });
+        body.push((start, BodyItem::Include(inc)));
+    }
+    body.extend(lc.methods.iter().enumerate().filter(|(index, _)| method_moves[*index]).map(|(_, m)| {
+        (m.name_span.start, BodyItem::Method(m))
+    }));
     body.sort_by_key(|(start, _)| *start);
     // Every require the file needs at its TOP: the class-body calls and
     // deferred constants (both run at load), and the method bodies.
@@ -7859,7 +7898,7 @@ fn emit_library_class_decl_inner(
             BodyItem::Constant(_, expr) | BodyItem::Initializer(expr) | BodyItem::Call(expr) => {
                 resolve_all(expr, true)
             }
-            BodyItem::Method(_) => BTreeSet::new(),
+            BodyItem::Method(_) | BodyItem::Include(_) => BTreeSet::new(),
         }).collect();
     let readers = constant_readers(lc, app, classes, &resolve);
     let mut splits = std::collections::BTreeMap::new();
@@ -8058,15 +8097,6 @@ fn emit_library_class_decl_inner(
     // earlier than it, so the includes keep their source order, and with
     // it the class's ancestors. An ordered body interleaves its methods
     // with ivar writes and keeps every include first.
-    let mut positioned: Vec<(usize, &ClassId)> = Vec::new();
-    if !ordered_body {
-        for inc in &lc.includes {
-            let floor = positioned.last().map(|(at, _)| *at);
-            if let Some(at) = hooked_include_position(lc, inc, app, classes).max(floor) {
-                positioned.push((at, inc));
-            }
-        }
-    }
     for inc in &lc.includes {
         if positioned.iter().any(|(_, p)| *p == inc) {
             continue;
@@ -8148,6 +8178,10 @@ fn emit_library_class_decl_inner(
                 // Keep initialization in the require plan even when the
                 // lowered class renders it after its methods below.
                 BodyItem::Initializer(_) => {}
+                BodyItem::Include(inc) => {
+                    nested.borrow_mut().write_include(s, depth, lc, inc);
+                    writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
+                }
                 BodyItem::Method(method) => {
                     writeln!(s).unwrap();
                     render_method(s, method);
@@ -8256,17 +8290,23 @@ fn emit_library_class_decl_inner(
                 writeln!(s).unwrap();
             }
             first = false;
-            for (_, inc) in positioned.iter().filter(|(at, _)| *at == index) {
+            for (slot, (_, inc)) in positioned.iter().enumerate().filter(|(_, (at, _))| *at == index) {
+                if include_moves[slot] {
+                    continue;
+                }
                 nested.borrow_mut().write_include(&mut s, depth, lc, inc);
                 writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
                 writeln!(s).unwrap();
             }
-            if method_with_call(m) {
+            if method_moves[index] {
                 continue;
             }
             render_method(&mut s, m);
         }
-        for (_, inc) in positioned.iter().filter(|(at, _)| *at >= lc.methods.len()) {
+        for (slot, (_, inc)) in positioned.iter().enumerate().filter(|(_, (at, _))| *at >= lc.methods.len()) {
+            if include_moves[slot] {
+                continue;
+            }
             writeln!(s).unwrap();
             nested.borrow_mut().write_include(&mut s, depth, lc, inc);
             writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();

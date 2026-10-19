@@ -55,6 +55,52 @@ fn a_class_body_block_constant_types_and_runs() {
     assert_eq!(run.stdout, "RUN.OPT\nrun.opt\n");
 }
 
+/// A hooked `include` sits between two class methods, and the call that
+/// defines the constant comes after both. The include has to stay
+/// between those methods when they move up with the call: the hook
+/// calls `prefix` and refuses to see `banner` already defined.
+#[test]
+fn a_hooked_include_stays_between_methods_the_call_needs() {
+    let hook = r#"module Outer
+  module Hook
+    def self.included(base)
+      base.prefix
+      raise "banner already defined" if base.respond_to?(:banner)
+    end
+  end
+end
+"#;
+    let handler = r#"module Outer
+  class Handler < Base
+    def self.prefix
+      "run"
+    end
+
+    include Hook
+
+    def self.banner
+      "class"
+    end
+
+    setup do |t|
+      LABEL = t.option("x") #: String
+    end
+
+    #: -> String
+    def self.label = LABEL
+  end
+end
+"#;
+    let run = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"probes\" do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("app/models/outer/base.rb", BASE)
+        .write("app/models/outer/hook.rb", hook)
+        .write("app/models/outer/handler.rb", handler)
+        .run_ruby("puts Outer::Handler.label\n");
+    run.assert_passes();
+    assert_eq!(run.stdout, "x\n");
+}
+
 #[test]
 fn a_constant_no_block_writes_stays_refused() {
     use std::collections::HashMap;
