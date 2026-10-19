@@ -132,45 +132,14 @@ pub struct ParamsSpec {
 #[derive(Clone, Debug, Default)]
 pub struct ParamsSpecs {
     specs: Vec<ParamsSpec>,
-    /// Names of `has_one` / `has_many` associations declared with a
-    /// `primary_key:` other than `id` (see [`Self::mark_keyed_associations`]).
-    keyed_assocs: std::collections::HashSet<Symbol>,
     /// Resources a model is named after (with a table), so the model
     /// lowering gives it the typed `update_from_<x>` variants. `None`
-    /// until [`Self::mark_model_resources`] is told the models: a caller
-    /// that lowers controllers without them keeps every rename.
-    model_resources: Option<std::collections::HashSet<Symbol>>,
+    /// until `typed_update::mark_model_resources` is told the models: a
+    /// caller that lowers controllers without them keeps every rename.
+    pub(super) model_resources: Option<std::collections::HashSet<Symbol>>,
 }
 
 impl ParamsSpecs {
-    /// Record which resources name a model with a table: only those get
-    /// the typed update variants (`model_to_library`'s
-    /// `push_update_typed_variants`). An empty model list leaves the
-    /// set unknown.
-    pub fn mark_model_resources(
-        &mut self,
-        models: &[crate::dialect::Model],
-        schema: Option<&crate::schema::Schema>,
-    ) {
-        let Some(schema) = schema else { return };
-        if models.is_empty() {
-            return;
-        }
-        self.model_resources = Some(
-            models
-                .iter()
-                .filter(|m| schema.tables.contains_key(&m.table.0))
-                .map(|m| Symbol::from(crate::naming::snake_case(m.name.0.as_str())))
-                .collect(),
-        );
-    }
-
-    /// Whether some model defines `spec`'s typed update variants (true
-    /// when the models are not known).
-    pub fn has_typed_update(&self, spec: &ParamsSpec) -> bool {
-        self.model_resources.as_ref().is_none_or(|set| set.contains(&spec.resource))
-    }
-
     pub fn iter(&self) -> std::slice::Iter<'_, ParamsSpec> {
         self.specs.iter()
     }
@@ -211,27 +180,6 @@ impl ParamsSpecs {
     /// `scan_create_demand` matches them — `snake_case(Model) ==
     /// resource` — so `:user` finds `User` and a list permitting
     /// `:avatar` on it types that field as a file.
-    /// Record the association names whose foreign key matches an owner
-    /// column other than `id` (`primary_key:`). The parent-ivar rewrite
-    /// (`@article.comments.build` -> `Comment.new(article_id:
-    /// @article.id)`) derives the foreign key from the ivar's name and
-    /// reads `.id`, which is wrong for these, so it declines them and
-    /// the typed association seed (which reads the declaration) handles
-    /// the call instead.
-    pub fn mark_keyed_associations(&mut self, models: &[crate::dialect::Model]) {
-        for model in models {
-            for assoc in model.associations() {
-                if crate::lower::assoc_primary_key::custom_primary_key(assoc).is_some() {
-                    self.keyed_assocs.insert(assoc.name().clone());
-                }
-            }
-        }
-    }
-
-    pub fn is_keyed_assoc(&self, name: &Symbol) -> bool {
-        self.keyed_assocs.contains(name)
-    }
-
     pub fn mark_file_fields(&mut self, models: &[crate::dialect::Model]) {
         for spec in &mut self.specs {
             let Some(model) = models
@@ -453,7 +401,6 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 file_fields: std::collections::BTreeSet::new(),
             })
             .collect(),
-        keyed_assocs: Default::default(),
         model_resources: None,
     }
 }
@@ -925,78 +872,6 @@ fn build_params_object(
     with_ty(Expr::new(span, ExprNode::Seq { exprs: stmts }), owner_ty)
 }
 
-/// Each method's name with the type of the value its typed body
-/// answers (its last statement's).
-pub(super) fn helper_answers(methods: &[MethodDef]) -> std::collections::HashMap<Symbol, Option<Ty>> {
-    methods.iter().map(|m| (m.name.clone(), body_tail(&m.body).ty.clone())).collect()
-}
-
-/// `record.update(x)` / `update!(x)` where `x` is TYPED as a params
-/// class no model has a typed update variant for (#856): Rails' `update`
-/// takes the attribute Hash, which is `x.to_attrs`. Runs on a typed
-/// body, so a helper that answers a Hash (`permitted.to_h.except(:k)`)
-/// is left as written, and the class is the one the call site holds
-/// (a controller-qualified list, not the resource's canonical one).
-/// Each class read this way is added to `wanted`.
-///
-/// `answers` is each of the controller's own methods' typed body value
-/// ([`helper_answers`]): a call to one of them counts only when its body
-/// answers the params class, whatever its signature declares.
-pub(super) fn hand_update_the_attrs(
-    body: &mut Expr,
-    specs: &ParamsSpecs,
-    answers: &std::collections::HashMap<Symbol, Option<Ty>>,
-    wanted: &mut std::collections::BTreeSet<ClassId>,
-) {
-    body.node.for_each_child_mut(&mut |c| hand_update_the_attrs(c, specs, answers, wanted));
-    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *body.node else {
-        return;
-    };
-    // `Model.new(x)` / `create(x)` / `create!(x)` take the attribute Hash
-    // too. The typed factories are reached by name before typing
-    // (`rewrite_model_new_to_from_params`), so one left here holds the
-    // params object some other way: a local (`attrs = <permit
-    // chain>.reverse_merge(...)`) or the statements a defaults merge
-    // lowers to.
-    let constructs = matches!(method.as_str(), "new" | "create" | "create!")
-        && matches!(&*recv.node, ExprNode::Const { .. });
-    let updates = matches!(method.as_str(), "update" | "update!");
-    if !(constructs || updates) || args.len() != 1 {
-        return;
-    }
-    let Some(Ty::Class { id, .. }) = args[0].ty.as_ref() else { return };
-    let Some(spec) = specs.by_class(id) else { return };
-    if let ExprNode::Send { recv, method: helper, args: helper_args, block: None, .. } = &*args[0].node {
-        let own = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) && helper_args.is_empty();
-        if own {
-            if let Some(answer) = answers.get(helper) {
-                if !matches!(answer, Some(Ty::Class { id: a, .. }) if a == id) {
-                    return;
-                }
-            }
-        }
-    }
-    if updates && specs.has_typed_update(spec) {
-        return;
-    }
-    let class_id = spec.class_id.clone();
-    let value = std::mem::replace(&mut args[0], expr(ExprNode::Lit { value: Literal::Nil }, None));
-    let span = value.span;
-    let mut attrs = expr(
-        ExprNode::Send {
-            recv: Some(value),
-            method: Symbol::from("to_attrs"),
-            args: Vec::new(),
-            block: None,
-            parenthesized: false,
-        },
-        Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }),
-    );
-    attrs.span = span;
-    args[0] = attrs;
-    wanted.insert(class_id);
-}
-
 pub fn helper_spec_map<'a, 'b, I>(
     actions: I,
     specs: &'a ParamsSpecs,
@@ -1151,7 +1026,7 @@ fn match_reverse_merge(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<Symbol>)
 
 /// The expression a body returns: the last statement, through nested Seqs
 /// and an explicit `return`.
-fn body_tail(body: &Expr) -> &Expr {
+pub(super) fn body_tail(body: &Expr) -> &Expr {
     match &*body.node {
         ExprNode::Seq { exprs } if !exprs.is_empty() => body_tail(&exprs[exprs.len() - 1]),
         ExprNode::Return { value } => body_tail(value),
@@ -2010,7 +1885,7 @@ fn synth_index_read(spec: &ParamsSpec) -> MethodDef {
 
 /// Node + type, with the boilerplate every synthesized `Expr` here
 /// repeats.
-fn expr(node: ExprNode, ty: Option<Ty>) -> Expr {
+pub(super) fn expr(node: ExprNode, ty: Option<Ty>) -> Expr {
     Expr {
         span: Span::synthetic(),
         node: Box::new(node),

@@ -7,3 +7,14 @@ module JsonBuilder
   def self.encode_string_array: (Array[String]) -> String
   def self.encode_enum: (Array[String], Integer) -> String
 end
+
+# The body lives in runtime/spinel/action_controller_json_render.rb, which
+# both boots load after this file. Declaring it here lets a computed
+# Inertia prop call the same encoder a literal prop is lowered to,
+# without a second `encode` that would replace the real one.
+module ActionController
+  module JsonRender
+    %a{abstract}
+    def self.encode: (untyped value) -> String
+  end
+end

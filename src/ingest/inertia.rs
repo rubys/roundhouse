@@ -23,6 +23,7 @@ enum PropKind {
     Eager,
     Optional,
     Deferred,
+    Always,
 }
 
 struct Prop {
@@ -257,7 +258,7 @@ fn expand_shares(app: &mut App) -> Vec<(ClassId, Vec<Symbol>)> {
                 if is_inertia_share(expr) {
                     record_gap(
                         expr.span,
-                        "`inertia_share` with a block, `if:`/`unless:`/`only:`/`except:`, a non-literal key or an InertiaRails prop type other than `optional`/`defer` is not lowered; its shared props are dropped from the output",
+                        "`inertia_share` with a block, `if:`/`unless:`/`only:`/`except:`, a non-literal key or an InertiaRails prop type other than `optional`/`defer`/`always` is not lowered; its shared props are dropped from the output",
                     );
                 }
                 continue;
@@ -406,6 +407,13 @@ fn classify_prop_value(v: &Expr) -> PropValue {
             group: String::new(),
             body,
         },
+        // Included on a partial reload even when the client did not ask
+        // for the key. inertia-rails' AlwaysProp is not a third gate.
+        "always" if args.is_empty() => PropValue::Wrapped {
+            kind: PropKind::Always,
+            group: String::new(),
+            body,
+        },
         "defer" => {
             let mut group = "default".to_string();
             match args.as_slice() {
@@ -473,20 +481,23 @@ fn desugar(e: &mut Expr, ctx: &mut RenderCtx) {
 fn prop_stmt(span: Span, p: &Prop, shared: bool) -> Expr {
     let page = || call(span, None, "inertia_page", Vec::new());
     let key = str_lit(span, &p.key);
-    let guard = match p.kind {
-        PropKind::Eager => call(span, Some(page()), "eager?", vec![key.clone()]),
-        PropKind::Optional => call(span, Some(page()), "optional?", vec![key.clone()]),
-        PropKind::Deferred => {
-            call(
+    let set = call(span, Some(page()), "prop", vec![key.clone(), p.value.clone()]);
+    let gated = if p.kind == PropKind::Always {
+        set
+    } else {
+        let guard = match p.kind {
+            PropKind::Eager => call(span, Some(page()), "eager?", vec![key.clone()]),
+            PropKind::Optional => call(span, Some(page()), "optional?", vec![key.clone()]),
+            PropKind::Deferred => call(
                 span,
                 Some(page()),
                 "deferred?",
                 vec![key.clone(), str_lit(span, &p.group)],
-            )
-        }
+            ),
+            PropKind::Always => unreachable!("always is not gated"),
+        };
+        if_expr(span, guard, set, nil(span))
     };
-    let set = call(span, Some(page()), "prop", vec![key.clone(), p.value.clone()]);
-    let gated = if_expr(span, guard, set, nil(span));
     if shared {
         let mark = call(span, Some(page()), "mark_shared", vec![key]);
         Expr::new(
@@ -535,13 +546,27 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
         );
         None
     };
-    let ExprNode::Lit {
-        value: Literal::Str { value: component },
-    } = &*component.1.node
-    else {
-        return unsupported("with a component that is not a String literal");
+    // A string literal stays a literal. A constant, a concat, or a method
+    // is stringified once: partial reload compares that string with
+    // `X-Inertia-Partial-Component`. `true`, `nil`, and a Hash are not
+    // names (inertia-rails infers the component, and a Hash is the props),
+    // so those calls stay written.
+    let component_name = match &*component.1.node {
+        ExprNode::Lit {
+            value: Literal::Str { value },
+        } => str_lit(span, value),
+        ExprNode::Lit { .. } | ExprNode::Hash { .. } | ExprNode::Array { .. } => {
+            return unsupported("with a component that is not a String or a String expression");
+        }
+        _ => call(
+            component.1.span,
+            Some(component.1.clone()),
+            "to_s",
+            Vec::new(),
+        ),
     };
     let mut props: Vec<Prop> = Vec::new();
+    let mut dynamic_props: Option<Expr> = None;
     let mut status: Option<Expr> = None;
     for (k, v) in entries {
         match literal_key(k).as_deref() {
@@ -549,7 +574,14 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
             Some("status") => status = Some(v.clone()),
             Some("props") => {
                 let ExprNode::Hash { entries: pairs, .. } = &*v.node else {
-                    return unsupported("with `props:` that is not a Hash literal");
+                    // `props: page_props` is a value. `merge_inertia_props`
+                    // evaluates a Proc on the controller and gates
+                    // `InertiaRails.optional` / `.defer` / `.always` the way
+                    // a literal hash gates optional and defer. A literal
+                    // hash stays the path that can see those wrappers in
+                    // the AST.
+                    dynamic_props = Some(v.clone());
+                    continue;
                 };
                 for (pk, pv) in pairs {
                     let Some(key) = literal_key(pk) else {
@@ -557,7 +589,7 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
                     };
                     let Ok((kind, group, value)) = decode_prop_value(pv) else {
                         return unsupported(
-                            "with an InertiaRails prop type other than `optional`/`defer`",
+                            "with an InertiaRails prop type other than `optional`/`defer`/`always`",
                         );
                     };
                     props.push(Prop {
@@ -578,7 +610,7 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
         None,
         "inertia_begin",
         vec![
-            str_lit(span, component),
+            component_name,
             str_lit(span, &config.version),
             bool_lit(span, config.encrypt_history),
             bool_lit(span, config.always_include_errors_hash),
@@ -589,6 +621,9 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
     }
     for p in props {
         stmts.push(prop_stmt(span, &p, false));
+    }
+    if let Some(value) = dynamic_props {
+        stmts.push(call(span, None, "merge_inertia_props", vec![value]));
     }
     let status_kw = |s: &Expr| (sym(span, "status"), s.clone());
     let json = call(
@@ -666,15 +701,44 @@ fn redirect_replacement(e: &Expr) -> Option<Expr> {
         return None;
     };
     let mut errors = None;
+    let mut clear_history = None;
+    let mut preserve_fragment = None;
     for (k, v) in inertia_entries {
-        if literal_key(k).as_deref() != Some("errors") {
-            record_gap(
-                e.span,
-                "`inertia:` redirect option other than `errors:`; the call is left as written",
-            );
-            return None;
+        match literal_key(k).as_deref() {
+            Some("errors") => errors = Some(v.clone()),
+            // `redirect_to path, inertia: { clear_history: true }` — the
+            // next visit's page object carries `clearHistory`, once.
+            // Only a boolean literal: the runtime flag is `bool`.
+            Some("clear_history") => {
+                let ExprNode::Lit { value: Literal::Bool { .. } } = &*v.node else {
+                    record_gap(
+                        e.span,
+                        "`inertia:` redirect `clear_history:` that is not `true` or `false`; the call is left as written",
+                    );
+                    return None;
+                };
+                clear_history = Some(v.clone());
+            }
+            // `redirect_to path, inertia: { preserve_fragment: true }` —
+            // the next visit's page object carries `preserveFragment`, once.
+            Some("preserve_fragment") => {
+                let ExprNode::Lit { value: Literal::Bool { .. } } = &*v.node else {
+                    record_gap(
+                        e.span,
+                        "`inertia:` redirect `preserve_fragment:` that is not `true` or `false`; the call is left as written",
+                    );
+                    return None;
+                };
+                preserve_fragment = Some(v.clone());
+            }
+            _ => {
+                record_gap(
+                    e.span,
+                    "`inertia:` redirect option other than `errors:`, `clear_history:`, or `preserve_fragment:`; the call is left as written",
+                );
+                return None;
+            }
         }
-        errors = Some(v.clone());
     }
     let span = e.span;
     let mut stmts = Vec::new();
@@ -687,6 +751,12 @@ fn redirect_replacement(e: &Expr) -> Option<Expr> {
             call(errors.span, Some(errors), "to_hash", Vec::new())
         };
         stmts.push(call(span, None, "inertia_errors", vec![errors]));
+    }
+    if let Some(flag) = clear_history {
+        stmts.push(call(span, None, "inertia_clear_history", vec![flag]));
+    }
+    if let Some(flag) = preserve_fragment {
+        stmts.push(call(span, None, "inertia_preserve_fragment", vec![flag]));
     }
     let kept: Vec<(Expr, Expr)> = entries
         .iter()

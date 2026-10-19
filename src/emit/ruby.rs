@@ -199,6 +199,16 @@ pub(crate) fn materialize_models(
     app: &App,
     materialization: crate::lower::model_to_library::Materialization<'_>,
 ) -> (Vec<LibraryClass>, crate::lower::controller_to_library::params::ParamsSpecs) {
+    materialize_models_with_param_binds(
+        app, materialization, crate::project::BuildTarget::Ruby.param_binds_enabled(None),
+    )
+}
+
+fn materialize_models_with_param_binds(
+    app: &App,
+    materialization: crate::lower::model_to_library::Materialization<'_>,
+    param_binds: bool,
+) -> (Vec<LibraryClass>, crate::lower::controller_to_library::params::ParamsSpecs) {
     // Collect controller `permit(...)` declarations so the model lowerer
     // can synthesize `from_params(p: <Resource>Params)` factories sized
     // to the permitted-fields list. See `controller_to_library/params.rs`.
@@ -238,6 +248,7 @@ pub(crate) fn materialize_models(
         materialization,
         crate::lower::model_to_library::FinderInputs::Request,
         true,
+        param_binds,
         crate::lower::model_to_library::ErrorsReaders::CreatedOnFirstRead,
     ).0;
     (lcs, params_specs)
@@ -248,14 +259,27 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     emit_model_classes(&lcs, app, &params_specs)
 }
 
+fn emit_lowered_models_with_param_binds(app: &App, param_binds: bool) -> Vec<EmittedFile> {
+    let (lcs, params_specs) = lowered_model_lcs_with_param_binds(app, param_binds);
+    emit_model_classes(&lcs, app, &params_specs)
+}
+
 /// The model classes `emit_lowered_models` writes, before rendering.
 /// Shared with `emit::futamura::routes`, which walks what is emitted.
 pub(crate) fn lowered_model_lcs(
     app: &App,
 ) -> (Vec<LibraryClass>, crate::lower::controller_to_library::params::ParamsSpecs) {
-    let (mut lcs, params_specs) = materialize_models(
+    lowered_model_lcs_with_param_binds(app, crate::project::BuildTarget::Ruby.param_binds_enabled(None))
+}
+
+fn lowered_model_lcs_with_param_binds(
+    app: &App,
+    param_binds: bool,
+) -> (Vec<LibraryClass>, crate::lower::controller_to_library::params::ParamsSpecs) {
+    let (mut lcs, params_specs) = materialize_models_with_param_binds(
         app,
         crate::lower::model_to_library::Materialization::Emit,
+        param_binds,
     );
     library::preserve_record_receiver_returns(&mut lcs, app);
     // The sqlite statement handle `Db.prepare` returns is a per-target
@@ -502,13 +526,17 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
 /// `app/models/<name>.rb` because they're plain holders, not request
 /// handlers.
 pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
+    emit_lowered_controllers_with_param_binds(app, crate::project::BuildTarget::Ruby.param_binds_enabled(None))
+}
+
+fn emit_lowered_controllers_with_param_binds(app: &App, param_binds: bool) -> Vec<EmittedFile> {
     // RSS_ONLY: the spinel tree compiles these, so the inline-json arms
     // stay out — they reference the CRuby-overlay JsonRender and don't
     // type under the AOT compile (CI caught `render(JsonRender.encode
     // (...))` as sp_RbVal-vs-char* in articles_controller). The rss arm
     // reaches only the emitted `Views::<X>.rss` template and the shared
     // `Rails.cache.fetch_str`, both of which this tree already carries.
-    let mut lcs = lower_controllers_for_spinel(app, FormatBreadth::RSS_ONLY);
+    let mut lcs = lower_controllers_for_spinel(app, FormatBreadth::RSS_ONLY, param_binds);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     // A record handed to a path helper becomes its slug here, not
@@ -546,13 +574,24 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 
+pub(crate) fn emit_lowered_controllers_with_layout_and_param_binds(
+    app: &App, param_binds: bool,
+) -> Vec<EmittedFile> {
+    let lcs = lowered_controller_lcs_with_layout_and_param_binds(app, param_binds);
+    emit_lowered_controllers_from_lcs(&lcs, app)
+}
+
 /// The controller classes `emit_lowered_controllers_with_layout`
 /// writes, before rendering. Shared with `emit::futamura::routes`.
 pub(crate) fn lowered_controller_lcs_with_layout(app: &App) -> Vec<LibraryClass> {
+    lowered_controller_lcs_with_layout_and_param_binds(app, crate::project::BuildTarget::Ruby.param_binds_enabled(None))
+}
+
+fn lowered_controller_lcs_with_layout_and_param_binds(app: &App, param_binds: bool) -> Vec<LibraryClass> {
     // FULL: the CRuby/JRuby trees ship the overlay (JsonRender) so the
     // widened respond_to arms all resolve; these files dedupe last-wins
     // over the spinel-shape ones.
-    let mut lcs = lower_controllers_for_spinel(app, FormatBreadth::FULL);
+    let mut lcs = lower_controllers_for_spinel(app, FormatBreadth::FULL, param_binds);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     // A record handed to a path helper becomes its slug here, not
@@ -575,7 +614,7 @@ pub(crate) fn lowered_controller_lcs_with_layout(app: &App) -> Vec<LibraryClass>
 /// controller lowerer's registry as extras — the Arel pass needs
 /// them to resolve `Article.includes(...).order(...)` chain
 /// receivers to a TableRef.
-fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec<LibraryClass> {
+fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth, param_binds: bool) -> Vec<LibraryClass> {
     // Use lower_models_with_registry (not lower_models_to_library_classes
     // + class_info_from_library_class) because the former returns
     // ClassInfo with `table` set — the Arel pass needs `info.table`
@@ -608,6 +647,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec
         model_extras,
         crate::lower::controller_to_library::LowerControllerOptions {
             ruby_read_values: true,
+            param_binds,
             schema: Some(&app.schema),
             views: &app.views,
             library_classes: &app.library_classes,
@@ -833,6 +873,11 @@ fn jbuilder_view_output_path(view_name: &str) -> PathBuf {
 /// which would have CRuby double-run every test if combined with the
 /// shim).
 pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
+    emit_spinel_with_param_binds(app, crate::project::BuildTarget::Spinel.param_binds_enabled(None))
+}
+
+/// Ruby-family emit with the build target's resolved bind policy.
+pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<EmittedFile> {
     let _indexes = library::install_lookup_indexes(app);
     let mut files = Vec::new();
     files.extend(emit_lowered_schema_pair(app));
@@ -892,11 +937,11 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
                 .to_string(),
         }),
     }
-    files.extend(emit_lowered_models(app));
+    files.extend(emit_lowered_models_with_param_binds(app, param_binds));
     if let Some(f) = library::emit_relation_scope_delegates(app) {
         files.push(f);
     }
-    files.extend(emit_lowered_controllers(app));
+    files.extend(emit_lowered_controllers_with_param_binds(app, param_binds));
     files.extend(emit_lowered_views(app));
     files.extend(emit_lowered_jbuilder_views(app));
 

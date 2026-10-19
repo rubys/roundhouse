@@ -651,6 +651,7 @@ class Routing(unittest.TestCase):
                 "spinel_db_lease",
                 *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
+                "stmt_stats",
                 "db_sqlite_concurrency",
             ],
         )
@@ -661,6 +662,7 @@ class Routing(unittest.TestCase):
                 "spinel_db_lease",
                 *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
+                "stmt_stats",
                 "db_sqlite_concurrency",
             ],
         )
@@ -756,6 +758,13 @@ class Routing(unittest.TestCase):
                     self.assertEqual(plan["spinel_tests"], [suite])
                     self.assertIn("spinel-framework", plan["jobs"])
 
+    def test_statement_stats_drivers_select_the_native_harness(self):
+        for path in ["tests/stmt_stats.rs", "tests/stmt_stats.rb"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertEqual(plan["spinel_tests"], ["stmt_stats"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
     def test_jdbc_bind_inputs_select_the_jruby_contract_job(self):
         for path in [
             "tests/param_binds_jruby.rb",
@@ -847,7 +856,7 @@ class Routing(unittest.TestCase):
             "tests/spinel_stmt_cache_lru.rb": ["spinel_stmt_cache_lru"],
             "tests/support/db_concurrency_spinel.rb": ["db_sqlite_concurrency"],
             "runtime/spinel/db.rb": [
-                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru",
+                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats",
                 "db_sqlite_concurrency",
             ],
             "runtime/spinel/sqlite_adapter.rb": [
@@ -855,10 +864,11 @@ class Routing(unittest.TestCase):
                 "spinel_db_lease",
                 *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
+                "stmt_stats",
                 "db_sqlite_concurrency",
             ],
             "runtime/spinel/active_support_time_parsing.rb": [
-                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru",
+                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats",
                 "db_sqlite_concurrency", "spinel_pg_db",
             ],
             # The PostgreSQL shim owns only its own gate, not the SQLite
@@ -870,7 +880,7 @@ class Routing(unittest.TestCase):
             "tests/spinel_pg_db_cases.rb": ["spinel_pg_db"],
             "runtime/ruby/db.rbs": [
                 "framework_tests_spinel",
-                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru",
+                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats",
                 "db_sqlite_concurrency", "spinel_pg_db",
             ],
             "runtime/spinel/date.rb": ["date_columns_spinel"],
@@ -922,6 +932,7 @@ class Routing(unittest.TestCase):
                 "spinel_db_lease",
                 *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
+                "stmt_stats",
                 "db_sqlite_concurrency",
             ],
         )

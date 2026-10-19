@@ -1257,7 +1257,7 @@ module ActiveRecord
 
     # The records whose id is (`keep`) or is not in `ids`.
     def id_filter(records, ids, keep)
-      records.select { |r| ids.include?(r.id) == keep }
+      records.select { |r| ids.include?(r._primary_key_value) == keep }
     end
 
     def set_operand(other)
@@ -1269,19 +1269,19 @@ module ActiveRecord
     end
 
     def ids_of(records)
-      records.map { |r| r.id }
+      records.map { |r| r._primary_key_value }
     end
 
     # Loaded: scan the cache. Unloaded: exists?(id), not ids (ORDER BY).
     def include?(record)
       return false if record.nil?
-      rid = record.id
+      rid = record._primary_key_value
       return false if rid.nil?
       key = @model._cast_primary_key(rid)
       return false if key.nil?
       loaded = @records
       unless loaded.nil?
-        return loaded.any? { |x| x.id == key }
+        return loaded.any? { |x| x._primary_key_value == key }
       end
       exists?(key)
     end
@@ -2003,8 +2003,8 @@ module ActiveRecord
       " WHERE #{@model.primary_key} IN (#{inner})"
     end
 
-    # `pluck(:col)` — a single column projected to an Array of its raw
-    # values (strings as stored; callers coerce).
+    # `pluck(*cols)` projects raw values, with an Array per row when
+    # more than one column is requested.
     #
     # THE PROJECTION IS RESTORED, and that is not housekeeping. `pluck`
     # is a TERMINAL: Rails builds it a query of its own and leaves the
@@ -2015,23 +2015,56 @@ module ActiveRecord
     # `Rooms::Direct.find_or_create_for` does exactly that: `find_for`
     # plucks the user ids, then hands the SAME relation to `grant_to`,
     # which built memberships for user 0.
-    def pluck(col)
+    def pluck(*cols)
       return [] if @null
+      columns = cols.length == 0 ? @model.schema_columns : cols
+      projections = []
+      columns.each_with_index do |col, index|
+        name = sql_ident(col)
+        # Same rule as `schema::pluck_argument`. A real `id` column is
+        # what `pluck(:id)` selects. `:id` aliases the primary key only
+        # when that column is absent, which is also why a bare `pluck`
+        # must not rename `id` and project the key twice.
+        if name == "id" && !@model.schema_columns.include?(:id)
+          name = @model.primary_key.to_s
+        end
+        # `sql_ident` accepts a reserved word. Quote after substitution,
+        # each part of a qualified name on its own. `@table` is already
+        # `_table_sql`.
+        if name.include?(".")
+          table, column = name.split(".", 2)
+          name = "#{ActiveRecord.adapter.quote_column_name(table)}.#{ActiveRecord.adapter.quote_column_name(column)}"
+        else
+          name = "#{@table}.#{ActiveRecord.adapter.quote_column_name(name)}"
+        end
+        projections << "#{name} AS v#{index}"
+      end
       prior = @select_sql
-      @select_sql = "#{@table}.#{col} AS v"
-      rows = ActiveRecord.adapter.select_rows(bound_sql)
-      @select_sql = prior
-      rows.map { |row| row["v"] }
+      begin
+        @select_sql = projections.join(", ")
+        rows = ActiveRecord.adapter.select_rows(bound_sql)
+      ensure
+        @select_sql = prior
+      end
+      return rows.map { |row| row["v0"] } if columns.length == 1
+      rows.map do |row|
+        values = []
+        columns.each_with_index { |_col, index| values << row["v#{index}"] }
+        values
+      end
     end
 
-    # `pick(col)` — Rails' `limit(1).pluck(col).first`: the single value
-    # from the first row, or nil when the relation matches nothing.
+    # `pick(*cols)` — Rails' `limit(1).pluck(*cols).first`: a value or
+    # row from the first result, or nil when the relation matches nothing.
     # Lobsters reads every Keystore counter through it.
-    def pick(col)
+    def pick(*cols)
       prior = @limit
-      @limit = 1
-      rows = pluck(col)
-      @limit = prior
+      begin
+        @limit = 1
+        rows = pluck(*cols)
+      ensure
+        @limit = prior
+      end
       rows.length == 0 ? nil : rows[0]
     end
 
@@ -2043,7 +2076,7 @@ module ActiveRecord
       cached = @records
       unless cached.nil?
         # `preloaded` may seed integer primary keys, not only records.
-        return cached.map { |row| row.is_a?(Base) ? row.id : row }
+        return cached.map { |row| row.is_a?(Base) ? row._primary_key_value : row }
       end
       prior = @select_sql
       key = @model.primary_key
@@ -2231,7 +2264,7 @@ module ActiveRecord
         raise RecordNotFound.new("Couldn't find all #{Inflector.pluralize_word(@model.name, 2)} with '#{@model.primary_key}': (#{listed}) (found #{rows.length} results, but was looking for #{expected}).", @model.name, @model.primary_key, ids)
       end
       if @orders.empty?
-        keys.map { |key| rows.find { |row| row.id == key } }
+        keys.map { |key| rows.find { |row| row._primary_key_value == key } }
       else
         rows
       end
@@ -2590,7 +2623,7 @@ module ActiveRecord
         # scalar elements escape as-is. An empty list is Rails' none
         # predicate (`1=0`): never `IN ()`. Pure — NullRelation is set by
         # `mark_null!` from `none` / lasting positive `where` only.
-        ids = val.map { |x| x.is_a?(Base) ? x.id : x }
+        ids = val.map { |x| x.is_a?(Base) ? x._primary_key_value : x }
         if ids.empty?
           "1=0"
         else
@@ -2604,7 +2637,7 @@ module ActiveRecord
         # static `v && v.id` narrowing was dropped in favor of this
         # runtime dispatch: hash values from untyped scope params can
         # be a record OR a collection, and only the runtime knows.
-        "#{qcol} = #{bind_literal(val.id)}"
+        "#{qcol} = #{bind_literal(val._primary_key_value)}"
       else
         "#{qcol} = #{bind_literal(val)}"
       end

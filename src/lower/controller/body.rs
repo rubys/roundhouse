@@ -1025,6 +1025,9 @@ const RESPONSE_TERMINALS: &[&str] = &[
     "send_data",
     "send_file",
     "render_inertia_json",
+    // Always responds: 409 + X-Inertia-Location, or a 302. Without this
+    // the implicit `head :no_content` runs second and raises.
+    "inertia_location",
 ];
 
 /// Rails' HTTP auth helpers that render the 401 challenge when the

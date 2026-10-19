@@ -98,6 +98,7 @@ fn routing_redirects_override_only_the_controller_host_policy() {
     let app = app_with("  get \"/outside\", to: redirect(\"https://other.test/landing\")\n");
     let emitted = redirect_controller(&app);
     assert!(emitted.contains("def same_host_location(location)"), "{emitted}");
+    assert!(emitted.contains("def absolute_redirect_location(location)"), "{emitted}");
     assert!(emitted.contains("redirect_to(\"https://other.test/landing\", status: :moved_permanently)"), "{emitted}");
 }
 
@@ -108,20 +109,26 @@ fn routing_redirects_override_only_the_controller_host_policy() {
 fn routing_redirect_host_policy_keeps_the_base_string_signature() {
     let app = app_with("  get \"/outside\", to: redirect(\"https://other.test/landing\")\n");
     let classes = roundhouse::lower::lower_controllers_to_library_classes(&app.controllers, Vec::new());
-    let method = classes
+    let redirect = classes
         .iter()
         .find(|class| class.name.0.as_str() == "RoundhouseRedirectsController")
-        .and_then(|class| class.methods.iter().find(|method| method.name.as_str() == "same_host_location"))
-        .expect("lowered host policy");
-    match method.signature.as_ref() {
-        Some(roundhouse::ty::Ty::Fn { params, ret, .. }) => {
-            assert!(
-                matches!(params.first().map(|param| param.ty.as_ref()), Some(roundhouse::ty::Ty::Str)),
-                "{params:?}"
-            );
-            assert!(matches!(ret.as_ref(), roundhouse::ty::Ty::Str), "{ret:?}");
+        .expect("redirect controller");
+    for name in ["same_host_location", "absolute_redirect_location"] {
+        let method = redirect
+            .methods
+            .iter()
+            .find(|method| method.name.as_str() == name)
+            .unwrap_or_else(|| panic!("lowered {name}"));
+        match method.signature.as_ref() {
+            Some(roundhouse::ty::Ty::Fn { params, ret, .. }) => {
+                assert!(
+                    matches!(params.first().map(|param| param.ty.as_ref()), Some(roundhouse::ty::Ty::Str)),
+                    "{name} {params:?}"
+                );
+                assert!(matches!(ret.as_ref(), roundhouse::ty::Ty::Str), "{name} {ret:?}");
+            }
+            other => panic!("{name} signature: {other:?}"),
         }
-        other => panic!("host policy signature: {other:?}"),
     }
     let controller_file = |files: Vec<roundhouse::emit::EmittedFile>, needle: &str| {
         files
@@ -138,15 +145,30 @@ fn routing_redirect_host_policy_keeps_the_base_string_signature() {
         "{}",
         kotlin.content
     );
+    assert!(
+        kotlin.content.contains("override fun absoluteRedirectLocation(location: String): String"),
+        "{}",
+        kotlin.content
+    );
     let csharp = controller_file(roundhouse::emit::csharp::emit(&app), "RoundhouseRedirectsController");
     assert!(
         csharp.content.contains("override string SameHostLocation(string location)"),
         "{}",
         csharp.content
     );
+    assert!(
+        csharp.content.contains("override string AbsoluteRedirectLocation(string location)"),
+        "{}",
+        csharp.content
+    );
     let swift = controller_file(roundhouse::emit::swift::emit(&app), "RoundhouseRedirectsController");
     assert!(
         swift.content.contains("override func sameHostLocation(_ location: String) -> String"),
+        "{}",
+        swift.content
+    );
+    assert!(
+        swift.content.contains("override func absoluteRedirectLocation(_ location: String) -> String"),
         "{}",
         swift.content
     );

@@ -11,6 +11,8 @@ mod emit_and_run;
 mod database_tasks;
 #[path = "emit_and_run/date_calendar_duration.rs"]
 mod date_calendar_duration;
+#[path = "emit_and_run/branch_local_join.rs"]
+mod branch_local_join;
 #[path = "emit_and_run/utc_zone_time.rs"]
 mod utc_zone_time;
 #[path = "emit_and_run/discard.rs"]
@@ -69,6 +71,8 @@ mod helper_escape_args;
 mod class_new_constants;
 #[path = "emit_and_run/i18n_subtree.rs"]
 mod i18n_subtree;
+#[path = "emit_and_run/i18n_values.rs"]
+mod i18n_values;
 #[path = "emit_and_run/i18n_plural_rules.rs"]
 mod i18n_plural_rules;
 #[path = "emit_and_run/rails_i18n_locales.rs"]
@@ -168,6 +172,10 @@ mod class_side_default;
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]
 mod controller_response_body;
+#[path = "emit_and_run/relation_projections.rs"]
+mod relation_projections;
+#[path = "emit_and_run/pluck_projection_semantics.rs"]
+mod pluck_projection_semantics;
 #[path = "emit_and_run/response_redirect.rs"]
 mod response_redirect;
 #[path = "emit_and_run/constructor_unrelated_mutations.rs"]
@@ -3193,6 +3201,313 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct contract passed"));
     assert!(run.stdout.contains("dry-struct stamp contract passed"));
     assert!(run.stdout.contains("dry-struct clock contract passed"));
+}
+
+/// Oj under `Oj.mimic_JSON` + `Oj.optimize_rails` (the initializer a Rails
+/// app writes): generate as `JSON.generate` (`<>&` raw, `Infinity` and
+/// `NaN` a `JSON::GeneratorError`), load as
+/// `JSON.parse` (nil and a non-String as given, `symbol_keys:`), and a
+/// parse failure a `JSON::ParserError` that `Oj::ParseError` does not
+/// catch. Checked against oj 3.17 with ActiveSupport.
+#[test]
+fn oj_under_mimic_json_runs_as_json() {
+    let run = oj_overlay(emit_and_run::real_blog()).run_ruby(OJ_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("oj passed"));
+}
+
+/// A call the stand-in does not model is a refusal of its own, ledgered
+/// (strict ingest fails on it): `Oj.dump` (its compat and rails encoding
+/// both unmodeled), `Oj.safe_load` (the strict parser). In survey mode
+/// `Oj.load` beside it is still lowered.
+#[test]
+fn oj_unmodeled_calls_are_refused_one_by_one() {
+    for (call, expected) in [
+        ("Oj.dump(v)", "`Oj.dump`: neither its compat nor its rails encoding is modeled"),
+        ("Oj.dump(v, mode: :rails)", "`Oj.dump`: neither its compat nor its rails encoding is modeled"),
+        ("Oj.safe_load(v)", "`Oj.safe_load`"),
+    ] {
+        let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+            ("config/initializers/oj.rb".to_string(), "Oj.mimic_JSON\n".to_string()),
+            (
+                "lib/codec.rb".to_string(),
+                format!("class Codec\n  def self.out(v)\n    {call}\n  end\n\n  def self.in(v)\n    Oj.load(v)\n  end\nend\n"),
+            ),
+            ("config/routes.rb".to_string(), "Rails.application.routes.draw do\nend\n".to_string()),
+        ]
+        .into_iter()
+        .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+        .collect();
+        assert!(roundhouse::ingest::ingest_app_from_tree(tree.clone()).is_err(), "{call}: strict ingest passed");
+        roundhouse::ingest::survey::activate();
+        let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+        let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+        assert!(ledger.iter().any(|e| e.contains(expected)), "{call}: {ledger:#?}");
+        let oj = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Oj").expect("load still lowered");
+        assert!(oj.methods.iter().all(|m| !matches!(m.name.as_str(), "dump" | "safe_load")), "{call}: modeled");
+    }
+}
+
+/// Without `Oj.mimic_JSON` Oj is in its `:object` mode, not modeled: its
+/// uses stay errors.
+#[test]
+fn oj_without_mimic_json_stays_unsupported() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("lib/payload.rb", OJ_LIB)
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("Oj")), "{errors:#?}");
+}
+
+/// An option the lowering does not read is a refusal (ledgered, strict
+/// ingest fails); a mode that may not be set, or `optimize_rails` alone,
+/// leaves Oj unmodeled.
+#[test]
+fn oj_unmodeled_options_are_refused() {
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+        ("config/initializers/oj.rb", "Oj.mimic_JSON\n"),
+        ("lib/pretty.rb", "class Pretty\n  def self.show(v)\n    Oj.load(v, bigdecimal_load: :float)\n  end\nend\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    assert!(roundhouse::ingest::ingest_app_from_tree(tree.clone()).is_err(), "strict ingest passed a refusal");
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+    let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+    assert!(ledger.iter().any(|e| e.contains("Oj not lowered: `Oj.load` option `bigdecimal_load: :float`")), "{ledger:#?}");
+    let _ = app;
+    // A mode that may not be set or that this does not read leaves Oj
+    // unmodeled; an option value oj rejects is a refusal of that call.
+    for (init, use_, expected, unmodeled) in [
+        ("if ENV[\"X\"]\n  Oj.mimic_JSON\nend\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
+        ("Oj.mimic_JSON if ENV[\"X\"]\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
+        ("Oj.mimic_JSON rescue nil\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
+        ("Oj.optimize_rails\n", "Oj.load(v)", "`Oj.optimize_rails` without `Oj.mimic_JSON`", true),
+        ("Oj.mimic_JSON(mode: :compat)\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
+        ("Oj.mimic_JSON\n", "Oj.load(v, symbol_keys: \"true\")", "`Oj.load` option `symbol_keys: \"true\"`", false),
+    ] {
+        let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+            ("config/initializers/oj.rb".to_string(), init.to_string()),
+            ("lib/reader.rb".to_string(), format!("class Reader\n  def self.read(v)\n    {use_}\n  end\nend\n")),
+            ("config/routes.rb".to_string(), "Rails.application.routes.draw do\nend\n".to_string()),
+        ]
+        .into_iter()
+        .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+        .collect();
+        roundhouse::ingest::survey::activate();
+        let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+        let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+        assert!(ledger.iter().any(|e| e.contains(expected)), "{init}: {ledger:#?}");
+        if unmodeled {
+            assert!(app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Oj"), "{init}: lowered");
+        }
+    }
+    // Empty parentheses are the same top-level call as the bare form.
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+        ("config/initializers/oj.rb".to_string(), "Oj.mimic_JSON()\n".to_string()),
+        ("lib/reader.rb".to_string(), "class Reader\n  def self.read(v)\n    Oj.load(v)\n  end\nend\n".to_string()),
+        ("config/routes.rb".to_string(), "Rails.application.routes.draw do\nend\n".to_string()),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+    .collect();
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+    let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+    assert!(
+        ledger.iter().all(|e| !e.contains("mimic_JSON")),
+        "empty parentheses were refused: {ledger:#?}"
+    );
+    assert!(
+        app.library_classes.iter().any(|lc| lc.name.0.as_str() == "Oj"),
+        "Oj.mimic_JSON() did not install the stand-in"
+    );
+}
+
+const OJ_LIB: &str = r##"class Payload
+  def self.generated(value)
+    Oj.generate(value)
+  end
+
+  def self.generated_or(value)
+    Oj.generate(value)
+  rescue JSON::GeneratorError
+    :not_finite
+  end
+
+  def self.decode(text)
+    Oj.load(text)
+  end
+
+  def self.decode_symbols(text)
+    Oj.load(text, symbol_keys: true)
+  end
+
+  def self.guarded(text)
+    Oj.load(text)
+  rescue Oj::ParseError
+    :oj_rescued
+  rescue JSON::ParserError
+    :json_rescued
+  end
+
+  def self.guarded_symbols(text)
+    Oj.load(text, symbol_keys: true)
+  rescue JSON::ParserError
+    :bad
+  end
+end
+"##;
+
+const OJ_ASSERTIONS: &str = r##"require "stringio"
+raise "generate" unless Payload.generated({a: :b, h: "<&>", n: [1.5, nil, true]}) == %({"a":"b","h":"<&>","n":[1.5,null,true]})
+raise "generate infinity" unless Payload.generated_or({x: Float::INFINITY}) == :not_finite
+raise "generate nan" unless Payload.generated_or({x: Float::NAN}) == :not_finite
+raise "load" unless Payload.decode(%({"a":[1,2.5,null,true],"b":{"c":"d"}})) == {"a" => [1, 2.5, nil, true], "b" => {"c" => "d"}}
+raise "load nil" unless Payload.decode(nil).nil?
+raise "load integer" unless Payload.decode(5) == 5
+raise "load symbols" unless Payload.decode_symbols(%({"a":{"b":1}})) == {a: {b: 1}}
+raise "parse error" unless Payload.guarded("{x") == :json_rescued
+raise "load array" unless Payload.decode([1]) == [1]
+raise "load array nil" unless Payload.guarded([nil]) == :json_rescued
+raise "load array symbol" unless Payload.guarded([:a]) == :json_rescued
+raise "load array hash" unless Payload.guarded([{"a" => 1}]) == :json_rescued
+raise "load array symbols" unless Payload.decode_symbols(%([{"a":1}])) == [{a: 1}]
+raise "load bad array symbols" unless Payload.guarded_symbols([{"a" => 1}]) == :bad
+raise "load rational" unless Payload.guarded(Rational(1, 2)) == :json_rescued
+raise "load infinity" unless Payload.decode(Float::INFINITY).infinite?
+raise "load nan" unless Payload.decode(Float::NAN).nan?
+require "bigdecimal"
+raise "load bigdecimal" unless Payload.decode(BigDecimal("2.5")) == 2.5
+raise "load bigdecimal class" unless Payload.decode(BigDecimal("2.5")).is_a?(Float)
+raise "load hash" unless Payload.guarded({"a" => 1}) == :json_rescued
+raise "load symbol" unless Payload.guarded(:x) == :json_rescued
+raise "load io" unless Payload.decode(StringIO.new(%([1,{"a":null}]))) == [1, {"a" => nil}]
+puts "oj passed"
+"##;
+
+fn oj_overlay(overlay: emit_and_run::Overlay) -> emit_and_run::Overlay {
+    overlay
+        .write("config/initializers/oj.rb", "# frozen_string_literal: true\n\nOj.mimic_JSON\nOj.optimize_rails\n")
+        .write("lib/payload.rb", OJ_LIB)
+}
+
+/// The stand-in is one Ruby class. Ruby emits it and stays clean. Python,
+/// Crystal, TypeScript and the other strict targets refuse the call in one
+/// place: no `Oj.load` / `Oj.generate` written against a missing class, and
+/// not the incidental `String#read` or missing-`JSON` errors the class body
+/// would raise.
+#[test]
+fn oj_stand_in_is_ruby_only() {
+    let dir = std::env::temp_dir().join(format!("rh-oj-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        ("config/initializers/oj.rb", "Oj.mimic_JSON\nOj.optimize_rails\n"),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n    t.bigint \"author_id\"\n  end\n  create_table \"comments\", force: :cascade do |t|\n    t.text \"body\"\n    t.bigint \"post_id\"\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\n  direct :payload do\n    Oj.load('{\"a\":1}', symbol_keys: true)\n  end\nend\n",
+        ),
+        (
+            "app/models/post.rb",
+            "class Post < ApplicationRecord\n  has_many :comments, -> { where(body: Oj.load('{\"a\":1}')) }\n  has_one :pin, -> { where(body: Oj.load('{\"b\":2}')) }, class_name: \"Comment\"\n  belongs_to :author, class_name: \"Post\", optional: true, default: -> { Oj.generate({a: \"<&>\"}) }\nend\n",
+        ),
+        (
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n  belongs_to :post\nend\n",
+        ),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    Oj.generate({a: \"<&>\"})\n    Oj.load('{\"a\":1}', symbol_keys: true)\n    render plain: \"ok\"\n  end\n\n  def self.only_rescue\n    raise \"x\"\n  rescue Oj::ParseError\n    :oj\n  end\nend\n",
+        ),
+        (
+            "test/models/post_test.rb",
+            "class PostTest < ActiveSupport::TestCase\n  PAYLOAD = Oj.generate({a: \"<&>\"})\n  class Inner\n    def self.read\n      Oj.load('{\"a\":1}', symbol_keys: true)\n    end\n  end\nend\n",
+        ),
+        (
+            "test/fixtures/posts.yml",
+            "one:\n  title: <%= Oj.generate({a: 1}) %>\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "ingest lowered with errors: {lower_diags:?}"
+    );
+    let ruby = oj_target_errors_and_text(&app, &dir, roundhouse::project::BuildTarget::Ruby);
+    assert!(ruby.0.is_empty(), "ruby refused a stand-in it emits:\n{}", ruby.0.join("\n"));
+    let stand_in = ruby.1.get("app/models/oj.rb").map(String::as_str).unwrap_or("");
+    assert!(stand_in.contains("def self.load"), "ruby emit dropped the stand-in:\n{stand_in}");
+    assert!(stand_in.contains("JSON.parse(source)"), "ruby stand-in is not the one-argument parse:\n{stand_in}");
+    assert!(stand_in.contains("json.is_a?(Integer)"), "ruby stand-in still passes every Numeric through:\n{stand_in}");
+    assert!(!stand_in.contains("json.is_a?(Array)"), "ruby stand-in still returns every Array:\n{stand_in}");
+    assert!(!stand_in.contains("def self.dump"), "ruby stand-in gained dump:\n{stand_in}");
+    for target in [
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            errors.iter().any(|e| e.contains("does not emit") && e.contains("missing class")),
+            "{target:?} did not refuse Oj:\n{}",
+            errors.join("\n")
+        );
+        assert!(
+            !errors.iter().any(|e| e.contains("String#read") || e.contains("JSON is not available")),
+            "{target:?} refused Oj for the wrong reason:\n{}",
+            errors.join("\n")
+        );
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| {
+                !path.ends_with(".map")
+                    && (text.contains("Oj.load") || text.contains("Oj.generate") || text.contains("Oj::"))
+            })
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        assert!(hits.is_empty(), "{target:?} emitted an Oj call in {hits:?}");
+        for site in ["Oj.load", "Oj.generate", "Oj::ParseError"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site)),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn oj_target_errors_and_text(
+    app: &roundhouse::App,
+    dir: &std::path::Path,
+    target: roundhouse::project::BuildTarget,
+) -> (Vec<String>, std::collections::HashMap<String, String>) {
+    let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
+        roundhouse::project::target_files(app, dir, target)
+    });
+    let errors = diags
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::diagnostic::Severity::Error)
+        .map(|d| d.message)
+        .collect();
+    let files = files.unwrap_or_default().into_iter().collect();
+    (errors, files)
 }
 
 /// `/(?<name>..)/ =~ str` assigns each named group to a local (nil when
@@ -7779,6 +8094,53 @@ fn an_include_from_an_included_block_takes_precedence_over_its_concern() {
         .assert_passes();
 }
 
+/// `def`s in a concern's `included do` are includer methods, instance and
+/// class side: they keep their visibility, and one over a column reader
+/// wins and reads the column through `super`.
+#[test]
+fn defs_in_an_included_block_run_on_the_includer() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n\n  included do\n    class << self\n      def loud\n        \"L\"\n      end\n    end\n\n    def self.quiet\n      \"q\"\n    end\n\n    def shout(times = 1)\n      title.upcase * times\n    end\n\n    def body\n      super + \"!\"\n    end\n\n    def peek\n      secret\n    end\n\n    private\n\n    def secret\n      \"hidden\"\n    end\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Shouty\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\n\
+             raise a.shout(2) unless a.shout(2) == \"HIHI\"\n\
+             raise a.body unless a.body == \"Body text here!\"\n\
+             raise a.peek unless a.peek == \"hidden\"\n\
+             raise \"secret is public\" if a.respond_to?(:secret)\n\
+             raise \"class side\" unless Article.loud + Article.quiet == \"Lq\"",
+        )
+        .assert_passes();
+}
+
+/// Where hoisting would change which definition wins, the def keeps its
+/// nested-def refusal: the module defines the name too, the block
+/// includes a module that sits ahead of the concern, or a `class << self`
+/// holds a statement the hoist would drop.
+#[test]
+fn included_block_defs_that_would_lose_their_precedence_stay_refused() {
+    for concern in [
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    def shout\n      \"block\"\n    end\n  end\n\n  def shout\n    \"module\"\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include Comparable\n    def shout\n      \"block\"\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      %i[a b].each { |n| define_method(n) { n } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  class_methods do\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    def self.loud\n      \"block\"\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  module ClassMethods\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    class << self\n      def loud\n        \"block\"\n      end\n    end\n  end\nend\n",
+    ] {
+        let errors = emit_and_run::real_blog()
+            .write("app/models/concerns/shouty.rb", concern)
+            .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+            .check_errors();
+        assert!(errors.iter().any(|e| e.contains("nested def")), "{concern}: {errors:?}");
+    }
+}
+
 /// The inner concern's own `included do` runs on the includer too: its
 /// scope is declared on the model.
 #[test]
@@ -9884,6 +10246,63 @@ end
 "#,
         )
         .run_test("test/models/article_json_column_test.rb")
+        .assert_passes();
+}
+
+/// Temporal and JSON columns share one storage slot: text in the
+/// database, a native or decoded value at the public reader, and a
+/// normalizing writer for `create!`, `[]=`, and reload.
+#[test]
+fn column_slot_temporal_and_json_round_trip() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.datetime \"reviewed_at\"\n    t.date \"published_on\"\n    t.json \"metadata\"\n    t.jsonb \"payload\"",
+        )
+        .write(
+            "test/models/article_column_slot_test.rb",
+            r#"require "test_helper"
+
+class ArticleColumnSlotTest < ActiveSupport::TestCase
+  test "temporal text and json text share the slot boundary" do
+    reviewed = Time.utc(2020, 1, 2, 3, 4, 5)
+    published = Date.new(2020, 1, 2)
+    metadata = [{ "name" => "Ada", "enabled" => true }]
+    payload = { "on" => true }
+    article = Article.create!(
+      title: "Slot",
+      body: "A body long enough to validate.",
+      reviewed_at: reviewed,
+      published_on: published,
+      metadata: metadata,
+      payload: payload
+    )
+    article = Article.find(article.id)
+
+    assert_equal reviewed, article.reviewed_at
+    assert_equal "2020-01-02 03:04:05.000000", article.reviewed_at_raw
+    assert_equal published, article.published_on
+    assert_equal published, article[:published_on]
+    assert_equal metadata, article.metadata
+    assert_equal metadata, article[:metadata]
+    assert_equal metadata, article.attributes["metadata"]
+    assert_equal payload, article.payload
+    assert_equal payload, article[:payload]
+
+    article[:reviewed_at] = Time.utc(2021, 2, 3, 4, 5, 6)
+    article[:metadata] = { "name" => "Grace" }
+    article.save!
+    reloaded = Article.find(article.id)
+    assert_equal Time.utc(2021, 2, 3, 4, 5, 6), reloaded.reviewed_at
+    assert_equal "2021-02-03 04:05:06.000000", reloaded.reviewed_at_raw
+    assert_equal({ "name" => "Grace" }, reloaded.metadata)
+    assert_equal published, reloaded.published_on
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_column_slot_test.rb")
         .assert_passes();
 }
 
@@ -13058,7 +13477,7 @@ controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.exam
 controller.request_method = "GET"
 controller.params = { "back" => "/home" }
 controller.process_action(:bounce)
-raise "relative redirect lost: #{controller.location.inspect}" unless controller.location == "/home"
+raise "relative redirect stays a path: #{controller.location.inspect}" unless controller.location == "http://app.example/home"
 
 controller = WidgetsController.new
 controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
@@ -15536,6 +15955,419 @@ raise "nil receiver" unless Presenter.label(nil).nil?
 "#,
         );
     run.assert_passes();
+}
+
+#[test]
+fn render_inertia_always_prop_survives_a_partial_reload() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/show\", to: \"pages#show\"\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def show
+    render inertia: "pages/show", props: {
+      n: 1,
+      kept: InertiaRails.always { "yes" }
+    }
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "always is present when the partial reload did not ask for it" do
+    get "/pages/show", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/show",
+      "X-Inertia-Partial-Data" => "n"
+    }
+    assert_response :success
+    assert_equal({ "n" => 1, "kept" => "yes" }, response.parsed_body["props"])
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn render_inertia_computed_props_answer_json_and_html() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/computed\", to: \"pages#computed\"\n  get \"/pages/local\", to: \"pages#local\"\n  get \"/pages/bad\", to: \"pages#bad\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def computed
+    @stamp = "from-ivar"
+    @article = Article.find_by!(title: "Getting Started with Rails")
+    render inertia: "pages/computed", props: computed_props
+  end
+
+  def local
+    props = { title: "from-local", n: 2 }
+    render inertia: "pages/local", props: props
+  end
+
+  def bad
+    render inertia: "pages/bad", props: "nope"
+  end
+
+  private
+    def computed_props
+      {
+        title: "from-method",
+        n: 1,
+        label: -> { @stamp },
+        secret: InertiaRails.optional { "opt" },
+        stats: InertiaRails.defer { { total: 3 } },
+        kept: InertiaRails.always { "yes" },
+        when: Time.utc(2026, 10, 19, 11, 22, 0),
+        row: { article: @article },
+        rows: [@article]
+      }
+    end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "a method hash evaluates lambdas and defers the rest" do
+    get "/pages/computed", headers: { "X-Inertia" => "true" }
+    assert_response :success
+    page = response.parsed_body
+    assert_equal "from-method", page["props"]["title"]
+    assert_equal 1, page["props"]["n"]
+    assert_equal "from-ivar", page["props"]["label"]
+    assert_equal "yes", page["props"]["kept"]
+    assert_equal "2026-10-19T11:22:00.000Z", page["props"]["when"]
+    assert_equal "Getting Started with Rails", page["props"]["row"]["article"]["title"]
+    assert_equal "Getting Started with Rails", page["props"]["rows"][0]["title"]
+    assert_nil page["props"]["secret"]
+    assert_nil page["props"]["stats"]
+    assert_equal({ "default" => ["stats"] }, page["deferredProps"])
+  end
+
+  test "a partial reload evaluates the requested optional and deferred props" do
+    get "/pages/computed", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/computed",
+      "X-Inertia-Partial-Data" => "secret,stats"
+    }
+    assert_response :success
+    assert_equal({ "secret" => "opt", "stats" => { "total" => 3 }, "kept" => "yes" }, response.parsed_body["props"])
+    assert_nil response.parsed_body["deferredProps"]
+  end
+
+  test "a local hash is the page props" do
+    get "/pages/local"
+    assert_response :success
+    assert_includes response.body, %("title":"from-local")
+    assert_includes response.body, %("n":2)
+  end
+
+  test "a partial reload keeps the requested prop and an always prop" do
+    get "/pages/computed", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/computed",
+      "X-Inertia-Partial-Data" => "n"
+    }
+    assert_response :success
+    assert_equal({ "n" => 1, "kept" => "yes" }, response.parsed_body["props"])
+  end
+
+  test "a non-hash is not an empty page" do
+    assert_raises(TypeError) do
+      get "/pages/bad", headers: { "X-Inertia" => "true" }
+    end
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn render_inertia_computed_component_answers_json_and_partial_reload() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/constant\", to: \"pages#constant\"\n  get \"/pages/named\", to: \"pages#named\"\n  get \"/pages/joined\", to: \"pages#joined\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  PAGE = "pages/from-constant"
+
+  def constant
+    render inertia: PAGE, props: { title: "c", n: 1 }
+  end
+
+  def named
+    render inertia: page_name, props: { title: "m", n: 2 }
+  end
+
+  def joined
+    render inertia: "pages/" + action_name, props: { title: "j", n: 3 }
+  end
+
+  private
+    def page_name
+      "pages/from-method"
+    end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "a constant is the component" do
+    get "/pages/constant", headers: { "X-Inertia" => "true" }
+    assert_response :success
+    assert_equal "pages/from-constant", response.parsed_body["component"]
+    assert_equal({ "title" => "c", "n" => 1 }, response.parsed_body["props"])
+  end
+
+  test "a method is the component and a partial reload matches that name" do
+    get "/pages/named", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/from-method",
+      "X-Inertia-Partial-Data" => "n"
+    }
+    assert_response :success
+    assert_equal "pages/from-method", response.parsed_body["component"]
+    assert_equal({ "n" => 2 }, response.parsed_body["props"])
+  end
+
+  test "a joined name is the component" do
+    get "/pages/joined"
+    assert_response :success
+    assert_includes response.body, %("component":"pages/joined")
+    assert_includes response.body, %("title":"j")
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn inertia_clear_history_reaches_the_next_visit_once() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/show\", to: \"pages#show\"\n  delete \"/pages\", to: \"pages#destroy\"\n  delete \"/pages/keep\", to: \"pages#keep\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.version = \"v1\"\n  config.always_include_errors_hash = true\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def show
+    render inertia: "pages/show", props: { title: "kept" }
+  end
+
+  def destroy
+    redirect_to "/pages/show", inertia: { errors: { base: ["gone"] }, clear_history: true }
+  end
+
+  def keep
+    redirect_to "/pages/show", inertia: { clear_history: false }
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  INERTIA = { "X-Inertia" => "true", "X-Inertia-Version" => "v1" }
+
+  test "clear_history is on the next visit and then gone" do
+    delete "/pages", headers: INERTIA
+    assert_response 303
+    assert_redirected_to "/pages/show"
+    get "/pages/show", headers: INERTIA
+    assert_equal true, response.parsed_body["clearHistory"]
+    assert_equal({ "base" => ["gone"] }, response.parsed_body["props"]["errors"])
+    get "/pages/show", headers: INERTIA
+    assert_equal false, response.parsed_body["clearHistory"]
+    assert_equal({}, response.parsed_body["props"]["errors"])
+  end
+
+  test "a stale version keeps clear_history for the full-page reload" do
+    delete "/pages", headers: INERTIA
+    get "/pages/show", headers: { "X-Inertia" => "true", "X-Inertia-Version" => "v0" }
+    assert_response 409
+    get "/pages/show"
+    assert_includes response.body, %("clearHistory":true)
+    get "/pages/show"
+    assert_includes response.body, %("clearHistory":false)
+  end
+
+  test "a false flag does not clear history" do
+    delete "/pages/keep", headers: INERTIA
+    assert_response 303
+    get "/pages/show", headers: INERTIA
+    assert_equal false, response.parsed_body["clearHistory"]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn inertia_preserve_fragment_reaches_the_next_visit_once() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/show\", to: \"pages#show\"\n  patch \"/pages\", to: \"pages#update\"\n  patch \"/pages/drop\", to: \"pages#drop\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.version = \"v1\"\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def show
+    render inertia: "pages/show", props: { title: "kept" }
+  end
+
+  def update
+    redirect_to "/pages/show", inertia: { preserve_fragment: true }
+  end
+
+  def drop
+    redirect_to "/pages/show", inertia: { preserve_fragment: false }
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  INERTIA = { "X-Inertia" => "true", "X-Inertia-Version" => "v1" }
+
+  test "preserve_fragment is on the next visit and then gone" do
+    patch "/pages", headers: INERTIA
+    assert_response 303
+    get "/pages/show", headers: INERTIA
+    assert_equal true, response.parsed_body["preserveFragment"]
+    get "/pages/show", headers: INERTIA
+    assert_nil response.parsed_body["preserveFragment"]
+  end
+
+  test "a stale version keeps preserve_fragment for the full-page reload" do
+    patch "/pages", headers: INERTIA
+    get "/pages/show", headers: { "X-Inertia" => "true", "X-Inertia-Version" => "v0" }
+    assert_response 409
+    get "/pages/show"
+    assert_includes response.body, %("preserveFragment":true)
+    get "/pages/show"
+    refute_includes response.body, "preserveFragment"
+  end
+
+  test "a false flag does not preserve the fragment" do
+    patch "/pages/drop", headers: INERTIA
+    assert_response 303
+    get "/pages/show", headers: INERTIA
+    assert_nil response.parsed_body["preserveFragment"]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn inertia_location_is_a_conflict_for_an_inertia_visit() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/away\", to: \"pages#away\"\n  get \"/pages/away_break\", to: \"pages#away_break\"\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def away
+    inertia_location "https://example.com/away"
+  end
+
+  def away_break
+    inertia_location "https://example.com/away\r\nSet-Cookie: x=1"
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "an Inertia visit is a 409 with the external url" do
+    get "/pages/away", headers: { "X-Inertia" => "true" }
+    assert_response 409
+    assert_equal "https://example.com/away", response.headers["X-Inertia-Location"]
+  end
+
+  test "a normal visit redirects to the external url" do
+    get "/pages/away"
+    assert_response 302
+    assert_equal "https://example.com/away", response.headers["Location"]
+  end
+
+  test "a line break is removed before either location is written" do
+    get "/pages/away_break", headers: { "X-Inertia" => "true" }
+    assert_response 409
+    assert_equal "https://example.com/awaySet-Cookie: x=1", response.headers["X-Inertia-Location"]
+    get "/pages/away_break"
+    assert_response 302
+    assert_equal "https://example.com/awaySet-Cookie: x=1", response.headers["Location"]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
 }
 
 #[test]

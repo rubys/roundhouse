@@ -29,6 +29,7 @@ mod inertia;
 mod process_action;
 pub mod params;
 mod permit_splat;
+mod typed_update;
 pub mod params_wrapper;
 pub mod rewrites;
 pub mod util;
@@ -243,6 +244,8 @@ pub fn lower_controllers_with_arel_views_and_assocs(
 pub struct LowerControllerOptions<'a> {
     /// Ruby-family nullable read values; strict-target defaults stay unchanged.
     pub ruby_read_values: bool,
+    /// The selected Db shim supports typed positional binds for read predicates.
+    pub param_binds: bool,
     /// App `Schema` — enables the Arel SQL-chain lowering pass.
     pub schema: Option<&'a crate::schema::Schema>,
     /// App views — scanned for `*.json.jbuilder` format dispatch and the
@@ -300,6 +303,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
 ) -> Vec<LibraryClass> {
     let LowerControllerOptions {
         ruby_read_values,
+        param_binds,
         schema,
         views,
         library_classes,
@@ -327,9 +331,11 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // rewrite controller bodies + register the class with the typer.
     let mut params_specs = self::params::collect_specs(controllers);
     params_specs.mark_file_fields(models);
-    params_specs.mark_keyed_associations(models);
-    params_specs.mark_model_resources(models, schema);
+    self::typed_update::mark_model_resources(&mut params_specs, models, schema);
     let params_lcs = self::params::synthesize_params_classes(&params_specs);
+    // What `@parent.<assoc>.build` / `.find` expand to: the same
+    // declarations the typed association seed reads.
+    let assoc_registry = crate::lower::scope_chain::build_assoc_registry(models);
 
     // The view↔controller ivar contract: each action view's read-ivars,
     // so the render rewrite passes `@<name>` for each (matching the view's
@@ -368,7 +374,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 library_classes,
                 concern_spliced_actions,
             );
-            let methods = build_methods(controller, controllers, &params_specs, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, wrapper.as_ref(), action_check.as_ref());
+            let methods = build_methods(controller, controllers, &params_specs, &assoc_registry, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params, wrapper.as_ref(), action_check.as_ref());
             all_methods.push((methods, controller));
         }
         subclass_template_hooks(&mut all_methods, controllers, &view_ivars, &partials);
@@ -529,7 +535,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
 
     let mut out = Vec::new();
     // Params classes a kept `update(<params object>)` reads `to_attrs`
-    // of (`params::hand_update_the_attrs`).
+    // of (`typed_update::hand_update_the_attrs`).
     let mut wants_to_attrs: std::collections::BTreeSet<ClassId> = Default::default();
     crate::timings::phase("lower: controllers type", || {
     for (mut methods, controller) in all_methods {
@@ -575,6 +581,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                     rewritten |= crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                         &mut method.body, schema, &classes, assocs, ruby_read_values,
                         &relation_scope_names,
+                        crate::lower::arel::SqliteVisitor { param_binds },
                     );
                 }
             }
@@ -591,14 +598,10 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
         }
-        // After every body is typed: whether a helper answers the params
-        // object is its body's type, which its declared signature does
-        // not say (`permitted.to_h.except(:k)` is still declared the
-        // params class).
-        let answers = self::params::helper_answers(&methods);
-        for method in &mut methods {
-            self::params::hand_update_the_attrs(&mut method.body, &params_specs, &answers, &mut wants_to_attrs);
-        }
+        // After every body is typed: a helper's answer is its body's
+        // type, which its declared signature does not say
+        // (`permitted.to_h.except(:k)` is still declared the params class).
+        self::typed_update::record_to_attrs_demand(&mut methods, &params_specs, &mut wants_to_attrs);
         methods.extend(collect_attr_accessor_methods(controller));
         apply_alias_methods(controller, &mut methods);
         apply_undef_methods(controller, &mut methods);
@@ -626,15 +629,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // seed, the typer leaves it as `TyVar(0)` and the strict residual
     // check fails.
     let mut params_lcs = params_lcs;
-    for params_lc in &mut params_lcs {
-        if wants_to_attrs.contains(&params_lc.name)
-            && !params_lc.methods.iter().any(|m| m.name.as_str() == "to_attrs")
-        {
-            if let Some(spec) = params_specs.by_class(&params_lc.name) {
-                params_lc.methods.push(self::params::synth_to_attrs(&spec.class_id, &spec.fields));
-            }
-        }
-    }
+    self::typed_update::synthesize_demanded_to_attrs(&mut params_lcs, &params_specs, &wants_to_attrs);
     for params_lc in &mut params_lcs {
         let mut params_ivars: std::collections::HashMap<Symbol, Ty> =
             std::collections::HashMap::new();
@@ -672,6 +667,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         controller,
         std::slice::from_ref(controller),
         &specs,
+        &Default::default(),
         &std::collections::HashSet::new(),
         &TextFormatActions::new(),
         None,
@@ -1115,6 +1111,7 @@ fn build_methods(
     controller: &Controller,
     all_controllers: &[Controller],
     params_specs: &ParamsSpecs,
+    assocs: &crate::lower::scope_chain::AssocRegistry,
     json_actions: &std::collections::HashSet<Symbol>,
     text_format_actions: &TextFormatActions,
     routed: Option<&std::collections::HashSet<Symbol>>,
@@ -1390,7 +1387,7 @@ fn build_methods(
     for a in &publics_inlined {
         methods.push(action_to_method(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ true,
-            params_specs, json_actions,
+            params_specs, assocs, json_actions,
             text_format_actions, view_ivars,
             partials, format_breadth, &shadows, route_id_segments, inferred_params,
             &deferred_renders, &mut deferred_tails,
@@ -1431,7 +1428,7 @@ fn build_methods(
     for a in &privs_kept {
         methods.push(action_to_method(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ false,
-            params_specs, json_actions,
+            params_specs, assocs, json_actions,
             text_format_actions, view_ivars,
             partials, format_breadth, &shadows, route_id_segments, inferred_params,
             &no_deferred, &mut std::collections::HashMap::new(),
@@ -1444,7 +1441,7 @@ fn build_methods(
     for a in &helper_publics {
         methods.push(action_to_method(
             a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ false,
-            params_specs, json_actions,
+            params_specs, assocs, json_actions,
             text_format_actions, view_ivars,
             partials, format_breadth, &shadows, route_id_segments, inferred_params,
             &no_deferred, &mut std::collections::HashMap::new(),
@@ -2781,6 +2778,7 @@ fn action_to_method(
     params_privs: &[Action],
     is_public: bool,
     params_specs: &ParamsSpecs,
+    assocs: &crate::lower::scope_chain::AssocRegistry,
     json_actions: &std::collections::HashSet<Symbol>,
     text_format_actions: &TextFormatActions,
     view_ivars: &ViewIvarMap,
@@ -2858,6 +2856,7 @@ fn action_to_method(
         params_privs,
         is_public,
         params_specs,
+        assocs,
         &variants,
         view_ivars,
         partials,
@@ -2889,14 +2888,17 @@ fn action_to_method(
     //   - Other private actions default to Nil; refine when a
     //     forcing fixture surfaces.
     // Routing redirects override `same_host_location` so an author-written
-    // external location is allowed. The only caller is the inherited
-    // runtime `redirect_to`, which app call-site inference never sees, so
-    // the parameter would stay `Untyped`. Kotlin, C#, and Swift then emit
+    // external location is allowed, and `absolute_redirect_location` so
+    // a route `redirect("/path")` stays a path (Rails does not join a
+    // host there). The only caller is the inherited runtime
+    // `redirect_to`, which app call-site inference never sees, so the
+    // parameter would stay `Untyped`. Kotlin, C#, and Swift then emit
     // `Any?` / `object?` against Base's `(String) -> String` and the
     // override does not compile. The contract is the same String the
     // runtime signature declares.
     let host_policy = controller.name.0.as_str() == crate::ingest::routes::REDIRECT_CONTROLLER
-        && a.name.as_str() == "same_host_location";
+        && (a.name.as_str() == "same_host_location"
+            || a.name.as_str() == "absolute_redirect_location");
     let ret_ty = if host_policy {
         Ty::Str
     } else if !is_public && method_name.ends_with("_params") {
@@ -3092,6 +3094,7 @@ fn lower_action_body(
     params_privs: &[Action],
     is_public: bool,
     params_specs: &ParamsSpecs,
+    assocs: &crate::lower::scope_chain::AssocRegistry,
     variants: &[&str],
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
@@ -3229,7 +3232,7 @@ fn lower_action_body(
     let with_from_params =
         rewrite_update_to_typed_variant(&with_from_params, params_privs, params_specs);
     let with_assoc =
-        rewrite_assoc_through_parent_typed(&with_from_params, params_privs, params_specs);
+        rewrite_assoc_through_parent_typed(&with_from_params, params_privs, params_specs, assocs);
     // The legacy chain rewrites (`rewrite_drop_includes` +
     // `rewrite_order_to_sort_by`) used to land here. They've moved
     // to a post-typing pass in the per-method loop so the Arel pass

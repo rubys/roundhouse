@@ -18,6 +18,8 @@ module ActionController
       @shared_keys = []
       @deferred_groups = []
       @deferred_keys = []
+      @clear_history = false
+      @preserve_fragment = false
     end
 
     def start_page(component, version, encrypt_history, partial_component, partial_data, partial_except)
@@ -32,6 +34,8 @@ module ActionController
       @shared_keys = []
       @deferred_groups = []
       @deferred_keys = []
+      @clear_history = false
+      @preserve_fragment = false
       nil
     end
 
@@ -71,6 +75,16 @@ module ActionController
     # Shared props are registered separately from the evaluate? guards so
     # share synthesis and page props share one eager?/optional?/deferred?
     # surface (predicates stay non-mutating aside from deferred bookkeeping).
+    def mark_clear_history
+      @clear_history = true
+      nil
+    end
+
+    def mark_preserve_fragment
+      @preserve_fragment = true
+      nil
+    end
+
     def mark_shared(key)
       @shared_keys << key unless @shared_keys.include?(key)
       nil
@@ -99,9 +113,17 @@ module ActionController
       out = out + "},\"url\":" + JsonBuilder.encode_value(url)
       out = out + ",\"version\":" + (@version.empty? ? "null" : JsonBuilder.encode_value(@version))
       out = out + ",\"encryptHistory\":" + (@encrypt_history ? "true" : "false")
-      out = out + ",\"clearHistory\":false"
+      out = out + ",\"clearHistory\":" + (@clear_history ? "true" : "false")
       out = out + flash_json(notice, alert)
+      out = out + preserve_fragment_json
       out + shared_json + deferred_json + "}"
+    end
+
+    # Omitted when false, matching inertia-rails: the key is present only
+    # after a redirect that asked to keep the URL fragment.
+    def preserve_fragment_json
+      return "" unless @preserve_fragment
+      ",\"preserveFragment\":true"
     end
 
     def flash_json(notice, alert)
@@ -188,6 +210,17 @@ module ActionController
         page.mark_shared("errors")
         page.prop_json("errors", "{}")
       end
+      # Same once-only session slot as errors. A stale-version 409 returns
+      # above, so the flags stay for the full-page reload that follows.
+      # The session stores each value's `to_s`, so the flag is `"true"`.
+      if session["inertia_clear_history"] == "true"
+        session.delete("inertia_clear_history")
+        page.mark_clear_history
+      end
+      if session["inertia_preserve_fragment"] == "true"
+        session.delete("inertia_preserve_fragment")
+        page.mark_preserve_fragment
+      end
       nil
     end
 
@@ -201,6 +234,38 @@ module ActionController
     # value's `to_s`, so a Hash would come back as its `inspect` String.
     def inertia_errors_json(json)
       session["inertia_errors"] = json
+      nil
+    end
+
+    # A false or nil option stores nothing, so it does not delete a flag
+    # an earlier redirect already stored.
+    def inertia_clear_history(flag)
+      session["inertia_clear_history"] = "true" if flag
+      nil
+    end
+
+    def inertia_preserve_fragment(flag)
+      session["inertia_preserve_fragment"] = "true" if flag
+      nil
+    end
+
+    # An Inertia visit cannot follow an external redirect. The protocol
+    # answer is 409 with X-Inertia-Location. A non-Inertia request is a
+    # normal 302. `redirect_to` refuses another host, and this method
+    # exists to send one, so the location is set directly.
+    #
+    # One sanitized value for both answers. HeaderStore and the CGI writer
+    # drop a value that still contains CR or LF, which would make the 409
+    # unreadable to the client. `head` does not take `location:`.
+    def inertia_location(url)
+      target = ActionController.sanitize_location(url)
+      if inertia_request?
+        headers["X-Inertia-Location"] = target
+        head(:conflict)
+      else
+        head(:found)
+        @location = target
+      end
       nil
     end
 
@@ -236,6 +301,49 @@ module ActionController
       nil
     end
 
+    def merge_inertia_props(hash)
+      raise TypeError, "inertia props must be a Hash" unless hash.is_a?(Hash)
+      page = inertia_page
+      hash.keys.each do |key|
+        apply_inertia_prop(page, key.to_s, hash[key])
+      end
+      nil
+    end
+
+    def apply_inertia_prop(page, name, raw)
+      if raw.is_a?(InertiaRails::Prop)
+        kind = raw.kind
+        if kind == "defer"
+          if page.deferred?(name, raw.group)
+            page.prop_json(name, raw.call(self))
+          end
+        elsif kind == "optional"
+          if page.optional?(name)
+            page.prop_json(name, raw.call(self))
+          end
+        elsif kind == "always"
+          page.prop_json(name, raw.call(self))
+        end
+      elsif raw.is_a?(Proc)
+        if page.eager?(name)
+          page.prop_json(name, inertia_exec(raw))
+        end
+      elsif page.eager?(name)
+        # Same encoder a literal prop is lowered to. It walks a Hash or
+        # Array and calls `as_json` on a record. The method lives in the
+        # JSON runtime, so this file does not define it.
+        page.prop_json(name, ActionController::JsonRender.encode(raw))
+      end
+      nil
+    end
+
+    # Kernel's `instance_exec`, declared on Base. The block runs with
+    # the controller as `self` and returns whatever the prop computed;
+    # this encodes that value once.
+    def inertia_exec(work)
+      ActionController::JsonRender.encode(instance_exec(&work))
+    end
+
     def inertia_root_html(use_script_element)
       headers["Vary"] = "X-Inertia"
       json = JsonBuilder.escape_html_entities(inertia_page.page_json(inertia_url, flash[:notice], flash[:alert]))
@@ -245,5 +353,55 @@ module ActionController
         "<div id=\"app\" data-page=\"" + ActionView::ViewHelpers.html_escape(json) + "\"></div>"
       end
     end
+  end
+end
+
+# The objects a computed props hash can hold. A literal hash never
+# builds these: the lowerer sees `-> { }`, `InertiaRails.optional`,
+# `.defer`, and `.always` and emits the gate itself. A helper that
+# returns the same wrappers builds them here, and `merge_inertia_props`
+# reads `kind`.
+module InertiaRails
+  class Prop
+    def initialize(kind, group)
+      @kind = kind
+      @group = group
+      @block = nil
+    end
+
+    def kind
+      @kind
+    end
+
+    def group
+      @group
+    end
+
+    def store(work)
+      @block = work
+      nil
+    end
+
+    def call(controller)
+      controller.inertia_exec(@block)
+    end
+  end
+
+  def self.optional(&block)
+    prop = Prop.new("optional", "")
+    prop.store(block)
+    prop
+  end
+
+  def self.defer(group: "default", &block)
+    prop = Prop.new("defer", group)
+    prop.store(block)
+    prop
+  end
+
+  def self.always(&block)
+    prop = Prop.new("always", "")
+    prop.store(block)
+    prop
   end
 end

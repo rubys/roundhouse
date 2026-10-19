@@ -137,8 +137,48 @@ module ActionDispatch
     # So an app with no `domain` of its own raised NoMethodError on its
     # first absolute URL: campfire's message row, which links each
     # message by `room_at_message_url`.
+    # Rails' `raw_host_with_port`, and what `host` answers here: the Host
+    # header already included its port. The last `X-Forwarded-Host`
+    # wins only from a loopback or private peer, and only when it is a
+    # host authority. `config.hosts` is not applied yet.
     def host
+      raw_host_with_port
+    end
+
+    def raw_host_with_port
+      forwarded = forwarded_authority
+      return forwarded unless forwarded.empty?
       @env["HTTP_HOST"] || @env["SERVER_NAME"] || "localhost"
+    end
+
+    def forwarded_authority
+      return "" unless trusted_forwarded_peer?
+      forwarded = @env.fetch("HTTP_X_FORWARDED_HOST", "").to_s.split(",").last.to_s.strip
+      return "" unless host_authority?(forwarded)
+      forwarded
+    end
+
+    def trusted_forwarded_peer?
+      ip = remote_ip.to_s
+      # Empty is not loopback. A missing address must not count as the
+      # proxy in front of the app.
+      return false if ip.empty?
+      return true if ip == "127.0.0.1" || ip == "::1" || ip == "localhost"
+      return true if ip.start_with?("10.") || ip.start_with?("192.168.") || ip.start_with?("169.254.")
+      return true if ip.start_with?("fc") || ip.start_with?("fd") || ip.start_with?("fe80:")
+      if ip.start_with?("172.")
+        second = ip.split(".")[1].to_s.to_i
+        return true if second >= 16 && second <= 31
+      end
+      if ip.start_with?("100.")
+        second = ip.split(".")[1].to_s.to_i
+        return true if second >= 64 && second <= 127
+      end
+      false
+    end
+
+    def host_authority?(value)
+      value.match?(/\A(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(:[0-9]{1,5})?\z/)
     end
 
     # See the shared twin: HTTPS=on, or a TLS-terminating proxy's
@@ -166,9 +206,9 @@ module ActionDispatch
     end
 
     def port
-      authority = @env.fetch("HTTP_X_FORWARDED_HOST", "").to_s.split(",").last.to_s.strip
+      authority = forwarded_authority
       if authority.empty?
-        authority = host
+        authority = @env["HTTP_HOST"] || @env["SERVER_NAME"] || "localhost"
         if !@env.key?("HTTP_HOST") && (@env.key?("SERVER_NAME") || !authority.include?(":"))
           authority = "#{authority}:#{@env.fetch("SERVER_PORT", "").to_s}"
         end

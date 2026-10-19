@@ -206,6 +206,47 @@ module I18n
     {}
   end
 
+  # An Array, a number or a boolean in the files, which I18n answers as it is: its kind letter, then its fields, from the first locale of the chain that has it.
+  def self.opaque_fields(full, options)
+    loc = options.key?(:locale) ? locale_name(options[:locale]) : locale.to_s
+    opaque = runtime_opaque
+    runtime_chain(loc).each do |l|
+      found = opaque[l + "." + full]
+      return found unless found.nil?
+    end
+    []
+  end
+
+  def self.translate_items(full, options)
+    found = opaque_fields(full, options)
+    return [] if found.length < 2
+    items = found[1, found.length - 1] || []
+    items.map { |item| item.start_with?("y") ? item[1, item.length - 1].to_s.to_sym : item[1, item.length - 1].to_s }
+  end
+
+  def self.translate_strings(full, options)
+    found = opaque_fields(full, options)
+    return [] if found.length < 2
+    items = found[1, found.length - 1] || []
+    items.map { |item| item[1, item.length - 1].to_s }
+  end
+
+  def self.translate_symbols(full, options)
+    translate_strings(full, options).map { |item| item.to_sym }
+  end
+
+  def self.translate_integer(full, options)
+    opaque_fields(full, options)[1].to_s.to_i
+  end
+
+  def self.translate_float(full, options)
+    opaque_fields(full, options)[1].to_s.to_f
+  end
+
+  def self.translate_boolean(full, options)
+    opaque_fields(full, options)[1].to_s == "true"
+  end
+
   # An empty mapping in the files (`feed: {}`), which I18n answers as `{}`.
   def self.insert_empty(tree, path)
     node = tree
@@ -547,7 +588,7 @@ module I18n
           j -= 1
         end
       elsif kind == "O"
-        opaque[fields[1]] = true
+        opaque[fields[1]] = fields[2, fields.length - 3] || []
       elsif kind == "R"
         rules[fields[1]] = fields[2].to_s.split(" ")
       elsif kind == "F"

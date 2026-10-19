@@ -1096,35 +1096,11 @@ jobs:
         run: cargo test --test sidekiq_push_live -- --ignored --nocapture --test-threads=1
       - *advisory-result
 
-  # Campfire conformance — ONCE Campfire's OWN test suite, run against a
-  # roundhouse emit of it. The C4 rung of the coverage ladder, and the
-  # first time that number is produced by anything but a human at a
-  # terminal: it was hand-run per session before this, so it could drift
-  # between them with nothing to say so.
-  #
-  # IN CI, NOT ON THE BENCH BOX — the opposite call from lobsters
-  # conformance, and for one reason: the INPUT IS PINNED. `CAMPFIRE_SHA`
-  # fixes the app, so every movement in the number belongs to a commit
-  # here, which is the only thing CI can attribute. `scripts/lobsters-specs`
-  # deliberately does NOT pin ("a ledger answers a present-tense question…
-  # record the input, don't freeze it"), so per-commit attribution is
-  # impossible there and the cron box is its home. Nor is this job
-  # timing-sensitive the way the benchmarks are, so a shared runner is
-  # fine. Bumping CAMPFIRE_SHA moves the number deliberately, and the
-  # commit that bumps it owns the delta.
-  #
-  # BLOCKING, NOT ADVISORY. `spinel-framework` above is
-  # `continue-on-error` because it tracks matz/spinel master unpinned and
-  # upstream churn must not gate unrelated work — but the cost is that a
-  # break there is invisible in the run's conclusion (learned the hard
-  # way: a rename broke all 8 and CI still reported success). Nothing here
-  # is unpinned, so there is no churn to excuse noise and no reason to
-  # reach for that hatch.
-  #
-  # Cheap, unlike its lobsters sibling: `campfire-suite` runs the EMIT's
-  # own tests, so it needs no Rails bundle and no mise-pinned ruby — just
-  # the shared debug roundhouse binary (#317), ruby, the sqlite3 gem, and
-  # the sqlite3 CLI.
+  # Campfire conformance runs ONCE Campfire's own suite against a
+  # roundhouse emit of `CAMPFIRE_SHA`. The job is blocking: the pin does
+  # not move with Campfire main, and a count under the floor fails the
+  # run. The suite executes the emit's tests with the shared debug
+  # binary. It does not boot Rails.
   # campfire-compare: REAL Rails campfire vs the CRuby-emit lane — the
   # only job that boots Rails campfire. Both lanes start from the same
   # seeded rows and take the same cable walk (sign in through the real
@@ -1355,10 +1331,7 @@ jobs:
       - *advisory-result
 
   # campfire-spinel-compare: the same equivalence, with the compiled
-  # BINARY as the emit lane — Rails' broadcast frames vs the binary's.
-  # A real gate since matz/spinel#4240 (SanitizeTags inert through an
-  # untyped slot) was fixed the day it was filed; its first green run
-  # is the strongest claim this repo makes about the demo artifact.
+  # binary as the emit lane — Rails' broadcast frames vs the binary's.
   # `continue-on-error` for the same reason spinel-framework is:
   # spinel is tracked unpinned, and upstream churn must not gate
   # unrelated work — with the known cost that a break here is invisible
@@ -1435,11 +1408,8 @@ jobs:
           tar -xzf campfire-compare-spinel.tar.gz -C build
           test -x build/campfire-compare-spinel/build/blog
       - name: System libvips + libsqlite3-dev + libjemalloc-dev
-        # Runtime deps for the served binary + oracle. DEV packages match
-        # the producer link set. libvips-dev is ~150 packages — keep the
-        # step bound high enough for slow Azure apt (8m was exhausted on
-        # Full validation 37683643149 campfire-smoke mid-download).
-        # .deb archive cache via ci-apt-install-cached; #590 timeouts stay.
+        # Runtime deps for the served binary and the oracle. Dev packages
+        # match the producer link set. libvips-dev is a large apt install.
         timeout-minutes: 20
         uses: ./.github/actions/ci-apt-install-cached
         with:
@@ -1595,118 +1565,31 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
-      # Two gems, from two different places, both needed by a bare
-      # `ruby -Itest` — which is how the suite runs each file, so they
-      # have to land on the DEFAULT gem path; a bundler-cached
-      # vendor/bundle would not be seen.
-      #
-      #   sqlite3 — the emitted `runtime/db.rb` is the gem-backed shim
-      #             (`require "sqlite3"`).
-      #   bcrypt  — from the APP, not from us: campfire's own
-      #             `test/fixtures/users.yml` opens with
-      #             `<% BCrypt::Password.create("secret123456") %>`, and
-      #             the emitted fixture carries that through. Our
-      #             `runtime/ruby/bcrypt_facade.rb` has no `require
-      #             "bcrypt"` — reading that as "the gem is not needed"
-      #             is what shipped this job red on its first run, with
-      #             `uninitialized constant UsersFixtures::BCrypt` in 49
-      #             of 52 files. A dev box that has bcrypt installed for
-      #             any other reason hides it completely.
-      #   mocha   — same story as webmock: the app declares it in
-      #             `group :test` and stubs `Resolv.getaddress` /
-      #             `SecureRandom` / `Webhook.any_instance` with it.
-      #             `apply_test_gem_wiring` writes `require "mocha/api"`
-      #             (not mocha/minitest — the emitted helper is
-      #             Minitest-free) plus the lifecycle calls.
-      #   webmock — also from the app, and the one WE now write the
-      #             require for: campfire's own test_helper opens with
-      #             `require "webmock/minitest"`, our emitted helper is a
-      #             shim that dropped it, and `apply_test_gem_wiring`
-      #             re-adds it. Adding that require without adding the
-      #             gem here is what took this job red — the same
-      #             ambient-dependency trap as bcrypt below, walked into
-      #             from the other direction: the gem was on the laptop,
-      #             so the emit looked fine.
-      #   nokogiri — also from the app: `app/models/opengraph/document.rb`
-      #             calls `Nokogiri::HTML(html)` and campfire carries it
-      #             transitively (rails-html-sanitizer). The emitted tree
-      #             does not DECLARE it in its Gemfile, which is its own
-      #             gap; installing it here is parity with what the emit
-      #             actually loads.
-      #   rqrcode — also from the app: `QrCodeController#show` renders a
-      #             QR as SVG. Gem façades are spinel-only (spinel AOT
-      #             cannot link native gems and ships a raising stub);
-      #             on the CRuby tree `runtime/gem_facades.rb` is swapped
-      #             for guarded requires of the REAL gems, and rqrcode
-      #             joins that list.
-      #   sentry-ruby — also from the app: campfire's message helpers
-      #             rescue through `Sentry.capture_exception`, and the
-      #             emitted Gemfile DECLARES it now
-      #             (`project.rs::RUNTIME_GEMS`), so the stub that used
-      #             to stand for it left `campfire-walk-stubs.rb`. Not
-      #             adding the gem here took this job red at 197/240 in
-      #             SEVEN files, all `uninitialized constant
-      #             MessagesHelper::Sentry` — the third time this exact
-      #             trap has been walked into, and the second from this
-      #             direction: the gem was on the laptop because the
-      #             emitted tree had just been bundled there, so the
-      #             local suite read 219/240 and the emit looked fine.
-      #             A local run proves nothing about this list unless
-      #             the gem is HIDDEN: put a file that raises LoadError
-      #             first on the load path
-      #             (`RUBYOPT=-I/tmp/nosentry scripts/campfire-suite`)
-      #             and the CI numbers reproduce exactly.
-      #   platform_agent — also from the app, and the ONE with a LOAD-time
-      #             reach: `app/models/application_platform.rb` opens
-      #             `class ApplicationPlatform < PlatformAgent`, so its
-      #             absence is not an undefined constant on one route —
-      #             `app/models.rb` stops requiring and EVERY file fails.
-      #             This job read 0 of 240 when the emitted Gemfile grew
-      #             the declaration (`project.rs::RUNTIME_GEMS`) and this
-      #             list did not: the fourth walk into the trap the
-      #             sentry-ruby note below describes, and the loudest,
-      #             because a load-time gem takes the whole suite rather
-      #             than the files that name it. Its own dependency
-      #             `useragent` arrives with it.
-      #   ruby-vips — also from the app, and the only one with a NATIVE
-      #             library behind it: campfire's logo and avatar tests
-      #             decode the response body and assert its PIXEL
-      #             dimensions, which is the only honest way to check
-      #             that an image endpoint served an image of the right
-      #             size. ruby-vips is an FFI binding, so the gem alone
-      #             installs fine and then fails at LOAD time without
-      #             libvips on the box — which is why the apt step below
-      #             is not optional.
-      #   ffmpeg — the video previewer (`runtime/spinel/active_storage_
-      #             previewer.rb`): campfire's own Dockerfile installs it,
-      #             and `Message::AttachmentTest` posts a .mov and asserts
-      #             the poster frame got attached.
+      # The suite runs each file with `ruby -Itest`, so these gems have
+      # to be on the default gem path. A bundler cache is not seen.
+      # sqlite3: the emitted Db shim requires it.
+      # bcrypt: the emitted user fixtures call BCrypt::Password.create.
+      # mocha, webmock: the emitted helper requires them.
+      # nokogiri: the app parses HTML with it.
+      # rqrcode: QrCodeController renders an SVG.
+      # sentry-ruby: the emitted Gemfile declares it, and message helpers
+      # call Sentry.capture_exception.
+      # platform_agent: ApplicationPlatform subclasses it at load time.
+      # useragent arrives with that gem.
+      # ruby-vips: an FFI binding, so libvips has to be installed too.
+      # ffmpeg: the video previewer extracts a poster frame.
       - &campfire-suite-apt
         name: Install libvips (ruby-vips binds it through FFI) and ffmpeg
-        # Full validation 37689396098: timed out at 8m mid-Get: on Azure apt
-        # (~libvips42 + ffmpeg). Match the 20m libvips-dev budget from #590.
+        # libvips42 and ffmpeg are a slow apt install on a shared runner.
         timeout-minutes: 20
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 ffmpeg
-      #   concurrent-ruby, net-http-persistent, web-push — also from the
-      #             app, all three behind `WebPush::Pool`: the thread
-      #             pools it posts deliveries to, the keep-alive client
-      #             it hands them, and the gem that sends. The CRuby
-      #             tree swaps the runtime's `Concurrent` port for a
-      #             bare `require "concurrent"`, so that one is a
-      #             LOAD-time reach like platform_agent (lib/web_push/
-      #             pool.rb requires it, and app/models.rb requires
-      #             that); the other two are guarded-required and fail
-      #             as an undefined constant in `room_push_test` alone.
-      #             concurrent-ruby already arrives as sentry-ruby's
-      #             dependency; named here so removing sentry-ruby
-      #             cannot silently take the pool with it.
+      # concurrent-ruby, net-http-persistent, web-push: WebPush::Pool
+      # loads them. concurrent-ruby is named even though sentry-ruby
+      # also depends on it.
       - &campfire-suite-gems
         name: Install the gems the emitted suite loads
-        # rack: the ruby-family swap of runtime/rack_utils.rb is
-        # `require "rack/utils"`. Without the gem every controller
-        # integration test aborts at load (`cannot load such file --
-        # rack/utils`). campfire-compare already installs it.
+        # rack: the ruby-family swap of runtime/rack_utils.rb requires it.
         run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent concurrent-ruby net-http-persistent web-push rails-html-sanitizer rack --no-document
       - name: Verify the suite's bcrypt test configuration
         run: ruby tests/campfire_suite_bcrypt.rb
@@ -1716,28 +1599,11 @@ jobs:
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
           mkdir -p /tmp/campfire
           tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
-      # The OTHER campfire number, and the one #71's Phase 0 gates on:
-      # the STRICT emit — no `--allow-unsupported`, so an unsupported
-      # construct is an ERROR and the run writes nothing at all. It
-      # reached 0 on 2026-08-26 (3357442f), 10 -> 0 in six commits, so
-      # it is a CEILING that ratchets down the way the suite's floor
-      # ratchets up.
-      #
-      # Deliberately a STRICT target, and deliberately not the lane the
-      # suite runs. `campfire-suite` emits `--target ruby
-      # --allow-unsupported`, where the same findings come out as
-      # `gradual_untyped` / `unresolved_type` warnings and the error
-      # count is 0 for a reason that means nothing — which is exactly
-      # the confusion the published summary page carries today
-      # (rubys/roundhouse#71). This step is the run the ledger's
-      # "zero errors" invariant is actually about.
-      #
-      # Same debug binary as the suite (ROUNDHOUSE_BIN from build-roundhouse), so the
-      # compiler is shared rather than paid twice (#317).
-      #
-      # It went 0 -> 2 with the edbc779 pin (WebPush::Connections::Stages'
-      # `(...)` overrides of Net::HTTP's transport hooks) and back to 0
-      # once `lower::known_super_forwarding` spelled those forwards out.
+      # Strict emit, separate from the suite. No `--allow-unsupported`,
+      # so an unsupported construct is an error and nothing is written.
+      # The suite emits `--target ruby --allow-unsupported`, where the
+      # same findings are warnings. This step is the zero-error ceiling,
+      # on the same debug binary as the suite.
       - name: Enforce the strict-emit ceiling
         env:
           CEILING_ERRORS: 0
@@ -1769,11 +1635,8 @@ jobs:
           if [ "$errors" -lt "$CEILING_ERRORS" ]; then
             echo "::notice::ceiling is stale — lower CEILING_ERRORS to $errors"
           fi
-      # --json is what the published page is rendered from; --fail-log is
-      # what makes its ranking honest. Without the fail log every unpassed
-      # test in a file is charged to that file's FIRST error, which reads
-      # as one wall blocking twelve tests when only three of them ever
-      # reach it (the trap dfa42be3 fixed for the terminal tally).
+      # --json feeds the published page. --fail-log attributes each
+      # unpassed test to its own message, not the file's first error.
       - name: Run campfire's suite against the emit
         run: |
           scripts/campfire-suite \
@@ -1781,282 +1644,14 @@ jobs:
             --fail-log /tmp/campfire-failures.txt \
             --json /tmp/campfire-suite/summary.json \
             /tmp/campfire
-      # The harness reports a number and never gates on one (by design —
-      # see its header), so the floor lives here. `>=`, so progress is
-      # never a failure; exceeding it emits a notice asking for the bump,
-      # which is how the floor stays honest instead of decorative.
+      # The harness reports a count and does not gate on it. A count
+      # under the floor fails this step. A count over it prints a notice
+      # so the floor can be raised. The pin is `CAMPFIRE_SHA`.
       - name: Enforce the floor
-      #
-      # MEASURED HERE, NOT ON A LAPTOP. The 72/8 this job first shipped
-      # with came from a dev box and was not reproducible: bcrypt and
-      # nokogiri were ambient there, and `Pathname()` — which
-      # `app/helpers/cable_helper.rb` calls without a `require
-      # "pathname"` — resolves bare on Ruby 4.0 but not on the 3.4 this
-      # job pins. (The BUNDLED table that writes that require lives in
-      # `spin_shape`, so the ruby target never gets it — fixed at the
-      # root in 49a12bf2, which gives the ruby family the table too.)
-      # With the gems installed above and that fix in, a clean runner
-      # independently reaches the same 72/8 the dev box did: the number
-      # was right, its REPRODUCIBILITY was not. The floor is whatever a
-      # runner reaches, and it goes UP by the notice below, never by
-      # assertion.
-      #
-      # 219/40 -> 220/41, raised on the notice this step emitted for
-      # `ede6c585`. The test that turned is
-      # `Sessions::TransfersControllerTest#test_show_renders_when_not_signed_in`,
-      # and its file with it: `fb835d02` gave `form_with` a runtime for
-      # the case the view walker's macro-inline cannot reach — one
-      # written inside an `app/helpers/` module, where there is no
-      # accumulator to splice into and the options are a runtime value.
-      # The spinel half of that same gap was an undefined SYMBOL at link
-      # time; this is the CRuby half.
-      #
-      # 220/41 -> 253/40 on the CAMPFIRE_SHA bump to `94a48aac`. The
-      # test count is up 33 and the DENOMINATOR is up 48 (240 -> 288):
-      # upstream added a JSON bot API (index/update/destroy for messages,
-      # create/destroy for boosts) and an SSRF guard over push
-      # endpoints, which is two new test files and one existing file
-      # grown from 7 tests to 23.
-      #
-      # The file count DIPPED to 40 on the bump and is back at 41: the
-      # file that had left was `messages/by_bots_controller_test`, and
-      # `messages/boosts/by_bots_controller_test` replaced it in the
-      # green set once `String#blank?` became whitespace-aware
-      # (`lower::blank`, which had deferred it). A boost posted with a
-      # body of three spaces was being accepted and stored where Rails
-      # answers 422 — the emit was WRONG there, not merely short a test.
-      #
-      # `by_bots_controller_test` itself is still 16 of 23: an
-      # `UploadedFile` reaching `blank?`, and a test helper whose return
-      # type is not inferred (so a local bound from it is not projected
-      # to its id at a route helper). Raising this floor further means
-      # closing those, not asserting the number.
-      #
-      # 255/41 -> 256/42, on the notice this step has now emitted FOUR
-      # TIMES. The file that turned is `messages_controller_test`, and it
-      # turned at `9d10511b` — "Rails deletes twelve URL options before
-      # generating a path; we forwarded all twelve". The three commits
-      # after it (`b2acbc64`, `ef6127cf`, `18e1601f`) each measured the
-      # same 256/42 and each asked again; the number moved once and the
-      # floor simply did not follow it.
-      #
-      # A stale floor is not harmless, which is the reason to bump it
-      # rather than let it ride: while it sat at 255, the test
-      # `9d10511b` had just won was free to break again without failing
-      # this step. A ratchet that lags is a ratchet with slack in it.
-      #
-      # 287/53 of 288/54 -> 291/51 of 300/55 on the CAMPFIRE_SHA bump to
-      # `977cbcd1` (2026-09-11: link-preview hardening, direct-upload
-      # auth, cable disconnect on sign-out, bot-key log redaction). No
-      # test that passed on `94a48aac` fails on the ruby lane; the nine
-      # short are all NEW tests, each a named cause in
-      # bench/campfire/suite-causes.json. The spinel lane is the one
-      # that regressed on the bump (287 -> 286/300): four tests in
-      # files upstream did not touch failed with `undefined method
-      # 'call' for an instance of Proc` — `proc-call-lost`, which was
-      # matz/spinel#4529 (one 4-param user `call` shadowing the poly
-      # `.call` fast path) and closed by #4530 the same day, 290/300
-      # on the merge. The rooms tests it added are the first to assert
-      # on attachment RENDERING, and they found that @mentions and link
-      # previews never reach their partials on either lane
-      # (`attachable-partials-not-rendered`).
-      #
-      # `ed0f9a5d` (2026-09-20) is one commit past `977cbcd1`: our own
-      # basecamp/once-campfire#279, merged by rosa, which mints the
-      # tampered sgid in action_text_attachment_test with `to_sgid(for:)`
-      # instead of extending one live Room. The suite is otherwise
-      # unchanged, and the last ledger line (`object-extend`) reads zero.
-      #
-      # `91d294f4` (2026-09-24) is one commit past `ed0f9a5d`:
-      # basecamp/once-campfire#280, merged by rosa, the same rewrite for
-      # the same idiom in test/lib/rails_ext/action_text_attachables_test.rb
-      # — the one test `object-extend` still counted on both lanes
-      # (394/395). With it no campfire test extends a single object, and
-      # the suite measured 396 of 396, 68 of 68 files, on both lanes
-      # (spinel 234125c5, the one skip is campfire's own `skip`).
-      #
-      # `f8e36e97` (2026-09-26) is three merges past `91d294f4`: rubyzip
-      # 3.4.0 (#282), an Actions bump (#281), and `REDIS_URL` (#262) —
-      # an ERB `ENV.fetch` in config/cable.yml and a new
-      # config/initializers/resque.rb, neither of which reaches the emit
-      # (cable.yml is not read; the initializer is not a mixin). The
-      # first of four steps across upstream's Lexxy merge (`9a258bd`),
-      # taken alone so each step's fallout is its own. Measured 396 of
-      # 396, 68 of 68 files, on both lanes (spinel 3bc554dc).
-      #
-      # `9a258bd1` (2026-09-26) is the Lexxy merge (#224): the editor
-      # replaces Trix. The second of four steps, alone. What it took: the
-      # gem's editor markup (one `<lexxy-editor>` holding the call's block,
-      # no hidden input); its sanitizer allow-list and campfire's own,
-      # read off their boot; its stylesheets and `lexxy.js` built from the
-      # gem; `render layout: false` and a bare `format.json` in the new
-      # autocompletion arms; a namespace split so `ContentFilters`' constant
-      # exists before `SanitizeTags` reads it; bare helper calls in an
-      # `ActionView::TestCase`; `Rails::HTML5::SafeListSanitizer` on spinel;
-      # and the newline Action Text's `_content` partial ends with. An
-      # allowed `style` is DROPPED on spinel (no CSS scrubber; ledgered).
-      # Measured 406 of 406, 69 of 69 files, on both lanes (spinel
-      # 3bc554dc), campfire-compare green on both, room page included.
-      #
-      # `8fa6138f` (2026-09-26) is two merges past `9a258bd1`: mocha 3.1.0
-      # (#257) and web-push 3.1.0 (#254), which lets openssl go to 4.0.2 —
-      # Gemfile.lock only. The emitted trees pin none of the three (the
-      # ruby lane already resolved current releases; spinel uses none),
-      # so what moved is the Rails oracle. The third of four steps.
-      # Measured 406 of 406, 69 of 69 files, on both lanes (spinel
-      # 3bc554dc), campfire-compare green on both.
-      #
-      # `90b33002` (2026-09-26) is upstream main: composer drafts (#283)
-      # and mention-menu spacing (#284) — the composer's JS and CSS, a
-      # `data-action` string, `bin/release`, a system test. The last of
-      # the four steps. Measured 406 of 406, 69 of 69 files, on both lanes
-      # (spinel 3bc554dc); campfire-compare green on both; the four
-      # browser specs green through the Lexxy composer.
-      #
-      # 300 of 300 -> 342 of 397 (2026-09-20), the SAME campfire: the
-      # ingest had only ever read `test/models` and `test/controllers`,
-      # and campfire's `test/lib`, `test/channels` and `test/helpers` —
-      # twelve files, ninety-seven tests — were in no tally at all. Now
-      # read, they land as thirteen files (one declares two test
-      # classes, which used to lose the second) and 42 pass at once,
-      # 21 of them the private-network guard's. The 55 short are each
-      # a named cause in bench/campfire/suite-causes.json, and the two
-      # largest are harness, not app: `ActionCable::Channel::TestCase`
-      # (20 tests, `cable-test-case` + `turbo-signed-stream-name`) and
-      # the libvips loader policy the test process never applies
-      # (`vips-policy-not-applied-in-tests`). The floor did not move:
-      # no file that was green went red, and a floor is raised on the
-      # notice below, never on a denominator.
-      #
-      # 256/42 -> 376/61, on the notice `414f3322` emitted (2026-09-22:
-      # the Channel/Connection test-case harness, 356 -> 376 with
-      # exactly the five test/channels files flipping and nothing else
-      # moving). The floor had sat at 256/42 through 300/300 and
-      # 356/397 — a ratchet with a hundred and twenty tests of slack in
-      # it, every one of them free to break again without failing this
-      # step. Set to what this runner measured, as the notice said.
-      #
-      # 376/61 -> 382/64, on the notice `4042b19b`'s run emitted (the
-      # helper test's `view`, the logger stack behind campfire's
-      # formatter, `squish` and the identity assertions). Three files
-      # turned and nothing else moved.
-      #
-      # NOT raised to the 391 measured locally in the same session: the
-      # vips loader-policy commit after this one turns nine more, and
-      # every one of them asks the LOCAL libvips which formats it
-      # compiled in. A Linux runner's build is not this laptop's, so
-      # that number is a prediction until a runner prints it — and the
-      # rule this ratchet is built on is that a floor goes up by the
-      # notice, never by prediction.
-      #
-      # 382/64 -> 390/65, on the notice `08e2e163`'s run emitted. That
-      # prediction is now settled and worth recording: this runner
-      # measured 390 of 395 where the laptop measured 391 of 396, and
-      # the ONLY difference is the skip count — two formats the Linux
-      # libvips did not compile in against one here. Files green agree
-      # at 65, which is what the `skip` commit was for.
-      #
-      # 390/65 -> 391/66, on the notice `6992754a`'s run emitted
-      # (`Current.set` and `ActionDispatch::TestRequest`, which turned
-      # the opengraph-embed file). Not raised to the 393 measured
-      # locally after it: that number includes `to_gid`, which lands in
-      # THIS commit and whose runner figure is not in yet — same rule
-      # as last time.
-      #
-      # `edbc779f` (2026-10-09) is upstream main with basecamp/once-campfire
-      # #351 (the pooled push connection is a `Net::HTTP` subclass that
-      # includes `Stages`, so no `extend` is left in app code) on top of
-      # the caching layer (#698/#720: ResponseCache, RecordCache,
-      # FragmentCache, CachedResponses, the WAL checkpointer, header-only
-      # forgery protection with token-free forms, and `rooms.messages_count`
-      # kept by SQLite triggers). Measured locally: ruby lane 552 of 579,
-      # 70 of 86 files; spinel lane 382 of 579, 50 of 86 files (16 do not
-      # link); campfire-compare green on both lanes with no forgiven
-      # divergence; strict emit 2 (see the ceiling above). The floor stays
-      # at the 32b4144 figure until this runner's notice, as before.
-      #
-      # 417/69 -> 550/69 on the notice `301da2b8`'s run emitted (550 of
-      # 578, 69 of 86 files on the runner; 552/70 on the laptop).
-      #
-      # `32b4144b` (2026-10-06) is the Rails main bump (#314, rails
-      # e3d5c569 with the 8.2 defaults live) and the PRs merged before it.
-      # Three shapes it needed: the 8.2 default forgery strategy,
-      # `:header_only` (Sec-Fetch-Site decides before any token, and a
-      # header-less POST passes on plain http — the cable walk's forged
-      # posts now send what a browser sends from another site); Lexxy
-      # rendering through Rails' `ActionText::Editor` adapter, which drops
-      # the `input` attribute; and `Message::Pagination::Page`, a scope
-      # that answers an Array subclass, so `page.first(2)` is Array's.
-      # Measured locally on the ruby lane: 418 of 419, 69 of 70 files;
-      # campfire-compare and the DB differential green; strict emit 0.
-      # The one unpassed test is `RichText#embeds`
-      # (`presentation-preload-introspection`). The floor is left to this
-      # runner's notice.
-      #
-      # `2393f01b` (2026-10-05) is the last upstream main before the next
-      # two shapes outside the subset: `WebPush::Connections`
-      # (`http.extend Stages`, a per-object mixin over Net::HTTP's private
-      # transport) and the response/record/fragment caches on a second
-      # SQLite connection (`PRAGMA data_version`, `ActiveSupport::Cache::
-      # MemoryStore`, `File::LOCK_*`). Strict emit is 0 errors here; the
-      # caches are their own modelling project, tracked separately, and
-      # campfire-latest keeps reporting how far main is past this pin.
-      # Measured locally on the ruby lane: 412 of 414 (405 of 405 at
-      # 90b33002 on the same box), 69 of 70 files. The two unpassed are
-      # new `MessageTest` cases reading preload internals
-      # (`presentation-preload-introspection` in suite-causes.json), and
-      # they turn `message_test` red.
-      #
-      # 412/69 -> 417/69, on the notice `3ab64d40`'s run emitted (the
-      # 32b4144 pin's own tests, plus `RichText#embeds`: the last
-      # `MessageTest` case left fails only on `deferred-preload-timing`).
-      #
-      # 392/66 -> 412/69, on the notice this bump's own run emitted
-      # (`61503a01`: 412 of 414, 69 of 70, 2 skipped). The runner now
-      # agrees with the laptop on files green: the vips loader-policy
-      # skips no longer cost a file.
-      #
-      # 391/66 -> 392/66, on the notice `eb2a4d09`'s run emitted (the
-      # `to_gid` mint). Files green did not move: the test it turned
-      # shares a file with `object-extend`, which is outside the subset
-      # and will keep that file red for as long as a compiled target
-      # has no per-object method table — or until upstream takes
-      # basecamp/once-campfire#280, #279's twin for this file.
-      #
-      # 555/74 -> 568/77 on the CAMPFIRE_SHA bump to `11d3fb9c`
-      # (2026-10-16: enforcing script CSP). 16 commits past `edbc779f`.
-      # Measured on the ruby lane against that tree: 568 of 584 tests,
-      # 77 of 86 files. Message creation is already green on this
-      # compiler (`d5bbeaaaa`; `message-creation-tx` is `at_zero`).
-      # The blocking job keeps the constant. It does not follow
-      # Campfire main.
-      #
-      # 568/77 -> 576/81. Cached pages write the narrowed script
-      # Content-Security-Policy (cached_responses 13/13). ruby-vips
-      # loads after boot, so Nokogiri keeps the libxml that accepts
-      # `*:` and css-class() (messages_helper 17/17, boosts 5/5,
-      # rooms_refreshes 1/1).
-      #
-      # 576/81 -> 577/82. `ActionView::Base#form_with` runs when a
-      # template form site runs (fragment_rendering 9/9). A
-      # non-joinable fixture transaction makes each destroy its own
-      # savepoint (room_test 11/11); the CRuby pool pins that
-      # connection so the request sees the uncommitted rows.
-      # messages_caching went 4/4 -> 3/4 on that measurement: the
-      # fixture BEGIN made `FragmentCache.transaction_open?` true.
-      #
-      # 577/82 -> 578/83. That frame is hidden from
-      # `transaction_open?`, and an uncommitted write moves the
-      # observer's data_version, so messages_caching is 4/4 again.
-      # room_test stays 11/11; `use_transactional_tests = false` still
-      # COMMITs. Still red, and outside this floor: ActiveRecord::Tasks
-      # 0/4, deferred preload 9/10, Object#extend 13/14. A parallel
-      # run can lose a channel file to Errno::EEXIST on `tmp/test`;
-      # those files are green serially and are counted here.
         env:
-          # Tip Campfire suite floor — 578/83 at CAMPFIRE_SHA 11d3fb9c.
-          FLOOR_TESTS: 578
-          FLOOR_FILES: 83
+          # 579 tests passed, 84 files green.
+          FLOOR_TESTS: 579
+          FLOOR_FILES: 84
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
@@ -3205,18 +2800,15 @@ jobs:
     needs: [build-roundhouse, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-archive-build') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
     runs-on: ubuntu-latest
-    # 50, not 30: `spin pack` runs spinel's front-end over the whole
-    # campfire tree, and with the ruby-vips package in it the job took
-    # 26 of its 30 minutes on 2026-09-12 (run 34725916085). Still below
-    # the old 60m ceiling so a hung pack fails sooner.
+    # `spin pack` runs Spinel's front end over the whole Campfire tree,
+    # including ruby-vips.
     timeout-minutes: 50
 
     env:
       MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
-      # No setup-rust: a release build here took ~2.5m on the campfire-smoke
-      # critical path; the shared debug binary emits the same tree in seconds.
+      # No setup-rust: emission uses the shared debug binary.
       - uses: actions/download-artifact@v8
         with:
           name: roundhouse-debug-bin
@@ -3436,8 +3028,8 @@ jobs:
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-smoke') && needs.campfire-archive-build.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
-    # 35m: libvips-dev apt alone can take ~20m on a slow Azure day, then
-    # Playwright + README smoke still need room (job was 25m / step 8m).
+    # libvips-dev apt can take most of the budget; Playwright and the
+    # README smoke still need room after it.
     timeout-minutes: 35
 
     continue-on-error: true
@@ -3918,13 +3510,9 @@ jobs:
         run: |
           mkdir -p _site/bench/campfire
           if curl -fsSL --max-time 30 "$BENCH_URL/summary.json" -o _site/bench/campfire/summary.json; then
-            # EVERY sidecar the renderer knows how to use. bench-report
-            # draws a section per file and silently omits the ones it
-            # cannot find, so a file missing from this list is a section
-            # missing from the published page with nothing to say it —
-            # which is how nine lanes went missing from the blog page on
-            # 2026-09-02. coldstart.json and sockets.json carry two of
-            # the measures campfire's own discussion asks for.
+            # Every sidecar the renderer draws. A file missing from this
+            # list is a section missing from the published page.
+            # coldstart.json and sockets.json are two of those measures.
             for f in env.json per-run.json summary.md parity.txt coldstart.json sockets.json skipped.json; do
               curl -fsSL --max-time 30 "$BENCH_URL/$f" -o "_site/bench/campfire/$f" || true
             done

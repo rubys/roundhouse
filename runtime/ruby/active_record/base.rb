@@ -308,6 +308,13 @@ module ActiveRecord
       raise NotImplementedError, "id=: subclasses must override"
     end
 
+    # The primary key, which is `id` unless the model names another
+    # column. A table can have both; `id` then stays that column and
+    # this method still answers the key. Models override it.
+    def _primary_key_value
+      id
+    end
+
     # `to_param` — the same contract. The lowerer synthesizes it on
     # ApplicationRecord (the key as a String, Rails' `id&.to_s`) and a
     # model may override it (lobsters' Story answers `short_id`).

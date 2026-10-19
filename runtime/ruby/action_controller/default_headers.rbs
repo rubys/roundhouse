@@ -1,0 +1,8 @@
+# Typing contract for default_headers.rb beside this file.
+module ActionController
+  class Base
+    @headers: ActionController::HeaderStore
+    def commit_default_headers!: () -> nil
+    def write_default_header: (String key, String value) -> nil
+  end
+end

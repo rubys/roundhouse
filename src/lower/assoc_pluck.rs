@@ -79,7 +79,7 @@
 //! direct callers. Do not re-add a second `for_each_test_body` here.
 
 use crate::app::App;
-use crate::expr::{BlockStyle, Expr, ExprNode, Literal};
+use crate::expr::{BlockStyle, Expr, ExprNode};
 use crate::ident::Symbol;
 
 pub fn apply_assoc_pluck_lowering(app: &mut App) {
@@ -133,88 +133,8 @@ fn rewrite(expr: &mut Expr, materialized: &std::collections::HashSet<Symbol>) {
 }
 
 pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::HashSet<Symbol>) {
-    let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*expr.node else {
-        return;
-    };
-    if method.as_str() != "pluck" || block.is_some() || args.is_empty() {
-        return;
-    }
-    // Symbol arguments only. `pluck(:"table.col")` and the string form
-    // name a column through SQL rather than through a reader, and
-    // nothing answers those on a materialized row.
-    let mut cols: Vec<Symbol> = Vec::new();
-    for a in args {
-        let ExprNode::Lit { value: Literal::Sym { value } } = &*a.node else { return };
-        if value.as_str().contains('.') {
-            return;
-        }
-        cols.push(value.clone());
-    }
-    // THE RECEIVER'S TYPE IS THE DISCRIMINATOR, and it has to be,
-    // because the two association shapes are not syntactically
-    // different. A plain `has_many` reader hydrates and answers an
-    // Array (`Room#memberships`); a `has_many :through` answers an
-    // `ActiveRecord::Relation` (`User#rooms`, a joins chain). Both are
-    // spelled `owner.name`. A Relation ALREADY has `pluck`, and its
-    // `pluck` is a single-column SELECT — rewriting that one would
-    // replace a projection with a whole-row hydrate.
-    //
-    // UNKNOWN TYPES ARE REWRITTEN, and that is safe rather than
-    // optimistic: `map` is Enumerable, so it answers on an Array and on
-    // a Relation both. The worst an unknown costs is a Relation losing
-    // its single-column SELECT — where the alternative, leaving it, is
-    // `undefined method 'pluck' for an instance of Array` on every
-    // Array-valued one. campfire's `room.memberships` is exactly this
-    // case: the site lives in a concern, where `room` has no type.
-    // `Ty::Array` LOOKS like the discriminator and is not. The analyzer
-    // types a `has_many :through` reader `Array[Room]` too, where the
-    // emitted reader is an `ActiveRecord::Relation` over a joins chain —
-    // the type is its approximation of "a collection", and it conflates
-    // exactly the two shapes this pass has to tell apart. Gating on it
-    // rewrote a Relation's single-column SELECT into a whole-row
-    // hydrate, which is the opposite of the fix.
-    //
-    // So the ASSOCIATION KIND decides, because that is what actually
-    // determines which reader gets emitted. A stated Relation or model
-    // Class still short-circuits — those are certain, and cheap to
-    // check.
-    if matches!(
-        &recv.ty,
-        Some(crate::ty::Ty::Relation { .. }) | Some(crate::ty::Ty::Class { .. })
-    ) {
-        return;
-    }
-    // A LOCAL or parameter that may hold an Array — typed `Array[…]`, or
-    // a union with an Array in it — is the other way a record Array
-    // reaches `pluck`: campfire's `Rooms::Direct.find_for(users)` does
-    // `users.pluck(:id)`, and its callers pass a Relation
-    // (`DirectsController`) or an Array (`find_or_create_for([jz,
-    // kevin])`, once-campfire-rust's model scenario). ActiveSupport's
-    // `Enumerable#pluck` answers the Array; our Array has none. `map` is
-    // right for both halves — only a stated Relation, returned above,
-    // keeps its single-column SELECT.
-    let var_array = matches!(&*recv.node, ExprNode::Var { .. })
-        && match &recv.ty {
-            Some(crate::ty::Ty::Array { .. }) => true,
-            Some(crate::ty::Ty::Union { variants }) => {
-                variants.iter().any(|v| matches!(v, crate::ty::Ty::Array { .. }))
-            }
-            _ => false,
-        };
-    if !var_array {
-        let ExprNode::Send { method: reader, .. } = &*recv.node else { return };
-        if !materialized.contains(reader) {
-            return;
-        }
-    }
-    // A Const root is `Model.where(…).pluck(:id)`, arel's inlined
-    // SELECT. Belt and braces: a model constant does not answer an
-    // association name, so this should not trigger — and if it ever
-    // does, the SELECT wins.
-    if const_rooted(recv) {
-        return;
-    }
-
+    let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*expr.node else { return };
+    let Some(cols) = crate::analyze::assoc_pluck::reader_columns(recv, method, args, block.as_ref(), materialized) else { return };
     let span = expr.span;
     let var = Symbol::from("__pluck");
     // The row a block sees is the receiver's element; one column's
@@ -223,11 +143,15 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
         Some(crate::ty::Ty::Array { elem }) => Some((**elem).clone()),
         _ => None,
     };
-    let col_ty = match (&expr.ty, cols.len()) {
-        (Some(crate::ty::Ty::Array { elem }), 1) => Some((**elem).clone()),
-        _ => None,
+    let col_types = match (&expr.ty, cols.len()) {
+        (Some(crate::ty::Ty::Array { elem }), 1) => vec![Some((**elem).clone())],
+        (Some(crate::ty::Ty::Array { elem }), _) => match elem.as_ref() {
+            crate::ty::Ty::Tuple { elems } => elems.iter().cloned().map(Some).collect(),
+            _ => vec![None; cols.len()],
+        },
+        _ => vec![None; cols.len()],
     };
-    let read = |col: &Symbol| {
+    let read = |(index, col): (usize, &Symbol)| {
         let mut row = Expr::new(
             span,
             ExprNode::Var { id: crate::ident::VarId(0), name: var.clone() },
@@ -243,7 +167,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
                 parenthesized: false,
             },
         );
-        send.ty = col_ty.clone();
+        send.ty = col_types.get(index).cloned().flatten();
         send
     };
     // Rails answers an Array of VALUES for one column and an Array of
@@ -251,16 +175,20 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
     // reading one or the other. The single-column form is the whole of
     // the corpus; the multi-column arm is here because getting it wrong
     // would be silent.
-    let body = if cols.len() == 1 {
-        read(&cols[0])
+    let mut body = if cols.len() == 1 {
+        read((0, &cols[0]))
     } else {
         Expr::new(
             span,
             ExprNode::Array {
-                elements: cols.iter().map(read).collect(),
+                elements: cols.iter().enumerate().map(read).collect(),
                 style: Default::default(),
             },
         )
+    };
+    body.ty = match &expr.ty {
+        Some(crate::ty::Ty::Array { elem }) => Some(elem.as_ref().clone()),
+        _ => None,
     };
 
     let block = Expr::new(
@@ -289,17 +217,4 @@ pub(crate) fn rewrite_node(expr: &mut Expr, materialized: &std::collections::Has
         },
     );
     expr.ty = ty;
-}
-
-/// Does this chain bottom out at a model constant?
-///
-/// `Room.where(x).order(y)` does; `room.memberships` does not. Walks
-/// only the RECEIVER spine — an argument that happens to name a class
-/// is not what the chain is rooted on.
-fn const_rooted(expr: &Expr) -> bool {
-    match &*expr.node {
-        ExprNode::Const { .. } => true,
-        ExprNode::Send { recv: Some(r), .. } => const_rooted(r),
-        _ => false,
-    }
 }

@@ -105,7 +105,13 @@ pub fn try_build_arel_with_assocs(
         // `Room.where(type: "Rooms::Open").pluck(:id)` from `sti_scope`.
         "pluck" | "ids" => {
             let (op, owner) = try_chain_recv(recv, schema, registry, assocs)?;
-            return apply_pluck(op, method, args, schema).map(|op| (op, owner));
+            if matches!(&*recv.node, ExprNode::Const { .. })
+                && ClassInfo::source_class_method(registry, &owner, method)
+            {
+                return None;
+            }
+            let primary_key = registry.get(&owner).and_then(|class| class.primary_key.as_ref());
+            return apply_pluck(op, method, args, schema, primary_key).map(|op| (op, owner));
         }
         // `count` LAYERED on a chain. The base arm already answers
         // `Model.count`; without this arm `Model.where(…).count`
@@ -296,6 +302,7 @@ fn apply_pluck(
     method: &Symbol,
     args: &[Expr],
     schema: &Schema,
+    primary_key: Option<&Symbol>,
 ) -> Option<ArelOp> {
     let mut sel = match op {
         ArelOp::Select(s) => s,
@@ -306,14 +313,23 @@ fn apply_pluck(
     if !matches!(sel.columns, ColumnSpec::All) {
         return None;
     }
+    let table = schema.tables.get(&sel.table.0)?;
+    let schema_key = table.columns.iter().find(|col| col.primary_key).map(|col| &col.name);
+    let primary_key = primary_key.or(schema_key);
+    let id_is_column = table.columns.iter().any(|col| col.name.as_str() == "id");
     let column = match method.as_str() {
-        // `ids` is `pluck(:id)` with the column named by Rails, not by
-        // the call site — so it takes no args.
-        "ids" if args.is_empty() => Symbol::from("id"),
-        "pluck" if args.len() == 1 => column_name_arg(&args[0])?,
+        // `ids` is the primary key, not a column named `id`.
+        "ids" if args.is_empty() => {
+            crate::schema::pluck_argument(Symbol::from("id"), false, primary_key)
+        }
+        // `pluck(:id)` keeps a real `id` column. The alias applies only
+        // when that column is absent — `schema::pluck_argument`.
+        "pluck" if args.len() == 1 => {
+            let requested = column_name_arg(&args[0])?;
+            crate::schema::pluck_argument(requested, id_is_column, primary_key)
+        }
         _ => return None,
     };
-    let table = schema.tables.get(&sel.table.0)?;
     if !table.columns.iter().any(|c| c.name == column) {
         return None;
     }
