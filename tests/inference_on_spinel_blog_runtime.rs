@@ -420,7 +420,11 @@ fn untyped_subexpressions_baseline() {
     // parameters, `Db.database_path`, `Rails.env_name`). The 794 ceiling
     // had unused room; the measured total is 835. The RBS-paired probe
     // types the same file at its own ceiling.
-    const CEILING: usize = 835;
+    // Refusing CHECK/COLLATE/AUTOINCREMENT/GENERATED and a composite
+    // primary key: 835 -> 846, MEASURED 2026-10-19. `keyword?` reads
+    // its unseeded `ddl`/`word` parameters. The RBS-paired probe types
+    // that method.
+    const CEILING: usize = 846;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

@@ -1578,32 +1578,45 @@ module Db
       request_error = e
     ensure
       cleanup_error = nil
-      # Close a leftover snapshot before rolling back an abandoned app
-      # transaction, then drain readers before eviction. Each stage runs
-      # even when an earlier cleanup failed, without replacing the request error.
-      begin
-        if conn.snap_depth > 0
-          conn.snap_depth = 1
-          read_snapshot_end
+      # `Db.close` inside the lease drops `@pools` and closes `conn`.
+      # Snapshot and rollback cleanup talk to SQLite, so skip them when
+      # this pool is no longer the live one. The lease index still goes
+      # back to the pool that issued it.
+      pool_live = false
+      if !@pools.nil?
+        pi = 0
+        while pi < @pools.length
+          pool_live = true if @pools[pi].equal?(pool)
+          pi += 1
         end
-      rescue StandardError => e
-        cleanup_error = e
       end
-      begin
-        release_abandoned_write(conn)
-      rescue StandardError => e
-        cleanup_error = e if cleanup_error.nil?
-      end
-      begin
-        conn.qc_end
-        conn.release_all
-      rescue StandardError => e
-        cleanup_error = e if cleanup_error.nil?
-      ensure
-        conn.trim!
+      if pool_live
+        begin
+          if conn.snap_depth > 0
+            conn.snap_depth = 1
+            read_snapshot_end
+          end
+        rescue StandardError => e
+          cleanup_error = e
+        end
+        begin
+          release_abandoned_write(conn)
+        rescue StandardError => e
+          cleanup_error = e if cleanup_error.nil?
+        end
+        begin
+          conn.qc_end
+          conn.release_all
+        rescue StandardError => e
+          cleanup_error = e if cleanup_error.nil?
+        ensure
+          conn.trim!
+          Thread.current[:db_conn] = nil
+        end
+      else
         Thread.current[:db_conn] = nil
-        pool.release(idx)
       end
+      pool.release(idx)
       raise cleanup_error if !cleanup_error.nil? && request_error.nil?
     end
     raise request_error if !request_error.nil?
@@ -1615,6 +1628,8 @@ module Db
     # connection. Schema purge closes and reopens the same path.
     Thread.current[:db_conn] = nil
     Thread.current[:db_pool] = nil
+    # A pin left set would `release(0)` on the pool `configure` opens next.
+    Thread.current[:db_txn_pin] = false
     return if @pools.nil?
     error = nil
     begin

@@ -344,7 +344,8 @@ module ActiveRecord
         end
         dumped = db_config.schema_dump
         return "" if dumped.empty? || dumped == "false"
-        dumped
+        return dumped if dumped.start_with?("/")
+        File.join("db", dumped)
       end
 
       def self.load_schema(db_config, format = "", file = "")
@@ -801,6 +802,12 @@ module ActiveRecord
         raise "no such table #{table}" if names.empty?
         raise "no such column #{column}" unless names.include?(column)
         refuse_unpreserved(table)
+        k = 0
+        while k < pks.length
+          pk = pks[k]
+          raise "change_column cannot preserve composite primary key on #{table}" if pk != 0 && pk != 1
+          k += 1
+        end
         defs = []
         selected = []
         i = 0
@@ -837,6 +844,18 @@ module ActiveRecord
       # through them.
       def self.refuse_unpreserved(table)
         quoted = quote_ident(table)
+        # `table_info` does not report CHECK, COLLATE, AUTOINCREMENT, or
+        # generated columns. Recording the version after dropping them
+        # would mark a migration applied that did not run.
+        ddl_stmt = Db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = #{ActiveRecord::Base.connection.quote(table)}")
+        ddl = ""
+        if Db.step?(ddl_stmt)
+          ddl = Db.column_text(ddl_stmt, 0).upcase
+        end
+        Db.finalize(ddl_stmt)
+        if keyword?(ddl, "CHECK") || keyword?(ddl, "COLLATE") || keyword?(ddl, "AUTOINCREMENT") || keyword?(ddl, "GENERATED")
+          raise "change_column cannot preserve table constraints on #{table}"
+        end
         stmt = Db.prepare("PRAGMA index_list(#{quoted})")
         while Db.step?(stmt)
           name = Db.column_text(stmt, 1)
@@ -854,6 +873,24 @@ module ActiveRecord
         Db.finalize(listed)
         refuse_incoming_foreign_keys(table)
         nil
+      end
+
+      # `word` as a SQL keyword. A column named `checked` contains the
+      # letters CHECK and is not a constraint.
+      def self.keyword?(ddl, word)
+        i = 0
+        while i < ddl.length
+          at = ddl.index(word, i)
+          return false if at.nil?
+          before = at == 0 ? " " : ddl[at - 1].to_s
+          after_at = at + word.length
+          after = after_at >= ddl.length ? " " : ddl[after_at].to_s
+          ident_before = (before >= "A" && before <= "Z") || (before >= "0" && before <= "9") || before == "_"
+          ident_after = (after >= "A" && after <= "Z") || (after >= "0" && after <= "9") || after == "_"
+          return true unless ident_before || ident_after
+          i = at + word.length
+        end
+        false
       end
 
       def self.refuse_incoming_foreign_keys(table)

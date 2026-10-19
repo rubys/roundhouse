@@ -503,8 +503,14 @@ module Db
     ensure
       cleanup_error = nil
       open = h.instance_variable_get(:@rh_open)
+      # `transaction_active?` on a handle `Db.close` already closed raises
+      # "cannot use a closed database" and turns a finished task into a
+      # cleanup failure. Still drop a write permit this fiber owns.
+      closed = h.closed?
       begin
-        if h.instance_variable_get(:@rh_snapshot_depth).to_i > 0
+        if closed
+          release_permit if permit_owned?
+        elsif h.instance_variable_get(:@rh_snapshot_depth).to_i > 0
           h.instance_variable_set(:@rh_snapshot_depth, 1)
           read_snapshot_end
         end
@@ -512,7 +518,7 @@ module Db
         cleanup_error = e
       end
       begin
-        release_abandoned_write(h)
+        release_abandoned_write(h) unless closed
       rescue StandardError => e
         cleanup_error ||= e
       end

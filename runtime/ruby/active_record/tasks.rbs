@@ -97,6 +97,7 @@ module ActiveRecord
       def self.clean_token: (String piece) -> String
       def self.rebuild_column: (String table, String column, String type_name) -> nil
       def self.refuse_unpreserved: (String table) -> nil
+      def self.keyword?: (String ddl, String word) -> bool
       def self.refuse_incoming_foreign_keys: (String table) -> nil
       def self.check_protected!: () -> nil
       def self.load_seed: () -> nil

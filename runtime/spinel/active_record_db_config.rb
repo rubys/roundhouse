@@ -71,9 +71,12 @@ module ActiveRecord
       end
 
       def schema_dump(_format = nil)
-        return "" if @configuration.nil?
-        value = lookup(@configuration, "schema_dump")
-        return "" if value.nil? || value == false
+        value = @configuration.nil? ? nil : lookup(@configuration, "schema_dump")
+        return "" if value == false
+        # Rails names the dump when the key is absent. An explicit false
+        # is the only "do not dump" value. `schema_dump_path` joins a
+        # relative name under `db/`.
+        return(@name == "primary" ? "schema.rb" : "#{@name}_schema.rb") if value.nil?
         value.to_s
       end
 
