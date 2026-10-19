@@ -66,7 +66,8 @@ pub fn apply_object_extend_stub(app: &mut App) -> Vec<Diagnostic> {
             let mut modules = base_modules.clone();
             let added =
                 hoist_anonymous_modules(&mut t.body, &sources, &mut tm.inner_classes, &mut modules);
-            rewrite_scope(&mut t.body, &classes, &modules, &helpers);
+            let mut seq = 0u32;
+            rewrite_scope(&mut t.body, &classes, &modules, &helpers, &mut seq);
             if let Some(d) = first_untraced(&t.body, &classes, &modules) {
                 let keep = tm.inner_classes.len() - added;
                 tm.inner_classes.truncate(keep);
@@ -413,6 +414,7 @@ fn rewrite_scope(
     classes: &HashSet<String>,
     modules: &HashSet<String>,
     helpers: &[Factory],
+    seq: &mut u32,
 ) {
     let span = body.span;
     let mut exprs = if let ExprNode::Seq { exprs } = &mut *body.node {
@@ -421,10 +423,9 @@ fn rewrite_scope(
         vec![body.clone()]
     };
     let mut i = 0;
-    let mut seq = 0u32;
     while i < exprs.len() {
-        rewrite_lambdas(&mut exprs[i], classes, modules, helpers);
-        let setups = pull_setups(&mut exprs[i], classes, modules, helpers, &mut seq, false);
+        rewrite_lambdas(&mut exprs[i], classes, modules, helpers, seq);
+        let setups = pull_setups(&mut exprs[i], classes, modules, helpers, seq, false);
         let n = setups.len();
         if n > 0 {
             for (k, setup) in setups.into_iter().enumerate() {
@@ -446,15 +447,16 @@ fn rewrite_lambdas(
     classes: &HashSet<String>,
     modules: &HashSet<String>,
     helpers: &[Factory],
+    seq: &mut u32,
 ) {
     if matches!(&*expr.node, ExprNode::Lambda { .. }) {
         if let ExprNode::Lambda { body, .. } = &mut *expr.node {
-            rewrite_scope(body, classes, modules, helpers);
+            rewrite_scope(body, classes, modules, helpers, seq);
         }
         return;
     }
     expr.node
-        .for_each_child_mut(&mut |c| rewrite_lambdas(c, classes, modules, helpers));
+        .for_each_child_mut(&mut |c| rewrite_lambdas(c, classes, modules, helpers, seq));
 }
 
 fn pull_setups(
@@ -465,9 +467,73 @@ fn pull_setups(
     seq: &mut u32,
     value_used: bool,
 ) -> Vec<Expr> {
+    // Hoisting in front of this statement would run the extend before
+    // an effect that Ruby evaluates first (`foo(bar(), obj.extend(mod))`).
+    if effect_precedes_extend(expr) {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     pull_one(expr, classes, modules, helpers, seq, value_used, &mut out);
     out
+}
+
+/// True when some call or write is evaluated before an `extend` in this
+/// expression. The extend's own receiver does not count: it is moved
+/// into the setup, immediately before the extend.
+fn effect_precedes_extend(expr: &Expr) -> bool {
+    let mut effect = false;
+    let mut preceded = false;
+    scan_eval_order(expr, &mut effect, &mut preceded);
+    preceded
+}
+
+fn scan_eval_order(expr: &Expr, effect: &mut bool, preceded: &mut bool) {
+    if *preceded || matches!(&*expr.node, ExprNode::Lambda { .. }) {
+        return;
+    }
+    // A statement sequence already runs in order. An earlier statement
+    // is not a reason to refuse an extend in a later one; only an
+    // effect inside the same expression is.
+    if let ExprNode::Seq { exprs } = &*expr.node {
+        for child in exprs {
+            let mut local_effect = false;
+            scan_eval_order(child, &mut local_effect, preceded);
+        }
+        return;
+    }
+    if gates_control(expr) {
+        *effect = true;
+        return;
+    }
+    if instance_extend(expr).is_some() {
+        if *effect {
+            *preceded = true;
+        }
+        *effect = true;
+        return;
+    }
+    expr.node.for_each_child(&mut |child| {
+        if !*preceded {
+            scan_eval_order(child, effect, preceded);
+        }
+    });
+    if is_effect(expr) {
+        *effect = true;
+    }
+}
+
+fn is_effect(expr: &Expr) -> bool {
+    matches!(
+        &*expr.node,
+        ExprNode::Send { .. }
+            | ExprNode::Assign { .. }
+            | ExprNode::OpAssign { .. }
+            | ExprNode::MultiAssign { .. }
+            | ExprNode::Yield { .. }
+            | ExprNode::Raise { .. }
+            | ExprNode::Super { .. }
+            | ExprNode::Return { .. }
+    )
 }
 
 fn pull_one(
@@ -821,8 +887,10 @@ fn untraced_at(
     classes: &HashSet<String>,
     modules: &HashSet<String>,
 ) -> Option<Diagnostic> {
-    if gates_control(expr) {
-        if let Some(site) = extend_outside_a_block(expr) {
+    if gates_control(expr) || effect_precedes_extend(expr) {
+        if let Some(site) =
+            extend_outside_a_block(expr).or_else(|| instance_extend(expr).map(|(e, _)| e))
+        {
             let mut d = Diagnostic::unsupported(site.span, None, CONSTRUCT, DETAIL);
             d.severity = Severity::Warning;
             return Some(d);
@@ -875,7 +943,12 @@ fn traced(
     let ExprNode::Send { args, .. } = &*extend_expr.node else {
         return false;
     };
-    let Some(mod_name) = args.first().and_then(const_name) else {
+    // One module. A second argument (`extend(Mod, other)`) is not the
+    // call Spinel transplants, and leaving it in the file refuses the link.
+    if args.len() != 1 {
+        return false;
+    }
+    let Some(mod_name) = const_name(&args[0]) else {
         return false;
     };
     if !modules.contains(&mod_name) {

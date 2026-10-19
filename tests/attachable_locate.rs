@@ -170,6 +170,105 @@ fn an_extend_under_a_condition_stays_unsupported() {
     assert!(!test.contains(".extend"), "the extend is not hoisted out of the if:\n{test}");
 }
 
+/// A block and the statement that contains it share one counter. The
+/// object the block extends is not the local the statement pings.
+#[test]
+fn a_block_and_the_statement_around_it_extend_different_objects() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"block\" do\n    closed = Module.new { def begin_transport = :closed }\n    other = Module.new { def begin_transport = :other }\n    assert_equal :closed, Box.new.extend(closed).tap { Box.new.extend(other) }.ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        diags.iter().all(|d| !d.message.contains("Object#extend")),
+        "both extends are traced:\n{diags:?}"
+    );
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        test.contains("__rh_extend_object_1") && test.contains("__rh_extend_object_2"),
+        "the block and the statement must not share a local:\n{test}"
+    );
+    assert!(test.contains("def test_sibling"), "the sibling test stays:\n{test}");
+}
+
+/// `foo(bar(), obj.extend(mod))` evaluates `bar()` first. Pulling the
+/// extend out in front of the call would reverse that, so the test is
+/// the raise.
+#[test]
+fn an_extend_after_another_call_stays_unsupported() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"after a call\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    assert_equal one.ping, one.extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(diags.iter().any(|d| d.message.contains("Object#extend")), "the extend after a call is reported");
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        test.contains("def test_after_a_call\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"),
+        "the test is the raise:\n{test}"
+    );
+    assert!(test.contains("def test_sibling"), "the sibling test stays:\n{test}");
+    assert!(!test.contains(".extend"), "the extend is not pulled ahead of the call:\n{test}");
+}
+
+/// Spinel transplants one module. `extend(Mod, other)` is left out of
+/// the file, or the extra argument refuses the link.
+#[test]
+fn an_extend_with_two_arguments_stays_unsupported() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"two arguments\" do\n    failing = Module.new { def begin_transport = :closed }\n    extra = Module.new { def begin_transport = :other }\n    one = Box.new\n    one.extend(failing, extra).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(diags.iter().any(|d| d.message.contains("Object#extend")), "a second argument is reported");
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        test.contains("def test_two_arguments\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"),
+        "the two-argument test is the raise:\n{test}"
+    );
+    assert!(test.contains("def test_sibling"), "the sibling test stays:\n{test}");
+    assert!(!test.contains(".extend"), "the two-argument extend does not stay in the file:\n{test}");
+}
+
 /// The same test without the extend: what `ActionText::Attachable#
 /// attachable_sgid` computes, written out as the `to_sgid(for:)` it is.
 /// A shape every target compiles, and Rails mints the identical bytes
