@@ -82,16 +82,16 @@ fn reader_index_matches_load_time_scan_including_ivars_and_bare_nested_reads() {
         .class_ivar_initializers.push(read);
     let owner = app.library_classes.iter().find(|c| c.name.0.as_str() == "Owner").unwrap();
     let resolve = |path: &Vec<String>, _: bool| Some(path.join("/"));
-    let scanned = constant_readers(owner, &app, &resolve);
+    let scanned = constant_readers(owner, &app, &app.library_classes, &resolve);
     assert_eq!(scanned["VALUE"], BTreeSet::from([
         "Qualified".into(), "Owner/Nested".into(), "Unrelated".into(),
     ]));
     let _guard = install_lookup_indexes(&app);
-    assert_eq!(constant_readers(owner, &app, &resolve), scanned);
+    assert_eq!(constant_readers(owner, &app, &app.library_classes, &resolve), scanned);
     let mut other = App::default();
     other.library_classes = classes("module Owner\n VALUE = 2\nend\n");
     assert!(ConstantReaderIndex::current(&other).is_none());
-    assert!(constant_readers(&other.library_classes[0], &other, &resolve).is_empty());
+    assert!(constant_readers(&other.library_classes[0], &other, &other.library_classes, &resolve).is_empty());
 }
 
 #[test]
@@ -103,21 +103,21 @@ fn ordered_reopenings_parent_precedence_and_rooted_modules_match_scans() {
     let mut rooted = app.library_classes.iter().find(|c| c.name.0.as_str() == "Hook").unwrap().clone();
     rooted.name = ClassId(Symbol::from("::Hook"));
     app.library_classes.insert(0, rooted);
-    let positions = |app: &App| library_classes_named("Same", app).iter()
+    let positions = |app: &App| library_classes_named("Same", app, &app.library_classes).iter()
         .map(|c| (c.is_module, c.parent.clone())).collect::<Vec<_>>();
     let expected = positions(&app);
-    let parent = outer_class_parent("Same", &app);
+    let parent = outer_class_parent("Same", &app, &app.library_classes);
     assert!(parent.is_none(), "first model's None parent wins over library classes");
-    let lexical = lexical_parent("Outer::Leaf", &ClassId(Symbol::from("Base")), &app);
-    let bare = first_module_bare_named("Hook", &app).unwrap() as *const _;
+    let lexical = lexical_parent("Outer::Leaf", &ClassId(Symbol::from("Base")), &app, &app.library_classes);
+    let bare = first_module_bare_named("Hook", &app, &app.library_classes).unwrap() as *const _;
     reset();
     let _guard = install_lookup_indexes(&app);
     assert_eq!(positions(&app), expected);
-    assert_eq!(outer_class_parent("Same", &app), parent);
-    assert_eq!(outer_class_parent("Missing", &app), None);
-    assert_eq!(lexical_parent("Outer::Leaf", &ClassId(Symbol::from("Base")), &app), lexical);
-    assert_eq!(first_module_bare_named("Hook", &app).unwrap() as *const _, bare);
-    assert_eq!(first_module_bare_named("Hook", &app).unwrap() as *const _, bare);
+    assert_eq!(outer_class_parent("Same", &app, &app.library_classes), parent);
+    assert_eq!(outer_class_parent("Missing", &app, &app.library_classes), None);
+    assert_eq!(lexical_parent("Outer::Leaf", &ClassId(Symbol::from("Base")), &app, &app.library_classes), lexical);
+    assert_eq!(first_module_bare_named("Hook", &app, &app.library_classes).unwrap() as *const _, bare);
+    assert_eq!(first_module_bare_named("Hook", &app, &app.library_classes).unwrap() as *const _, bare);
     assert_eq!(BARE_MODULE_BUILDS.get(), 1);
 }
 
@@ -164,11 +164,11 @@ fn real_app_extension_selection_keeps_first_of_either_name_not_innermost_first()
         "Widget::Registry" => 0, "Registry" => 1, _ => 2,
     });
     let widget = app.library_classes.iter().find(|c| c.name.0.as_str() == "Widget").unwrap();
-    let scanned = app_extension_calls(widget, &app).iter().map(|e| super::super::emit_expr(e)).collect::<Vec<_>>();
+    let scanned = app_extension_calls(widget, &app, &app.library_classes).iter().map(|e| super::super::emit_expr(e)).collect::<Vec<_>>();
     assert!(scanned.iter().any(|s| s.trim() == "nested"));
     assert!(!scanned.iter().any(|s| s.trim() == "top"));
     let _guard = install_lookup_indexes(&app);
-    assert_eq!(app_extension_calls(widget, &app).iter().map(|e| super::super::emit_expr(e)).collect::<Vec<_>>(), scanned);
+    assert_eq!(app_extension_calls(widget, &app, &app.library_classes).iter().map(|e| super::super::emit_expr(e)).collect::<Vec<_>>(), scanned);
     assert_eq!(output(emit_library_class_decls(&app)), uncached(|| output(emit_library_class_decls(&app))));
 }
 
@@ -180,6 +180,24 @@ fn actual_library_emission_keeps_owner_and_require_answers_including_data_contex
     let scanned = uncached(|| output(emit_library_class_decls(&app)));
     assert_eq!(indexed, scanned);
     assert!(indexed.iter().any(|(p, _)| p.ends_with("container.rb")));
+    assert!(NameIndex::current(&app).is_none());
+}
+
+#[test]
+fn data_factory_methods_come_from_the_lowered_slice() {
+    let app = tree(&[(
+        "app/services/sample.rb",
+        "class Container\n Item = Data.define(:label) do\n  def icon; sanitize(label); end\n end\nend\n",
+    )]);
+    reset();
+    let indexed = output(emit_library_class_decls(&app));
+    assert_eq!((READER_BUILDS.get(), NAME_BUILDS.get()), (2, 2));
+    let scanned = uncached(|| output(emit_library_class_decls(&app)));
+    assert_eq!(indexed, scanned);
+    let rb = indexed.iter().find(|(path, _)| path.ends_with("container.rb")).expect("container.rb");
+    assert!(rb.1.contains("Data.define(:label) do"), "{}", rb.1);
+    assert!(rb.1.contains("ActionView::ViewHelpers.sanitize"), "{}", rb.1);
+    assert!(!rb.1.contains("\n    sanitize("), "{}", rb.1);
     assert!(NameIndex::current(&app).is_none());
 }
 
@@ -273,10 +291,10 @@ fn hook_position_uses_the_first_reopening_with_or_without_indexes() {
     app.library_classes = classes("module Hook\n def self.included(base); base.ready; end\nend\nmodule Hook\n def self.included(base); base.other; end\nend\nclass Container\n def self.ready; 1; end\n def self.other; 2; end\n include Hook\nend\n");
     let class = app.library_classes.iter().find(|c| c.name.0.as_str() == "Container").unwrap();
     let target = ClassId(Symbol::from("::Hook"));
-    let scanned = hooked_include_position(class, &target, &app);
+    let scanned = hooked_include_position(class, &target, &app, &app.library_classes);
     assert_eq!(scanned, Some(1));
     let _guard = install_lookup_indexes(&app);
-    assert_eq!(hooked_include_position(class, &target, &app), scanned);
+    assert_eq!(hooked_include_position(class, &target, &app, &app.library_classes), scanned);
     assert_eq!(output(emit_library_class_decls(&app)), uncached(|| output(emit_library_class_decls(&app))));
 }
 
@@ -373,13 +391,13 @@ fn namespace_prefix_set_reuses_original_algorithm_without_changing_shadowing() {
     app.library_classes = classes("module Outer::Catalog\n VALUE = 1\nend\nclass Catalog::Base\n def label; 1; end\nend\nclass Root::Leaf\n def label; 1; end\nend\n");
     app.library_classes.iter_mut().find(|c| c.name.0.as_str() == "Root::Leaf").unwrap().name = ClassId(Symbol::from("::Root::Leaf"));
     let names = ["ModelSpace", "ModelSpace::Record", "Model", "Outer", "Outer::Catalog", "Outer::Cat", "Catalog", "Catalog::Base", "Root", "Root::Leaf", "Missing"];
-    let expected = names.map(|name| declares_constant_path(name, &app));
-    let qualified = lexically_qualified("Catalog::Base", &["Outer"], &app);
+    let expected = names.map(|name| declares_constant_path(name, &app, &app.library_classes));
+    let qualified = lexically_qualified("Catalog::Base", &["Outer"], &app, &app.library_classes);
     assert_eq!(qualified, "::Catalog::Base");
     reset();
     let _guard = install_lookup_indexes(&app);
-    assert_eq!(names.map(|name| declares_constant_path(name, &app)), expected);
-    assert_eq!(lexically_qualified("Catalog::Base", &["Outer"], &app), qualified);
+    assert_eq!(names.map(|name| declares_constant_path(name, &app, &app.library_classes)), expected);
+    assert_eq!(lexically_qualified("Catalog::Base", &["Outer"], &app, &app.library_classes), qualified);
     assert_eq!(CONSTANT_PATH_BUILDS.get(), 1);
     assert_eq!(output(emit_library_class_decls(&app)), uncached(|| output(emit_library_class_decls(&app))));
 }

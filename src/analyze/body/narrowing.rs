@@ -323,16 +323,44 @@ fn const_to_ty(e: &Expr) -> Option<Ty> {
 
 pub(super) fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -> Ctx {
     let mut new_ctx = ctx.clone();
+    narrowings(pred, then_branch, &mut |key, narrow| {
+        narrow_binding(&mut new_ctx, key, |current| narrow(current))
+    });
+    new_ctx
+}
+
+/// The locals `pred` narrows on one side of its condition, each from the
+/// type `current` gives it (or an earlier narrowing in the same compound).
+/// Names `current` does not know are left out.
+pub(super) fn narrow_locals(
+    pred: &NarrowPred,
+    then_branch: bool,
+    current: &dyn Fn(&Symbol) -> Option<Ty>,
+) -> std::collections::HashMap<Symbol, Ty> {
+    let mut out = std::collections::HashMap::new();
+    narrowings(pred, then_branch, &mut |key, narrow| {
+        if let VarKey::Local(name) = key {
+            if let Some(ty) = out.get(name).cloned().or_else(|| current(name)) {
+                out.insert(name.clone(), narrow(&ty));
+            }
+        }
+    });
+    out
+}
+
+/// Each variable `pred` narrows on one side, in order, with the function
+/// from its type before to its type after.
+fn narrowings(pred: &NarrowPred, then_branch: bool, f: &mut dyn FnMut(&VarKey, &dyn Fn(&Ty) -> Ty)) {
     match pred {
         NarrowPred::Compound { if_true, if_false } => {
             for p in if then_branch { if_true } else { if_false } {
-                new_ctx = apply_narrowing(&new_ctx, p, true);
+                narrowings(p, true, f);
             }
         }
         NarrowPred::IsNil(k) | NarrowPred::IsNotNil(k) => {
             let is_is_nil = matches!(pred, NarrowPred::IsNil(_));
             let narrow_to_nil = is_is_nil == then_branch;
-            narrow_binding(&mut new_ctx, k, |current| {
+            f(k, &|current| {
                 if narrow_to_nil {
                     Ty::Nil
                 } else {
@@ -343,7 +371,7 @@ pub(super) fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -
         NarrowPred::IsA(k, ty) | NarrowPred::IsNotA(k, ty) => {
             let is_is_a = matches!(pred, NarrowPred::IsA(_, _));
             let narrow_to_ty = is_is_a == then_branch;
-            narrow_binding(&mut new_ctx, k, |current| {
+            f(k, &|current| {
                 if narrow_to_ty {
                     intersect_with(current, ty)
                 } else {
@@ -354,7 +382,7 @@ pub(super) fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -
         NarrowPred::IsPresent(k) | NarrowPred::IsBlank(k) => {
             let is_present = matches!(pred, NarrowPred::IsPresent(_));
             if is_present == then_branch {
-                narrow_binding(&mut new_ctx, k, |current| remove_nil(current));
+                f(k, &remove_nil);
             }
         }
         NarrowPred::IsTruthy(k) | NarrowPred::IsFalsy(k) => {
@@ -368,11 +396,10 @@ pub(super) fn apply_narrowing(ctx: &Ctx, pred: &NarrowPred, then_branch: bool) -
             let is_is_truthy = matches!(pred, NarrowPred::IsTruthy(_));
             let narrow_to_truthy = is_is_truthy == then_branch;
             if narrow_to_truthy {
-                narrow_binding(&mut new_ctx, k, |current| remove_nil(current));
+                f(k, &remove_nil);
             }
         }
     }
-    new_ctx
 }
 
 fn narrow_binding<F: FnOnce(&Ty) -> Ty>(ctx: &mut Ctx, key: &VarKey, f: F) {

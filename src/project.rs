@@ -94,6 +94,27 @@ pub enum BuildTarget {
     TypescriptWorker,
 }
 
+/// Driver support and the measured rollout policy are separate decisions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParamBindCapability {
+    /// Use binds unless the compiler receives the explicit `=0` override.
+    DefaultOn,
+    /// The driver is supported, but binds require the explicit `=1` override.
+    OptIn,
+    /// The selected driver/profile cannot execute the generated bind contract.
+    Unsupported,
+}
+
+impl ParamBindCapability {
+    fn enabled(self, override_value: Option<&str>) -> bool {
+        match self {
+            Self::DefaultOn => override_value != Some("0"),
+            Self::OptIn => override_value == Some("1"),
+            Self::Unsupported => false,
+        }
+    }
+}
+
 impl BuildTarget {
     /// All targets that participate in `--site` archive generation,
     /// in site-archive order.
@@ -163,6 +184,28 @@ impl BuildTarget {
             BuildTarget::Typescript => "typescript",
             BuildTarget::TypescriptWorker => "typescript-worker",
         }
+    }
+
+    /// Typed positional read binds: support plus the runtime's rollout policy.
+    /// TypeScript's node-sync, libsql and worker shims are all disabled until
+    /// each deployment profile implements that execution contract.
+    pub fn param_bind_capability(self) -> ParamBindCapability {
+        match self {
+            BuildTarget::Spinel => ParamBindCapability::DefaultOn,
+            // CRuby loses SQL-only result replay on repeated bound reads;
+            // JRuby has correctness coverage but no matched performance run.
+            BuildTarget::Ruby | BuildTarget::Jruby => ParamBindCapability::OptIn,
+            BuildTarget::Blog | BuildTarget::Roda | BuildTarget::Futamura | BuildTarget::Crystal
+            | BuildTarget::Elixir | BuildTarget::Go | BuildTarget::Kotlin
+            | BuildTarget::Python | BuildTarget::Rust | BuildTarget::Swift
+            | BuildTarget::CSharp | BuildTarget::Typescript
+            | BuildTarget::TypescriptWorker => ParamBindCapability::Unsupported,
+        }
+    }
+
+    /// Unknown values use the target default; `=1` cannot enable an unsupported shim.
+    pub(crate) fn param_binds_enabled(self, override_value: Option<&str>) -> bool {
+        self.param_bind_capability().enabled(override_value)
     }
 
     /// Does this target ship a runtime `ActiveRecord::Relation` for a
@@ -2088,6 +2131,18 @@ fn target_files_inner(
         }
         None => app,
     };
+    // One gate for the Oj stand-in: ruby, jruby and spinel keep the class
+    // ingest installed. Every other transpile target drops it here, before
+    // the bundled-constant and TypeScript walks, so a missing `JSON` or
+    // `String#read` inside the class is not a second, incidental error.
+    let without_oj;
+    let app = match crate::lower::oj::without_unrun_stand_in(app, target) {
+        Some(trimmed) => {
+            without_oj = trimmed;
+            &without_oj
+        }
+        None => app,
+    };
     if target == BuildTarget::Roda {
         if let Some((table, column)) = app.schema.tables.values().find_map(|table| {
             table
@@ -2125,6 +2180,11 @@ fn target_files_inner(
     // errors than the app has.
     report_unsupported_bundled_constants(app, target);
     report_i18n_table_sites(app, target);
+    // Snapshot the optional measurement override at the target boundary. The
+    // lowerers receive a value; they never consult process-global environment.
+    let param_binds = target.param_binds_enabled(
+        std::env::var("ROUNDHOUSE_PARAM_BINDS").ok().as_deref(),
+    );
     reject_unsupported_pattern_matches(app, target)?;
     reject_file_blob_fixtures(app, target)?;
     reject_unsupported_data_factories(app, target)?;
@@ -2255,7 +2315,7 @@ fn target_files_inner(
     let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || match target {
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Futamura => futamura_files(fixture),
-        BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture).and_then(|(mut files, _)| {
+        BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture, param_binds).and_then(|(mut files, _)| {
             spinel_relation_model_handle(&mut files)?;
             spin_shape(files)
         }),
@@ -2266,13 +2326,13 @@ fn target_files_inner(
         BuildTarget::Ruby => {
             if crate::roundsnap::enabled() {
                 emit::ruby::source_markers::with_source_markers(app, || {
-                    ruby_runtime_files(app, fixture)
+                    ruby_runtime_files(app, fixture, param_binds)
                 }).map(with_bundled_requires)
             } else {
-                ruby_runtime_files(app, fixture).map(with_bundled_requires)
+                ruby_runtime_files(app, fixture, param_binds).map(with_bundled_requires)
             }
         }
-        BuildTarget::Jruby => jruby_runtime_files(app, fixture).map(with_bundled_requires),
+        BuildTarget::Jruby => jruby_runtime_files(app, fixture, param_binds).map(with_bundled_requires),
         BuildTarget::Roda => Ok(sort_files(emit::roda::emit(app))),
         BuildTarget::Crystal => Ok(sort_files(emit::crystal::emit(app))),
         BuildTarget::Elixir => Ok(sort_files(emit::elixir::emit(app))),
@@ -3304,8 +3364,9 @@ enum RubyFlavor {
 fn ruby_runtime_files(
     app: &App,
     fixture: &Path,
+    param_binds: bool,
 ) -> Result<Vec<(String, String)>, String> {
-    ruby_family_runtime_files(app, fixture, RubyFlavor::CRuby)
+    ruby_family_runtime_files(app, fixture, RubyFlavor::CRuby, param_binds)
 }
 
 /// "jruby" archive: byte-identical to the "ruby" tree except the SQLite
@@ -3317,19 +3378,21 @@ fn ruby_runtime_files(
 fn jruby_runtime_files(
     app: &App,
     fixture: &Path,
+    param_binds: bool,
 ) -> Result<Vec<(String, String)>, String> {
-    ruby_family_runtime_files(app, fixture, RubyFlavor::JRuby)
+    ruby_family_runtime_files(app, fixture, RubyFlavor::JRuby, param_binds)
 }
 
 fn ruby_family_runtime_files(
     app: &App,
     fixture: &Path,
     flavor: RubyFlavor,
+    param_binds: bool,
 ) -> Result<Vec<(String, String)>, String> {
     // Keep the original immutable App borrowed across base assembly and overlays.
     let _indexes = emit::ruby::install_lookup_indexes(app);
     let _body_names = crate::lower::model_to_library::schema::share_model_body_names(&app.models, &Default::default());
-    let (mut files, test_stems) = spinel_files(app, fixture)?;
+    let (mut files, test_stems) = spinel_files(app, fixture, param_binds)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb");
     // The spinel SQL-functions file is FFI; CRuby writes its own below
@@ -3718,7 +3781,7 @@ fn ruby_family_runtime_files(
     // the layout — the seam where the @ivars a layout reads are in
     // scope. The plain spinel target keeps unwrapped controllers (its
     // dispatch wraps body-only).
-    files.extend(sort_files(emit::ruby::emit_lowered_controllers_with_layout(app)));
+    files.extend(sort_files(emit::ruby::emit_lowered_controllers_with_layout_and_param_binds(app, param_binds)));
 
     // The source app's `app/javascript/` + `public/` static assets are
     // already folded in by `spinel_files` (both targets need them — the
@@ -3749,6 +3812,9 @@ fn ruby_family_runtime_files(
     // gets the block exactly once; this is the ruby family's turn, and
     // the ruby family is the one that can run the lines.
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
+    // Overlay boot replaced the spinel boot, so the flags written into
+    // that file in `spinel_files` are gone. Write them again here.
+    apply_environment_flags(&mut files, app);
     apply_app_requires(&mut files, app, RequireTarget::RubyFamily);
     apply_rails_version(&mut files, app);
     // Overlay boot replaces the spinel boot wholesale (see comment above
@@ -3970,7 +4036,8 @@ fn i18n_table_text(app: &App) -> String {
                 }
             }
             for key in &c.opaque {
-                out.push_str(&format!("O\u{1f}{locale}.{key}\u{1f}.\u{1e}"));
+                let fields = c.values.get(key).map_or_else(|| vec!["?".to_string()], |v| v.fields());
+                out.push_str(&format!("O\u{1f}{locale}.{key}\u{1f}{}\u{1f}.\u{1e}", fields.join("\u{1f}")));
             }
         }
         for variant in catalog.variants(&locales) {
@@ -5236,6 +5303,34 @@ fn apply_rails_version(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// `AppEnvironment` at the end of boot.rb. `assume_ssl?(env)` is
+/// `config.assume_ssl = true` in that environment (Rails'
+/// `ActionDispatch::AssumeSSL`). `serving_assume_ssl?` reads
+/// `RAILS_ENV` (development when unset) so both dispatchers share one
+/// check. Always defined, so a tree with the flag off still answers
+/// false.
+fn apply_environment_flags(files: &mut [(String, String)], app: &App) {
+    const MARK: &str = "# Per-environment flags, from config/environments/*.rb";
+    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else {
+        return;
+    };
+    if boot.contains(MARK) {
+        return;
+    }
+    let cond = if app.assume_ssl_envs.is_empty() {
+        "false".to_string()
+    } else {
+        app.assume_ssl_envs.iter().map(|e| format!("env == {e:?}")).collect::<Vec<_>>().join(" || ")
+    };
+    boot.push_str(&format!(
+        "\n{MARK} (see project.rs::apply_environment_flags).\n\
+         module AppEnvironment\n  def self.assume_ssl?(env)\n    {cond}\n  end\n  \
+         def self.serving_assume_ssl?\n    name = ENV[\"RAILS_ENV\"].to_s\n    \
+         if name.empty?\n      name = \"development\"\n    end\n    \
+         assume_ssl?(name)\n  end\nend\n"
+    ));
+}
+
 /// THE FORM DIFFERS BY TARGET, and the reason is spinel's, not ours.
 /// `X.prepend Y` through an explicit receiver is refused outright there
 /// — "the class graph, ancestor chain, and method/ivar layout are baked
@@ -5772,6 +5867,7 @@ fn scaffold_readme_to_specimen(files: &mut [(String, String)]) {
 /// `spinel: main.rb: cannot load such file` rather than as anything a
 /// unit test could see. A toolchain test should drive what ships.
 pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, String> {
+    let param_binds = BuildTarget::Spinel.param_binds_enabled(None);
     // The bundled-library requires belong HERE, not only in
     // `spin_shape`. This is the tree `tests/spinel_toolchain.rs`
     // compiles, and without them it compiles something the CLI never
@@ -5785,7 +5881,7 @@ pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, Strin
     // got it — one layer down. A lane is evidence only if it runs the
     // same code. Idempotent: the gap scan skips a file that already
     // requires the library, so `spin_shape` running it again is inert.
-    let (mut files, _) = spinel_files_with_source_markers(app, fixture)?;
+    let (mut files, _) = spinel_files_with_source_markers(app, fixture, param_binds)?;
     spinel_relation_model_handle(&mut files)?;
 
     write_bundled_requires(&mut files);
@@ -6519,9 +6615,10 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
 fn spinel_files_with_source_markers(
     app: &App,
     fixture: &Path,
+    param_binds: bool,
 ) -> Result<(Vec<(String, String)>, Vec<String>), String> {
     let (mut files, stems) =
-        emit::ruby::source_markers::with_source_markers(app, || spinel_files(app, fixture))?;
+        emit::ruby::source_markers::with_source_markers(app, || spinel_files(app, fixture, param_binds))?;
     for (path, content) in files.iter_mut() {
         if path.ends_with(".rb") {
             *content = emit::ruby::source_markers::finish(content);
@@ -6530,7 +6627,7 @@ fn spinel_files_with_source_markers(
     Ok((files, stems))
 }
 
-fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec<String>), String> {
+fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(String, String)>, Vec<String>), String> {
     let mut files: Vec<(String, String)> = Vec::new();
 
     crate::runtime_files::walk_into("runtime/spinel/scaffold", "", &mut files)?;
@@ -7054,7 +7151,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         }
     }
 
-    let app_files = emit::ruby::emit_spinel(app);
+    let app_files = emit::ruby::emit_spinel_with_param_binds(app, param_binds);
     let test_stems = app_test_stems(&app_files);
     files.extend(sort_files(app_files));
 
@@ -7178,6 +7275,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     apply_models_aggregator(&mut files);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
+    apply_environment_flags(&mut files, app);
     apply_app_requires(&mut files, app, RequireTarget::Spinel);
     apply_rails_version(&mut files, app);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
@@ -11560,7 +11658,7 @@ mod tests {
             "#<SPINEL_SOURCE>real-blog/app/views/articles/_article.html.erb:1",
             "{view}"
         );
-        let ruby = ruby_runtime_files(&app, fixture).expect("ruby tree");
+        let ruby = ruby_runtime_files(&app, fixture, BuildTarget::Ruby.param_binds_enabled(None)).expect("ruby tree");
         // Whole-line markers only (docs like SPECIMEN.md may *mention*
         // `#<SPINEL_SOURCE>` without emitting them into `.rb`).
         let marked: Vec<&str> = ruby
@@ -11660,7 +11758,7 @@ mod tests {
             "shared relation.rbs must keep Base for Bar A/B"
         );
         // CRuby/JRuby share `spinel_files` but must NOT get the rewrite.
-        let ruby = ruby_runtime_files(&app, fixture).expect("ruby runtime files");
+        let ruby = ruby_runtime_files(&app, fixture, BuildTarget::Ruby.param_binds_enabled(None)).expect("ruby runtime files");
         let ruby_relation = ruby
             .iter()
             .find(|(p, _)| p.ends_with("active_record/relation.rbs"))
@@ -11683,5 +11781,34 @@ mod tests {
             ruby_connection.contains("def self.first: () -> Base?"),
             "CRuby connection.rbs must keep Base.first:()->Base?: {ruby_connection}"
         );
+    }
+}
+
+#[cfg(test)]
+mod param_binds_tests {
+    use super::{BuildTarget, ParamBindCapability};
+
+    #[test]
+    fn every_target_has_an_explicit_bind_capability() {
+        use BuildTarget::*;
+        use ParamBindCapability::*;
+        let cases = [
+            (Blog, Unsupported), (Spinel, DefaultOn), (Ruby, OptIn), (Jruby, OptIn),
+            (Roda, Unsupported), (Futamura, Unsupported), (Crystal, Unsupported), (Elixir, Unsupported),
+            (Go, Unsupported), (Kotlin, Unsupported), (Python, Unsupported),
+            (Rust, Unsupported), (Swift, Unsupported), (CSharp, Unsupported),
+            (Typescript, Unsupported), (TypescriptWorker, Unsupported),
+        ];
+        assert_eq!(cases.len(), BuildTarget::TRANSPILE.len() + 1);
+        for (target, capability) in cases {
+            assert_eq!(target.param_bind_capability(), capability, "{target:?}");
+            for value in [None, Some(""), Some("unexpected")] {
+                assert_eq!(target.param_binds_enabled(value), capability == DefaultOn,
+                    "{target:?}: {value:?}");
+            }
+            assert_eq!(target.param_binds_enabled(Some("1")), capability != Unsupported,
+                "{target:?}: =1");
+            assert!(!target.param_binds_enabled(Some("0")), "{target:?}");
+        }
     }
 }

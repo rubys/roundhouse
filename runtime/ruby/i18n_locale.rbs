@@ -42,7 +42,14 @@ module I18n
   def self.plural_num: (Array[String] rule, Hash[String, Float] ops) -> Float
   def self.plural_step: () -> Integer
   def self.runtime_rules: () -> Hash[String, Array[String]]
-  def self.runtime_opaque: () -> Hash[String, bool]
+  def self.runtime_opaque: () -> Hash[String, Array[String]]
+  def self.opaque_fields: (String full, Hash[Symbol, untyped] options) -> Array[String]
+  def self.translate_items: (String full, Hash[Symbol, untyped] options) -> Array[String | Symbol]
+  def self.translate_strings: (String full, Hash[Symbol, untyped] options) -> Array[String]
+  def self.translate_symbols: (String full, Hash[Symbol, untyped] options) -> Array[Symbol]
+  def self.translate_integer: (String full, Hash[Symbol, untyped] options) -> Integer
+  def self.translate_float: (String full, Hash[Symbol, untyped] options) -> Float
+  def self.translate_boolean: (String full, Hash[Symbol, untyped] options) -> bool
   def self.translate_tree: (String full, Hash[Symbol, untyped] options) -> Hash[Symbol, untyped]
   def self.insert_tree: (Hash[Symbol, untyped] tree, Array[String] path, String value) -> nil
   def self.runtime_chain: (String loc) -> Array[String]

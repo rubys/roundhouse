@@ -102,6 +102,13 @@ module Main
   def self.dispatch_core_inner(env, stdin)
     ActionView::ViewHelpers.reset_slots!
     Broadcasts.reset_log!
+    # config.assume_ssl, same as the spinel dispatcher: the Rack env is
+    # what `request.ssl?` and the Secure cookie flag both read.
+    if AppEnvironment.serving_assume_ssl?
+      env["HTTPS"] = "on"
+      env["HTTP_X_FORWARDED_PROTO"] = "https"
+      env["rack.url_scheme"] = "https"
+    end
 
     request = CgiIo.parse_request(env, stdin)
     # Browser forms can only GET/POST; a hidden `_method` field carries
@@ -367,6 +374,7 @@ module Main
     # Cache-Control, and a 304 for a matching If-None-Match, on the
     # controller's status, body and headers before they are read below.
     controller.commit_conditional_get!(env["REQUEST_METHOD"].to_s, env["HTTP_IF_NONE_MATCH"].to_s)
+    controller.commit_default_headers!
     # Headers the action set beyond Content-Type/Location — a
     # `Content-Disposition` on a download, the Cache-Control a blob
     # route asks for — ride as the tuple's sixth element.
@@ -379,7 +387,7 @@ module Main
     end
     if is_redirect
       [controller.status,
-       %(<a href="#{controller.location}">Redirecting</a>),
+       %(<a href="#{ActionView::ViewHelpers.html_escape(controller.location.to_s)}">Redirecting</a>),
        "text/html; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies, expires_cookies]
     else
       # The controller body IS the full page: the Ruby emit path's

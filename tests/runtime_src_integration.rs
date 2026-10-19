@@ -1096,7 +1096,14 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 793 on 2026-10-19: the class-side query fallbacks
     // (`Model.maximum(:x)` through `all`, connection.rb) answer the column's
     // value as `Relation#maximum` / `#pick` do, whatever the column holds (+2).
-    const CEILING: usize = 793;
+    // MEASURED 794 on 2026-10-19: a local assigned on some paths through
+    // a branch now reads as the join of them. In
+    // `ActionText::Fragment#flush_pending_removals`, `cursor = finish if
+    // finish > cursor` makes `cursor` Integer | whatever `finish` is, and
+    // `finish = range[1]` is already gradual, so `cursor < @html.length`
+    // is too (+1 in action_text.rb). `cursor` used to read as Integer from
+    // its `0` seed, narrower than the code allows.
+    const CEILING: usize = 794;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

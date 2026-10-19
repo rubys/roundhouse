@@ -955,9 +955,12 @@ fn a_hit_on_one_side_does_not_suppress_the_other_sides_method_missing() {
 /// `"#{x}"` calls `x.to_s`.
 #[test]
 fn string_interpolation_calls_to_s() {
+    // RTA bounds an untyped send to the route's live classes: `Gadget`
+    // must actually be built on this route (not merely defined) for its
+    // `to_s` to be a real dispatch target, so the action also builds one.
     let stderr = reach_ledger(
         "reach-interp",
-        "    @name = \"<#{{ w: pick }[:w]}>\"",
+        "    @other = Gadget.new\n    @name = \"<#{{ w: pick }[:w]}>\"",
         "",
         &[("app/lib/gadget.rb", "class Gadget\n  def to_s\n    Frobnicator::Spinner.new.spin\n  end\nend\n")],
     );
@@ -1012,6 +1015,306 @@ fn a_parameter_default_is_walked() {
         &[GADGET],
     );
     assert_left_to_rails(&stderr, "Gadget#call");
+}
+
+/// Rapid type analysis: an untyped send reaches only the classes that
+/// can have an instance while the route runs. Each fixture below sends
+/// `call` from `widgets#index` to a value neither the lowering nor the
+/// analyzer types (a helper's result read back out of a Hash literal),
+/// and `Gadget#call`, on an unrelated plain class, has a body the
+/// lowered app cannot run. Whether the route clears depends only on
+/// whether a `Gadget` can exist on it.
+fn rta_ledger(name: &str, action: &str, helpers: &str, extra: &[(&str, &str)]) -> String {
+    rta_ledger_env(name, action, helpers, extra, &[])
+}
+
+/// `rta_ledger`, with extra environment variables set on the run (the
+/// `ROUNDHOUSE_FUTAMURA_TRUST_BOX_CACHE` switch).
+fn rta_ledger_env(name: &str, action: &str, helpers: &str, extra: &[(&str, &str)], envs: &[(&str, &str)]) -> String {
+    let src = scratch(&format!("{name}-src"));
+    let out = scratch(&format!("{name}-out"));
+    write(&src, "Gemfile", b"source \"https://rubygems.org\"\ngem \"rails\"\n");
+    write(&src, "config/routes.rb", b"Rails.application.routes.draw do\n  get \"widgets\" => \"widgets#index\"\nend\n");
+    write(&src, "app/controllers/application_controller.rb", b"class ApplicationController < ActionController::Base\nend\n");
+    let controller = format!(
+        "class WidgetsController < ApplicationController\n  def index\n{action}\n  end\n\n  private\n\n  def pick\n    Widget.new\n  end\n{helpers}end\n"
+    );
+    write(&src, "app/controllers/widgets_controller.rb", controller.as_bytes());
+    write(&src, "app/views/widgets/index.html.erb", b"<%= @name %>\n");
+    write(&src, "app/lib/widget.rb", b"class Widget\n  def call\n    \"hi\"\n  end\nend\n");
+    write(&src, "app/lib/gadget.rb", b"class Gadget\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n");
+    for (path, body) in extra {
+        write(&src, path, body.as_bytes());
+    }
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_roundhouse"));
+    cmd.args(["--target", "futamura", "--survey", "-o"]).arg(&out).arg(&src).env("ROUNDHOUSE_FUTAMURA_LEDGER", "2");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let run = cmd.output().unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    assert!(run.status.success(), "{stderr}");
+    fs::remove_dir_all(&src).unwrap();
+    fs::remove_dir_all(&out).unwrap();
+    stderr
+}
+
+/// Only a `Widget` is ever built, so the untyped `call` can only be
+/// `Widget#call`: `Gadget#call` is not reached and the route clears.
+#[test]
+fn rta_untyped_send_reaches_only_classes_the_route_can_build() {
+    let stderr = rta_ledger("rta-live", "    @name = { w: pick }[:w].call", "", &[]);
+    assert!(stderr.contains("whole-route: 1 GET action(s) served by the lowered app; 0 left to Rails"), "{stderr}");
+    assert!(!stderr.contains("Frobnicator"), "{stderr}");
+    assert!(stderr.contains("rta         widgets#index: bounded"), "{stderr}");
+}
+
+/// Control: the route also builds a `Gadget` (in a helper it calls), so
+/// the same untyped `call` may be `Gadget#call`.
+#[test]
+fn rta_untyped_send_reaches_a_class_the_route_builds() {
+    let stderr = rta_ledger(
+        "rta-built",
+        "    @name = { w: pick }[:w].call\n    @other = spare",
+        "\n  def spare\n    Gadget.new\n  end\n",
+        &[],
+    );
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    assert!(stderr.contains("app/lib/gadget.rb:3") && stderr.contains("Gadget#call"), "{stderr}");
+    assert!(stderr.contains("rta         widgets#index: bounded"), "{stderr}");
+}
+
+/// A record the database hands back is live. The runtime builds models
+/// by name (its generated `instantiate-named` table), so every model is
+/// live on every route, and a query's result is a framework value the
+/// walk follows: the untyped `call` on a record out of a relation (the
+/// lowering spells it `ActiveRecord::Relation.new(Post).where(…)`)
+/// reaches `Post#call`. It does not reach `Gadget#call`: the route
+/// reaches one error, not two.
+#[test]
+fn rta_a_record_from_a_finder_is_live() {
+    let stderr = rta_ledger(
+        "rta-model",
+        "    @name = Post.where(title: \"x\").to_a.sample.call",
+        "",
+        &[
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\", null: false\n  end\nend\n",
+            ),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+            ("app/models/post.rb", "class Post < ApplicationRecord\n  def call\n    Combobulator::Unit.new.run\n  end\nend\n"),
+        ],
+    );
+    let residue = stderr.lines().find(|l| l.contains("rails ") && l.contains("widgets#index")).unwrap_or_else(|| panic!("{stderr}"));
+    assert!(residue.contains("reaches 1 error(s)") && residue.contains("app/models/post.rb:3"), "{residue}");
+    assert!(!stderr.contains("Frobnicator"), "{stderr}");
+}
+
+/// A value read from the cache may have been written by another
+/// request, by Rails code outside any box, or directly by an operator
+/// (a console session, a migration) — the box's own reach can never
+/// confirm or rule any of that out from the box's code alone. So by
+/// default a cache read goes to full fan-out (case 5 in the design-doc
+/// comment above `reach`), exactly like `constantize` or `Marshal.load`:
+/// `Gadget` is never built anywhere in this fixture, yet it is still
+/// reached.
+#[test]
+fn rta_cache_read_is_conservative_by_default() {
+    let stderr = rta_ledger("rta-cache-default", "    @name = Rails.cache.read(\"gadget\").call", "", &[]);
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    assert!(stderr.contains("app/lib/gadget.rb:3"), "{stderr}");
+    assert!(stderr.contains("rta         widgets#index: full fan-out: Rails.cache.read in WidgetsController#index"), "{stderr}");
+}
+
+/// `ROUNDHOUSE_FUTAMURA_TRUST_BOX_CACHE=1` opts into the narrower,
+/// unconfirmed assumption that this box's cache only ever holds a value
+/// some box code wrote: the read is then bounded to the app-wide live
+/// set instead of fanning out by name. Nothing in this fixture ever
+/// builds a `Gadget`, so under the switch the route actually clears —
+/// the switch is not merely a different ledger label, it changes what
+/// the route reaches.
+#[test]
+fn rta_cache_read_is_bounded_with_the_trust_switch() {
+    let stderr = rta_ledger_env(
+        "rta-cache-trust",
+        "    @name = Rails.cache.read(\"gadget\").call",
+        "",
+        &[],
+        &[("ROUNDHOUSE_FUTAMURA_TRUST_BOX_CACHE", "1")],
+    );
+    assert!(stderr.contains("whole-route: 1 GET action(s) served by the lowered app; 0 left to Rails"), "{stderr}");
+    assert!(!stderr.contains("Frobnicator"), "{stderr}");
+    assert!(stderr.contains("rta         widgets#index: every app-live class: Rails.cache.read in WidgetsController#index"), "{stderr}");
+}
+
+/// The trust switch still catches a `Gadget` the app genuinely builds
+/// (in a helper this route never calls): bounded is not the same as
+/// unreached, only narrower than full fan-out.
+#[test]
+fn rta_cache_read_trust_switch_still_reaches_a_class_the_app_builds() {
+    let stderr = rta_ledger_env(
+        "rta-cache-trust-built",
+        "    @name = Rails.cache.read(\"gadget\").call",
+        "\n  def warm\n    Rails.cache.write(\"gadget\", Gadget.new)\n  end\n",
+        &[],
+        &[("ROUNDHOUSE_FUTAMURA_TRUST_BOX_CACHE", "1")],
+    );
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    assert!(stderr.contains("app/lib/gadget.rb:3"), "{stderr}");
+    assert!(stderr.contains("rta         widgets#index: every app-live class: Rails.cache.read in WidgetsController#index"), "{stderr}");
+}
+
+/// A class named by data can be any class, built or not: the route goes
+/// back to full fan-out, and `Gadget#call` is reached though nothing in
+/// the app ever builds a `Gadget`.
+#[test]
+fn rta_a_class_from_data_falls_back_to_full_fan_out() {
+    let stderr = rta_ledger("rta-constantize", "    kind = params[:kind].constantize\n    @name = kind.new.call", "", &[]);
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    assert!(stderr.contains("app/lib/gadget.rb:3"), "{stderr}");
+    assert!(stderr.contains("rta         widgets#index: full fan-out: `constantize` in WidgetsController#index"), "{stderr}");
+}
+
+/// A registry the app fills at load time, read back on the route
+/// (`Registry.items.first`): nothing in the route names the class
+/// whose object it holds.
+const REGISTRY: (&str, &str) = (
+    "app/lib/registry.rb",
+    "class Registry\n  ITEMS = []\n\n  def self.items\n    ITEMS\n  end\nend\n",
+);
+
+fn registering_gadget(arg: &str) -> String {
+    format!(
+        "class Gadget\n  def self.register(x)\n    Registry::ITEMS << x\n  end\n  register({arg})\n\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n"
+    )
+}
+
+/// A class body runs with the class as `self`: `register(new)` builds
+/// a `Gadget` at load time and hands it on, written receiverless or on
+/// `self`, with `new` or `allocate`. The `Gadget` is live, so the
+/// untyped `call` on what the registry holds reaches `Gadget#call`.
+#[test]
+fn rta_a_class_body_that_builds_its_own_instance_makes_it_live() {
+    for arg in ["new", "allocate", "self.new", "self.allocate"] {
+        let gadget = registering_gadget(arg);
+        let stderr = rta_ledger(
+            &format!("rta-body-{}", arg.replace('.', "-")),
+            "    @name = Registry.items.first.call",
+            "",
+            &[REGISTRY, ("app/lib/gadget.rb", &gadget)],
+        );
+        assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{arg}: {stderr}");
+        assert!(stderr.contains("app/lib/gadget.rb:8") && stderr.contains("Gadget#call"), "{arg}: {stderr}");
+    }
+}
+
+/// `register(self)` hands on the class object itself: whoever holds it
+/// can build one (`Registry.items.first.new.call`).
+#[test]
+fn rta_a_class_body_that_hands_on_self_makes_the_class_live() {
+    let gadget = registering_gadget("self");
+    let stderr = rta_ledger(
+        "rta-body-self",
+        "    @name = Registry.items.first.new.call",
+        "",
+        &[REGISTRY, ("app/lib/gadget.rb", &gadget)],
+    );
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    assert!(stderr.contains("app/lib/gadget.rb:8") && stderr.contains("Gadget#call"), "{stderr}");
+}
+
+/// Precision: a class body that only makes framework calls (`include`,
+/// `attr_reader`) hands nothing on, so `Gadget` stays dead and the
+/// untyped `call` on a `Widget` still clears.
+#[test]
+fn rta_a_class_body_of_framework_calls_keeps_the_class_dead() {
+    let stderr = rta_ledger(
+        "rta-body-framework",
+        "    @name = { w: pick }[:w].call",
+        "",
+        &[(
+            "app/lib/gadget.rb",
+            "class Gadget\n  include Comparable\n  attr_reader :size\n\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n",
+        )],
+    );
+    assert!(stderr.contains("whole-route: 1 GET action(s) served by the lowered app; 0 left to Rails"), "{stderr}");
+    assert!(!stderr.contains("Frobnicator"), "{stderr}");
+}
+
+/// Ruby passes each subclass to its parent's `inherited` hook when the
+/// subclass loads, with nothing in the subclass' body to show for it:
+/// every class under an app `inherited` hook is live.
+#[test]
+fn rta_an_inherited_hook_makes_every_subclass_live() {
+    let stderr = rta_ledger(
+        "rta-inherited",
+        "    @name = Registry.items.first.new.call",
+        "",
+        &[
+            REGISTRY,
+            ("app/lib/base.rb", "class Base\n  def self.inherited(k)\n    Registry::ITEMS << k\n  end\nend\n"),
+            ("app/lib/gadget.rb", "class Gadget < Base\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n"),
+        ],
+    );
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
+    assert!(stderr.contains("app/lib/gadget.rb:3") && stderr.contains("Gadget#call"), "{stderr}");
+}
+
+/// `Gadget` gets into the registry through a module, with nothing in
+/// its own body but `include` / `extend`: the module's `included` /
+/// `extended` hook, or an extended module's method that the class body
+/// calls. Each makes `Gadget` live.
+#[test]
+fn rta_a_module_that_hands_on_its_includer_makes_it_live() {
+    let cases = [
+        (
+            "included-hook",
+            "module Registrable\n  def self.included(base)\n    Registry::ITEMS << base\n  end\nend\n",
+            "include Registrable",
+        ),
+        (
+            "extended-hook",
+            "module Registrable\n  def self.extended(base)\n    Registry::ITEMS << base\n  end\nend\n",
+            "extend Registrable",
+        ),
+        (
+            "extended-method",
+            "module Registrable\n  def register\n    Registry::ITEMS << self\n  end\nend\n",
+            "extend Registrable\n  register",
+        ),
+    ];
+    let mut failed = Vec::new();
+    for (name, module, body) in cases {
+        let gadget = format!("class Gadget\n  {body}\n\n  def call\n    Frobnicator::Spinner.new.spin\n  end\nend\n");
+        let stderr = rta_ledger(
+            &format!("rta-module-{name}"),
+            "    @name = Registry.items.first.new.call",
+            "",
+            &[REGISTRY, ("app/lib/registrable.rb", module), ("app/lib/gadget.rb", &gadget)],
+        );
+        if !(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails") && stderr.contains("Gadget#call")) {
+            failed.push(format!("{name}: {stderr}"));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+}
+
+/// A class-side `method_missing` answers a name no class defines
+/// (`Setting.some_key`): the walk follows it, so an error behind it
+/// blocks the route. (This is already covered independently of RTA's
+/// bounding — see `a_class_side_method_missing_is_followed` above —
+/// but is ported here too since it is one of RTA's own 6 tests.)
+#[test]
+fn a_class_side_method_missing_is_reached() {
+    let stderr = rta_ledger(
+        "rta-missing",
+        "    @name = Gizmo.anything",
+        "",
+        &[("app/lib/gizmo.rb", "class Gizmo\n  def self.method_missing(name, *args)\n    Frobnicator::Spinner.new.spin\n  end\nend\n")],
+    );
+    assert!(stderr.contains("app/lib/gizmo.rb:3") && stderr.contains("Gizmo.method_missing"), "{stderr}");
+    assert!(stderr.contains("whole-route: 0 GET action(s) served by the lowered app; 1 left to Rails"), "{stderr}");
 }
 
 /// A minimal app whose `ruby` emit refuses one association (a `through:`

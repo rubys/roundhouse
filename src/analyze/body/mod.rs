@@ -2041,6 +2041,11 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
                 }
+                if translate
+                    && let Some((_, _, ty)) = crate::lower::i18n_translate::value_answer(catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site)
+                {
+                    return ty;
+                }
                 if translate && let Some(resolved) = crate::lower::i18n_translate::resolves(
                     catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site,
                 ) {
@@ -2464,28 +2469,31 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
-                    // A `begin … rescue … end` STATEMENT exports the
-                    // locals its body and rescue arms assign at their own
-                    // top level — Ruby's `begin` opens no scope — typed
-                    // as the assigned value OR what the name held before
-                    // (nil when it was unbound): the exception may come
-                    // before the assignment runs. Without this a local
-                    // assigned in one `begin` and read after it (`user =
-                    // User.find(id)` in a begin, `user.messages.create!`
-                    // below) read as unresolved, and everything keyed on
-                    // its type — the association constructor rewrite —
-                    // silently declined. Found by the model scenario
+                    // A branching STATEMENT (`if`/`unless`/ternary,
+                    // `case`, `while`, `begin … rescue`, `a && (x = …)`)
+                    // exports the locals it assigns: Ruby's control flow
+                    // opens no scope, so a local assigned on one path is
+                    // bound after the join on every path, holding nil
+                    // where it was never assigned. [`flow_locals`] walks
+                    // the paths and joins them. Without this, `if c; x =
+                    // 1; end; x` read `x` as unresolved, and `w = 0; if
+                    // c; w = "s"; end; w` read `w` as Int, which is wrong.
+                    // The `begin` case was found by the model scenario
                     // scripts/campfire-db-differential runs statement by
-                    // statement.
-                    if let ExprNode::BeginRescue { body, rescues, .. } = &*e.node {
-                        let mut exported: Vec<(Symbol, Ty)> = Vec::new();
-                        top_level_local_assigns(body, &mut exported);
-                        for rc in rescues.iter() {
-                            top_level_local_assigns(&rc.body, &mut exported);
-                        }
-                        for (name, ty) in exported {
-                            let prior = local_ctx.local_bindings.get(&name).cloned().unwrap_or(Ty::Nil);
-                            local_ctx.local_bindings.insert(name, union_of(prior, ty));
+                    // statement (`user = User.find(id)` in a begin,
+                    // `user.messages.create!` below).
+                    if matches!(&*e.node,
+                        ExprNode::If { .. } | ExprNode::Case { .. } | ExprNode::While { .. }
+                            | ExprNode::BeginRescue { .. } | ExprNode::BoolOp { .. })
+                    {
+                        let mut flowed = HashMap::new();
+                        let mut unknown = std::collections::HashSet::new();
+                        if flow_locals(e, &local_ctx.local_bindings, &mut flowed, &mut unknown) {
+                            for (name, ty) in flowed {
+                                if !unknown.contains(&name) {
+                                    local_ctx.local_bindings.insert(name, ty);
+                                }
+                            }
                         }
                     }
                     // Short-circuit compound assignment (`@x ||= y`,
@@ -3302,23 +3310,204 @@ fn collect_local_assignment_tys(expr: &Expr, out: &mut Vec<(Symbol, Ty)>) {
     expr.node.for_each_child(&mut |child| collect_local_assignment_tys(child, out));
 }
 
-/// The local assignments a statement list makes at ITS OWN level — the
-/// statement itself, or each statement of a `Seq` — with the value's
-/// stamped type. Blocks and nested bodies are not entered: a local first
-/// assigned inside a block does not outlive it. Open types are skipped,
-/// as in [`collect_local_assignment_tys`].
-fn top_level_local_assigns(expr: &Expr, out: &mut Vec<(Symbol, Ty)>) {
-    let stmts: Vec<&Expr> = match &*expr.node {
-        ExprNode::Seq { exprs } => exprs.iter().collect(),
-        _ => vec![expr],
-    };
-    for s in stmts {
-        if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*s.node {
-            if let Some(t) = value.ty.clone() {
-                if !t.is_open() {
-                    out.push((name.clone(), t));
+/// Walk one statement's control flow forward, recording in `flowed` the
+/// type each local holds where the statement completes. `bound` is what
+/// the locals held before it; `flowed` carries only the names written
+/// since. Where paths join (`if`/`case` arms, a loop that may not run, the
+/// right side of `&&`/`||`, a `rescue` that may fire before the body's
+/// assignments), a name takes the union of every arriving path, with nil
+/// for a path on which it was never bound. Returns false when no path
+/// completes (`return`, `raise`, `next`, …); such a path joins nothing.
+///
+/// A write this walk does not model (inside a block, a pattern, a
+/// destructuring, or with a still-open type) puts the name in `unknown`,
+/// and the caller exports nothing for it: a join that missed one write
+/// would be a confident wrong type, worse than none.
+fn flow_locals(
+    expr: &Expr,
+    bound: &HashMap<Symbol, Ty>,
+    flowed: &mut HashMap<Symbol, Ty>,
+    unknown: &mut std::collections::HashSet<Symbol>,
+) -> bool {
+    // Each path is its writes plus what its condition narrowed. A
+    // narrowing stands in for the entry type on a path that does not
+    // write the name (`child = {} unless child.is_a?(Hash)` leaves a
+    // Hash either way), but only the writes decide which names join.
+    type Path = (HashMap<Symbol, Ty>, HashMap<Symbol, Ty>);
+    fn join(paths: Vec<Path>, bound: &HashMap<Symbol, Ty>) -> Option<HashMap<Symbol, Ty>> {
+        let mut names: Vec<&Symbol> = paths.iter().flat_map(|(w, _)| w.keys()).collect();
+        names.sort();
+        names.dedup();
+        let mut out = HashMap::new();
+        for name in names {
+            let mut tys = paths.iter().map(|(writes, narrowed)| {
+                writes.get(name).or_else(|| narrowed.get(name)).or_else(|| bound.get(name))
+                    .cloned().unwrap_or(Ty::Nil)
+            });
+            let first = tys.next()?;
+            out.insert(name.clone(), tys.fold(first, union_of));
+        }
+        (!paths.is_empty()).then_some(out)
+    }
+    fn unmodeled(expr: &Expr, unknown: &mut std::collections::HashSet<Symbol>) {
+        let mut names = Vec::new();
+        match &*expr.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => names.push(name.clone()),
+            ExprNode::MultiAssign { targets, .. } => {
+                for target in targets {
+                    if let LValue::Var { name, .. } = target { names.push(name.clone()); }
                 }
             }
+            ExprNode::CaseMatch { arms, .. } => {
+                for arm in arms { arm.pattern.bound_names(&mut names); }
+            }
+            ExprNode::MatchRequired { pattern, .. } | ExprNode::MatchPredicate { pattern, .. } => {
+                pattern.bound_names(&mut names)
+            }
+            ExprNode::BeginRescue { rescues, .. } => {
+                for rescue in rescues { names.extend(rescue.binding.iter().cloned()); }
+            }
+            _ => {}
+        }
+        unknown.extend(names);
+        expr.node.for_each_child(&mut |child| unmodeled(child, unknown));
+    }
+    let flow = |e: &Expr, flowed: &mut HashMap<Symbol, Ty>, unknown: &mut _| flow_locals(e, bound, flowed, unknown);
+    match &*expr.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            if !flow(value, flowed, unknown) { return false; }
+            match value.ty.clone() {
+                Some(t) if !t.is_open() => { flowed.insert(name.clone(), t); }
+                _ => { unknown.insert(name.clone()); }
+            }
+            true
+        }
+        // The Seq arm's `||=` threading: union with what the name held.
+        ExprNode::OpAssign { target: LValue::Var { name, .. }, value, .. } => {
+            if !flow(value, flowed, unknown) { return false; }
+            match expr.ty.clone() {
+                Some(t) if !t.is_open() => {
+                    let merged = match flowed.get(name).or_else(|| bound.get(name)) {
+                        Some(prev) => union_of(prev.clone(), t),
+                        None => t,
+                    };
+                    flowed.insert(name.clone(), merged);
+                }
+                _ => { unknown.insert(name.clone()); }
+            }
+            true
+        }
+        ExprNode::Seq { exprs } => exprs.iter().all(|e| flow(e, flowed, unknown)),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            if !flow(cond, flowed, unknown) { return false; }
+            let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|_| None));
+            let mut paths = Vec::new();
+            for (branch, then_side) in [(then_branch, true), (else_branch, false)] {
+                let narrowed = match &pred {
+                    Some(p) => narrowing::narrow_locals(p, then_side, &|name| {
+                        flowed.get(name).or_else(|| bound.get(name)).cloned()
+                    }),
+                    None => HashMap::new(),
+                };
+                let mut path = flowed.clone();
+                if flow(branch, &mut path, unknown) { paths.push((path, narrowed)); }
+            }
+            match join(paths, bound) {
+                Some(joined) => { *flowed = joined; true }
+                None => false,
+            }
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            if !flow(scrutinee, flowed, unknown) { return false; }
+            let mut paths = Vec::new();
+            for arm in arms {
+                let mut path = flowed.clone();
+                let completes = arm.guard.as_ref().is_none_or(|g| flow(g, &mut path, unknown))
+                    && flow(&arm.body, &mut path, unknown);
+                if completes { paths.push((path, HashMap::new())); }
+            }
+            // No catch-all arm: no arm may match, and the value is nil.
+            let exhaustive = arms.iter().any(|a| {
+                matches!(a.pattern, crate::expr::Pattern::Wildcard) && a.guard.is_none()
+            });
+            if !exhaustive { paths.push((flowed.clone(), HashMap::new())); }
+            match join(paths, bound) {
+                Some(joined) => { *flowed = joined; true }
+                None => false,
+            }
+        }
+        // The body may run zero times; `break`/`next` leave it with the
+        // writes made so far, so its end state joins whether or not it
+        // completes.
+        ExprNode::While { cond, body, .. } => {
+            if !flow(cond, flowed, unknown) { return false; }
+            let mut path = flowed.clone();
+            flow(body, &mut path, unknown);
+            *flowed = join(vec![(flowed.clone(), HashMap::new()), (path, HashMap::new())], bound).unwrap_or_default();
+            true
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            if !flow(left, flowed, unknown) { return false; }
+            let mut path = flowed.clone();
+            let mut paths = vec![(flowed.clone(), HashMap::new())];
+            if flow(right, &mut path, unknown) { paths.push((path, HashMap::new())); }
+            *flowed = join(paths, bound).unwrap_or_default();
+            true
+        }
+        // A rescue can fire before or after any of the body's writes, so
+        // it starts from the join of the entry and the body's end state.
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            let mut body_path = flowed.clone();
+            let mut completes = flow(body, &mut body_path, unknown);
+            if completes {
+                if let Some(eb) = else_branch {
+                    completes = flow(eb, &mut body_path, unknown);
+                }
+            }
+            let entry = join(vec![(flowed.clone(), HashMap::new()), (body_path.clone(), HashMap::new())], bound)
+                .unwrap_or_default();
+            let mut paths = Vec::new();
+            if completes { paths.push((body_path, HashMap::new())); }
+            for rescue in rescues {
+                unknown.extend(rescue.binding.iter().cloned());
+                let mut path = entry.clone();
+                if flow(&rescue.body, &mut path, unknown) { paths.push((path, HashMap::new())); }
+            }
+            let joined = join(paths, bound);
+            if let Some(ensure) = ensure {
+                let mut path = joined.clone().unwrap_or_else(|| entry.clone());
+                if !flow(ensure, &mut path, unknown) { return false; }
+                if joined.is_some() { *flowed = path; return true; }
+                return false;
+            }
+            match joined {
+                Some(joined) => { *flowed = joined; true }
+                None => false,
+            }
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                if !flow(r, flowed, unknown) { return false; }
+            }
+            for a in args {
+                if !flow(a, flowed, unknown) { return false; }
+            }
+            if let Some(b) = block { unmodeled(b, unknown); }
+            true
+        }
+        ExprNode::Return { value } | ExprNode::Raise { value } => {
+            flow(value, flowed, unknown);
+            false
+        }
+        ExprNode::Next { value } | ExprNode::Break { value } => {
+            if let Some(v) = value { flow(v, flowed, unknown); }
+            false
+        }
+        ExprNode::Retry | ExprNode::Redo => false,
+        _ => {
+            unmodeled(expr, unknown);
+            true
         }
     }
 }

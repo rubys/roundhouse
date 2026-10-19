@@ -169,6 +169,7 @@ pub mod session_options;
 pub mod status_literal;
 pub mod to_param_residue;
 pub mod relation_residue;
+pub mod oj;
 pub mod params_residue;
 pub mod params_permit;
 pub mod normalizes;
@@ -1502,6 +1503,73 @@ pub(crate) fn for_each_forwarding_body_ref(app: &crate::App, f: &mut impl FnMut(
     forwarding_roots!(app, f, iter, as_ref);
 }
 
+/// Mutable twin of [`for_each_emit_body_ref`]. The two must walk the same
+/// roots: a rewrite that sees only one of them leaves the other copy to emit.
+pub(crate) fn for_each_emit_body(app: &mut crate::App, f: &mut impl FnMut(&mut crate::expr::Expr)) {
+    for_each_forwarding_body(app, f);
+    for model in &mut app.models {
+        for item in &mut model.body {
+            if let crate::dialect::ModelBodyItem::Association { assoc, .. } = item {
+                match assoc {
+                    crate::dialect::Association::BelongsTo { default: Some(e), .. }
+                    | crate::dialect::Association::HasMany { scope: Some(e), .. }
+                    | crate::dialect::Association::HasOne { scope: Some(e), .. } => f(e),
+                    _ => {}
+                }
+            }
+        }
+    }
+    for controller in &mut app.controllers {
+        for item in &mut controller.body {
+            if let crate::dialect::ControllerBodyItem::Action { action, .. } = item {
+                for default in action.kw_params.iter_mut().filter_map(|(_, e)| e.as_mut()) {
+                    f(default);
+                }
+            }
+        }
+    }
+    for view in &mut app.views {
+        if let Some(locals) = &mut view.strict_locals {
+            for param in locals {
+                if let Some(default) = &mut param.default {
+                    f(default);
+                }
+            }
+        }
+    }
+    for fixture in &mut app.fixtures {
+        for e in &mut fixture.preamble {
+            f(e);
+        }
+        for record in fixture.records.values_mut() {
+            for value in record.values_mut() {
+                if let crate::dialect::FixtureValue::Ruby(e) = value {
+                    f(e);
+                }
+            }
+        }
+    }
+    for helper in &mut app.routes.direct_helpers {
+        f(&mut helper.body);
+    }
+    for function in &mut app.sql_functions {
+        match &mut function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => visit_sql_method(method, f),
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } => {
+                visit_sql_method(step, f);
+                visit_sql_method(finalize, f);
+            }
+        }
+    }
+}
+
+fn visit_sql_method(method: &mut crate::dialect::MethodDef, f: &mut impl FnMut(&mut crate::expr::Expr)) {
+    f(&mut method.body);
+    for default in method.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+        f(default);
+    }
+}
+
 /// Survey every emit-bound expression root, including defaults and fixture
 /// expressions outside the forwarding pass's narrower inventory. Callers walk
 /// children themselves, so each root is visited exactly once.
@@ -1510,7 +1578,8 @@ pub(crate) fn for_each_emit_body_ref(app: &crate::App, f: &mut impl FnMut(&crate
     for association in app.models.iter().flat_map(|model| model.associations()) {
         match association {
             crate::dialect::Association::BelongsTo { default: Some(e), .. }
-            | crate::dialect::Association::HasMany { scope: Some(e), .. } => f(e),
+            | crate::dialect::Association::HasMany { scope: Some(e), .. }
+            | crate::dialect::Association::HasOne { scope: Some(e), .. } => f(e),
             _ => {}
         }
     }

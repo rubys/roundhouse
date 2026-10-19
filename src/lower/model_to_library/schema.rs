@@ -63,6 +63,7 @@ pub(super) fn push_schema_methods(
     model: &Model,
     models: &[Model],
     table: &Table,
+    through_joins: &super::associations::ThroughJoins,
 ) {
     let owner = &model.name;
 
@@ -415,7 +416,7 @@ pub(super) fn push_schema_methods(
     // lobsters emits.)
 
     // def initialize(attrs = {}); super(); per-column self.col = attrs[:col] [|| 0 for id]; end
-    methods.push(synth_initialize(owner, table, model, models));
+    methods.push(synth_initialize(owner, table, model, through_joins));
 
     // def id; @identifier; end / def id=(value); @identifier = value; end
     // — when the key column is not called `id`. Rails' `record.id`
@@ -2335,7 +2336,12 @@ fn guard_unless_nil(lookup: Expr, action: Expr) -> Expr {
     )
 }
 
-fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Model]) -> MethodDef {
+fn synth_initialize(
+    owner: &ClassId,
+    table: &Table,
+    model: &Model,
+    through_joins: &super::associations::ThroughJoins,
+) -> MethodDef {
     let attrs = Symbol::from("attrs");
 
     let mut stmts: Vec<Expr> = Vec::new();
@@ -2871,19 +2877,13 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             ));
             continue;
         }
-        if let Association::HasMany { name, target, through, .. } = assoc {
+        if let Association::HasMany { name, target, .. } = assoc {
             // `has_many :through` collection writers stage into the
             // cache and flag the join rows stale — init the flag on
             // every construction path (mirrors cache/loaded below).
-            // Only when the writer itself will exist: a nested chain
-            // gets no writer (see `through_writer_join`), so no flag.
-            let writer_synthesized = through.as_ref().is_some_and(|thr_name| {
-                matches!(
-                    super::associations::through_writer_join(model, models, thr_name, target),
-                    super::associations::ThroughWriterJoin::Resolved(..)
-                )
-            });
-            if writer_synthesized {
+            // The flag exists only when `through_joins` already decided
+            // a writer. This block does not resolve the join again.
+            if through_joins.writer(name) {
                 let false_lit = with_ty(
                     Expr::new(
                         Span::synthetic(),

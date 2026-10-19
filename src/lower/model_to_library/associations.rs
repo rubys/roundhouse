@@ -5,6 +5,8 @@
 //! `preload`) and, when `autosave: true`, a writer plus `after_save`
 //! that stamps the child FK and saves.
 
+use std::collections::HashMap;
+
 use crate::dialect::{
     AccessorKind, Association, Dependent, MethodDef, MethodReceiver, Model, Param,
 };
@@ -16,39 +18,70 @@ use crate::ty::Ty;
 
 use super::{class_const, fn_sig, lit_int, lit_sym, nil_lit, seq, var_ref};
 
-/// Join recipe for a `has_many :through` collection writer, resolved
-/// against the app's model slice.
-pub(super) enum ThroughWriterJoin {
-    /// Join class, owner-side fk, target-side fk — synthesize the
-    /// writer. The target fk comes from the join model's `belongs_to`
-    /// matching the target class when that model is in the slice
-    /// (survives `foreign_key:` overrides); a join model outside the
-    /// slice falls back to the `<target>_id` convention.
-    /// The fourth field is the through association's `as:` interface:
-    /// a polymorphic join row also carries `<as>_type` = the owner.
+/// Join recipe for one `has_many :through`. Reader, writer, and
+/// `dependent: :destroy` all read this value. Nothing else decides
+/// which join row that association writes.
+pub(crate) enum ThroughWriterJoin {
+    /// Join class, owner-side fk, target-side fk. The target fk is the
+    /// source association's `belongs_to` key (`foreign_key:` included),
+    /// found by name the way [`Model::through_source`](crate::dialect::Model::through_source)
+    /// finds it — two `belongs_to`s of one class are different joins.
+    /// A join model outside the slice falls back to the `<target>_id`
+    /// convention. The fourth field is the through association's `as:`
+    /// interface: a polymorphic join row also carries `<as>_type`.
     Resolved(ClassId, Symbol, Symbol, Option<Symbol>),
-    /// The chain is nested — the join model reaches the target through
-    /// ANOTHER association rather than a `belongs_to` (`Category
-    /// has_many :stories, through: :tags` — Tag#stories itself goes
-    /// through taggings), so there is no join row to write. Rails makes
-    /// these collections read-only
-    /// (HasManyThroughNestedAssociationsAreReadonly); no writer.
+    /// No join row to write. The first hop is itself `:through`, or the
+    /// source association is not a `belongs_to` (`Category has_many
+    /// :stories, through: :tags`, where `Tag#stories` goes through
+    /// taggings). Rails makes these collections read-only
+    /// (HasManyThroughNestedAssociationsAreReadonly).
     Nested(ClassId),
     /// No sibling has_many names the join — nothing to synthesize.
     NoJoin,
 }
 
-/// Resolve the writer's join recipe: the sibling through association
-/// names the join class and owner-side fk; the join model's
-/// `belongs_to` supplies the target-side fk. Shared with the
-/// initialize synthesis (schema.rs), which must skip the writer's
-/// `_stale` flag when no writer will exist.
-pub(super) fn through_writer_join(
+/// One decision per `has_many :through` on `model`, keyed by the
+/// association's own name (`:labels`, not the sibling `:labelings`).
+pub(super) struct ThroughJoins {
+    by_name: HashMap<Symbol, ThroughWriterJoin>,
+}
+
+impl ThroughJoins {
+    pub(super) fn decide(model: &Model, models: &[Model]) -> Self {
+        let mut by_name = HashMap::new();
+        for assoc in model.associations() {
+            if let Association::HasMany { name, through: Some(_), .. } = assoc {
+                by_name.insert(name.clone(), through_writer_join(model, models, name));
+            }
+        }
+        Self { by_name }
+    }
+
+    pub(super) fn get(&self, name: &Symbol) -> Option<&ThroughWriterJoin> {
+        self.by_name.get(name)
+    }
+
+    /// A collection writer, and its `_stale` flag, exists for this name.
+    pub(super) fn writer(&self, name: &Symbol) -> bool {
+        matches!(self.get(name), Some(ThroughWriterJoin::Resolved(..)))
+    }
+}
+
+/// Resolve one through association's join. `through_name` is that
+/// association (`:labels`), not the sibling it names (`:labelings`).
+pub(crate) fn through_writer_join(
     model: &Model,
     models: &[Model],
-    thr_name: &Symbol,
-    target: &ClassId,
+    through_name: &Symbol,
 ) -> ThroughWriterJoin {
+    let Some((target, thr_name)) = model.associations().find_map(|a| match a {
+        Association::HasMany { name, target, through: Some(thr), .. } if name == through_name => {
+            Some((target.clone(), thr.clone()))
+        }
+        _ => None,
+    }) else {
+        return ThroughWriterJoin::NoJoin;
+    };
     let Some((join_class, owner_fk, thr_through, thr_as)) = model.associations().find_map(|a| match a {
         Association::HasMany {
             name: n,
@@ -57,7 +90,7 @@ pub(super) fn through_writer_join(
             through: jthru,
             as_interface,
             ..
-        } if n == thr_name => Some((jt.clone(), jfk.clone(), jthru.clone(), as_interface.clone())),
+        } if n == &thr_name => Some((jt.clone(), jfk.clone(), jthru.clone(), as_interface.clone())),
         _ => None,
     }) else {
         return ThroughWriterJoin::NoJoin;
@@ -86,12 +119,18 @@ pub(super) fn through_writer_join(
         ));
         return ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as);
     };
-    match join_model.associations().find_map(|a| match a {
-        Association::BelongsTo { target: t, foreign_key, .. } if same(t, target) => {
-            Some(foreign_key.clone())
+    // The source association, by name. Matching a `belongs_to` by target
+    // class instead picks the wrong key when the join model points at
+    // that class twice (`source_article` and `target_article`).
+    let src_fk = model.associations().find(|a| a.name() == through_name).and_then(|assoc| {
+        match join_model.through_source(assoc) {
+            Some(Association::BelongsTo { foreign_key, polymorphic: false, .. }) => {
+                Some(foreign_key.clone())
+            }
+            _ => None,
         }
-        _ => None,
-    }) {
+    });
+    match src_fk {
         Some(src_fk) => ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as),
         None => ThroughWriterJoin::Nested(join_class),
     }
@@ -161,6 +200,7 @@ pub(super) fn push_association_methods(
     methods: &mut Vec<MethodDef>,
     model: &Model,
     models: &[Model],
+    through_joins: &ThroughJoins,
 ) {
     let owner = &model.name;
     for (span, assoc) in model.spanned_associations() {
@@ -183,6 +223,9 @@ pub(super) fn push_association_methods(
                     continue;
                 }
                 let owner_key = assoc.owner_key();
+                // A through reader is a Relation. Whether this name is
+                // one is the same map the writer and destroy read.
+                let through_relation = through_joins.get(name).is_some();
                 methods.push(synth_has_many_reader(
                     owner,
                     name,
@@ -191,7 +234,7 @@ pub(super) fn push_association_methods(
                     &owner_key,
                     as_interface.as_ref(),
                     scope.as_ref(),
-                    through.is_some(),
+                    through_relation,
                 ));
                 methods.push(synth_preload_setter(owner, name, target));
                 // `<name>_loaded?` / `<name>_target`: the eager-load cache
@@ -264,8 +307,8 @@ pub(super) fn push_association_methods(
                 // is ledgered as lower_residue.
                 if let Some(thr_name) = through {
                     let writer_name = Symbol::from(format!("{}=", name.as_str()));
-                    match through_writer_join(model, models, thr_name, target) {
-                        ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as) => {
+                    match through_joins.get(name) {
+                        Some(ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk, thr_as)) => {
                             if !model_defines_instance_method(model, &writer_name)
                                 && !methods.iter().any(|m| {
                                     m.name == writer_name && m.receiver == MethodReceiver::Instance
@@ -275,9 +318,9 @@ pub(super) fn push_association_methods(
                                 methods.push(synth_through_sync(
                                     owner,
                                     name,
-                                    &join_class,
-                                    &owner_fk,
-                                    &src_fk,
+                                    join_class,
+                                    owner_fk,
+                                    src_fk,
                                     thr_as.as_ref(),
                                 ));
                                 super::markers::fold_into_or_push(
@@ -300,7 +343,7 @@ pub(super) fn push_association_methods(
                                 );
                             }
                         }
-                        ThroughWriterJoin::Nested(join_class) => {
+                        Some(ThroughWriterJoin::Nested(join_class)) => {
                             let kind = crate::diagnostic::DiagnosticKind::LowerResidue {
                                 pass: Symbol::from("through_writer"),
                                 construct: Symbol::from("has_many"),
@@ -326,7 +369,7 @@ pub(super) fn push_association_methods(
                             };
                             crate::emit::diagnostics::push(d);
                         }
-                        ThroughWriterJoin::NoJoin => {}
+                        Some(ThroughWriterJoin::NoJoin) | None => {}
                     }
                 }
             }
@@ -2249,7 +2292,121 @@ fn dependent_rows_statement(model: &Model, assoc: &Association) -> Option<Expr> 
     Some(statement)
 }
 
-pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model) {
+/// Destroy the join rows for the targets the reader returns:
+/// `name.each { |__target| Join.where(owner_fk: @id, src_fk: __target.id).each { |__row| __row.destroy } }`.
+/// The source key keeps a second through association on the same sibling
+/// from deleting the other's rows, and the reader carries the association scope.
+fn through_join_destroy(
+    owner: &ClassId,
+    name: &Symbol,
+    join_class: &ClassId,
+    owner_fk: &Symbol,
+    src_fk: &Symbol,
+    owner_as: Option<&Symbol>,
+) -> Expr {
+    let target = Symbol::from("__target");
+    let id_ivar = Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") });
+    let target_id = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(target.clone())),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let mut entries = vec![
+        (lit_sym(owner_fk.clone()), id_ivar),
+        (lit_sym(src_fk.clone()), target_id),
+    ];
+    if let Some(intf) = owner_as {
+        entries.push((
+            lit_sym(Symbol::from(format!("{intf}_type"))),
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Str { value: owner.0.as_str().to_string() } },
+            ),
+        ));
+    }
+    let where_call = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(join_class)),
+            method: Symbol::from("where"),
+            args: vec![Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true })],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let row = Symbol::from("__row");
+    let row_block = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
+            rest_param: None,
+            params: vec![row.clone()],
+            block_param: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(row)),
+                    method: Symbol::from("destroy"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    );
+    let rows = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(where_call),
+            method: Symbol::from("each"),
+            args: vec![],
+            block: Some(row_block),
+            parenthesized: false,
+        },
+    );
+    let target_block = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            extra_params: Vec::new(),
+            rest_param: None,
+            params: vec![target],
+            block_param: None,
+            body: rows,
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: None,
+                    method: name.clone(),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            )),
+            method: Symbol::from("each"),
+            args: vec![],
+            block: Some(target_block),
+            parenthesized: false,
+        },
+    )
+}
+
+pub(super) fn push_dependent_destroy(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    through_joins: &ThroughJoins,
+) {
     let mut stmts: Vec<Expr> = Vec::new();
 
     for (span, assoc) in model.spanned_associations() {
@@ -2258,8 +2415,37 @@ pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model
             stmts.push(statement);
             continue;
         }
-        if let Association::HasMany { name, dependent, .. } = assoc {
+        if let Association::HasMany { name, dependent, through, .. } = assoc {
             if matches!(dependent, Dependent::Destroy) {
+                if through.is_some() {
+                    // A refused through association has no reader. Cascading
+                    // anyway would delete rows the refusal exists to avoid.
+                    let has_reader = model_defines_instance_method(model, name)
+                        || methods.iter().any(|m| {
+                            m.name == *name && m.receiver == MethodReceiver::Instance
+                        });
+                    if has_reader {
+                        if let Some(ThroughWriterJoin::Resolved(
+                            join_class,
+                            owner_fk,
+                            src_fk,
+                            thr_as,
+                        )) = through_joins.get(name)
+                        {
+                            let mut cascade = through_join_destroy(
+                                &model.name,
+                                name,
+                                join_class,
+                                owner_fk,
+                                src_fk,
+                                thr_as.as_ref(),
+                            );
+                            cascade.inherit_span(span);
+                            stmts.push(cascade);
+                        }
+                    }
+                    continue;
+                }
                 // assoc_name.each { |c| c.destroy }
                 let iter_body = Expr::new(
                     Span::synthetic(),

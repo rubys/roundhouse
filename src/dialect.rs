@@ -1174,6 +1174,8 @@ pub enum LibraryClassOrigin {
         members: Vec<Symbol>,
         span: Span,
     },
+    /// The `Oj` stand-in an app under `Oj.mimic_JSON` reaches (`ingest::oj`).
+    Oj,
 }
 
 /// A graphql-ruby object type (a class descending from

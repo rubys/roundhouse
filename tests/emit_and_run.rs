@@ -9,6 +9,8 @@
 mod emit_and_run;
 #[path = "emit_and_run/date_calendar_duration.rs"]
 mod date_calendar_duration;
+#[path = "emit_and_run/branch_local_join.rs"]
+mod branch_local_join;
 #[path = "emit_and_run/utc_zone_time.rs"]
 mod utc_zone_time;
 #[path = "emit_and_run/discard.rs"]
@@ -67,6 +69,8 @@ mod helper_escape_args;
 mod class_new_constants;
 #[path = "emit_and_run/i18n_subtree.rs"]
 mod i18n_subtree;
+#[path = "emit_and_run/i18n_values.rs"]
+mod i18n_values;
 #[path = "emit_and_run/i18n_plural_rules.rs"]
 mod i18n_plural_rules;
 #[path = "emit_and_run/rails_i18n_locales.rs"]
@@ -3191,6 +3195,313 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct contract passed"));
     assert!(run.stdout.contains("dry-struct stamp contract passed"));
     assert!(run.stdout.contains("dry-struct clock contract passed"));
+}
+
+/// Oj under `Oj.mimic_JSON` + `Oj.optimize_rails` (the initializer a Rails
+/// app writes): generate as `JSON.generate` (`<>&` raw, `Infinity` and
+/// `NaN` a `JSON::GeneratorError`), load as
+/// `JSON.parse` (nil and a non-String as given, `symbol_keys:`), and a
+/// parse failure a `JSON::ParserError` that `Oj::ParseError` does not
+/// catch. Checked against oj 3.17 with ActiveSupport.
+#[test]
+fn oj_under_mimic_json_runs_as_json() {
+    let run = oj_overlay(emit_and_run::real_blog()).run_ruby(OJ_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("oj passed"));
+}
+
+/// A call the stand-in does not model is a refusal of its own, ledgered
+/// (strict ingest fails on it): `Oj.dump` (its compat and rails encoding
+/// both unmodeled), `Oj.safe_load` (the strict parser). In survey mode
+/// `Oj.load` beside it is still lowered.
+#[test]
+fn oj_unmodeled_calls_are_refused_one_by_one() {
+    for (call, expected) in [
+        ("Oj.dump(v)", "`Oj.dump`: neither its compat nor its rails encoding is modeled"),
+        ("Oj.dump(v, mode: :rails)", "`Oj.dump`: neither its compat nor its rails encoding is modeled"),
+        ("Oj.safe_load(v)", "`Oj.safe_load`"),
+    ] {
+        let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+            ("config/initializers/oj.rb".to_string(), "Oj.mimic_JSON\n".to_string()),
+            (
+                "lib/codec.rb".to_string(),
+                format!("class Codec\n  def self.out(v)\n    {call}\n  end\n\n  def self.in(v)\n    Oj.load(v)\n  end\nend\n"),
+            ),
+            ("config/routes.rb".to_string(), "Rails.application.routes.draw do\nend\n".to_string()),
+        ]
+        .into_iter()
+        .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+        .collect();
+        assert!(roundhouse::ingest::ingest_app_from_tree(tree.clone()).is_err(), "{call}: strict ingest passed");
+        roundhouse::ingest::survey::activate();
+        let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+        let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+        assert!(ledger.iter().any(|e| e.contains(expected)), "{call}: {ledger:#?}");
+        let oj = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Oj").expect("load still lowered");
+        assert!(oj.methods.iter().all(|m| !matches!(m.name.as_str(), "dump" | "safe_load")), "{call}: modeled");
+    }
+}
+
+/// Without `Oj.mimic_JSON` Oj is in its `:object` mode, not modeled: its
+/// uses stay errors.
+#[test]
+fn oj_without_mimic_json_stays_unsupported() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("lib/payload.rb", OJ_LIB)
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("Oj")), "{errors:#?}");
+}
+
+/// An option the lowering does not read is a refusal (ledgered, strict
+/// ingest fails); a mode that may not be set, or `optimize_rails` alone,
+/// leaves Oj unmodeled.
+#[test]
+fn oj_unmodeled_options_are_refused() {
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+        ("config/initializers/oj.rb", "Oj.mimic_JSON\n"),
+        ("lib/pretty.rb", "class Pretty\n  def self.show(v)\n    Oj.load(v, bigdecimal_load: :float)\n  end\nend\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    assert!(roundhouse::ingest::ingest_app_from_tree(tree.clone()).is_err(), "strict ingest passed a refusal");
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+    let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+    assert!(ledger.iter().any(|e| e.contains("Oj not lowered: `Oj.load` option `bigdecimal_load: :float`")), "{ledger:#?}");
+    let _ = app;
+    // A mode that may not be set or that this does not read leaves Oj
+    // unmodeled; an option value oj rejects is a refusal of that call.
+    for (init, use_, expected, unmodeled) in [
+        ("if ENV[\"X\"]\n  Oj.mimic_JSON\nend\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
+        ("Oj.mimic_JSON if ENV[\"X\"]\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
+        ("Oj.mimic_JSON rescue nil\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
+        ("Oj.optimize_rails\n", "Oj.load(v)", "`Oj.optimize_rails` without `Oj.mimic_JSON`", true),
+        ("Oj.mimic_JSON(mode: :compat)\n", "Oj.load(v)", "`Oj.mimic_JSON` not at an initializer's top level", true),
+        ("Oj.mimic_JSON\n", "Oj.load(v, symbol_keys: \"true\")", "`Oj.load` option `symbol_keys: \"true\"`", false),
+    ] {
+        let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+            ("config/initializers/oj.rb".to_string(), init.to_string()),
+            ("lib/reader.rb".to_string(), format!("class Reader\n  def self.read(v)\n    {use_}\n  end\nend\n")),
+            ("config/routes.rb".to_string(), "Rails.application.routes.draw do\nend\n".to_string()),
+        ]
+        .into_iter()
+        .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+        .collect();
+        roundhouse::ingest::survey::activate();
+        let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+        let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+        assert!(ledger.iter().any(|e| e.contains(expected)), "{init}: {ledger:#?}");
+        if unmodeled {
+            assert!(app.library_classes.iter().all(|lc| lc.name.0.as_str() != "Oj"), "{init}: lowered");
+        }
+    }
+    // Empty parentheses are the same top-level call as the bare form.
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+        ("config/initializers/oj.rb".to_string(), "Oj.mimic_JSON()\n".to_string()),
+        ("lib/reader.rb".to_string(), "class Reader\n  def self.read(v)\n    Oj.load(v)\n  end\nend\n".to_string()),
+        ("config/routes.rb".to_string(), "Rails.application.routes.draw do\nend\n".to_string()),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+    .collect();
+    roundhouse::ingest::survey::activate();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("survey ingest");
+    let ledger: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|e| e.to_string()).collect();
+    assert!(
+        ledger.iter().all(|e| !e.contains("mimic_JSON")),
+        "empty parentheses were refused: {ledger:#?}"
+    );
+    assert!(
+        app.library_classes.iter().any(|lc| lc.name.0.as_str() == "Oj"),
+        "Oj.mimic_JSON() did not install the stand-in"
+    );
+}
+
+const OJ_LIB: &str = r##"class Payload
+  def self.generated(value)
+    Oj.generate(value)
+  end
+
+  def self.generated_or(value)
+    Oj.generate(value)
+  rescue JSON::GeneratorError
+    :not_finite
+  end
+
+  def self.decode(text)
+    Oj.load(text)
+  end
+
+  def self.decode_symbols(text)
+    Oj.load(text, symbol_keys: true)
+  end
+
+  def self.guarded(text)
+    Oj.load(text)
+  rescue Oj::ParseError
+    :oj_rescued
+  rescue JSON::ParserError
+    :json_rescued
+  end
+
+  def self.guarded_symbols(text)
+    Oj.load(text, symbol_keys: true)
+  rescue JSON::ParserError
+    :bad
+  end
+end
+"##;
+
+const OJ_ASSERTIONS: &str = r##"require "stringio"
+raise "generate" unless Payload.generated({a: :b, h: "<&>", n: [1.5, nil, true]}) == %({"a":"b","h":"<&>","n":[1.5,null,true]})
+raise "generate infinity" unless Payload.generated_or({x: Float::INFINITY}) == :not_finite
+raise "generate nan" unless Payload.generated_or({x: Float::NAN}) == :not_finite
+raise "load" unless Payload.decode(%({"a":[1,2.5,null,true],"b":{"c":"d"}})) == {"a" => [1, 2.5, nil, true], "b" => {"c" => "d"}}
+raise "load nil" unless Payload.decode(nil).nil?
+raise "load integer" unless Payload.decode(5) == 5
+raise "load symbols" unless Payload.decode_symbols(%({"a":{"b":1}})) == {a: {b: 1}}
+raise "parse error" unless Payload.guarded("{x") == :json_rescued
+raise "load array" unless Payload.decode([1]) == [1]
+raise "load array nil" unless Payload.guarded([nil]) == :json_rescued
+raise "load array symbol" unless Payload.guarded([:a]) == :json_rescued
+raise "load array hash" unless Payload.guarded([{"a" => 1}]) == :json_rescued
+raise "load array symbols" unless Payload.decode_symbols(%([{"a":1}])) == [{a: 1}]
+raise "load bad array symbols" unless Payload.guarded_symbols([{"a" => 1}]) == :bad
+raise "load rational" unless Payload.guarded(Rational(1, 2)) == :json_rescued
+raise "load infinity" unless Payload.decode(Float::INFINITY).infinite?
+raise "load nan" unless Payload.decode(Float::NAN).nan?
+require "bigdecimal"
+raise "load bigdecimal" unless Payload.decode(BigDecimal("2.5")) == 2.5
+raise "load bigdecimal class" unless Payload.decode(BigDecimal("2.5")).is_a?(Float)
+raise "load hash" unless Payload.guarded({"a" => 1}) == :json_rescued
+raise "load symbol" unless Payload.guarded(:x) == :json_rescued
+raise "load io" unless Payload.decode(StringIO.new(%([1,{"a":null}]))) == [1, {"a" => nil}]
+puts "oj passed"
+"##;
+
+fn oj_overlay(overlay: emit_and_run::Overlay) -> emit_and_run::Overlay {
+    overlay
+        .write("config/initializers/oj.rb", "# frozen_string_literal: true\n\nOj.mimic_JSON\nOj.optimize_rails\n")
+        .write("lib/payload.rb", OJ_LIB)
+}
+
+/// The stand-in is one Ruby class. Ruby emits it and stays clean. Python,
+/// Crystal, TypeScript and the other strict targets refuse the call in one
+/// place: no `Oj.load` / `Oj.generate` written against a missing class, and
+/// not the incidental `String#read` or missing-`JSON` errors the class body
+/// would raise.
+#[test]
+fn oj_stand_in_is_ruby_only() {
+    let dir = std::env::temp_dir().join(format!("rh-oj-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        ("config/initializers/oj.rb", "Oj.mimic_JSON\nOj.optimize_rails\n"),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n    t.bigint \"author_id\"\n  end\n  create_table \"comments\", force: :cascade do |t|\n    t.text \"body\"\n    t.bigint \"post_id\"\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\n  direct :payload do\n    Oj.load('{\"a\":1}', symbol_keys: true)\n  end\nend\n",
+        ),
+        (
+            "app/models/post.rb",
+            "class Post < ApplicationRecord\n  has_many :comments, -> { where(body: Oj.load('{\"a\":1}')) }\n  has_one :pin, -> { where(body: Oj.load('{\"b\":2}')) }, class_name: \"Comment\"\n  belongs_to :author, class_name: \"Post\", optional: true, default: -> { Oj.generate({a: \"<&>\"}) }\nend\n",
+        ),
+        (
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n  belongs_to :post\nend\n",
+        ),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    Oj.generate({a: \"<&>\"})\n    Oj.load('{\"a\":1}', symbol_keys: true)\n    render plain: \"ok\"\n  end\n\n  def self.only_rescue\n    raise \"x\"\n  rescue Oj::ParseError\n    :oj\n  end\nend\n",
+        ),
+        (
+            "test/models/post_test.rb",
+            "class PostTest < ActiveSupport::TestCase\n  PAYLOAD = Oj.generate({a: \"<&>\"})\n  class Inner\n    def self.read\n      Oj.load('{\"a\":1}', symbol_keys: true)\n    end\n  end\nend\n",
+        ),
+        (
+            "test/fixtures/posts.yml",
+            "one:\n  title: <%= Oj.generate({a: 1}) %>\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "ingest lowered with errors: {lower_diags:?}"
+    );
+    let ruby = oj_target_errors_and_text(&app, &dir, roundhouse::project::BuildTarget::Ruby);
+    assert!(ruby.0.is_empty(), "ruby refused a stand-in it emits:\n{}", ruby.0.join("\n"));
+    let stand_in = ruby.1.get("app/models/oj.rb").map(String::as_str).unwrap_or("");
+    assert!(stand_in.contains("def self.load"), "ruby emit dropped the stand-in:\n{stand_in}");
+    assert!(stand_in.contains("JSON.parse(source)"), "ruby stand-in is not the one-argument parse:\n{stand_in}");
+    assert!(stand_in.contains("json.is_a?(Integer)"), "ruby stand-in still passes every Numeric through:\n{stand_in}");
+    assert!(!stand_in.contains("json.is_a?(Array)"), "ruby stand-in still returns every Array:\n{stand_in}");
+    assert!(!stand_in.contains("def self.dump"), "ruby stand-in gained dump:\n{stand_in}");
+    for target in [
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            errors.iter().any(|e| e.contains("does not emit") && e.contains("missing class")),
+            "{target:?} did not refuse Oj:\n{}",
+            errors.join("\n")
+        );
+        assert!(
+            !errors.iter().any(|e| e.contains("String#read") || e.contains("JSON is not available")),
+            "{target:?} refused Oj for the wrong reason:\n{}",
+            errors.join("\n")
+        );
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| {
+                !path.ends_with(".map")
+                    && (text.contains("Oj.load") || text.contains("Oj.generate") || text.contains("Oj::"))
+            })
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        assert!(hits.is_empty(), "{target:?} emitted an Oj call in {hits:?}");
+        for site in ["Oj.load", "Oj.generate", "Oj::ParseError"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site)),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn oj_target_errors_and_text(
+    app: &roundhouse::App,
+    dir: &std::path::Path,
+    target: roundhouse::project::BuildTarget,
+) -> (Vec<String>, std::collections::HashMap<String, String>) {
+    let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
+        roundhouse::project::target_files(app, dir, target)
+    });
+    let errors = diags
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::diagnostic::Severity::Error)
+        .map(|d| d.message)
+        .collect();
+    let files = files.unwrap_or_default().into_iter().collect();
+    (errors, files)
 }
 
 /// `/(?<name>..)/ =~ str` assigns each named group to a local (nil when
@@ -7775,6 +8086,53 @@ fn an_include_from_an_included_block_takes_precedence_over_its_concern() {
             "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.shout unless a.shout == \"inner\"",
         )
         .assert_passes();
+}
+
+/// `def`s in a concern's `included do` are includer methods, instance and
+/// class side: they keep their visibility, and one over a column reader
+/// wins and reads the column through `super`.
+#[test]
+fn defs_in_an_included_block_run_on_the_includer() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n\n  included do\n    class << self\n      def loud\n        \"L\"\n      end\n    end\n\n    def self.quiet\n      \"q\"\n    end\n\n    def shout(times = 1)\n      title.upcase * times\n    end\n\n    def body\n      super + \"!\"\n    end\n\n    def peek\n      secret\n    end\n\n    private\n\n    def secret\n      \"hidden\"\n    end\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Shouty\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\n\
+             raise a.shout(2) unless a.shout(2) == \"HIHI\"\n\
+             raise a.body unless a.body == \"Body text here!\"\n\
+             raise a.peek unless a.peek == \"hidden\"\n\
+             raise \"secret is public\" if a.respond_to?(:secret)\n\
+             raise \"class side\" unless Article.loud + Article.quiet == \"Lq\"",
+        )
+        .assert_passes();
+}
+
+/// Where hoisting would change which definition wins, the def keeps its
+/// nested-def refusal: the module defines the name too, the block
+/// includes a module that sits ahead of the concern, or a `class << self`
+/// holds a statement the hoist would drop.
+#[test]
+fn included_block_defs_that_would_lose_their_precedence_stay_refused() {
+    for concern in [
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    def shout\n      \"block\"\n    end\n  end\n\n  def shout\n    \"module\"\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include Comparable\n    def shout\n      \"block\"\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      %i[a b].each { |n| define_method(n) { n } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  class_methods do\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    def self.loud\n      \"block\"\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  module ClassMethods\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    class << self\n      def loud\n        \"block\"\n      end\n    end\n  end\nend\n",
+    ] {
+        let errors = emit_and_run::real_blog()
+            .write("app/models/concerns/shouty.rb", concern)
+            .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+            .check_errors();
+        assert!(errors.iter().any(|e| e.contains("nested def")), "{concern}: {errors:?}");
+    }
 }
 
 /// The inner concern's own `included do` runs on the includer too: its
@@ -13113,7 +13471,7 @@ controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.exam
 controller.request_method = "GET"
 controller.params = { "back" => "/home" }
 controller.process_action(:bounce)
-raise "relative redirect lost: #{controller.location.inspect}" unless controller.location == "/home"
+raise "relative redirect stays a path: #{controller.location.inspect}" unless controller.location == "http://app.example/home"
 
 controller = WidgetsController.new
 controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")

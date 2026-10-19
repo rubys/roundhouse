@@ -212,7 +212,7 @@ module ActionController
     def head: (Symbol status, ?content_type: String?, ?location: String?) -> void
     def response: () -> Base
     def redirect?: () -> bool
-    # Strict stubs; Ruby/Spinel reopen in current.rb fills these in.
+    # Strict stubs; Ruby/Spinel reopen in conditional_get.rb fills these in.
     def fresh_when: (untyped subject) -> void
     def stale?: (?etag: untyped) -> bool
     # Integer SECONDS on every duration-shaped keyword —
@@ -234,6 +234,7 @@ module ActionController
     def csrf_session_secret: () -> String
     def csrf_header_token: () -> String
     def request_for_csrf: () -> untyped
+    def absolute_redirect_location: (String loc) -> String
     def same_host_location: (String loc) -> String
     def request_host_for_redirect: () -> String
     def default_url_options: () -> Hash[Symbol, String]

@@ -55,6 +55,10 @@ module ActionDispatch
     def referer=: (String) -> String
     def host: () -> String
     def host=: (String) -> String
+    def raw_host_with_port: () -> String
+    def forwarded_authority: () -> String
+    def trusted_forwarded_peer?: () -> bool
+    def host_authority?: (String value) -> bool
     def format: () -> String
     def format=: (untyped value) -> untyped
     def body: () -> RequestBody

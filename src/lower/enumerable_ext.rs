@@ -67,6 +67,17 @@ pub(crate) fn rewrite_body(expr: &mut Expr) -> bool {
     rewrite_node(expr) || changed
 }
 
+pub(crate) fn rewrite_squish_body(expr: &mut Expr) -> bool {
+    let mut changed = false;
+    expr.node.for_each_child_mut(&mut |child| {
+        changed |= rewrite_squish_body(child);
+    });
+    if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "squish") {
+        changed |= rewrite_node(expr);
+    }
+    changed
+}
+
 fn rewrite(expr: &mut Expr) {
     let _ = rewrite_body(expr);
 }

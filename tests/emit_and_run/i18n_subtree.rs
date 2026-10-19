@@ -1,8 +1,9 @@
 //! `I18n.t` on a node of Strings answers a nested Hash of them, keyed by
 //! Symbols in the files' order, from the first locale of the fallback
 //! chain that has the node (forem hands one to its front end). A value
-//! that is not a String (an Array here) stays an error: the catalog
-//! holds Strings only; a nil value is a missing one, as I18n finds
+//! that is not a String and no Array of Strings and Symbols, a number or
+//! a boolean (an Array holding a Hash here) stays an error; a nil value
+//! is a missing one, as I18n finds
 //! nothing there; an empty mapping is `{}`, even where a fallback
 //! locale has the node. Expected values are i18n 1.15.2's for the same
 //! files on CRuby 3.4.
@@ -65,7 +66,7 @@ fn a_node_of_strings_answers_as_a_hash_on_spinel() {
 #[test]
 fn a_value_that_is_not_a_string_stays_an_error() {
     let (_emitted, errors) = emit_and_run::real_blog()
-        .write("config/locales/en.yml", "en:\n  probe:\n    days:\n      - \"Mon\"\n      - \"Tue\"\n    week:\n      days:\n        - \"Mon\"\n      name: \"Week\"\n")
+        .write("config/locales/en.yml", "en:\n  probe:\n    days:\n      - \"Mon\"\n      - tue: \"Tue\"\n    week:\n      days:\n        - \"Mon\"\n      name: \"Week\"\n")
         .edit(
             "app/models/article.rb",
             "  validates :title, presence: true\n",
