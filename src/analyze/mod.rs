@@ -30,7 +30,7 @@ mod body;
 mod class_configuration;
 mod data;
 mod class_new;
-pub(crate) use body::{indexed_pluck, lexical_class, string_answers};
+pub(crate) use body::{indexed_pluck, string_answers};
 #[cfg(test)]
 pub(crate) use body::counted_first_last;
 pub(crate) use body::{ConstResolver, ConstResolverTask};
@@ -7752,14 +7752,51 @@ pub(crate) fn source_class_method(app: &App, owner: &ClassId, name: &str) -> boo
     source_method(app, owner, name, crate::dialect::MethodReceiver::Class)
 }
 
+/// A mixin path as Ruby binds it. A rooted path, and a path
+/// `written_names` already resolved, stay as stored. A per-file ingest
+/// still has the source spelling (`Concerns::Reloading`, or `Helpers`
+/// while a nearer `Helpers` is also registered), so that one is resolved
+/// from the owner's scope.
+fn mixin_target(
+    owner: &ClassId,
+    path: &[crate::ident::Symbol],
+    resolved: bool,
+    classes: &HashMap<ClassId, ()>,
+) -> ClassId {
+    let rooted = path.first().is_some_and(|head| head.as_str().is_empty());
+    let written = mixin_path_id(path);
+    if rooted || resolved {
+        return written;
+    }
+    body::lexical_class(&written, owner.0.as_str(), classes).unwrap_or(written)
+}
+
+/// A stored superclass or library-class include. Registered names are
+/// Rubydex's answer (or a real class id). An unregistered relative name
+/// is resolved from `scope`.
+fn stored_target(scope: &ClassId, written: &ClassId, classes: &HashMap<ClassId, ()>) -> ClassId {
+    if classes.contains_key(written) {
+        written.clone()
+    } else {
+        body::lexical_class(written, scope.0.as_str(), classes).unwrap_or_else(|| written.clone())
+    }
+}
+
 fn source_method(app: &App, owner: &ClassId, name: &str, side: crate::dialect::MethodReceiver) -> bool {
     use crate::dialect::MethodReceiver::Instance;
+    let classes: HashMap<ClassId, ()> = app
+        .models
+        .iter()
+        .map(|model| (model.name.clone(), ()))
+        .chain(app.library_classes.iter().map(|class| (class.name.clone(), ())))
+        .collect();
     fn lookup(
         app: &App,
         owner: &ClassId,
         name: &str,
         side: crate::dialect::MethodReceiver,
         seen: &mut BTreeSet<ClassId>,
+        classes: &HashMap<ClassId, ()>,
     ) -> bool {
         if !seen.insert(owner.clone()) {
             return false;
@@ -7769,21 +7806,42 @@ fn source_method(app: &App, owner: &ClassId, name: &str, side: crate::dialect::M
             if model.methods().any(|method| method.receiver == side && method.name.as_str() == name) {
                 return true;
             }
-            return model.parent.as_ref().is_some_and(|parent| lookup(app, parent, name, side, seen))
-                || (walk_includes
-                    && model_includes(model).iter().any(|include| lookup(app, include, name, side, seen)));
+            if model.parent.as_ref().is_some_and(|parent| {
+                lookup(app, &stored_target(owner, parent, classes), name, side, seen, classes)
+            }) {
+                return true;
+            }
+            if !walk_includes {
+                return false;
+            }
+            for item in &model.body {
+                let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+                let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+                if method.as_str() != "include" {
+                    continue;
+                }
+                for arg in args {
+                    let ExprNode::Const { path } = &*arg.node else { continue };
+                    let include = mixin_target(owner, path, arg.decisions & crate::expr::RESOLVED_MIXIN != 0, classes);
+                    if lookup(app, &include, name, side, seen, classes) {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
-        app.library_classes
-            .iter()
-            .filter(|class| &class.name == owner)
-            .any(|class| {
-                class.methods.iter().any(|method| method.receiver == side && method.name.as_str() == name)
-                    || class.parent.as_ref().is_some_and(|parent| lookup(app, parent, name, side, seen))
-                    || (walk_includes
-                        && class.includes.iter().any(|include| lookup(app, include, name, side, seen)))
-            })
+        app.library_classes.iter().filter(|class| &class.name == owner).any(|class| {
+            class.methods.iter().any(|method| method.receiver == side && method.name.as_str() == name)
+                || class.parent.as_ref().is_some_and(|parent| {
+                    lookup(app, &stored_target(owner, parent, classes), name, side, seen, classes)
+                })
+                || (walk_includes
+                    && class.includes.iter().any(|include| {
+                        lookup(app, &stored_target(owner, include, classes), name, side, seen, classes)
+                    }))
+        })
     }
-    lookup(app, owner, name, side, &mut BTreeSet::new())
+    lookup(app, owner, name, side, &mut BTreeSet::new(), &classes)
 }
 
 /// `**{k: v, …}.merge(h)`, `h` a `Hash[Symbol, V]` and the literal's
