@@ -2141,7 +2141,7 @@ fn target_files_inner(
     } else {
         let files = ensure_seed_sql(files, app)?;
         let files = ensure_storage_keep(files, target);
-        let files = ensure_static_assets(files, target);
+        let files = ensure_static_assets(files, target, app);
         ensure_e2e(files, target)
     };
     Ok(ensure_readme(files, target))
@@ -2398,9 +2398,16 @@ fn ensure_readme(
 /// in that job), and its binary sendfiles `static/assets/` the same way
 /// jruby's `Rack::Static` does. Without baked assets either serves no
 /// tailwind.css / turbo.min.js and Turbo never boots.
+///
+/// JRuby and Spinel request CSS through Propshaft's digested names
+/// (`/assets/tailwind-<digest>.css`). The bake directory still uses the
+/// logical filename (`tailwind.css`), which is what strict targets'
+/// undigested helpers ask for. Those two therefore also receive a copy
+/// at the digested path `make assets` would have written.
 fn ensure_static_assets(
     mut files: Vec<(String, String)>,
     target: BuildTarget,
+    app: &App,
 ) -> Vec<(String, String)> {
     let bakes_assets = matches!(
         target,
@@ -2429,14 +2436,43 @@ fn ensure_static_assets(
     }
     let mut injected: Vec<(String, String)> = Vec::new();
     collect_asset_files(&dir, &dir, &mut injected);
-    for (rel, content) in injected {
-        let path = format!("static/assets/{rel}");
-        if !files.iter().any(|(p, _)| p == &path) {
-            files.push((path, content));
-        }
-    }
+    place_baked_assets(&mut files, target, app, injected);
     files.sort_by(|a, b| a.0.cmp(&b.0));
     files
+}
+
+/// Write baked assets into `files`. JRuby and Spinel also get each
+/// Propshaft CSS file at its digested path; the logical name stays for
+/// targets whose helpers are still undigested. An existing path wins.
+fn place_baked_assets(
+    files: &mut Vec<(String, String)>,
+    target: BuildTarget,
+    app: &App,
+    injected: Vec<(String, String)>,
+) {
+    let alias_digests = matches!(target, BuildTarget::Jruby | BuildTarget::Spinel);
+    for (rel, content) in injected {
+        let mut paths = vec![format!("static/assets/{rel}")];
+        if alias_digests
+            && let Some(digested) = propshaft_digested_static_path(app, &rel)
+            && !paths.contains(&digested)
+        {
+            paths.push(digested);
+        }
+        for path in paths {
+            if !files.iter().any(|(existing, _)| existing == &path) {
+                files.push((path, content.clone()));
+            }
+        }
+    }
+}
+
+/// Digested `static/assets/` path for a baked CSS file, when Propshaft
+/// fingerprinted that logical name. `rel` is the path under the bake
+/// directory (`tailwind.css`).
+fn propshaft_digested_static_path(app: &App, rel: &str) -> Option<String> {
+    let stem = rel.strip_suffix(".css")?;
+    propshaft_stylesheet_asset_name(app, stem).map(|name| format!("static/assets/{name}"))
 }
 
 /// Recursively gather UTF-8 files under `dir` as `(relpath_from_root, content)`.
@@ -10501,6 +10537,88 @@ mod tests {
         apply_makefile_stylesheet_list(&mut files, &tw);
         assert!(files[0].1.contains("$(ASSETS)/tailwind.css: app/assets/tailwind.css"));
         assert!(files[0].1.contains("node_modules/.installed:\n"));
+    }
+
+    /// JRuby smoke does not run `make assets`, so the baked Tailwind file
+    /// has to sit at the digested path the layout requests. Strict
+    /// targets keep requesting the logical name.
+    #[test]
+    fn baked_tailwind_is_also_written_at_the_propshaft_digest() {
+        use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
+        use crate::effect::EffectSet;
+        use crate::expr::{Expr, ExprNode, Literal};
+        use crate::ident::{ClassId, Symbol};
+        use crate::span::Span;
+
+        let mut app = App::new();
+        app.gem_lock = Some(crate::gems::Lockfile::parse(
+            "GEM\n  remote: https://rubygems.org/\n  specs:\n    propshaft (1.3.2)\n\nPLATFORMS\n  ruby\n\nDEPENDENCIES\n  propshaft\n",
+        ));
+        app.binary_assets.push((
+            "static/assets/tailwind-be38fee9.css".into(),
+            b"source-bytes-not-the-bake".to_vec(),
+        ));
+        app.rails_application = Some(LibraryClass {
+            name: ClassId(Symbol::from("Rails::Application")),
+            is_module: false,
+            parent: None,
+            parent_span: Default::default(),
+            includes: Vec::new(),
+            include_spans: Vec::new(),
+            methods: vec![MethodDef {
+                name: Symbol::from("propshaft_asset_path"),
+                receiver: MethodReceiver::Instance,
+                visibility: Default::default(),
+                params: Vec::new(),
+                unsupported_formals: None,
+                has_anonymous_block: false,
+                block_param: None,
+                name_span: Span::synthetic(),
+                body: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                signature: None,
+                effects: EffectSet::pure(),
+                enclosing_class: None,
+                kind: AccessorKind::Method,
+                is_async: false,
+                mutates_self: false,
+            }],
+            nullable_columns: Vec::new(),
+            origin: None,
+            constants: Vec::new(),
+            unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
+        });
+        let injected = vec![
+            ("tailwind.css".to_string(), "compiled-tailwind".to_string()),
+            ("turbo.min.js".to_string(), "turbo".to_string()),
+        ];
+        let body = |files: &[(String, String)], path: &str| {
+            files
+                .iter()
+                .find(|(existing, _)| existing == path)
+                .map(|(_, text)| text.clone())
+        };
+
+        let mut jruby = Vec::new();
+        place_baked_assets(&mut jruby, BuildTarget::Jruby, &app, injected.clone());
+        assert_eq!(body(&jruby, "static/assets/tailwind.css").as_deref(), Some("compiled-tailwind"));
+        assert_eq!(
+            body(&jruby, "static/assets/tailwind-be38fee9.css").as_deref(),
+            Some("compiled-tailwind")
+        );
+        assert_eq!(body(&jruby, "static/assets/turbo.min.js").as_deref(), Some("turbo"));
+
+        let mut spinel = Vec::new();
+        place_baked_assets(&mut spinel, BuildTarget::Spinel, &app, injected.clone());
+        assert_eq!(
+            body(&spinel, "static/assets/tailwind-be38fee9.css").as_deref(),
+            Some("compiled-tailwind")
+        );
+
+        let mut rust = Vec::new();
+        place_baked_assets(&mut rust, BuildTarget::Rust, &app, injected);
+        assert_eq!(body(&rust, "static/assets/tailwind.css").as_deref(), Some("compiled-tailwind"));
+        assert!(body(&rust, "static/assets/tailwind-be38fee9.css").is_none());
     }
 
     /// Both dispatchers reset the app's `CurrentAttributes` subclass.
