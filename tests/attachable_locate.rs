@@ -95,6 +95,49 @@ fn an_instance_extend_stubs_the_test_that_reaches_for_it() {
     );
 }
 
+/// Campfire's TLS-failure test: `Module.new { private def ... }` mixed
+/// into one live object, whose receiver is a helper that returns
+/// `HTTP.new(...).tap { ... }`. The module becomes a real module, the
+/// receiver a single `.new` local, and a sibling that never extends
+/// keeps the class method.
+#[test]
+fn an_instance_extend_of_one_new_keeps_the_sibling() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  attr_accessor :note\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\nend\n",
+        ),
+        (
+            "test/test_helpers/open_helper.rb",
+            "module OpenHelper\n  def opened(tag)\n    Box.new.tap do |box|\n      box.note = tag\n    end\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  include OpenHelper\n  test \"one object\" do\n    failing = Module.new { private def begin_transport(*) = :closed }\n    assert_equal :closed, opened(\"a\").extend(failing).ping\n    assert_equal :open, opened(\"b\").ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\n  test \"direct\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    assert_equal :closed, one.extend(failing).ping\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let extend_warns: Vec<_> = diags.iter().filter(|d| d.message.contains("Object#extend")).collect();
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(extend_warns.is_empty(), "a traced extend is supported:\n{extend_warns:?}\n{test}");
+    assert!(test.contains(".extend("), "the extend stays in the emit:\n{test}");
+    assert!(
+        !test.contains(".extend(RhInstanceExtend1).ping") && !test.contains(".extend(RhInstanceExtend2).ping"),
+        "spinel flips the class at the extend statement, so the value is the local:\n{test}"
+    );
+    assert!(test.contains("module RhInstanceExtend"), "the anonymous module is a real module:\n{test}");
+    assert!(test.contains("def begin_transport"), "the nested def was hoisted:\n{test}");
+    assert!(test.contains("def test_sibling"), "the sibling test stays:\n{test}");
+    assert!(!test.contains("Object#extend not supported"), "no stub remains:\n{test}");
+}
+
 /// The same test without the extend: what `ActionText::Attachable#
 /// attachable_sgid` computes, written out as the `to_sgid(for:)` it is.
 /// A shape every target compiles, and Rails mints the identical bytes
