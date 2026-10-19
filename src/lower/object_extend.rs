@@ -479,7 +479,7 @@ fn pull_one(
     value_used: bool,
     out: &mut Vec<Expr>,
 ) {
-    if matches!(&*expr.node, ExprNode::Lambda { .. }) {
+    if matches!(&*expr.node, ExprNode::Lambda { .. }) || gates_control(expr) {
         return;
     }
     if let Some(setups) = explode_extend(expr, classes, modules, helpers, seq, value_used) {
@@ -488,6 +488,30 @@ fn pull_one(
     expr.node.for_each_child_mut(&mut |c| {
         pull_one(c, classes, modules, helpers, seq, true, out);
     });
+}
+
+/// `if` / `&&` / `||` (and the other short-circuit forms) run only some
+/// of their children. Setups have to stay in that arm. Pulling them out
+/// to the enclosing statement would extend the object when the branch
+/// did not run, so an `extend` written there is left in place and the
+/// test is stubbed.
+fn gates_control(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::If { .. }
+        | ExprNode::BoolOp { .. }
+        | ExprNode::Case { .. }
+        | ExprNode::CaseMatch { .. }
+        | ExprNode::While { .. }
+        | ExprNode::RescueModifier { .. }
+        | ExprNode::BeginRescue { .. } => true,
+        ExprNode::OpAssign { op, .. } => {
+            matches!(
+                op,
+                crate::expr::OpAssignOp::OrOr | crate::expr::OpAssignOp::AndAnd
+            )
+        }
+        _ => false,
+    }
 }
 
 struct Built {
@@ -567,7 +591,7 @@ fn explode_extend(
         },
     );
     for mut set in built.sets {
-        subst_var(&mut set, &local, &local_expr);
+        subst_name(&mut set, &receiver_placeholder(), &local_expr);
         setups.push(set);
     }
     {
@@ -661,7 +685,7 @@ fn explode_expr(expr: &Expr) -> Option<Built> {
         new_call: (*inner).clone(),
         sets,
     };
-    let placeholder = Symbol::from("__rh_extend_receiver");
+    let placeholder = receiver_placeholder();
     for set in &mut built.sets {
         subst_name(
             set,
@@ -675,9 +699,11 @@ fn explode_expr(expr: &Expr) -> Option<Built> {
             ),
         );
     }
-    // The caller substitutes the placeholder for the fresh local.
-    let _ = placeholder;
     Some(built)
+}
+
+fn receiver_placeholder() -> Symbol {
+    Symbol::from("__rh_extend_receiver")
 }
 
 fn setter_sends(body: &Expr, param: &Symbol) -> Option<Vec<Expr>> {
@@ -754,11 +780,6 @@ fn subst_name(expr: &mut Expr, name: &Symbol, replacement: &Expr) {
         .for_each_child_mut(&mut |c| subst_name(c, name, replacement));
 }
 
-fn subst_var(expr: &mut Expr, _local: &Symbol, _replacement: &Expr) {
-    let placeholder = Symbol::from("__rh_extend_receiver");
-    subst_name(expr, &placeholder, _replacement);
-}
-
 fn qualify(expr: &mut Expr, owner: &ClassId, constants: &[Symbol]) {
     if let ExprNode::Const { path } = &mut *expr.node {
         if path.len() == 1 && constants.iter().any(|c| c == &path[0]) {
@@ -800,6 +821,13 @@ fn untraced_at(
     classes: &HashSet<String>,
     modules: &HashSet<String>,
 ) -> Option<Diagnostic> {
+    if gates_control(expr) {
+        if let Some(site) = extend_outside_a_block(expr) {
+            let mut d = Diagnostic::unsupported(site.span, None, CONSTRUCT, DETAIL);
+            d.severity = Severity::Warning;
+            return Some(d);
+        }
+    }
     let (recv, _) = instance_extend(expr)?;
     if traced(recv, expr, root, classes, modules) {
         return None;
@@ -807,6 +835,34 @@ fn untraced_at(
     let mut d = Diagnostic::unsupported(expr.span, None, CONSTRUCT, DETAIL);
     d.severity = Severity::Warning;
     Some(d)
+}
+
+/// An `extend` in this arm, not one inside a block. A block is its own
+/// scope: its setups stay inside it, so they run when the block runs.
+fn extend_outside_a_block(expr: &Expr) -> Option<&Expr> {
+    let mut found = None;
+    expr.node.for_each_child(&mut |child| {
+        if found.is_none() {
+            found = extend_in_arm(child);
+        }
+    });
+    found
+}
+
+fn extend_in_arm(expr: &Expr) -> Option<&Expr> {
+    if matches!(&*expr.node, ExprNode::Lambda { .. }) {
+        return None;
+    }
+    if instance_extend(expr).is_some() {
+        return Some(expr);
+    }
+    let mut found = None;
+    expr.node.for_each_child(&mut |child| {
+        if found.is_none() {
+            found = extend_in_arm(child);
+        }
+    });
+    found
 }
 
 fn traced(

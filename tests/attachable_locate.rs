@@ -138,6 +138,38 @@ fn an_instance_extend_of_one_new_keeps_the_sibling() {
     assert!(!test.contains("Object#extend not supported"), "no stub remains:\n{test}");
 }
 
+/// An `extend` under `if` is not pulled out in front of the condition.
+/// The test that writes it is the raise; the test beside it is not.
+#[test]
+fn an_extend_under_a_condition_stays_unsupported() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"conditional\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    if false\n      one.extend(failing).ping\n    end\n    assert_equal :open, one.ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(diags.iter().any(|d| d.message.contains("Object#extend")), "the conditional extend is reported");
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        test.contains("def test_conditional\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"),
+        "the conditional test is the raise:\n{test}"
+    );
+    assert!(test.contains("def test_sibling"), "the sibling test stays:\n{test}");
+    assert!(!test.contains(".extend"), "the extend is not hoisted out of the if:\n{test}");
+}
+
 /// The same test without the extend: what `ActionText::Attachable#
 /// attachable_sgid` computes, written out as the `to_sgid(for:)` it is.
 /// A shape every target compiles, and Rails mints the identical bytes
