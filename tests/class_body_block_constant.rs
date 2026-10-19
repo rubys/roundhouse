@@ -142,6 +142,46 @@ end
     assert_eq!(run.stdout, "x\n");
 }
 
+/// The call that defines `LABEL` is above the include. The hook reads
+/// that constant, so the include has to stay below the call.
+#[test]
+fn a_hooked_include_stays_below_a_call_the_hook_reads() {
+    let hook = r#"module Outer
+  module Hook
+    def self.included(base)
+      base.banner
+      raise "LABEL missing" unless base.const_defined?(:LABEL, false)
+    end
+  end
+end
+"#;
+    let handler = r#"module Outer
+  class Handler < Base
+    def self.banner
+      "class"
+    end
+
+    setup do |t|
+      LABEL = t.option("x") #: String
+    end
+
+    include Hook
+
+    #: -> String
+    def self.label = LABEL
+  end
+end
+"#;
+    let run = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"probes\" do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("app/models/outer/base.rb", BASE)
+        .write("app/models/outer/hook.rb", hook)
+        .write("app/models/outer/handler.rb", handler)
+        .run_ruby("puts Outer::Handler.label\nputs Outer::Handler::LABEL\n");
+    run.assert_passes();
+    assert_eq!(run.stdout, "x\nx\n");
+}
+
 #[test]
 fn a_constant_no_block_writes_stays_refused() {
     use std::collections::HashMap;

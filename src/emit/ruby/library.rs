@@ -8330,10 +8330,11 @@ fn emit_library_class_decl_inner(
 /// includes that sit between them.
 ///
 /// Returns method indices (ascending) and `(slot, anchor)` into
-/// `positioned`. The anchor is the end of the method the include
-/// follows, so a call written before the next `def` stays after the
-/// hook. An include that cannot move stays with the later method loop,
-/// and so does every method that would otherwise pass it.
+/// `positioned`. The anchor is the include's own offset, and not
+/// before the end of the method the hook calls. A call written on
+/// either side of the include stays there. An include that cannot
+/// move stays with the later method loop, and so does every method
+/// that would otherwise pass it.
 fn methods_traveling_with_constant_call<'a>(
     lc: &'a LibraryClass,
     positioned: &[(usize, &'a ClassId)],
@@ -8368,8 +8369,15 @@ fn methods_traveling_with_constant_call<'a>(
         .filter(|(_, moves)| **moves)
         .map(|(slot, _)| {
             let followed = &lc.methods[positioned[slot].0 - 1];
-            let anchor = followed.name_span.end.max(followed.name_span.start.saturating_add(1));
-            (slot, anchor)
+            let after_method = followed.name_span.end.max(followed.name_span.start.saturating_add(1));
+            let source = lc
+                .includes
+                .iter()
+                .zip(lc.include_spans.iter())
+                .find_map(|(inc, span)| std::ptr::eq(inc, positioned[slot].1).then_some(span))
+                .filter(|span| !span.is_synthetic())
+                .map(|span| span.start);
+            (slot, source.map(|start| start.max(after_method)).unwrap_or(after_method))
         })
         .collect();
     (methods, includes)
