@@ -8173,6 +8173,7 @@ fn emit_library_class_decl_inner(
             .collect()
     } else {
         let own = app_extension_calls(lc, app, classes);
+        let mut replayed = own.clone();
         for call in &lc.unknown_calls {
             // A payload job's `queue_as` and `discard_on
             // ActiveJob::DeserializationError` are not dropped: the plan
@@ -8180,14 +8181,22 @@ fn emit_library_class_decl_inner(
             if call.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 && ordered_body {
                 continue;
             }
-            if !own.iter().any(|c| std::ptr::eq(*c, call))
-                && !is_preserved_external_include(call)
-                && !crate::lower::job_payload::modelled_class_body_call(app, lc, call)
-            {
-                report_dropped_class_body_call(lc, call);
+            let listed = own.iter().any(|c| std::ptr::eq(*c, call))
+                || is_preserved_external_include(call)
+                || crate::lower::job_payload::modelled_class_body_call(app, lc, call);
+            if listed {
+                continue;
             }
+            // `setup do |t| LABEL = t.option(…) end` defines LABEL on this
+            // class when the call runs. The read is typed from that write;
+            // dropping the call leaves the constant uninitialized.
+            if constant_defining_class_call(app, classes, lc, call) {
+                replayed.push(call);
+                continue;
+            }
+            report_dropped_class_body_call(lc, call);
         }
-        own
+        replayed
     };
     for call in &replayed {
         nested.borrow_mut().write_expr(&mut s, depth, lc, call);
@@ -8936,6 +8945,60 @@ fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [Librar
         }
     }
     out
+}
+
+/// A receiverless class-body call that assigns a constant inside its block,
+/// and whose method this class or an ancestor defines. Running the call is
+/// what creates the constant; the ancestor check keeps a framework macro
+/// (`queue_as`, `included`) from being replayed just because a block wrote
+/// a name.
+fn constant_defining_class_call(app: &App, classes: &[LibraryClass], lc: &LibraryClass, call: &Expr) -> bool {
+    if lc.is_module {
+        return false;
+    }
+    let ExprNode::Send { recv: None, method, .. } = &*call.node else { return false };
+    block_assigns_bare_constant(call) && singleton_method_visible(app, classes, &lc.name, method)
+}
+
+fn block_assigns_bare_constant(call: &Expr) -> bool {
+    let ExprNode::Send { block: Some(block), .. } = &*call.node else { return false };
+    let ExprNode::Lambda { body, .. } = &*block.node else { return false };
+    let stmts: &[Expr] = match &*body.node {
+        ExprNode::Seq { exprs } => exprs,
+        _ => std::slice::from_ref(body),
+    };
+    stmts.iter().any(|stmt| match &*stmt.node {
+        ExprNode::Assign { target: LValue::Const { path }, .. } => path.len() == 1,
+        ExprNode::Send { .. } => block_assigns_bare_constant(stmt),
+        _ => false,
+    })
+}
+
+fn singleton_method_visible(app: &App, classes: &[LibraryClass], start: &ClassId, method: &Symbol) -> bool {
+    let mut current = Some(start.clone());
+    let mut seen = BTreeSet::new();
+    while let Some(id) = current {
+        if !seen.insert(id.clone()) {
+            return false;
+        }
+        let defines = |m: &MethodDef| m.receiver == MethodReceiver::Class && m.name == *method;
+        if let Some(lc) = classes.iter().find(|lc| lc.name == id) {
+            if lc.methods.iter().any(defines) {
+                return true;
+            }
+            current = lc.parent.clone();
+            continue;
+        }
+        if let Some(model) = app.models.iter().find(|model| model.name == id) {
+            if model.methods().any(defines) {
+                return true;
+            }
+            current = model.parent.clone();
+            continue;
+        }
+        return false;
+    }
+    false
 }
 
 /// Ledger a class-body call we captured but chose not to replay. The
