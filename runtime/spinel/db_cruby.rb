@@ -588,11 +588,19 @@ module Db
   end
 
   def self.close
-    Thread.current[:db_conn] = nil
-    Thread.current[:db_pool] = nil
-    return if @pool.nil? && @quarantined.empty?
+    # This shim's live handle is the fiber lease, not Thread[:db_conn].
+    # Schema switch closes that checkout too: leaving it set makes the
+    # next statement keep writing the file we just replaced.
+    leased = Fiber[:db_handle]
+    Fiber[:db_handle] = nil
+    Fiber[:db_owner] = nil
+    Fiber[:db_txn_pin] = false
+    return if @pool.nil? && @quarantined.empty? && (leased.nil? || leased.closed?)
     conns = @quarantined.dup
     conns.concat(@pool.free) unless @pool.nil?
+    if !leased.nil? && !leased.closed? && !conns.include?(leased)
+      conns << leased
+    end
     error = nil
     conns.each do |conn|
       close_error = close_connection(conn)

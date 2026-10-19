@@ -688,13 +688,28 @@ module ActiveRecord
 
       def self.apply_migration(text)
         lines = text.split("\n")
+        applying = false
+        method_indent = -1
         i = 0
         while i < lines.length
           raw = lines[i]
           i += 1
           next if raw.nil?
+          indent = leading_spaces(raw)
           line = raw.strip
-          next if line.empty? || line.start_with?("#") || line.start_with?("class ") || line.start_with?("def ") || line == "end"
+          next if line.empty? || line.start_with?("#")
+          if line.start_with?("def ")
+            name = method_name(line)
+            applying = name == "change" || name == "up"
+            method_indent = indent
+            next
+          end
+          if applying && indent <= method_indent && (line == "end" || line.start_with?("end "))
+            applying = false
+            next
+          end
+          next if line.start_with?("class ") || line.start_with?("module ") || line == "end" || line.start_with?("end ")
+          next unless applying
           if line.start_with?("change_column")
             apply_change_column(line)
           else
@@ -702,6 +717,21 @@ module ActiveRecord
           end
         end
         nil
+      end
+
+      def self.leading_spaces(raw)
+        n = 0
+        while n < raw.length && raw[n].to_s == " "
+          n += 1
+        end
+        n
+      end
+
+      def self.method_name(line)
+        rest = line[4, line.length].to_s.strip
+        paren = rest.index("(")
+        rest = rest[0, paren].to_s.strip unless paren.nil?
+        token_at(rest)
       end
 
       def self.apply_change_column(line)
@@ -759,6 +789,8 @@ module ActiveRecord
         end
         Db.finalize(stmt)
         raise "no such table #{table}" if names.empty?
+        raise "no such column #{column}" unless names.include?(column)
+        refuse_unpreserved(table)
         defs = []
         selected = []
         i = 0
@@ -778,6 +810,30 @@ module ActiveRecord
         execute_sql("INSERT INTO #{tmp} (#{joined}) SELECT #{joined} FROM #{quoted}")
         execute_sql("DROP TABLE #{quoted}")
         execute_sql("ALTER TABLE #{tmp} RENAME TO #{quoted}")
+        nil
+      end
+
+      # SQLite's table rewrite drops indexes and foreign keys. Rails copies
+      # them back. Recording the version without that copy would mark a
+      # migration applied after throwing those away. Triggers are dropped
+      # on purpose: Rails does not put them back, and the prepended hook
+      # is what repairs the ones the app owns.
+      def self.refuse_unpreserved(table)
+        quoted = ActiveRecord::Base.connection.quote(table)
+        stmt = Db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = #{quoted}")
+        while Db.step?(stmt)
+          name = Db.column_text(stmt, 0)
+          next if name.start_with?("sqlite_")
+          Db.finalize(stmt)
+          raise "change_column cannot preserve index #{name}"
+        end
+        Db.finalize(stmt)
+        listed = Db.prepare("PRAGMA foreign_key_list(#{quote_ident(table)})")
+        if Db.step?(listed)
+          Db.finalize(listed)
+          raise "change_column cannot preserve foreign keys on #{table}"
+        end
+        Db.finalize(listed)
         nil
       end
 
