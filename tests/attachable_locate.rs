@@ -269,6 +269,124 @@ fn an_extend_with_two_arguments_stays_unsupported() {
     assert!(!test.contains(".extend"), "the two-argument extend does not stay in the file:\n{test}");
 }
 
+fn box_extend_app(test_body: &str) -> (Vec<roundhouse::diagnostic::Diagnostic>, String) {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  attr_accessor :note, :n\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\n  def delta\n    1\n  end\nend\n",
+        ),
+        (
+            "test/test_helpers/open_helper.rb",
+            "module OpenHelper\n  def opened(tag)\n    Box.new.tap do |box|\n      box.note = tag\n    end\n  end\nend\n",
+        ),
+        ("test/lib/box_test.rb", test_body),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    (diags, test)
+}
+
+fn assert_extend_stub(test_name: &str, source: &str) {
+    let (diags, test) = box_extend_app(source);
+    assert!(
+        diags.iter().any(|d| d.message.contains("Object#extend")),
+        "{test_name} is reported:\n{diags:?}\n{test}"
+    );
+    assert!(
+        test.contains(&format!(
+            "def {test_name}\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"
+        )),
+        "{test_name} is the raise:\n{test}"
+    );
+    assert!(test.contains("def test_sibling"), "the sibling test stays:\n{test}");
+    assert!(!test.contains(".extend"), "no extend stays in the file:\n{test}");
+}
+
+/// A write under `if` is not the one definition of the module or the
+/// receiver. Hoisting it would mix the module in when the branch did
+/// not run.
+#[test]
+fn an_extend_whose_write_is_conditional_stays_unsupported() {
+    assert_extend_stub(
+        "test_conditional_module",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"conditional module\" do\n    failing = Module.new { def begin_transport = :closed } if false\n    one = Box.new\n    one.extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+    assert_extend_stub(
+        "test_conditional_receiver",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"conditional receiver\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new if false\n    one.extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// `opened(side()).extend` has to run `side` before `Box.new`. The
+/// helper body would run it at the setter, so the test stays a raise.
+#[test]
+fn an_extend_through_a_helper_call_argument_stays_unsupported() {
+    assert_extend_stub(
+        "test_helper_argument",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  include OpenHelper\n  test \"helper argument\" do\n    failing = Module.new { def begin_transport = :closed }\n    assert_equal :closed, opened(\"a\".upcase).extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// `one.n += one.extend(mod).delta` reads `n` before the extend.
+#[test]
+fn an_extend_on_the_right_of_op_assign_stays_unsupported() {
+    assert_extend_stub(
+        "test_op_assign",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"op assign\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    one.n += one.extend(failing).delta\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// `self.extended` runs at the call. Leaving the extend in the file
+/// makes Spinel refuse the link.
+#[test]
+fn an_extend_hook_stays_unsupported() {
+    assert_extend_stub(
+        "test_extended_hook",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"extended hook\" do\n    failing = Module.new do\n      def self.extended(base) = base\n      def begin_transport = :closed\n    end\n    Box.new.extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// A class that defines `extend` returns that method's value. The call
+/// is not `Object#extend`.
+#[test]
+fn an_extend_the_class_defines_stays_unsupported() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  def extend(_mod)\n    :custom\n  end\n  def ping\n    :open\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"own extend\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    assert_equal :custom, one.extend(failing)\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        diags.iter().any(|d| d.message.contains("Object#extend")),
+        "a user-defined extend is reported:\n{diags:?}\n{test}"
+    );
+    assert!(
+        test.contains("def test_own_extend\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"),
+        "the test is the raise:\n{test}"
+    );
+    assert!(!test.contains(".extend"), "the call is not rewritten into Object#extend:\n{test}");
+}
+
 /// The same test without the extend: what `ActionText::Attachable#
 /// attachable_sgid` computes, written out as the `to_sgid(for:)` it is.
 /// A shape every target compiles, and Rails mints the identical bytes

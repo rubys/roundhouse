@@ -59,8 +59,16 @@ pub fn apply_object_extend_stub(app: &mut App) -> Vec<Diagnostic> {
         let helpers = factories(tm);
         let mut classes = library.classes.clone();
         let mut base_modules = library.modules.clone();
+        let mut extend_defined = library.extend_defined.clone();
         for lc in &tm.inner_classes {
             note_class(lc, &library.models, &mut classes, &mut base_modules);
+            let parent_defines = lc
+                .parent
+                .as_ref()
+                .is_some_and(|p| extend_defined.contains(p.0.as_str()));
+            if defines_instance_extend(lc) || parent_defines {
+                extend_defined.insert(lc.name.0.as_str().to_string());
+            }
         }
         for t in &mut tm.tests {
             let mut modules = base_modules.clone();
@@ -68,7 +76,7 @@ pub fn apply_object_extend_stub(app: &mut App) -> Vec<Diagnostic> {
                 hoist_anonymous_modules(&mut t.body, &sources, &mut tm.inner_classes, &mut modules);
             let mut seq = 0u32;
             rewrite_scope(&mut t.body, &classes, &modules, &helpers, &mut seq);
-            if let Some(d) = first_untraced(&t.body, &classes, &modules) {
+            if let Some(d) = first_untraced(&t.body, &classes, &modules, &extend_defined) {
                 let keep = tm.inner_classes.len() - added;
                 tm.inner_classes.truncate(keep);
                 diags.push(d);
@@ -92,6 +100,9 @@ struct LibraryIndex {
     /// defines `self.extended` is refused by Spinel: the hook would
     /// have to run at the call.
     modules: HashSet<String>,
+    /// Classes that define their own `extend`. The call is that method,
+    /// and its return value is not the receiver.
+    extend_defined: HashSet<String>,
 }
 
 fn library_index(app: &App) -> LibraryIndex {
@@ -105,11 +116,43 @@ fn library_index(app: &App) -> LibraryIndex {
     for lc in &app.library_classes {
         note_class(lc, &models, &mut classes, &mut modules);
     }
+    let extend_defined = extend_defined_names(&app.library_classes);
     LibraryIndex {
         models,
         classes,
         modules,
+        extend_defined,
     }
+}
+
+fn defines_instance_extend(lc: &LibraryClass) -> bool {
+    lc.methods
+        .iter()
+        .any(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "extend")
+}
+
+/// A class, and any class under it, whose `extend` is not `Object#extend`.
+fn extend_defined_names(classes: &[LibraryClass]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for lc in classes {
+            let name = lc.name.0.as_str().to_string();
+            if out.contains(&name) {
+                continue;
+            }
+            let parent_defines = lc
+                .parent
+                .as_ref()
+                .is_some_and(|p| out.contains(p.0.as_str()));
+            if defines_instance_extend(lc) || parent_defines {
+                out.insert(name);
+                grew = true;
+            }
+        }
+    }
+    out
 }
 
 fn note_class(
@@ -220,6 +263,14 @@ fn hoist_anonymous_modules(
             defs.push(def);
         }
         if !ok || defs.is_empty() {
+            continue;
+        }
+        // `self.extended` runs at the call. Spinel refuses the module,
+        // then refuses `Object#extend`, and the test file does not link.
+        if defs
+            .iter()
+            .any(|m| m.receiver == MethodReceiver::Class && m.name.as_str() == "extended")
+        {
             continue;
         }
         inner.push(LibraryClass {
@@ -362,22 +413,79 @@ fn sole_extend_local(body: &Expr, name: &Symbol) -> bool {
     let mut writes = 0u32;
     let mut reads = 0u32;
     let mut extend_reads = 0u32;
-    walk(body, &mut |e| {
-        if is_plain_assign_to(e, name) {
-            writes += 1;
-        } else if is_other_write(e, name) {
-            writes += 2;
-        }
-        if let ExprNode::Send { method, args, .. } = &*e.node {
-            if method.as_str() == "extend" && args.len() == 1 && var_is(&args[0], name) {
+    let mut foreign = false;
+    let total = extend_reads_of(body, name);
+    visit_scoped(
+        body,
+        &|e| total > 0 && extend_reads_of(e, name) == total,
+        &mut |e| {
+            if is_plain_assign_to(e, name) {
+                writes += 1;
+            } else if is_other_write(e, name) {
+                writes += 2;
+            }
+            if is_extend_read(e, name) {
                 extend_reads += 1;
             }
-        }
-        if var_is(e, name) {
-            reads += 1;
+            if var_is(e, name) {
+                reads += 1;
+            }
+        },
+        &mut |e| {
+            if is_plain_assign_to(e, name) || is_other_write(e, name) {
+                foreign = true;
+            }
+        },
+    );
+    !foreign && writes == 1 && reads > 0 && reads == extend_reads
+}
+
+fn is_extend_read(expr: &Expr, name: &Symbol) -> bool {
+    matches!(&*expr.node, ExprNode::Send { method, args, .. }
+        if method.as_str() == "extend" && args.len() == 1 && var_is(&args[0], name))
+}
+
+fn extend_reads_of(expr: &Expr, name: &Symbol) -> u32 {
+    let mut n = 0u32;
+    walk(expr, &mut |e| {
+        if is_extend_read(e, name) {
+            n += 1;
         }
     });
-    writes == 1 && reads > 0 && reads == extend_reads
+    n
+}
+
+/// A gate or a block is its own scope. Enter it only when `contains`
+/// says the extend being judged is inside. A write in a skipped scope
+/// is `on_foreign`: it is not the one unconditional definition.
+fn visit_scoped(
+    expr: &Expr,
+    contains: &impl Fn(&Expr) -> bool,
+    on_node: &mut impl FnMut(&Expr),
+    on_foreign: &mut impl FnMut(&Expr),
+) {
+    let boundary = gates_control(expr) || matches!(&*expr.node, ExprNode::Lambda { .. });
+    if boundary && !contains(expr) {
+        walk(expr, on_foreign);
+        return;
+    }
+    on_node(expr);
+    expr.node.for_each_child(&mut |child| {
+        visit_scoped(child, contains, on_node, on_foreign);
+    });
+}
+
+fn contains_expr(hay: &Expr, needle: &Expr) -> bool {
+    if std::ptr::eq(hay, needle) {
+        return true;
+    }
+    let mut found = false;
+    hay.node.for_each_child(&mut |child| {
+        if !found {
+            found = contains_expr(child, needle);
+        }
+    });
+    found
 }
 
 fn replace_extend_arg(expr: &mut Expr, name: &Symbol, constant: &Expr) {
@@ -503,6 +611,13 @@ fn scan_eval_order(expr: &Expr, effect: &mut bool, preceded: &mut bool) {
     }
     if gates_control(expr) {
         *effect = true;
+        return;
+    }
+    // `obj.n += expr` reads `obj.n` before `expr`. That read is not a
+    // child node, so an extend in the right-hand side is preceded.
+    if let ExprNode::OpAssign { value, .. } = &*expr.node {
+        *effect = true;
+        scan_eval_order(value, effect, preceded);
         return;
     }
     if instance_extend(expr).is_some() {
@@ -702,6 +817,12 @@ fn explode_receiver(recv: &Expr, helpers: &[Factory]) -> Option<Built> {
         .iter()
         .find(|f| f.name.as_str() == method.as_str())?;
     let bound = bind_params(&factory.params, args)?;
+    // An argument with a call has to run before `Class.new`. Splicing
+    // it into the body runs it at the use, which is later, and a second
+    // use runs it twice. A literal, constant, or local can move.
+    if bound.iter().any(|(_, value)| !pure_binding(value)) {
+        return None;
+    }
     let mut body = value_of(&factory.body).clone();
     for (name, value) in &bound {
         subst_name(&mut body, name, value);
@@ -813,7 +934,13 @@ fn bind_params(params: &[Param], args: &[Expr]) -> Option<Vec<(Symbol, Expr)>> {
             bound.push((p.name.clone(), args[i].clone()));
             i += 1;
         } else if let Some(default) = &p.default {
-            bound.push((p.name.clone(), default.clone()));
+            let mut default = default.clone();
+            // `note = tag` means the earlier parameter, not a local of
+            // the method the body is copied into.
+            for (name, value) in &bound {
+                subst_name(&mut default, name, value);
+            }
+            bound.push((p.name.clone(), default));
         } else {
             return None;
         }
@@ -823,6 +950,13 @@ fn bind_params(params: &[Param], args: &[Expr]) -> Option<Vec<(Symbol, Expr)>> {
     } else {
         Some(bound)
     }
+}
+
+fn pure_binding(expr: &Expr) -> bool {
+    matches!(
+        &*expr.node,
+        ExprNode::Lit { .. } | ExprNode::Const { .. } | ExprNode::Var { .. } | ExprNode::SelfRef
+    )
 }
 
 fn value_of(expr: &Expr) -> &Expr {
@@ -868,13 +1002,14 @@ fn first_untraced(
     body: &Expr,
     classes: &HashSet<String>,
     modules: &HashSet<String>,
+    extend_defined: &HashSet<String>,
 ) -> Option<Diagnostic> {
     let mut found = None;
     walk(body, &mut |e| {
         if found.is_some() {
             return;
         }
-        if let Some(d) = untraced_at(e, body, classes, modules) {
+        if let Some(d) = untraced_at(e, body, classes, modules, extend_defined) {
             found = Some(d);
         }
     });
@@ -886,6 +1021,7 @@ fn untraced_at(
     root: &Expr,
     classes: &HashSet<String>,
     modules: &HashSet<String>,
+    extend_defined: &HashSet<String>,
 ) -> Option<Diagnostic> {
     if gates_control(expr) || effect_precedes_extend(expr) {
         if let Some(site) =
@@ -897,7 +1033,7 @@ fn untraced_at(
         }
     }
     let (recv, _) = instance_extend(expr)?;
-    if traced(recv, expr, root, classes, modules) {
+    if traced(recv, expr, root, classes, modules, extend_defined) {
         return None;
     }
     let mut d = Diagnostic::unsupported(expr.span, None, CONSTRUCT, DETAIL);
@@ -939,6 +1075,7 @@ fn traced(
     root: &Expr,
     classes: &HashSet<String>,
     modules: &HashSet<String>,
+    extend_defined: &HashSet<String>,
 ) -> bool {
     let ExprNode::Send { args, .. } = &*extend_expr.node else {
         return false;
@@ -958,26 +1095,40 @@ fn traced(
         return false;
     };
     let mut values = Vec::new();
-    let mut others = false;
-    walk(root, &mut |e| {
-        if let ExprNode::Assign {
-            target: LValue::Var { name, .. },
-            value,
-        } = &*e.node
-        {
-            if name == &local {
-                values.push(value.clone());
+    let others = std::cell::Cell::new(false);
+    visit_scoped(
+        root,
+        &|e| contains_expr(e, extend_expr),
+        &mut |e| {
+            if let ExprNode::Assign {
+                target: LValue::Var { name, .. },
+                value,
+            } = &*e.node
+            {
+                if name == &local {
+                    values.push(value.clone());
+                }
+            } else if is_other_write(e, &local) {
+                others.set(true);
             }
-        } else if is_other_write(e, &local) {
-            others = true;
-        }
-    });
-    if others || values.len() != 1 {
+        },
+        &mut |e| {
+            if is_plain_assign_to(e, &local) || is_other_write(e, &local) {
+                others.set(true);
+            }
+        },
+    );
+    if others.get() || values.len() != 1 {
         return false;
     }
     let Some(class_name) = plain_new_class(&values[0]) else {
         return false;
     };
+    // `def extend` on the class is that method. Replacing the call with
+    // the receiver drops the value it returns.
+    if extend_defined.contains(&class_name) {
+        return false;
+    }
     classes.contains(&class_name)
 }
 
