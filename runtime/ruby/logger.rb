@@ -111,8 +111,15 @@ module ActiveSupport
     end
 
     # The one write path. `Time.now` per line, as Ruby's does.
+    #
+    # `<<` writes the same bytes as `write` and returns the device; this
+    # method returns nil either way. Spinel's poly `write` builds a
+    # default arm that assigns a shared String handle to `const char *`
+    # once any `write` in the program appends its argument
+    # (`Tep::Stream#write`), so the blog does not compile. `<<` does not
+    # take that arm.
     def write_entry(severity, message)
-      @io.write(@formatter.call(severity, Time.now, @progname, message))
+      @io << @formatter.call(severity, Time.now, @progname, message)
       nil
     end
 

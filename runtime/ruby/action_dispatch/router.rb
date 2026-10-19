@@ -232,7 +232,11 @@ module ActionDispatch
         # the GET pass, in declaration order with the GET routes.
         verb = route.verb
         if (verb == method_upcase || (verb == "ANY" && method_upcase != "HEAD")) && admits(route, count, lead)
-          params = match_parts(route.pattern_parts, path_parts, route.int_params, format, route.seg_constraints)
+          # `match_parts` only reads these strings (`split`, `empty?`).
+          # Spinel will not pass the attr-reader String into that call
+          # while another name can append to it: the reader does not
+          # carry the shared handle. A copy has the same characters.
+          params = match_parts(route.pattern_parts, path_parts, route.int_params.dup, format, route.seg_constraints.dup)
           unless params.nil?
             return ActionDispatch::Router::MatchResult.new(route.controller, route.action, params, route.req_format)
           end

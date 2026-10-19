@@ -24,6 +24,18 @@ module Tep
     attr_accessor :remote_host
     attr_accessor :ivars
 
+    # These three stay String to String. A poly `[]=` is every user
+    # `[]=` in the program, and Spinel then treats
+    # `parse_query(...).each { |k, v| @req_params[k] = v }` as an
+    # appending value block. The share walk does not follow the strings
+    # stored inside `parse_query` into that block, and refuses the
+    # stores. The pin makes `[]=` Hash's, which does not append its
+    # argument. Missing keys still read as "" via `Tep.str_hash`.
+
+    # @rbs @req_params: Hash[String, String]
+    # @rbs @query: Hash[String, String]
+    # @rbs @body_fields: Hash[String, String]
+
     def initialize
       @verb         = +""
       @path         = +""
