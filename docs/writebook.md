@@ -72,6 +72,23 @@ unchanged. This reviewed inventory change records recovered source and its
 remaining limits, not runnable Writebook helper or whole-app support. The
 corpus pin and the manual inventory are unchanged.
 
+The 2026-10-16 refresh catches the inventory up with a week of changes it had
+not recorded. `673aa83c2` reports `ApplicationController`'s
+`content_security_policy` block as an ingest gap instead of dropping it
+silently, and ingest-gap attribution moves 151 diagnostics downstream of that
+gap to `Info` with the cause named. Markdown ERB support ingests
+`books/show.md.erb` and `leafables/show.md.erb`, clearing their two gaps. The
+`Rouge::Plugins::Redcarpet` include error now carries its call span. At
+`books_controller.rb:74:63` and `75:63`, four `lower_residue` notes on
+`params[...]&.map(&:to_i)` give way to two `gradual_untyped` warnings. One
+regression is fixed rather than recorded: `1dc93ea85` stopped the model-file
+nested scan from ingesting top-level declarations, which dropped the
+compact-named `module ActionText::Markdown::Uploads` and made the model's
+include of it an unresolved-include error. The scan now also takes top-level
+compact names under the model
+(`tests/model_file_nested_class_scan.rs`). Analysis errors go from 29 to 19.
+The pin is unchanged.
+
 ## Roadmap, not a support claim
 
 1. **Routes (resolved).** Empty resource action lists are supported, including

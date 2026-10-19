@@ -54,6 +54,9 @@ fn normalize_predicate(predicate: &mut Predicate, schema: &Schema) {
 /// must stay a String. Explicit numeric conversion preserves nil; an IR
 /// narrowing Cast can be elided after later typing and is not serialization.
 fn serialized_value_expr(expr: &Expr, column: &ColumnType, nullable: bool) -> Expr {
+    if let Some(serialized) = crate::lower::column_slot::serialize_arel_value(expr, column, nullable) {
+        return serialized;
+    }
     let text_ty = if nullable { Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() } } else { Ty::Str };
     let converted = match column {
         ColumnType::Float | ColumnType::Decimal { .. } => {
@@ -76,28 +79,7 @@ fn serialized_value_expr(expr: &Expr, column: &ColumnType, nullable: bool) -> Ex
                 text
             }
         }
-        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => {
-            let method = match expr.ty.as_ref().map(Ty::peel_nilable) {
-                Some(Ty::Time) => "format_db_time",
-                Some(Ty::Date) => "format_db_date",
-                // App RBS signatures may still spell the native type as
-                // a root class; nominal namespaced classes are not Time.
-                Some(Ty::Class { id, args }) if args.is_empty() && id.0.as_str() == "Time" => "format_db_time",
-                Some(Ty::Class { id, args }) if args.is_empty() && id.0.as_str() == "Date" => "format_db_date",
-                _ => return expr.clone(),
-            };
-            Expr::new(expr.span, ExprNode::Send {
-                recv: Some(Expr::new(expr.span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] })),
-                method: Symbol::from(method), args: vec![expr.clone()],
-                block: None, parenthesized: true,
-            })
-        }
-        ColumnType::Integer | ColumnType::BigInt | ColumnType::Reference { .. }
-        | ColumnType::Boolean | ColumnType::String { .. } | ColumnType::Text
-        | ColumnType::Binary
-        | ColumnType::Json
-        | ColumnType::Jsonb
-        | ColumnType::Uuid => return expr.clone(),
+        _ => return expr.clone(),
     };
     crate::lower::typing::with_ty(converted, text_ty)
 }

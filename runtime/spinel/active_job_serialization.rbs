@@ -41,5 +41,6 @@ module ActiveJob
 
   module Payload
     def self.build: (String job_class, String queue_name, String arguments_json) -> String
+    def self.build_at: (String job_class, String queue_name, Float at, String arguments_json) -> String
   end
 end

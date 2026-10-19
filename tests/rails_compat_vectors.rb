@@ -18,11 +18,12 @@
 # that contract — the cookie jar's verifier, `ActiveRecord::SignedId`,
 # `ActionText::SignedGlobalId`, Active Storage's blob verifier,
 # `GlobalID.param`, tep's cookie codec — not a re-derivation of it, so a
-# pass means the app's own bytes agree with Rails'.
+# pass means the app's own bytes agree with Rails'. The encrypted
+# cookie jar's sections drive its encryptor the same way.
 #
 # A section the runtime does not implement is REPORTED as such, with the
-# runtime.md entry that owns it, rather than skipped: encrypted cookies
-# (the session store), CSRF tokens, bcrypt.
+# runtime.md entry that owns it, rather than skipped: CSRF tokens,
+# bcrypt.
 require "json"
 require "time"
 
@@ -52,6 +53,7 @@ end
 load "#{root}/runtime/spinel/base64.rb"
 load "#{root}/runtime/spinel/message_digest_cruby.rb"
 load "#{root}/runtime/ruby/action_controller/message_verifier.rb"
+load "#{root}/runtime/ruby/action_controller/message_encryptor.rb"
 load "#{root}/runtime/ruby/active_record/signed_id.rb"
 load "#{root}/runtime/spinel/tep/url.rb"
 
@@ -176,6 +178,19 @@ if (i = ARGV.index("--cases"))
     next skipped += 1 unless stable.(c["signed_id"], c["now"])
     want = c["expected"].is_a?(Integer) ? c["expected"].to_s : typed.(c["expected"])
     add.("sid_verify", c["signed_id"], signed_id_purpose(c["model"], c["purpose"]), want)
+  end
+  # Encrypted cookies: the message JSON the jar decrypts (as ActiveSupport
+  # writes it, so `<` reads `<`), and the cipher alone - Rails'
+  # plaintext under Rails' IV with the key derived here.
+  ec_exp = V["encrypted_cookies"]["generate"].to_h { |g| [g["name"], g["expires_at"] && Time.iso8601(g["expires_at"])] }
+  V["encrypted_cookies"]["verify"].each do |c|
+    exp = ec_exp[c["name"]]
+    next skipped += 1 unless exp.nil? || ((exp <= Time.iso8601(c["now"])) == (exp <= real_now))
+    add.("ec_verify", c["name"], c["raw"], c["expected"].nil? ? nil : as_json(c["expected"]))
+  end
+  V["encrypted_cookies"]["generate"].each do |c|
+    ct, iv, tag = c["raw"].split("--").map { |p| p.unpack1("m0") }
+    add.("ec_cipher", iv, c["plaintext"], ct + tag)
   end
   # (global_ids: plain base64, no crypto — the CRuby lane holds them.)
   V["sgids"]["generate"].each do |c|
@@ -369,9 +384,36 @@ section("app_verifiers.data") do
   end
 end
 
+# -- encrypted cookies (the session store and `cookies.encrypted`) ----
+# Verify: what the jar answers for each cookie Rails minted, tampered or
+# not, as the session store and `cookies.encrypted[...]` read it.
+ME = ActionController::MessageEncryptor
+section("encrypted_cookies.verify") do
+  V["encrypted_cookies"]["verify"].each do |c|
+    got = at(c["now"]) do
+      json = ME.decrypted_json(SECRET, c["raw"], "cookie." + c["name"])
+      json == "" ? nil : (JSON.parse(json) rescue nil)
+    end
+    check(c["case"], got, c["expected"])
+  end
+end
+# Generate: the IV is random, so each case checks the two halves that
+# are not: the envelope the jar encrypts (Rails' plaintext, given Rails'
+# expiry) and the cipher (Rails' plaintext under Rails' IV, with the key
+# derived here, is Rails' ciphertext and tag).
+section("encrypted_cookies.generate") do
+  key = ME.derive_key(SECRET)
+  V["encrypted_cookies"]["generate"].each do |c|
+    exp = c["expires_at"] ? "\"#{c["expires_at"]}\"" : "null"
+    envelope = MV.message_envelope(as_json(c["value"]), "cookie." + c["name"], exp)
+    ct, iv, tag = c["raw"].split("--").map { |p| p.unpack1("m0") }
+    sealed = MessageDigest.aes_256_gcm_encrypt(key, iv, c["plaintext"])
+    check("#{c["name"]} #{c["value"].inspect[0, 40]}", [envelope, sealed.b], [c["plaintext"], (ct + tag).b])
+  end
+end
+
 # ── contracts the runtime does not implement ─────────────────────────
 {
-  "encrypted_cookies" => LEDGER,
   "csrf" => LEDGER,
   "passwords" => LEDGER,
 }.each do |name, owner|

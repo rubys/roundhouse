@@ -17,8 +17,8 @@
 #
 # As the gem does: `new` opens (READWRITE|CREATE, or READONLY) and raises
 # `SQLite3::CantOpenException` when it cannot; the block form yields the
-# database and closes it after; `execute` steps the first statement of
-# its SQL and answers its rows, each an Array of column values (Integer,
+# database and closes it after; `execute` binds its `?` parameters,
+# steps the first statement of its SQL and answers its rows, each an Array of column values (Integer,
 # Float, String, nil); `get_first_row` / `get_first_value` read the first
 # of those; a failed prepare or step raises `SQLite3::SQLException`
 # (`SQLite3::BusyException` for SQLITE_BUSY), carrying sqlite's message.
@@ -101,7 +101,13 @@ module SQLite3
       milliseconds
     end
 
-    def execute(sql)
+    # `bind_vars` fill the statement's `?` placeholders in order, as the
+    # gem's `execute(sql, bind_vars = [])` does: one value or an Array of
+    # them, each nil, an Integer, true/false (0/1) or a String (its bytes,
+    # NULs included). Anything else raises rather than binding as text —
+    # the gem would bind a Float as a REAL, and a Hash by name.
+    def execute(sql, bind_vars = [])
+      binds = bind_vars.is_a?(Array) ? bind_vars : [bind_vars]
       @lock.synchronize do
         raise SQLite3::Exception, "cannot use a closed database" if @closed
         rc = 0
@@ -113,6 +119,7 @@ module SQLite3
         raise_error(rc) if rc != SQL::OK
         rows = []
         begin
+          binds.each_with_index { |value, i| bind(stmt, i + 1, value) }
           while true
             rc = SQL.sqlite3_step(stmt)
             break if rc == SQL::DONE
@@ -126,16 +133,33 @@ module SQLite3
       end
     end
 
-    def get_first_row(sql)
-      execute(sql).first
+    def get_first_row(sql, *bind_vars)
+      execute(sql, bind_vars).first
     end
 
-    def get_first_value(sql)
-      first = execute(sql).first
+    def get_first_value(sql, *bind_vars)
+      first = execute(sql, bind_vars).first
       first.nil? ? nil : first[0]
     end
 
     private
+
+    def bind(stmt, idx, value)
+      rc =
+        if value.nil?
+          SQL.sqlite3_bind_null(stmt, idx)
+        elsif value.is_a?(Integer)
+          SQL.sqlite3_bind_int64(stmt, idx, value)
+        elsif value == true || value == false
+          SQL.sqlite3_bind_int64(stmt, idx, value ? 1 : 0)
+        elsif value.is_a?(String)
+          text = value.to_s
+          SQL.sqlite3_bind_text(stmt, idx, text, text.bytesize, -1)
+        else
+          raise ArgumentError, "SQLite3::Database#execute: cannot bind #{value.class} here"
+        end
+      raise_error(rc) if rc != SQL::OK
+    end
 
     def row(stmt)
       out = []

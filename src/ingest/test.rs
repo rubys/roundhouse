@@ -7,10 +7,12 @@
 
 use ruby_prism::Node;
 
-use crate::dialect::{MethodDef, Test, TestModule};
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, MethodVisibility, Test, TestModule};
+use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::VarId;
 use crate::span::Span;
+use crate::ty::Ty;
 use crate::{ClassId, Symbol};
 
 use super::expr::ingest_expr;
@@ -219,6 +221,14 @@ fn ingest_test_class(
                     continue;
                 }
             }
+            // `self.use_transactional_tests = false` — Rails' per-class
+            // opt-out of the fixture transaction. Kept as a class method
+            // so the autorun shim can ask the class. Anything else in
+            // the class body is still skipped.
+            if let Some(method) = transactional_tests_method(&stmt) {
+                helpers.push(method);
+                continue;
+            }
             // Class-level constant assignment — `TABLE = [...]`,
             // `Article = Struct.new(...)`. Captured here so the test
             // emit can hoist them to file scope as `const NAME =
@@ -416,6 +426,57 @@ fn ingest_test_class(
         helpers,
         constants,
         includes,
+    })
+}
+
+/// `self.use_transactional_tests = false` (or `true`) as
+/// `def self.use_transactional_tests; <bool>; end`. The shim calls that
+/// class method; `TestBase` answers true when the class does not override it.
+fn transactional_tests_method(stmt: &Node) -> Option<MethodDef> {
+    let call = stmt.as_call_node()?;
+    if constant_id_str(&call.name()) != "use_transactional_tests=" {
+        return None;
+    }
+    let recv = call.receiver()?;
+    if recv.as_self_node().is_none() {
+        return None;
+    }
+    let args = call.arguments()?;
+    let arg = args.arguments().iter().next()?;
+    let value = if arg.as_true_node().is_some() {
+        true
+    } else if arg.as_false_node().is_some() {
+        false
+    } else {
+        return None;
+    };
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lit {
+            value: Literal::Bool { value },
+        },
+    );
+    Some(MethodDef {
+        name: Symbol::from("use_transactional_tests"),
+        receiver: MethodReceiver::Class,
+        visibility: MethodVisibility::Public,
+        params: Vec::new(),
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        block_param: None,
+        name_span: Span::synthetic(),
+        body,
+        signature: Some(Ty::Fn {
+            params: Vec::new().into(),
+            block: None,
+            ret: std::sync::Arc::new(Ty::Bool),
+            effects: EffectSet::pure(),
+        }),
+        effects: EffectSet::pure(),
+        enclosing_class: None,
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
     })
 }
 

@@ -712,7 +712,7 @@ class BaseTest < Minitest::Test
     assert_match(/title = 'B'/, fork.to_sql)
     assert_equal prior, base.to_sql
     # Copy-on-write: mutating the parent after spawn must not rewrite the fork.
-    base.where(title: "C")
+    base.where!(title: "C")
     assert_match(/title = 'B'/, fork.to_sql)
     refute_match(/title = 'C'/, fork.to_sql)
     ordered = ActiveRecord::Relation.new(Item).where(title: "A")
@@ -721,6 +721,21 @@ class BaseTest < Minitest::Test
     ordered.order!(:id)
     assert_equal prior_order, fork_order.to_sql
     assert_match(/ORDER BY/, ordered.to_sql)
+  end
+
+  def test_chain_methods_leave_the_receiver_unchanged
+    base = ActiveRecord::Relation.new(Item).where(title: "A")
+    prior = base.to_sql
+    forks = [
+      base.where(id: 1), base.not(id: 2), base.order(:id), base.reorder(:id),
+      base.limit(1), base.offset(1), base.select(:id), base.distinct,
+      base.group(:title), base.having("COUNT(*) > 1"), base.none,
+      base.merge(base.where(id: 3)), base.unscope(where: :title),
+      base.or(base.where(id: 4)), base.excluding([1]), base.page(2)
+    ]
+    forks.each { |fork| refute_same base, fork }
+    assert_equal prior, base.to_sql
+    refute base.null_relation?
   end
 
   def test_find_in_batches_yields_loaded_records_once

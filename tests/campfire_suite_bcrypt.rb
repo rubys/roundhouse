@@ -23,10 +23,13 @@ Dir.mktmpdir("roundhouse-campfire-suite-bcrypt") do |emit|
         raise "wrong password accepted" if digest == "wrong horse" || explicit == "wrong horse"
         raise "expected test failure" if ENV["FAIL_SUITE_TEST"] == "1"
       end
+      def __txn_test_configuration
+        test_configuration
+      end
     end
     __t = BcryptTest.new
     begin
-      __t.test_configuration
+      __t.__txn_test_configuration
     end
     puts "BcryptTest: 1 tests passed"
   RUBY

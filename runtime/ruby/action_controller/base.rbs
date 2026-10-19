@@ -211,6 +211,7 @@ module ActionController
     # signature in runtime/spinel/action_controller_head.rbs.
     def head: (Symbol status, ?content_type: String?, ?location: String?) -> void
     def response: () -> Base
+    def redirect?: () -> bool
     # Strict stubs; Ruby/Spinel reopen in current.rb fills these in.
     def fresh_when: (untyped subject) -> void
     def stale?: (?etag: untyped) -> bool
@@ -226,6 +227,7 @@ module ActionController
     def cache_control_max_age: () -> Integer
     def cache_control_public: () -> bool
     def headers: () -> ActionController::HeaderStore
+    def helpers: () -> Base
     def send_data: (String data, ?type: String, ?disposition: String) -> void
     def verify_authenticity_token: () -> void
     def verified_request?: () -> bool

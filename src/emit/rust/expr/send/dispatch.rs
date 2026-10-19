@@ -12,15 +12,18 @@
 
 use crate::expr::{Expr, ExprNode, Literal};
 
-use super::super::util::peel_nil;
 use super::super::emit_expr;
+use super::super::util::peel_nil;
 
 /// Per-method positional-param Tys for hand-written runtime modules
 /// (`Db`, future `Broadcasts`, etc.) that aren't surfaced through
 /// `CLASS_METHOD_PARAM_TYS`. The Const-recv dispatch in emit_send
 /// consults this so `Db::prepare(format!(...))` (String arg, `&str`
 /// param) inserts the Borrow coercion automatically.
-pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Option<Vec<crate::ty::Ty>> {
+pub(super) fn external_class_method_param_tys(
+    class: &str,
+    method: &str,
+) -> Option<Vec<crate::ty::Ty>> {
     use crate::ty::Ty;
     let hash_str_untyped = || Ty::Hash {
         key: std::sync::Arc::new(Ty::Str),
@@ -144,8 +147,8 @@ pub(super) fn controller_shim_arity(method: &str) -> Option<usize> {
 /// so files without `use RubyToS` compile. Untyped/Record and other
 /// Sends keep method-style `.ruby_to_s()`.
 fn ruby_to_s_emit(recv: &Expr, recv_s: &str, ufcs: bool) -> String {
-    use crate::ty::Ty;
     use super::super::util::is_option_ty;
+    use crate::ty::Ty;
     match &*recv.node {
         ExprNode::Send { method: m, .. } if m.as_str() == "get" => {
             format!("{recv_s}.clone().unwrap_or_default()")
@@ -180,25 +183,23 @@ fn ruby_to_s_emit(recv: &Expr, recv_s: &str, ufcs: bool) -> String {
                     format!("{recv_s}.clone().unwrap_or_default()")
                 }
                 Some(Ty::Array { .. }) => format!("{recv_s}.to_string()"),
-                Some(ty) if ufcs && (super::super::super::ty::rust_value_shaped(ty)
-                    || matches!(ty, Ty::Hash { .. })) =>
+                Some(ty)
+                    if ufcs
+                        && (super::super::super::ty::rust_value_shaped(ty)
+                            || matches!(ty, Ty::Hash { .. })) =>
                 {
-                    format!(
-                        "<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))"
-                    )
+                    format!("<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))")
                 }
-                _ if ufcs => format!(
-                    "<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))"
-                ),
+                _ if ufcs => {
+                    format!("<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))")
+                }
                 _ => format!("{recv_s}.ruby_to_s()"),
             }
         }
         ExprNode::Var { .. } | ExprNode::Ivar { .. } if ufcs => {
             format!("<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))")
         }
-        ExprNode::Send { method: m, .. }
-            if ufcs && matches!(m.as_str(), "fetch") =>
-        {
+        ExprNode::Send { method: m, .. } if ufcs && matches!(m.as_str(), "fetch") => {
             format!("<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))")
         }
         _ => format!("{recv_s}.ruby_to_s()"),
@@ -244,7 +245,12 @@ pub(super) fn dispatch_method_by_recv_ty(
     // both shapes as Var-like for the binding-is-Option check.
     let var_name: Option<&str> = match &*recv.node {
         ExprNode::Var { name, .. } => Some(name.as_str()),
-        ExprNode::Send { recv: None, method, args, .. } if args.is_empty() => {
+        ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            ..
+        } if args.is_empty() => {
             let n = method.as_str();
             if super::super::param_ty(n).is_some() {
                 Some(n)
@@ -347,77 +353,45 @@ pub(super) fn dispatch_method_by_recv_ty(
             // Borrow constraint. Dereference the iter item so both
             // bool == bool and String == &str comparisons work; `==`
             // borrows its operands, so non-Copy elements are not moved.
-            "include?" | "contains?" if args.len() == 1 => Some(format!(
-                "{recv_s}.iter().any(|__c| *__c == {})",
-                args_s[0]
-            )),
-            _ => None,
-        },
-        Some(Ty::Str) | Some(Ty::Sym) => match method {
-            "empty?" if args.is_empty() => Some(format!("{recv_s}.is_empty()")),
-            "size" | "length" if args.is_empty() => {
-                // `as i64` cast — non-primary. Decide pass stamps
-                // `NEEDS_PARENS` on this Send for chained-recv use;
-                // consumer wraps. Arg/let-RHS positions stay bare.
-                Some(format!("{recv_s}.chars().count() as i64"))
-            }
-            // `str.to_i` → Ruby semantics: parse leading digits, 0 on
-            // parse failure / non-numeric input. Rust's `parse::<i64>`
-            // is stricter (full-string match); `unwrap_or(0)` covers
-            // the failure path. `&str` and `String` both expose
-            // `.parse()` so this works uniformly across the recv-Ty
-            // Str/Sym arms.
-            "to_i" if args.is_empty() => {
-                // Method chain (already primary). No outer wrap
-                // needed — `.parse::<i64>().unwrap_or(0).method()`
-                // chains correctly. Defensive wrap retired by Stage 1
-                // of #22.
-                Some(format!("{recv_s}.parse::<i64>().unwrap_or(0)"))
-            }
-            "to_f" if args.is_empty() => {
-                Some(format!("{recv_s}.parse::<f64>().unwrap_or(0.0)"))
-            }
-            "upcase" if args.is_empty() => Some(format!("{recv_s}.to_uppercase()")),
-            "downcase" if args.is_empty() => Some(format!("{recv_s}.to_lowercase()")),
-            // `strip` → `trim()` returns &str; `.to_string()` forces
-            // owned to match Ruby's `String#strip` return shape.
-            "strip" if args.is_empty() => Some(format!("{recv_s}.trim().to_string()")),
-            // `reverse` on String — codepoint reversal via chars().
-            "reverse" if args.is_empty() => Some(format!(
-                "{recv_s}.chars().rev().collect::<String>()"
-            )),
-            // `chars` returns Array<String> in Ruby; mirror with
-            // `Vec<String>` (each char converted to a one-char String).
-            "chars" if args.is_empty() => Some(format!(
-                "{recv_s}.chars().map(|c| c.to_string()).collect::<Vec<String>>()"
-            )),
-            // The argument is borrowed as `&*(…)`: `str`'s pattern
-            // methods take `&str` (and `char`), not `String`, so a
-            // computed argument (`ap.start_with?(pp[0, n])`) did not
-            // compile. `&*` is a no-op reborrow on a literal `&str`.
-            "start_with?" if args.len() == 1 => {
-                Some(format!("{recv_s}.starts_with(&*({}))", args_s[0]))
-            }
-            "end_with?" if args.len() == 1 => {
-                Some(format!("{recv_s}.ends_with(&*({}))", args_s[0]))
-            }
-            "include?" if args.len() == 1 => {
-                Some(format!("{recv_s}.contains(&*({}))", args_s[0]))
-            }
-            // `String#match?(re)` → `re.is_match(str)`. Rust has no
-            // `str::match_pred`; the Regex is the natural receiver
-            // (mirrors the TypeScript `re.test(s)` flip).
-            "match?" if args.len() == 1 => {
-                Some(format!("{}.is_match(&*({recv_s}))", args_s[0]))
+            "include?" | "contains?" if args.len() == 1 => {
+                Some(format!("{recv_s}.iter().any(|__c| *__c == {})", args_s[0]))
             }
             _ => None,
         },
+        Some(Ty::Str) | Some(Ty::Sym) => {
+            // String kernel, also the Symbol arm this match has always
+            // shared. Spellings live in `catalog::string_kernel`.
+            if let Some(entry) = crate::catalog::string_kernel::lookup(method, args.len()) {
+                return Some(crate::catalog::string_kernel::render_rust(
+                    entry, &recv_s, &args_s,
+                ));
+            }
+            match method {
+                "to_f" if args.is_empty() => {
+                    Some(format!("{recv_s}.parse::<f64>().unwrap_or(0.0)"))
+                }
+                // `reverse` on String — codepoint reversal via chars().
+                "reverse" if args.is_empty() => {
+                    Some(format!("{recv_s}.chars().rev().collect::<String>()"))
+                }
+                // `chars` returns Array<String> in Ruby; mirror with
+                // `Vec<String>` (each char converted to a one-char String).
+                "chars" if args.is_empty() => Some(format!(
+                    "{recv_s}.chars().map(|c| c.to_string()).collect::<Vec<String>>()"
+                )),
+                // `String#match?(re)` → `re.is_match(str)`. Rust has no
+                // `str::match_pred`; the Regex is the natural receiver
+                // (mirrors the TypeScript `re.test(s)` flip).
+                "match?" if args.len() == 1 => {
+                    Some(format!("{}.is_match(&*({recv_s}))", args_s[0]))
+                }
+                _ => None,
+            }
+        }
         // `Regexp#match?(str)` → `re.is_match(str)` when the receiver
         // is already the pattern (validations, flipped call sites).
         Some(Ty::Class { id, .. }) if id.0.as_str() == "Regexp" => match method {
-            "match?" if args.len() == 1 => {
-                Some(format!("{recv_s}.is_match(&*({}))", args_s[0]))
-            }
+            "match?" if args.len() == 1 => Some(format!("{recv_s}.is_match(&*({}))", args_s[0])),
             _ => None,
         },
         // `Untyped` recv (rust's alias for `serde_json::Value`) +
@@ -466,12 +440,12 @@ pub(super) fn dispatch_method_by_recv_ty(
                 // consumer wraps. Arg/let-RHS positions stay bare.
                 Some(format!("{recv_s}.len() as i64"))
             }
-            "keys" if args.is_empty() => Some(format!(
-                "{recv_s}.keys().cloned().collect::<Vec<_>>()"
-            )),
-            "values" if args.is_empty() => Some(format!(
-                "{recv_s}.values().cloned().collect::<Vec<_>>()"
-            )),
+            "keys" if args.is_empty() => {
+                Some(format!("{recv_s}.keys().cloned().collect::<Vec<_>>()"))
+            }
+            "values" if args.is_empty() => {
+                Some(format!("{recv_s}.values().cloned().collect::<Vec<_>>()"))
+            }
             "dup" | "clone" if args.is_empty() => Some(format!("{recv_s}.clone()")),
             // `hash.delete(k)` — Ruby removes by key, returns the
             // removed value. The `&` prefix is needed when the arg
@@ -480,7 +454,9 @@ pub(super) fn dispatch_method_by_recv_ty(
             "delete" if args.len() == 1 => {
                 let key_emit = if matches!(
                     &*args[0].node,
-                    ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                    ExprNode::Lit {
+                        value: Literal::Str { .. } | Literal::Sym { .. }
+                    }
                 ) {
                     args_s[0].clone()
                 } else {
@@ -491,5 +467,206 @@ pub(super) fn dispatch_method_by_recv_ty(
             _ => None,
         },
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::emit_expr;
+    use super::super::super::with_emit_ctx;
+    use crate::catalog::string_kernel::{STRING_KERNEL, StringKernel};
+    use crate::diagnostic::Severity;
+    use crate::emit::crystal;
+    use crate::emit::rust::EmitCtx;
+    use crate::emit::typescript;
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::ident::Symbol;
+    use crate::span::Span;
+    use crate::ty::Ty;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn rust_emit(expr: &Expr) -> String {
+        with_emit_ctx(EmitCtx::default(), || emit_expr(expr))
+    }
+
+    /// Oracle for one call on the literal `"ab"` (and `"a"` when the
+    /// row takes an argument). These are the spellings the bridges
+    /// emitted before the table existed.
+    fn emitted(name: &str) -> (&'static str, &'static str, &'static str) {
+        match name {
+            "empty?" => (
+                r#""ab".is_empty()"#,
+                r#""ab".length === 0"#,
+                r#""ab".empty?"#,
+            ),
+            "length" | "size" => (
+                r#""ab".chars().count() as i64"#,
+                r#""ab".length"#,
+                r#""ab".size.to_i64"#,
+            ),
+            "upcase" => (
+                r#""ab".to_uppercase()"#,
+                r#""ab".toUpperCase()"#,
+                r#""ab".upcase"#,
+            ),
+            "downcase" => (
+                r#""ab".to_lowercase()"#,
+                r#""ab".toLowerCase()"#,
+                r#""ab".downcase"#,
+            ),
+            "strip" => (
+                r#""ab".trim().to_string()"#,
+                r#""ab".trim()"#,
+                r#""ab".strip"#,
+            ),
+            "start_with?" => (
+                r#""ab".starts_with(&*("a"))"#,
+                r#""ab".startsWith("a")"#,
+                r#""ab".starts_with?("a")"#,
+            ),
+            "end_with?" => (
+                r#""ab".ends_with(&*("a"))"#,
+                r#""ab".endsWith("a")"#,
+                r#""ab".ends_with?("a")"#,
+            ),
+            "include?" => (
+                r#""ab".contains(&*("a"))"#,
+                r#""ab".includes("a")"#,
+                r#""ab".includes?("a")"#,
+            ),
+            "to_i" => (
+                r#""ab".parse::<i64>().unwrap_or(0)"#,
+                r#"Number("ab")"#,
+                r#""ab".to_i64"#,
+            ),
+            other => panic!("no emit oracle for `{other}`"),
+        }
+    }
+
+    fn call_source(entry: &StringKernel) -> String {
+        if entry.arity == 0 {
+            format!("\"ab\".{}", entry.name)
+        } else {
+            format!("\"ab\".{}(\"a\")", entry.name)
+        }
+    }
+
+    fn find_send(expr: &Expr, method: &str) -> Expr {
+        let mut found = None;
+        let mut pending = vec![expr];
+        while let Some(current) = pending.pop() {
+            if let ExprNode::Send { method: name, .. } = &*current.node {
+                if name.as_str() == method {
+                    found = Some(current.clone());
+                }
+            }
+            current
+                .node
+                .for_each_child(&mut |child| pending.push(child));
+        }
+        found.unwrap_or_else(|| panic!("no `{method}` send"))
+    }
+
+    fn analyze_method(source: &str, method_name: &str) -> Expr {
+        let mut app = crate::ingest::ingest_app_from_tree(HashMap::from([(
+            PathBuf::from("app/lib/probe.rb"),
+            source.as_bytes().to_vec(),
+        )]))
+        .unwrap();
+        crate::analyze::Analyzer::new(&app).analyze(&mut app);
+        let errors: Vec<_> = crate::analyze::diagnose(&app)
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.message)
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        let class = app
+            .library_classes
+            .iter()
+            .find(|class| class.name.0.as_str() == "Probe")
+            .expect("Probe");
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == method_name)
+            .unwrap_or_else(|| panic!("missing {method_name}"));
+        method.body.clone()
+    }
+
+    #[test]
+    fn analyze_rust_and_typescript_match_the_string_kernel() {
+        let mut body = String::from("class Probe\n");
+        for (i, entry) in STRING_KERNEL.iter().enumerate() {
+            body.push_str(&format!("  def m{i}\n    {}\n  end\n", call_source(entry)));
+        }
+        body.push_str("end\n");
+        for (i, entry) in STRING_KERNEL.iter().enumerate() {
+            let body_expr = analyze_method(&body, &format!("m{i}"));
+            let send = find_send(&body_expr, entry.name);
+            assert_eq!(send.ty, Some(entry.returns.ty()), "{}", entry.name);
+            let ExprNode::Send { recv, .. } = &*send.node else {
+                panic!("not a send");
+            };
+            assert_eq!(
+                recv.as_ref().and_then(|r| r.ty.clone()),
+                Some(Ty::Str),
+                "{}",
+                entry.name
+            );
+            let (want_rust, want_ts, want_crystal) = emitted(entry.name);
+            assert_eq!(rust_emit(&send), want_rust, "rust {}", entry.name);
+            assert_eq!(
+                typescript::emit_expr_for_runtime(&send),
+                want_ts,
+                "typescript {}",
+                entry.name
+            );
+            assert_eq!(
+                crystal::emit_expr_for_runtime(&send),
+                want_crystal,
+                "crystal {}",
+                entry.name
+            );
+        }
+    }
+
+    /// A Symbol receiver shares the Rust string bridge. The table is
+    /// keyed by String; the shared arm still prints its spelling.
+    #[test]
+    fn rust_symbol_receiver_uses_the_string_kernel_spelling() {
+        let mut recv = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Sym {
+                    value: Symbol::from("ab"),
+                },
+            },
+        );
+        recv.ty = Some(Ty::Sym);
+        let send = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from("empty?"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        assert_eq!(rust_emit(&send), r#""ab".is_empty()"#);
+    }
+
+    /// Wrong arity stays typed, and the Rust bridge declines it.
+    #[test]
+    fn wrong_arity_stays_typed_and_unbridged() {
+        let body = analyze_method(
+            "class Probe\n  def wrong\n    \"ab\".upcase(1)\n  end\nend\n",
+            "wrong",
+        );
+        let send = find_send(&body, "upcase");
+        assert_eq!(send.ty, Some(Ty::Str));
+        let rust = rust_emit(&send);
+        assert!(!rust.contains("to_uppercase"), "{rust}");
     }
 }

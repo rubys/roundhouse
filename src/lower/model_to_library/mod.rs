@@ -572,7 +572,8 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
 
 /// Canonical class envelope for both production lowering and ownership
 /// observation. Typing and method selection remain the caller's job.
-fn model_class(model: &Model, methods: Vec<MethodDef>, table: Option<&Table>) -> LibraryClass {
+fn model_class(model: &Model, mut methods: Vec<MethodDef>, table: Option<&Table>) -> LibraryClass {
+    apply_inherited_visibility(model, &mut methods);
     LibraryClass {
         name: model.name.clone(),
         is_module: false,
@@ -588,7 +589,7 @@ fn model_class(model: &Model, methods: Vec<MethodDef>, table: Option<&Table>) ->
         nullable_columns: nullable_column_names(table),
         origin: None,
         constants: collect_model_constants(model),
-        unknown_calls: Vec::new(),
+        unknown_calls: replayed_class_body(model),
         class_ivar_initializers: collect_class_attr_initializers(model),
     }
 }
@@ -600,7 +601,7 @@ fn model_class(model: &Model, methods: Vec<MethodDef>, table: Option<&Table>) ->
 fn collect_class_attr_initializers(model: &Model) -> Vec<Expr> {
     use crate::ingest::library_class::{mattr_nil_seed, mattr_seed};
 
-    model
+    let mut out: Vec<Expr> = model
         .class_attr_defaults
         .iter()
         .map(|(name, value)| {
@@ -610,7 +611,74 @@ fn collect_class_attr_initializers(model: &Model) -> Vec<Expr> {
                 mattr_seed(name, value.clone())
             }
         })
+        .collect();
+    // The class body's own writes to its class instance variables (`@registry ||= []`, `@registry << …`), in order.
+    for item in &model.body {
+        if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item
+            && writes_class_ivar(expr)
+        {
+            out.push(expr.clone());
+        }
+    }
+    out
+}
+
+/// `private :comments` on a method the lowering synthesizes; a name it does not synthesize (a gem's) has no method here to mark.
+fn apply_inherited_visibility(model: &Model, methods: &mut [MethodDef]) {
+    for (class_side, name, visibility) in inherited_visibility(model) {
+        let side = if class_side { MethodReceiver::Class } else { MethodReceiver::Instance };
+        for m in methods.iter_mut().filter(|m| m.name.as_str() == name && m.receiver == side) {
+            m.visibility = visibility;
+        }
+    }
+}
+
+/// `(class side, name, visibility)` per name a model's `private :x` gives a method its body does not define.
+pub(crate) fn inherited_visibility(model: &Model) -> Vec<(bool, &str, crate::dialect::MethodVisibility)> {
+    let mut out = Vec::new();
+    for item in &model.body {
+        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        if expr.decisions & crate::expr::INHERITED_VISIBILITY == 0 {
+            continue;
+        }
+        let ExprNode::Send { method: marker, args, .. } = &*expr.node else { continue };
+        let visibility = match marker.as_str() {
+            "public" | "public_class_method" => crate::dialect::MethodVisibility::Public,
+            "protected" => crate::dialect::MethodVisibility::Protected,
+            _ => crate::dialect::MethodVisibility::Private,
+        };
+        let class_side = marker.as_str().ends_with("_class_method");
+        for arg in args {
+            let name = match &*arg.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.as_str(),
+                _ => continue,
+            };
+            out.push((class_side, name, visibility));
+        }
+    }
+    out
+}
+
+/// The class-body statements the Ruby family replays (`ingest::app_extension_calls`), in source order.
+fn replayed_class_body(model: &Model) -> Vec<Expr> {
+    model
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            crate::dialect::ModelBodyItem::Unknown { expr, .. } if expr.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 => Some(expr.clone()),
+            _ => None,
+        })
         .collect()
+}
+
+pub(crate) fn writes_class_ivar(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Assign { target: crate::expr::LValue::Ivar { .. }, .. }
+        | ExprNode::OpAssign { target: crate::expr::LValue::Ivar { .. }, .. } => true,
+        ExprNode::Send { recv: Some(r), block: None, .. } => matches!(&*r.node, ExprNode::Ivar { .. }),
+        _ => false,
+    }
 }
 
 /// Class-level `NAME = <expr>` constants declared in a model body (e.g.
@@ -660,6 +728,14 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
 
     for item in &model.body {
         let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        // Replayed where the source has it (`ingest::app_extension_calls`).
+        if expr.decisions & crate::expr::REPLAYED_CLASS_BODY != 0 {
+            continue;
+        }
+        // Claimed by `apply_inherited_visibility` and `analyze::private_calls`.
+        if expr.decisions & crate::expr::INHERITED_VISIBILITY != 0 {
+            continue;
+        }
         // Class-scope constants — claimed by analyze::extract_const_assignments.
         if matches!(&*expr.node, ExprNode::Assign { target: LValue::Const { .. }, .. }) {
             continue;
@@ -1262,7 +1338,12 @@ fn build_methods_with_finder_inputs(
     // one of these (last-def-wins) — exactly the collapse snapshot
     // semantics needs to see THROUGH, not after.
     let pre_user_methods = methods.clone();
-    push_user_methods(&mut methods, model);
+    let columns: HashSet<crate::ident::Symbol> = schema
+        .tables
+        .get(&model.table.0)
+        .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
+        .unwrap_or_default();
+    push_user_methods(&mut methods, model, &columns);
     // friendly_id — `friendly`, its configuration and the slug
     // `to_param`. After the user methods (their own wins), before the
     // `to_param` default below.
@@ -1340,7 +1421,7 @@ fn build_methods_with_finder_inputs(
 ///     an earlier real method, but only when that method was already
 ///     selected from the model body; generated framework methods are not
 ///     reordered by source spans.
-fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model, columns: &HashSet<crate::ident::Symbol>) {
     use crate::dialect::{AccessorKind, ModelBodyItem};
     use crate::expr::{ExprNode, LValue};
     let mut selected_source_methods = HashSet::new();
@@ -1388,6 +1469,31 @@ fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
                     && selected_source_methods.contains(&existing.name_span)
                     && existing.name_span.file == method.name_span.file
                     && method.name_span.start > existing.name_span.start;
+            // A table column's accessor yields to the model's own, as Rails' generated attribute methods do; not a signed virtual one (`has_secure_password`'s `confirmation=`).
+            let existing_is_column = existing.signature.is_some()
+                && matches!(existing.kind, AccessorKind::AttributeReader | AccessorKind::AttributeWriter)
+                && columns.contains(&crate::ident::Symbol::from(existing.name.as_str().trim_end_matches('=')));
+            if incoming_is_real && existing_is_column && !method.name_span.is_synthetic() {
+                // The synthesized accessor stays, under the name the override's `super` (`ingest::column_accessors`) and hydration (`schema::hydration_setter`) reach it by.
+                let raw = {
+                    let mut raw = existing.clone();
+                    let column = existing.name.as_str().trim_end_matches('=');
+                    raw.name = crate::ident::Symbol::from(match existing.kind {
+                        AccessorKind::AttributeWriter => format!("_write_{column}_raw"),
+                        _ => format!("_read_{column}_raw"),
+                    });
+                    Some(raw)
+                };
+                selected_source_methods.remove(&existing.name_span);
+                if let Some(raw) = raw
+                    && !methods.iter().any(|m| m.name == raw.name && m.receiver == raw.receiver)
+                {
+                    methods.push(raw);
+                }
+                methods[idx] = method.clone();
+                selected_source_methods.insert(method.name_span);
+                continue;
+            }
             if incoming_is_real && (existing_is_attr_half || incoming_is_later_delegate) {
                 selected_source_methods.remove(&existing.name_span);
                 methods[idx] = method.clone();
@@ -1788,21 +1894,21 @@ pub(crate) fn push_scope_methods(
 
         // Rails relations are immutable, so every implicit-self root in
         // a scope body starts from the scope as it was on entry:
-        // `where(a).or(where(b))` is `a OR b`. Ours mutate in place, and
-        // the rewrite roots each of those on the one threaded `__rel`,
-        // so the receiver's `where(a)` landed on the argument too and
-        // the query became `(a AND b) OR (a AND b)`. When the body reads
-        // the relation more than once, each read takes its own copy.
-        // (A single read keeps the bare `__rel`; the entry spawn below
-        // already protects the caller's relation.)
+        // `where(a).or(where(b))` is `a OR b`. The rewrite roots each of
+        // those on the one threaded `__rel`. Chain methods now answer a
+        // new relation (#1041), so these copies no longer change the
+        // query; they cost one clone per extra read and can go once
+        // nothing reaches a scope body through a bang method.
+        // (A single read keeps the bare `__rel`.)
         if count_var_reads(&mut body, &rel_param) > 1 {
             spawn_each_var_read(&mut body, &rel_param, &model.name);
         }
 
         // Rails scopes spawn on entry: `rel.visible.with_direct_rooms`
         // must not leave joins/orders on `rel.visible` for a sibling
-        // `rel.visible.with_ordered_room`. Our chain methods mutate in
-        // place, so the scope method itself takes a copy first.
+        // `rel.visible.with_ordered_room`. Chain methods fork on their
+        // own since #1041; the entry copy is kept for the bang methods
+        // (`where!`, `order!`), which still write in place.
         let span = body.span;
         let rel_ty = Ty::Relation {
             of: model.name.clone(),
@@ -2769,7 +2875,8 @@ fn backfill_scalar_signature(method: &mut MethodDef, body_ty: Ty) {
     });
 }
 
-fn contains_return(e: &Expr) -> bool {
+/// Does `e` contain a `return` anywhere, nested blocks included?
+pub(crate) fn contains_return(e: &Expr) -> bool {
     if matches!(&*e.node, ExprNode::Return { .. }) {
         return true;
     }

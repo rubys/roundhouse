@@ -7,6 +7,7 @@
 //! sets `github.sha`), else `git rev-parse --short HEAD` on the source
 //! tree, else nothing — a tarball build simply has no commit.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -15,6 +16,17 @@ fn main() {
     // honor rerun-if-env-changed for it (cargo#8693). Switching checkouts that
     // share a target dir is covered by reading the env at execution time below.
     embed_runtime_files();
+    println!("cargo:rerun-if-env-changed=ROUNDHOUSE_TEST_BUNDLE_ROOT");
+    println!("cargo:rustc-check-cfg=cfg(roundhouse_test_bundle)");
+    // Scope this setting to the checkout: tests also build small child crates
+    // with this build script, which must not inherit the test bundle.
+    if std::env::var_os("ROUNDHOUSE_TEST_BUNDLE_ROOT").is_some_and(|root| {
+        Path::new(&root).canonicalize().expect("test bundle checkout root")
+            == manifest_root().canonicalize().expect("manifest root")
+    }) {
+        println!("cargo:rustc-cfg=roundhouse_test_bundle");
+        integration_test_modules();
+    }
     println!("cargo:rerun-if-env-changed=ROUNDHOUSE_COMMIT");
     let commit = std::env::var("ROUNDHOUSE_COMMIT")
         .ok()
@@ -126,6 +138,38 @@ fn runtime_table<'a>(entries: impl Iterator<Item = &'a (String, PathBuf)>) -> St
     }
     out.push_str("]\n");
     out
+}
+
+/// Compile the same integration sources together for full-suite execution.
+/// Directory discovery includes new suites without a second registration list.
+fn integration_test_modules() {
+    let tests = manifest_root().join("tests");
+    println!("cargo:rerun-if-changed={}", tests.display());
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(&tests).expect("read integration test directory") {
+        let path = entry.expect("read integration test entry").path();
+        if path.is_file()
+            && path.extension().is_some_and(|ext| ext == "rs")
+            && path.file_name().is_some_and(|name| name != "all_tests.rs")
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    let mut modules = String::new();
+    for path in paths {
+        let stem = path.file_stem().and_then(|stem| stem.to_str()).expect("UTF-8 test name");
+        writeln!(
+            modules,
+            "#[path = {:?}]\nmod r#{stem};",
+            path.to_str().expect("UTF-8 test path"),
+        ).expect("format integration test module");
+    }
+    let dest = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"))
+        .join("integration_tests.rs");
+    if std::fs::read_to_string(&dest).ok().as_deref() != Some(modules.as_str()) {
+        std::fs::write(dest, modules).expect("write integration test modules");
+    }
 }
 
 fn collect(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) {

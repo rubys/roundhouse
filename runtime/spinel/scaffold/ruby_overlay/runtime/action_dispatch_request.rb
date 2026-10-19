@@ -165,6 +165,22 @@ module ActionDispatch
       port
     end
 
+    def port
+      authority = @env.fetch("HTTP_X_FORWARDED_HOST", "").to_s.split(",").last.to_s.strip
+      if authority.empty?
+        authority = host
+        if !@env.key?("HTTP_HOST") && (@env.key?("SERVER_NAME") || !authority.include?(":"))
+          authority = "#{authority}:#{@env.fetch("SERVER_PORT", "").to_s}"
+        end
+      end
+      sep = authority.rindex(":")
+      unless sep.nil?
+        value = authority[(sep + 1)..].to_s
+        return value.to_i if value.match?(/\A[0-9]+\z/)
+      end
+      ssl? ? 443 : 80
+    end
+
     # Without the scheme's standard port, as the shared twin's: Rails'
     # `host_with_port` writes no `:443`/`:80`, and the CSRF check
     # compares this with an Origin a browser serializes the same way.
@@ -173,6 +189,25 @@ module ActionDispatch
       default = ssl? ? ":443" : ":80"
       h = h[0, h.length - default.length] if h.end_with?(default)
       "#{protocol}#{h}"
+    end
+
+    # Twin of the shared Request: scheme stripped, standard port already
+    # dropped by `base_url`.
+    def host_with_port
+      b = base_url
+      p = protocol
+      return "" if b.length < p.length
+      b[p.length..].to_s
+    end
+
+    # Same memo as the shared class. This overlay replaces that class on
+    # the CRuby lane, so the method has to live here too.
+    def content_security_policy
+      return @content_security_policy if defined?(@csp_ready) && @csp_ready
+      @csp_ready = true
+      src = Rails.application.content_security_policy
+      @content_security_policy = src.nil? ? nil : src.dup
+      @content_security_policy
     end
 
     def remote_ip

@@ -182,6 +182,64 @@ module I18n
     in_view && !html ? ActionView::ViewHelpers.html_escape(out) : out
   end
 
+  # A node of Strings as I18n answers it: a nested Hash keyed by Symbols,
+  # in the files' order, from the first locale of the chain that has it.
+  def self.translate_tree(full, options)
+    loc = options.key?(:locale) ? locale_name(options[:locale]) : locale.to_s
+    leaves = runtime_leaves
+    empties = runtime_empties
+    runtime_chain(loc).each do |l|
+      next unless runtime_nodes.key?(l + "." + full)
+      prefix = l + "." + full + "."
+      tree = {}
+      runtime_order.each do |k|
+        next unless k.start_with?(prefix)
+        path = k[prefix.length, k.length - prefix.length].to_s.split(".")
+        if empties.key?(k)
+          insert_empty(tree, path)
+        else
+          insert_tree(tree, path, leaves[k].to_s)
+        end
+      end
+      return tree
+    end
+    {}
+  end
+
+  # An empty mapping in the files (`feed: {}`), which I18n answers as `{}`.
+  def self.insert_empty(tree, path)
+    node = tree
+    i = 0
+    while i < path.length
+      key = path[i].to_s.to_sym
+      child = node[key]
+      unless child.is_a?(Hash)
+        child = {}
+        node[key] = child
+      end
+      node = child
+      i += 1
+    end
+    nil
+  end
+
+  def self.insert_tree(tree, path, value)
+    node = tree
+    i = 0
+    while i < path.length - 1
+      key = path[i].to_s.to_sym
+      child = node[key]
+      unless child.is_a?(Hash)
+        child = {}
+        node[key] = child
+      end
+      node = child
+      i += 1
+    end
+    node[path[path.length - 1].to_s.to_sym] = value
+    nil
+  end
+
   def self.scope_text(scope)
     return "" if scope.nil?
     return scope.map { |part| part.to_s }.join(".") if scope.is_a?(Array)
@@ -200,6 +258,7 @@ module I18n
     runtime_chain(loc).each do |l|
       text = leaves[l + "." + full]
       return text unless text.nil?
+      raise NotImplementedError, "I18n.t(\"#{full}\") answers a value that is not a String, which is not supported" if runtime_opaque.key?(l + "." + full)
       next unless runtime_nodes.key?(l + "." + full)
       return plural_form(leaves, l, l + "." + full, count) unless count.nil?
       subtree_translation(full)
@@ -423,6 +482,16 @@ module I18n
     @runtime_nodes || {}
   end
 
+  def self.runtime_order
+    load_translation_table if @runtime_order.nil?
+    @runtime_order || []
+  end
+
+  def self.runtime_empties
+    load_translation_table if @runtime_empties.nil?
+    @runtime_empties || {}
+  end
+
   def self.runtime_chains
     load_translation_table if @runtime_chains.nil?
     @runtime_chains || {}
@@ -439,13 +508,21 @@ module I18n
     @runtime_rules || {}
   end
 
+  def self.runtime_opaque
+    load_translation_table if @runtime_opaque.nil?
+    @runtime_opaque || {}
+  end
+
   def self.load_translation_table
     table = {}
     rules = {}
+    opaque = {}
     entries = []
     keys = {}
     leaves = {}
     nodes = {}
+    order = []
+    empties = {}
     chains = {}
     sep = "\u001C"
     File.read(File.join(Rails.root.to_s, "config", "i18n_translations")).split("\u001E").each do |line|
@@ -455,14 +532,22 @@ module I18n
         entries << fields[1, fields.length - 2]
       elsif kind == "K"
         keys[fields[1]] = fields[2, fields.length - 3]
-      elsif kind == "L"
-        leaves[fields[1]] = fields[2].to_s
+      elsif kind == "L" || kind == "M"
+        if kind == "L"
+          leaves[fields[1]] = fields[2].to_s
+        else
+          empties[fields[1]] = true
+          nodes[fields[1]] = true
+        end
+        order << fields[1].to_s
         parts = fields[1].split(".")
         j = parts.length - 1
         while j > 1
           nodes[parts[0, j].join(".")] = true
           j -= 1
         end
+      elsif kind == "O"
+        opaque[fields[1]] = true
       elsif kind == "R"
         rules[fields[1]] = fields[2].to_s.split(" ")
       elsif kind == "F"
@@ -480,8 +565,11 @@ module I18n
     end
     @runtime_leaves = leaves
     @runtime_nodes = nodes
+    @runtime_order = order
+    @runtime_empties = empties
     @runtime_chains = chains
     @runtime_rules = rules
+    @runtime_opaque = opaque
     @translation_entries = entries
     @translation_table = table
     nil

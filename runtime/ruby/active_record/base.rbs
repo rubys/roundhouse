@@ -274,6 +274,8 @@ module ActiveRecord
     # self either way (idempotent on already-destroyed records).
     def save: () -> bool
     def save_after_validation: () -> bool
+    def _save_committed: (bool was_new) -> void
+    def _destroy_committed: () -> void
     def _insert_row: () -> bool
     def save!: () -> Base
     def destroy: () -> Base

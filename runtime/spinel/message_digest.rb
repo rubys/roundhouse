@@ -20,6 +20,14 @@
 # Static-buffer contract: every sp_crypto return points at a per-function
 # static that the next call to the same function clobbers, so each result
 # is copied (`+ ""`) before it can outlive the next call.
+#
+# AES-256-GCM is not sp_crypto: it comes from spinel's `packages/openssl`
+# (CRuby's `OpenSSL::Cipher`, `aes-256-gcm` among its two modes, one C
+# call into the system libcrypto at `#final`). `cookies.encrypted` needs
+# it, and every spinel web app carries this file, so every spinel web app
+# now links libssl/libcrypto: a build host needs the OpenSSL headers.
+require "openssl"
+
 module SpCrypto
   ffi_func :sp_crypto_hmac_sha1_hex,            [:str, :str],             :str
   ffi_func :sp_crypto_hmac_sha256_hex,          [:str, :str],             :str
@@ -78,5 +86,38 @@ module MessageDigest
   def self.pbkdf2_sha256(secret, salt, iters, dklen)
     b64 = SpCrypto.sp_crypto_pbkdf2_sha256_b64url_len(secret, salt, iters, dklen) + ""
     Base64.urlsafe_decode64(b64)
+  end
+
+  # AES-256-GCM, as message_digest_cruby.rb has it and over the same
+  # object: `OpenSSL::Cipher` is the package's spelling of CRuby's. The
+  # encrypt side answers ciphertext followed by the 16-byte tag; the
+  # decrypt side answers the plaintext, or "" when the tag does not
+  # authenticate (the package raises `OpenSSL::CipherError`, its name
+  # for CRuby's `OpenSSL::Cipher::CipherError`). The callers never
+  # encrypt an empty message, so "" is never a real plaintext here.
+  def self.aes_256_gcm_encrypt(key, iv, plain)
+    c = OpenSSL::Cipher.new("aes-256-gcm")
+    c.encrypt
+    c.key = key
+    c.iv = iv
+    c.auth_data = ""
+    ct = c.update(plain) + c.final
+    ct + c.auth_tag
+  end
+
+  # A tag that is not 16 bytes is refused first, as Rails refuses it.
+  def self.aes_256_gcm_decrypt(key, iv, ct, tag)
+    return "" if tag.bytesize != 16
+    c = OpenSSL::Cipher.new("aes-256-gcm")
+    c.decrypt
+    c.key = key
+    c.iv = iv
+    c.auth_tag = tag
+    c.auth_data = ""
+    begin
+      c.update(ct) + c.final
+    rescue OpenSSL::CipherError
+      ""
+    end
   end
 end

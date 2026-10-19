@@ -1,0 +1,5 @@
+module ActionController
+  class Base
+    def config: () -> ControllerConfig
+  end
+end

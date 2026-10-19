@@ -132,8 +132,11 @@ fn controller() -> String {
 fn a_constructor_on_an_owner_expression_names_the_owner_once() {
     let src = controller();
     assert!(
-        src.contains("Message.create!(body: \"one\", room_id: Room.find(1).id)"),
-        "the owner expression becomes the foreign key, evaluated once:\n{src}"
+        // The Ruby family hands the owner OBJECT to the automatic
+        // inverse (`Message belongs_to :room`), as Rails sets it; the
+        // writer stores the same foreign key.
+        src.contains("Message.create!(body: \"one\", room: Room.find(1))"),
+        "the owner expression goes to the inverse, evaluated once:\n{src}"
     );
     assert!(!src.contains(".messages.create!"), "no constructor may stay on the reader:\n{src}");
 }
@@ -142,7 +145,7 @@ fn a_constructor_on_an_owner_expression_names_the_owner_once() {
 fn a_local_assigned_in_a_begin_keeps_its_type_after_it() {
     let src = controller();
     assert!(
-        src.contains("Boost.create!(content: \"hi\", message_id: second.id)"),
+        src.contains("Boost.create!(content: \"hi\", message: second)"),
         "`second` is still a Message after the begin, so its constructor rewrites:\n{src}"
     );
 }

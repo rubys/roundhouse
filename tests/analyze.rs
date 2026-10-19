@@ -4805,12 +4805,12 @@ end
     assert_eq!(ty("form.object.try(:name)", 12), "String?");
 }
 
-/// `.text.erb` templates are ingested for the analyzer (their Ruby
-/// types, the IDE sees them) and dropped before lowering. A `.json.erb`
-/// is not: it lowers through the view path as `<action>_json` (campfire's
-/// PWA manifest), and is no jbuilder.
+/// `.text.erb` templates are typed (the IDE sees them) and lower through
+/// the view path as `<action>_text`, which a mailer's `mail` renders. A
+/// `.json.erb` lowers as `<action>_json` (campfire's PWA manifest), and
+/// is no jbuilder.
 #[test]
-fn text_erb_templates_are_analysis_only_and_json_erb_is_rendered() {
+fn text_erb_and_json_erb_templates_are_rendered() {
     let mut app = app_from_files(&[
         ("app/mailers/application_mailer.rb", "class ApplicationMailer < ActionMailer::Base\nend\n"),
         ("app/mailers/product_mailer.rb", "class ProductMailer < ApplicationMailer\n  def in_stock\n    @name = \"x\"\n  end\nend\n"),
@@ -4825,7 +4825,9 @@ fn text_erb_templates_are_analysis_only_and_json_erb_is_rendered() {
         .filter(|v| v.analysis_only)
         .map(|v| format!("{}.{}", v.name.as_str(), v.format.as_str()))
         .collect();
-    assert_eq!(analysis_only, vec!["product_mailer/in_stock.text"]);
+    assert!(analysis_only.is_empty(), "{analysis_only:?}");
+    let text = app.views.iter().find(|v| v.name.as_str() == "product_mailer/in_stock" && v.format.as_str() == "text").expect("text view");
+    assert!(roundhouse::lower::view::lowers_through_view_path(text));
     let manifest = app.views.iter().find(|v| v.name.as_str() == "pwa/manifest").expect("manifest ingested");
     assert!(!manifest.jbuilder, "a json.erb is text, not jbuilder");
     assert!(roundhouse::lower::view::lowers_through_view_path(manifest));
@@ -5708,6 +5710,31 @@ fn record_identifier_include_is_admitted_and_dom_calls_are_strings() {
     assert_eq!(row.body.ty, Some(Ty::Str), "Presenter#row");
 }
 
+/// A backtick literal is `Kernel#``: a String, unless the class defines
+/// its own ` (Ruby dispatches the literal to it), whose return wins.
+#[test]
+fn a_backtick_types_as_string_unless_the_class_defines_its_own() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        ),
+        (
+            "lib/shells.rb",
+            "class Shell\n  def run\n    `ls`\n  end\nend\n\nclass FakeShell\n  def `(cmd)\n    [cmd]\n  end\n\n  def run\n    `ls`\n  end\nend\n\nclass ClassOnly\n  def self.`(cmd)\n    [cmd]\n  end\n\n  def run\n    `ls`\n  end\nend\n\nclass InstanceOnly\n  def `(cmd)\n    [cmd]\n  end\n\n  def self.run\n    `ls`\n  end\nend\n",
+        ),
+    ]);
+    let run = |name: &str| {
+        let class = app.library_classes.iter().find(|c| c.name.0.as_str() == name).expect(name);
+        class.methods.iter().find(|m| m.name.as_str() == "run").expect("run").body.ty.clone()
+    };
+    assert_eq!(run("Shell"), Some(Ty::Str), "Shell#run");
+    assert!(matches!(run("FakeShell"), Some(Ty::Array { .. })), "FakeShell#run: {:?}", run("FakeShell"));
+    // A method on the other side is not an override of this call.
+    assert_eq!(run("ClassOnly"), Some(Ty::Str), "ClassOnly#run");
+    assert_eq!(run("InstanceOnly"), Some(Ty::Str), "InstanceOnly.run");
+}
+
 /// Only the BARE `dom_id` is the mixed-in helper (emit qualifies bare
 /// calls alone); an explicit receiver that does not define it stays
 /// unresolved (not String-typed), so nothing claims it runs.
@@ -5730,4 +5757,29 @@ fn record_identifier_explicit_receiver_dom_id_stays_unresolved() {
         .expect("Caller");
     let bad = caller.methods.iter().find(|m| m.name.as_str() == "bad").expect("bad");
     assert_ne!(bad.body.ty, Some(Ty::Str), "explicit-receiver dom_id must not type as String");
+}
+
+#[test]
+fn a_method_reference_to_a_computed_name_reads_untyped() {
+    let app = app_from_files(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n"),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("lib/settings_extension.rb", "module SettingsExtension\n  def setting(name, default)\n    define_singleton_method(name) { default }\n  end\nend\n"),
+        ("app/models/article.rb", "class Article < ApplicationRecord\n  extend SettingsExtension\n  setting :title_limit, 40\n\n  def self.limit_ref\n    method(:title_limit)\n  end\n\n  def self.limits\n    [1].map(&method(:title_limit))\n  end\nend\n"),
+    ]);
+    let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").expect("Article");
+    let limits = article.methods().find(|m| m.name.as_str() == "limits").expect("limits");
+    assert_eq!(limits.body.ty, Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }), "{:?}", limits.body.ty);
+}
+
+#[test]
+fn a_private_marker_on_a_generated_enum_predicate_is_enforced() {
+    let app = app_from_files(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.integer :status\n  end\nend\n"),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("app/models/article.rb", "class Article < ApplicationRecord\n  enum :status, { draft: 0, published: 1 }\n  private :draft?\nend\n"),
+        ("app/models/probe.rb", "class Probe\n  def self.run\n    Article.new.draft?\n  end\nend\n"),
+    ]);
+    let found = diagnose(&app).iter().any(|d| d.message.contains("private method `draft?` called on Article"));
+    assert!(found, "{:#?}", diagnose(&app).iter().map(|d| d.message.clone()).collect::<Vec<_>>());
 }

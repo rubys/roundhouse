@@ -23,6 +23,8 @@ use crate::span::{SourceFile, Span};
 use crate::ty::Ty;
 
 pub(crate) const CONSTRUCTOR_KEYWORD_ARGUMENTS: &str = "constructor keyword arguments";
+/// `def` at expression position (in a block or a method body), stamped by ingest.
+pub(crate) const NESTED_DEF: &str = "nested def";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Diagnostic {

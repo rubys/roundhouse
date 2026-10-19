@@ -6,7 +6,7 @@ gem "dry-validation", "1.11.1"; gem "dry-schema", "1.14.1"; gem "dry-types", "1.
 require "dry-validation"; require "bigdecimal"; require "date"; require "time"
 CASES = File.read(ARGV[1]).lines.map(&:strip).reject { |l| l.empty? || l.start_with?("#") }
 Dir.chdir(ARGV[0])
-(Dir["lib/**/*.rb"].sort + Dir["app/contracts/*.rb"].sort).each { |f| load File.expand_path(f) }
+(Dir["lib/**/*.rb"].sort.sort_by { |f| f.include?("types") ? 1 : 0 } + Dir["app/contracts/*.rb"].sort).each { |f| load File.expand_path(f) }
 
 def lit(v)
   case v
@@ -17,6 +17,8 @@ def lit(v)
   when Date then "Date.new(#{v.year}, #{v.month}, #{v.day})"
   when Time then "Time.new(#{v.year}, #{v.month}, #{v.day}, #{v.hour}, #{v.min}, #{v.sec})"
   when Range then "(#{lit(v.first)}..#{lit(v.last)})"
+  # An app object stands for its class (`dv_norm` maps the answer alike).
+  when Shop::User, Shop::Guest then v.class.name
   else v.inspect
   end
 end

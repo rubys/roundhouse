@@ -1,29 +1,37 @@
-//! Predicate cond rewrite: collapse Rails-style emptiness predicates
-//! into the `.empty?`-based forms spinel's runtime expects, with a
-//! nil-safe variant for known-nullable locals and a nil-based variant
-//! for reads that yield a record reference (or nil), where `empty?`
-//! doesn't exist.
+//! Predicate cond rewrite. `blank?` / `present?` become
+//! `(recv || "").empty?`: the nil guard from `lower::blank::or_empty_string`,
+//! without `strip`. A template receiver is untyped, so the string arm's
+//! `strip` would raise on an array, hash, or relation. `any?` /
+//! `empty?` / `none?` stay collection `empty?`, with a nil-safe variant
+//! for known-nullable locals. A record reference has no `empty?`, so
+//! `blank?` / `present?` on one stay a nil test.
 
 use crate::expr::{Expr, ExprNode};
 
 use super::send;
 
-/// Rewrite Rails-style emptiness predicates to spinel-shape boolean
-/// forms. Applied to the cond of every template-level `if`:
-///   `recv.present?` / `recv.any?`  →  `!recv.empty?`
-///   `recv.blank?`   / `recv.empty?` / `recv.none?`  →  `recv.empty?`
+/// Rewrite Rails-style emptiness predicates. Applied to the cond of
+/// every template-level `if`:
+///   `recv.present?`  →  `!((recv || "").empty?)`
+///   `recv.blank?`    →  `(recv || "").empty?`
+///   `recv.any?`      →  `!recv.empty?`
+///   `recv.empty?` / `recv.none?`  →  `recv.empty?`
 /// Recursive through `BoolOp` so `a.present? && b.any?` rewrites both
 /// sides; other shapes pass through unchanged.
 ///
-/// When `recv` is a known-nullable local (a view's extra_param with a
-/// `nil` default) — or a nilable-scalar reader through a record
-/// (`nilable_reads`: typed_store attributes with no default, which read
-/// nil when unset; `showing_user.github_username.present?`) — the
-/// nil-safe form is generated instead:
-///   `notice.present?`  →  `!notice.nil? && !notice.empty?`
-///   `notice.empty?`    →  `notice.nil? || notice.empty?`
-/// matching spinel-blog's hand-written guards. Without the nil check
-/// the body NoMethodErrors when the controller omits the flash kwarg.
+/// `blank?` / `present?` do not take a second nil-check, and they do
+/// not `strip`. The `|| ""` already answers nil, and it is the same
+/// guard the typed string arm wraps around `strip`. A view has no
+/// receiver type: `strip` on `@posts` or `article.errors` raises.
+/// Whitespace-only flash text stays the pre-existing view gap.
+/// `any?` / `empty?` / `none?` still grow a nil-check when `recv` is a
+/// known-nullable local (a view's extra_param with a `nil` default) or
+/// a nilable-scalar reader (`nilable_reads`: typed_store attributes
+/// with no default):
+///   `notice.any?`    →  `!notice.nil? && !notice.empty?`
+///   `notice.empty?`  →  `notice.nil? || notice.empty?`
+/// Without that check a collection predicate NoMethodErrors when the
+/// controller omits the kwarg.
 ///
 /// When `recv` reads a record REFERENCE — a `belongs_to`/`has_one`
 /// reader (`story.domain`) or a foreign-key column (`ms.domain_id`),
@@ -64,13 +72,14 @@ pub(super) fn rewrite_predicates(
                     ..
                 } if args.is_empty() => nullable.contains(method.as_str()),
                 // An index read (`flash[f]`, `params[:x]`) yields nil on a
-                // missing key — `flash[f].present?` must not become a bare
-                // `!flash[f].empty?` (nil crash where Rails says false).
+                // missing key. Collection predicates (`empty?` / `any?`)
+                // need the nil-check; `blank?` / `present?` already carry
+                // `|| ""` and do not read this flag.
                 ExprNode::Send { recv: Some(_), method, .. }
                     if method.as_str() == "[]" => true,
                 // A nilable-scalar reader through a record — a
                 // typed_store attribute with no default reads nil when
-                // unset, so its emptiness predicates need the guard.
+                // unset, so a collection predicate on it needs the guard.
                 ExprNode::Send { recv: Some(_), method, args, block: None, .. }
                     if args.is_empty() =>
                 {
@@ -101,7 +110,22 @@ pub(super) fn rewrite_predicates(
                 };
             }
             match method.as_str() {
-                "present?" | "any?" => {
+                // Nil guard in the IR, no `strip`: the receiver is untyped.
+                "present?" | "blank?" => {
+                    let span = rewritten_recv.span;
+                    let guarded = crate::lower::blank::or_empty_string(
+                        span,
+                        rewritten_recv,
+                        crate::ty::Ty::Untyped,
+                    );
+                    let empty_call = send(Some(guarded), "empty?", Vec::new(), None, false);
+                    return if method.as_str() == "present?" {
+                        send(None, "!", vec![empty_call], None, false)
+                    } else {
+                        empty_call
+                    };
+                }
+                "any?" => {
                     let empty_call = send(
                         Some(rewritten_recv.clone()),
                         "empty?",
@@ -131,7 +155,7 @@ pub(super) fn rewrite_predicates(
                     }
                     return not_empty;
                 }
-                "blank?" | "empty?" | "none?" => {
+                "empty?" | "none?" => {
                     let empty_call = send(
                         Some(rewritten_recv.clone()),
                         "empty?",

@@ -1,0 +1,19 @@
+module ActionDispatch
+  class ContentSecurityPolicy
+    @names: Array[String]
+    @values: Array[Array[String]]
+
+    def initialize: () -> void
+    def directives: () -> ContentSecurityPolicy
+    def []: (String name) -> Array[String]?
+    def []=: (String name, Array[String] value) -> nil
+    def set_directive: (String name, Array[String] sources) -> nil
+    def worker_src: (String source) -> nil
+    def build: () -> String
+    def dup: () -> ContentSecurityPolicy
+    def self.write_header: (ActionController::Base controller) -> nil
+    def find_name: (String name) -> Integer
+    def copy_sources: (Array[String]? list) -> Array[String]
+    def join_sources: (Array[String]? list) -> String
+  end
+end

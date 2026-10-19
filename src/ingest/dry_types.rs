@@ -351,6 +351,15 @@ pub(super) fn dry_type(expr: &Expr, scope: &Scope<'_>) -> Option<DryType> {
             let parts: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
             plain(named_base(&parts)?)
         }
+        // `Instance(X)` in a `Types` module's own body.
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "Instance" && scope.types_modules.iter().any(|(m, _)| m == scope.owner) =>
+        {
+            let [class] = args.as_slice() else { return None };
+            matches!(&*class.node, ExprNode::Const { .. })
+                .then(|| plain(Base::Instance(crate::emit::ruby::emit_expr(class))))
+                .flatten()
+        }
         ExprNode::Send { recv: Some(recv), method, args, block: None, .. } => match method.as_str() {
             "optional" if args.is_empty() => {
                 let mut ty = dry_type(recv, scope)?;
@@ -538,6 +547,8 @@ fn named_base(rest: &[&str]) -> Option<Base> {
         ["Coercible", "String"] => Base::Coerce("String"),
         ["Coercible", "Integer"] => Base::Coerce("Integer"),
         ["Coercible" | "Params", "Float"] => Base::Coerce("Float"),
+        // dry-types' `Params::String` is `String` with `type?(String)`.
+        ["Params", "String"] => Base::Strict("String"),
         ["Coercible", "Hash"] => Base::Coerce("Hash"),
         ["Coercible", "Symbol"] => Base::CoerceSymbol,
         ["Params", "Integer"] => Base::ParamsInteger,
@@ -681,7 +692,11 @@ pub(super) fn holds_dry_type(
 ) -> bool {
     let own = matches!(&*expr.node, ExprNode::Const { path }
         if types_module_of(path, holder, types_modules, names)
-            .is_some_and(|(module, _, rest)| !plain.contains(&format!("{module}::{}", rest.join("::")))));
+            .is_some_and(|(module, _, rest)| !plain.contains(&format!("{module}::{}", rest.join("::")))))
+        // `Instance(X)`, `Constructor(X)` in a `Types` module's own body.
+        || matches!(&*expr.node, ExprNode::Send { recv: None, method, .. }
+            if matches!(method.as_str(), "Instance" | "Constructor" | "Array" | "Hash" | "Interface")
+                && types_modules.iter().any(|(m, _)| m == holder));
     let mut found = own;
     expr.node.for_each_child(&mut |c| found |= holds_dry_type(c, holder, types_modules, names, plain));
     found

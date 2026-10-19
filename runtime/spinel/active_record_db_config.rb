@@ -11,8 +11,11 @@
 # - `ActiveRecord::Base.connection_pool.with_connection { |c| … }` and
 #   `connection.transaction_open?` — `FragmentCache.transaction_open?`,
 #   which keeps a page rendered inside a transaction out of the cache.
-#   The transaction is the app's: the request read snapshot the shims
-#   open around a GET does not count, as Rails has no such thing.
+#   The transaction is the app's. The request read snapshot the shims
+#   open around a GET does not count, and neither does the test shim's
+#   single non-joinable fixture transaction: that BEGIN only holds the
+#   example's rows. A joinable transaction, and anything nested under
+#   the fixture, still count.
 # - `ActiveRecord::Base.instantiate_named(name, attributes)` — what
 #   `lower::record_snapshot` makes of `name.constantize.instantiate(...)`.
 # - `ActiveRecord::ConnectionAdapters::SQLite3Adapter.resolve_path` —
@@ -94,8 +97,14 @@ module ActiveRecord
   end
 
   class Connection
+    # See the note at the top of this file. `Db.transaction_open?` is
+    # the sqlite transaction, including the fixture BEGIN. The caches
+    # ask this method, so the lone non-joinable fixture frame is hidden.
     def transaction_open?
-      Db.transaction_open?
+      return false unless Db.transaction_open?
+      depth = Db._txn_depth
+      return true if depth != 1
+      ActiveRecord::Base._txn_parent_joinable?(1)
     end
   end
 

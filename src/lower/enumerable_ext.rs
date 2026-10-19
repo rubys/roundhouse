@@ -84,7 +84,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) -> bool {
     // `first` takes no count (ArgumentError, every sidebar render for a
     // member of a group direct room). Both halves answer `to_a`, and
     // on the Array that follows `first(n)` means what Ruby means.
-    if matches!(method.as_str(), "first" | "last") && args.len() == 1 && block.is_none() {
+    if crate::catalog::counted_relation_terminal(method.as_str(), args.len(), block.is_some()).is_some() {
         if let Some(array_ty) = recv.as_ref().and_then(|r| relation_or_array_half(r.ty.as_ref())) {
             let receiver = recv.take().expect("checked above");
             let mut to_a = Expr::new(

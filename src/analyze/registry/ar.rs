@@ -669,7 +669,14 @@ pub(in crate::analyze) fn register_action_cable(classes: &mut HashMap<ClassId, C
         .insert(Symbol::from("where"), Ty::Class { id: remote_id, args: vec![].into() });
     classes.insert(remotes_id.clone(), remotes);
 
+    // `server.config.mount_path`, which `lower::config_reader` folds to its literal; no other reader is.
+    let config_id = ClassId(Symbol::from("ActionCable::Server::Configuration"));
+    let mut config = ClassInfo::default();
+    config.instance_methods.insert(Symbol::from("mount_path"), Ty::Str);
+    classes.insert(config_id.clone(), config);
+
     let mut server = ClassInfo::default();
+    server.instance_methods.insert(Symbol::from("config"), Ty::Class { id: config_id, args: vec![].into() });
     server.instance_methods.insert(Symbol::from("broadcast"), Ty::Nil);
     server
         .instance_methods
@@ -681,6 +688,17 @@ pub(in crate::analyze) fn register_action_cable(classes: &mut HashMap<ClassId, C
         .class_methods
         .insert(Symbol::from("server"), Ty::Class { id: server_id, args: vec![].into() });
     classes.insert(ClassId(Symbol::from("ActionCable")), cable);
+}
+
+/// `Sentry` as `runtime/ruby/gem_facades.rbs` declares it: the gem on
+/// the CRuby tree, the façade on the others. Registered only when the
+/// app locks `sentry-ruby`; without it Rails has no `Sentry` either.
+pub(in crate::analyze) fn register_sentry(classes: &mut HashMap<ClassId, ClassInfo>) {
+    let mut sentry = ClassInfo::default();
+    for m in ["capture_exception", "capture_message"] {
+        sentry.class_methods.insert(Symbol::from(m), Ty::Nil);
+    }
+    classes.insert(ClassId(Symbol::from("Sentry")), sentry);
 }
 
 pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, ClassInfo>) {
@@ -731,6 +749,8 @@ pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, Cl
     // own per-app dispatch.
     attachment.class_methods.insert(Symbol::from("from_node"), attachment_ty.clone());
     attachment.instance_methods.insert(Symbol::from("to_partial_path"), Ty::Str);
+    // What the node names: a record, a blob or a content attachable, as `runtime/ruby/action_text.rb` builds it.
+    attachment.instance_methods.insert(Symbol::from("attachable"), Ty::Untyped);
     classes.insert(attachment_id, attachment);
 
     // `ActionText::Fragment` / `ActionText::Node` — the element view a

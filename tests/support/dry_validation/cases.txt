@@ -53,3 +53,6 @@ Users::SignupContract.new | {"login" => "adm", "age" => 1}
 Users::SignupContract.new | {"login" => "zzz", "age" => 1}
 Users::SignupContract.new | {"login" => "hsh", "age" => 1}
 RulesContract.new | {"name" => "ok", "nick" => "hsh"}
+ShapesContract.new | {"tags" => [{"title" => "a"}], "code" => "x", "nick" => "ab", "owner" => Shop::User.new, "address" => {"city" => "M", "z" => 1}}
+ShapesContract.new | {"tags" => [{}], "code" => 1, "nick" => "a", "owner" => 1, "address" => {}}
+ShapesContract.new | {"code" => nil, "nick" => 3, "owner" => Shop::Guest.new, "address" => nil}

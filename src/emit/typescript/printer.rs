@@ -228,6 +228,24 @@ impl Printer {
                 self.word(";");
                 self.newline();
             }
+            JsDecl::Namespace { export, name, decls } => {
+                self.start_line();
+                if *export {
+                    self.word("export ");
+                }
+                self.word("namespace ");
+                self.word(name);
+                self.word(" {");
+                self.newline();
+                self.indent += 1;
+                for d in decls {
+                    self.decl(d);
+                }
+                self.indent -= 1;
+                self.start_line();
+                self.word("}");
+                self.newline();
+            }
             JsDecl::Raw(text) => {
                 for line in text.lines() {
                     self.start_line();

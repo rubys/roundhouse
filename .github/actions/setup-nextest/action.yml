@@ -1,0 +1,13 @@
+name: Set up pinned Nextest
+description: Install the tested prebuilt Nextest release with checksum verification
+runs:
+  using: composite
+  steps:
+    - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+      with:
+        tool: nextest@0.9.148
+        checksum: true
+        fallback: none
+    - name: Verify Nextest installation
+      shell: bash
+      run: cargo nextest --version

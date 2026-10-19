@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/test_subprocess.rs"]
+mod test_subprocess;
 
 use roundhouse::project::BuildTarget;
 use std::path::PathBuf;
@@ -477,7 +479,7 @@ puts "runtime: NUL inline writes and bound reads agree"
 
 #[test]
 fn varying_binds_ruby() {
-    emitted("varying_binds_ruby", BuildTarget::Ruby);
+    emitted(test_subprocess::name!("varying_binds_ruby"), BuildTarget::Ruby);
 }
 
 #[test]
@@ -488,7 +490,7 @@ fn bind_runtime_ruby() {
 #[test]
 #[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
 fn varying_binds_spinel() {
-    emitted("varying_binds_spinel", BuildTarget::Spinel);
+    emitted(test_subprocess::name!("varying_binds_spinel"), BuildTarget::Spinel);
 }
 
 #[test]
@@ -580,13 +582,13 @@ puts "PASS seeded String-only find/exists adapter boundary and nil guards"
 
 #[test]
 fn string_key_adapter_ruby() {
-    string_key_adapter("string_key_adapter_ruby", BuildTarget::Ruby);
+    string_key_adapter(test_subprocess::name!("string_key_adapter_ruby"), BuildTarget::Ruby);
 }
 
 #[test]
 #[ignore = "requires Spinel and its RBS extractor"]
 fn string_key_adapter_spinel() {
-    string_key_adapter("string_key_adapter_spinel", BuildTarget::Spinel);
+    string_key_adapter(test_subprocess::name!("string_key_adapter_spinel"), BuildTarget::Spinel);
 }
 
 fn nullable_associations(test: &str, target: BuildTarget) {
@@ -700,13 +702,13 @@ Db.close
 
 #[test]
 fn nullable_associations_ruby() {
-    nullable_associations("nullable_associations_ruby", BuildTarget::Ruby);
+    nullable_associations(test_subprocess::name!("nullable_associations_ruby"), BuildTarget::Ruby);
 }
 
 #[test]
 #[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
 fn nullable_associations_spinel() {
-    nullable_associations("nullable_associations_spinel", BuildTarget::Spinel);
+    nullable_associations(test_subprocess::name!("nullable_associations_spinel"), BuildTarget::Spinel);
 }
 
 fn cache_probe(native: bool) -> &'static str {

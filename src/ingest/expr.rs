@@ -20,7 +20,7 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // ingester keeps going. Errors are recorded into the per-thread
     // collector for the post-run punch list. See `survey.rs`.
     match ingest_expr_strict(node, file) {
-        Ok(e) => Ok(e),
+        Ok(e) => Ok(proc_new_as_proc(e)),
         Err(err) if super::survey::is_active() => {
             super::survey::record(&err);
             Ok(Expr::new(
@@ -32,6 +32,20 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     }
 }
 
+
+/// `Proc.new { … }` is Kernel's `proc { … }`: the same Proc from the same
+/// block, which the pipeline already carries.
+fn proc_new_as_proc(mut e: Expr) -> Expr {
+    if let ExprNode::Send { recv, method, args, block: Some(_), .. } = &mut *e.node
+        && method.as_str() == "new"
+        && args.is_empty()
+        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Proc"])))
+    {
+        *recv = None;
+        *method = Symbol::from("proc");
+    }
+    e
+}
 
 /// Extract one multi-write target — `a`, `@a`, `recv.attr`, or
 /// `recv[i]` (e.g. `link['href'], title = attrs`) — as an `LValue`. Shared by the
@@ -2365,6 +2379,82 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             ExprNode::Range { begin, end, exclusive: r.is_exclude_end() }
         }
+        // `/(?<name>..)/ =~ str`: Ruby assigns each named group to a local
+        // of that name (nil on no match) and answers the match's index.
+        // As `Regexp#match`, which sets `$~` the same way:
+        //   __mw = re.match(str); name = __mw ? __mw[:name] : nil
+        //   __mw ? __mw.begin(0) : nil
+        n if n.as_match_write_node().is_some() => {
+            let mw = n.as_match_write_node().unwrap();
+            let call = mw.call();
+            let (Some(regex), Some(args)) = (call.receiver(), call.arguments()) else {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "a named-capture match without its operands".into(),
+                });
+            };
+            let args: Vec<Node<'_>> = args.arguments().iter().collect();
+            let [subject] = args.as_slice() else {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "a named-capture match with more than one operand".into(),
+                });
+            };
+            let stem = format!("__mw_{}", span.start);
+            let mut name = stem.clone();
+            let mut suffix = 0;
+            while super::sources::generated_local_is_reserved(&n.location(), &name) {
+                suffix += 1;
+                name = format!("{stem}_{suffix}");
+            }
+            let tmp = Symbol::from(name);
+            let var = |name: &Symbol| Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
+            let nil = || Expr::new(span, ExprNode::Lit { value: Literal::Nil });
+            let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+                Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(recv),
+                        method: Symbol::from(method),
+                        args,
+                        block: None,
+                        parenthesized: true,
+                    },
+                )
+            };
+            let assign = |name: &Symbol, value: Expr| {
+                Expr::new(
+                    span,
+                    ExprNode::Assign {
+                        target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: name.clone() },
+                        value,
+                    },
+                )
+            };
+            let matched = send(ingest_expr(&regex, file)?, "match", vec![ingest_expr(subject, file)?]);
+            let mut exprs = vec![assign(&tmp, matched)];
+            for target in mw.targets().iter() {
+                let Some(local) = target.as_local_variable_target_node() else {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "a named-capture match into a non-local target".into(),
+                    });
+                };
+                let local = Symbol::from(String::from_utf8_lossy(local.name().as_slice()).as_ref());
+                let group = Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: local.clone() } });
+                let read = Expr::new(
+                    span,
+                    ExprNode::If { cond: var(&tmp), then_branch: send(var(&tmp), "[]", vec![group]), else_branch: nil() },
+                );
+                exprs.push(assign(&local, read));
+            }
+            let zero = Expr::new(span, ExprNode::Lit { value: Literal::Int { value: 0 } });
+            exprs.push(Expr::new(
+                span,
+                ExprNode::If { cond: var(&tmp), then_branch: send(var(&tmp), "begin", vec![zero]), else_branch: nil() },
+            ));
+            ExprNode::Seq { exprs }
+        }
         n if n.as_regular_expression_node().is_some() => {
             let r = n.as_regular_expression_node().unwrap();
             let pattern = String::from_utf8_lossy(r.unescaped()).into_owned();
@@ -2586,25 +2676,61 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let implicit = n.as_implicit_node().unwrap();
             return ingest_expr(&implicit.value(), file);
         }
-        // `def`/`def self.X` at expression position — appears inside
+        // `def`/`def self.X` at expression position — inside
         // `Class.new(Parent) do ... end` blocks (anonymous-class
-        // idiom). Roundhouse's IR has no first-class "method def as
-        // expression" node; lift it to a no-op so the surrounding
-        // statement sequence still ingests. The behavioral fidelity
-        // gap (the resulting anonymous class won't carry the
-        // overridden methods) surfaces at runtime, not at ingest.
+        // idiom), or nested in another method's body. Roundhouse's IR has no first-class "method def as
+        // expression" node. The site still ingests, so the surrounding
+        // statement sequence does, but as a REFUSAL rather than a nil:
+        // a bare nil dropped the method silently, and campfire's
+        // `Class.new(WebPush::Connections::HTTP) { private def
+        // begin_transport ... }` emitted as `{ private nil }` with no
+        // diagnostic, a class missing the one method it was made for.
+        // The stamp is an error in app code (`analyze::diagnostics`),
+        // renders as a raise, and stubs a test that reaches it
+        // (`lower::nested_def`).
         n if n.as_def_node().is_some() => {
-            ExprNode::Lit { value: Literal::Nil }
-        }
-        // Backticks / `%x{…}` — a shell-out (`Kernel#\``). Not a
-        // construct any target can run, and not worth pretending to
-        // model; ledgered by name so it stops reading as the generic
-        // "unsupported expression node" catch-all.
-        n if n.as_x_string_node().is_some() || n.as_interpolated_x_string_node().is_some() => {
-            return Err(IngestError::Unsupported {
-                file: file.into(),
-                message: "shell command (backticks) is not modeled".into(),
+            let def = n.as_def_node().unwrap();
+            let name = String::from_utf8_lossy(def.name().as_slice()).into_owned();
+            let mut stub = Expr::new(span, ExprNode::Lit { value: Literal::Nil });
+            stub.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                target: None,
+                construct: Symbol::from(crate::diagnostic::NESTED_DEF),
+                detail: format!(
+                    "`def {name}` nested in a block or method body defines a method at run time; \
+                     no IR node carries it, so the site raises"
+                ),
             });
+            return Ok(stub);
+        }
+        // Backticks / `%x{…}` - a shell-out. Ruby evaluates the literal
+        // as a call of `Kernel#\`` with the (interpolated) command
+        // string, so that is the IR: a receiverless Send named "`". The
+        // ruby family writes it back as the literal (spinel compiles
+        // backticks; it has no `Kernel.\`` method). A strict target
+        // ledgers the call (`shell_command` in
+        // `project::report_unsupported_bundled_constants`) instead of
+        // emitting a method named "`". It used to be a survey gap, and
+        // `--allow-unsupported`
+        // emitted `nil` in its place: a tmux session list read
+        // `nil.split("\n")`.
+        n if n.as_x_string_node().is_some() || n.as_interpolated_x_string_node().is_some() => {
+            let command = if let Some(xs) = n.as_x_string_node() {
+                ExprNode::Lit {
+                    value: Literal::Str { value: String::from_utf8_lossy(xs.unescaped()).into_owned() },
+                }
+            } else {
+                let ix = n.as_interpolated_x_string_node().unwrap();
+                let mut parts: Vec<InterpPart> = Vec::new();
+                collect_interp_parts(ix.parts(), &mut parts, file)?;
+                ExprNode::StringInterp { parts }
+            };
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("`"),
+                args: vec![Expr::new(span, command)],
+                block: None,
+                parenthesized: true,
+            }
         }
         // Prism's error-recovery node: the parser hit something it
         // couldn't make sense of and inserted a placeholder to keep

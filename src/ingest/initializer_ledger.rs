@@ -353,6 +353,12 @@ const RECOGNIZERS: &[Recognizer] = &[
         levels: ANY,
         reads: |p| code_lines(p.text).any(|l| raise_on_missing_line(l).is_some()),
     },
+    Recognizer {
+        name: "content_security_policy (config.content_security_policy do |policy|)",
+        origins: INIT,
+        levels: ANY,
+        reads: |p| super::app::content_security_policy_method(p.text).is_some(),
+    },
 ];
 
 /// Names of every recognizer the ledger consults, for the docs and tests.

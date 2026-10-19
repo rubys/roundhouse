@@ -248,6 +248,24 @@ class SqliteObserverProbe
     [ first.is_a?(Integer), still, moved, rows, refused, missing, checkpoint.length, checkpoint[0], held.closed?, observer.closed? ]
   end
 
+  # `execute(sql, bind_vars)`: the gem's placeholders, in order — one
+  # value (campfire's form) or an Array of a String, an Integer and nil —
+  # and `get_first_value(sql, *bind_vars)`.
+  def self.bound
+    FileUtils.mkdir_p(DIR)
+    rows = nil
+    count = nil
+    SQLite3::Database.new(File.join(DIR, "bound.sqlite3")) do |db|
+      db.execute("CREATE TABLE IF NOT EXISTS items (body TEXT, n INTEGER)")
+      db.execute("DELETE FROM items")
+      db.execute("INSERT INTO items VALUES (?, ?)", [ "row-1", 41 ])
+      db.execute("INSERT INTO items VALUES (?, 2)", nil)
+      rows = db.execute("SELECT body, n + 1 FROM items ORDER BY n DESC")
+      count = db.get_first_value("SELECT count(*) FROM items WHERE body = ?", "row-1")
+    end
+    [ rows, count ]
+  end
+
   def self.config
     config = ActiveRecord::Base.connection_db_config
     [ config.database, config.adapter ]
@@ -292,6 +310,7 @@ end
         "  Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) }\n",
         "end\n",
         r#"puts SqliteObserverProbe.observe.inspect
+puts SqliteObserverProbe.bound.inspect
 puts SqliteObserverProbe.config.inspect
 puts SqliteObserverProbe.resolved.inspect
 puts SqliteObserverProbe.transactions.inspect
@@ -300,6 +319,7 @@ puts SqliteObserverProbe.locks.inspect
     ),
     expected: concat!(
         "[true, true, true, [[\"committed\", 7, 2.5, nil]], \"refused\", \"cannot open\", 3, 0, true, true]\n",
+        "[[[\"row-1\", 42], [nil, 3]], 1]\n",
         "[\":memory:\", \"sqlite3\"]\n",
         "[\"/app/storage/test.sqlite3\", \"/data/x.sqlite3\", \"/data/y.sqlite3\", \"/app/rel.sqlite3\"]\n",
         "[false, true]\n",

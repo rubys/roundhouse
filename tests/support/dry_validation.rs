@@ -18,6 +18,9 @@ const FILES: &[(&str, &str)] = &[
     ("lib/shop/types.rb", include_str!("dry_validation/lib/shop/types.rb")),
     ("app/contracts/chain_contract.rb", include_str!("dry_validation/app/contracts/chain_contract.rb")),
     ("app/contracts/rules_contract.rb", include_str!("dry_validation/app/contracts/rules_contract.rb")),
+    ("app/contracts/address_contract.rb", include_str!("dry_validation/app/contracts/address_contract.rb")),
+    ("app/contracts/shapes_contract.rb", include_str!("dry_validation/app/contracts/shapes_contract.rb")),
+    ("lib/shop/people.rb", include_str!("dry_validation/lib/shop/people.rb")),
 ];
 
 pub fn overlay() -> super::emit_and_run::Overlay {
@@ -27,10 +30,19 @@ pub fn overlay() -> super::emit_and_run::Overlay {
 pub fn assertions() -> String {
     format!(
         r##"
+def dv_norm(value)
+  case value
+  when Hash then value.to_h {{ |k, v| [k, dv_norm(v)] }}
+  when Array then value.map {{ |v| dv_norm(v) }}
+  when Shop::User, Shop::Guest then value.class
+  else value
+  end
+end
+
 def dv_check(index, callee, input, success, to_h, errors)
   result = callee.call(input)
   raise "case #{{index}}: success? #{{result.success?}}" unless result.success? == success
-  raise "case #{{index}}: to_h #{{result.to_h.inspect}}" unless result.to_h == to_h
+  raise "case #{{index}}: to_h #{{result.to_h.inspect}}" unless dv_norm(result.to_h) == to_h
   raise "case #{{index}}: errors #{{result.errors.to_h.inspect}}" unless result.errors.to_h == errors
 end
 

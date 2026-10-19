@@ -52,3 +52,23 @@ fn python_framework_units_emit() {
     }
     println!("\n  STRANGLER READINESS: {valid}/{total} framework files transpile to valid Python\n");
 }
+
+/// A default argument is evaluated while the class body runs, so a
+/// constant it names has to be bound before `class ViewHelpers`.
+/// `EMPTY_HTML_OPTS` does not name a class and stays in front (the
+/// constants that do name one follow it — see `runtime_loader`'s
+/// `py_wrap_namespace` unit test).
+#[test]
+fn python_default_arg_constant_precedes_its_class() {
+    use roundhouse::runtime_loader::python_units_subset;
+    let units = python_units_subset(&["app/view_helpers.py"], |_path, classes| classes)
+        .expect("python_units_subset");
+    let body = &units[0].content;
+    let const_at = body.find("EMPTY_HTML_OPTS = ").expect("EMPTY_HTML_OPTS");
+    let class_at = body.find("class ViewHelpers").expect("ViewHelpers class");
+    let def_at = body.find("def link_to(").expect("link_to");
+    assert!(
+        const_at < class_at && class_at < def_at,
+        "EMPTY_HTML_OPTS must be bound before class ViewHelpers uses it as a default"
+    );
+}

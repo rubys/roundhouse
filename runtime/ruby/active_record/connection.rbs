@@ -57,10 +57,15 @@ module ActiveRecord
     def exec_insert: (String sql, ?String? name, ?Array[String | Integer | Float | bool | nil] binds) -> Result
   end
 
+  class EnlistedRecord
+    @record: Base
+    @kind: Integer
+    def record: () -> Base
+    def kind: () -> Integer
+    def initialize: (Base record, Integer kind) -> void
+  end
+
   class Base
-    @__pending_preload: PendingPreload?
-    def _pend_preload: (PendingPreload pending) -> nil
-    def _await_preload: () -> nil
     # Request values stay intact until the schema-selected scalar adapter.
     def self.find: (Integer | Float | String | nil id) -> Base
     def self.find_by!: (Hash[String | Symbol, untyped] conditions) -> Base
@@ -96,6 +101,44 @@ module ActiveRecord
     def self.find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
     def self.find_or_create_by!: (Hash[Symbol, untyped] conditions) -> Base
     def self.sole: () -> Base
+    def self.delete_by: (Hash[Symbol, untyped] | String conditions) -> Integer
+    def self.destroy_by: (Hash[Symbol, untyped] | String conditions) -> Array[Base]
+    def self.distinct: (?(bool | Symbol | String) value) -> Relation
+    def self.eager_load: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
+    def self.excluding: (*untyped records) -> Relation
+    def self.find_each: () { (Base) -> void } -> Relation
+    def self.find_in_batches: () { (Array[Base]) -> void } -> Relation
+    def self.first_or_initialize: () -> Base
+    def self.first!: () -> Base
+    def self.from: (String source) -> Relation
+    def self.group: (*(String | Symbol) parts) -> Relation
+    def self.having: (String condition, *untyped args) -> Relation
+    def self.ids: () -> Array[Integer]
+    def self.includes: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
+    def self.joins: (String | Symbol spec) -> Relation
+    def self.left_joins: (String | Symbol spec) -> Relation
+    def self.left_outer_joins: (String | Symbol spec) -> Relation
+    def self.limit: (Integer | Float | String | nil n) -> Relation
+    def self.many?: () -> bool
+    def self.maximum: (String | Symbol expr) -> untyped
+    def self.merge: (Relation other) -> Relation
+    def self.minimum: (String | Symbol expr) -> untyped
+    def self.offset: (Integer | String | nil n) -> Relation
+    def self.one?: () -> bool
+    def self.or: (Relation other) -> Relation
+    def self.order: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
+    def self.pick: (String | Symbol col) -> untyped
+    def self.pluck: (String | Symbol col) -> Array[untyped]
+    def self.preload: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
+    def self.references: (*Symbol names) -> Relation
+    def self.reorder: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
+    def self.select: (*(String | Symbol) specs) -> Relation
+    def self.sum: (String | Symbol expr) -> Float
+    def self.touch_all: (?Symbol? name) -> Integer
+    def self.unscope: (?where: Symbol | String | Array[Symbol | String]?) -> Relation
+    def self.update_all: (Hash[Symbol, untyped] | String updates) -> Integer
+    def self.with_recursive: (Hash[Symbol, Array[Relation]] ctes) -> Relation
+    def self.without: (*untyped records) -> Relation
     def self.all: () -> Relation
     def self.none: () -> Relation
     def self.page: (?(Integer | String | nil) num) -> Relation
@@ -111,6 +154,23 @@ module ActiveRecord
     def self.take: () -> Base?
     def self._hydrate_all: (String sql) -> Array[Base]
     def update_attribute: (Symbol name, untyped value) -> bool
+    def save: () -> bool
+    def destroy: () -> Base
+    def touch: () -> bool
+    def touch_written: () -> bool
+    def _note_touched: () -> nil
+    @__touch_owner: Base?
+    def _adopt_touch_owner: (Base owner) -> nil
+    def _touch_owner: () -> nil
+    def _save_committed: (bool was_new) -> void
+    def _destroy_committed: () -> void
+    def _run_commit_callbacks: (Integer kind) -> nil
+    def self._txn_parent_joinable?: (Integer depth) -> bool
+    def self._txn_note_joinable: (Integer depth, bool joinable) -> nil
+    def self._commit_enlisted: () -> nil
+    def self._commit_enlisted_from: (Integer from) -> nil
+    def self._rollback_enlisted: (Integer from) -> nil
+    def _restore_after_rollback: (Integer kind) -> nil
     # Ruby-family overrides of base.rb's dirty-tracking stubs.
     def __track_saved_changes: (bool was_new) -> void
     def saved_changes: () -> Hash[String, untyped]

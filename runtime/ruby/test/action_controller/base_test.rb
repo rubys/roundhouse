@@ -64,6 +64,21 @@ class ActionControllerBaseTest < Minitest::Test
     assert_equal "text/vnd.turbo-stream.html", @controller.content_type
   end
 
+  def test_response_redirect_predicate_matches_redirect_statuses
+    # `head` names the status: `instance_variable_set` has no strict-target counterpart.
+    %i[moved_permanently found see_other temporary_redirect permanent_redirect].each do |status|
+      controller = TestController.new
+      controller.head(status)
+      assert controller.response.redirect?, "status #{status}"
+    end
+
+    %i[ok no_content im_used multiple_choices not_modified use_proxy bad_request internal_server_error].each do |status|
+      controller = TestController.new
+      controller.head(status)
+      refute controller.response.redirect?, "status #{status}"
+    end
+  end
+
   def test_media_type_drops_the_content_type_parameters
     @controller.response.content_type = "text/html; charset=utf-8"
     assert_equal "text/html", @controller.media_type

@@ -438,18 +438,13 @@ fn raise_panic_peephole() {
     );
 }
 
-/// `Time.now.utc.iso8601` chain — used by `ActiveRecord::Base#fill_timestamps`
-/// to stamp `created_at` / `updated_at` with a UTC ISO-8601 string. Ruby
-/// chains three Sends; Go's stdlib provides no element-wise analog
-/// (`time.Time` has no `.utc` method, formatting goes through
-/// `Format(layout)`), so the outermost-Send peephole rewrites the whole
-/// chain to `time.Now().UTC().Format(time.RFC3339)` in one shot. The
-/// `time.RFC3339` literal triggers `time` import injection via
+/// Lowered `Time.utc.to_rfc3339` — the IR form of the old
+/// `Time.now.utc.iso8601` clock. Go has no element-wise analog, so the
+/// outermost send becomes `time.Now().UTC().Format(time.RFC3339)`.
+/// The `time.RFC3339` literal triggers `time` import injection via
 /// `needed_imports`.
 #[test]
 fn time_now_utc_iso8601_peephole() {
-    // Body: `Time.now.utc.iso8601` — outermost Send is `.iso8601`
-    // on `.utc` on `.now` on `Const(Time)`.
     let chain = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -458,16 +453,7 @@ fn time_now_utc_iso8601_peephole() {
                 ExprNode::Send {
                     recv: Some(Expr::new(
                         Span::synthetic(),
-                        ExprNode::Send {
-                            recv: Some(Expr::new(
-                                Span::synthetic(),
-                                ExprNode::Const { path: vec![Symbol::from("Time")] },
-                            )),
-                            method: Symbol::from("now"),
-                            args: vec![],
-                            block: None,
-                            parenthesized: false,
-                        },
+                        ExprNode::Const { path: vec![Symbol::from("Time")] },
                     )),
                     method: Symbol::from("utc"),
                     args: vec![],
@@ -475,7 +461,7 @@ fn time_now_utc_iso8601_peephole() {
                     parenthesized: false,
                 },
             )),
-            method: Symbol::from("iso8601"),
+            method: Symbol::from("to_rfc3339"),
             args: vec![],
             block: None,
             parenthesized: false,
@@ -524,7 +510,7 @@ fn time_now_utc_iso8601_peephole() {
     // exact rewrite so a partial-chain change in the future is loud.
     assert!(
         emitted.contains("time.Now().UTC().Format(time.RFC3339)"),
-        "Time.now.utc.iso8601 chain missing Go rewrite:\n{emitted}",
+        "Time.utc.to_rfc3339 missing Go rewrite:\n{emitted}",
     );
     // Regression guard: the generic Const-recv class-method fallback
     // would otherwise emit `Time_now()` (an undefined bare function).

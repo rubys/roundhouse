@@ -7,6 +7,10 @@
 #
 # `pbkdf2_sha256` returns RAW BYTES, not hex or base64: the derived key
 # is an HMAC key, and HMAC keys are bytes.
+#
+# The AES-256-GCM pair is the encrypted cookie jar's: encrypt answers the
+# ciphertext followed by the 16-byte tag, decrypt the plaintext or ""
+# when the tag does not authenticate.
 module MessageDigest
   def self.hmac_sha1_hex: (String key, String msg) -> String
   def self.hmac_sha256_hex: (String key, String msg) -> String
@@ -14,4 +18,6 @@ module MessageDigest
   def self.pbkdf2_sha256: (String secret, String salt, Integer iters, Integer dklen) -> String
   def self.secure_random_bytes: (Integer n) -> String
   def self.secure_compare: (String a, String b) -> bool
+  def self.aes_256_gcm_encrypt: (String key, String iv, String plain) -> String
+  def self.aes_256_gcm_decrypt: (String key, String iv, String ct, String tag) -> String
 end

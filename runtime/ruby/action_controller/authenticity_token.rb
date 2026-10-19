@@ -59,8 +59,11 @@ module ActionController
       xor(decoded[0, 32].to_s, decoded[32, 32].to_s)
     end
 
+    # Not left to raise: a gem's `require "base64"` swaps in the strict stdlib decoder, and Rails reads its ArgumentError as a bad token.
     def self.decode(encoded)
       Base64.urlsafe_decode64(encoded)
+    rescue ArgumentError
+      ""
     end
 
     def self.xor(a, b)

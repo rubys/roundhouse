@@ -175,3 +175,95 @@ fn a_root_written_under_the_interpolated_app_root_is_walked() {
         );
     }
 }
+
+#[test]
+fn a_file_config_application_requires_relative_is_ingested() {
+    // Rails runs `config/application.rb` top to bottom before any
+    // initializer, so a constant in a file it loads with a literal
+    // `require_relative` is defined for the whole process (#1013).
+    let application_rb = r#"require_relative "boot"
+require "rails/all"
+require_relative "interactors"
+
+module Blog
+  class Application < Rails::Application
+  end
+end
+"#;
+    let (app, diags) = diagnostics(&[
+        ("config/application.rb", application_rb),
+        ("config/interactors.rb", INTERACTOR),
+    ]);
+    assert!(
+        !interactor_error(&app, &diags),
+        "a file `config/application.rb` requires is app code; diagnostics = {diags:?}"
+    );
+
+    // The same file with nothing requiring it is not loaded by Rails,
+    // so the require is doing the work rather than `config/` being walked.
+    let (app, diags) = diagnostics(&[("config/interactors.rb", INTERACTOR)]);
+    assert!(
+        interactor_error(&app, &diags),
+        "an unrequired file under `config/` stays invisible; diagnostics = {diags:?}"
+    );
+}
+
+#[test]
+fn a_file_config_environment_requires_relative_is_ingested() {
+    let environment_rb = r#"require_relative "application"
+require_relative "../shared/interactors"
+
+Rails.application.initialize!
+"#;
+    let (app, diags) = diagnostics(&[
+        ("config/environment.rb", environment_rb),
+        ("shared/interactors.rb", INTERACTOR),
+    ]);
+    assert!(
+        !interactor_error(&app, &diags),
+        "a file `config/environment.rb` requires is app code; diagnostics = {diags:?}"
+    );
+}
+
+#[test]
+fn a_computed_require_relative_path_is_a_survey_gap() {
+    use roundhouse::ingest::{survey, IngestError};
+    let application_rb = r#"require_relative "boot"
+require "rails/all"
+require_relative File.join("..", "shared", "interactors")
+
+module Blog
+  class Application < Rails::Application
+  end
+end
+"#;
+    let environment_rb = "require_relative \"application\"\n\nRails.application.initialize!\n";
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        ("config/boot.rb", "require \"bundler/setup\"\n"),
+        ("config/application.rb", application_rb),
+        ("config/environment.rb", environment_rb),
+        ("shared/interactors.rb", INTERACTOR),
+    ]
+    .iter()
+    .map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let result = ingest_app_from_tree(tree);
+    let gaps = survey::drain();
+    result.expect("ingest must not hard-fail");
+    let not_followed: Vec<&str> = gaps
+        .iter()
+        .filter_map(|gap| match gap {
+            IngestError::Unsupported { message, .. } if message.starts_with("require_relative not followed") => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    // Only the computed path: `boot` and `application` are the boot
+    // chain, not files to follow, and are not gaps either.
+    assert_eq!(not_followed.len(), 1, "gaps = {gaps:?}");
+    assert!(not_followed[0].contains("File.join"), "gaps = {gaps:?}");
+}

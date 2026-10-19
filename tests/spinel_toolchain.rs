@@ -48,6 +48,10 @@ mod class_configuration;
 mod dry_initializer;
 #[path = "support/data_factory.rs"]
 mod data_factory;
+#[path = "support/relation_fork.rs"]
+mod relation_fork_contract;
+#[path = "spinel_toolchain/relation_fork.rs"]
+mod relation_fork;
 #[path = "support/dry_struct.rs"]
 mod dry_struct;
 #[path = "support/dry_validation.rs"]
@@ -118,6 +122,10 @@ mod json_params;
 mod io_process_constants_contract;
 #[path = "spinel_toolchain/io_process_constants.rs"]
 mod io_process_constants;
+#[path = "support/backticks.rs"]
+mod backticks_contract;
+#[path = "spinel_toolchain/backticks.rs"]
+mod backticks;
 #[path = "support/class_side_default.rs"]
 mod class_side_default_contract;
 #[path = "spinel_toolchain/class_side_default.rs"]
@@ -559,4 +567,40 @@ fn dry_monads_results_run_lowered_natively() {
     let run = dry_monads::overlay().run_spinel(&dry_monads::assertions());
     run.assert_passes();
     assert!(run.stdout.contains("dry-monads contract passed"));
+}
+
+/// The native half of `emit_and_run::named_capture_matches_assign_their_locals`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn named_capture_matches_assign_their_locals_natively() {
+    let run = emit_and_run::real_blog()
+        .write("lib/matcher.rb", r##"class Matcher
+  def self.map_name(html)
+    /usemap=\s*['"]#(?<map_name>\S+?)['"]/m =~ html
+    map_name
+  end
+
+  def self.pair(text)
+    if /(?<a>\d+)-(?<b>\d+)/ =~ text
+      [a, b]
+    else
+      [a, b, :none]
+    end
+  end
+
+  def self.index(text)
+    /(?<w>x)/ =~ text
+  end
+end
+"##)
+        .run_spinel(r##"raise "map" unless Matcher.map_name(%(<img usemap="#m1">)) == "m1"
+raise "map none" unless Matcher.map_name("none").nil?
+raise "pair" unless Matcher.pair("1-2") == ["1", "2"]
+raise "pair none" unless Matcher.pair("x") == [nil, nil, :none]
+raise "index" unless Matcher.index("abx") == 2
+raise "index none" unless Matcher.index("q").nil?
+puts "named captures passed"
+"##);
+    run.assert_passes();
+    assert!(run.stdout.contains("named captures passed"));
 }

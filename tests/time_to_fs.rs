@@ -101,9 +101,26 @@ fn the_older_spelling_lowers_identically() {
 
 /// Two of Rails' entries are one-line lambdas over a method the
 /// pipeline already handles, so they cost a rename, not a format.
+/// `:iso8601` on a time-valued receiver lands on `to_rfc3339`. A
+/// receiver that is not a time keeps `iso8601`.
 #[test]
 fn the_lambda_builtins_that_are_just_a_method_become_that_method() {
-    assert_eq!(stamp("created_at.to_fs(:iso8601)", vec![]), "created_at.iso8601");
+    let schema = "\
+ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table \"things\", force: :cascade do |t|
+    t.datetime \"created_at\"
+    t.string \"name\"
+  end
+end
+";
+    assert_eq!(
+        stamp("created_at.to_fs(:iso8601)", vec![("db/schema.rb", schema)]),
+        "created_at.to_rfc3339"
+    );
+    assert_eq!(
+        stamp("name.to_fs(:iso8601)", vec![("db/schema.rb", schema)]),
+        "name.iso8601"
+    );
     assert_eq!(stamp("created_at.to_fs(:rfc2822)", vec![]), "created_at.rfc2822");
 }
 

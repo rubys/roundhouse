@@ -141,7 +141,7 @@ pub fn ingest_template(
 
     Ok(View {
         name: Symbol::from(name),
-        analysis_only: format.as_str() == "text",
+        analysis_only: false,
         jbuilder: false,
         format: Symbol::from(format),
         locals: Row::closed(),

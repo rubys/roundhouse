@@ -665,6 +665,88 @@ pub(super) fn emit_class_file_full(
     )
 }
 
+/// The outermost name a nested app class (`Importer::TooBig`) is declared
+/// under. Its file is that root's, where a namespace carries it: a file of
+/// its own named `importer::too_big.ts` left `Importer.TooBig` undefined.
+pub(super) fn nested_class_root(lc: &LibraryClass) -> Option<&str> {
+    let name = lc.name.0.as_str();
+    if lc.is_module || lc.origin.is_some() || !name.contains("::") {
+        return None;
+    }
+    name.split("::").next()
+}
+
+/// The file of the app class `root` (absent when only a module names it)
+/// with the classes nested under it declared in `export namespace` blocks
+/// after it, so `Root.Inner` reads them from one import of `Root`.
+pub(super) fn emit_class_file_with_nested(
+    primary: Option<&LibraryClass>,
+    root: &str,
+    nested: &[&LibraryClass],
+    app: &App,
+    out_path: PathBuf,
+    synthesized: &[String],
+) -> Vec<EmittedFile> {
+    let (anchor, rest): (&LibraryClass, Vec<LibraryClass>) = match primary {
+        Some(p) => (p, nested.iter().map(|c| (*c).clone()).collect()),
+        None => (nested[0], nested[1..].iter().map(|c| (*c).clone()).collect()),
+    };
+    let mut imports = collect_imports_with_companions(anchor, app, &out_path, synthesized, &rest);
+    for imp in &mut imports {
+        if let JsImport::Named { names, .. } = imp {
+            names.retain(|(n, _)| n != root);
+        }
+    }
+    imports.retain(|imp| !matches!(imp, JsImport::Named { names, .. } if names.is_empty()));
+
+    let mut decls: Vec<JsDecl> = Vec::new();
+    if let Some(p) = primary {
+        decls.push(library_class_decl(p));
+    }
+    decls.extend(nested_namespace(root, nested));
+    render_module(
+        &JsModule { header: module_header(), imports, decls },
+        out_path,
+        &app.sources,
+        &app.root,
+    )
+}
+
+fn library_class_decl(lc: &LibraryClass) -> JsDecl {
+    match super::js_library_class(lc) {
+        Ok(d) => d,
+        Err(e) => JsDecl::Raw(format!("// EMIT ERROR for {}: {e}", lc.name.0.as_str())),
+    }
+}
+
+/// `export namespace <last segment of prefix> { ... }` holding each class
+/// one segment below `prefix`, each followed by its own namespace when
+/// classes sit below it in turn.
+fn nested_namespace(prefix: &str, nested: &[&LibraryClass]) -> Option<JsDecl> {
+    let below = format!("{prefix}::");
+    let children: BTreeSet<&str> = nested
+        .iter()
+        .filter_map(|c| c.name.0.as_str().strip_prefix(below.as_str()))
+        .filter_map(|rest| rest.split("::").next())
+        .collect();
+    if children.is_empty() {
+        return None;
+    }
+    let mut decls = Vec::new();
+    for child in children {
+        let full = format!("{prefix}::{child}");
+        if let Some(c) = nested.iter().find(|c| c.name.0.as_str() == full) {
+            decls.push(library_class_decl(c));
+        }
+        decls.extend(nested_namespace(&full, nested));
+    }
+    Some(JsDecl::Namespace {
+        export: true,
+        name: prefix.rsplit("::").next().unwrap_or(prefix).to_string(),
+        decls,
+    })
+}
+
 /// `NAME = Struct.new(:a, :b)` shim — a class whose constructor binds
 /// positional args to public fields, plus the `get(field)` accessor
 /// the `record[:field]` emit dispatches to. `Article.name` is the JS
@@ -1022,7 +1104,11 @@ fn collect_imports_with_companions(
         } else if app.models.iter().any(|m| m.name.0.as_str() == r) {
             let stem = crate::naming::snake_case(&r);
             model_imports.push((r, stem));
-        } else if app.library_classes.iter().any(|other| other.name.0.as_str() == r) {
+        } else if app
+            .library_classes
+            .iter()
+            .any(|other| other.name.0.as_str() == r || nested_class_root(other) == Some(r_str))
+        {
             let stem = crate::naming::snake_case(&r);
             model_imports.push((r, stem));
         } else if synthesized.iter().any(|s| s == &r) {

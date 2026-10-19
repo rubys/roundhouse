@@ -16,21 +16,68 @@
 # `new.notify(...)` wrappers on mailer classes), so nothing here is
 # reflective.
 #
-# Known gaps, deliberately open: mailer view templates (*.text.erb)
-# are not ingested yet, so Message#body stays empty unless the mail
-# opts carry one; ApplicationMailer's `default from:` DSL is dropped
-# at ingest, so a mailer that omits an explicit :from sends nil.
+# A mailer action's templates are rendered at compile time into the
+# parts `mail` receives (`lower::mailer_templates`), with the class's
+# `default` headers merged under the action's own.
 module ActionMailer
   # One built mail. Header values are stored verbatim from the mail()
   # opts — raw SQL-style honesty: the corpus interpolates arbitrary
   # strings here, and nothing downstream needs them re-typed.
+  # One part of a multipart message: its rendered template.
+  class Part
+    def initialize(body, mime)
+      @body = body
+      @mime = mime
+    end
+
+    def body
+      @body
+    end
+
+    def decoded
+      @body
+    end
+
+    def mime_type
+      @mime
+    end
+  end
+
+  # One built mail, as ActionMailer's `Mail::Message` answers it: address
+  # headers as Arrays of bare addresses, and with both a text and an html
+  # template, a multipart/alternative whose own body is empty.
   class Message
-    def initialize(opts)
-      @to = opts[:to]
-      @from = opts[:from]
-      @replyto = opts[:replyto]
+    def initialize(opts, text_body = nil, html_body = nil)
+      @to = Message.addresses(opts[:to])
+      @from = Message.addresses(opts[:from])
+      @cc = Message.addresses(opts[:cc])
+      @bcc = Message.addresses(opts[:bcc])
+      @reply_to = Message.addresses(opts[:reply_to])
       @subject = opts[:subject]
-      @body = opts[:body]
+      @text_body = text_body
+      @html_body = html_body
+      given = opts[:body]
+      @body = if !text_body.nil? && !html_body.nil?
+        ""
+      elsif !text_body.nil?
+        text_body
+      elsif !html_body.nil?
+        html_body
+      else
+        given.nil? ? "" : given.to_s
+      end
+    end
+
+    # `"Name <a@example.com>"` → `"a@example.com"`; nil stays nil.
+    def self.addresses(value)
+      return nil if value.nil?
+      list = value.is_a?(Array) ? value : [value]
+      list.map do |item|
+        text = item.to_s
+        open = text.index("<")
+        close = text.index(">")
+        open.nil? || close.nil? || close < open ? text.strip : text[open + 1, close - open - 1].to_s
+      end
     end
 
     def to
@@ -41,8 +88,16 @@ module ActionMailer
       @from
     end
 
-    def replyto
-      @replyto
+    def cc
+      @cc
+    end
+
+    def bcc
+      @bcc
+    end
+
+    def reply_to
+      @reply_to
     end
 
     def subject
@@ -51,6 +106,18 @@ module ActionMailer
 
     def body
       @body
+    end
+
+    def multipart?
+      !@text_body.nil? && !@html_body.nil?
+    end
+
+    def text_part
+      multipart? ? Part.new(@text_body.to_s, "text/plain") : nil
+    end
+
+    def html_part
+      multipart? ? Part.new(@html_body.to_s, "text/html") : nil
     end
 
     # Rails' :test delivery semantics — collect, don't transmit. Both
@@ -81,8 +148,17 @@ module ActionMailer
       @deliveries ||= []
     end
 
-    def mail(opts)
-      Message.new(opts)
+    def mail(opts, text_body = nil, html_body = nil)
+      Message.new(opts, text_body, html_body)
+    end
+
+    def params
+      @params ||= {}
+    end
+
+    def _with_params(params)
+      @params = params
+      self
     end
   end
 end

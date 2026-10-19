@@ -390,7 +390,31 @@ fn untyped_subexpressions_baseline() {
     const LIKE_CEILING: usize = 27;
     let existing_untyped = all_untyped.len() - like_untyped;
     eprintln!("inference-only ledger: existing={existing_untyped}, sanitize_sql_like={like_untyped}");
-    const CEILING: usize = 677;
+    // Transactional saves (connection.rb: `save`/`destroy`/`touch` in a
+    // transaction, commit callbacks enlisted until the outermost COMMIT):
+    // 676 -> 757, MEASURED against origin/main 57f9521d3's runtime. The
+    // new `_commit_enlisted` (37), `_rollback_enlisted` (23),
+    // `_save_committed`/`_destroy_committed` (6), `_touch_owner` /
+    // `_adopt_touch_owner` (6), `_restore_after_rollback` (2) and the
+    // `transaction` / `update_attribute` / `changes_to_save` additions
+    // all read the enlisted list through `Db._txn_records` (or the
+    // owner slot) — unmodeled `Db` here, as the depth counter's reads
+    // above are; the RBS-paired gate types them all.
+    // Non-joinable fixture transactions (savepoints under
+    // `use_transactional_tests`): 757 -> 787, MEASURED by swapping
+    // connection.rb against this branch's base. The net thirty are
+    // `_txn_parent_joinable?` (6), `_txn_note_joinable` (11), six more
+    // in `transaction` (the parent-joinable read and the savepoint
+    // name/flag), and `_commit_enlisted` moving into
+    // `_commit_enlisted_from` (37 -> 44, the extra `from` reads). Same
+    // unmodeled `Db` accessors as the depth counter; the RBS-paired
+    // gate types them.
+    // Raw `transaction` savepoints when SQLite is already open (the
+    // fixture BEGIN must not be a second BEGIN): 787 -> 794, MEASURED.
+    // The seven new sites are that branch's `Db.transaction_open?`,
+    // `Db._txn_depth`, and `Db.exec` calls, unmodeled here like the
+    // other `Db` reads. The RBS-paired gate types the method.
+    const CEILING: usize = 794;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

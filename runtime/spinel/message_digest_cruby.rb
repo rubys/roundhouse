@@ -19,7 +19,8 @@
 #
 # Both digests are needed because Rails genuinely uses both; see the
 # comment in message_verifier.rb for the full table. CSRF adds raw
-# HMAC-SHA256, `secure_random_bytes`, and constant-time compare.
+# HMAC-SHA256, `secure_random_bytes`, and constant-time compare. The
+# encrypted cookie jar adds AES-256-GCM.
 require "openssl"
 require "securerandom"
 
@@ -81,5 +82,41 @@ module MessageDigest
   # key is the HMAC key above, and HMAC keys are bytes.
   def self.pbkdf2_sha256(secret, salt, iters, dklen)
     OpenSSL::PKCS5.pbkdf2_hmac(secret, salt, iters, dklen, OpenSSL::Digest::SHA256.new)
+  end
+
+  # AES-256-GCM, the cipher Rails' encrypted cookie jar (and so its
+  # session store) uses since `use_authenticated_cookie_encryption`:
+  # a 32-byte key, a 12-byte IV, no associated data, a 16-byte tag.
+  #
+  # `aes_256_gcm_encrypt` answers the ciphertext followed by the tag
+  # (GCM is a stream mode, so the tag is always the last 16 bytes).
+  # `aes_256_gcm_decrypt` answers the plaintext, or "" when the tag does
+  # not authenticate the ciphertext under this key and IV. The callers
+  # encrypt a JSON envelope, never an empty message, so "" cannot be a
+  # real plaintext here.
+  def self.aes_256_gcm_encrypt(key, iv, plain)
+    c = OpenSSL::Cipher.new("aes-256-gcm")
+    c.encrypt
+    c.key = key
+    c.iv = iv
+    c.auth_data = ""
+    ct = c.update(plain) + c.final
+    ct + c.auth_tag
+  end
+
+  # A tag that is not 16 bytes is refused before the cipher sees it, as
+  # Rails' MessageEncryptor refuses it: OpenSSL would check a truncated
+  # tag against only as many bytes as it was given.
+  def self.aes_256_gcm_decrypt(key, iv, ct, tag)
+    return "" if tag.bytesize != 16
+    c = OpenSSL::Cipher.new("aes-256-gcm")
+    c.decrypt
+    c.key = key
+    c.iv = iv
+    c.auth_tag = tag
+    c.auth_data = ""
+    c.update(ct) + c.final
+  rescue OpenSSL::Cipher::CipherError
+    ""
   end
 end

@@ -13,7 +13,10 @@ import json
 import os
 import re
 import subprocess
+import sys
+import time
 from collections import namedtuple
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 TARGETS = [
@@ -41,6 +44,7 @@ FLOOR_SMOKE_TARGETS = ["rust", "typescript", "ruby", "jruby"]
 # compare, WASM, and Spinel are not in this list.
 BASE = [
     "generate-fixture",
+    "unit-build",
     "unit",
     "build-roundhouse",
     "store-check",
@@ -87,6 +91,7 @@ SPINEL_TESTS = [
     "routes_segment_pattern_spinel",
     "open_telemetry_stub_spinel",
     "around_block_filter_spinel",
+    "before_action_return_spinel",
     "plain_class_optional_keywords_spinel",
     "jbuilder_array_value_spinel",
     "active_job_payload",
@@ -95,36 +100,83 @@ SPINEL_TESTS = [
     "jbuilder_extract_attributes_spinel",
     "hash_to_query_symbol_keys_spinel",
     "storage_proxy_path_spinel",
+    "filter_block_params_spinel",
+    "sidekiq_push",
 ]
-# Seconds each suite took in spinel-framework (full run 38665931779), for
-# balancing its shards; a suite not listed counts as one Spinel build.
+# Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
+# driver loads beside it.
+SIDEKIQ_PUSH_INPUTS = {
+    "runtime/ruby/active_job.rb",
+    "runtime/spinel/active_job_serialization.rb",
+    "runtime/spinel/global_id_locator.rb",
+    "runtime/spinel/base64.rb",
+    "runtime/spinel/sidekiq_push.rb",
+    "runtime/spinel/sidekiq_redis.rb",
+    "runtime/spinel/job_registry.rb",
+}
+# Inputs of the live Sidekiq gate (tests/sidekiq_push_live.rs, the
+# sidekiq-live job): the push runtime, its real Redis client, and the gate.
+SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_PUSH_INPUTS - {"runtime/spinel/sidekiq_redis.rb"}) | {
+    "runtime/spinel/sidekiq/sidekiq_redis.rb",
+    "tests/sidekiq_push_live.rs",
+}
+# Seconds each suite took in spinel-framework (main run 38936441376, its
+# test binary's compile included), for balancing its shards; a suite not
+# listed counts as one Spinel build.
 SPINEL_TEST_SECONDS = {
-    "date_columns_spinel": 45,
-    "framework_tests_spinel": 77,
-    "param_binds": 174,
-    "param_binds_values": 79,
-    "param_binds_cleanup": 88,
-    "spinel_stmt_cache_lru": 113,
-    "db_sqlite_concurrency": 14,
-    "spinel_pg_db": 11,
-    "pessimistic_locking": 46,
-    "not_found_parity_spinel": 118,
-    "spinel_transaction_connection": 98,
+    "spinel_transaction_connection": 501,
+    "spinel_stmt_cache_lru": 203,
+    "param_binds": 181,
+    "not_found_parity_spinel": 169,
+    "param_binds_values": 126,
+    "param_binds_cleanup": 86,
+    "framework_tests_spinel": 78,
+    "date_columns_spinel": 62,
+    "postgres_json_types_spinel": 61,
+    "around_block_filter_spinel": 57,
+    "pessimistic_locking": 54,
+    "render_json_encoder_spinel": 54,
+    "jbuilder_array_value_spinel": 52,
+    "jbuilder_extract_attributes_spinel": 52,
+    "hash_to_query_symbol_keys_spinel": 51,
+    "open_telemetry_stub_spinel": 50,
+    "storage_proxy_path_spinel": 46,
+    "plain_class_optional_keywords_spinel": 41,
+    "url_helpers_absolute_spinel": 38,
+    "routes_segment_pattern_spinel": 37,
+    "generated_columns_spinel": 36,
+    "db_sqlite_concurrency": 23,
+    "spinel_pg_db": 19,
+    "spinel_net_http_start": 10,
     **dict.fromkeys(
         [
             "spinel_web_push_crypto",
             "spinel_db_lease",
             "param_binds_planner",
             "spinel_param_builder",
-            "spinel_net_http_start",
             "rails_compat_vectors_spinel",
             "active_job_payload",
+            "sidekiq_push",
         ],
         5,
     ),
 }
 SPINEL_TEST_DEFAULT_SECONDS = 40
-SPINEL_FRAMEWORK_SHARDS = 3
+SPINEL_FRAMEWORK_SHARDS = 4
+# Not balanced by count: these three take two to three times a typical test (local run, 2026-10-17).
+SPINEL_TOOLCHAIN_SECONDS = {
+    "real_blog_spinel_tests_pass": 265,
+    "identical_cli_emission_reuses_native_build_but_changed_ruby_rebuilds": 187,
+    "finite_concern_class_configuration_runs_natively": 133,
+}
+SPINEL_TOOLCHAIN_DEFAULT_SECONDS = 80
+SPINEL_TOOLCHAIN_SHARDS = 4
+SPINEL_TOOLCHAIN_THREADS = 4
+# tiny_api's gate runs alone after the suite on the last shard, so its seconds count once per test thread.
+SPINEL_TOOLCHAIN_TAIL = "tiny_api"
+SPINEL_TOOLCHAIN_TAIL_SECONDS = 111
+# The tables above are seeds and the fallback only: main's runs keep measured seconds in the Actions cache (ci.yml spinel-timings).
+SPINEL_TIMING_KINDS = ("framework", "toolchain")
 # Inputs of the ActiveJob payload gate (tests/active_job_payload.rs):
 # the files its driver loads beside it.
 ACTIVE_JOB_PAYLOAD_INPUTS = {
@@ -191,6 +243,7 @@ SPINEL11 = [
     "campfire-archive-build",
     "campfire-smoke",
     "campfire-smoke-docker",
+    "sidekiq-live",
 ]
 # Main-push / unknown-input Spinel suite (advisory). PR `ci:spinel` uses the
 # narrower CORE focus lane (built in focus_plan) and makes those jobs required.
@@ -224,17 +277,39 @@ PROJECT_BUILDERS = {
 }
 
 # Coverage labels. Precedence: ci:full (or CI_FULL) > any focus labels
-# (ci:<lang> / ci:extras / ci:jruby / ci:spinel) > path ownership.
+# (ci:<lang> / ci:extras / ci:jruby / ci:spinel / ci:rust /
+# ci:typescript) > path ownership.
 # Focus mode is NARROW: BASE + selected focus lanes only.
 CI_FULL = "ci:full"
 CI_SPINEL = "ci:spinel"
 CI_JRUBY = "ci:jruby"
 CI_EXTRAS = "ci:extras"
 CI_FOCUS_BY_LABEL = {f"ci:{t}": t for t in EXTRA_COMPARE_TARGETS}
+CI_COMPARE_BY_LABEL = {f"ci:{t}": t for t in COMPARE_TARGETS}
 
 CoverageLabels = namedtuple(
-    "CoverageLabels", "full focus_spinel focus_jruby focus_extras"
+    "CoverageLabels", "full focus_spinel focus_jruby focus_extras focus_compare"
 )
+
+
+# A committer pushing to main has no PR to label. A line reading exactly
+# `[ci full]` in a pushed commit's message plans like `ci:full`. Only a
+# whole line counts, so prose that names the marker does not trigger it,
+# and only a push to main honors it: a PR author controls their messages,
+# and `ci:full` there stays a maintainer's label.
+CI_FULL_MARKER = "[ci full]"
+
+
+def full_marker_commit(event, event_name, ref):
+    """The first pushed commit whose message requests full validation."""
+    if event_name != "push" or ref != "refs/heads/main":
+        return None
+    commits = event.get("commits") or [event.get("head_commit") or {}]
+    for commit in commits:
+        lines = (commit.get("message") or "").splitlines()
+        if any(line.strip() == CI_FULL_MARKER for line in lines):
+            return commit.get("id") or ""
+    return None
 
 
 def parse_coverage_labels(names, *, env_full=False):
@@ -248,22 +323,28 @@ def parse_coverage_labels(names, *, env_full=False):
         if label in labels:
             focus.add(target)
     focus_extras = tuple(t for t in EXTRA_COMPARE_TARGETS if t in focus)
+    focus_compare = tuple(
+        target for label, target in CI_COMPARE_BY_LABEL.items() if label in labels
+    )
     return CoverageLabels(
         full=full,
         focus_spinel=CI_SPINEL in labels,
         focus_jruby=CI_JRUBY in labels,
         focus_extras=focus_extras,
+        focus_compare=focus_compare,
     )
 
 
-def focus_plan(extras=(), jruby=False, spinel=False):
+def focus_plan(extras=(), jruby=False, spinel=False, compare_targets=()):
     """BASE plus selected focus lanes; path ownership suppressed.
 
-    Focused extras / jruby / CORE Spinel are merge-gate required for the
-    fix round. Unrelated extras, WASM, rust/ts compare, and the heavy
-    Spinel11 Campfire suite stay off.
+    Focused extras / jruby / rust / typescript / CORE Spinel are
+    merge-gate required for the fix round. Unrelated extras, WASM, and
+    the heavy Spinel11 Campfire suite stay off. `ci:rust` and
+    `ci:typescript` add only that language's `compare` and floor `smoke`.
     """
     extra = [t for t in EXTRA_COMPARE_TARGETS if t in extras]
+    compare = [t for t in COMPARE_TARGETS if t in compare_targets]
     jobs = list(BASE)
     smoke_floor = []
     reasons = []
@@ -273,6 +354,18 @@ def focus_plan(extras=(), jruby=False, spinel=False):
             "ci focus: BASE + "
             + ", ".join(extra)
             + " (compare-extra and smoke-extra; required)"
+        )
+    if compare:
+        jobs.append("compare")
+        if "build-site" not in jobs:
+            jobs.extend(["build-site", "archive-results"])
+        if "smoke" not in jobs:
+            jobs.append("smoke")
+        smoke_floor.extend(compare)
+        reasons.append(
+            "ci focus: "
+            + ", ".join(compare)
+            + " (compare and floor smoke; required)"
         )
     if jruby:
         if "build-site" not in jobs:
@@ -298,7 +391,7 @@ def focus_plan(extras=(), jruby=False, spinel=False):
         bool(spinel),
         reasons,
         smoke_extra=extra,
-        compare=[],
+        compare=compare,
         focus_required=bool(extra) or jruby,
         hard_spinel=bool(spinel),
         spinel_tests=list(SPINEL_TESTS) if spinel else None,
@@ -430,6 +523,8 @@ def native_coverage(path):
         suites.update(owned_tests)
     if path in ACTIVE_JOB_PAYLOAD_INPUTS or path.startswith("tests/active_job_payload/"):
         suites.add("active_job_payload")
+    if path in SIDEKIQ_PUSH_INPUTS or path.startswith("tests/sidekiq_push/"):
+        suites.add("sidekiq_push")
     if (
         path.startswith(("tests/rails_compat/", "tests/params_vectors/"))
         or path == "tests/rails_compat_vectors.rb"
@@ -492,19 +587,21 @@ def select(
     focus_extras=(),
     focus_jruby=False,
     focus_spinel=False,
+    focus_compare=(),
     publish=False,
     project_scope=None,
     campfire_latest=True,
 ):
     focus_extras = tuple(focus_extras or ())
+    focus_compare = tuple(focus_compare or ())
     # Publication always requires full mode — reject before any narrow lane
     # (focus / main Spinel) can silently drop publish=True.
     if publish and not full:
         raise ValueError("publication requires full validation mode")
     # Focus labels narrow the plan before path ownership or main-push Spinel.
     # ci:full still falls through to the full ledger below.
-    if not full and (focus_extras or focus_jruby or focus_spinel):
-        return focus_plan(focus_extras, focus_jruby, focus_spinel)
+    if not full and (focus_extras or focus_jruby or focus_spinel or focus_compare):
+        return focus_plan(focus_extras, focus_jruby, focus_spinel, focus_compare)
     if spinel_lane and not full:
         return finish(
             [j for j in SPINEL_LANE if campfire_latest or j != "campfire-latest"],
@@ -552,6 +649,10 @@ def select(
             jobs_selected.update(CORE)
         if native:
             reasons.append(f"{path}: native Spinel core")
+        if path in SIDEKIQ_LIVE_INPUTS or path.startswith("tests/sidekiq_push_live/"):
+            spinel = True
+            jobs_selected.add("sidekiq-live")
+            reasons.append(f"{path}: live Sidekiq gate")
         if target in TARGETS or target == "spinel":
             owners = (
                 {"ruby", "jruby", "spinel"}
@@ -670,19 +771,111 @@ def select(
     )
 
 
-def spinel_test_seconds(test):
-    return SPINEL_TEST_SECONDS.get(test, SPINEL_TEST_DEFAULT_SECONDS)
+def positive_seconds(value):
+    # A bound, not math.isfinite: a huge JSON integer overflows its float conversion; NaN and inf fail it too.
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < 86400
 
 
-def spinel_framework_shards(tests, count=SPINEL_FRAMEWORK_SHARDS):
+def load_spinel_timings(raw):
+    """Recorded seconds per kind and test; anything malformed counts as unrecorded."""
+    try:
+        data = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        kind: {
+            name: seconds
+            for name, seconds in data[kind].items()
+            if positive_seconds(seconds)
+        }
+        for kind in SPINEL_TIMING_KINDS
+        if isinstance(data.get(kind), dict)
+    }
+
+
+def spinel_timings_from_env():
+    path = os.environ.get("CI_SPINEL_TIMINGS_FILE", "")
+    try:
+        raw = Path(path).read_text() if path else os.environ.get("CI_SPINEL_TIMINGS", "")
+    except (OSError, UnicodeError):
+        raw = ""
+    return load_spinel_timings(raw)
+
+
+def spinel_test_seconds(test, timings=None):
+    recorded = (timings or {}).get("framework", {}).get(test)
+    return recorded or SPINEL_TEST_SECONDS.get(test, SPINEL_TEST_DEFAULT_SECONDS)
+
+
+def spinel_toolchain_seconds(test, timings=None):
+    recorded = (timings or {}).get("toolchain", {}).get(test)
+    return recorded or SPINEL_TOOLCHAIN_SECONDS.get(test, SPINEL_TOOLCHAIN_DEFAULT_SECONDS)
+
+
+def spinel_framework_shards(tests, count=SPINEL_FRAMEWORK_SHARDS, timings=None):
     """Longest suite first onto the lightest shard; each shard keeps SPINEL_TESTS order."""
     shards = [[] for _ in range(min(count, len(tests)) or 1)]
     loads = [0] * len(shards)
-    for test in sorted(tests, key=lambda t: -spinel_test_seconds(t)):
+    for test in sorted(tests, key=lambda t: -spinel_test_seconds(t, timings)):
         i = loads.index(min(loads))
         shards[i].append(test)
-        loads[i] += spinel_test_seconds(test)
+        loads[i] += spinel_test_seconds(test, timings)
     return [{"shard": i, "tests": [t for t in tests if t in shard]} for i, shard in enumerate(shards)]
+
+
+def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS, timings=None):
+    """This shard's tests: longest first onto the lightest shard, by name order within it."""
+    loads = [0] * count
+    tail = (timings or {}).get("toolchain", {}).get(SPINEL_TOOLCHAIN_TAIL, SPINEL_TOOLCHAIN_TAIL_SECONDS)
+    loads[-1] = tail * SPINEL_TOOLCHAIN_THREADS
+    mine = []
+    for test in sorted(tests, key=lambda t: (-spinel_toolchain_seconds(t, timings), t)):
+        i = loads.index(min(loads))
+        loads[i] += spinel_toolchain_seconds(test, timings)
+        if i == shard:
+            mine.append(test)
+    return sorted(mine)
+
+
+def record_timing(kind, name, seconds, ok):
+    if out := os.environ.get("CI_SPINEL_TIMINGS_OUT"):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "a") as f:
+            f.write(json.dumps({"kind": kind, "name": name, "seconds": max(round(seconds), 1), "ok": ok}) + "\n")
+
+
+def run_timed(kind, name, command):
+    start = time.monotonic()
+    status = subprocess.run(command).returncode
+    record_timing(kind, name, time.monotonic() - start, status == 0)
+    return status
+
+
+def run_tests(kind, tests, parallel, command):
+    """Each test in its own process, so each one's seconds can be recorded."""
+    with ThreadPoolExecutor(max_workers=max(parallel, 1)) as pool:
+        statuses = list(pool.map(lambda t: run_timed(kind, t, [*command, t]), tests))
+    failed = [t for t, status in zip(tests, statuses) if status != 0]
+    print(f"{len(tests) - len(failed)} passed, {len(failed)} failed")
+    for test in failed:
+        print(f"::error::{test} failed")
+    return bool(failed)
+
+
+def merge_timings(previous, records, weight=0.5):
+    """Each passing test's seconds averaged into its last value; failures keep the last value."""
+    merged = {kind: dict(previous.get(kind, {})) for kind in SPINEL_TIMING_KINDS}
+    for record in records:
+        kind, name, seconds = record.get("kind"), record.get("name"), record.get("seconds")
+        if not isinstance(kind, str) or kind not in merged or not isinstance(name, str):
+            continue
+        if record.get("ok") is not True or not positive_seconds(seconds):
+            continue
+        last = merged[kind].get(name)
+        merged[kind][name] = round(last + (seconds - last) * weight) if last else round(seconds)
+    return merged
 
 
 def finish(
@@ -917,7 +1110,7 @@ def _advisory_complete(job, need, advisory, plan=None):
         return False
     keys = {
         "campfire-spinel-compare": ["default", "minor-gc", "verify-gen"],
-        "spinel-toolchain": ["shard-0", "shard-1", "shard-2"],
+        "spinel-toolchain": [f"shard-{i}" for i in range(SPINEL_TOOLCHAIN_SHARDS)],
         "spinel-framework": [
             f"shard-{s['shard']}"
             for s in (plan or {}).get("spinel_framework_shards", [])
@@ -941,8 +1134,50 @@ def write_outputs(values):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["plan", "gate", "compact-gate"])
-    args = parser.parse_args()
+    parser.add_argument(
+        "command",
+        choices=["plan", "gate", "compact-gate", "toolchain-shard", "timed", "run-tests", "merge-timings"],
+    )
+    parser.add_argument("--shard", type=int)
+    parser.add_argument("--kind", choices=SPINEL_TIMING_KINDS)
+    parser.add_argument("--name")
+    parser.add_argument("--parallel", type=int, default=os.cpu_count() or 1)
+    parser.add_argument("--previous")
+    parser.add_argument("--records")
+    parser.add_argument("--out")
+    argv = sys.argv[1:]
+    split = argv.index("--") if "--" in argv else len(argv)
+    args = parser.parse_args(argv[:split])
+    command = argv[split + 1 :]
+    if args.command == "toolchain-shard":
+        tests = [line.strip() for line in sys.stdin if line.strip()]
+        for test in spinel_toolchain_shard(tests, args.shard, timings=spinel_timings_from_env()):
+            print(test)
+        return False
+    if args.command == "timed":
+        return run_timed(args.kind, args.name, command) != 0
+    if args.command == "run-tests":
+        tests = [line.strip() for line in sys.stdin if line.strip()]
+        return run_tests(args.kind, tests, args.parallel, command)
+    if args.command == "merge-timings":
+        try:
+            previous = load_spinel_timings(Path(args.previous).read_text())
+        except (OSError, UnicodeError):
+            previous = {}
+        records = []
+        for path in sorted(Path(args.records).glob("*.jsonl")) if Path(args.records).is_dir() else []:
+            for line in path.read_text().splitlines():
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(record, dict):
+                    records.append(record)
+        merged = merge_timings(previous, records)
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(json.dumps(merged, indent=1, sort_keys=True) + "\n")
+        print(f"merged {len(records)} records: " + ", ".join(f"{k} {len(v)}" for k, v in merged.items()))
+        return False
     if args.command != "plan":
         raw_plan = os.environ.get("CI_PLAN", "")
         if not raw_plan.strip():
@@ -968,11 +1203,13 @@ def main():
         {label["name"] for label in pr.get("labels", [])},
         env_full=os.environ.get("CI_FULL") == "true",
     )
-    full = coverage.full
+    marker = full_marker_commit(event, event_name, os.environ.get("GITHUB_REF"))
+    full = coverage.full or marker is not None
     focus_extras = coverage.focus_extras
     focus_jruby = coverage.focus_jruby
     focus_spinel = coverage.focus_spinel
-    any_focus = bool(focus_extras or focus_jruby or focus_spinel)
+    focus_compare = coverage.focus_compare
+    any_focus = bool(focus_extras or focus_jruby or focus_spinel or focus_compare)
     # Main-push / unknown-input advisory Spinel suite (not the PR focus lane).
     spinel_lane = False
     if (
@@ -1023,12 +1260,19 @@ def main():
         focus_extras=focus_extras,
         focus_jruby=focus_jruby,
         focus_spinel=focus_spinel,
+        focus_compare=focus_compare,
         publish=publish,
         project_scope=project_scope,
         campfire_latest=not pr,
     )
     if reason:
         plan["reasons"].append(reason)
+    if marker is not None and not coverage.full:
+        plan["reasons"].append(f"{CI_FULL_MARKER} in commit {marker[:12]}".rstrip())
+    timings = spinel_timings_from_env()
+    plan["spinel_framework_shards"] = spinel_framework_shards(plan["spinel_tests"] or [], timings=timings)
+    if not any(timings.values()):
+        plan["reasons"].append("No recorded Spinel test seconds: shards balanced by the static tables")
     spinel = os.environ.get("CI_SPINEL_REVISION", "")
     if plan["spinel"] and not spinel:
         try:
@@ -1065,6 +1309,7 @@ def main():
             "compare": plan["compare"],
             "spinel-tests": plan["spinel_tests"],
             "spinel-framework-shards": plan["spinel_framework_shards"],
+            "spinel-timings": {"toolchain": timings.get("toolchain", {})},
             "smoke": plan["smoke"],
             "smoke-extra": plan["smoke_extra"],
             "extras-advisory": plan["extras_advisory"],

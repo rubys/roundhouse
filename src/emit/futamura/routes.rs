@@ -14,9 +14,10 @@
 //! (controllers with their filter chain spelled out in `process_action`,
 //! views as module functions, models, library classes), starting from
 //! one action's arm of `process_action`. It over-approximates: a send
-//! whose receiver the analysis did not type reaches every app method of
-//! that name, and a symbol literal naming an app method counts as a
-//! call (callbacks, `send`). An error inside a reached method's source
+//! whose receiver the analysis did not type (a local, a helper's result,
+//! a framework call's result) reaches every app method of that name and
+//! every `method_missing` that could answer it, and a symbol literal
+//! naming an app method counts as a call (callbacks, `send`). An error inside a reached method's source
 //! range taints the route; an error outside every method (a class-level
 //! `include`) taints routes that reach any method in its file.
 //!
@@ -31,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::App;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::dialect::{ControllerBodyItem, LibraryClass, MethodReceiver};
-use crate::expr::{Expr, ExprNode, Literal, Pattern};
+use crate::expr::{Expr, ExprNode, InterpPart, Literal, Pattern};
 use crate::ident::Symbol;
 use crate::lower::routes::FlatRoute;
 use crate::ty::Ty;
@@ -57,6 +58,9 @@ struct Index<'a> {
     classes: HashMap<String, Vec<&'a LibraryClass>>,
     /// method name -> every (class, side) defining it, for fan-out.
     by_name: HashMap<Symbol, Vec<(String, bool)>>,
+    /// Last segment of a class name -> every class so named, for
+    /// resolving a constant whose path is written relative to its scope.
+    by_last: HashMap<String, Vec<String>>,
     /// INTERIM (see `enqueue_send`'s fallback): the analyzer's own type
     /// for every expression in the app's controller bodies, from before
     /// `routes::plan`'s own re-lowering re-types them from scratch and
@@ -65,6 +69,12 @@ struct Index<'a> {
     /// (file, start, end), since the re-lowering reads the same spans
     /// without moving them.
     analyzer_stamps: HashMap<(u32, u32, u32), Ty>,
+    /// Last segment of every constant an app class defines as a value
+    /// (`NAME = <expr>`), not as a class.
+    value_consts: HashSet<String>,
+    /// Every class whose instance-side lookup ends in a `method_missing`
+    /// the app wrote, with that method.
+    missing: Vec<(String, MethodKey)>,
 }
 
 impl<'a> Index<'a> {
@@ -80,7 +90,20 @@ impl<'a> Index<'a> {
                     .push((lc.name.0.as_str().to_string(), is_class_side(&m.receiver)));
             }
         }
-        Index { classes, by_name, analyzer_stamps }
+        let value_consts = lcs.iter().flat_map(|lc| lc.constants.iter()).map(|(n, _)| n.as_str().to_string()).collect();
+        let mut by_last: HashMap<String, Vec<String>> = HashMap::new();
+        for name in classes.keys() {
+            by_last.entry(name.rsplit("::").next().unwrap_or(name).to_string()).or_default().push(name.clone());
+        }
+        let mut index = Index { classes, by_name, by_last, analyzer_stamps, value_consts, missing: Vec::new() };
+        let mut missing: Vec<(String, MethodKey)> = index
+            .classes
+            .keys()
+            .filter_map(|c| index.lookup(c, &Symbol::from("method_missing"), false).map(|k| (c.clone(), k)))
+            .collect();
+        missing.sort();
+        index.missing = missing;
+        index
     }
 
     /// Every body of `class`'s `name` on one side (a reopened class or a
@@ -128,6 +151,31 @@ impl<'a> Index<'a> {
     fn is_module(&self, class: &str) -> bool {
         self.classes.get(class).into_iter().flatten().any(|lc| lc.is_module)
     }
+
+    /// Every app class a constant path can name: the path itself, or a
+    /// class nested somewhere under that name (`Formatter` written
+    /// inside `module Admin` is `Admin::Formatter`). Over-approximates:
+    /// that is the safe direction for reach.
+    fn app_classes_named(&self, path: &[Symbol]) -> Vec<String> {
+        self.app_classes_named_str(&const_name(path))
+    }
+
+    fn app_classes_named_str(&self, name: &str) -> Vec<String> {
+        let name = name.trim_start_matches("::");
+        let last = name.rsplit("::").next().unwrap_or(name);
+        let suffix = format!("::{name}");
+        self.by_last
+            .get(last)
+            .into_iter()
+            .flatten()
+            .filter(|c| c.as_str() == name || c.ends_with(&suffix))
+            .cloned()
+            .collect()
+    }
+}
+
+fn const_name(path: &[Symbol]) -> String {
+    path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")
 }
 
 fn is_class_side(r: &MethodReceiver) -> bool {
@@ -562,7 +610,11 @@ fn callees_of(index: &Index, key: &MethodKey) -> Vec<MethodKey> {
     let mut seen: HashMap<MethodKey, Option<MethodKey>> = HashMap::new();
     let mut found: VecDeque<MethodKey> = VecDeque::new();
     for m in index.bodies(class, name, *class_side) {
-        visit(&m.body, &mut |e| enqueue_send(index, e, class, *class_side, key, &mut seen, &mut found));
+        // A parameter's default runs in the method too.
+        let defaults = m.params.iter().filter_map(|p| p.default.as_ref());
+        for body in std::iter::once(&m.body).chain(defaults) {
+            visit(body, &mut |e| enqueue_send(index, e, class, *class_side, key, &mut seen, &mut found));
+        }
     }
     found.into()
 }
@@ -636,6 +688,26 @@ fn enqueue_send(
     reached: &mut HashMap<MethodKey, Option<MethodKey>>,
     queue: &mut VecDeque<MethodKey>,
 ) {
+    // `x.public_send(:foo)` (or `send`, `__send__`, `try`) is `x.foo`.
+    // On `self` the symbol arm below already resolves it.
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node {
+        let named = match args.first().map(|a| &*a.node) {
+            Some(ExprNode::Lit { value: Literal::Sym { value } }) => Some(value.clone()),
+            Some(ExprNode::Lit { value: Literal::Str { value } }) => Some(Symbol::from(value.as_str())),
+            _ => None,
+        };
+        if let (true, false, Some(name)) = (
+            matches!(method.as_str(), "send" | "public_send" | "__send__" | "try" | "try!"),
+            matches!(&*r.node, ExprNode::SelfRef),
+            named,
+        ) {
+            let call = Expr::new(
+                e.span,
+                ExprNode::Send { recv: Some(r.clone()), method: name, args: Vec::new(), block: None, parenthesized: true },
+            );
+            enqueue_send(index, &call, class, class_side, from, reached, queue);
+        }
+    }
     let mut push = |k: MethodKey| {
         if !reached.contains_key(&k) {
             reached.insert(k.clone(), Some(from.clone()));
@@ -643,11 +715,18 @@ fn enqueue_send(
         }
     };
     // A value the analysis did not type is an instance: a class object
-    // reaches here as a constant, which is resolved exactly.
+    // reaches here as a constant, which is resolved exactly. It may be
+    // an instance of any app class: one defining `name`, or one that
+    // does not and answers through the `method_missing` the app wrote.
     let fan_out = |name: &Symbol, push: &mut dyn FnMut(MethodKey)| {
         for (c, side) in index.by_name.get(name).into_iter().flatten() {
             if !*side {
                 push((c.clone(), name.clone(), false));
+            }
+        }
+        for (c, mm) in &index.missing {
+            if index.lookup(c, name, false).is_none() {
+                push(mm.clone());
             }
         }
     };
@@ -664,7 +743,12 @@ fn enqueue_send(
                     // never reach an unrelated concrete class that
                     // happens to define the same name — only a module,
                     // the shape a mixed-in helper takes.
+                    // It may also land on the class's own
+                    // `method_missing`, when the app wrote one.
                     None => {
+                        if let Some(k) = index.lookup(class, &Symbol::from("method_missing"), class_side) {
+                            push(k);
+                        }
                         for (c, side) in index.by_name.get(method).into_iter().flatten() {
                             if index.is_module(c) {
                                 push((c.clone(), method.clone(), *side));
@@ -674,18 +758,37 @@ fn enqueue_send(
                 }
             }
             Some((ExprNode::Const { path }, _)) => {
-                let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-                if let Some(k) = index.lookup(&name, method, true) {
-                    push(k);
-                } else if method.as_str() == "new" {
-                    if let Some(k) = index.lookup(&name, &Symbol::from("initialize"), false) {
+                // Every app class the path can name (it may be written
+                // relative to its namespace), and a class-side
+                // `method_missing` for a name none defines
+                // (`Setting.some_key`).
+                let named = index.app_classes_named(path);
+                for name in &named {
+                    if let Some(k) = index.lookup(name, method, true) {
+                        push(k);
+                    } else if method.as_str() == "new" {
+                        if let Some(k) = index.lookup(name, &Symbol::from("initialize"), false) {
+                            push(k);
+                        }
+                    } else if let Some(k) = index.lookup(name, &Symbol::from("method_missing"), true) {
                         push(k);
                     }
                 }
+                // An app constant that holds a value (`SPARE =
+                // Gadget.new`), not a class: a send on it dispatches on
+                // whatever it holds. Checked regardless of whether
+                // `named` also matched some namespaced class by the
+                // same last segment (`Admin::SPARE`) — the planner
+                // cannot tell which one the path actually names, so it
+                // reaches through both.
+                if path.last().is_some_and(|l| index.value_consts.contains(l.as_str())) {
+                    fan_out(method, &mut push);
+                }
             }
-            // `Rails.cache.fetch`, `ActiveRecord::Base.connection.x`: a
-            // framework object, whose methods are the runtime's.
-            Some(_) if rooted_in_framework(index, class, class_side, recv.as_ref().unwrap()) => {}
+            // A send on a framework call's result (`current_user.account`,
+            // `Rails.cache.read(k).call`, a record out of a relation) is
+            // an untyped send like any other: the framework hands back app
+            // objects, so it is no reason to skip the call.
             Some((_, ty)) => {
                 // INTERIM (rubys/roundhouse#58, G2/G3): `routes::plan`'s
                 // own re-lowering re-types every body from scratch and
@@ -717,9 +820,20 @@ fn enqueue_send(
                     fan_out(method, &mut push);
                 } else {
                     for c in classes {
+                        // Each side on its own: a class-side hit says
+                        // nothing about whether the instance side
+                        // defines it too (`Ty::Class` carries both the
+                        // class object and an instance of it), so a hit
+                        // on one side must never suppress the other
+                        // side's own `method_missing`.
                         for side in [false, true] {
-                            if let Some(k) = index.lookup(&c, method, side) {
-                                push(k);
+                            match index.lookup(&c, method, side) {
+                                Some(k) => push(k),
+                                None => {
+                                    if let Some(k) = index.lookup(&c, &Symbol::from("method_missing"), side) {
+                                        push(k);
+                                    }
+                                }
                             }
                         }
                     }
@@ -740,6 +854,21 @@ fn enqueue_send(
             }
         }
         ExprNode::MethodRef { name, .. } => fan_out(name, &mut push),
+        // `"#{x}"` calls `x.to_s`, which an app class may define.
+        ExprNode::StringInterp { parts } => {
+            for part in parts {
+                let InterpPart::Expr { expr } = part else { continue };
+                let classes = expr.ty.as_ref().map(classes_of).unwrap_or_default();
+                if classes.is_empty() {
+                    fan_out(&Symbol::from("to_s"), &mut push);
+                }
+                for c in classes {
+                    if let Some(k) = index.lookup(&c, &Symbol::from("to_s"), false) {
+                        push(k);
+                    }
+                }
+            }
+        }
         // `send(:x)`, `public_send(:x)`, a callback named by symbol: a
         // method of the class whose code holds the symbol.
         ExprNode::Lit { value: Literal::Sym { value } } => {
@@ -750,26 +879,6 @@ fn enqueue_send(
             }
         }
         _ => {}
-    }
-}
-
-/// Is `e` a chain of sends rooted in a constant the app does not define,
-/// or in a receiverless call `class` itself does not resolve? `class` and
-/// `class_side` are the method body being walked, so a receiverless call
-/// is checked the same way `enqueue_send`'s own dispatch is: through
-/// `class`'s lookup, never by asking whether some unrelated app class
-/// happens to define a method of that name.
-fn rooted_in_framework(index: &Index, class: &str, class_side: bool, e: &Expr) -> bool {
-    match &*e.node {
-        ExprNode::Const { path } => {
-            let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-            !index.classes.contains_key(&name)
-        }
-        ExprNode::Send { recv: Some(r), .. } => rooted_in_framework(index, class, class_side, r),
-        // `request.env`, `params[:x]`, `cookies`: a receiverless call
-        // `class`'s own lookup misses is the framework's accessor.
-        ExprNode::Send { recv: None, method, .. } => index.lookup(class, method, class_side).is_none(),
-        _ => false,
     }
 }
 

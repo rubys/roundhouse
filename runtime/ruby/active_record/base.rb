@@ -920,6 +920,16 @@ module ActiveRecord
       # done, as Rails runs them after the transaction: an
       # `after_update_commit` reads what `after_save` wrote (an
       # attachment, a rich-text body), not the record half saved.
+      _save_committed(was_new)
+      true
+    end
+
+    # A save's commit callbacks. Here they run at once, since a strict
+    # target has no transaction for them to wait on; the ruby-family
+    # reopen (connection.rb) holds them until the enclosing
+    # transaction's COMMIT, and drops them on its ROLLBACK, as Rails
+    # does.
+    def _save_committed(was_new)
       if was_new
         after_create_commit
       else
@@ -927,7 +937,12 @@ module ActiveRecord
       end
       after_save_commit
       after_commit
-      true
+    end
+
+    # `destroy`'s half of the same seam.
+    def _destroy_committed
+      after_destroy_commit
+      after_commit
     end
 
     # A row inserted raw, as Rails' fixture loader (`insert_fixtures_set`)
@@ -1153,8 +1168,8 @@ module ActiveRecord
     # its Message, and Message's own `belongs_to :room, touch: true`
     # is registered on `after_touch` — so without this call the
     # cascade stops one level short and a room's `updated_at` never
-    # moves. (Rails also fires the commit callbacks here; this runtime
-    # still does not, and that half of the divergence stands.)
+    # moves. (Rails also fires the commit callbacks here; the ruby-family
+    # reopen in connection.rb does, the strict targets still do not.)
     #
     # The bare form writes `updated_at` ALONE (`_adapter_touch`), as
     # Rails' `touch` does. Writing the whole row put back every column
@@ -1197,8 +1212,7 @@ module ActiveRecord
       @persisted = false
       @destroyed = true
       after_destroy
-      after_destroy_commit
-      after_commit
+      _destroy_committed
       self
     end
 

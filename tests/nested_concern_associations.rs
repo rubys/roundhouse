@@ -204,7 +204,7 @@ fn nested_library_failures_still_abort_strict_model_ingestion() {
   module Associations
     extend ActiveSupport::Concern
     included { has_many :memberships }
-    def broken; `unsupported_command`; end
+    def broken; defined?(helper(1)); end
   end
 end
 "#,

@@ -198,11 +198,45 @@ class FocusLabels(unittest.TestCase):
         self.assertFalse(parsed.focus_spinel)
         self.assertFalse(parsed.focus_jruby)
         self.assertEqual(parsed.focus_extras, ())
+        self.assertEqual(parsed.focus_compare, ())
         self.assertFalse(hasattr(parsed, "focus_roundsnap"))
         plan = plan_pull_request(["ci:roundsnap"])
         self.assertEqual(plan["jobs"], ci.BASE)
         self.assertNotIn("campfire-roundsnap", plan["jobs"])
         self.assertTrue(set(ci.BASE).issubset(plan["required"]))
+
+    def test_rust_and_typescript_focus_labels_are_independent(self):
+        parsed = ci.parse_coverage_labels(["ci:rust", "ci:crystal"])
+        self.assertEqual(parsed.focus_compare, ("rust",))
+        self.assertEqual(parsed.focus_extras, ("crystal",))
+        rust = ci.select(
+            ["src/emit/typescript/expr.rs", "src/emit/go.rs"],
+            focus_compare=("rust",),
+        )
+        self.assertEqual(rust["compare"], ["rust"])
+        self.assertEqual(rust["smoke"], ["rust"])
+        self.assertEqual(rust["extra_compare"], [])
+        self.assertNotIn("compare-extra", rust["jobs"])
+        self.assertNotIn("browser-smoke-typescript", rust["jobs"])
+        self.assertIn("compare", rust["required"])
+        self.assertIn("smoke", rust["required"])
+        self.assertFalse(set(ci.SPINEL11).intersection(rust["jobs"]))
+        both = plan_pull_request(
+            ["ci:typescript", "ci:rust", "ci:crystal"],
+            changed_inputs=(["src/analyze/body/send.rs"], None),
+        )
+        self.assertEqual(both["compare"], ["rust", "typescript"])
+        self.assertEqual(both["smoke"], ["rust", "typescript"])
+        self.assertEqual(both["extra_compare"], ["crystal"])
+        self.assertEqual(both["smoke_extra"], ["crystal"])
+        self.assertIn("compare", both["required"])
+        self.assertIn("smoke", both["required"])
+        self.assertIn("compare-extra", both["required"])
+        self.assertIn("smoke-extra", both["required"])
+        self.assertNotIn("browser-smoke-typescript", both["jobs"])
+        self.assertFalse(both["wasm"])
+        self.assertFalse(both["spinel"])
+        self.assertFalse(both["extras_advisory"])
 
     def test_pr_events_drive_focus_and_unknown_keeps_focus(self):
         plan = plan_pull_request(

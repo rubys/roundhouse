@@ -42,10 +42,16 @@ module I18n
   def self.plural_num: (Array[String] rule, Hash[String, Float] ops) -> Float
   def self.plural_step: () -> Integer
   def self.runtime_rules: () -> Hash[String, Array[String]]
+  def self.runtime_opaque: () -> Hash[String, bool]
+  def self.translate_tree: (String full, Hash[Symbol, untyped] options) -> Hash[Symbol, untyped]
+  def self.insert_tree: (Hash[Symbol, untyped] tree, Array[String] path, String value) -> nil
   def self.runtime_chain: (String loc) -> Array[String]
   def self.interpolate_runtime: (String text, Hash[Symbol, untyped] options, bool html) -> String
   def self.runtime_leaves: () -> Hash[String, String]
   def self.runtime_nodes: () -> Hash[String, bool]
+  def self.runtime_order: () -> Array[String]
+  def self.runtime_empties: () -> Hash[String, bool]
+  def self.insert_empty: (Hash[Symbol, untyped] tree, Array[String] path) -> nil
   def self.runtime_chains: () -> Hash[String, Array[String]]
   def self.translate_site: (String id, String loc, String key, (Integer | Float)? count, Array[String] names, Array[String] values, String details, bool raises, bool in_view, bool escape_plain) -> String
   def self.site_entry: (String id, String loc, String key) -> Array[String]

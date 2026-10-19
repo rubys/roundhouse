@@ -1852,10 +1852,113 @@ fn py_format_constant(name: &str, value: &Expr) -> String {
 }
 
 /// Python resolves cross-file refs through `from app.x import Y` (like
-/// TS through imports); bodies emit flat at module top, so namespace
-/// wrapping is a no-op.
+/// TS through imports); bodies emit flat at module top, so there is no
+/// namespace to wrap. The shared dump still prints constants and then
+/// classes, which Crystal and TypeScript need and Python does not:
+/// a method looks a global up when it is called, but a constant
+/// initializer runs at import. `SLOT = [Config()]` therefore has to
+/// follow `class Config`. A default argument is also evaluated while the
+/// class body runs, so `opts = EMPTY_HTML_OPTS` has to see that
+/// constant *before* the class. Move only the constants whose value
+/// names a class in this file; leave the rest ahead of the class. A
+/// file with no class (module mode) is left as emitted.
 fn py_wrap_namespace(_namespace: &str, body: &str) -> String {
-    body.to_string()
+    let class_at = if body.starts_with("class ") {
+        0
+    } else {
+        match body.find("\nclass ") {
+            Some(i) => i + 1,
+            None => return body.to_string(),
+        }
+    };
+    if class_at == 0 {
+        return body.to_string();
+    }
+    let constants = body[..class_at].trim_end_matches(|c: char| c == '\n' || c == '\r');
+    if constants.is_empty() {
+        return body.to_string();
+    }
+    let class_names = python_class_names(&body[class_at..]);
+    let (before, after) = split_python_constants_around_classes(constants, &class_names);
+    let mut out = String::with_capacity(body.len() + 4);
+    if !before.is_empty() {
+        out.push_str(&before);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.push_str(&body[class_at..]);
+    if !after.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+        out.push_str(&after);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Top-level and nested `class Name` declarations in an emitted Python
+/// body. Indentation does not matter: a constant that constructs a
+/// nested class still has to follow that class.
+fn python_class_names(body: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in body.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("class ") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() && !names.iter().any(|n| n == &name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Split a leading constant block into values that do not mention a
+/// class in this file (they stay above the class, so a default
+/// argument can read them) and values that do (they follow the class
+/// they construct).
+fn split_python_constants_around_classes(constants: &str, class_names: &[String]) -> (String, String) {
+    let mut before = String::new();
+    let mut after = String::new();
+    let mut stmt = String::new();
+    let flush = |stmt: &mut String, before: &mut String, after: &mut String| {
+        if stmt.trim().is_empty() {
+            stmt.clear();
+            return;
+        }
+        let depends = class_names.iter().any(|name| {
+            stmt.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|word| word == name.as_str())
+        });
+        if depends {
+            after.push_str(stmt);
+        } else {
+            before.push_str(stmt);
+        }
+        stmt.clear();
+    };
+    for line in constants.split_inclusive('\n') {
+        let is_assign = !line.starts_with(|c: char| c == ' ' || c == '\t')
+            && line.contains(" = ");
+        if is_assign && !stmt.is_empty() {
+            flush(&mut stmt, &mut before, &mut after);
+        }
+        stmt.push_str(line);
+    }
+    flush(&mut stmt, &mut before, &mut after);
+    (
+        before.trim_end_matches(|c: char| c == '\n' || c == '\r').to_string(),
+        after.trim_end_matches(|c: char| c == '\n' || c == '\r').to_string(),
+    )
 }
 
 /// Python runtime transpile table. Mirrors `TYPESCRIPT_RUNTIME` 1:1 by
@@ -2008,4 +2111,26 @@ where
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::py_wrap_namespace;
+
+    /// Python runs a module constant at import and a method body later:
+    /// a constant that constructs a class in this file follows that
+    /// class's body, and one that does not stays in front of it.
+    #[test]
+    fn py_constant_constructing_a_class_follows_it() {
+        let body = "SLOT = [Config()]\nLIMIT = 3\n\nclass Config:\n    def root(self):\n        return \"\"\n";
+        let out = py_wrap_namespace("", body);
+        let limit_at = out.find("LIMIT = 3").expect("LIMIT");
+        let class_at = out.find("class Config:").expect("class");
+        let body_at = out.find("        return").expect("class body");
+        let slot_at = out.find("SLOT = [Config()]").expect("SLOT");
+        assert!(limit_at < class_at, "{out}");
+        assert!(body_at < slot_at, "the slot follows the class body, not inside it:\n{out}");
+        let slot_line_start = out[..slot_at].rfind('\n').map_or(0, |i| i + 1);
+        assert_eq!(slot_line_start, slot_at, "the slot stays a module constant:\n{out}");
+    }
 }

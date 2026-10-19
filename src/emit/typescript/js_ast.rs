@@ -245,6 +245,13 @@ pub enum JsDecl {
         name: String,
         ty: TsType,
     },
+    /// `export namespace Name { ... }` — merges with a class of the same
+    /// name declared before it, so `Outer.Inner` is both a value and a type.
+    Namespace {
+        export: bool,
+        name: String,
+        decls: Vec<JsDecl>,
+    },
     /// Migration escape hatch — a pre-rendered declaration block.
     /// Deleted at switchover.
     Raw(String),

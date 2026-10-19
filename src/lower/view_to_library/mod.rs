@@ -265,6 +265,9 @@ pub struct ViewLowerCtx<'a> {
     /// Helper methods that are a thin wrapper around a BUILDER-YIELDING
     /// form helper (see [`form_wrapper_helpers`]).
     form_wrappers: std::rc::Rc<std::collections::HashMap<String, FormWrapperHelper>>,
+    /// See the ViewCtx field of the same name. Off unless the emitter
+    /// opts in with [`ViewLowerCtx::observe_form_with_entry`].
+    form_with_entry: bool,
 }
 
 impl<'a> ViewLowerCtx<'a> {
@@ -336,16 +339,59 @@ impl<'a> ViewLowerCtx<'a> {
             strict_locals: std::rc::Rc::new(strict_locals_by_key(&app.views)),
             collection_element_locals: std::rc::Rc::new(collection_element_locals(&app.views, app)),
             form_wrappers: std::rc::Rc::new(form_wrapper_helpers(app)),
+            form_with_entry: false,
         }
     }
 
+    /// Open each template `form_with` site with the
+    /// `ActionView::Base.new.form_with` entry. Only the Ruby family
+    /// ships `ActionView::Base` (`runtime/ruby/action_view/base.rb`):
+    /// the call exists so a mocha spy on the view context observes the
+    /// site, and the strict targets have neither the class nor mocha.
+    pub fn observe_form_with_entry(mut self) -> Self {
+        self.form_with_entry = true;
+        self
+    }
+
     pub fn lower(&self, view: &View) -> LibraryClass {
-        build_library_class(view, self, /*type_body=*/ true)
+        plain_text(view, build_library_class(view, self, /*type_body=*/ true))
     }
 
     pub(crate) fn lower_untyped(&self, view: &View) -> LibraryClass {
-        build_library_class(view, self, /*type_body=*/ false)
+        plain_text(view, build_library_class(view, self, /*type_body=*/ false))
     }
+}
+
+/// A text/plain template (`.text.erb`, `.txt.erb`) writes `<%= x %>` as
+/// it is: Rails' ERB handler escapes every other format but this one
+/// (`escape_ignore_list`), so the walker's `html_escape` comes back off.
+fn plain_text(view: &View, mut lc: LibraryClass) -> LibraryClass {
+    if !matches!(view.format.as_str(), "text" | "txt") {
+        return lc;
+    }
+    fn unescape(e: &mut Expr) {
+        e.node.for_each_child_mut(&mut |c| unescape(c));
+        let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else { return };
+        let helpers = matches!(&*recv.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"]));
+        if !helpers || method.as_str() != "html_escape" || args.len() != 1 {
+            return;
+        }
+        let arg = args[0].clone();
+        let span = e.span;
+        let already_string = matches!(&*arg.node, ExprNode::Send { method, args, .. } if method.as_str() == "to_s" && args.is_empty())
+            || matches!(arg.ty, Some(crate::ty::Ty::Str));
+        *e = if already_string {
+            arg
+        } else {
+            let mut s = Expr::new(span, ExprNode::Send { recv: Some(arg), method: Symbol::from("to_s"), args: vec![], block: None, parenthesized: false });
+            s.ty = Some(crate::ty::Ty::Str);
+            s
+        };
+    }
+    for m in &mut lc.methods {
+        unescape(&mut m.body);
+    }
+    lc
 }
 
 pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
@@ -740,6 +786,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         i18n: lx.i18n.clone(),
         route_helper_arity: lx.route_helper_arity.clone(),
         form_wrappers: lx.form_wrappers.clone(),
+        form_with_entry: lx.form_with_entry,
         stylesheets: app.stylesheets.clone(),
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
@@ -1102,6 +1149,36 @@ pub fn insert_db_stub(
         Symbol::from("_txn_depth="),
         fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
     );
+    // Bit `depth - 1` records whether that frame can be joined. A
+    // fixture transaction is not joinable, so a nested save or
+    // destroy opens a savepoint (connection.rb). Same boxed accessor
+    // as the depth so the body stays concretely typed.
+    db_info.class_methods.insert(
+        Symbol::from("_txn_joinable_bits"),
+        fn_sig(vec![], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("_txn_joinable_bits="),
+        fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
+    );
+    // Whether the connection holds a transaction — one ActiveRecord
+    // opened or one opened beneath it (connection.rb's
+    // `self.transaction` joins the latter instead of nesting a BEGIN).
+    db_info.class_methods.insert(Symbol::from("transaction_open?"), fn_sig(vec![], Ty::Bool));
+    // The open transaction's enlisted writes (connection.rb's
+    // `_commit_enlisted`), boxed per thread the same way.
+    db_info.class_methods.insert(
+        Symbol::from("_txn_records"),
+        fn_sig(
+            vec![],
+            Ty::Array {
+                elem: std::sync::Arc::new(Ty::Class {
+                    id: ClassId(Symbol::from("ActiveRecord::EnlistedRecord")),
+                    args: vec![].into(),
+                }),
+            },
+        ),
+    );
     classes.insert(ClassId(Symbol::from("Db")), db_info);
 
     // MessageDigest — the keyed-digest primitive surface, same
@@ -1143,6 +1220,17 @@ pub fn insert_db_stub(
             ],
             Ty::Str,
         ),
+    );
+    // AES-256-GCM, the encrypted cookie jar's cipher: encrypt answers the
+    // ciphertext followed by the tag, decrypt the plaintext or "".
+    let bytes = |n: &str| (Symbol::from(n), Ty::Str);
+    digest_info.class_methods.insert(
+        Symbol::from("aes_256_gcm_encrypt"),
+        fn_sig(vec![bytes("key"), bytes("iv"), bytes("plain")], Ty::Str),
+    );
+    digest_info.class_methods.insert(
+        Symbol::from("aes_256_gcm_decrypt"),
+        fn_sig(vec![bytes("key"), bytes("iv"), bytes("ct"), bytes("tag")], Ty::Str),
     );
     classes.insert(ClassId(Symbol::from("MessageDigest")), digest_info);
 
@@ -1424,6 +1512,20 @@ pub(crate) fn insert_framework_stubs(
     // entry. Lowerer-synthesized refs (`view_helpers_call`) also
     // resolve through the same key.
     classes.insert(ClassId(Symbol::from("ActionView::ViewHelpers")), vh);
+
+    // `ActionView::Base.new.form_with` is the cache-observable entry
+    // planted at each Ruby-family form site (`form_with::form_with_entry`).
+    // The method returns nil; the markup is the expansion that
+    // follows. `.new` already types as an instance of the receiver.
+    // Without this stub the zero-arg call stays `Ty::Var`, and the
+    // lowered real-blog residual is no longer zero.
+    let mut av_base = crate::analyze::ClassInfo::default();
+    av_base.instance_methods.insert(
+        Symbol::from("form_with"),
+        fn_sig(vec![], Ty::Nil),
+    );
+    tag_all_method(&mut av_base);
+    classes.insert(ClassId(Symbol::from("ActionView::Base")), av_base);
 
     // RouteHelpers — every `_path` / `_url` helper returns String.
     // Catch-all: the typer's `Class { id }` lookup returns Untyped if
@@ -4155,6 +4257,10 @@ pub(super) struct ViewCtx {
     /// to the wrapped call so the form-builder macro-inline can see
     /// both halves at once.
     pub(super) form_wrappers: std::rc::Rc<std::collections::HashMap<String, FormWrapperHelper>>,
+    /// Begin each `form_with` expansion with the
+    /// `ActionView::Base.new.form_with` entry (Ruby family only — see
+    /// `form_with::form_with_entry`).
+    pub(super) form_with_entry: bool,
     /// Stylesheet logical names ingested from `app/assets/stylesheets/`
     /// + `app/assets/builds/`. Used by the `stylesheet_link_tag(:app,
     /// ...)` expansion: a `:app` symbol arg fans out to one call per

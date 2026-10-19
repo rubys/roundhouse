@@ -109,7 +109,9 @@ fn server_source_for_active_profile() -> &'static str {
     }
 }
 
+mod char_set;
 mod expr;
+pub(crate) use expr::{array_method_handled, numeric_method_handled, string_method_handled};
 pub mod js_ast;
 mod library;
 mod naming;
@@ -897,15 +899,35 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         .collect();
     synthesized_names.sort();
     synthesized_names.dedup();
+    let mut nested_by_root: std::collections::BTreeMap<&str, Vec<&crate::dialect::LibraryClass>> =
+        std::collections::BTreeMap::new();
+    for lc in &app.library_classes {
+        if let Some(root) = library::nested_class_root(lc) {
+            nested_by_root.entry(root).or_default().push(lc);
+        }
+    }
+    expr::set_nested_class_names(
+        nested_by_root.values().flatten().map(|lc| lc.name.0.as_str().to_string()),
+    );
     for lc in &model_lcs {
         let stem = crate::naming::snake_case(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("app/models/{stem}.ts"));
-        files.extend(library::emit_class_file_with_synthesized(
-            lc,
-            app,
-            out_path,
-            &synthesized_names,
-        ));
+        match nested_by_root.remove(lc.name.0.as_str()) {
+            Some(nested) => files.extend(library::emit_class_file_with_nested(
+                Some(lc),
+                lc.name.0.as_str(),
+                &nested,
+                app,
+                out_path,
+                &synthesized_names,
+            )),
+            None => files.extend(library::emit_class_file_with_synthesized(
+                lc,
+                app,
+                out_path,
+                &synthesized_names,
+            )),
+        }
     }
 
     // Views: flatten the per-template LibraryClasses into
@@ -981,9 +1003,27 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     for lc in &app.library_classes {
+        if library::nested_class_root(lc).is_some() {
+            continue;
+        }
         let stem = crate::naming::snake_case(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("app/models/{stem}.ts"));
-        files.extend(library::emit_class_file(lc, app, out_path));
+        match nested_by_root.remove(lc.name.0.as_str()) {
+            Some(nested) => files.extend(library::emit_class_file_with_nested(
+                Some(lc),
+                lc.name.0.as_str(),
+                &nested,
+                app,
+                out_path,
+                &[],
+            )),
+            None => files.extend(library::emit_class_file(lc, app, out_path)),
+        }
+    }
+    // A root no class carries (`module Billing` around `class Invoice`) gets a file of its own.
+    for (root, nested) in nested_by_root {
+        let out_path = PathBuf::from(format!("app/models/{}.ts", crate::naming::snake_case(root)));
+        files.extend(library::emit_class_file_with_nested(None, root, &nested, app, out_path, &[]));
     }
 
     for lc in &fixture_lcs {

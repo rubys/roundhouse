@@ -25,12 +25,24 @@ const RAILS_EN: &[(&str, &str)] = &[
 
 pub const DEFAULT_ERRORS_FORMAT: &str = "%{attribute} %{message}";
 
+/// Why a lookup that lands on a node is refused, read back by the lowering
+/// that answers a plain one as a Hash.
+pub const SUBTREE: &str = "names a subtree, which I18n answers as a Hash";
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
     /// `config.i18n.default_locale`, `en` when the app sets none.
     pub locale: String,
     /// Dotted key (`activerecord.attributes.user.email`) → string leaf.
     pub entries: BTreeMap<String, String>,
+    /// Keys whose value is not a String (an Array, a number, a boolean):
+    /// I18n answers them as they are, which `entries` cannot hold.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub opaque: std::collections::BTreeSet<String>,
+    /// Each node's children in the order the files give them, as the
+    /// deep merge of Ruby Hashes keeps it ("" for the locale's root).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub order: BTreeMap<String, Vec<String>>,
     /// What a translation the locale lacks does, per environment.
     #[serde(default)]
     pub missing: MissingPolicy,
@@ -241,7 +253,7 @@ impl Catalog {
         let mut value: Value = serde_yaml_ng::from_str(source).map_err(|e| e.to_string())?;
         value.apply_merge().map_err(|e| e.to_string())?;
         if let Some(tree) = value.get(self.locale.as_str()) {
-            flatten(tree, String::new(), &mut self.entries);
+            flatten(tree, String::new(), &mut Flat { entries: &mut self.entries, opaque: &mut self.opaque, order: &mut self.order });
         }
         Ok(())
     }
@@ -540,15 +552,27 @@ impl Catalog {
                     .collect()
             }
         };
-        for (catalog, key) in candidates.iter().flatten() {
-            if catalog.entry(key, call.counted).is_none() && catalog.is_subtree(key) {
-                return Err(format!("`{key}` names a subtree, which I18n answers as a Hash"));
+        let mut found = None;
+        for c in &candidates {
+            match c {
+                Ok((catalog, key)) => {
+                    if let Some(t) = catalog.entry(key, call.counted) {
+                        found = Some(t);
+                        break;
+                    }
+                    if catalog.opaque.contains(key) {
+                        return Err(format!("`{key}` is not a String (an Array, a number or a boolean), which I18n answers as it is"));
+                    }
+                    if catalog.is_subtree(key) {
+                        return Err(format!("`{key}` {SUBTREE}"));
+                    }
+                }
+                Err(text) => {
+                    found = Some(Translation::One(text.clone()));
+                    break;
+                }
             }
         }
-        let found = candidates.iter().find_map(|c| match c {
-            Ok((catalog, key)) => catalog.entry(key, call.counted),
-            Err(text) => Some(Translation::One(text.clone())),
-        });
         let missing = format!("{locale}.{key}");
         let translation = match found {
             Some(t) => t,
@@ -607,7 +631,44 @@ impl Catalog {
 /// Whether `key` has entries beneath it.
     pub fn is_subtree(&self, key: &str) -> bool {
         let below = format!("{key}.");
-        self.entries.range(below.clone()..).next().is_some_and(|(k, _)| k.starts_with(&below))
+        self.order.contains_key(key) || self.entries.range(below.clone()..).next().is_some_and(|(k, _)| k.starts_with(&below))
+    }
+
+    /// Whether `key` is a subtree holding only Strings (and empty
+    /// mappings), which a Hash of them answers whole.
+    pub fn plain_subtree(&self, key: &str) -> bool {
+        let below = format!("{key}.");
+        self.is_subtree(key) && !self.opaque.iter().any(|k| k.starts_with(&below))
+    }
+
+    /// Every String leaf and every empty mapping (`None`), in the order
+    /// the files give them, as a Ruby Hash built from them iterates.
+    pub fn ordered_nodes(&self) -> Vec<(String, Option<&String>)> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        fn walk<'a>(c: &'a Catalog, node: &str, out: &mut Vec<(String, Option<&'a String>)>, seen: &mut std::collections::HashSet<String>) {
+            for child in c.order.get(node).into_iter().flatten() {
+                let path = if node.is_empty() { child.clone() } else { format!("{node}.{child}") };
+                if let Some(v) = c.entries.get(&path) {
+                    if seen.insert(path.clone()) {
+                        out.push((path, Some(v)));
+                    }
+                } else if c.order.get(&path).is_some_and(|children| children.is_empty()) {
+                    if seen.insert(path.clone()) {
+                        out.push((path, None));
+                    }
+                } else {
+                    walk(c, &path, out, seen);
+                }
+            }
+        }
+        walk(self, "", &mut out, &mut seen);
+        for (k, v) in &self.entries {
+            if seen.insert(k.clone()) {
+                out.push((k.clone(), Some(v)));
+            }
+        }
+        out
     }
 
     /// The keys a call can reach when its key is `base` (already scoped
@@ -955,12 +1016,43 @@ pub fn humanize(attr: &str) -> String {
     }
 }
 
+struct Flat<'a> {
+    entries: &'a mut BTreeMap<String, String>,
+    opaque: &'a mut std::collections::BTreeSet<String>,
+    order: &'a mut BTreeMap<String, Vec<String>>,
+}
+
+impl Flat<'_> {
+    /// A leaf at `prefix` replaces whatever subtree stood there.
+    fn clear_below(&mut self, prefix: &str) {
+        let nested = format!("{prefix}.");
+        let stale: Vec<String> = self.entries.range(nested.clone()..).take_while(|(k, _)| k.starts_with(&nested)).map(|(k, _)| k.clone()).collect();
+        for k in stale {
+            self.entries.remove(&k);
+        }
+        let stale: Vec<String> = self.opaque.range(nested.clone()..).take_while(|k| k.starts_with(&nested)).cloned().collect();
+        for k in stale {
+            self.opaque.remove(&k);
+        }
+        let stale: Vec<String> = self.order.range(nested.clone()..).take_while(|(k, _)| k.starts_with(&nested)).map(|(k, _)| k.clone()).collect();
+        for k in stale {
+            self.order.remove(&k);
+        }
+        self.order.remove(prefix);
+    }
+}
+
 /// Deep-merge `value` under `prefix`: a leaf replaces whatever subtree
 /// stood at its key, as a later file's string replaces an earlier hash.
-fn flatten(value: &Value, prefix: String, out: &mut BTreeMap<String, String>) {
+fn flatten(value: &Value, prefix: String, out: &mut Flat<'_>) {
     match value {
         Value::Mapping(map) => {
-            out.remove(&prefix);
+            out.entries.remove(&prefix);
+            out.opaque.remove(&prefix);
+            // An empty mapping is still a node: I18n answers `{}` for it rather than falling back.
+            if !prefix.is_empty() {
+                out.order.entry(prefix.clone()).or_default();
+            }
             for (k, v) in map {
                 let key = match k {
                     Value::String(s) => s.clone(),
@@ -968,20 +1060,31 @@ fn flatten(value: &Value, prefix: String, out: &mut BTreeMap<String, String>) {
                     Value::Number(n) => n.to_string(),
                     _ => continue,
                 };
+                let children = out.order.entry(prefix.clone()).or_default();
+                if !children.contains(&key) {
+                    children.push(key.clone());
+                }
                 let path = if prefix.is_empty() { key } else { format!("{prefix}.{key}") };
                 flatten(v, path, out);
             }
         }
         Value::String(s) => {
-            let nested = format!("{prefix}.");
-            let stale: Vec<String> = out.range(nested.clone()..).take_while(|(k, _)| k.starts_with(&nested)).map(|(k, _)| k.clone()).collect();
-            for k in stale {
-                out.remove(&k);
-            }
-            out.insert(prefix, s.clone());
+            out.clear_below(&prefix);
+            out.opaque.remove(&prefix);
+            out.entries.insert(prefix, s.clone());
         }
         Value::Tagged(t) => flatten(&t.value, prefix, out),
-        _ => {}
+        // A nil value: I18n finds nothing there, as for a missing key.
+        Value::Null => {
+            out.clear_below(&prefix);
+            out.entries.remove(&prefix);
+            out.opaque.remove(&prefix);
+        }
+        _ => {
+            out.clear_below(&prefix);
+            out.entries.remove(&prefix);
+            out.opaque.insert(prefix);
+        }
     }
 }
 
@@ -1071,6 +1174,35 @@ mod tests {
         let unknown = Catalog { missing: MissingPolicy { unknown: Some("`:strict`".into()), ..Default::default() }, ..c.clone() };
         assert!(unknown.resolve(&t("nope")).is_err());
         assert!(c.resolve(&t(".title")).is_err());
+    }
+
+    #[test]
+    fn a_lookup_stops_at_the_first_candidate_that_resolves() {
+        let c = catalog(&[("config/locales/en.yml", "en:\n  title: \"Hello\"\n  list:\n    - a\n    - b\n")]);
+        let t = |key: &str| Translate { key: key.into(), ..Default::default() };
+        assert_eq!(c.resolve(&Translate { defaults: vec![Fallback::Key("list".into())], ..t("title") }), Ok(Translation::One("Hello".into())));
+        assert!(c.resolve(&Translate { defaults: vec![Fallback::Key("title".into())], ..t("list") }).is_err());
+    }
+
+    #[test]
+    fn a_leaf_replacing_a_subtree_drops_its_nested_nodes() {
+        let c = catalog(&[
+            ("config/locales/a.yml", "en:\n  foo:\n    bar:\n      title: \"T\"\n"),
+            ("config/locales/b.yml", "en:\n  foo: \"plain\"\n"),
+        ]);
+        assert!(!c.is_subtree("foo.bar"));
+        assert!(!c.is_subtree("foo"));
+    }
+
+    #[test]
+    fn an_empty_mapping_is_a_node_in_the_files_order() {
+        let c = catalog(&[("config/locales/en.yml", "en:\n  feed: {}\n  menu:\n    more: {}\n    home: \"Home\"\n")]);
+        assert!(c.is_subtree("feed"));
+        assert!(c.plain_subtree("feed"));
+        assert!(c.plain_subtree("menu"));
+        let home = "Home".to_string();
+        let ours: Vec<_> = c.ordered_nodes().into_iter().filter(|(k, _)| k == "feed" || k.starts_with("menu.")).collect();
+        assert_eq!(ours, vec![("feed".to_string(), None), ("menu.more".to_string(), None), ("menu.home".to_string(), Some(&home))]);
     }
 
     #[test]

@@ -742,10 +742,21 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         // A bare module-state `@ivar` read → the whole process-dictionary
         // store. (Element/method access is intercepted in `emit_send`.)
         ExprNode::Ivar { name } => ivar_pd_get_typed(name.as_str(), e.ty.as_ref()),
-        ExprNode::Send { recv, method, args, block, .. } => match block {
-            Some(blk) => emit_block_call(recv.as_ref(), method.as_str(), args, blk),
-            None => emit_send(recv.as_ref(), method.as_str(), args),
-        },
+        ExprNode::Send { recv, method, args, block, .. } => {
+            if e.decisions & crate::expr::GROUNDED_TIME_FORMAT != 0
+                && method.as_str() == "to_rfc3339"
+                && args.is_empty()
+                && block.is_none()
+            {
+                if let Some(r) = recv {
+                    return format!("DateTime.to_iso8601({})", emit_expr(r));
+                }
+            }
+            match block {
+                Some(blk) => emit_block_call(recv.as_ref(), method.as_str(), args, blk),
+                None => emit_send(recv.as_ref(), method.as_str(), args),
+            }
+        }
         ExprNode::Return { value } => emit_expr(value),
         // `next` inside a fold yields the accumulator unchanged (`next v`
         // yields `v`). Outside a fold there's no accumulator to yield —
@@ -787,7 +798,9 @@ pub(super) fn emit_expr(e: &Expr) -> String {
                 BoolOpKind::Or => "||",
                 BoolOpKind::And => "&&",
             };
-            format!("{} {op_s} {}", emit_expr(left), emit_expr(right))
+            // Parenthesized: `||`/`&&` bind looser than `==` and `|>`, so a
+            // bare `x || "" == ""` would compare `""` instead of the result.
+            format!("({} {op_s} {})", emit_expr(left), emit_expr(right))
         }
         ExprNode::Array { elements, .. } => {
             let parts: Vec<String> = elements.iter().map(emit_expr).collect();
@@ -1318,10 +1331,13 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // idiom `Time.now.utc.iso8601` maps to
     // `DateTime.to_iso8601(DateTime.utc_now())`: `.utc` is the identity
     // (already UTC) and `.iso8601` wraps in `DateTime.to_iso8601`.
-    if method == "now" && args.is_empty() {
+    if matches!(method, "now" | "utc") && args.is_empty() {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
-                if path.last().map(|s| s.as_str()) == Some("Time") {
+                // Bare `Time` and rooted `::Time`. `Foo::Time.now` keeps its own method.
+                if path.last().map(|s| s.as_str()) == Some("Time")
+                    && path.iter().rev().skip(1).all(|s| s.as_str().is_empty())
+                {
                     return "DateTime.utc_now()".to_string();
                 }
             }
@@ -1332,9 +1348,13 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             return emit_expr(r);
         }
     }
-    if method == "iso8601" && args.is_empty() {
+    // Zero-arg `iso8601` on a time is `to_rfc3339` after `time_calendar`.
+    // An application method of that name keeps normal dispatch.
+    if method == "to_rfc3339" && args.is_empty() {
         if let Some(r) = recv {
-            return format!("DateTime.to_iso8601({})", emit_expr(r));
+            if crate::lower::time_calendar::is_time_rfc3339_receiver(r) {
+                return format!("DateTime.to_iso8601({})", emit_expr(r));
+            }
         }
     }
 
@@ -3080,10 +3100,9 @@ mod tests {
 
     #[test]
     fn time_now_utc_iso8601_maps_to_datetime() {
-        // Time.now.utc.iso8601 → DateTime.to_iso8601(DateTime.utc_now())
-        let now = call(const_path("Time"), "now", vec![]);
-        let utc = call(now, "utc", vec![]);
-        let iso = call(utc, "iso8601", vec![]);
+        // Lowered `Time.utc.to_rfc3339` → DateTime.to_iso8601(DateTime.utc_now())
+        let utc = call(const_path("Time"), "utc", vec![]);
+        let iso = call(utc, "to_rfc3339", vec![]);
         assert_eq!(emit_expr(&iso), "DateTime.to_iso8601(DateTime.utc_now())");
     }
 

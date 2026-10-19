@@ -5,6 +5,7 @@ use crate::dialect::{AccessorKind, Association, MethodDef, MethodReceiver, Model
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, BoolOpKind, BoolOpSurface, Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
+use crate::lower::column_slot::{self, ColumnSlot};
 use crate::schema::{Column, Table};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -96,16 +97,17 @@ pub(super) fn push_schema_methods(
     );
     let mut demanded: Option<std::rc::Rc<std::collections::HashSet<Symbol>>> = None;
     for col in &table.columns {
+        let slot = ColumnSlot::classify(col, model);
         methods.push(synth_attr_reader(owner, col, model));
         if model.enums.contains_key(&col.name) {
             methods.push(synth_enum_storage_writer(owner, col));
         }
-        if is_generic_json_col(col, model) {
+        if slot.is_json() {
             // Hydration writes stored JSON text without dump; the public
             // `<col>=` writer always goes through JsonColumn.dump.
             methods.push(synth_json_storage_writer(owner, col));
         }
-        if is_temporal_col(col) {
+        if slot.is_temporal() {
             methods.push(synth_raw_reader(owner, col));
             // Rails-parity Time-accepting writer (lobsters' ban flow:
             // `self.banned_at = Time.now.utc`). A custom writer in the
@@ -114,7 +116,7 @@ pub(super) fn push_schema_methods(
             // yields here (same dance as `synth_belongs_to_writer`).
             let writer_name = Symbol::from(format!("{}=", col.name.as_str()));
             if !super::associations::model_defines_instance_method(model, &writer_name) {
-                methods.push(synth_temporal_writer(owner, col));
+                methods.push(synth_temporal_writer(owner, col, model));
             }
         }
         methods.push(synth_attr_writer(owner, col, model));
@@ -809,11 +811,7 @@ fn col_ivar(col: &Column, ty: Ty) -> Expr {
 /// internal references go through this so the storage/accessor split is
 /// explicit in the IR rather than re-derived per target at emit time.
 pub fn col_storage_name(col: &Column) -> Symbol {
-    if is_temporal_col(col) {
-        Symbol::from(format!("{}_raw", col.name.as_str()))
-    } else {
-        col.name.clone()
-    }
+    column_slot::storage_name(col)
 }
 
 /// The setter-method name synthesized internal writes dispatch to
@@ -828,10 +826,11 @@ fn col_storage_setter(col: &Column) -> Symbol {
 fn hydration_setter(model: &Model, col: &Column) -> Symbol {
     if model.enums.contains_key(&col.name) {
         enum_storage_writer(col)
-    } else if is_generic_json_col(col, model) {
-        json_storage_writer(col)
     } else {
-        col_storage_setter(col)
+        // The model's own `<col>=` is what assignment runs, not what a row loads through.
+        // Temporal and JSON decide that inside the slot: raw text, no public codec.
+        ColumnSlot::classify(col, model)
+            .hydration_method(super::model_defines_writer(model, &col.name))
     }
 }
 
@@ -840,7 +839,7 @@ pub(crate) fn enum_storage_writer(col: &Column) -> Symbol {
 }
 
 fn json_storage_writer(col: &Column) -> Symbol {
-    Symbol::from(format!("_write_{}_json_raw", col.name.as_str()))
+    column_slot::json_hydration_method(col)
 }
 
 /// Fixture omissions are schema row data, not enum DSL defaults for `new`.
@@ -1000,17 +999,9 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
     // before an emitter can silently substitute a timestamp carrier.
     let (body, ret_ty) = if let Some(label) = enum_label_read(model, col) {
         (label, Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() })
-    } else if is_temporal_col(col) {
-        // Nilable: a stored value can be absent (NULL / unset), so the
-        // parse short-circuits to nil. Date?/Time? is the honest static type
-        // and matches what a strict-null target infers from the nilable
-        // storage ivar.
-        (
-            temporal_reader_body(col),
-            Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil].into() },
-        )
-    } else if is_generic_json_col(col, model) {
-        (json_reader_body(col), Ty::Untyped)
+    } else if let Some((body, ret_ty)) = ColumnSlot::classify(col, model).coerced_reader() {
+        // Temporal and JSON: the slot's read coercion, not the storage ivar.
+        (body, ret_ty)
     } else {
         // The slot type, not the bare column type: a nullable column
         // reads back nil until something sets it.
@@ -1042,109 +1033,11 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
     }
 }
 
-/// A column whose public accessors go through `JsonColumn` load/dump:
-/// schema `t.json` / `t.jsonb` (except `has_json` keyed schemas), or an
-/// ActiveRecord `serialize …, coder: JSON` declaration on text/string/json.
-fn is_generic_json_col(col: &Column, model: &Model) -> bool {
-    if crate::lower::serialize::json_serialize_columns(model).contains(&col.name) {
-        return true;
-    }
-    matches!(
-        col.col_type,
-        crate::schema::ColumnType::Json | crate::schema::ColumnType::Jsonb
-    )
-        && !crate::lower::has_json::has_json_decls(&model.body)
-            .iter()
-            .any(|decl| decl.column == col.name)
-}
-
-/// `JsonColumn.load(@<col>)` — decode serialized DB text at the public
-/// accessor boundary. JSON is schema-less, so the logical value is the
-/// deliberate gradual type while the backing slot remains String.
-fn json_reader_body(col: &Column) -> Expr {
-    let stored = col_ivar(col, super::ty_of_column_slot(col));
-    with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Const { path: vec![Symbol::from("JsonColumn")] },
-                )),
-                method: Symbol::from("load"),
-                args: vec![stored],
-                block: None,
-                parenthesized: true,
-            },
-        ),
-        Ty::Untyped,
-    )
-}
-
-fn json_dump_value(col: &Column, value: Expr) -> Expr {
-    with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Const { path: vec![Symbol::from("JsonColumn")] },
-                )),
-                method: Symbol::from("dump"),
-                args: vec![value],
-                block: None,
-                parenthesized: true,
-            },
-        ),
-        super::ty_of_column_slot(col),
-    )
-}
-
-/// True for a stored-text column with native Date or Time accessors.
-fn is_temporal_col(col: &Column) -> bool {
-    matches!(
-        col.col_type,
-        crate::schema::ColumnType::Date
-            | crate::schema::ColumnType::DateTime
-            | crate::schema::ColumnType::Time
-    )
-}
-
 /// One authority for the logical value, parser and formatter. Storage
 /// stays String. The legacy hand-written Ruby accessor path uses this
 /// too; it must not independently decide that a Date is a timestamp.
 pub(crate) fn temporal_seam(col: &Column) -> (Ty, &'static str, &'static str) {
-    if col.col_type == crate::schema::ColumnType::Date {
-        (Ty::Date, "parse_db_date", "format_db_date")
-    } else {
-        (Ty::Time, "parse_db_time", "format_db_time")
-    }
-}
-
-/// Nil-safe native Date/Time parsing over the raw storage text. Dates
-/// have no zone; timestamps read zone-less storage as UTC. Backends
-/// without the selected native seam must report unsupported.
-fn temporal_reader_body(col: &Column) -> Expr {
-    let ivar = with_ty(
-        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }),
-        Ty::Str,
-    );
-    with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
-                )),
-                method: Symbol::from(temporal_seam(col).1),
-                args: vec![ivar],
-                block: None,
-                parenthesized: true,
-            },
-        ),
-        Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil].into() },
-    )
+    column_slot::temporal_seam(col).expect("temporal column")
 }
 
 /// `<col>_raw` — the plain String reader over a temporal column's
@@ -1216,32 +1109,13 @@ fn synth_raw_reader(owner: &ClassId, col: &Column) -> MethodDef {
 /// synthesized-writer arm (`emit::ruby::library::apply_datetime_
 /// lowering`); strict targets previously had NO public temporal writer
 /// at all.
-fn synth_temporal_writer(owner: &ClassId, col: &Column) -> MethodDef {
+fn synth_temporal_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef {
     let value_param = Symbol::from("value");
-    let (value_ty, text_ty) = if col.nullable {
-        (
-            Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil].into() },
-            Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() },
-        )
-    } else {
-        (temporal_seam(col).0, Ty::Str)
-    };
-    let normalize = with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
-                )),
-                method: Symbol::from(temporal_seam(col).2),
-                args: vec![with_ty(var_ref(value_param.clone()), value_ty.clone())],
-                block: None,
-                parenthesized: true,
-            },
-        ),
-        text_ty.clone(),
-    );
+    let slot = ColumnSlot::classify(col, model);
+    let (value_ty, text_ty) = slot.temporal_writer_types().expect("temporal writer");
+    let normalize = slot
+        .format_temporal(with_ty(var_ref(value_param.clone()), value_ty.clone()), text_ty.clone())
+        .expect("temporal format");
     let body = with_ty(
         Expr::new(
             Span::synthetic(),
@@ -1339,10 +1213,11 @@ fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
     // writer takes the decoded value and serializes it into the String slot.
     // Hydration uses `_write_<col>_json_raw` so DB text never goes through dump.
     let col_ty = super::ty_of_column_slot(col);
-    let value_ty = if is_generic_json_col(col, model) { Ty::Untyped } else { col_ty.clone() };
+    let slot = ColumnSlot::classify(col, model);
+    let value_ty = if slot.is_json() { Ty::Untyped } else { col_ty.clone() };
     let value = with_ty(var_ref(value_param.clone()), value_ty.clone());
-    let rhs = if is_generic_json_col(col, model) {
-        json_dump_value(col, value)
+    let rhs = if let Some(dumped) = slot.json_dump(value.clone()) {
+        dumped
     } else {
         let value = crate::lower::normalizes::normalized_write(model, &col.name, value.clone())
             .unwrap_or(value);
@@ -2511,6 +2386,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         // is the default, and only the type-zero case (no default
         // declared) leaves it NULL.
         let col_ty = ty_of_column(&col.col_type);
+        let column = ColumnSlot::classify(col, model);
         let schema_default = column_default_literal(model, col);
         let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. })
             && schema_default.is_none();
@@ -2561,7 +2437,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             continue;
         }
 
-        if is_temporal_col(col) {
+        if column.is_temporal() {
             // Temporal columns: callers pass native Date or Time values
             // (`Username.create!(created_at: user.created_at)` in
             // lobsters), so the attrs value can't be stuffed into the
@@ -2607,26 +2483,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             // intrinsic's Time parameter on strict targets (same seam
             // as `from_raw`'s adapter-row Cast); ruby-family emit
             // unwraps it to the inner value.
-            let time_value = Expr::new(
-                Span::synthetic(),
-                ExprNode::Cast { value: lookup.clone(), target_ty: temporal_seam(col).0 },
-            );
-            let normalized = with_ty(
-                Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Send {
-                        recv: Some(Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
-                        )),
-                        method: Symbol::from(temporal_seam(col).2),
-                        args: vec![time_value],
-                        block: None,
-                        parenthesized: true,
-                    },
-                ),
-                Ty::Str,
-            );
+            let normalized = column.format_cast(lookup.clone()).expect("temporal format");
             let raw_assign = Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
@@ -2664,7 +2521,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             let json_assign_is_none = json_assign.is_none();
             let value = if let Some(assign) = json_assign {
                 assign
-            } else if is_generic_json_col(col, model) {
+            } else if column.is_json() {
                 if nullable {
                     lookup
                 } else {
@@ -3170,11 +3027,8 @@ fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
         .map(|c| {
             let col_ty = super::ty_of_column_slot(c);
             let value = enum_label_read(model, c).unwrap_or_else(|| {
-                if is_generic_json_col(c, model) {
-                    json_reader_body(c)
-                } else {
-                    col_ivar(c, col_ty)
-                }
+                let slot = ColumnSlot::classify(c, model);
+                slot.attributes_read().unwrap_or_else(|| col_ivar(c, col_ty))
             });
             (super::lit_str(c.name.as_str().to_string()), value)
         })
@@ -3238,8 +3092,7 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
             // `&self`.
             body: crate::lower::has_json::column_hash_read(model, &c.name)
                 .or_else(|| enum_label_read(model, c))
-                .or_else(|| (c.col_type == crate::schema::ColumnType::Date).then(|| temporal_reader_body(c)))
-                .or_else(|| is_generic_json_col(c, model).then(|| json_reader_body(c)))
+                .or_else(|| ColumnSlot::classify(c, model).index_read())
                 .unwrap_or_else(|| {
                 let read = Expr::new(
                     Span::synthetic(),
@@ -3530,6 +3383,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
         .iter()
         .map(|c| {
             let col_ty = super::ty_of_column_slot(c);
+            let slot = ColumnSlot::classify(c, model);
             // `self[:role] = "administrator"` — same label problem the
             // attrs-hash writers have, same answer. `self[:settings] =
             // { … }` likewise routes through the has_json seam.
@@ -3540,10 +3394,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
                 col_ty.clone(),
             )
             .or_else(|| enum_label_cast(model, c, var_ref(value.clone())))
-            .or_else(|| {
-                is_generic_json_col(c, model)
-                    .then(|| json_dump_value(c, var_ref(value.clone())))
-            })
+            .or_else(|| slot.json_dump(var_ref(value.clone())))
             .unwrap_or_else(|| {
                     Expr::new(
                         Span::synthetic(),
@@ -3560,29 +3411,8 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
             // value, so `update_attribute(:discarded_at, nil)` on a record
             // that had been read came back still discarded; and a `Time`
             // was stored as its `to_s`, not the canonical storage form.
-            let body = if is_temporal_col(c) {
-                let normalized = with_ty(
-                    Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Send {
-                            recv: Some(Expr::new(
-                                Span::synthetic(),
-                                ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
-                            )),
-                            method: Symbol::from(temporal_seam(c).2),
-                            args: vec![Expr::new(
-                                Span::synthetic(),
-                                ExprNode::Cast {
-                                    value: var_ref(value.clone()),
-                                    target_ty: temporal_seam(c).0,
-                                },
-                            )],
-                            block: None,
-                            parenthesized: true,
-                        },
-                    ),
-                    Ty::Str,
-                );
+            let body = if slot.is_temporal() {
+                let normalized = slot.format_cast(var_ref(value.clone())).expect("temporal format");
                 // An attribute assignment, as `synth_temporal_writer` writes
                 // it: every target lowers it, where a bare `x_raw=` Send in
                 // value position renders as `return self.x_raw=(…)` in Python.
@@ -3708,7 +3538,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
 // Not the `||` alone: `new(flag: false)` under `default: true` and `new(n: nil)` under `default: 7` would read back the default.
 fn overrides_schema_default(model: &Model, col: &Column) -> bool {
     column_default_literal(model, col).is_some()
-        && !is_temporal_col(col)
+        && !ColumnSlot::classify(col, model).is_temporal()
         && (matches!(col.col_type, crate::schema::ColumnType::Boolean)
             || matches!(super::ty_of_column_slot(col), Ty::Union { .. }))
 }
@@ -4045,6 +3875,7 @@ fn synth_update_hash(
             continue;
         }
         let slot_ty = super::ty_of_column_slot(col);
+        let column = ColumnSlot::classify(col, model);
         // `Cast` to the column's SLOT type is the bridge from the
         // untyped attrs value on every strict target — the same node,
         // for the same reason, that `synth_index_write` wraps its
@@ -4075,7 +3906,7 @@ fn synth_update_hash(
             slot_ty.clone(),
         )
         .or_else(|| enum_label_cast(model, col, lookup(&col.name)))
-        .or_else(|| is_generic_json_col(col, model).then(|| lookup(&col.name)))
+        .or_else(|| column.is_json().then(|| lookup(&col.name)))
         .unwrap_or_else(|| {
             Expr::new(
                 Span::synthetic(),
@@ -4094,9 +3925,9 @@ fn synth_update_hash(
         );
 
         stmts.push(when_present(&col.name, raw_assign));
-        if is_temporal_col(col) {
+        if column.is_temporal() {
             // Normalize a native `Time` into the raw ISO-text slot
-            // through `format_db_time`, the same funnel
+            // through the slot's formatter, the same funnel
             // `synth_initialize` uses. `update! last_active_at:
             // Time.now` is the campfire shape, and without this the slot
             // keeps a Time whose `to_s` is not Rails' storage form.
@@ -4107,26 +3938,7 @@ fn synth_update_hash(
             // other synthesizer here emits. Nesting an `If` in
             // then-position is a shape the python emitter renders on one
             // line (`if a: if b: …`), which is a syntax error.
-            let time_value = Expr::new(
-                Span::synthetic(),
-                ExprNode::Cast { value: lookup(&col.name), target_ty: temporal_seam(col).0 },
-            );
-            let normalized = with_ty(
-                Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Send {
-                        recv: Some(Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
-                        )),
-                        method: Symbol::from(temporal_seam(col).2),
-                        args: vec![time_value],
-                        block: None,
-                        parenthesized: true,
-                    },
-                ),
-                Ty::Str,
-            );
+            let normalized = column.format_cast(lookup(&col.name)).expect("temporal format");
             let normalize_assign = Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {

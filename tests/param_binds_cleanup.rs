@@ -3,6 +3,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/test_subprocess.rs"]
+mod test_subprocess;
 
 use roundhouse::project::BuildTarget;
 use std::path::Path;
@@ -111,19 +113,19 @@ end
 
 #[test]
 fn generated_cleanup_ruby() {
-    emitted("generated_cleanup_ruby", BuildTarget::Ruby);
+    emitted(test_subprocess::name!("generated_cleanup_ruby"), BuildTarget::Ruby);
 }
 
 #[test]
 #[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
 fn generated_cleanup_spinel() {
-    emitted("generated_cleanup_spinel", BuildTarget::Spinel);
+    emitted(test_subprocess::name!("generated_cleanup_spinel"), BuildTarget::Spinel);
 }
 
 #[test]
 #[ignore = "requires JRuby 10+ and jdbc-sqlite3"]
 fn generated_cleanup_jruby() {
-    emitted("generated_cleanup_jruby", BuildTarget::Jruby);
+    emitted(test_subprocess::name!("generated_cleanup_jruby"), BuildTarget::Jruby);
 }
 
 #[test]

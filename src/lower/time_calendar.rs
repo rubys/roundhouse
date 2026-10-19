@@ -21,6 +21,22 @@ fn rewrite(expr: &mut Expr) {
 }
 
 pub(crate) fn rewrite_node(expr: &mut Expr) {
+    // Crystal prints these names literally. The rewrite used to live in
+    // `emit/crystal/expr.rs`. `time_current` calls the same function on
+    // the node it just built (`Time.current`, `to_fs(:iso8601)`).
+    ground_crystal_time_bridge(expr);
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node {
+        let time_class = matches!(&*r.node, ExprNode::Const { path }
+            if path.last().is_some_and(|s| s.as_str() == "Time")
+                && path.iter().rev().skip(1).all(|s| s.as_str().is_empty()));
+        if time_class && method.as_str() == "find_zone" && args.len() == 1 {
+            *r = Expr::new(r.span, ExprNode::Const {
+                path: vec![Symbol::from("ActiveSupport"), Symbol::from("TimeZone")],
+            });
+            *method = Symbol::from("lookup");
+            return;
+        }
+    }
     // Not `TimeZone[name]`: a class-side index is an operator on the strict targets; the runtime port answers it as `lookup`.
     if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node {
         if method.as_str() == "[]" && args.len() == 1 && is_time_zone_class(r) {
@@ -98,6 +114,11 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         return;
     }
     if !is_time_value(r) {
+        return;
+    }
+    if method.as_str() == "to_date" && args.is_empty() {
+        *expr.node = active_support_call("date_current", vec![r.clone()]);
+        expr.ty = Some(Ty::Date);
         return;
     }
     if method.as_str() == "in_time_zone" && args.len() <= 1 {
@@ -187,7 +208,30 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     *expr.node = active_support_call(target, call_args);
 }
 
+pub(crate) fn date_calendar_duration(expr: &Expr) -> Option<(&'static str, &Expr)> {
+    let ExprNode::Send { recv: Some(count), method, args, block: None, .. } = &*expr.node else { return None };
+    if !args.is_empty() || !matches!(count.ty, Some(Ty::Int)) {
+        return None;
+    }
+    let unit = match method.as_str() {
+        "day" | "days" => "days",
+        "week" | "weeks" => "weeks",
+        "month" | "months" => "months",
+        "year" | "years" => "years",
+        _ => return None,
+    };
+    Some((unit, count))
+}
+
 fn rewrite_date_value(expr: &mut Expr, r: &Expr, method: &str, args: &[Expr]) {
+    if matches!(method, "+" | "-") && args.len() == 1
+        && let Some((unit, count)) = date_calendar_duration(&args[0])
+    {
+        let direction = if method == "+" { "since" } else { "ago" };
+        *expr.node = active_support_call(&format!("date_{unit}_{direction}"), vec![r.clone(), count.clone()]);
+        expr.ty = Some(Ty::Date);
+        return;
+    }
     if method == "in_time_zone" && args.len() <= 1 {
         let midnight = time_expr(active_support_call("date_at_midnight", vec![r.clone()]));
         let grounded = match args.first() {
@@ -433,6 +477,86 @@ fn active_support_call(method: &str, args: Vec<Expr>) -> ExprNode {
         args,
         block: None,
     }
+}
+
+/// `Time.now.utc` (zero args, bare or root `Time`) → `Time.utc`.
+/// Zero-arg `iso8601` on a time value, or on that clock, → `to_rfc3339`.
+///
+/// `Foo::Time` is a different constant: `Foo::Time.now.utc` stays a chain.
+/// An unknown receiver, a `Date`, and an application class keep `iso8601`
+/// — those targets print the method name, and only `Time` grew
+/// `to_rfc3339`. `Time.utc(year, …)` and `iso8601(n)` stay: Crystal's
+/// clock is the no-arg class method, and an explicit fraction is a
+/// different call.
+pub(crate) fn ground_crystal_time_bridge(expr: &mut Expr) {
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else {
+        return;
+    };
+    if method.as_str() == "iso8601" && args.is_empty() && is_time_rfc3339_receiver(r) {
+        *method = Symbol::from("to_rfc3339");
+        expr.decisions |= crate::expr::GROUNDED_TIME_FORMAT;
+        return;
+    }
+    if method.as_str() != "utc" || !args.is_empty() {
+        return;
+    }
+    // The send is already `.utc`. Point it at `Time` instead of rebuilding
+    // the node, so `parenthesized` and the surrounding expr stay.
+    let Some(time) = time_now_const(r) else { return };
+    *r = time;
+}
+
+/// A tree spliced in after the postorder walk (`to_fs` format lambdas).
+pub(crate) fn ground_crystal_time_bridge_tree(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut ground_crystal_time_bridge_tree);
+    ground_crystal_time_bridge(expr);
+}
+
+/// The `Time` constant under `Time.now`, cloned so the clock send can
+/// reuse it as `Time.utc`.
+fn time_now_const(now_send: &Expr) -> Option<Expr> {
+    let ExprNode::Send { recv: Some(inner), method, args, block: None, .. } = &*now_send.node else {
+        return None;
+    };
+    if method.as_str() != "now" || !args.is_empty() {
+        return None;
+    }
+    if is_root_time_const(inner) { Some(inner.clone()) } else { None }
+}
+
+/// Bare `Time` and rooted `::Time`. A namespaced `Foo::Time` is not the
+/// stdlib clock — same rule as the TypeScript emitter.
+fn is_root_time_const(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Const { path }
+        if path.last().is_some_and(|s| s.as_str() == "Time")
+            && path.iter().rev().skip(1).all(|s| s.as_str().is_empty()))
+}
+
+/// `Time.now` / `Time.utc` / `Time.now.utc`, including the rooted form.
+/// The type stamp is missing on some synthesized chains; the shape is
+/// still the stdlib clock.
+fn is_stdlib_time_clock(e: &Expr) -> bool {
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node else {
+        return false;
+    };
+    if !args.is_empty() {
+        return false;
+    }
+    match method.as_str() {
+        "now" | "utc" if is_root_time_const(r) => true,
+        "utc" => is_stdlib_time_clock(r),
+        _ => false,
+    }
+}
+
+/// A zero-arg `to_rfc3339` on this receiver is the grounded time format.
+/// Emitters use the same test so an application method of that name
+/// keeps normal dispatch.
+pub(crate) fn is_time_rfc3339_receiver(recv: &Expr) -> bool {
+    if is_root_time_const(recv) {
+        return false;
+    }
+    is_time_value(recv) || is_stdlib_time_clock(recv)
 }
 
 fn is_time_const(e: &Expr) -> bool {

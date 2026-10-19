@@ -36,7 +36,8 @@ const FLOORS: &[(&str, usize, usize)] = &[
     ("app_verifiers.blob_id", 8, 8),
     ("app_verifiers.envelope", 3, 3),
     ("app_verifiers.data", 7, 7),
-    ("encrypted_cookies", 0, 28),
+    ("encrypted_cookies.verify", 20, 20),
+    ("encrypted_cookies.generate", 8, 8),
     ("csrf", 0, 208),
     ("passwords", 0, 45),
 ];

@@ -193,11 +193,11 @@ end
     );
 }
 
-/// Schema column AttributeReaders must keep winning over a body `def`
-/// of the same name — `push_user_methods` only replaces bare-ivar
-/// attr_* halves, never a column reader's body.
+/// A body `def` over a schema column's reader is the one Rails calls:
+/// ActiveRecord generates the column's accessors in a module the class
+/// includes, so the class's own definition wins (`push_user_methods`).
 #[test]
-fn a_schema_column_reader_is_not_replaced_by_a_body_def() {
+fn a_schema_column_reader_yields_to_a_body_def() {
     let mut app = ingest_app_from_tree(tree(&[
         (
             "db/schema.rb",
@@ -227,8 +227,8 @@ end
         .content
         .clone();
     assert!(
-        !src.contains("\"override\""),
-        "schema column reader must win over body def title; got:\n{src}"
+        src.contains("\"override\""),
+        "the body def title must win over the column reader; got:\n{src}"
     );
     assert!(
         src.contains("def title"),

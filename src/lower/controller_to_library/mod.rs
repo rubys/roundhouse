@@ -586,7 +586,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             // made it `helper.field`, a String. Ground them now, then type
             // the grounded calls.
             if bracket_rewritten
-                && crate::lower::string_inflections::ground_in_place(&mut method.body)
+                && crate::lower::string_core_ext::ground_in_place(&mut method.body)
             {
                 crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
@@ -1243,17 +1243,21 @@ fn build_methods(
     // inlining — drop them from the emitted methods. Filter targets
     // that are also called from action bodies (e.g., `_params`
     // helpers — actually those don't appear in before_filters, but
-    // be defensive) stay. A guarded filter (`if:`/`unless:`) is never
-    // inlined (`inline_before_filters` skips it; see
-    // `filter_is_guarded`) — its target is still called by name from
-    // the preamble, so it's excluded here even when another,
-    // unguarded, before_action on the same controller also names it.
-    let guarded_target_names: std::collections::HashSet<&Symbol> =
-        before_filters.iter().filter(|f| filter_is_guarded(f)).map(|f| &f.target).collect();
+    // be defensive) stay. A guarded filter (`if:`/`unless:`), or one
+    // whose target returns early, is never inlined
+    // (`inline_before_filters` skips it; see `filter_is_spliceable`):
+    // its target is still called by name from the preamble, so it's
+    // excluded here even when another, spliceable, before_action on the
+    // same controller also names it.
+    let called_target_names: std::collections::HashSet<&Symbol> = before_filters
+        .iter()
+        .filter(|f| !filter_is_spliceable(f, &privs))
+        .map(|f| &f.target)
+        .collect();
     let filter_target_names: std::collections::HashSet<&Symbol> = before_filters
         .iter()
         .map(|f| &f.target)
-        .filter(|t| !guarded_target_names.contains(*t))
+        .filter(|t| !called_target_names.contains(*t))
         .collect();
     // A subclassed controller keeps its filter targets: descendants
     // inherit the before_action and their preambles call the target
@@ -1399,20 +1403,26 @@ fn build_methods(
             all_controllers,
             &dispatcher_bodies(&preamble, &wraps, &rescues),
         );
-        methods.insert(
-            dispatcher_at,
-            synthesize_process_action(
-                &preamble,
-                &publics_inlined,
-                &inherited,
-                controller.name.0.clone(),
-                &deferred_tails,
-                &rescues,
-                &wraps,
-                reads,
-                &missing,
-            ),
+        let mut dispatcher = synthesize_process_action(
+            &preamble,
+            &publics_inlined,
+            &inherited,
+            controller.name.0.clone(),
+            &deferred_tails,
+            &rescues,
+            &wraps,
+            reads,
+            &missing,
         );
+        // Block-form filters are inlined into `process_action` after
+        // `rewrite_controller_route_helpers` has already run on action
+        // bodies. A CSP block calls `service_worker_path(format: :js)`,
+        // which `route_format_suffix` renamed. The rewrite is idempotent
+        // on nodes it has already touched, so every dispatcher gets it —
+        // the next block filter that names a helper would otherwise stay bare.
+        dispatcher.body =
+            rewrite_controller_route_helpers(&dispatcher.body, &shadows, route_id_segments);
+        methods.insert(dispatcher_at, dispatcher);
     }
     // The empty set for both non-public loops below: `is_public: false`
     // already suppresses the implicit render, so there is never one to
@@ -1652,6 +1662,24 @@ fn filter_is_guarded(f: &Filter) -> bool {
         || f.unless_cond_expr.is_some()
 }
 
+/// May `f`'s target body be spliced into the actions it applies to?
+/// Not when the filter is guarded (`filter_is_guarded`), and not when
+/// its target method leaves early with `return`: spliced into an action,
+/// that `return` would leave the ACTION, while in Rails it ends only the
+/// filter method and the chain goes on unless the filter rendered or
+/// redirected. `def require_login; return if logged_in?; redirect_to
+/// login_path; end` then answered a signed-in request with an empty 200
+/// instead of running the action. Such a filter stays a call in the
+/// preamble, where its `return` ends the call and `return if
+/// performed?` decides the halt, as Rails does.
+fn filter_is_spliceable(f: &Filter, privs: &[Action]) -> bool {
+    !filter_is_guarded(f)
+        && !privs
+            .iter()
+            .find(|a| a.name == f.target)
+            .is_some_and(|a| crate::lower::model_to_library::contains_return(&a.body))
+}
+
 /// May this controller's own filters be inlined into its action bodies
 /// at all?
 ///
@@ -1689,11 +1717,11 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
     let own_priv = |target: &Symbol| privs.iter().any(|a| &a.name == target);
     let mut seen_inlinable = false;
     for f in controller.filters().filter(|f| matches!(f.kind, FilterKind::Before)) {
-        // A guarded own-private filter is never inlined (see
-        // `filter_is_guarded`) — it stays in the preamble exactly like
-        // an ancestor-target filter, so it doesn't count as "inlinable"
-        // for this ordering check either.
-        if own_priv(&f.target) && !filter_is_guarded(f) {
+        // A guarded or early-returning own-private filter is never
+        // inlined (see `filter_is_spliceable`): it stays in the
+        // preamble exactly like an ancestor-target filter, so it doesn't
+        // count as "inlinable" for this ordering check either.
+        if own_priv(&f.target) && filter_is_spliceable(f, privs) {
             seen_inlinable = true;
         } else if seen_inlinable {
             return false;
@@ -1716,6 +1744,9 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
 /// every response publicly cacheable). A guarded filter is left for
 /// `build_filter_preamble`, which already turns `if:`/`unless:` into a
 /// runtime condition (`cond_from_guards`) around the dispatch call.
+/// A filter whose target leaves early with `return` is left there too
+/// (`filter_is_spliceable`): spliced in, its `return` would leave the
+/// action.
 ///
 /// A prepended body that can render/redirect/head is followed by
 /// `return if performed?`, exactly as the preamble does for the filters
@@ -1732,7 +1763,7 @@ fn inline_before_filters(
     let action_name = &action.name;
     let mut prepended: Vec<Expr> = Vec::new();
     for f in filters {
-        if !filter_applies(f, action_name) || filter_is_guarded(f) {
+        if !filter_applies(f, action_name) || !filter_is_spliceable(f, privs) {
             continue;
         }
         // Look up the filter's target action by name in privs.
@@ -1958,7 +1989,7 @@ fn build_filter_preamble(
                     if is_own
                         && own_privs_inlined
                         && own_priv_targets.contains(&filter.target)
-                        && !filter_is_guarded(filter)
+                        && filter_is_spliceable(filter, own_privs)
                     {
                         continue; // inlined into action bodies upstream
                     }
@@ -2857,7 +2888,18 @@ fn action_to_method(
     //     permits `:user`, and one resource can carry several lists.
     //   - Other private actions default to Nil; refine when a
     //     forcing fixture surfaces.
-    let ret_ty = if !is_public && method_name.ends_with("_params") {
+    // Routing redirects override `same_host_location` so an author-written
+    // external location is allowed. The only caller is the inherited
+    // runtime `redirect_to`, which app call-site inference never sees, so
+    // the parameter would stay `Untyped`. Kotlin, C#, and Swift then emit
+    // `Any?` / `object?` against Base's `(String) -> String` and the
+    // override does not compile. The contract is the same String the
+    // runtime signature declares.
+    let host_policy = controller.name.0.as_str() == crate::ingest::routes::REDIRECT_CONTROLLER
+        && a.name.as_str() == "same_host_location";
+    let ret_ty = if host_policy {
+        Ty::Str
+    } else if !is_public && method_name.ends_with("_params") {
         let spec = self::params::first_permit_in(&a.body)
             .and_then(|(resource, fields)| params_specs.find(&resource, &fields));
         if let Some(spec) = spec {
@@ -2902,6 +2944,8 @@ fn action_to_method(
         .map(|(i, p)| {
             let ty = if p.rest {
                 Ty::Untyped
+            } else if host_policy {
+                Ty::Str
             } else {
                 unified
                     .and_then(|v| v.get(i))

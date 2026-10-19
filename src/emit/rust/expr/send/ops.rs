@@ -57,7 +57,11 @@ pub(super) fn try_stdlib_class_method(
     if let ExprNode::Const { path } = &*r.node {
         let last = path.last().map(|s| s.as_str()).unwrap_or("");
         match (last, method, args.len()) {
-            ("Time", "now", 0) => return Some("chrono::Utc::now()".to_string()),
+            ("Time", "now" | "utc", 0)
+                if path.iter().rev().skip(1).all(|s| s.as_str().is_empty()) =>
+            {
+                return Some("chrono::Utc::now()".to_string());
+            }
             ("JSON", "generate" | "dump" | "fast_generate", 1) => {
                 return Some(format!("serde_json::to_string(&{}).unwrap()", emit_expr(&args[0])));
             }
@@ -93,7 +97,9 @@ pub(super) fn try_stdlib_class_method(
     if recv_is_time(r) {
         match (method, args.len()) {
             ("utc" | "to_time", 0) => return Some(emit_expr(r)),
-            ("iso8601" | "rfc3339", 0) => return Some(format!("{}.to_rfc3339()", emit_expr(r))),
+            ("rfc3339" | "to_rfc3339", 0) => {
+                return Some(format!("{}.to_rfc3339()", emit_expr(r)))
+            }
             ("rfc2822", 0) => return Some(format!("{}.to_rfc2822()", emit_expr(r))),
             ("strftime", 1) => {
                 return Some(format!(
@@ -124,7 +130,10 @@ fn recv_is_time(e: &Expr) -> bool {
     if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node {
         if args.is_empty() {
             if let ExprNode::Const { path } = &*r.node {
-                if path.last().map(|s| s.as_str()) == Some("Time") && method.as_str() == "now" {
+                if path.last().map(|s| s.as_str()) == Some("Time")
+                    && path.iter().rev().skip(1).all(|s| s.as_str().is_empty())
+                    && matches!(method.as_str(), "now" | "utc")
+                {
                     return true;
                 }
             }

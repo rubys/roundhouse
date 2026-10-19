@@ -174,3 +174,43 @@ end
         app.library_classes.iter().map(|c| c.name.0.as_str()).collect::<Vec<_>>()
     );
 }
+
+/// Nested by name but not by scope: a concern written beside the model
+/// under a compact name, `module Widget::Uploads`. Writebook's
+/// `lib/rails_ext/action_text_markdown.rb` defines
+/// `ActionText::Markdown::Uploads` this way. Skipping every top-level
+/// declaration dropped it, and the model's include of it became an
+/// unresolved-include error. The model's own class is still not
+/// re-walked: the enum alias below must not fail ingest.
+const WIDGET_WITH_SIBLING_CONCERN: &str = r#"class Widget < ApplicationRecord
+  enum :state, { idle: 0, accepted: 1 }
+  alias enabled? accepted?
+end
+
+module Widget::Uploads
+  extend ActiveSupport::Concern
+
+  included do
+    has_many_attached :uploads
+  end
+end
+
+class Widget
+  include Widget::Uploads
+end
+"#;
+
+#[test]
+fn a_compact_named_sibling_under_the_model_is_ingested_from_either_root() {
+    for path in ["app/models/widget.rb", "lib/pkg/widget.rb"] {
+        let app = ingest_app_from_tree(tree(&[
+            ("db/schema.rb", SCHEMA),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+            (path, WIDGET_WITH_SIBLING_CONCERN),
+        ]))
+        .unwrap_or_else(|error| panic!("{path}: must ingest despite the enum alias: {error:?}"));
+        let names: Vec<_> = app.library_classes.iter().map(|c| c.name.0.as_str()).collect();
+        assert!(names.contains(&"Widget::Uploads"), "{path}: the sibling concern must be registered: {names:?}");
+        assert!(!names.contains(&"Widget"), "{path}: the model's own class must not be re-walked: {names:?}");
+    }
+}

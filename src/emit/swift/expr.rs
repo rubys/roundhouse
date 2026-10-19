@@ -880,21 +880,19 @@ pub(super) fn begin_method(body: &Expr, returns_value: bool) {
     count_assigns(body, &mut counts, &mut nil_types, &mut mutated);
     DECLARED.with(|d| d.borrow_mut().clear());
 
-    // Var-hoist (Kotlin's scan_hoist): a local FIRST assigned inside a
-    // nested scope but assigned more than once needs a typed `var`
-    // declaration at the method top — Swift scopes the nested decl to
-    // its branch.
-    let mut hoist_info: HashMap<String, (usize, usize, Option<crate::ty::Ty>)> = HashMap::new();
-    scan_hoist(body, 0, &mut hoist_info);
+    // Var-hoist (`emit::shared::hoist`, shared with Kotlin): a local
+    // FIRST assigned inside a nested scope but assigned more than once
+    // needs a typed `var` declaration at the method top — Swift scopes
+    // the nested decl to its branch. The type is the first non-nil one.
     let mut hoisted: Vec<(String, String, String)> = Vec::new();
-    for (n, (first_depth, count, ty)) in hoist_info {
-        if first_depth > 0 && count > 1 {
-            let (st, d) = hoist_decl(ty.as_ref());
-            DECLARED.with(|dset| {
-                dset.borrow_mut().insert(n.clone());
-            });
-            hoisted.push((n, st, d));
-        }
+    for h in crate::emit::shared::hoist::hoisted_locals(body) {
+        let n = camel(&h.name);
+        let ty = h.tys.iter().flatten().next();
+        let (st, d) = hoist_decl(ty);
+        DECLARED.with(|dset| {
+            dset.borrow_mut().insert(n.clone());
+        });
+        hoisted.push((n, st, d));
     }
     hoisted.sort();
     HOISTED.with(|h| *h.borrow_mut() = hoisted);
@@ -991,56 +989,6 @@ pub(super) fn container_scan(e: &Expr) -> HashMap<String, String> {
     let mut out = HashMap::new();
     scan_container_types(e, &mut out);
     out
-}
-
-/// Hoist-scan walk: branch bodies (If/While/Case/Lambda) are depth+1,
-/// Seq and conditions stay at the current depth.
-fn scan_hoist(
-    e: &Expr,
-    depth: usize,
-    info: &mut HashMap<String, (usize, usize, Option<crate::ty::Ty>)>,
-) {
-    match &*e.node {
-        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
-            let cn = camel(name.as_str());
-            let entry = info.entry(cn).or_insert((depth, 0, None));
-            entry.1 += 1;
-            if entry.2.is_none() {
-                if let Some(t) = value.ty.as_ref() {
-                    if !matches!(t, crate::ty::Ty::Nil) {
-                        entry.2 = Some(t.clone());
-                    }
-                }
-            }
-            scan_hoist(value, depth, info);
-        }
-        ExprNode::Seq { exprs } => {
-            for x in exprs {
-                scan_hoist(x, depth, info);
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            scan_hoist(cond, depth, info);
-            scan_hoist(then_branch, depth + 1, info);
-            scan_hoist(else_branch, depth + 1, info);
-        }
-        ExprNode::While { cond, body, .. } => {
-            scan_hoist(cond, depth, info);
-            scan_hoist(body, depth + 1, info);
-        }
-        ExprNode::Case { scrutinee, arms } => {
-            scan_hoist(scrutinee, depth, info);
-            for a in arms {
-                scan_hoist(&a.body, depth + 1, info);
-            }
-        }
-        ExprNode::Lambda { body, .. } => scan_hoist(body, depth + 1, info),
-        _ => {
-            for c in children(e) {
-                scan_hoist(c, depth, info);
-            }
-        }
-    }
 }
 
 /// Declaration type + default for a hoisted local.
@@ -2551,9 +2499,14 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
 }
 
 fn emit_lambda(params: &[crate::ident::Symbol], body: &Expr) -> String {
+    // A local the block declares is the block's own (Ruby scopes it the
+    // same way), so a sibling block assigning the same name declares its
+    // own too. See `emit::shared::hoist`.
+    let outer = DECLARED.with(|d| d.borrow().clone());
     IN_LAMBDA.with(|d| *d.borrow_mut() += 1);
     let body_s = emit_expr(body);
     IN_LAMBDA.with(|d| *d.borrow_mut() -= 1);
+    DECLARED.with(|d| *d.borrow_mut() = outer);
     if params.is_empty() {
         format!("{{ {body_s} }}")
     } else {

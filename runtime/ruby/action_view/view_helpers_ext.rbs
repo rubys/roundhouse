@@ -3,6 +3,8 @@ module ActionView
   module ViewHelpers
     type number_option_value = String | Integer | Float | Rational | Symbol | bool | Regexp | nil | Hash[Symbol, String | Hash[Symbol, String]]
     def self.content_security_policy_nonce: () -> String
+    def self.csp_policy_for_test=: (bool present) -> bool
+    def self.csp_meta_tag: () -> String
     def self.url_origin=: (String origin) -> String
     def self.url_for_path: (String path) -> String
     def self.class_names: (*(String | Symbol | Integer | bool | Hash[String | Symbol, untyped] | Array[untyped] | nil) args) -> String

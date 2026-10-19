@@ -87,11 +87,14 @@ debug = 1
 [profile.dev.package."*"]
 debug = false
 
-# Hundreds of integration-test binaries link the library independently.
-# Keep file/line backtraces, not the module metadata that `debug = 1`
-# repeats in every binary. Code remains unoptimized, including stack frames.
+# Hundreds of integration-test binaries repeatedly run the compiler pipeline.
+# Light optimization reduces that work without the build cost of release mode.
+# Keep file/line backtraces and the same debug assertions and overflow checks.
 [profile.test]
+opt-level = 1
 debug = "line-tables-only"
+debug-assertions = true
+overflow-checks = true
 
 [profile.test.package."*"]
 debug = false

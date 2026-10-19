@@ -4,6 +4,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/test_subprocess.rs"]
+mod test_subprocess;
 
 use roundhouse::project::BuildTarget;
 use std::process::Command;
@@ -13,7 +15,7 @@ fn nullable_read_plans_ruby() {
     if std::env::var_os("ROUNDHOUSE_BINDS_CHILD").is_none() {
         for mode in ["0", "1"] {
             let output = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "nullable_read_plans_ruby", "--nocapture"])
+                .args(["--exact", test_subprocess::name!("nullable_read_plans_ruby"), "--nocapture"])
                 .env("ROUNDHOUSE_BINDS_CHILD", "1")
                 .env("ROUNDHOUSE_PARAM_BINDS", mode)
                 .output().unwrap();

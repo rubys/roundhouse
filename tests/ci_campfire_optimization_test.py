@@ -25,10 +25,13 @@ SHIM = textwrap.dedent(
     class {klass}
       def test_one
       end
+      def __txn_test_one
+        test_one
+      end
     end
     __t = {klass}.new
     begin
-      __t.test_one
+      __t.__txn_test_one
     end
     """
 )

@@ -2,28 +2,51 @@
 # Header values are untyped by design — they arrive through mail()'s
 # heterogeneous opts hash and nothing downstream re-dispatches on them.
 module ActionMailer
-  class Message
-    @to: untyped
-    @from: untyped
-    @replyto: untyped
-    @subject: untyped
-    @body: untyped
+  class Part
+    @body: String
+    @mime: String
 
-    def initialize: (Hash[Symbol, untyped] opts) -> void
-    def to: () -> untyped
-    def from: () -> untyped
-    def replyto: () -> untyped
+    def initialize: (String body, String mime) -> void
+    def body: () -> String
+    def decoded: () -> String
+    def mime_type: () -> String
+  end
+
+  class Message
+    @to: Array[String]?
+    @from: Array[String]?
+    @cc: Array[String]?
+    @bcc: Array[String]?
+    @reply_to: Array[String]?
+    @subject: untyped
+    @text_body: String?
+    @html_body: String?
+    @body: String
+
+    def initialize: (Hash[Symbol, untyped] opts, ?String? text_body, ?String? html_body) -> void
+    def self.addresses: (untyped value) -> Array[String]?
+    def to: () -> Array[String]?
+    def from: () -> Array[String]?
+    def cc: () -> Array[String]?
+    def bcc: () -> Array[String]?
+    def reply_to: () -> Array[String]?
     def subject: () -> untyped
-    def body: () -> untyped
+    def body: () -> String
+    def multipart?: () -> bool
+    def text_part: () -> Part?
+    def html_part: () -> Part?
     def deliver_now: () -> Message
     def deliver_later: () -> Message
   end
 
   class Base
     self.@deliveries: Array[Message]
+    @params: Hash[Symbol, untyped]?
 
     def self.default: (?Hash[Symbol, untyped]? opts) -> nil
     def self.deliveries: () -> Array[Message]
-    def mail: (Hash[Symbol, untyped] opts) -> Message
+    def mail: (Hash[Symbol, untyped] opts, ?String? text_body, ?String? html_body) -> Message
+    def params: () -> Hash[Symbol, untyped]
+    def _with_params: (Hash[Symbol, untyped] params) -> self
   end
 end

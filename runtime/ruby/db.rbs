@@ -91,4 +91,13 @@ module Db
   # `current_dbh`/`current_conn`).
   def self._txn_depth: () -> Integer
   def self._txn_depth=: (Integer) -> Integer
+  # Bit `depth - 1` is set when that frame can be joined. A Rails
+  # fixture transaction is not joinable, so a save or destroy inside
+  # it opens a savepoint.
+  def self._txn_joinable_bits: () -> Integer
+  def self._txn_joinable_bits=: (Integer) -> Integer
+  # The writes the open transaction holds commit callbacks for
+  # (connection.rb's `_commit_enlisted`), per thread like the depth and
+  # boxed the same way. Empty outside a transaction.
+  def self._txn_records: () -> Array[ActiveRecord::EnlistedRecord]
 end

@@ -12,13 +12,38 @@ require_relative "../action_view_number_helper"
 module ActionView
   module ViewHelpers
     # `content_security_policy_nonce` — the per-request CSP script
-    # nonce Rails interpolates into `<script nonce=…>`. The CSP HEADER
-    # pipeline isn't modeled (no Content-Security-Policy response
-    # header is emitted), so the nonce is inert to browsers; a stable
-    # token keeps the layout's interpolation rendering without pulling
-    # a randomness primitive into every target runtime.
+    # nonce Rails interpolates into `<script nonce=…>`. No app in the
+    # corpus sets a nonce generator (campfire's policy is hash-based,
+    # so the page stays cacheable), and a stable token keeps a layout
+    # that does interpolate one rendering without a randomness primitive.
     def self.content_security_policy_nonce
       "roundhouse-nonce"
+    end
+
+    # Rails' `csp_meta_tag`: a `<meta name="csp-nonce">` when a policy
+    # is configured, nothing when it is not. The content attribute is
+    # the nonce, and Rails' tag helper omits a nil one — campfire
+    # configures no generator, so the tag is the name alone. ` />` is
+    # `tag("meta")`'s void spelling; the compare canonicalizer drops
+    # the slash.
+    #
+    # The signal is `Rails.application.content_security_policy`, the
+    # object the request duplicates. This unit's require list does not
+    # load `ActionController::Current`, and a strict target's helper
+    # has no request, so the universal body stays "". `@csp_policy_for_test`
+    # is the stand-in a unit test sets: spinel cannot reopen
+    # `Application`, and `Rails.application` is a fresh instance per
+    # call. Production leaves the flag false.
+    @csp_policy_for_test = false
+
+    def self.csp_policy_for_test=(present)
+      @csp_policy_for_test = present
+    end
+
+    def self.csp_meta_tag
+      return "<meta name=\"csp-nonce\" />" if @csp_policy_for_test
+      return "" if Rails.application.content_security_policy.nil?
+      "<meta name=\"csp-nonce\" />"
     end
 
     # The ruby family's `url_for_path` (see the universal body in

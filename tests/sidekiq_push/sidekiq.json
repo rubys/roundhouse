@@ -1,0 +1,552 @@
+{
+  "sidekiq": "8.1.7",
+  "activejob": "8.1.3",
+  "redis_client": "0.31.0",
+  "json": "3.1.0",
+  "adapter": "ActiveJob::QueueAdapters::SidekiqAdapter",
+  "pushes": [
+    {
+      "name": "immediate on default",
+      "round_trips": [
+        {
+          "pipelined": true,
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "default"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:default"
+              ],
+              "envelope_keys": [
+                "retry",
+                "queue",
+                "wrapped",
+                "args",
+                "class",
+                "jid",
+                "created_at",
+                "enqueued_at"
+              ],
+              "envelope": {
+                "retry": true,
+                "queue": "default",
+                "wrapped": "InspectCarJob",
+                "args": [
+                  {
+                    "job_class": "InspectCarJob",
+                    "job_id": "<uuid>",
+                    "provider_job_id": null,
+                    "queue_name": "default",
+                    "priority": null,
+                    "arguments": [
+                      {
+                        "_aj_globalid": "gid://depot/Car/1"
+                      }
+                    ],
+                    "executions": 0,
+                    "exception_executions": {},
+                    "locale": "en",
+                    "timezone": "UTC",
+                    "enqueued_at": "<iso8601(9)>",
+                    "scheduled_at": null
+                  }
+                ],
+                "class": "Sidekiq::ActiveJob::Wrapper",
+                "jid": "<jid>",
+                "created_at": "<ms>",
+                "enqueued_at": "<ms>"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "queue_as low",
+      "round_trips": [
+        {
+          "pipelined": true,
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "low"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:low"
+              ],
+              "envelope_keys": [
+                "retry",
+                "queue",
+                "wrapped",
+                "args",
+                "class",
+                "jid",
+                "created_at",
+                "enqueued_at"
+              ],
+              "envelope": {
+                "retry": true,
+                "queue": "low",
+                "wrapped": "WashCarJob",
+                "args": [
+                  {
+                    "job_class": "WashCarJob",
+                    "job_id": "<uuid>",
+                    "provider_job_id": null,
+                    "queue_name": "low",
+                    "priority": null,
+                    "arguments": [
+                      {
+                        "_aj_globalid": "gid://depot/Car/2"
+                      }
+                    ],
+                    "executions": 0,
+                    "exception_executions": {},
+                    "locale": "en",
+                    "timezone": "UTC",
+                    "enqueued_at": "<iso8601(9)>",
+                    "scheduled_at": null
+                  }
+                ],
+                "class": "Sidekiq::ActiveJob::Wrapper",
+                "jid": "<jid>",
+                "created_at": "<ms>",
+                "enqueued_at": "<ms>"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set(queue: :critical)",
+      "round_trips": [
+        {
+          "pipelined": true,
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "critical"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:critical"
+              ],
+              "envelope_keys": [
+                "retry",
+                "queue",
+                "wrapped",
+                "args",
+                "class",
+                "jid",
+                "created_at",
+                "enqueued_at"
+              ],
+              "envelope": {
+                "retry": true,
+                "queue": "critical",
+                "wrapped": "InspectCarJob",
+                "args": [
+                  {
+                    "job_class": "InspectCarJob",
+                    "job_id": "<uuid>",
+                    "provider_job_id": null,
+                    "queue_name": "critical",
+                    "priority": null,
+                    "arguments": [
+                      {
+                        "_aj_globalid": "gid://depot/Car/3"
+                      }
+                    ],
+                    "executions": 0,
+                    "exception_executions": {},
+                    "locale": "en",
+                    "timezone": "UTC",
+                    "enqueued_at": "<iso8601(9)>",
+                    "scheduled_at": null
+                  }
+                ],
+                "class": "Sidekiq::ActiveJob::Wrapper",
+                "jid": "<jid>",
+                "created_at": "<ms>",
+                "enqueued_at": "<ms>"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set(wait: 300)",
+      "round_trips": [
+        {
+          "pipelined": true,
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule"
+              ],
+              "score_minus_created_at": 300.0,
+              "score_is_float_to_s": true,
+              "envelope_keys": [
+                "retry",
+                "queue",
+                "wrapped",
+                "args",
+                "class",
+                "jid",
+                "created_at"
+              ],
+              "envelope": {
+                "retry": true,
+                "queue": "default",
+                "wrapped": "InspectCarJob",
+                "args": [
+                  {
+                    "job_class": "InspectCarJob",
+                    "job_id": "<uuid>",
+                    "provider_job_id": null,
+                    "queue_name": "default",
+                    "priority": null,
+                    "arguments": [
+                      {
+                        "_aj_globalid": "gid://depot/Car/4"
+                      }
+                    ],
+                    "executions": 0,
+                    "exception_executions": {},
+                    "locale": "en",
+                    "timezone": "UTC",
+                    "enqueued_at": "<iso8601(9)>",
+                    "scheduled_at": "<iso8601(9)>"
+                  }
+                ],
+                "class": "Sidekiq::ActiveJob::Wrapper",
+                "jid": "<jid>",
+                "created_at": "<ms>"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set(wait: 5.minutes) on low",
+      "round_trips": [
+        {
+          "pipelined": true,
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule"
+              ],
+              "score_minus_created_at": 300.0,
+              "score_is_float_to_s": true,
+              "envelope_keys": [
+                "retry",
+                "queue",
+                "wrapped",
+                "args",
+                "class",
+                "jid",
+                "created_at"
+              ],
+              "envelope": {
+                "retry": true,
+                "queue": "low",
+                "wrapped": "WashCarJob",
+                "args": [
+                  {
+                    "job_class": "WashCarJob",
+                    "job_id": "<uuid>",
+                    "provider_job_id": null,
+                    "queue_name": "low",
+                    "priority": null,
+                    "arguments": [
+                      {
+                        "_aj_globalid": "gid://depot/Car/5"
+                      }
+                    ],
+                    "executions": 0,
+                    "exception_executions": {},
+                    "locale": "en",
+                    "timezone": "UTC",
+                    "enqueued_at": "<iso8601(9)>",
+                    "scheduled_at": "<iso8601(9)>"
+                  }
+                ],
+                "class": "Sidekiq::ActiveJob::Wrapper",
+                "jid": "<jid>",
+                "created_at": "<ms>"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set(wait_until:) in the past",
+      "round_trips": [
+        {
+          "pipelined": true,
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "default"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:default"
+              ],
+              "envelope_keys": [
+                "retry",
+                "queue",
+                "wrapped",
+                "args",
+                "class",
+                "jid",
+                "created_at",
+                "enqueued_at"
+              ],
+              "envelope": {
+                "retry": true,
+                "queue": "default",
+                "wrapped": "InspectCarJob",
+                "args": [
+                  {
+                    "job_class": "InspectCarJob",
+                    "job_id": "<uuid>",
+                    "provider_job_id": null,
+                    "queue_name": "default",
+                    "priority": null,
+                    "arguments": [
+                      {
+                        "_aj_globalid": "gid://depot/Car/6"
+                      }
+                    ],
+                    "executions": 0,
+                    "exception_executions": {},
+                    "locale": "en",
+                    "timezone": "UTC",
+                    "enqueued_at": "<iso8601(9)>",
+                    "scheduled_at": "<iso8601(9)>"
+                  }
+                ],
+                "class": "Sidekiq::ActiveJob::Wrapper",
+                "jid": "<jid>",
+                "created_at": "<ms>",
+                "enqueued_at": "<ms>"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "enqueue_after_transaction_commit, no transaction",
+      "round_trips": [
+        {
+          "pipelined": true,
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "default"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:default"
+              ],
+              "envelope_keys": [
+                "retry",
+                "queue",
+                "wrapped",
+                "args",
+                "class",
+                "jid",
+                "created_at",
+                "enqueued_at"
+              ],
+              "envelope": {
+                "retry": true,
+                "queue": "default",
+                "wrapped": "AfterCommitJob",
+                "args": [
+                  {
+                    "job_class": "AfterCommitJob",
+                    "job_id": "<uuid>",
+                    "provider_job_id": null,
+                    "queue_name": "default",
+                    "priority": null,
+                    "arguments": [
+                      {
+                        "_aj_globalid": "gid://depot/Car/7"
+                      }
+                    ],
+                    "executions": 0,
+                    "exception_executions": {},
+                    "locale": "en",
+                    "timezone": "UTC",
+                    "enqueued_at": "<iso8601(9)>",
+                    "scheduled_at": null
+                  }
+                ],
+                "class": "Sidekiq::ActiveJob::Wrapper",
+                "jid": "<jid>",
+                "created_at": "<ms>",
+                "enqueued_at": "<ms>"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "every Phase 1 argument type",
+      "round_trips": [
+        {
+          "pipelined": true,
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "default"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:default"
+              ],
+              "envelope_keys": [
+                "retry",
+                "queue",
+                "wrapped",
+                "args",
+                "class",
+                "jid",
+                "created_at",
+                "enqueued_at"
+              ],
+              "envelope": {
+                "retry": true,
+                "queue": "default",
+                "wrapped": "EveryArgumentJob",
+                "args": [
+                  {
+                    "job_class": "EveryArgumentJob",
+                    "job_id": "<uuid>",
+                    "provider_job_id": null,
+                    "queue_name": "default",
+                    "priority": null,
+                    "arguments": [
+                      null,
+                      true,
+                      false,
+                      42,
+                      -7,
+                      1099511627776,
+                      1.5,
+                      0.1,
+                      -0.000000025,
+                      1e+20,
+                      "plain",
+                      "quote\" backslash\\ nl\n tab\t ctrl\u0001 <&> é ✓  /  ",
+                      "",
+                      {
+                        "_aj_serialized": "ActiveJob::Serializers::SymbolSerializer",
+                        "value": "open"
+                      },
+                      {
+                        "_aj_globalid": "gid://depot/Car/7"
+                      },
+                      {
+                        "_aj_globalid": "gid://depot/Cars::Freight/8"
+                      },
+                      {
+                        "_aj_serialized": "ActiveJob::Serializers::TimeSerializer",
+                        "value": "2026-10-09T12:14:56.123456789Z"
+                      },
+                      [
+                        1,
+                        2,
+                        3
+                      ],
+                      [
+                        "a",
+                        "b"
+                      ],
+                      [],
+                      [
+                        true,
+                        false
+                      ],
+                      [
+                        {
+                          "_aj_serialized": "ActiveJob::Serializers::SymbolSerializer",
+                          "value": "x"
+                        },
+                        {
+                          "_aj_serialized": "ActiveJob::Serializers::SymbolSerializer",
+                          "value": "y"
+                        }
+                      ]
+                    ],
+                    "executions": 0,
+                    "exception_executions": {},
+                    "locale": "en",
+                    "timezone": "UTC",
+                    "enqueued_at": "<iso8601(9)>",
+                    "scheduled_at": null
+                  }
+                ],
+                "class": "Sidekiq::ActiveJob::Wrapper",
+                "jid": "<jid>",
+                "created_at": "<ms>",
+                "enqueued_at": "<ms>"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "redis_after": {
+    "queues": [
+      "critical",
+      "default",
+      "low"
+    ],
+    "lengths": {
+      "critical": 1,
+      "default": 4,
+      "low": 1
+    },
+    "schedule_size": 2
+  }
+}

@@ -1,0 +1,14 @@
+module ActionController
+  class ControllerConfig
+    @relative_url_root: String
+    def initialize: () -> void
+    def relative_url_root: () -> String
+    def relative_url_root=: (String value) -> String
+  end
+
+  def self.controller_config: () -> ControllerConfig
+
+  class Base
+    def self.config: () -> ControllerConfig
+  end
+end

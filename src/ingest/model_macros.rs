@@ -309,7 +309,7 @@ fn include_closure(app: &App, id: ClassId, included: &mut HashSet<ClassId>) {
 /// Library IR intentionally flattens some Ruby parameters. Expansion
 /// needs the original signature: destructuring and anonymous rest may
 /// otherwise disappear altogether and look like a simpler valid macro.
-fn supported_source_signature(def: &MethodDef, sources: &[SourceFile]) -> bool {
+pub(super) fn supported_source_signature(def: &MethodDef, sources: &[SourceFile]) -> bool {
     let Some(source) = def
         .name_span
         .file

@@ -671,6 +671,56 @@ module Rails
     def default_per_page
       25
     end
+
+    # `Rails.application.config.assets.prefix`. A fresh object each
+    # call is enough: the prefix is a constant, and
+    # `Rails.application` itself is a fresh object per call.
+    def config
+      FrameworkConfig.new
+    end
+
+    # No policy unless an initializer says so. Ingest overrides this
+    # on the app's reopen when `config.content_security_policy` is set.
+    def content_security_policy
+      nil
+    end
+
+    # `Rails.application.importmap`. Paths are already `/assets/…`
+    # from ingest; `to_json` ignores the resolver. The string is the
+    # pretty script body the layout embeds, because a CSP hash of a
+    # compact encoding does not match the page.
+    def importmap
+      ImportmapMap.new
+    end
+
+    # Override on the app reopen when `config/importmap.rb` has pins.
+    # That override is the pretty script body. This default is only
+    # the empty map an app with no pins would hash, and no page embeds it.
+    def importmap_json
+      "{\"imports\":{}}"
+    end
+  end
+
+  class AssetConfig
+    def prefix
+      "/assets"
+    end
+  end
+
+  class FrameworkConfig
+    def initialize
+      @assets = AssetConfig.new
+    end
+
+    def assets
+      @assets
+    end
+  end
+
+  class ImportmapMap
+    def to_json(resolver: nil)
+      Rails.application.importmap_json
+    end
   end
 end
 

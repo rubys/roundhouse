@@ -364,7 +364,18 @@ pub(super) fn emit_bool_op(
             } else {
                 rhs_s
             };
-            return format!("{}.unwrap_or({})", emit_expr(left), default_s);
+            // `unwrap_or` consumes its receiver. A bare name (a local, or
+            // a view parameter read as a receiverless call) is read again
+            // after a guard like `(notice || "").empty?`, so it is cloned
+            // rather than moved.
+            let bare_name = match &*left.node {
+                ExprNode::Var { .. } => true,
+                ExprNode::Send { recv: None, args, block: None, .. } => args.is_empty(),
+                _ => false,
+            };
+            let lhs_s = emit_expr(left);
+            let lhs_s = if bare_name { format!("{lhs_s}.clone()") } else { lhs_s };
+            return format!("{lhs_s}.unwrap_or({default_s})");
         }
         if !lhs_is_bool && left.ty.is_some() {
             // Statically non-nil — RHS unreachable in Ruby semantics. Drop.

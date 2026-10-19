@@ -364,7 +364,10 @@ fn a_content_type_attachable_renders_through_its_own_from_node() {
     );
     // `link_to_if` is an `if` over the two `link_to` halves, the label
     // escaped once in each.
-    assert!(partial.contains("if ! (opengraph_embed.href || \"\").empty?"), "{partial}");
+    assert!(
+        partial.contains("if ! (opengraph_embed.href || \"\").empty?"),
+        "{partial}"
+    );
     assert!(partial.contains("ActionView::ViewHelpers.link_to(ActionView::ViewHelpers.truncate("), "{partial}");
     assert!(!partial.contains("html_escape(ActionView::ViewHelpers.link_to"), "the link is not escaped:\n{partial}");
     let class = text("app/models/action_text/attachment/opengraph_embed.rb");

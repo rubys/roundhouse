@@ -88,8 +88,13 @@ CEILING="${CAMPFIRE_CEILING_ERRORS:-0}"
 allow=()
 [[ "$CEILING" -gt 0 ]] && allow=(--allow-unsupported)
 step "transpiling $APP → spinel (error ceiling $CEILING)"
-(cd "$REPO_ROOT" && cargo run --release --quiet --bin roundhouse -- \
-    --target spinel "$APP" -o "$TREE" ${allow[@]+"${allow[@]}"}) 2>"$WORK/emit.log" || {
+if [[ -n "${ROUNDHOUSE_BIN:-}" ]]; then
+    . "$REPO_ROOT/scripts/lib/roundhouse-bin.sh"
+    transpile() { roundhouse_run "$@"; }
+else
+    transpile() { (cd "$REPO_ROOT" && cargo run --release --quiet --bin roundhouse -- "$@"); }
+fi
+transpile --target spinel "$APP" -o "$TREE" ${allow[@]+"${allow[@]}"} 2>"$WORK/emit.log" || {
     tail -30 "$WORK/emit.log" >&2
     fail "transpile failed"
 }

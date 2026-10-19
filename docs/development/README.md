@@ -39,7 +39,8 @@ test readiness. Fixture generation uses Rails and can change with its release.
    the fix from a plausible wrong implementation, not just a no-crash case.
 3. Iterate with [focused tests](testing.md), inspecting [IR/output](debugging.md)
    when needed. Removing an error diagnostic requires emitted execution coverage.
-4. Run the default `cargo test` suite before committing; use
+4. Run the complete default suite before committing. Use `bin/rh verify --all`
+   for concurrent execution, or `cargo test` without Nextest. Use
    `cargo test --all-targets` at milestones. A focused pass is not full CI.
 
 For a PR, include the repro, regression test, and what you actually verified.

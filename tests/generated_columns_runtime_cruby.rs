@@ -240,7 +240,8 @@ end
 Db.singleton_class.prepend(FailSecondGeneratedReturningTextRead)
 
 # This failure happens while decoding an already materialized INSERT result.
-# It tests staging and handle cleanup; the database write itself is not rolled back.
+# It tests staging and handle cleanup. The save's transaction rolls the
+# INSERT back, as Rails' does for an exception raised inside `save`.
 person = Person.new(first_name: "Decode", last_name: "Failure")
 failure = nil
 sqls = Db.capture_sql do
@@ -255,7 +256,7 @@ raise "generated value reads were not staged in order" unless Db.instance_variab
 raise "the returned handle was not finalized after a read error" unless Db.instance_variable_get(:@rh_test_generated_finalizes) == 1
 raise "first generated cache changed before all reads succeeded" unless person.display_name.nil?
 raise "second generated cache changed before all reads succeeded" unless person.normalized_first_name.nil?
-raise "the already executed INSERT should remain persisted" unless Person.count == 1
+raise "the failed save's INSERT should be rolled back" unless Person.count == 0
 raise "the create used a follow-up SELECT: #{sqls.inspect}" if sqls.any? { |sql| sql.start_with?("SELECT") && sql.include?("people") && sql.include?("display_name") }
 puts "generated RETURNING read failure finalizes without partial cache updates"
 "##,

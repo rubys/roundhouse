@@ -32,7 +32,7 @@ A passing target's comparison proves the blog's features on that target.
 
 **Campfire** (Basecamp's chat product — file attachments with image
 variants, rich text, web push, bots and webhooks, full-text search,
-signed cookies and sessions, `Current`, fragment caching, rate
+signed and encrypted cookies and sessions, `Current`, fragment caching, rate
 limiting, ~70 routes) is what the **Ruby shape** — running on CRuby,
 and compiled by [Spinel](spinel.md) — passes the same gate against,
 along with Campfire's own test suite and its cable broadcasts. What
@@ -313,6 +313,12 @@ What differs from Rails, and why:
   an empty session or no message. The session payload is not Rails'
   JSON either, so a migration from Rails starts every session afresh;
   Campfire's login rides its own signed cookie and carries over.
+  `cookies.encrypted` is Rails' jar (AES-256-GCM, the "authenticated
+  encrypted cookie" key from `SECRET_KEY_BASE`, JSON values), so a value
+  either side encrypted reads on the other; the session store does not
+  use it yet. An `expires:` given with a signed or encrypted write is
+  dropped: no `Expires` is sent and the value carries no expiry, so it
+  reads for as long as the browser keeps it.
 - **An unset `SECRET_KEY_BASE` is generated, not fatal.** Rails
   development keeps a generated key in `tmp/local_secret.txt`, and
   production refuses to boot without one. The ruby family generates the

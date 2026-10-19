@@ -44,6 +44,7 @@
 use std::collections::BTreeSet;
 
 pub mod gems;
+pub mod string_kernel;
 pub use gems::{GemClass, GemTy, GEM_CATALOG};
 
 /// One cataloged method. Static-lifetime strings keep entries
@@ -602,6 +603,16 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Builder,
         return_kind: Some(ReturnKind::RelationOfSelf),
     },
+    // Rails 7 `where.not(id: …)` in one hop. A chain that continues
+    // through it (`user.searches.excluding(…).destroy_all`) has to stay
+    // on Relation; `without` is the same method (see [`BUILDER_ALIASES`]).
+    CatalogedMethod {
+        name: "excluding",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
+    },
     CatalogedMethod {
         name: "references",
         receiver: ReceiverContext::Class,
@@ -1154,6 +1165,14 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
     },
     CatalogedMethod {
         name: "left_outer_joins",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
+    },
+    // Same hop as the class entry. `without` is its alias.
+    CatalogedMethod {
+        name: "excluding",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,
         chain: ChainKind::Builder,
@@ -1835,6 +1854,86 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
     },
 ];
 
+/// Alternate spellings of a [`ChainKind::Builder`] entry. The chain and
+/// refiner predicates read these together with the Builder names. Each
+/// pair is `(alias, canonical)`.
+///
+/// `left_joins` is `left_outer_joins`. `where!` and `order!` are the
+/// in-place spellings of `where` and `order`. `without` is `excluding`.
+pub(crate) const BUILDER_ALIASES: &[(&str, &str)] = &[
+    ("left_joins", "left_outer_joins"),
+    ("where!", "where"),
+    ("order!", "order"),
+    ("without", "excluding"),
+];
+
+/// True when `name` is a [`ChainKind::Builder`] entry, on any receiver,
+/// or an alias of one ([`BUILDER_ALIASES`]), and every catalog entry for
+/// that name agrees.
+///
+/// This is the membership test for name-only chain hops and for arel
+/// refiners. A terminal (`first`, `all`, `pluck`) stays out. So does a
+/// name that is a Builder on one receiver and something else on another:
+/// `reload` is a Relation builder and an Instance read that returns the
+/// record. Treating every `reload` as a relation hop keeps
+/// `article = Model.where(…).find { … }; article.reload` on the runtime
+/// relation, and `find` then ignores the block.
+pub(crate) fn is_relation_builder_name(name: &str) -> bool {
+    let canonical = BUILDER_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == name)
+        .map(|(_, canonical)| *canonical)
+        .unwrap_or(name);
+    let mut saw_builder = false;
+    for entry in AR_CATALOG.iter().filter(|entry| entry.name == canonical) {
+        if entry.chain != ChainKind::Builder {
+            return false;
+        }
+        saw_builder = true;
+    }
+    saw_builder
+}
+
+/// Counted `first(n)` / `last(n)` on a relation: one positional argument
+/// and no block. The runtime spells these `first_n` / `last_n` because
+/// one method cannot return both a record and an Array.
+///
+/// The name is a catalog terminal on both the class and the relation,
+/// and [`is_relation_builder_name`] rejects it. `take(n)` is the same
+/// terminal shape and stays `take` — this predicate does not rename it.
+/// Enumerable `Array#first(n)` and `String#split.last(n)` share the
+/// call shape; a caller renames only after it has proved a relation.
+pub(crate) fn counted_relation_terminal(
+    name: &str,
+    argc: usize,
+    has_block: bool,
+) -> Option<&'static str> {
+    if argc != 1 || has_block || is_relation_builder_name(name) {
+        return None;
+    }
+    let runtime = match name {
+        "first" => "first_n",
+        "last" => "last_n",
+        _ => return None,
+    };
+    let class = lookup(name, ReceiverContext::Class)?;
+    let relation = lookup(name, ReceiverContext::Relation)?;
+    if class.chain != ChainKind::Terminal || relation.chain != ChainKind::Terminal {
+        return None;
+    }
+    Some(runtime)
+}
+
+/// True when the Relation-context entry for `name` is a Builder.
+///
+/// Callers that already know the receiver is a relation use this so
+/// `relation.reload` stays a hop. Name-only sites keep
+/// [`is_relation_builder_name`], which rejects `reload`.
+pub(crate) fn is_relation_context_builder(name: &str) -> bool {
+    lookup(name, ReceiverContext::Relation)
+        .is_some_and(|entry| entry.chain == ChainKind::Builder)
+}
+
 /// Look up a method in the catalog by name + receiver context.
 /// Returns the single matching entry or None. Used by adapters
 /// that need the full record (effect + chain + future facets).
@@ -1986,7 +2085,7 @@ mod tests {
         // it so the future work is data-in-place.
         for m in [
             "where", "limit", "offset", "order", "group", "having",
-            "joins", "includes", "preload", "select", "distinct",
+            "joins", "left_outer_joins", "excluding", "includes", "preload", "select", "distinct",
         ] {
             let entry = lookup(m, ReceiverContext::Class)
                 .unwrap_or_else(|| panic!("no Class entry for `{m}`"));
@@ -2062,7 +2161,7 @@ mod tests {
         // produce exactly the arm's result shapes.
         for m in [
             "where", "order", "limit", "offset", "includes", "preload",
-            "joins", "left_outer_joins", "distinct", "group", "having",
+            "joins", "left_outer_joins", "excluding", "distinct", "group", "having",
             "references", "eager_load", "readonly", "reorder", "rewhere",
             "merge", "merge!", "extending", "unscope", "not", "or", "and",
             "none", "load", "load_async", "reload", "reselect",
@@ -2124,6 +2223,84 @@ mod tests {
             assert!(
                 cataloged,
                 "query-builder method `{name}` has no Builder/Terminal AR_CATALOG entry",
+            );
+        }
+    }
+
+    #[test]
+    fn relation_chain_and_refiners_match_builder_entries() {
+        // Both directions. A name whose every catalog entry is a Builder,
+        // or a [`BUILDER_ALIASES`] spelling of such a name, is a chain hop
+        // and a refiner. Any other catalog name is neither. A mixed name
+        // (`reload`: Relation builder, Instance read) is neither.
+        // Reintroducing a hand list on either side fails one of the asserts.
+        let mut uniform_builder: std::collections::BTreeMap<&str, bool> =
+            std::collections::BTreeMap::new();
+        for entry in AR_CATALOG {
+            let is_builder = entry.chain == ChainKind::Builder;
+            uniform_builder
+                .entry(entry.name)
+                .and_modify(|all| *all &= is_builder)
+                .or_insert(is_builder);
+        }
+        let mut builders: BTreeSet<&str> = BTreeSet::new();
+        for (name, all_builder) in &uniform_builder {
+            if *all_builder {
+                builders.insert(*name);
+            }
+        }
+        assert_eq!(
+            uniform_builder.get("reload"),
+            Some(&false),
+            "reload should stay a mixed chain kind so the predicate cannot treat every reload as a relation hop",
+        );
+        assert!(!is_relation_builder_name("reload"));
+        assert!(is_relation_context_builder("reload"));
+        let mut seen_alias: BTreeSet<&str> = BTreeSet::new();
+        for (alias, canonical) in BUILDER_ALIASES {
+            assert!(
+                builders.contains(canonical),
+                "alias `{alias}` points at `{canonical}`, which has no Builder entry",
+            );
+            assert!(
+                seen_alias.insert(alias),
+                "duplicate builder alias `{alias}`",
+            );
+            assert!(
+                !AR_CATALOG.iter().any(|entry| entry.name == *alias),
+                "alias `{alias}` is also a catalog entry",
+            );
+            builders.insert(alias);
+        }
+        for name in ["left_joins", "where!", "order!", "without", "excluding"] {
+            assert!(
+                builders.contains(name),
+                "`{name}` dropped out of the builder/alias set",
+            );
+        }
+        for name in &builders {
+            assert!(
+                crate::lower::scope_chain::is_relation_chain_method(name),
+                "`{name}` is a Builder or alias but is_relation_chain_method rejects it",
+            );
+            assert!(
+                crate::lower::arel::is_relation_refiner(name),
+                "`{name}` is a Builder or alias but the arel refiner rejects it",
+            );
+        }
+        for entry in AR_CATALOG {
+            if builders.contains(entry.name) {
+                continue;
+            }
+            assert!(
+                !crate::lower::scope_chain::is_relation_chain_method(entry.name),
+                "`{}` is not a Builder but is_relation_chain_method accepts it",
+                entry.name,
+            );
+            assert!(
+                !crate::lower::arel::is_relation_refiner(entry.name),
+                "`{}` is not a Builder but the arel refiner accepts it",
+                entry.name,
             );
         }
     }

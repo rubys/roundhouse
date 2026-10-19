@@ -10,7 +10,7 @@
 //! analyzer already stamped make the dynamic dispatch unnecessary at
 //! almost every site, so this pass rewrites, per receiver type:
 //!
-//!   String        blank? → `r.strip.empty?` (see below)
+//!   String        blank? → `(r || "").strip.empty?` (see below)
 //!   Array/Hash    blank? → `r.empty?`
 //!   Class w/ own  left as-is when the app class defines the
 //!   definition    predicate itself; grounded via `empty?` when it
@@ -40,18 +40,20 @@
 //! disagree there among themselves anyway — Python's `.strip()` and
 //! JavaScript's `.trim()` do take them.
 //!
-//! The nil-safety patch this used to be deferred behind
-//! (`emit::ruby::library::rewrite_empty_nilsafe`, which wraps the
-//! receiver of `empty?` as `(r || "")`) now looks THROUGH the `.strip`,
-//! so a nullable column still reads `(r || "").strip.empty?` and not
-//! `(r.strip || "").empty?`, which would have raised on nil before the
-//! guard could answer.
+//! The nil guard is this `|| ""`, and it is already in the IR. A column
+//! typed `String` can still be nil once nullable hydration runs, and
+//! `nil.strip` would raise before any later wrap could answer. The
+//! guard sits on the value, so the form is `(r || "").strip.empty?`.
+//! Emitters print that node. Ruby does not wrap `empty?` again on the
+//! way out.
 //!
-//! NOT the same question as the view-cond predicate rewrite
-//! (`view_to_library::predicates`), which still emits a plain `empty?`.
-//! That pass runs with NO receiver type and folds `blank?`, `empty?`
-//! and `none?` onto one form, so a `.strip` there would land on
-//! collections too.
+//! View conditions have no receiver type, so they do not call this
+//! string form. `blank?` / `present?` there become `(recv || "").empty?`
+//! — the same nil guard, without `strip`, because an array, hash, or
+//! relation answers `blank?` with `empty?` and has no `strip`. `any?`,
+//! `empty?` and `none?` stay a collection `empty?`. This pass still
+//! does not walk view bodies. The other view emitters match the
+//! original predicate names.
 //!
 //! Residue policy: a receiver the pass can't ground — `untyped`, an
 //! open inference var, a multi-variant union — keeps its dynamic call
@@ -83,14 +85,13 @@ pub fn apply_blank_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
 
     // View bodies are deliberately NOT walked (`for_each_hook_body`
-    // excludes them). Every target already has working view-cond
-    // predicate handling — the shared `view_to_library::predicates`
-    // rewrite for the ruby/spinel family, and the python/rust view
-    // emitters' own vocabulary — and those walkers match the ORIGINAL
-    // `present?`/`blank?` shapes. Rewriting under them breaks the ones
-    // with closed vocabularies (python's unemittable-cond fallback is a
-    // silent `False`; the flash-notice smoke caught it). Views rejoin
-    // when the view pipeline migrates to shared lowerings.
+    // excludes them). `view_to_library::predicates` builds
+    // `(recv || "").empty?` for `blank?` / `present?` with no `strip`:
+    // a template receiver is untyped, and `strip` on an array raises.
+    // The python/rust view emitters still match the ORIGINAL names;
+    // rewriting under them breaks the ones with closed vocabularies
+    // (python's unemittable-cond fallback is a silent `False`; the
+    // flash-notice smoke caught it).
     super::for_each_hook_body(app, &mut |body| {
         walk(body, &defs, &mut diags);
     });
@@ -474,6 +475,24 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
         // `Object#blank?` branches on the VALUE, and so does the
         // runtime predicate: hand it the read.
         let grounding = if is_params_read(r) { Grounding::Runtime } else { classify(r.ty.as_ref(), defs) };
+        // An IVAR read keeps its nil arm whatever its stamp says. An
+        // unassigned ivar reads nil, and the controller-wide ivar
+        // environment strips Nil on purpose (the find-then-guard idiom,
+        // `analyze/mod.rs`), so a non-nil stamp there is not a proof.
+        // A blank predicate is how the app spells that nil guard:
+        // campfire's `CachedResponses#perform_caching` reads
+        // `@response_cache_version.present?`, which a detached
+        // `ApplicationController.new` never assigned, and grounding it
+        // as `!@response_cache_version.empty?` raised on nil.
+        let grounding = match (grounding, &*r.node) {
+            (Grounding::Container { nilable: false, whitespace }, ExprNode::Ivar { .. }) => {
+                Grounding::Container { nilable: true, whitespace }
+            }
+            (Grounding::NeverBlank { nilable: false }, ExprNode::Ivar { .. }) => {
+                Grounding::NeverBlank { nilable: true }
+            }
+            (g, _) => g,
+        };
         (pred, grounding, r.ty.clone(), is_effect_free_reader(r))
     };
     // An ASSIGNMENT receiver — lobsters' login does
@@ -536,7 +555,7 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
 
     // Forms that evaluate the receiver more than once (or fold it
     // away) demand an effect-free reader; the single-eval forms
-    // (`r.strip.empty?`, `r.nil?`, `!r`, `r ? true : nil`, plain `r`)
+    // (`(r || "").strip.empty?`, `r.nil?`, `!r`, `r ? true : nil`, plain `r`)
     // don't.
     let needs_pure = match (&grounding, pred) {
         (Container { .. }, Pred::Presence) => true,
@@ -817,9 +836,9 @@ fn rewrite_emptyable(
             nil_check(span, r),
             empty_form(span, later),
         ),
-        // `!r.nil? && !r.strip.empty?` — both operands are unary
-        // sends, so no `!`-around-`||` precedence hazard reaches any
-        // emitter.
+        // `!r.nil? && !((r || "").strip.empty?)` — the `!` is a unary
+        // send around the string form, so no `!`-around-`||` precedence
+        // hazard reaches any emitter.
         (Pred::Present, true) => bool_op(
             span,
             crate::expr::BoolOpKind::And,
@@ -939,27 +958,41 @@ fn plain_empty(span: crate::span::Span, r: Expr) -> Expr {
     send0(span, r, "empty?", Ty::Bool)
 }
 
-/// `r.strip.empty?` — ActiveSupport's `String#blank?`, which is a
+/// `(left || "")`. `result_ty` is `String` on the typed string arm,
+/// where the value after the guard is a string. A view passes
+/// `Untyped`: the receiver may be an array, and a `String` stamp would
+/// describe a collection as a string.
+pub(crate) fn or_empty_string(span: crate::span::Span, left: Expr, result_ty: Ty) -> Expr {
+    mk(
+        span,
+        ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::Or,
+            surface: crate::expr::BoolOpSurface::Symbol,
+            left,
+            right: mk(
+                span,
+                ExprNode::Lit { value: Literal::Str { value: String::new() } },
+                Ty::Str,
+            ),
+        },
+        result_ty,
+    )
+}
+
+/// `(r || "").strip.empty?` — ActiveSupport's `String#blank?`, which is a
 /// whitespace match and not `empty?`. See the module header for why it
 /// is `strip` rather than the `/\A[[:space:]]*\z/` Rails writes, and
 /// for the one divergence that leaves.
 ///
-/// THE RECEIVER'S STAMP IS NARROWED to its non-nil half, because every
-/// nilable form below guards the strip behind a `nil?` test and that is
-/// what makes the narrowing true. Saying it matters to any consumer
-/// that dispatches off the stamped type: the analyzer cannot resolve
-/// `strip` through a `Str | Nil` union, so without this a re-type after
-/// this pass drops the `Ty::Str` put on the strip send below.
-///
-/// It does NOT rescue a receiver the emitter could not type in the
-/// first place. MEASURED on lobsters: the TypeScript emit carries the
-/// same 82 `is_empty` / 56 `.length === 0` split before and after this
-/// change, so a nullable-column ivar that read `x.is_empty` still reads
-/// `x.trim().is_empty` — a pre-existing per-target gap this pass rides
-/// on top of, not one it introduces.
-fn blank_str(span: crate::span::Span, mut r: Expr) -> Expr {
-    r.ty = Some(non_nil_ty(&r));
-    plain_empty(span, send0(span, r, "strip", Ty::Str))
+/// The `|| ""` is the nil guard. It belongs on the value, before
+/// `strip`: `(r.strip || "").empty?` would raise `nil.strip` before the
+/// guard could answer. The `BoolOp` is stamped `String` because that is
+/// what the guard yields, and `strip` resolves on that stamp. The left
+/// operand keeps the receiver's own type, so a nilable string stays
+/// nilable for an emitter that lowers `||` through `Option`.
+fn blank_str(span: crate::span::Span, r: Expr) -> Expr {
+    let guarded = or_empty_string(span, r, Ty::Str);
+    plain_empty(span, send0(span, guarded, "strip", Ty::Str))
 }
 
 /// The grounded form a LATER pass must synthesize instead of spelling

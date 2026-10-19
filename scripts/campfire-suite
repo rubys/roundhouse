@@ -358,7 +358,7 @@ tests_skip=0
 #
 # `n` is this file's denominator in the row; `tests_total` is the
 # suite's, already credited the full count from the shim's
-# `__t.test_*` calls. The shim prints one `SKIP <Class>#<test>: <why>`
+# `__t.__txn_test_*` calls. The shim prints one `SKIP <Class>#<test>: <why>`
 # line per skip (emit/ruby.rs::render_autorun_shim).
 take_skips_out() {
     local ns
@@ -507,9 +507,10 @@ for t in "${TESTS[@]}"; do
     # The emitted autorun shim (emit/ruby.rs::render_autorun_shim) runs
     # EVERY test and prints one `FAIL <Class>#<test>: <msg>` line per
     # failure, so a file's score is tests, not a boolean. The
-    # denominator comes from the shim's own `__t.test_*` calls, which
-    # exist even when the file dies before running any of them.
-    n=$(grep -cE '^  __t\.test_' "$t.rb" || true)
+    # denominator comes from the shim's own `__t.__txn_test_*` calls,
+    # which exist even when the file dies before running any of them.
+    # Each one is the fixture-transaction wrapper around a `test_*`.
+    n=$(grep -cE '^  __t\.__txn_test_' "$t.rb" || true)
     tests_total=$((tests_total + n))
     # THE THIRD STATUS, and only the spinel lane can produce it: a file
     # that never linked ran nothing, so nothing can be credited and its

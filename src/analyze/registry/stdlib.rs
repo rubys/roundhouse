@@ -151,6 +151,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     time_cls.class_methods.insert(Symbol::from("now"), time_ty());
     time_cls.class_methods.insert(Symbol::from("zone"), time_ty());
     time_cls.class_methods.insert(Symbol::from("at"), time_ty());
+    time_cls.class_methods.insert(Symbol::from("find_zone"), Ty::Union {
+        variants: vec![
+            Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![].into() },
+            Ty::Nil,
+        ].into(),
+    });
     classes.insert(ClassId(Symbol::from("Time")), time_cls);
 
     // The seconds-based Duration value class the Ruby-family trees ship
@@ -684,7 +690,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     for exc in [
         "Exception", "StandardError", "RuntimeError", "ArgumentError",
         "TypeError", "NameError", "NoMethodError", "IndexError",
-        "KeyError", "RangeError", "IOError", "NotImplementedError",
+        "KeyError", "RangeError", "IOError", "IO::TimeoutError", "NotImplementedError",
         "FrozenError", "ZeroDivisionError", "StopIteration",
         "ThreadError", "ClosedQueueError", "RegexpError",
         // CRuby's bundled libraries and Spinel's uri/net/json packages
@@ -911,6 +917,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("rewind", Ty::Int),
         ("binmode", io.clone()),
         ("close", Ty::Nil),
+        // Writing to a stream: `STDERR.puts "…"`.
+        ("puts", Ty::Nil),
+        ("print", Ty::Nil),
+        ("flush", io.clone()),
+        ("sync", Ty::Bool),
+        ("tty?", Ty::Bool),
+        ("fileno", Ty::Int),
     ]);
     // `File < IO` — Ruby's hierarchy (not a PTY detail). File's class
     // methods are registered earlier; the parent is set once `IO` exists

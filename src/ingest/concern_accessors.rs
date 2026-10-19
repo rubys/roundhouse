@@ -414,6 +414,8 @@ fn refusals(
                             .as_ref()
                             .is_none_or(|recv| matches!(&*recv.node, ExprNode::SelfRef))
                             && matches!(method.as_str(), "private" | "protected" | "public")
+                            // Not a refusal: the model lowering applies a carried marker to the accessor it synthesizes.
+                            && expr.decisions & crate::expr::INHERITED_VISIBILITY == 0
                         {
                             for arg in args {
                                 let name = match &*arg.node {

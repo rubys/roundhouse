@@ -121,11 +121,17 @@ module ActionController
     # token minted here meets a real Rails. `exp` is the JSON for the
     # envelope's `exp` slot: "null", or a quoted `iso8601_ms` instant.
     def self.envelope(secret, salt, message_json, purpose, exp, sha1)
-      message = Base64.strict_encode64(message_json)
-      env = "{\"_rails\":{\"message\":\"" + message +
-            "\",\"exp\":" + exp + ",\"pur\":\"" + purpose + "\"}}"
-      payload = Base64.strict_encode64(env)
+      payload = Base64.strict_encode64(message_envelope(message_json, purpose, exp))
       payload + "--" + digest_for(secret, salt, payload, sha1)
+    end
+
+    # The `_rails` envelope a cookie jar wraps its message in, before it
+    # signs it (above) or encrypts it (MessageEncryptor): the message JSON
+    # base64ed into `message`, then `exp` and `pur`. The encrypted jar and
+    # the session store write the same envelope, inside the ciphertext.
+    def self.message_envelope(message_json, purpose, exp)
+      "{\"_rails\":{\"message\":\"" + Base64.strict_encode64(message_json) +
+        "\",\"exp\":" + exp + ",\"pur\":\"" + purpose + "\"}}"
     end
 
     # ISO8601 in UTC with exactly three fractional digits — the shape
@@ -172,7 +178,14 @@ module ActionController
       payload = signed[0, sep]
       supplied = signed[sep + 2, signed.length - sep - 2]
       return "" unless secure_compare(supplied, digest_for(secret, salt, payload, sha1))
-      env = Base64.strict_decode64(payload)
+      envelope_message(Base64.strict_decode64(payload), purpose)
+    end
+
+    # The message JSON inside a `message_envelope`, or "" when its
+    # purpose is not `purpose` or its `exp` has passed. Shared by the
+    # signed jar (above) and the encrypted one, which reach the same
+    # envelope by a digest and by a cipher.
+    def self.envelope_message(env, purpose)
       return "" if extract(env, "\"pur\":\"") != purpose
       # `"exp":null` does not match the quoted prefix, so an
       # unexpiring message reads "" here and skips the compare — which

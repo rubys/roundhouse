@@ -171,7 +171,7 @@ class Draft
 end
 "#,
     );
-    assert!(out.contains("errors || \"\").empty?"), "`blank?` → `empty?`:\n{out}");
+    assert!(out.contains("errors.empty?"), "`blank?` → `empty?`:\n{out}");
     assert!(out.contains("errors.any?"), "`present?` → `any?`:\n{out}");
     assert!(diags.is_empty(), "unexpected residue: {diags:?}");
 }

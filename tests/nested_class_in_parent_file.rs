@@ -40,6 +40,166 @@ fn file(files: &[(String, String)], stem: &str) -> String {
         .unwrap_or_else(|| panic!("no {stem} in {:?}", files.iter().map(|(p, _)| p).collect::<Vec<_>>()))
 }
 
+fn assert_runs(files: &[(&str, &str)], stem: &str, script: &str) {
+    let files = emitted(files);
+    let source = file(&files, stem);
+    let output = std::process::Command::new("ruby")
+        .args(["--enable-frozen-string-literal", "-e", &format!("{source}\n{script}")])
+        .output()
+        .expect("run emitted Ruby");
+    assert!(output.status.success(), "{}\n{source}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn a_nested_file_reads_parent_constants_after_their_assignment() {
+    assert_runs(&[
+        ("app/services/gauge.rb", "class Gauge\n  PREFIX = \"start\"\n  SUFFIX = \"end\"\nend\n"),
+        ("app/services/gauge/reading.rb", "class Gauge::Reading\n  TEXT = Gauge::PREFIX + Gauge::SUFFIX\nend\n"),
+    ], "gauge.rb", "raise unless Gauge::Reading::TEXT == \"startend\"");
+}
+
+#[test]
+fn inline_children_and_sibling_constant_reads_follow_parent_constants() {
+    assert_runs(&[("app/services/gauge.rb", r#"class Gauge
+  PREFIX = "start"
+  class Reading
+    TEXT = PREFIX
+  end
+  class Copy
+    TEXT = Gauge::Reading::TEXT
+  end
+  TEXT = Copy::TEXT
+end
+"#)], "gauge.rb", "raise unless Gauge::TEXT == \"start\"");
+}
+
+#[test]
+fn unreferenced_children_follow_the_whole_parent_body() {
+    assert_runs(&[("app/services/gauge.rb", r#"class Gauge
+  PREFIX = "start"
+  def self.prefix
+    PREFIX
+  end
+  class Reading
+    TEXT = Gauge.prefix
+  end
+end
+"#)], "gauge.rb", "raise unless Gauge::Reading::TEXT == \"start\"");
+}
+
+#[test]
+fn a_parent_initializer_loads_a_child_through_a_called_method() {
+    assert_runs(&[("app/services/gauge.rb", r#"class Gauge
+  PREFIX = "start"
+  class Reading
+    TEXT = Gauge::PREFIX
+  end
+  def self.text
+    Reading::TEXT
+  end
+  TEXT = text
+end
+"#)], "gauge.rb", "raise unless Gauge::TEXT == \"start\"");
+}
+
+#[test]
+fn a_load_time_call_reads_a_child_from_a_parameter_default() {
+    assert_runs(&[("app/services/gauge.rb", r#"class Gauge
+  def self.text(value = Reading::TEXT)
+    value
+  end
+  def initialize(value = Reading::COPY)
+    @value = value
+  end
+  VALUE = text
+  BUILTIN = new
+  class Reading
+    TEXT = "start"
+    COPY = "end"
+  end
+end
+"#)], "gauge.rb", "raise unless Gauge::VALUE == \"start\" && Gauge::BUILTIN.instance_variable_get(:@value) == \"end\"");
+}
+
+#[test]
+fn an_immediately_invoked_lambda_reads_a_child_from_its_default() {
+    assert_runs(&[("app/services/gauge.rb", r#"class Gauge
+  VALUE = ->(x = Reading::TEXT) { x }.call
+  PROC = -> { Reading::COPY }[]
+  class Reading
+    TEXT = "start"
+    COPY = "end"
+  end
+end
+"#)], "gauge.rb", "raise unless Gauge::VALUE == \"start\" && Gauge::PROC == \"end\"");
+}
+
+#[test]
+fn an_immediately_invoked_lambda_loads_its_child_first() {
+    assert_runs(&[("app/services/gauge.rb", r#"class Gauge
+  PREFIX = "start"
+  TEXT = -> { Reading::TEXT }.call
+  PROC = proc { Reading::COPY }.call
+  class Reading
+    TEXT = Gauge::PREFIX
+    COPY = TEXT
+  end
+end
+"#)], "gauge.rb", "raise unless Gauge::TEXT == \"start\" && Gauge::PROC == \"start\"");
+}
+
+#[test]
+fn a_stored_lambda_does_not_load_a_child_before_later_parent_constants() {
+    assert_runs(&[("app/services/gauge.rb", r#"class Gauge
+  TEXT = -> { Reading::TEXT }
+  PREFIX = "start"
+  class Reading
+    TEXT = Gauge::PREFIX
+  end
+end
+"#)], "gauge.rb", "raise unless Gauge::TEXT.call == \"start\"");
+}
+
+#[test]
+fn a_parent_constant_can_read_a_child_that_reads_an_earlier_parent_constant() {
+    assert_runs(&[("app/services/gauge.rb", r#"class Gauge
+  PREFIX = "start"
+  class Reading
+    TEXT = Gauge::PREFIX
+  end
+  TEXT = Reading::TEXT + "end"
+end
+"#)], "gauge.rb", "raise unless Gauge::TEXT == \"startend\"");
+}
+
+#[test]
+fn a_child_waits_for_a_parent_constant_initialized_by_a_parent_method() {
+    assert_runs(&[("app/services/gauge.rb", r#"class Gauge
+  def self.prefix
+    "start"
+  end
+  PREFIX = prefix
+  class Reading
+    TEXT = Gauge::PREFIX
+  end
+end
+"#)], "gauge.rb", "raise unless Gauge::Reading::TEXT == \"start\"");
+}
+
+#[test]
+fn a_namespaced_child_initializes_class_state_from_a_parent_constant() {
+    assert_runs(&[
+        ("app/services/tools/gauge.rb", "module Tools\n  class Gauge\n    PREFIX = \"start\"\n  end\nend\n"),
+        ("app/services/tools/gauge/reading.rb", r#"class Tools::Gauge::Reading
+  @prefix = Tools::Gauge::PREFIX
+  def self.prefix
+    @prefix
+  end
+end
+"#),
+    ], "tools/gauge.rb", "raise unless Tools::Gauge::Reading.prefix == \"start\"");
+}
+
 #[test]
 fn a_nested_class_has_no_file_of_its_own() {
     let files = emitted(&[(

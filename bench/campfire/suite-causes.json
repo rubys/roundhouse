@@ -46,7 +46,8 @@
       "owner": "compiler",
       "match": "expected 0 queries, got \\d+",
       "match_test": "MessageTest#test_presentation_associations_load_together",
-      "note": "`Message.where(...).with_presentation.to_a`, then `assert_no_queries { … every presentation association … }`. Rails runs the preloads inside `to_a`; the ruby family defers them (`ActiveRecord::PendingPreload`, `lower::deferred_preload`, de8edb3) until the first association read on any record of the group, so the same nine batched queries — creators, avatars, rich texts, their embeds, attachments, boosts, boosters, their avatars, rooms — land inside the block. Nothing is N+1 and nothing is missing; the queries are counted in the wrong window. Closing it means running a loaded relation's includes eagerly again, which is a choice about the deferral (it was made for pages that serve a cached collection), not a missing feature."
+      "note": "`Message.where(...).with_presentation.to_a`, then `assert_no_queries { … every presentation association … }`. Rails runs the preloads inside `to_a`. The ruby family used to defer them until the first association read, so the same nine batched queries landed inside the block.",
+      "at_zero": "load_records runs includes unless skip_preloading!. message_test is 10/10 on Campfire 11d3fb9, and the page-preload sibling still leaves unrendered rows unloaded. The rule stays as a regression tripwire."
     },
     {
       "slug": "ar-database-tasks",
@@ -67,7 +68,8 @@
       "title": "`ActionView::Base` unnamed in fragment/cache tests",
       "owner": "compiler",
       "match": "uninitialized constant ActionView::Base",
-      "note": "`FragmentRenderingTest#test_message_controls_survive_creator_edits…` names `ActionView::Base` (cache lookup / fragment store identity). The constant is not on the emit; sibling fragment fails share the same file's cache story."
+      "note": "`FragmentRenderingTest#test_message_controls_survive_creator_edits…` names `ActionView::Base` (cache lookup / fragment store identity). The constant is not on the emit; sibling fragment fails share the same file's cache story.",
+      "at_zero": "served by the ActionView::Base#form_with peel (b513fa665): fragment_rendering_test is 9/9 on Campfire 11d3fb9. The rule stays as a regression tripwire."
     },
     {
       "slug": "native-validators-304",
@@ -84,7 +86,8 @@
       "owner": "compiler",
       "match": ".",
       "match_test": "FragmentRenderingTest#",
-      "note": "Five fails in one file: `assert_same` on the bounded MemoryStore, jbuilder HTML token state, detached-broadcast `to_html` on nil, cross-room content-validated hits, plus the `ActionView::Base` constant (also matched above when that message wins). Shared view/cache runtime — largest file-green opportunity on the tip suite."
+      "note": "Five fails in one file: `assert_same` on the bounded MemoryStore, jbuilder HTML token state, detached-broadcast `to_html` on nil, cross-room content-validated hits, plus the `ActionView::Base` constant (also matched above when that message wins). Shared view/cache runtime — largest file-green opportunity on the tip suite.",
+      "at_zero": "fragment_rendering_test is 9/9 on Campfire 11d3fb9 after ActionView::Base#form_with (b513fa665). The rule stays as a regression tripwire."
     },
     {
       "slug": "message-creation-tx",
@@ -92,7 +95,8 @@
       "owner": "compiler",
       "match": ".",
       "match_test": "(Message::CreationTest|MessageCreationCommitTest|Message::SearchableTest)#",
-      "note": "Creation commit ordering, failed index/unread rollback, outer rollback restoring counter/jobs, and searchable reindex word replace. High density if one AR transaction / after_create_commit seam is wrong."
+      "note": "Creation commit ordering, failed index/unread rollback, outer rollback restoring counter/jobs, and searchable reindex word replace. High density if one AR transaction / after_create_commit seam is wrong.",
+      "at_zero": "served by d5bbeaaaa (transactional saves, deferred commit callbacks, automatic inverses) on 448bfea2e; the three files measure 15/15 (was 10/15, five fails, on 61a8f105f). The rule stays as a regression tripwire."
     },
     {
       "slug": "sqlite-wal-checkpoint",
@@ -124,7 +128,17 @@
       "owner": "compiler",
       "match": ".",
       "match_test": "RoomTest#(test_a_room_destroyed_later|test_each_message_is_destroyed_in_its_own_transaction)",
-      "note": "`assert_broadcast_on` for connection reset after late destroy, and per-message destroy transaction interleaving. Shared cable recording + destroy batching."
+      "note": "`assert_broadcast_on` for connection reset after late destroy, and per-message destroy transaction interleaving. Shared cable recording + destroy batching.",
+      "at_zero": "served by the room-destroy peel (6e3405f50): a non-joinable fixture transaction opens a savepoint per destroy, and room_test is 11/11. `use_transactional_tests = false` still COMMITs. The rule stays as a regression tripwire."
+    },
+    {
+      "slug": "messages-caching-fixture-txn",
+      "title": "Cached message page still queries while the fixture transaction is open",
+      "owner": "compiler",
+      "match": "expected no query matching /action_text_rich_texts",
+      "match_test": "MessagesCachingTest#test_cached_pages_skip_presentation_queries",
+      "note": "room_test's fixture transaction BEGINs around the example. Campfire turns response caching off while `FragmentCache.transaction_open?` is true, so the second GET of the watercooler runs the presentation queries the test forbids.",
+      "at_zero": "The fixture frame is hidden from `transaction_open?`, and an uncommitted write moves the observer's data_version, so the cached page is dropped when the example edits a message. messages_caching_test is 4/4. The rule stays as a regression tripwire."
     },
     {
       "slug": "presentation-preload-introspection",
@@ -133,7 +147,7 @@
       "match": "undefined method 'embeds' for an instance of ActionText::RichText",
       "match_test": "MessageTest#test_presentation_",
       "note": "campfire 2393f01 (2026-10-05) added two `MessageTest` cases for `Message.with_presentation` and `Message::Pagination::Page#preload_associations`. The second (`association(:rich_text_body).loaded?` before and after a page preloads only the rendered rows) passes since `association(:name).loaded?` lowers onto each association's flat `<name>_loaded?` reader. The first walks `message.body.embeds` under `assert_no_queries`. Served 2026-10-09: the synthesized `ActionText::RichText` declares `has_many_attached :embeds` and fills it after save from the blobs its body's attachment nodes name (Rails' `before_save`, run after the insert because an attachment row needs the id); `with_rich_text_<attr>_and_embeds` preloads `{ rich_text_<attr>: :embeds_attachments }`, and the has_many-attached batch installs the rows it found, so `embeds.each` asks nothing. That test's remaining failure is `deferred-preload-timing`.",
-      "at_zero": "served 2026-10-09 (`embeds` modeled and preloaded; `…associations_load_together` now fails only on `deferred-preload-timing`); the rule stays as a regression tripwire."
+      "at_zero": "served 2026-10-09 (`embeds` modeled and preloaded). associations_load_together is cleared with deferred-preload-timing. The rule stays as a regression tripwire."
     },
     {
       "slug": "turbo-signed-stream-name",

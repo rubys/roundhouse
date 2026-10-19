@@ -1,7 +1,11 @@
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[path = "support/test_subprocess.rs"]
+mod test_subprocess;
+
 use std::fs;
 
 #[test]
-fn unit_batches_all_targets_without_reducing_coverage() {
+fn unit_job_runs_roundsnap_gem_tests_before_the_partition() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let unit = &ci["jobs"]["unit"];
@@ -17,15 +21,6 @@ fn unit_batches_all_targets_without_reducing_coverage() {
     assert!(
         unit.get("outputs").is_none(),
         "no racing matrix artifact output"
-    );
-    assert_eq!(
-        unit["env"]["CARGO_PROFILE_TEST_SPLIT_DEBUGINFO"].as_str(),
-        Some("unpacked")
-    );
-    assert!(
-        ci["env"]
-            .get("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO")
-            .is_none()
     );
     let steps = unit["steps"].as_sequence().unwrap();
     let gems = steps
@@ -43,7 +38,8 @@ fn unit_batches_all_targets_without_reducing_coverage() {
             && install.contains("rails-html-sanitizer")
             && install.contains("activerecord")
             && install.contains("minitest")
-            && install.contains("csv"),
+            && install.contains("csv")
+            && install.contains("markly"),
         "{install}"
     );
     let vips = steps
@@ -63,8 +59,10 @@ fn unit_batches_all_targets_without_reducing_coverage() {
     );
     let tests = steps
         .iter()
-        .position(|step| step["name"].as_str() == Some("Build and run all test targets in batches"))
-        .expect("batch every lib/bin/integration target through Cargo");
+        .position(|step| {
+            step["name"].as_str() == Some("Validate coverage and run this test partition")
+        })
+        .expect("run the archived partition");
     let minitest = steps
         .iter()
         .position(|step| step["name"].as_str() == Some("Run Roundsnap gem Minitest files"))
@@ -111,51 +109,14 @@ fn unit_batches_all_targets_without_reducing_coverage() {
     assert!(steps[tests].get("if").is_none());
     assert!(steps[tests].get("continue-on-error").is_none());
     let body = steps[tests]["run"].as_str().unwrap();
-    assert!(body.contains("--out \"$RUNNER_TEMP/unit-resources/tests\" --"));
-    assert!(body.contains("python3 scripts/ci-unit-tests.py"));
+    assert!(body.contains("python3 scripts/ci-unit-tests.py run"));
     assert!(body.contains(
         "--shard-index ${{ strategy.job-index }} --shard-count ${{ strategy.job-total }}"
     ));
+    assert!(body.contains("unit-tests.tar.zst"));
     assert!(
         !body.contains("cargo test --locked --all-targets"),
-        "all-target peak must not rebuild every integration executable at once"
-    );
-    let timings = steps
-        .iter()
-        .find(|step| {
-            step["with"]["name"].as_str() == Some("unit-build-timings-${{ matrix.shard }}")
-        })
-        .expect("retain build timings for investigation");
-    assert_eq!(timings["if"].as_str(), Some("always()"));
-    assert_eq!(
-        timings["with"]["path"].as_str(),
-        Some("target/cargo-timings/")
-    );
-    let bench = steps
-        .iter()
-        .find(|step| {
-            step["name"].as_str()
-                == Some("Emit every bench lane in the debug profile (scripts/bench's shape)")
-        })
-        .expect("retain the independent dev-profile stack-overflow gate");
-    assert_eq!(bench["if"].as_str(), Some("matrix.shard == 0"));
-    assert!(bench.get("continue-on-error").is_none());
-    let body = bench["run"].as_str().unwrap();
-    assert!(body.contains("bash -euo pipefail -c"));
-    assert!(body.contains("typescript crystal rust python elixir go kotlin swift csharp"));
-    assert!(body.contains("target/debug/emit_preview --target"));
-    assert!(
-        !body.contains("cargo run"),
-        "shard 0 already built bins; do not pay cargo startup per lane"
-    );
-    let resources = steps
-        .iter()
-        .find(|step| step["with"]["name"].as_str() == Some("unit-resources-${{ matrix.shard }}"))
-        .expect("retain phase samples even when a command fails");
-    assert_eq!(resources["if"].as_str(), Some("always()"));
-    assert_eq!(
-        resources["with"]["path"].as_str(),
-        Some("${{ runner.temp }}/unit-resources/")
+        "partitions run the unit-build archive; they must not rebuild every target"
     );
 }
 
@@ -405,9 +366,14 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let jobs = &ci["jobs"];
     assert!(jobs.get("writebook-inventory").is_none());
-    assert_eq!(jobs["unit"]["needs"].as_str(), Some("generate-fixture"));
+    assert_eq!(jobs["unit-build"]["needs"].as_str(), Some("generate-fixture"));
+    assert_eq!(
+        jobs["unit"]["needs"],
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[generate-fixture, unit-build]").unwrap()
+    );
     assert_eq!(jobs["generate-fixture"]["needs"].as_str(), Some("plan"));
     assert!(jobs["generate-fixture"].get("if").is_none());
+    assert!(jobs["unit-build"].get("if").is_none());
     assert!(jobs["unit"].get("if").is_none());
     for name in [
         "build-roundhouse",
@@ -455,6 +421,7 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
     for name in ["compact-required", "ci-summary"] {
         let needs = jobs[name]["needs"].as_sequence().unwrap();
         for required in [
+            "unit-build",
             "unit",
             "build-roundhouse",
             "campfire-conformance",
@@ -746,7 +713,7 @@ fn test_backtraces_retain_library_and_integration_source_locations() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "test_backtraces_retain_library_and_integration_source_locations",
+            test_subprocess::name!("test_backtraces_retain_library_and_integration_source_locations"),
             "--nocapture",
         ])
         .env(PROBE, "1")

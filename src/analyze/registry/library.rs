@@ -207,6 +207,7 @@ pub(in crate::analyze) fn register(
             id: ClassId(Symbol::from("ActionMailer::MessageDelivery")),
             args: vec![].into(),
         };
+        let own_with = crate::lower::mailer_class_side::defines_with(app);
         for lc in &app.library_classes {
             if !is_mailer(&lc.name) {
                 continue;
@@ -227,6 +228,11 @@ pub(in crate::analyze) fn register(
                 cls.class_methods
                     .entry(method.name.clone())
                     .or_insert_with(|| delivery_ty.clone());
+            }
+            if !own_with.contains(lc.name.0.as_str()) {
+                cls.class_methods
+                    .entry(Symbol::from("with"))
+                    .or_insert_with(|| Ty::Class { id: lc.name.clone(), args: vec![].into() });
             }
         }
 
@@ -256,9 +262,35 @@ pub(in crate::analyze) fn register(
         delivery_cls
             .instance_methods
             .insert(Symbol::from("processed?"), Ty::Bool);
+        // What the delivered message answers (runtime/ruby/action_mailer.rb's
+        // `Message`): address headers as Arrays of bare addresses, the
+        // body, and a multipart's parts.
+        let addresses = Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::Str) }, Ty::Nil].into() };
+        let part = Ty::Union {
+            variants: vec![Ty::Class { id: ClassId(Symbol::from("ActionMailer::Part")), args: vec![].into() }, Ty::Nil].into(),
+        };
+        for (m, ty) in [
+            ("to", addresses.clone()),
+            ("from", addresses.clone()),
+            ("cc", addresses.clone()),
+            ("bcc", addresses.clone()),
+            ("reply_to", addresses),
+            ("subject", Ty::Untyped),
+            ("body", Ty::Str),
+            ("multipart?", Ty::Bool),
+            ("text_part", part.clone()),
+            ("html_part", part),
+        ] {
+            delivery_cls.instance_methods.insert(Symbol::from(m), ty);
+        }
         classes
             .entry(ClassId(Symbol::from("ActionMailer::MessageDelivery")))
             .or_insert(delivery_cls);
+        let part_cls = classes.entry(ClassId(Symbol::from("ActionMailer::Part"))).or_default();
+        for m in ["body", "decoded", "mime_type"] {
+            part_cls.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
+        }
+
     }
 
     // ActiveJob classes: the app defines an instance

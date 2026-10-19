@@ -26,3 +26,23 @@ fn a_nested_create_with_association_new_saves_under_the_owner() {
         .run_test("test/controllers/comments_controller_test.rb")
         .assert_passes();
 }
+
+/// The same nested build with an inline keyword hash instead of a
+/// params helper. `attrs = <arg>` emitted the braceless kwargs form,
+/// so the controller was `attrs = commenter: ...` and did not parse.
+#[test]
+fn a_nested_create_with_an_inline_keyword_hash_saves_under_the_owner() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "@article.comments.build(comment_params)",
+            "@article.comments.new(commenter: comment_params[:commenter], body: comment_params[:body])",
+        )
+        .edit(
+            "test/controllers/comments_controller_test.rb",
+            "    assert_redirected_to article_url(@article)\n  end\n\n  test \"should not create comment with invalid params\" do",
+            "    assert_redirected_to article_url(@article)\n    assert_equal @article.id, Comment.last.article_id\n    assert_equal \"A test comment.\", Comment.last.body\n  end\n\n  test \"should not create comment with invalid params\" do",
+        )
+        .run_test("test/controllers/comments_controller_test.rb")
+        .assert_passes();
+}

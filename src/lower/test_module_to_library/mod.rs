@@ -145,6 +145,20 @@ pub fn lower_test_modules_with_inner(
     // `crate::lower::routes::helper_id_segments`.
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
 ) -> Vec<LoweredTestModule> {
+    lower_test_modules_with_inner_opts(test_modules, fixtures, models, extras, route_id_segments, false)
+}
+
+/// `lower_test_modules_with_inner`, with `owner_objects` for the Ruby
+/// family: an association constructor hands its owner OBJECT to the
+/// automatic inverse (see `rewrite_assoc_create_with_models_in_place`).
+pub fn lower_test_modules_with_inner_opts(
+    test_modules: &[TestModule],
+    fixtures: &[Fixture],
+    models: &[Model],
+    extras: Vec<(ClassId, ClassInfo)>,
+    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    owner_objects: bool,
+) -> Vec<LoweredTestModule> {
     let mut classes: HashMap<ClassId, ClassInfo> = HashMap::new();
     for (id, info) in extras {
         classes.insert(id, info);
@@ -404,7 +418,7 @@ pub fn lower_test_modules_with_inner(
             // `lowered_real_blog_typing_residual` enforces a
             // 0-untyped ceiling.
             let mut rewritten = crate::lower::seeds_to_library::
-                rewrite_assoc_create_with_models_in_place(&mut method.body, models);
+                rewrite_assoc_create_with_models_in_place(&mut method.body, models, owner_objects);
             // A record standing where a route helper wants an id.
             // Type-directed, so it must be here and not back where the
             // `RouteHelpers.` receiver was added: at THAT point a test

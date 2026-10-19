@@ -160,6 +160,27 @@ class ActionDispatchRequestTest < Minitest::Test
     assert_equal 8080, ActionDispatch::Request.for({ "HTTP_HOST" => "[::1]:8080" }).optional_port
   end
 
+  def test_port_uses_the_host_or_scheme_default
+    assert_equal 80, ActionDispatch::Request.for({ "HTTP_HOST" => "chat.test" }).port
+    assert_equal 443, ActionDispatch::Request.for({ "HTTP_HOST" => "chat.test", "HTTPS" => "on" }).port
+    assert_equal 3000, ActionDispatch::Request.for({ "HTTP_HOST" => "chat.test:3000" }).port
+    assert_equal 80, ActionDispatch::Request.for({ "HTTP_HOST" => "chat.test:80", "HTTPS" => "on" }).port
+    assert_equal 80, ActionDispatch::Request.for({ "HTTP_HOST" => "[::1]" }).port
+    assert_equal 8080, ActionDispatch::Request.for({ "HTTP_HOST" => "[::1]:8080" }).port
+  end
+
+  def test_port_prefers_forwarded_host_and_uses_server_port_only_without_a_host_header
+    assert_equal 8443, ActionDispatch::Request.for({
+      "HTTP_HOST" => "internal:3000", "HTTP_X_FORWARDED_HOST" => "first.test:81, public.test:8443"
+    }).port
+    assert_equal 443, ActionDispatch::Request.for({
+      "HTTP_HOST" => "internal:3000", "HTTP_X_FORWARDED_HOST" => "public.test", "HTTP_X_FORWARDED_PROTO" => "https"
+    }).port
+    assert_equal 8123, ActionDispatch::Request.for({ "SERVER_NAME" => "chat.test", "SERVER_PORT" => "8123" }).port
+    assert_equal 8123, ActionDispatch::Request.for({ "SERVER_NAME" => "[::1]", "SERVER_PORT" => "8123" }).port
+    assert_equal 80, ActionDispatch::Request.for({ "HTTP_HOST" => "chat.test", "SERVER_PORT" => "8123" }).port
+  end
+
   def test_the_first_forwarded_scheme_is_the_clients
     assert ActionDispatch::Request.for({ "HTTP_X_FORWARDED_PROTO" => "https, http" }).ssl?
     assert ActionDispatch::Request.for({ "HTTPS" => "on" }).ssl?

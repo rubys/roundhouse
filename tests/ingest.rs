@@ -1558,11 +1558,11 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
     use std::path::PathBuf;
 
     let files: &[(&str, &str)] = &[
-        // A backtick command (`XStringNode`) — an expression roundhouse
-        // doesn't model, so it aborts strict ingest.
+        // A `defined?` of a call with arguments - an expression
+        // roundhouse doesn't model, so it aborts strict ingest.
         (
             "app/controllers/widgets_controller.rb",
-            "class WidgetsController < ApplicationController\n  def index\n    @out = `echo hi`\n  end\nend\n",
+            "class WidgetsController < ApplicationController\n  def index\n    @out = defined?(helper(1))\n  end\nend\n",
         ),
         // A HAML view: now ingested through the shared view pipeline.
         ("app/views/widgets/show.html.haml", "%h1= @widget.name\n"),
@@ -1579,7 +1579,7 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
     // Strict mode (default): the unsupported construct aborts ingest.
     assert!(
         ingest_app_from_tree(tree()).is_err(),
-        "expected strict ingest to abort on the unsupported backtick command"
+        "expected strict ingest to abort on the unsupported `defined?` call"
     );
 
     // Survey mode: ingest recovers to a best-effort App and records every
@@ -1609,8 +1609,10 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
         "skipped RABL view should be recorded as a gap, got: {messages:?}"
     );
     assert!(
-        !messages.is_empty(),
-        "unsupported backtick command should be recorded as a gap"
+        messages
+            .iter()
+            .any(|m| m.contains("defined? calls with arguments, blocks or safe navigation are not modeled")),
+        "unsupported `defined?` call should be recorded as a gap, got: {messages:?}"
     );
 }
 
@@ -2266,8 +2268,6 @@ fn specific_ledger_messages_replace_the_generic_catch_all() {
     use roundhouse::ingest::IngestError;
 
     for (source, expected) in [
-        ("`ls`", "shell command (backticks) is not modeled"),
-        ("%x{ls}", "shell command (backticks) is not modeled"),
         ("class Foo; end", "class/module defined inside a method or block (runtime class definition)"),
         ("module Foo; end", "class/module defined inside a method or block (runtime class definition)"),
         ("1 + ", "unparsed fragment (Prism recovery node)"),
@@ -2279,6 +2279,25 @@ fn specific_ledger_messages_replace_the_generic_catch_all() {
             panic!("expected unsupported: {source}");
         };
         assert_eq!(message, expected);
+    }
+}
+
+/// A backtick literal is Ruby's `Kernel#`` call: ingest spells it as
+/// that call and the ruby family writes the literal back.
+#[test]
+fn backticks_ingest_as_the_kernel_call_and_round_trip() {
+    use roundhouse::emit::ruby::emit_expr;
+    for (source, expected) in [
+        ("`ls -la`", "`ls -la`"),
+        ("%x{ls}", "`ls`"),
+        ("`tmux list -F '\\#{x}' #{name}`", "`tmux list -F '\\#{x}' #{name}`"),
+        ("%x{echo #{`printf hi`} a\\`b}", "`echo #{`printf hi`} a\\`b`"),
+    ] {
+        let result = ruby_prism::parse(source.as_bytes());
+        let program = result.node();
+        let stmt = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+        let expr = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect("backticks ingest");
+        assert_eq!(emit_expr(&expr), expected, "{source}");
     }
 }
 

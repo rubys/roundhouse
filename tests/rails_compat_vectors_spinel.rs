@@ -38,6 +38,8 @@ const FLOORS: &[(&str, usize, usize)] = &[
     ("as_generate", 6, 6),
     ("blob_verify", 5, 5),
     ("as_data", 4, 4),
+    ("ec_verify", 18, 18),
+    ("ec_cipher", 8, 8),
     ("nul_key", 6, 6),
 ];
 
@@ -71,6 +73,7 @@ fn the_binary_signs_and_verifies_as_rails_and_cruby_do() {
         for (from, to) in [
             ("runtime/spinel/base64.rb", "base64.rb"),
             ("runtime/ruby/action_controller/message_verifier.rb", "message_verifier.rb"),
+            ("runtime/ruby/action_controller/message_encryptor.rb", "message_encryptor.rb"),
             ("runtime/ruby/active_record/signed_id.rb", "signed_id.rb"),
             ("runtime/spinel/tep/url.rb", "url.rb"),
             ("tests/rails_compat/spinel_driver.rb", "driver.rb"),

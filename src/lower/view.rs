@@ -718,10 +718,12 @@ pub fn renders_through_view_path(format: &str) -> bool {
     // here or only there is silently dropped in between.
     // `css`: joins them the same way — a CSS responder with no html
     // sibling (Mastodon's `custom_css#show`), as `<action>_css`.
+    // `text`: a mailer's plain-text part and its layout, as
+    // `<action>_text`, which `lower::mailer_templates` renders.
     matches!(
         format,
         "html" | "turbo_stream" | "svg" | "rss" | "atom" | "xml" | "xls" | "json" | "js" | "pdf"
-            | "csv" | "txt" | "css" | "md"
+            | "csv" | "txt" | "css" | "md" | "text"
     )
 }
 

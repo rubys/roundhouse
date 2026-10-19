@@ -710,7 +710,7 @@ fn run_analysis(
     let mut gaps = crate::ingest::survey::drain();
     match result {
         Ok(mut app) => {
-            let mut analyzer = Analyzer::new(&app);
+            let mut analyzer = Analyzer::for_source(&app);
             analyzer.analyze(&mut app);
             let registry = analyzer.class_registry().clone();
             let mut diags = diagnose(&app);
@@ -1317,7 +1317,7 @@ mod tests {
         // from the analyzer, not hard-coded.
         let (ir, _) = crate::ingest::prism::scope(|| crate::ingest::ingest_app(&root));
         let mut app = ir.expect("real-blog should ingest");
-        Analyzer::new(&app).analyze(&mut app);
+        Analyzer::for_source(&app).analyze(&mut app);
 
         let mut target: Option<(String, u32, String)> = None;
         'scan: for (i, src) in app.sources.iter().enumerate() {

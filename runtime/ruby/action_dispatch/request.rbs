@@ -38,6 +38,8 @@ module ActionDispatch
     @user_agent: String
     @session_options: Hash[Symbol, bool]
     @params: Hash[String, untyped]
+    @csp_ready: bool
+    @content_security_policy: ContentSecurityPolicy?
 
     def remote_ip: () -> String
     def remote_ip=: (String) -> String
@@ -80,7 +82,10 @@ module ActionDispatch
     def ssl?: () -> bool
     def protocol: () -> String
     def optional_port: () -> Integer?
+    def port: () -> Integer
     def base_url: () -> String
+    def host_with_port: () -> String
+    def content_security_policy: () -> ContentSecurityPolicy?
     def original_url: () -> String
     def url: () -> String
     def referrer: () -> String

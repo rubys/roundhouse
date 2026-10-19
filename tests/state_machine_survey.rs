@@ -199,7 +199,7 @@ end
 #[test]
 fn declaration_gap_does_not_hide_a_failure_inside_the_block() {
     let files = tree(
-        "class Article < ApplicationRecord\n  aasm do\n    `unsupported_command`\n  end\nend\n",
+        "class Article < ApplicationRecord\n  aasm do\n    defined?(helper(1))\n  end\nend\n",
         "module Workflow\nend\n",
     );
     let strict_error = ingest_app_from_tree(files.clone()).expect_err("strict ingest still fails");

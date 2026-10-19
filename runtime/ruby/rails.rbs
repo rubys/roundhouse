@@ -95,6 +95,24 @@ module Rails
     def vips_block_untrusted: () -> bool
     def vips_blocked_operations: () -> Array[String]
     def default_per_page: () -> Integer
+    def config: () -> FrameworkConfig
+    def content_security_policy: () -> ActionDispatch::ContentSecurityPolicy?
+    def importmap: () -> ImportmapMap
+    def importmap_json: () -> String
+  end
+
+  class AssetConfig
+    def prefix: () -> String
+  end
+
+  class FrameworkConfig
+    @assets: AssetConfig
+    def initialize: () -> void
+    def assets: () -> AssetConfig
+  end
+
+  class ImportmapMap
+    def to_json: (?resolver: untyped) -> String
   end
 end
 

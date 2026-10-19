@@ -50,7 +50,16 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     let Some(col) = sym else { return };
     let ExprNode::Send { recv, .. } = &mut *expr.node else { return };
     let receiver = recv.take().unwrap();
-    let to_a = Expr::new(
+    // The new sends are built after analysis. A typed receiver with an
+    // unstamped send is `no known method`, so `check` would reject the
+    // rewrite it just asked for. `to_a` is the identity on an Array, so
+    // that result keeps the receiver type; a Relation materializes and
+    // the block sum is left untyped rather than still claiming the query.
+    let materialized = match receiver.ty.as_ref() {
+        Some(crate::ty::Ty::Array { .. }) => receiver.ty.clone(),
+        _ => Some(crate::ty::Ty::Untyped),
+    };
+    let mut to_a = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(receiver),
@@ -60,6 +69,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
             parenthesized: false,
         },
     );
+    to_a.ty = materialized;
     let record = Symbol::from("__r");
     let read = Expr::new(
         span,
@@ -90,5 +100,5 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         block: Some(lambda),
         parenthesized: false,
     };
-    expr.ty = None;
+    expr.ty = Some(crate::ty::Ty::Untyped);
 }

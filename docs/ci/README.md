@@ -26,6 +26,7 @@ advisory jobs and the scheduled Full cycle for the multi-target ledger.
 | **Draft or ready** + focus label(s) | Ruby floor plus **only** the selected focus lanes (required) |
 | **Draft or ready** + `ci:full` | Full validation (all targets, WASM, Spinel); extras stay advisory |
 | **Push to canonical `main`** | Ruby floor plus the full Spinel suite (advisory except `campfire-archive-build`) and `campfire-latest` (advisory); extra-language SDKs wait for the schedule |
+| **Push to `main`** with a `[ci full]` line in a pushed commit's message | Full validation, as `ci:full` would plan it; extras stay advisory |
 | **Scheduled / manual Full validation** | Full validation (the extra-language ledger and publication cycle) |
 
 PRs without a special label run a Ruby floor: fixture preparation, unit
@@ -39,8 +40,9 @@ basecamp/once-campfire `main` on that app's own Ruby after every merge to
 a pull request's plan), advisory. It always
 surveys the strict emit and reports ingest gaps and strict-emit errors; it
 runs the suite, and reports tests against the pinned floor, only when the
-survey finds no ingest gap. Four unit shards cover all package test targets in
-bounded batches; ignored integrations need selected toolchain lanes.
+survey finds no ingest gap. `unit-build` compiles one archive of all library,
+binary, and integration tests. Four unit shards partition the active cases;
+ignored integrations still need selected toolchain lanes.
 Shard 0 of `unit` also runs each `gems/roundsnap/test/*_test.rb` in its own
 MRI process (`ruby -Ilib:test "$file"`): extra positional arguments are ARGV,
 not additional test files, so one invocation cannot load the suite. Missing
@@ -58,8 +60,7 @@ its full emitted suite without stubs. Its per-file results and per-test
 failures must match the plain Ruby lane on the same app, MRI, gems and
 compiler; the plain lane's existing conformance floor still applies.
 The standalone `campfire-roundsnap` script remains a boot-only local smoke.
-Framework and toolchain suites also run inside comparison jobs, not
-necessarily as standalone checks. **Spinel is not part of `BASE`.**
+Framework and toolchain suites also run inside comparison jobs. **Spinel is not part of `BASE`.**
 
 That floor is the merge claim for ordinary analyzer, lowerer, and runtime
 work: the Ruby shape runs, and Campfire still matches Rails. Crystal, Go,
@@ -102,6 +103,29 @@ has no effect. Stacked labels prefer the broader lane:
 still receive checks; changes to the rendered user guide also select
 site/browser coverage.
 
+### Unit test execution
+
+`unit-build` creates a same-run Nextest archive and a complete case inventory.
+The test jobs download its exact artifact ID, including on failed-job reruns.
+They retain the fixture, Ruby gems, system libraries, and Rust toolchain needed
+by test bodies, but do not rebuild the workspace.
+
+Each job checks the source SHA, archive digest, workspace paths, case identities,
+and ignored states before execution. The four hash partitions must be disjoint
+and cover every active case. An empty combined suite or incomplete inventory
+fails the job. Build artifacts are shared; test results are never reused.
+
+Producer and consumer workspace paths stay identical because existing tests
+embed source and executable paths. Test binaries retain embedded backtrace line
+data. The producer runs documentation tests once, then explicitly rebuilds
+`emit_preview` in the unoptimized dev profile for the nine-target bench gate.
+
+The producer and every unit shard remain required. Per-attempt timing, resource,
+coverage, and test-result artifacts retain failure evidence without matrix
+output races. The runner and its contracts are
+[`ci-unit-tests.py`](../../scripts/ci-unit-tests.py) and
+[`ci_unit_tests_test.py`](../../tests/ci_unit_tests_test.py).
+
 ### Focus labels (narrow fix rounds)
 
 When Full validation (or a `ci:full` PR) shows red lanes, apply focus labels
@@ -111,14 +135,16 @@ so fix rounds only queue the lanes under repair — and those lanes are
 | Label | Selects (required while focused) |
 |---|---|
 | `ci:crystal` … `ci:python` | That language's `compare-extra` **and** `smoke-extra` (+ `build-site` / archives / `archive-results`) |
+| `ci:rust` / `ci:typescript` | That language's `compare` and floor `smoke` (+ `build-site` / archives). Each label is its own leg |
 | `ci:extras` | All seven of the above |
 | `ci:jruby` | `compare-jruby` + floor `smoke` jruby (+ site/archives) |
 | `ci:spinel` | CORE Spinel (`spinel-build`, `spinel-toolchain`, `spinel-compare`) + `spinel-framework` (+ site/archives). Not the heavy Campfire Spinel suite (`campfire-spinel-*`); not folded into `ci:extras`. |
 
 **Narrow semantics:** with any focus label set and `ci:full` **not** set, the
 plan is the Ruby floor (`BASE`) plus only the selected focus lanes. Path
-ownership does not expand the plan. Unrelated extras / WASM / rust·ts
-`compare` / full Spinel11 stay off. `ci:full` still wins as the
+ownership does not expand the plan. Unrelated extras / WASM / full
+Spinel11 stay off, and rust·ts `compare` stays off unless `ci:rust` or
+`ci:typescript` is set. `ci:full` still wins as the
 full ledger (extras remain advisory there).
 
 **Rust vs TypeScript:** selecting one no longer forces both `compare` matrix
@@ -181,6 +207,13 @@ path, and floating-pin catch-up.
 - **A newer head:** needs a new run. Reruns retain the original SHA and
   coverage; rerunning an old compact run neither tests the new head nor
   expands its matrix.
+- **Full validation of a push to `main`:** put `[ci full]` on a line of its
+  own in a pushed commit's message, outside the subject. Committers land on
+  `main` without a PR, so there is no label to set. The run plans like
+  `ci:full` and names the commit in the plan's reasons. Only a whole line
+  counts, so prose that names the marker does not trigger it. Pull requests
+  ignore the marker and keep the maintainer-applied label. A later push
+  still cancels the run, and plans from its own commits only.
 - **Manual full validation:** Actions → **Full validation** → **Run workflow**.
   Leave `publish` unchecked. This executes freshly on the chosen ref; a
   branch-head dispatch is not a substitute for a PR merge-tree check.
@@ -242,7 +275,7 @@ Read the owner and its executable contract before editing:
 
 | Concern | Source | Tests |
 |---|---|---|
-| Coverage and execution | [ci.yml](../../.github/workflows/ci.yml), [ci-plan.py](../../scripts/ci-plan.py), [ci-unit-tests.py](../../scripts/ci-unit-tests.py) | `tests/ci_plan_test.py`, `tests/ci_plan_focus_test.py`, `tests/ci_policy_workflow.rs`, `tests/workflow_yaml_parses.rs` |
+| Coverage and execution | [ci.yml](../../.github/workflows/ci.yml), [ci-plan.py](../../scripts/ci-plan.py), [ci-unit-tests.py](../../scripts/ci-unit-tests.py) | `tests/ci_unit_tests_test.py`, `tests/ci_plan_test.py`, `tests/ci_plan_focus_test.py`, `tests/ci_policy_workflow.rs`, `tests/workflow_yaml_parses.rs` |
 | Toolchain selection | [ci.yml](../../.github/workflows/ci.yml), [`.ruby-version`](../../.ruby-version), [bin/rh](../../bin/rh) | `tests/ci_toolchain_workflow.rs`, `tests/rh_verify.rs` |
 | Receipt reuse | [ci-reuse.py](../../scripts/ci-reuse.py) | `tests/ci_reuse_test.py` |
 | Fixture caching | [generate-fixture in ci.yml](../../.github/workflows/ci.yml) | `tests/ci_fixture_workflow.rs` |

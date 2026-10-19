@@ -1299,10 +1299,9 @@ pub(super) fn emit_send_base(
             }
         })
         .collect();
-    // Ruby → Crystal method-name translations. Crystal stdlib
-    // collections (Array, String, Hash) use `size` not `length`;
-    // Ruby has both as aliases. Translate at the call site so
-    // emitted code is Crystal-idiomatic.
+    // Ruby → Crystal method-name translations. `length` → `size`
+    // (Array, String, and Hash) is the string kernel's Crystal
+    // spelling, applied by name below.
     // Ruby's `raise Klass, "msg"` is a 2-arg form that Crystal doesn't
     // accept (Crystal's `raise` is single-arg: an Exception or a
     // String). Translate `raise X, "msg"` to `raise X.new("msg")`
@@ -1407,35 +1406,6 @@ pub(super) fn emit_send_base(
             }
         }
     }
-    // Ruby `Time` stdlib → Crystal `Time` stdlib bridges.
-    //
-    // - `Time.now.utc` (Ruby: current time, then convert to UTC) →
-    //   `Time.utc` (Crystal: class method returning current UTC time).
-    //   Detected as the outer `.utc` Send whose receiver is `Time.now`.
-    // - `<expr>.iso8601` (Ruby: ISO-8601 string) → `<expr>.to_rfc3339`
-    //   (Crystal's spelling of the same format).
-    // Both come from `runtime/ruby/active_record/base.rb`'s
-    // `fill_timestamps` chain `Time.now.utc.iso8601`. Spinel/Ruby pass
-    // through; only Crystal needs the rewrite since its stdlib uses
-    // different method names.
-    if method.as_str() == "utc" && args.is_empty() {
-        if let Some(r) = recv {
-            if let ExprNode::Send { recv: Some(inner), method: inner_m, args: inner_args, .. } = &*r.node {
-                if inner_m.as_str() == "now" && inner_args.is_empty() {
-                    if let ExprNode::Const { path } = &*inner.node {
-                        if path.last().map(|s| s.as_str()) == Some("Time") {
-                            return "Time.utc".to_string();
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if method.as_str() == "iso8601" && args.is_empty() {
-        if let Some(r) = recv {
-            return format!("{}.to_rfc3339", emit_expr(r));
-        }
-    }
     // Ruby `JSON.generate(obj)` → Crystal `obj.to_json`. Both produce
     // a JSON String from a serializable value, but Crystal exposes
     // the API as an instance method rather than a module function.
@@ -1459,7 +1429,6 @@ pub(super) fn emit_send_base(
         Some(r) if matches!(&*r.node, ExprNode::Const { path } if path.last().map(|s| s.as_str()) == Some("Base64"))
     );
     let m = match method.as_str() {
-        "length" => "size",
         // Ruby `Array#count` (no args) → element count. Crystal's
         // `Enumerable#count` requires either an item to match or a
         // block — `arr.count` (no args) doesn't compile. Rewrite to
@@ -1480,13 +1449,6 @@ pub(super) fn emit_send_base(
         // `key?` explicitly as part of their API, so skip the
         // rewrite when the receiver is one of those.
         "key?" if !is_framework_hash_recv(recv) => "has_key?",
-        // Crystal: starts_with? / ends_with? / includes? (note plural).
-        // `include?` is method-only — the bare `include` Ruby keyword
-        // for module mixin lowers to `LibraryClass::includes`, not
-        // a Send, so it's never seen here.
-        "start_with?" => "starts_with?",
-        "end_with?" => "ends_with?",
-        "include?" => "includes?",
         // Ruby `Regexp#match?(str)` → Crystal `Regex#matches?(str)`
         // (note plural). Both predicate-only forms — return Bool.
         // No receiver-type narrowing here: the only Ruby class with
@@ -1500,7 +1462,13 @@ pub(super) fn emit_send_base(
         "decode64" if base64_recv => "decode",
         "urlsafe_encode64" if base64_recv => "urlsafe_encode",
         "urlsafe_decode64" if base64_recv => "urlsafe_decode",
-        other => other,
+        // String-kernel renames (`length` → `size`, `include?` →
+        // `includes?`, `start_with?` → `starts_with?`, `end_with?` →
+        // `ends_with?`) and every kernel name Crystal already spelled
+        // the same way. The old match applied these to every receiver,
+        // so the lookup is by name. `include` the mixin keyword is not
+        // a Send.
+        name => crate::catalog::string_kernel::crystal_name(name).unwrap_or(name),
     };
     // Ruby's `String#to_sym` dynamically creates Symbols; Crystal
     // doesn't allow runtime Symbol creation. Drop the call entirely

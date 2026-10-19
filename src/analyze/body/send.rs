@@ -1193,7 +1193,11 @@ impl<'a> BodyTyper<'a> {
         // own `call` (a callable app class, an untyped proc).
         if method.as_str() == "call" {
             if let Some(Ty::Fn { ret, .. }) = recv_ty {
-                return (**ret).clone();
+                // Not left a type variable: `call` is known, and what the body answers is the body's own sends' to report.
+                return match &**ret {
+                    Ty::Var { .. } => Ty::Untyped,
+                    ret => ret.clone(),
+                };
             }
         }
         // `then` / `yield_self` are the receiver-identity pair's mirror:
@@ -2643,6 +2647,7 @@ fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
             Some(Ty::Int) | Some(Ty::Var { .. }) | None => date(),
             _ => return None,
         },
+        "+" | "-" if args.len() == 1 && crate::lower::time_calendar::date_calendar_duration(&args[0]).is_some() => date(),
         // `Date + Integer` → Date. `Date + Untyped` stays gradual: the
         // operand might not be an Integer day shift, and Spinel has no `+`.
         "+" if args.len() == 1 => match args[0].ty.as_ref() {
@@ -2714,19 +2719,6 @@ fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
     })
 }
 
-/// `first(n)` / `last(n)` — the COUNTED form. Ruby's `Array#first(n)`,
-/// Rails' `Relation#last(n)` and `Model.first(n)` all answer an Array of
-/// up to n elements, where the bare form answers one element or nil.
-/// Every method table here is keyed by name alone and so typed the
-/// counted form as `elem | nil`; campfire's searches controller then
-/// carried `Message?` for `reachable_messages.search(q).last(100)`, the
-/// controller ivar joined that with the other branch's `Message.none`,
-/// and the emitted view signature — which the LOWERER got right
-/// (`last_n`, declared `Array[untyped]`) — disagreed with the analyzer
-/// about the same value. Gated on one non-block argument that is an
-/// Integer (or not yet typed): `first { … }` and `first` stay as they
-/// were. Mirrors `lower::scope_chain::counted_terminal`, which renames
-/// the call for the runtime for the same reason.
 /// `Array#[]` / `slice` return a *sub-array* (`Array<elem> | Nil`) when
 /// indexed by a `Range` or a `(start, length)` pair, but a single
 /// *element* (`elem | Nil`) for a lone integer. `array_method` sees only
@@ -2747,16 +2739,29 @@ fn sub_array_slice(method: &Symbol, args: &[crate::expr::Expr], elem: &Ty) -> Op
     })
 }
 
-fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
-    // `take(n)` is the same counted terminal as `first(n)`: the Rails
-    // tutorial seeds with `User.order(:created_at).take(6)` and then
-    // `.each`es the result.
-    matches!(method.as_str(), "first" | "last" | "take" | "sample")
-        && args.len() == 1
-        && matches!(
-            args[0].ty.as_ref(),
-            None | Some(Ty::Int) | Some(Ty::Untyped) | Some(Ty::Var { .. })
-        )
+/// `first(n)` / `last(n)` — the counted form. Ruby's `Array#first(n)`,
+/// Rails' `Relation#last(n)` and `Model.first(n)` all answer an Array of
+/// up to n elements, where the bare form answers one element or nil.
+/// The name and arity come from [`crate::catalog::counted_relation_terminal`],
+/// which `scope_chain::counted_terminal` and
+/// `relation_counted_terminal` read too. `take(n)` / `sample(n)` are
+/// counted here only; the runtime does not rename them. This dispatch
+/// does not see the block node, so a block is not part of the question
+/// — the renamers pass it and then refuse.
+pub(crate) fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
+    // `take(n)` / `sample(n)` answer an Array too. They are not the
+    // relation rename: the runtime keeps those names. `first` / `last`
+    // go through the shared predicate so the renamers cannot spell a
+    // different arity.
+    let [arg] = args else { return false };
+    if !matches!(
+        arg.ty.as_ref(),
+        None | Some(Ty::Int) | Some(Ty::Untyped) | Some(Ty::Var { .. })
+    ) {
+        return false;
+    }
+    crate::catalog::counted_relation_terminal(method.as_str(), args.len(), false).is_some()
+        || matches!(method.as_str(), "take" | "sample")
 }
 
 fn array_find(method: &Symbol, args: &[crate::expr::Expr], block_ret: Option<&Ty>) -> bool {
@@ -3403,9 +3408,14 @@ pub(crate) fn string_answers(method: &Symbol) -> bool {
 }
 
 pub(super) fn str_method(method: &Symbol) -> Ty {
+    // The mirrored kernel lives in `catalog::string_kernel`. This
+    // ladder keeps every other String method.
+    if let Some(ty) = crate::catalog::string_kernel::return_ty(method.as_str()) {
+        return ty;
+    }
     match method.as_str() {
-        "length" | "size" | "bytesize" => Ty::Int,
-        "upcase" | "downcase" | "strip" | "chomp" | "chop" | "reverse" | "to_s"
+        "bytesize" => Ty::Int,
+        "chomp" | "chop" | "reverse" | "to_s"
         | "capitalize" | "swapcase" | "squeeze" | "dup" | "clone"
         | "tr" | "tr_s" | "delete" | "gsub" | "sub" | "lstrip" | "rstrip"
         | "delete_prefix" | "delete_suffix"
@@ -3423,7 +3433,6 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // on a String is a shape the transpiled targets do not all
         // lower). Both answer a String whatever the width.
         | "rjust" | "ljust" | "center" => Ty::Str,
-        "to_i" => Ty::Int,
         "to_f" => Ty::Float,
         "to_sym" | "intern" => Ty::Sym,
         // Case-insensitive comparison: `casecmp` returns -1/0/1 (Int),
@@ -3466,8 +3475,7 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // template names; `unpack1` its first element.
         "unpack" => Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) },
         "unpack1" => Ty::Untyped,
-        "empty?" | "blank?" | "present?" | "include?" | "start_with?"
-        | "end_with?" | "match?" => Ty::Bool,
+        "blank?" | "present?" | "match?" => Ty::Bool,
         // ActiveSupport `Object#presence_in(collection)` — the receiver
         // when the collection includes it, else nil. campfire's
         // `params.require(:user)[:role].presence_in(%w[ member

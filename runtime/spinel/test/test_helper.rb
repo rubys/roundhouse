@@ -747,6 +747,26 @@ module ActionCable
     def assert_no_broadcasts(stream, &block)
       assert_broadcasts(stream, 0, &block)
     end
+
+    # `assert_broadcast_on stream, data`: some broadcast to `stream` —
+    # during the block, or so far in this test without one — carries
+    # `data`. Compared as Rails compares it, after a JSON round trip:
+    # `data` goes through the same encoder a broadcast does, and both
+    # sides are parsed, so key order and symbol keys do not matter. The
+    # log holds each publish as its JSON text on this tree.
+    def assert_broadcast_on(stream, data, &block)
+      entries =
+        if block
+          capture_broadcasts_on(stream, &block)
+        else
+          Broadcasts.log.select { |entry| entry[:stream] == stream }
+        end
+      want = JSON.parse(ActionCable.payload_json(data))
+      payloads = entries.map { |entry| entry[:payload] }.compact
+      return if payloads.any? { |payload| JSON.parse(payload.to_s) == want }
+      raise "assert_broadcast_on failed: no broadcast to #{stream.inspect} carried #{JSON.generate(want)}; " \
+            "got #{payloads.inspect}"
+    end
   end
 end
 
@@ -930,8 +950,9 @@ end
 # (`SchemaSetup.reset!` if defined).
 # What `skip` raises. Minitest's own is `Minitest::Skip < Exception`,
 # deliberately outside StandardError so a test's `rescue => e` cannot
-# swallow it; same rule here, and the autorun shim rescues this arm
-# BEFORE its `rescue Exception` so a skip is never counted a failure.
+# swallow it; same rule here. The autorun shim's `rescue Exception`
+# treats an exception whose class name is `TestSkipped` as a skip, so
+# a framework file that never loads this helper still runs.
 class TestSkipped < Exception
 end
 
@@ -1031,6 +1052,15 @@ module ActiveRecord
 end
 
 class TestBase
+  # Rails wraps each example in a non-joinable transaction
+  # (`use_transactional_tests`, default true) so a nested `save` or
+  # `destroy` is a SAVEPOINT. Campfire's room-destroy test counts those
+  # releases. A class that must see a real COMMIT sets this false
+  # (`MessageCreationCommitTest`).
+  def self.use_transactional_tests
+    true
+  end
+
   # Rails puts both of these on `ActiveSupport::TestCase` itself, so a
   # test that never writes `include ActiveJob::TestHelper` still has
   # `perform_enqueued_jobs` — campfire's `User::BotTest` is exactly
@@ -1184,6 +1214,18 @@ class TestBase
     ensure
       travel_back
     end
+  end
+
+  # Rails' `stub_const`, for the sites `lower::stub_const` could not
+  # make static: a stub that changes the constant's type (`TIME_LIMIT =
+  # 10` stubbed with `0.2`), or one whose owner the pass did not find.
+  # This tree resolves constants at build time and has no `const_set`,
+  # so the stub cannot take effect; the test FAILS, saying so, rather
+  # than running its block against the unstubbed value. The CRuby tree
+  # replaces this with the real helper (test_support_cruby.rb).
+  def stub_const(mod, constant, _value)
+    raise "stub_const(#{mod}, #{constant.inspect}) has no compiled form here: " \
+          "the stub changes the constant's type, or names a constant the lowering could not find"
   end
 
   # Minitest's `assert_nothing_raised`: the block runs, and an exception

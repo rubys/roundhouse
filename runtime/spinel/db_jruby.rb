@@ -162,7 +162,7 @@ module Db
   # thread-local (each worker thread's root fiber).
   def self.current_dbh
     c = Fiber[:db_handle]
-    return c unless c.nil?
+    return c if lease_visible?
     @free[0]
   end
 
@@ -179,6 +179,28 @@ module Db
     Fiber[:ar_txn_depth] = value
   end
 
+  # Bit `depth - 1` of this integer is whether that frame can be joined.
+  # Same fiber slot as the depth. See runtime/ruby/db.rbs.
+  def self._txn_joinable_bits
+    bits = Fiber[:ar_txn_joinable_bits]
+    bits.nil? ? 0 : bits
+  end
+
+  def self._txn_joinable_bits=(value)
+    Fiber[:ar_txn_joinable_bits] = value
+  end
+
+  # The open transaction's enlisted writes (connection.rb), held in the
+  # same per-thread storage as the depth.
+  def self._txn_records
+    records = Fiber[:ar_txn_records]
+    if records.nil?
+      records = []
+      Fiber[:ar_txn_records] = records
+    end
+    records
+  end
+
   # Request-scoped connection lease. Mirrors db_cruby.rb: checks out a
   # Conn under @mutex (parking on @cv while the pool is momentarily
   # exhausted), binds it to fiber-storage so `current_dbh` resolves to it
@@ -188,7 +210,16 @@ module Db
   # re-entrant, and a second lease on a thread that holds one would
   # rebind the connection and, on release, unbind the outer lease's.
   def self.in_lease?
-    !Fiber[:db_handle].nil?
+    lease_visible?
+  end
+
+  # Same rule as db_cruby.rb. An ordinary lease stays with its owner
+  # thread. A fixture BEGIN pin is shared with threads the example
+  # starts, so they see the uncommitted rows.
+  def self.lease_visible?
+    return false if Fiber[:db_handle].nil?
+    return true if Fiber[:db_owner] == Thread.current
+    Fiber[:db_txn_pin] == true
   end
 
   # `ActiveRecord::Base.connection_db_config` answers from these
@@ -247,6 +278,12 @@ module Db
   end
 
   def self.with_connection
+    # Re-entrant, as db_cruby.rb. A BEGIN outside a lease pins its
+    # connection; a second checkout would miss those uncommitted rows.
+    if in_lease?
+      result = yield
+      return result
+    end
     conn = nil
     @mutex.synchronize do
       while @free.empty?
@@ -259,6 +296,8 @@ module Db
       conn = @free.pop
     end
     Fiber[:db_handle] = conn
+    Fiber[:db_owner] = Thread.current
+    Fiber[:db_txn_pin] = false
     request_failed = false
     begin
       yield
@@ -273,6 +312,7 @@ module Db
         cleanup_error = e
       ensure
         Fiber[:db_handle] = nil
+        Fiber[:db_owner] = nil
         begin
           if conn.open_statements.empty?
             @mutex.synchronize do
@@ -354,17 +394,53 @@ module Db
     raise error if error
   end
 
+  # A BEGIN outside a lease binds its connection until COMMIT or
+  # ROLLBACK, as db_cruby.rb's `reserve_txn_connection` does. The test
+  # shim's fixture transaction is that BEGIN; a later `with_connection`
+  # has to see its uncommitted rows.
+  def self.reserve_txn_connection
+    conn = nil
+    @mutex.synchronize do
+      while @free.empty?
+        if @missing_connections > 0
+          replace_connection
+        else
+          @cv.wait(@mutex)
+        end
+      end
+      conn = @free.pop
+    end
+    Fiber[:db_handle] = conn
+    Fiber[:db_owner] = Thread.current
+    Fiber[:db_txn_pin] = true
+    conn
+  end
+
+  def self.release_txn_pin_if_idle(conn)
+    return nil unless Fiber[:db_txn_pin] == true && Fiber[:db_owner] == Thread.current
+    return nil if conn.in_txn
+    Fiber[:db_handle] = nil
+    Fiber[:db_owner] = nil
+    Fiber[:db_txn_pin] = false
+    @mutex.synchronize do
+      @free.unshift(conn)
+      @cv.signal
+    end
+    nil
+  end
+
   def self.exec(sql)
     record_query(sql)
     # Any exec is (per the Db contract) DDL or a write — Rails
     # invalidates the whole query cache on write; so do we.
     qcache = Fiber[:rh_qcache]
     qcache.clear unless qcache.nil?
+    word = sql.strip.split(" ", 2).first.to_s.upcase
+    reserve_txn_connection if word == "BEGIN" && !in_lease?
     conn = current_dbh
     st = conn.raw.create_statement
     begin
       st.execute(sql)
-      word = sql.strip.split(" ", 2).first.to_s.upcase
       conn.in_txn = true if word == "BEGIN"
       rollback_to_savepoint = word == "ROLLBACK" && sql.strip.upcase.start_with?("ROLLBACK TO ")
       conn.in_txn = false if word == "COMMIT" || word == "END" || (word == "ROLLBACK" && !rollback_to_savepoint)
@@ -372,6 +448,7 @@ module Db
       Db.raise_statement_error(e.message, e.message.include?("SQLITE_BUSY"))
     ensure
       st.close
+      release_txn_pin_if_idle(conn)
     end
     nil
   end

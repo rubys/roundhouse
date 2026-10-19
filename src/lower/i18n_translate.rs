@@ -447,6 +447,39 @@ fn runs_at_run_time(reason: &str, args: &[Expr], catalog: &Catalog) -> bool {
     }
 }
 
+/// `I18n.t("views.feed")` landing on a node of Strings, which I18n
+/// answers as a nested Hash of them: its full key, when every locale's
+/// lookup lands on such a node. Not from a template's `t`, whose Hash
+/// would meet the view's escaping, nor with anything a Hash answer
+/// would ignore or need (`count:`, `default:`, interpolation values).
+pub(crate) fn tree_answer(catalog: &Catalog, recv: Option<&Expr>, method: &str, args: &[Expr], block: Option<&Expr>) -> Option<String> {
+    let on_i18n = matches!(recv.map(|r| &*r.node),
+        Some(ExprNode::Const { path }) if path.len() == 1 && path[0].as_str() == "I18n");
+    if !on_i18n || block.is_some() || !matches!(method, "t" | "translate") {
+        return None;
+    }
+    let call = parse_args(args, None, false).ok()?;
+    if call.dynamic.is_some() || call.lookup.counted || !call.lookup.defaults.is_empty() || !call.lookup.values.is_empty() {
+        return None;
+    }
+    let full = Translate::full_key(&call.lookup, &call.lookup.key).ok()?;
+    let mut locales = catalog.locales();
+    for other in &catalog.others {
+        if !locales.contains(&other.locale) {
+            locales.push(other.locale.clone());
+        }
+    }
+    let lands = |c: &Catalog| c.entries.contains_key(&full) || c.opaque.contains(&full) || c.is_subtree(&full);
+    let every = catalog.variants(&locales).iter().all(|v| {
+        let chain = match &v.fallbacks {
+            Some(defaults) => crate::i18n::fallback_chain(&v.locale, defaults),
+            None => vec![v.locale.clone()],
+        };
+        chain.iter().filter_map(|l| catalog.catalog_for(l)).find(|c| lands(c)).is_some_and(|c| c.plain_subtree(&full))
+    });
+    every.then_some(full)
+}
+
 const COUNT_BY_RULE: &str = "a count whose form a locale's own plural rule picks";
 
 /// A count meets a locale's own rule only when the call runs.
@@ -569,20 +602,33 @@ pub fn apply_i18n_translate_lowering(app: &mut App) {
         }
         rewrite(body, &catalog, Site::Other)
     });
+    // An `app/helpers` module's instance methods run in the view: their bare `t` is ActionView's, with no template for a lazy key.
+    let helpers: std::collections::HashSet<crate::ident::ClassId> = app.helper_method_index.values().cloned().collect();
+    for lc in app.library_classes.iter_mut().filter(|lc| helpers.contains(&lc.name)) {
+        for m in lc.methods.iter_mut().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+            for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                rewrite_default(default, &catalog, Site::View(None));
+            }
+            rewrite(&mut m.body, &catalog, Site::View(None));
+        }
+    }
     for controller in &mut app.controllers {
         let Some(scope) = controllers.get(&controller.name) else { continue };
         for item in &mut controller.body {
             match item {
                 crate::dialect::ControllerBodyItem::Action { action, .. } => {
                     for (_name, default) in &mut action.opt_params {
-                        rewrite(default, &catalog, Site::Controller(scope));
+                        rewrite_default(default, &catalog, Site::Controller(scope));
+                    }
+                    for default in action.kw_params.iter_mut().filter_map(|(_, d)| d.as_mut()) {
+                        rewrite_default(default, &catalog, Site::Controller(scope));
                     }
                     rewrite(&mut action.body, &catalog, Site::Controller(scope));
                 }
                 crate::dialect::ControllerBodyItem::ClassMethod { method, .. } => {
                     for p in &mut method.params {
                         if let Some(default) = &mut p.default {
-                            rewrite(default, &catalog, Site::Other);
+                            rewrite_default(default, &catalog, Site::Other);
                         }
                     }
                     rewrite(&mut method.body, &catalog, Site::Other);
@@ -632,8 +678,33 @@ fn translates(app: &App, controller: &crate::dialect::Controller) -> bool {
     false
 }
 
+// A parameter default has no statement ahead of it to hoist a `Seq` into, so a dynamic key's `__k = …; case __k …` keeps its own `begin`.
+fn rewrite_default(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
+    rewrite(expr, catalog, site);
+    if matches!(&*expr.node, ExprNode::Seq { exprs } if exprs.len() > 1) {
+        let body = expr.clone();
+        *expr = Expr { ty: body.ty.clone(), ..Expr::new(body.span, ExprNode::BeginRescue { body, rescues: Vec::new(), else_branch: None, ensure: None, implicit: false }) };
+    }
+}
+
 fn rewrite(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, catalog, site));
+    // Folded as the view's `t` it is, without the `raw` a controller body has no helper for: nothing renders this copy.
+    if expr.decisions & crate::expr::HELPER_COPY_TRANSLATE != 0 {
+        expr.decisions &= !crate::expr::HELPER_COPY_TRANSLATE;
+        rewrite_one(expr, catalog, Site::View(None));
+        if let ExprNode::Send { recv: None, method, args, .. } = &*expr.node
+            && method.as_str() == "raw"
+            && args.len() == 1
+        {
+            *expr = args[0].clone();
+        }
+        return;
+    }
+    rewrite_one(expr, catalog, site);
+}
+
+fn rewrite_one(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
     if let Some(spelled) = with_locale(expr) {
         *expr = spelled;
         return;
@@ -664,6 +735,10 @@ fn rewrite(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
             *expr = runtime_call(expr.span, args, catalog, site);
         }
     };
+    if let Some(full) = tree_answer(catalog, recv.as_ref(), method.as_str(), args, block.as_ref()) {
+        *expr = tree_call(expr.span, &full, args.get(1));
+        return;
+    }
     let call = match parsed {
         Ok(call) => call,
         Err(reason) => return runtime(&reason, expr),
@@ -768,6 +843,30 @@ fn fold_variants(call: &Call, plans: Vec<(Variant, Plan)>, span: Span, in_view: 
 /// for a call written `t(key, options)`: the options as the call passes
 /// them, and in a template the answer marked raw, the runtime having
 /// escaped what is not html-safe.
+/// `I18n.translate_tree(full_key, options)`: the node's Strings as a
+/// nested Hash, built from the app's catalog when the call runs.
+fn tree_call(span: Span, full: &str, options: Option<&Expr>) -> Expr {
+    RUNTIME_SITES.with(|r| {
+        let mut r = r.borrow_mut();
+        r.0.push(span);
+        r.1.push(span);
+    });
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let options = match options {
+        Some(opts) => {
+            let mut opts = opts.clone();
+            if let ExprNode::Hash { kwargs, .. } = &mut *opts.node {
+                *kwargs = false;
+            }
+            opts
+        }
+        None => Expr { ty: Some(hash_ty.clone()), ..Expr::new(span, ExprNode::Hash { entries: Vec::new(), kwargs: false }) },
+    };
+    let mut call = const_send(span, "I18n", "translate_tree", vec![lit(span, full.to_string()), options]);
+    call.ty = Some(hash_ty);
+    call
+}
+
 fn runtime_call(span: Span, args: &[Expr], catalog: &Catalog, site: Site<'_>) -> Expr {
     RUNTIME_SITES.with(|r| {
         let mut r = r.borrow_mut();
@@ -1050,8 +1149,8 @@ fn bind_all_options(call: &mut Call, span: Span) -> Vec<Expr> {
 /// an `around_action` writes it, spelled out as the gem runs it:
 ///
 /// ```ruby
-/// __i18n_locale_prev = I18n.enter_locale(l)
 /// begin
+///   __i18n_locale_prev = I18n.enter_locale(l)
 ///   body              # or action.call
 /// ensure
 ///   I18n.leave_locale(__i18n_locale_prev)
@@ -1095,11 +1194,12 @@ fn with_locale(e: &Expr) -> Option<Expr> {
     let leave = Expr { ty: Some(Ty::Nil), ..const_send(span, "I18n", "leave_locale", vec![read_prev]) };
     let save = Expr { ty: Some(prev_ty), ..Expr::new(span, ExprNode::Assign { target: LValue::Var { id: VarId(0), name: prev }, value: enter }) };
     let body_ty = body.ty.clone();
-    let run = Expr {
-        ty: body_ty.clone(),
+    // The save inside the `begin`, not a statement before it: a value-position Seq is hoisted ahead of the whole statement (`[t(…), with_locale(…) { … }]`), which ran its siblings in the new locale.
+    let body = Expr { ty: body_ty.clone(), ..Expr::new(span, ExprNode::Seq { exprs: vec![save, body] }) };
+    Some(Expr {
+        ty: body_ty,
         ..Expr::new(span, ExprNode::BeginRescue { body, rescues: Vec::new(), else_branch: None, ensure: Some(leave), implicit: false })
-    };
-    Some(Expr { ty: body_ty, ..Expr::new(span, ExprNode::Seq { exprs: vec![save, run] }) })
+    })
 }
 
 /// `branches` (each with the environments it runs in, `None` for every

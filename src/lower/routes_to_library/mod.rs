@@ -1063,7 +1063,9 @@ fn build_helper_function(
     // placement is the whole point of this variant — `x_path(room_id: 2)
     // + ".json"` at the call site put it after `?room_id=2`, so the
     // parameter VALUE became "2.json" and the lookup missed.
-    if let Some(ext) = ext {
+    if let Some(ext) = ext
+        && route.format.as_ref().is_none_or(|default| default.as_str() != ext)
+    {
         body = with_ty(
             Expr::new(
                 Span::synthetic(),

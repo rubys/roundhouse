@@ -1072,7 +1072,31 @@ fn every_runtime_method_body_concretely_typed() {
     // reached it and Spinel refused the `Hash[String, _]` declaration);
     // the key's `to_s` in `query_pairs` is read twice (+2 in
     // active_support_ext.rb).
-    const CEILING: usize = 773;
+    // MEASURED 776 on 2026-10-16: transactional saves (connection.rb).
+    // A touch remembers the `updated_at` it wrote beside the Dirty
+    // snapshot rather than inside it, and `changes_to_save` reads it
+    // back: the column-dependent attribute value, gradual as the
+    // snapshot's own values are (+2); and `transaction`'s branch that
+    // runs inside a transaction opened beneath ActiveRecord answers the
+    // block's untyped value, as the others do (+1).
+    // MEASURED 779 on 2026-10-16: `RawConnection#transaction` nests a
+    // savepoint when SQLite is already open. That arm answers the
+    // block's untyped value the same way the outer arm does (+3 in
+    // connection.rb: the `yield`, the local it is stored in, and the
+    // value the method returns).
+    // MEASURED 781 on 2026-10-17: a mailer's address headers read
+    // `mail`'s opts, whatever the action put there (a String, an Array,
+    // nil), as ActionMailer's `Mail::Message` normalizes them (+5 in
+    // action_mailer.rb).
+    // MEASURED 784 on 2026-10-17: both of those, on the same 776 base.
+    // MEASURED 791 on 2026-10-17: `cookies.encrypted` (`EncryptedCookieJar`
+    // in action_controller/cookies.rb) reads and writes JSON values, so its
+    // `[]`, `[]=` and `value_of` carry an untyped value by contract, as Rails'
+    // encrypted jar answers whatever the cookie holds (+7 on the 784 base).
+    // MEASURED 793 on 2026-10-19: the class-side query fallbacks
+    // (`Model.maximum(:x)` through `all`, connection.rb) answer the column's
+    // value as `Relation#maximum` / `#pick` do, whatever the column holds (+2).
+    const CEILING: usize = 793;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

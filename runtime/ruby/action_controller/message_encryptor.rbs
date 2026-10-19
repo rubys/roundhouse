@@ -1,0 +1,23 @@
+# Typing contract for message_encryptor.rb beside this file. Every value
+# in and out is a String: the message goes in as JSON and comes out as
+# JSON, "" for a cookie that does not read; the caller parses it.
+module ActionController
+  module MessageEncryptor
+    SALT: String
+    KEY_SIZE: Integer
+    IV_SIZE: Integer
+    TAG_SIZE: Integer
+    ENCODED_IV_LENGTH: Integer
+    ENCODED_TAG_LENGTH: Integer
+    ENVELOPE_PREFIX: String
+
+    def self.derived_keys: () -> Hash[String, String]
+    def self.derive_key: (String secret) -> String
+    def self.encrypt: (String secret, String message_json, String purpose, String exp) -> String
+    def self.decrypted_json: (String secret, String value, String purpose) -> String
+    def self.purposed_json: (String plain, String purpose) -> String
+    def self.unpurposed_json: (String plain) -> String
+    def self.decrypt: (String secret, String value) -> String
+    def self.strict_decode: (String text) -> String
+  end
+end

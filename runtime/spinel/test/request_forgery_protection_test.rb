@@ -13,11 +13,15 @@ require_relative "../runtime/request_forgery_protection"
 class RequestForgeryProtectionTest < Minitest::Test
   # The harness turns the check off for app suites, as Rails' test.rb
   # does; this file is the one that tests it.
+  # The app's own strategy is pinned away: an app on `header_only` (Rails 8.2's default) never reaches the token cases below.
   def setup
     ActionController::Base.allow_forgery_protection = true
+    @app_strategy = Rails::Application.instance_method(:forgery_protection_verification_strategy)
+    Rails::Application.define_method(:forgery_protection_verification_strategy) { "header_or_legacy_token" }
   end
 
   def teardown
+    Rails::Application.define_method(:forgery_protection_verification_strategy, @app_strategy)
     ActionController::Base.allow_forgery_protection = false
     ActionController::Current.controller = nil
     ActionController::Current.request = nil

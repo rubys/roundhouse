@@ -1,374 +1,286 @@
 #!/usr/bin/env python3
-"""Run unit CI as bounded cargo batches and free finished integration artifacts.
-
-Preserves every --all-targets identity: library unit tests, package binaries,
-and each integration target discovered from Cargo metadata. Cargo still builds
-and executes each batch; results are never cached or skipped. After a batch of
-integration targets finishes successfully, only that batch's integration
-executables and their own split-DWARF sidecars are deleted. Shared libraries,
-package binaries (including CARGO_BIN_EXE helpers), fingerprints, and dependency
-artifacts stay until the job ends.
-
-Peak disk is reduced because only one integration batch is resident at a time.
-Compile-everything-before-any-execute is intentionally not preserved: a later
-batch can fail to compile after earlier batches have already run.
-
-Optional --shard-index/--shard-count spread integration targets across jobs by
-the seconds each took (scripts/ci-unit-weights.json; an unlisted target counts
-one second). Coverage is checked on the global metadata set first. Shard 0 also runs
-library and binary unit tests; every integration target still executes exactly
-once across the shards.
-"""
+"""Build one CI test archive, then run a checked case partition without rebuilding."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-DEFAULT_BATCH = 20
-PACKAGE = "roundhouse"
-# Cargo names integration executables `{target}-{16 hex hash}` under deps/.
-EXEC_HASH = re.compile(r"\A([0-9a-f]+)\Z")
+ROOT = Path(__file__).resolve().parents[1]
+FORMAT_VERSION = 1
+Case = tuple[str, str]
 
 
-def cargo_bin() -> str:
-    return os.environ.get("CARGO", "cargo")
+class ContractError(ValueError):
+    pass
 
 
-def run_cargo(args: list[str], *, capture: bool = False) -> int:
-    command = [cargo_bin(), *args]
-    if capture:
-        result = subprocess.run(command, check=False, text=True, capture_output=True)
-        if result.returncode != 0 and result.stderr:
-            sys.stderr.write(result.stderr)
-        return result.returncode if result.returncode >= 0 else 128 - result.returncode
-    # Inherit stdio so cargo diagnostics and test output stream normally.
-    status = subprocess.call(command)
-    return status if status >= 0 else 128 - status
+class ChildFailure(Exception):
+    def __init__(self, status: int):
+        self.status = status if status >= 0 else 128 - status
 
 
-def cargo_metadata() -> dict:
-    for offline in (True, False):
-        args = ["metadata", "--format-version", "1", "--no-deps"]
-        if offline:
-            args.append("--offline")
-        result = subprocess.run(
-            [cargo_bin(), *args],
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        if result.returncode == 0:
-            return json.loads(result.stdout)
-        if not offline:
-            sys.stderr.write(result.stderr or result.stdout or "cargo metadata failed\n")
-            raise SystemExit(result.returncode or 1)
-    raise SystemExit("cargo metadata failed")
+def check_command(command: list[str], *, env: dict | None = None, capture: bool = False) -> str:
+    result = subprocess.run(command, env=env, cwd=ROOT, text=True,
+                            stdout=subprocess.PIPE if capture else None, check=False)
+    if result.returncode:
+        raise ChildFailure(result.returncode)
+    return result.stdout if capture else ""
 
 
-def package_plan(meta: dict) -> tuple[list[str], Path]:
-    packages = [p for p in meta["packages"] if p["name"] == PACKAGE]
-    if len(packages) != 1:
-        raise SystemExit(f"expected one {PACKAGE} package, found {len(packages)}")
-    names = sorted(t["name"] for t in packages[0]["targets"] if "test" in t["kind"])
-    if not names:
-        raise SystemExit("no integration test targets in cargo metadata")
-    return names, Path(meta["target_directory"])
+def nextest(*args: str) -> list[str]:
+    return [os.environ.get("CARGO", "cargo"), "nextest", *args]
 
 
-def chunks(items: list[str], size: int) -> list[list[str]]:
-    if size < 1:
-        raise SystemExit("--batch-size must be >= 1")
-    return [items[i : i + size] for i in range(0, len(items), size)]
+def digest(path: Path) -> str:
+    result = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            result.update(block)
+    return result.hexdigest()
+
+
+def write_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2) + "\n")
 
 
 def validate_shard(index: int, count: int) -> None:
-    if count < 1:
-        raise SystemExit("--shard-count must be >= 1")
-    if not 0 <= index < count:
-        raise SystemExit("--shard-index must satisfy 0 <= index < --shard-count")
+    if type(count) is not int or count < 1:
+        raise ContractError("shard count must be a positive integer")
+    if type(index) is not int or not 0 <= index < count:
+        raise ContractError("shard index must satisfy 0 <= index < shard count")
 
 
-# Targets too long for one shard: every shard runs its share of their tests.
-SPLIT_TARGETS = ("emit_and_run",)
-WEIGHTS = Path(__file__).with_name("ci-unit-weights.json")
-# Seconds shard 0 spends on library and binary unit tests before any target.
-LIB_BINS_SECONDS = 100
+def parse_inventory(data: dict, *, partitioned: bool = False) -> tuple[dict[Case, bool], set[Case]]:
+    """Retain ignored identities; only explicitly matched active cases may run."""
+    if not isinstance(data, dict) or not isinstance(data.get("rust-suites"), dict):
+        raise ContractError("missing Nextest rust-suites inventory")
+    cases: dict[Case, bool] = {}
+    selected: set[Case] = set()
+    bundled = False
+    for binary, suite in data["rust-suites"].items():
+        if (not isinstance(binary, str) or not binary or not isinstance(suite, dict)
+                or suite.get("binary-id") != binary or suite.get("status") != "listed"
+                or not isinstance(suite.get("testcases"), dict)):
+            raise ContractError("malformed or unlisted Nextest suite")
+        if suite.get("binary-name") == "all_tests" and suite.get("kind") == "test":
+            bundled = bool(suite["testcases"])
+        for name, case in suite["testcases"].items():
+            if (not isinstance(name, str) or not name or not isinstance(case, dict)
+                    or case.get("kind") != "test" or type(case.get("ignored")) is not bool
+                    or not isinstance(case.get("filter-match"), dict)):
+                raise ContractError("malformed Nextest test identity")
+            identity = (binary, name)
+            if identity in cases:
+                raise ContractError("duplicate Nextest test identity")
+            ignored = case["ignored"]
+            match = case["filter-match"]
+            status = match.get("status")
+            if status not in {"matches", "mismatch"}:
+                raise ContractError("unknown Nextest filter status")
+            if ignored:
+                if status == "matches":
+                    raise ContractError("an ignored test was selected")
+            elif status == "matches":
+                selected.add(identity)
+            elif not partitioned or match.get("reason") != "partition":
+                raise ContractError(f"active test omitted by a non-partition filter: {identity}")
+            cases[identity] = ignored
+    if not bundled:
+        raise ContractError("combined all_tests suite is missing or empty")
+    if type(data.get("test-count")) is not int or data["test-count"] != len(cases):
+        raise ContractError("Nextest test-count does not match its identities")
+    if not any(not ignored for ignored in cases.values()):
+        raise ContractError("test inventory has no active cases")
+    return cases, selected
 
 
-def load_weights() -> dict[str, float]:
-    try:
-        return json.loads(WEIGHTS.read_text())
-    except FileNotFoundError:
-        return {}
+def encode_cases(cases: dict[Case, bool]) -> list[dict]:
+    return [{"binary": binary, "name": name, "ignored": cases[(binary, name)]}
+            for binary, name in sorted(cases)]
 
 
-def select_shard(
-    names: list[str],
-    index: int,
-    count: int,
-    weights: dict[str, float] | None = None,
-    first_shard_seconds: float = 0,
-) -> list[str]:
-    """Heaviest target first onto the lightest shard; unweighted names interleave."""
-    weights = weights or {}
-    loads = [first_shard_seconds] + [0.0] * (count - 1)
-    owner: dict[str, int] = {}
-    for name in sorted(names, key=lambda n: -weights.get(n, 1)):
-        shard = loads.index(min(loads))
-        owner[name] = shard
-        loads[shard] += weights.get(name, 1)
-    return [name for name in names if owner[name] == index]
+def manifest_cases(manifest: dict) -> dict[Case, bool]:
+    required = {"version", "source_sha", "workspace", "target", "archive_sha256", "shard_count", "tests"}
+    if (not isinstance(manifest, dict) or set(manifest) != required
+            or type(manifest["version"]) is not int or manifest["version"] != FORMAT_VERSION):
+        raise ContractError("unsupported unit inventory manifest")
+    for key, lengths in (("source_sha", (40, 64)), ("archive_sha256", (64,))):
+        value = manifest[key]
+        if not isinstance(value, str) or len(value) not in lengths or re.fullmatch(r"[0-9a-f]+", value) is None:
+            raise ContractError(f"invalid {key} in unit inventory")
+    for key in ("workspace", "target"):
+        if not isinstance(manifest[key], str) or not Path(manifest[key]).is_absolute():
+            raise ContractError(f"invalid {key} in unit inventory")
+    validate_shard(0, manifest["shard_count"])
+    if not isinstance(manifest["tests"], list) or not manifest["tests"]:
+        raise ContractError("empty unit inventory manifest")
+    cases: dict[Case, bool] = {}
+    for row in manifest["tests"]:
+        if (not isinstance(row, dict) or set(row) != {"binary", "name", "ignored"}
+                or not isinstance(row["binary"], str) or not row["binary"]
+                or not isinstance(row["name"], str) or not row["name"]
+                or type(row["ignored"]) is not bool):
+            raise ContractError("malformed unit inventory identity")
+        identity = (row["binary"], row["name"])
+        if identity in cases:
+            raise ContractError("duplicate unit inventory identity")
+        cases[identity] = row["ignored"]
+    if not any(not ignored for ignored in cases.values()):
+        raise ContractError("unit inventory has no active cases")
+    return cases
 
 
-def verify_coverage(names: list[str]) -> None:
-    roots = sorted(p.stem for p in Path("tests").glob("*.rs"))
-    missing = [stem for stem in roots if stem not in names]
-    if missing:
-        raise SystemExit(
-            "integration metadata missing tests/*.rs stems: " + ", ".join(missing[:20])
-        )
-    extra = [name for name in names if name not in roots]
-    if extra:
-        raise SystemExit(
-            "cargo metadata lists integration targets without tests/*.rs: "
-            + ", ".join(extra[:20])
-        )
+def validate_manifest(manifest: dict, *, workspace: Path, target: Path, source: str,
+                      archive_sha256: str, shard_count: int) -> dict[Case, bool]:
+    cases = manifest_cases(manifest)
+    if manifest["shard_count"] != shard_count:
+        raise ContractError("shard count differs from producer inventory")
+    if (Path(manifest["workspace"]).resolve() != workspace.resolve()
+            or Path(manifest["target"]).resolve() != target.resolve()):
+        raise ContractError("archive paths differ from this checkout; compile-time paths cannot be remapped")
+    if manifest["source_sha"] != source:
+        raise ContractError("archive source SHA differs from this checkout")
+    if manifest["archive_sha256"] != archive_sha256:
+        raise ContractError("archive digest differs from producer inventory")
+    return cases
 
 
-def integration_executables(deps: Path, target_name: str) -> list[Path]:
-    """Locate Cargo integration executables for one target by deps stem."""
-    if not deps.is_dir():
-        return []
-    prefix = target_name + "-"
-    found: list[Path] = []
-    for path in deps.iterdir():
-        if not path.is_file() or path.suffix:
-            continue
-        if not path.name.startswith(prefix):
-            continue
-        suffix = path.name[len(prefix) :]
-        if not EXEC_HASH.fullmatch(suffix):
-            continue
-        if not os.access(path, os.X_OK):
-            continue
-        found.append(path)
-    return found
+def check_partition_coverage(cases: dict[Case, bool], partitions: list[set[Case]]) -> None:
+    active = {identity for identity, ignored in cases.items() if not ignored}
+    covered: set[Case] = set()
+    for partition in partitions:
+        if covered & partition:
+            raise ContractError("test partitions overlap")
+        if not partition <= active:
+            raise ContractError("test partition selects unknown or ignored cases")
+        covered.update(partition)
+    if covered != active:
+        raise ContractError("test partitions omit active cases")
 
 
-def owned_integration_paths(executable: Path) -> list[Path]:
-    """Files that belong only to one finished integration executable.
-
-    Unpacked .dwo sidecars sit beside the executable as `{stem}.*`. Match by
-    the full executable stem so neighboring targets and package bins stay.
-    """
-    if not executable.is_file():
-        return []
-    stem = executable.name
-    owned = [executable]
-    for path in executable.parent.iterdir():
-        name = path.name
-        if name == stem:
-            continue
-        if name.startswith(stem + "."):
-            owned.append(path)
-    return owned
+def source_sha() -> str:
+    locations = {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"}
+    env = {key: value for key, value in os.environ.items() if key not in locations}
+    return check_command(["git", "rev-parse", "HEAD"], env=env, capture=True).strip()
 
 
-def free_integration_targets(deps: Path, names: list[str]) -> int:
-    freed = 0
-    for name in names:
-        for executable in integration_executables(deps, name):
-            for path in owned_integration_paths(executable):
-                try:
-                    size = path.stat().st_size if path.exists() else 0
-                    path.unlink(missing_ok=True)
-                    freed += size
-                except OSError as error:
-                    print(f"warning: could not free {path}: {error}", file=sys.stderr)
-    return freed
+def target_directory() -> Path:
+    target = ROOT / "target"
+    configured = Path(os.environ.get("CARGO_TARGET_DIR", str(target)))
+    if not configured.is_absolute():
+        configured = ROOT / configured
+    if configured.resolve() != target.resolve():
+        raise ContractError("CI archives require CARGO_TARGET_DIR to be workspace/target")
+    return target.resolve()
 
 
-def selectors(names: list[str]) -> list[str]:
-    out: list[str] = []
-    for name in names:
-        out.extend(["--test", name])
-    return out
+def list_tests(args: list[str], *, env: dict | None = None) -> dict:
+    return json.loads(check_command(nextest("list", *args, "--profile", "ci", "--ignore-default-filter",
+                                             "--run-ignored", "default", "--message-format=json"),
+                                    env=env, capture=True))
 
 
-def build_and_run_lib_bins(*, timings: bool) -> int:
-    # One cargo invocation: a split --no-run + run pair re-fingerprints
-    # the same artifacts and was paying a second process on every shard 0.
-    command = ["test", "--locked", "--lib", "--bins"]
-    if timings:
+def build(args: argparse.Namespace) -> int:
+    validate_shard(0, args.shard_count)
+    target = target_directory()
+    env = dict(os.environ, ROUNDHOUSE_TEST_BUNDLE_ROOT=str(ROOT), CARGO_TARGET_DIR=str(target))
+    if env.get("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO", "off") != "off":
+        raise ContractError("CI archives require test split-debuginfo=off for embedded backtrace line data")
+    env.setdefault("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO", "off")
+    archive = args.archive.resolve()
+    inventory = args.inventory.resolve()
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    selectors = ["--locked", "--lib", "--bins", "--test", "all_tests"]
+    command = nextest("archive", *selectors, "--profile", "ci", "--archive-file", str(archive))
+    if args.timings:
         command.append("--timings")
-    print("== unit batch: library + binaries ==", flush=True)
-    return run_cargo(command)
-
-
-def build_and_run_integration_batch(
-    names: list[str],
-    *,
-    batch_index: int,
-    batch_count: int,
-    deps: Path,
-    timings: bool,
-) -> int:
-    label = f"{batch_index}/{batch_count}"
-    flags = selectors(names)
-    print(
-        f"== unit batch {label}: {len(names)} integration target(s) ==",
-        flush=True,
-    )
-    command = ["test", "--locked", *flags]
-    if timings and batch_index == 1:
-        # One timings report for the first integration wave; later waves would
-        # overwrite cargo-timing.html and add little signal for disk work.
-        command.append("--timings")
-    status = run_cargo(command)
-    if status != 0:
-        # Keep failing artifacts for local inspection; do not free on failure.
-        return status
-    missing = [name for name in names if not integration_executables(deps, name)]
-    if missing:
-        print(
-            "error: no integration executable under deps/ for: " + ", ".join(missing),
-            file=sys.stderr,
-        )
-        return 1
-    freed = free_integration_targets(deps, names)
-    print(
-        f"== unit batch {label}: freed {freed} bytes of finished integration artifacts ==",
-        flush=True,
-    )
+    check_command(command, env=env)
+    data = list_tests(selectors, env=env)
+    cases, _selected = parse_inventory(data)
+    if Path(data["rust-build-meta"]["target-directory"]).resolve() != target:
+        raise ContractError("built test target directory differs from the archive contract")
+    write_json(inventory, {
+        "version": FORMAT_VERSION, "source_sha": source_sha(), "workspace": str(ROOT),
+        "target": str(target), "archive_sha256": digest(archive), "shard_count": args.shard_count,
+        "tests": encode_cases(cases),
+    })
+    print(f"unit archive: {len(cases)} identities, {sum(not ignored for ignored in cases.values())} active")
     return 0
 
 
-def split_share(tests: list[str], index: int, count: int) -> list[str]:
-    return sorted(tests)[index::count]
-
-
-def build_and_run_split_target(name: str, index: int, count: int, deps: Path) -> int:
-    print(f"== unit split {name}: share {index} of {count} ==", flush=True)
-    listing = subprocess.run(
-        [cargo_bin(), "test", "--locked", "--test", name, "--", "--list", "--format", "terse"],
-        check=False,
-        text=True,
-        capture_output=True,
-    )
-    if listing.returncode != 0:
-        sys.stderr.write(listing.stderr)
-        return listing.returncode
-    tests = [line[: -len(": test")] for line in listing.stdout.splitlines() if line.endswith(": test")]
-    share = split_share(tests, index, count)
-    if share:
-        status = run_cargo(["test", "--locked", "--test", name, "--", "--exact", *share])
-        if status != 0:
-            return status
-    freed = free_integration_targets(deps, [name])
-    print(f"== unit split {name}: {len(share)} of {len(tests)} tests; freed {freed} bytes ==", flush=True)
+def run(args: argparse.Namespace, report: dict) -> int:
+    validate_shard(args.shard_index, args.shard_count)
+    target = target_directory()
+    manifest = json.loads(args.inventory.read_text())
+    expected = validate_manifest(manifest, workspace=ROOT, target=target, source=source_sha(),
+                                 archive_sha256=digest(args.archive), shard_count=args.shard_count)
+    extracted = list_tests(["--archive-file", str(args.archive.resolve()), "--extract-to", str(ROOT),
+                            "--extract-overwrite"])
+    actual, _selected = parse_inventory(extracted)
+    if actual != expected:
+        raise ContractError("extracted tests or ignored states differ from producer inventory")
+    metadata = ["--cargo-metadata", str(target / "nextest/cargo-metadata.json"),
+                "--binaries-metadata", str(target / "nextest/binaries-metadata.json")]
+    partitions = []
+    for index in range(args.shard_count):
+        listed = list_tests([*metadata, "--partition", f"hash:{index + 1}/{args.shard_count}"])
+        identities, selected = parse_inventory(listed, partitioned=True)
+        if identities != expected:
+            raise ContractError("partition inventory differs from producer inventory")
+        partitions.append(selected)
+    check_partition_coverage(expected, partitions)
+    selected = partitions[args.shard_index]
+    if not selected:
+        raise ContractError("assigned test partition is empty")
+    report.update(coverage_verified=True, source_sha=manifest["source_sha"], total_cases=len(expected),
+                  ignored_cases=sum(expected.values()), selected_cases=len(selected),
+                  selected=[{"binary": binary, "name": name} for binary, name in sorted(selected)])
+    command = nextest("run", *metadata, "--profile", "ci", "--partition",
+                      f"hash:{args.shard_index + 1}/{args.shard_count}", "--no-fail-fast",
+                      "--ignore-default-filter", "--run-ignored", "default", "--retries", "0", "--no-tests", "fail")
+    check_command(command)
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=int(os.environ.get("ROUNDHOUSE_UNIT_BATCH_SIZE", DEFAULT_BATCH)),
-        help=f"integration targets per build/run/free wave (default {DEFAULT_BATCH})",
-    )
-    parser.add_argument(
-        "--timings",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="pass --timings on the shared lib/bin build and first integration wave",
-    )
-    parser.add_argument(
-        "--list-only",
-        action="store_true",
-        help="print this shard's integration targets after coverage validation and exit",
-    )
-    parser.add_argument(
-        "--shard-index",
-        type=int,
-        default=0,
-        help="zero-based shard to run (default 0)",
-    )
-    parser.add_argument(
-        "--shard-count",
-        type=int,
-        default=1,
-        help="number of shards to partition integration targets across (default 1)",
-    )
+    modes = parser.add_subparsers(dest="mode", required=True)
+    producer = modes.add_parser("build", help="build one archive and its complete test inventory")
+    producer.add_argument("--archive", type=Path, required=True)
+    producer.add_argument("--inventory", type=Path, required=True)
+    producer.add_argument("--shard-count", type=int, default=4)
+    producer.add_argument("--timings", action=argparse.BooleanOptionalAction, default=True)
+    consumer = modes.add_parser("run", help="validate and run one case partition from an archive")
+    consumer.add_argument("--archive", type=Path, required=True)
+    consumer.add_argument("--inventory", type=Path, required=True)
+    consumer.add_argument("--shard-index", type=int, required=True)
+    consumer.add_argument("--shard-count", type=int, required=True)
+    consumer.add_argument("--report", type=Path, required=True)
     args = parser.parse_args(argv)
-    validate_shard(args.shard_index, args.shard_count)
-
-    started = time.monotonic()
-    names, target_root = package_plan(cargo_metadata())
-    verify_coverage(names)
-    split = [name for name in SPLIT_TARGETS if name in names]
-    selected = select_shard(
-        [name for name in names if name not in split],
-        args.shard_index,
-        args.shard_count,
-        load_weights(),
-        LIB_BINS_SECONDS,
-    )
-    batches = chunks(selected, args.batch_size)
-    shard_note = (
-        f"shard {args.shard_index} of {args.shard_count}: "
-        f"{len(selected)} selected of {len(names)} integration targets"
-    )
-    if args.list_only:
-        for name in selected:
-            print(name)
-        print(
-            f"# {shard_note}; {len(batches)} batch(es) of up to {args.batch_size}",
-            file=sys.stderr,
-        )
-        return 0
-
-    deps = target_root / "debug" / "deps"
-    lib_bins = args.shard_index == 0
-    print(
-        f"unit CI: {shard_note}, "
-        f"{len(batches)} batch(es) of up to {args.batch_size}; "
-        f"{'lib+bins first; ' if lib_bins else 'lib+bins skipped; '}"
-        f"reclaim finished integration artifacts only",
-        flush=True,
-    )
-
-    if lib_bins:
-        status = build_and_run_lib_bins(timings=args.timings)
-        if status != 0:
-            return status
-
-    for index, batch in enumerate(batches, start=1):
-        status = build_and_run_integration_batch(
-            batch,
-            batch_index=index,
-            batch_count=len(batches),
-            deps=deps,
-            timings=args.timings,
-        )
-        if status != 0:
-            return status
-
-    for name in split:
-        status = build_and_run_split_target(name, args.shard_index, args.shard_count, deps)
-        if status != 0:
-            return status
-
-    elapsed = time.monotonic() - started
-    print(f"unit CI complete in {elapsed:.1f}s", flush=True)
-    return 0
+    report = {"status": "not-run", "coverage_verified": False}
+    if args.mode == "run":
+        report.update(shard_index=args.shard_index, shard_count=args.shard_count)
+    try:
+        status = build(args) if args.mode == "build" else run(args, report)
+    except ChildFailure as error:
+        status = error.status
+    except (ContractError, OSError, ValueError, KeyError, TypeError) as error:
+        print(f"unit CI: {error}", file=sys.stderr)
+        report["error"] = str(error)
+        status = 2
+    report.update(status="passed" if status == 0 else "failed", exit=status)
+    if args.mode == "run":
+        write_json(args.report, report)
+    return status
 
 
 if __name__ == "__main__":

@@ -291,6 +291,14 @@ pub(super) fn synthesize_process_action(
                 PreambleStmt::Lead { body } => body.clone(),
             });
         }
+        // Rails writes the CSP header in middleware, after the
+        // controller — including an around_action that served a cached
+        // page and did not yield. Only a chain that narrowed (or
+        // consulted) `content_security_policy` pays for the call;
+        // `write_header` no-ops when the request has no policy.
+        if chain_mentions_csp(preamble, wraps) {
+            stmts.push(csp_header_stmt());
+        }
     }
 
     let mut body = match stmts.len() {
@@ -346,6 +354,16 @@ pub(super) fn synthesize_process_action(
     // of gap (map_expr walks If / Seq / Lambda / BeginRescue). The
     // transform is idempotent on already-rewritten action-arm Sends.
     body = rewrites::rewrite_request_format(&body);
+    // `params` the same way, and for the same reason. Rails runs a block
+    // or lambda filter, an `if:`/`unless:` lambda and a `rescue_from`
+    // block with `instance_exec` on the controller, so `params` there is
+    // the Parameters the action reads. Left raw, `params[:id]` was a
+    // Symbol-keyed read on the String-keyed `@params` Hash and answered
+    // nil: `Widget.find(nil)` became a 404, and `head :forbidden if
+    // params[:deny] == "1"` never fired (rubys/roundhouse#998). The
+    // action arms are already rewritten and carry `@params`, which the
+    // pass leaves alone.
+    body = rewrites::rewrite_params(&body);
 
     let param_sym = Symbol::from(param);
     MethodDef {
@@ -711,6 +729,56 @@ fn case_dispatch(
 // Synthetic-Expr helpers — every node a synthesized span and default
 // effects/ty so the rest of the pipeline doesn't choke on them.
 // ---------------------------------------------------------------------------
+
+fn chain_mentions_csp(preamble: &[PreambleStmt], wraps: &WrapFilters) -> bool {
+    preamble.iter().chain(&wraps.after).any(|stmt| match stmt {
+        PreambleStmt::Block { body, if_cond_expr, unless_cond_expr, .. } => {
+            expr_calls(body, "content_security_policy")
+                || if_cond_expr.as_ref().is_some_and(|e| expr_calls(e, "content_security_policy"))
+                || unless_cond_expr
+                    .as_ref()
+                    .is_some_and(|e| expr_calls(e, "content_security_policy"))
+        }
+        PreambleStmt::Call { filter, .. } => {
+            filter.if_cond_expr.as_ref().is_some_and(|e| expr_calls(e, "content_security_policy"))
+                || filter
+                    .unless_cond_expr
+                    .as_ref()
+                    .is_some_and(|e| expr_calls(e, "content_security_policy"))
+        }
+        PreambleStmt::Lead { body } => expr_calls(body, "content_security_policy"),
+    })
+}
+
+pub(super) fn expr_calls(expr: &Expr, name: &str) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, name: &str, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { method, .. } = &*e.node {
+            if method.as_str() == name {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |child| walk(child, name, found));
+    }
+    walk(expr, name, &mut found);
+    found
+}
+
+fn csp_header_stmt() -> Expr {
+    syn(ExprNode::Send {
+        recv: Some(syn(ExprNode::Const {
+            path: vec![Symbol::from("ActionDispatch"), Symbol::from("ContentSecurityPolicy")],
+        })),
+        method: Symbol::from("write_header"),
+        args: vec![syn(ExprNode::SelfRef)],
+        block: None,
+        parenthesized: true,
+    })
+}
 
 fn syn(node: ExprNode) -> Expr {
     Expr::new(Span::synthetic(), node)

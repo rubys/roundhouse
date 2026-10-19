@@ -2023,9 +2023,10 @@ pub struct View {
     /// for the overwhelmingly common headerless partial/view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strict_locals: Option<Vec<Param>>,
-    /// Ingested for the analyzer only — a mailer's `.text.erb` variant
-    /// and the mailer layout: templates whose Ruby the type checks and
-    /// the IDE should see, but which no emitter renders yet.
+    /// Ingested for the analyzer only: a template whose Ruby the type
+    /// checks and the IDE should see, but which no emitter renders. No
+    /// ingest sets it today (a mailer's `.text.erb` renders, through
+    /// `lower::mailer_templates`).
     /// `session::analyze_and_lower` drops them before lowering;
     /// `check`, the LSP and the MCP keep them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

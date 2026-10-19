@@ -1,0 +1,6 @@
+# Typing for the raising façade at runtime/spinel/sidekiq_redis.rb.
+# Dropped with the façade when a tree on :sidekiq gets the real client.
+module SidekiqRedis
+  def self.push: (String url, String queue, String json) -> nil
+  def self.schedule: (String url, Float at, String json) -> nil
+end

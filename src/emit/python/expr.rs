@@ -857,6 +857,14 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             }
         }
         ExprNode::Send { recv, method, args, parenthesized, .. } => {
+            if e.decisions & crate::expr::GROUNDED_TIME_FORMAT != 0
+                && method.as_str() == "to_rfc3339"
+                && args.is_empty()
+            {
+                if let Some(r) = recv {
+                    return format!("{}.isoformat()", emit_expr(r));
+                }
+            }
             emit_send(recv.as_ref(), method.as_str(), args, *parenthesized)
         }
         ExprNode::Assign { target: _, value } => emit_expr(value),
@@ -1140,25 +1148,32 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
     // timestamp columns; `.utc` is then a no-op (the value is already
     // UTC) and `.iso8601` becomes `.isoformat()`. `import datetime` is
     // injected for active_record_base via the runtime-loader import list.
-    if method == "now" && args.is_empty() {
+    if matches!(method, "now" | "utc") && args.is_empty() {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
-                if path.len() == 1 && path[0].as_str() == "Time" {
+                // Bare `Time` and rooted `::Time`. `Foo::Time.now` keeps its own method.
+                if path.last().is_some_and(|s| s.as_str() == "Time")
+                    && path.iter().rev().skip(1).all(|s| s.as_str().is_empty())
+                {
                     return "datetime.datetime.now(datetime.timezone.utc)".to_string();
                 }
             }
         }
     }
     // `<time>.utc` → no-op: the `Time.now` mapping is already UTC-aware.
+    // The class-method clock `Time.utc` was handled above.
     if method == "utc" && args.is_empty() {
         if let Some(r) = recv {
             return emit_expr(r);
         }
     }
-    // `<time>.iso8601` → `.isoformat()` (ISO-8601 timestamp string).
-    if method == "iso8601" && args.is_empty() {
+    // Zero-arg `iso8601` on a time is `to_rfc3339` after `time_calendar`.
+    // An application method of that name keeps normal dispatch.
+    if method == "to_rfc3339" && args.is_empty() {
         if let Some(r) = recv {
-            return format!("{}.isoformat()", emit_expr(r));
+            if crate::lower::time_calendar::is_time_rfc3339_receiver(r) {
+                return format!("{}.isoformat()", emit_expr(r));
+            }
         }
     }
     // Ruby's binary operators ride the Send channel (`a == b` is

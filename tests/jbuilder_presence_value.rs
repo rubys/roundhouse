@@ -163,13 +163,16 @@ fn a_predicate_in_a_ternary_value_is_grounded() {
 /// Template-level `if` / `unless` conditions ground `present?` /
 /// `blank?` too: jbuilder does not run the ERB view-condition rewrite,
 /// and Spinel has no `String#present?`. A typed String becomes the
-/// whitespace emptiness test (`strip.empty?`); an open value would be
-/// `ActiveSupport.present?(…)`.
+/// nil-guarded whitespace emptiness test (`(s || "").strip.empty?`);
+/// an open value would be `ActiveSupport.present?(…)`.
 #[test]
 fn a_template_condition_predicate_is_grounded() {
     let files = emitted();
     let src = view(&files, "widgets/flag_json.rb");
-    assert!(src.contains("widget.name.strip.empty?"), "{src}");
+    assert!(
+        src.contains("!((widget.name || \"\").strip.empty?)"),
+        "{src}"
+    );
     assert!(!src.contains("name.present?"), "{src}");
 }
 

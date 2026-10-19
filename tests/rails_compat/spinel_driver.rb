@@ -1,16 +1,19 @@
 # Rails' signed-value vectors under the SPINEL-compiled runtime: the
 # verifier, signed ids and cookie codec the binary actually runs, over
 # sp_crypto's HMAC and PBKDF2 (runtime/spinel/message_digest.rb) rather
-# than CRuby's OpenSSL.
+# than CRuby's OpenSSL, and the encrypted cookie jar over spinel's
+# openssl package.
 #
 # The harness (tests/rails_compat_vectors_spinel.rs) copies beside this
 # file the runtime sources it requires, and the case file the CRuby
 # driver writes with `--cases`: tab-separated hex fields, op first,
 # expected last, "-" for nil and "=" for the empty string. Only clock-stable cases are in it — this
 # binary's verifier reads the real clock.
+require "json"
 require_relative "base64"
 require_relative "message_digest"
 require_relative "message_verifier"
+require_relative "message_encryptor"
 require_relative "signed_id"
 require_relative "url"
 
@@ -107,6 +110,17 @@ while i < lines.length
   elsif op == "as_data"
     json = MV.verified_data_json(secret, "ActiveStorage", a, b, true)
     got = json == "" ? "-" : json
+  elsif op == "ec_verify"
+    # The jar answers nil for a message that is not JSON (a Marshal one).
+    json = ActionController::MessageEncryptor.decrypted_json(secret, b, "cookie." + a)
+    got = json == "" ? "-" : json
+    begin
+      JSON.parse(json) if got != "-"
+    rescue StandardError
+      got = "-"
+    end
+  elsif op == "ec_cipher"
+    got = MessageDigest.aes_256_gcm_encrypt(ActionController::MessageEncryptor.derive_key(secret), a, b)
   elsif op == "nul_key"
     # A secret whose derived key holds a zero byte: the digest must be
     # over all 64 bytes of it (a C-string decode used to cut it short).

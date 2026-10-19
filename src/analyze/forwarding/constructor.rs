@@ -294,6 +294,14 @@ fn is_method_lookup_hook(name: &str) -> bool {
     )
 }
 
+/// Names that can replace `Class#new` without themselves being `new` or
+/// `initialize`: the lookup hooks, and the callbacks that receive another
+/// class and can install those hooks. `define_method(:summary)` stays safe.
+fn defines_constructor_lookup_callback(name: &str) -> bool {
+    is_method_lookup_hook(name)
+        || matches!(name, "included" | "inherited" | "extended" | "prepended")
+}
+
 fn scan_method_defaults(
     method: &MethodDef,
     scan_mutations: &mut impl FnMut(&Expr, Option<&ClassId>, bool, Option<&Symbol>),
@@ -629,15 +637,21 @@ fn mutates_constructor_lookup_method(
                     .iter()
                     .any(|module| super::constant_names_class(arg, module))
         }),
-        "define_method"
-        | "define_singleton_method"
-        | "class_eval"
+        "define_method" | "define_singleton_method" => args.first().is_none_or(|arg| {
+            literal_method_name(arg).is_none_or(|name| {
+                matches!(name, "new" | "initialize") || defines_constructor_lookup_callback(name)
+            })
+        }),
+        "remove_method" | "undef_method" => args.iter().any(|arg| {
+            literal_method_name(arg).is_none_or(|name| {
+                matches!(name, "new" | "initialize") || defines_constructor_lookup_callback(name)
+            })
+        }),
+        "class_eval"
         | "module_eval"
         | "instance_eval"
         | "class_exec"
-        | "instance_exec"
-        | "remove_method"
-        | "undef_method" => true,
+        | "instance_exec" => true,
         "alias_method" => args.iter().any(|arg| {
             literal_method_name(arg).is_some_and(|name| matches!(name, "new" | "initialize"))
         }),

@@ -96,6 +96,46 @@ module Net
   end
 
   class HTTP
+    # CRuby's positional form, `Net::HTTP.start(address, port, p_addr,
+    # opt)`: the proxy fields come before a trailing options Hash.
+    # `Opengraph::Fetch` writes `start(host, port, nil, ipaddr:, use_ssl:,
+    # **timeouts)`, and with a `**` the keywords arrive as that one Hash,
+    # which CRuby's `start(address, *arg)` reads off the end. The package's
+    # keyword form stays as it was for a call that names them directly.
+    #
+    # `p_addr` nil is "no proxy", the only kind served; a proxy raises
+    # rather than connecting direct. Of the options, `write_timeout` is
+    # accepted and not enforced (the package bounds connects and reads,
+    # not writes), and `max_retries` is moot: the package never retries.
+    def self.start(address, port = nil, p_addr = nil, opt = nil,
+                   use_ssl: false, ipaddr: nil, open_timeout: 60, read_timeout: 60)
+      raise NotImplementedError, "Net::HTTP.start through a proxy is not supported here" unless p_addr.nil?
+      unless opt.nil?
+        use_ssl = opt[:use_ssl] == true
+        ipaddr = opt[:ipaddr] unless opt[:ipaddr].nil?
+        open_timeout = HTTP.timeout_seconds(opt[:open_timeout], open_timeout)
+        read_timeout = HTTP.timeout_seconds(opt[:read_timeout], read_timeout)
+      end
+      http = HTTP.new(address, port.nil? ? (use_ssl ? 443 : 80) : port)
+      http.use_ssl = use_ssl
+      http.ipaddr = ipaddr.to_s
+      http.open_timeout = open_timeout
+      http.read_timeout = read_timeout
+      http.start { |h| yield h }
+    end
+
+    # A timeout option as the package's whole seconds: an Integer, a
+    # Float rounded UP (a limit is never shortened), or an
+    # ActiveSupport::Duration (what campfire passes, whole seconds on this
+    # runtime); absent, the default.
+    def self.timeout_seconds(value, default)
+      return default if value.nil?
+      return value.to_i if value.is_a?(ActiveSupport::Duration)
+      return value if value.is_a?(Integer)
+      return value.ceil if value.is_a?(Float)
+      default
+    end
+
     # Lazy: started, but with no socket until a request needs one. The
     # package's `finish` closes whatever is open and clears the flags,
     # so a `start`/`finish` pair around nothing but stubbed requests
@@ -112,14 +152,22 @@ module Net
     # yields too, and every caller of it holds a typed `HTTP.new`.
     # Like CRuby's, it raises on a session that is already open, before
     # touching it, so a nested `start` can't finish the outer session.
+    #
+    # `if block_given? … else` rather than an early `return self unless
+    # block_given?`: with the early return, spinel loses a `return` from
+    # the caller's block through this ensure (matz/spinel#9511), and
+    # `Opengraph::Fetch#fetch_document` ran its redirect loop out.
     def start
       raise IOError, "HTTP session already opened" if @started
       @started = true
-      return self unless block_given?
-      begin
-        yield self
-      ensure
-        finish if started?
+      if block_given?
+        begin
+          yield self
+        ensure
+          finish if started?
+        end
+      else
+        self
       end
     end
 

@@ -65,6 +65,46 @@ fn a_controller_t_reads_the_action_s_keys() {
     controller_translate_app().run_test("test/controllers/translated_flash_controller_test.rb").assert_passes();
 }
 
+/// A parameter default is the method's code too: a keyword default's
+/// `t` was left bare, and the emitted controller has no `t` for it.
+#[test]
+fn a_parameter_default_s_t_is_the_controller_s() {
+    controller_translate_app()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @missing = t(\".nowhere\")\n",
+            "    @missing = t(\".nowhere\")\n    @defaults = defaulted_labels\n",
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "  private\n",
+            "  private\n    def defaulted_labels(plain = t(\"plain\"), label: t(\".label\"))\n      \"#{plain}/#{label}\"\n    end\n\n",
+        )
+        .edit("app/views/articles/index.html.erb", "<h1", "<p id=\"defaults\"><%= @defaults %></p>\n<h1")
+        .edit(
+            "test/controllers/translated_flash_controller_test.rb",
+            "    get articles_url\n",
+            "    get articles_url\n    assert_includes response.body, \"<p id=\\\"defaults\\\">Plain text/Index label</p>\"\n",
+        )
+        .run_test("test/controllers/translated_flash_controller_test.rb")
+        .assert_passes();
+}
+
+/// An `_html` key in a parameter default is checked as the body's is.
+#[test]
+fn a_parameter_default_s_html_key_is_an_error() {
+    let (_emitted, errors) = emit_and_run::real_blog()
+        .write("config/locales/en.yml", "en:\n  articles:\n    index:\n      note_html: \"<b>Note</b>\"\n")
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n    @note = noted\n",
+        )
+        .edit("app/controllers/articles_controller.rb", "  private\n", "  private\n    def noted(note: t(\".note_html\"))\n      note\n    end\n\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("`_html` key in a controller")), "{errors:?}");
+}
+
 /// An `_html` key stays an error in a controller: Rails returns it
 /// html-safe, and that mark does not reach the view here. A controller
 /// that defines its own `t` keeps it.

@@ -24,6 +24,7 @@ pub(super) struct Visibility {
     changed: HashSet<(bool, String)>,
     accessors: HashSet<(bool, String)>,
     defaults: HashMap<usize, MethodVisibility>,
+    inherited: Vec<(bool, String, usize)>,
     /// Walking a concern's `ClassMethods` carrier, whose body is the
     /// includers' class side rather than a singleton of its own.
     carrier: bool,
@@ -218,6 +219,18 @@ impl Visibility {
         file: &str,
         module_owner: Option<&ClassId>,
     ) -> IngestResult<Self> {
+        let out = Self::resolve_carrying_inherited(body, file, module_owner)?;
+        match out.inherited.first() {
+            Some((_, name, _)) => Err(Self::undefined(file, name)),
+            None => Ok(out),
+        }
+    }
+
+    pub(super) fn resolve_carrying_inherited(
+        body: Option<&Node<'_>>,
+        file: &str,
+        module_owner: Option<&ClassId>,
+    ) -> IngestResult<Self> {
         let mut out = Self::default();
         if let Some(body) = body {
             let Some(statements) = body.as_statements_node() else {
@@ -228,7 +241,33 @@ impl Visibility {
             };
             out.walk(Some(statements.as_node()), false, file, module_owner)?;
         }
+        // Ruby raises NameError at the marker for a later `def` or one only on the other side, so those are no inherited method.
+        if let Some((_, name, _)) = out.inherited.iter().find(|(class_side, name, _)| {
+            out.known.contains_key(&(*class_side, name.clone())) || out.known.contains_key(&(!*class_side, name.clone()))
+        }) {
+            return Err(Self::undefined(file, name));
+        }
         Ok(out)
+    }
+
+    // Not dropped with the nested scope that wrote it: `class << self; private :recent; end` has no body statement to carry it.
+    pub(super) fn uncarried_inherited(&self, carried: &std::collections::HashSet<usize>, file: &str) -> IngestResult<()> {
+        match self.inherited.iter().find(|(_, _, at)| !carried.contains(at)) {
+            Some((_, name, _)) => Err(Self::undefined(file, name)),
+            None => Ok(()),
+        }
+    }
+
+    pub(super) fn names_inherited(&self, statement: &Node<'_>) -> bool {
+        let offset = statement.location().start_offset();
+        self.inherited.iter().any(|(_, _, at)| *at == offset)
+    }
+
+    fn undefined(file: &str, name: &str) -> IngestError {
+        Self::unsupported(
+            file,
+            format!("visibility change for `{name}` requires an already defined local method (not forward or inherited)"),
+        )
     }
 
     /// `private_class_method` / `public_class_method` named this method
@@ -315,15 +354,12 @@ impl Visibility {
         class_side: bool,
         visibility: MethodVisibility,
         file: &str,
+        statement: usize,
     ) -> IngestResult<()> {
         let key = (class_side, name.clone());
         let Some(positions) = self.known.get(&key) else {
-            return Err(Self::unsupported(
-                file,
-                format!(
-                    "visibility change for `{name}` requires an already defined local method (not forward or inherited)"
-                ),
-            ));
+            self.inherited.push((class_side, name, statement));
+            return Ok(());
         };
         let [position] = positions.as_slice() else {
             return Err(Self::unsupported(
@@ -341,6 +377,9 @@ impl Visibility {
         // class. Their methods only share a bucket after flattening.
         let mut carrier = Self { carrier: true, ..Self::default() };
         carrier.walk(body, true, file, None)?;
+        if let Some((_, name, _)) = carrier.inherited.first() {
+            return Err(Self::undefined(file, name));
+        }
         self.values.extend(carrier.values);
         Ok(())
     }
@@ -380,6 +419,9 @@ impl Visibility {
         included
             .walk(body, false, file, None)
             .map_err(|_| Self::unsupported(file, "conditional or dynamic visibility declarations are not modeled"))?;
+        if !included.inherited.is_empty() {
+            return Err(Self::unsupported(file, "conditional or dynamic visibility declarations are not modeled"));
+        }
         self.values.extend(included.values);
         Ok(())
     }
@@ -430,6 +472,9 @@ impl Visibility {
     }
 
     fn reject_dynamic_declarations(node: &Node<'_>, file: &str) -> IngestResult<()> {
+        if console_only(node) {
+            return Ok(());
+        }
         struct Declarations {
             invalid: bool,
             reject_defs: bool,
@@ -568,7 +613,7 @@ impl Visibility {
                         let class_copy = named_class
                             && !self.known.contains_key(&(false, name.clone()))
                             && self.known.contains_key(&(true, name.clone()));
-                        self.change(name, class_side || named_class || class_copy, visibility, file)?;
+                        self.change(name, class_side || named_class || class_copy, visibility, file, offset)?;
                     }
                     continue;
                 } else {
@@ -792,4 +837,21 @@ impl Visibility {
         }
         Ok(())
     }
+}
+
+/// `if defined?(Rails::Console) … end` with no `else`: what it declares
+/// exists only under `rails console`, never in the app a target emits
+/// (a server or its tests), so the branch declares nothing there.
+pub(super) fn console_only(node: &Node<'_>) -> bool {
+    let Some(branch) = node.as_if_node() else { return false };
+    if branch.subsequent().is_some() {
+        return false;
+    }
+    let Some(defined) = branch.predicate().as_defined_node() else { return false };
+    let Some(path) = defined.value().as_constant_path_node() else { return false };
+    let parent_is_rails = path.parent().is_some_and(|p| {
+        p.as_constant_read_node().is_some_and(|c| c.name().as_slice() == b"Rails")
+            || p.as_constant_path_node().is_some_and(|cp| cp.parent().is_none() && cp.name().is_some_and(|n| n.as_slice() == b"Rails"))
+    });
+    parent_is_rails && path.name().is_some_and(|n| n.as_slice() == b"Console")
 }

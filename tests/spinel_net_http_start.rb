@@ -106,4 +106,36 @@ check "the session stays started after the failed block restart", nested_blk.sta
 nested_blk.finish
 check "finish still closes the session after a failed block restart", !nested_blk.started?
 
+# CRuby's positional form, `start(address, port, p_addr, opt)`: what a
+# `**options` splat beside keywords arrives as (campfire's
+# Opengraph::Fetch). The options Hash is read for TLS, the pinned address
+# and the timeouts; a fractional timeout is rounded up, never shortened.
+options = { ipaddr: nil, use_ssl: false }.merge({ open_timeout: 2, read_timeout: 1.5, write_timeout: 1, max_retries: 0 })
+timeouts = nil
+res = Net::HTTP.start("widgets.example", 80, nil, options) do |http|
+  timeouts = [ http.open_timeout, http.read_timeout ]
+  http.request(Net::HTTP::Get.new("/gadget"))
+end
+check "the positional form with an options Hash serves the request", res.body == "gadget body"
+check "the options Hash sets the timeouts", timeouts == [ 2, 2 ]
+
+proxied = ""
+begin
+  Net::HTTP.start("widgets.example", 80, "proxy.example", {}) { |http| http }
+rescue NotImplementedError => e
+  proxied = e.message
+end
+check "a proxy address is refused, not connected around", proxied.include?("proxy")
+
+# A `return` from the caller's block leaves the caller through the
+# session's ensure (Opengraph::Fetch#fetch_document returns this way out
+# of its redirect loop; see matz/spinel#9511).
+def first_body_through_start
+  3.times do
+    Net::HTTP.start("widgets.example", 80) { |http| return http.request(Net::HTTP::Get.new("/gadget")).body }
+  end
+  "the return was lost"
+end
+check "a block's return leaves the caller through Net::HTTP.start", first_body_through_start == "gadget body"
+
 puts "done"

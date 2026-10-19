@@ -109,6 +109,10 @@ module ActiveSupport
     def self.utc_zone?
       zone = ActiveSupport.current_zone
       name = zone.nil? ? Rails.application.config_time_zone : zone.name
+      utc_zone_name?(name)
+    end
+
+    def self.utc_zone_name?(name)
       UTC_ZONE_NAMES.include?(name)
     end
 
@@ -1065,7 +1069,7 @@ module ActiveSupport
     iana = ZONE_NAMES[name.to_s] || name.to_s
     DEFAULT_ZONE.clear
     if iana == "UTC" || iana == "Etc/UTC" || iana == "Etc/UCT" || iana == "GMT" || iana == "Etc/GMT"
-      DEFAULT_ZONE << TimeZoneData.new("UTC", [], [], 0, [], [])
+      DEFAULT_ZONE << TimeZoneData.new(name.to_s, [], [], 0, [], [])
     else
       DEFAULT_ZONE << find_zone!(name)
     end
@@ -1089,7 +1093,12 @@ module ActiveSupport
 
   def self.present(t)
     zone = current_zone
-    zone.nil? ? t.getlocal : t.getlocal(zone.offset_at(t.to_i))
+    zone.nil? ? t.getlocal : present_in_zone(t, zone)
+  end
+
+  def self.present_in_zone(t, zone)
+    return t.getutc if ActiveSupport::JSON.utc_zone_name?(zone.name)
+    t.getlocal(zone.offset_at(t.to_i))
   end
 
   def self.present_db(t)
@@ -1099,7 +1108,7 @@ module ActiveSupport
 
   def self.in_time_zone(t, zone)
     return present(t) if zone.nil?
-    t.getlocal(find_zone!(zone).offset_at(t.to_i))
+    present_in_zone(t, find_zone!(zone))
   end
 
   def self.zone_name(zone)
@@ -1117,7 +1126,7 @@ module ActiveSupport
     return Time.at(Time.local(y, mo, d, h, mi, s).to_i, nsec, :nsec) if zone.nil?
     guess = Time.utc(y, mo, d, h, mi, s).to_i
     epoch = guess - zone.offset_at(guess - zone.offset_at(guess))
-    Time.at(epoch, nsec, :nsec).getlocal(zone.offset_at(epoch))
+    present_in_zone(Time.at(epoch, nsec, :nsec), zone)
   end
 
   # Not `number.to_s` with commas everywhere: only an all-digit integer part takes them, so `1.0e+20` and `Infinity` pass through.
@@ -1236,7 +1245,7 @@ module ActiveSupport
 
     def now
       t = Time.now
-      t.getlocal(@data.offset_at(t.to_i))
+      ActiveSupport.present_in_zone(t, @data)
     end
   end
 end

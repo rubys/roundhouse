@@ -116,10 +116,11 @@ fn send(recv: Expr, method: &str, args: Vec<Expr>, span: Span) -> Expr {
 
 /// `Model.where(key: value)`, typed as the model's relation.
 fn where_eq(model: &ClassId, key: &Symbol, value: &Expr, span: Span) -> Expr {
-    let class = Expr::new(
+    let mut class = Expr::new(
         span,
         ExprNode::Const { path: model.0.as_str().split("::").map(Symbol::from).collect() },
     );
+    class.decisions |= crate::expr::GENERATED_CONST_REF;
     let cond = Expr::new(
         span,
         ExprNode::Hash { entries: vec![(sym(key.as_str(), span), value.clone())], kwargs: true },

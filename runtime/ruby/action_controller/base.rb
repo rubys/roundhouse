@@ -955,6 +955,10 @@ module ActionController
       self
     end
 
+    def redirect?
+      @status == 301 || @status == 302 || @status == 303 || @status == 307 || @status == 308
+    end
+
     # Rails' `self.response_body =` (campfire's MessagesController and
     # CachedResponses serve a prebuilt page this way). A body is a
     # response, so the before_action halting check sees it; nil clears
@@ -1045,6 +1049,13 @@ module ActionController
 
     def headers
       @headers
+    end
+
+    # `importmap.to_json(resolver: helpers)`. The map's paths are
+    # already resolved at ingest, so the resolver is accepted and
+    # unused. `self` is enough for the call to evaluate.
+    def helpers
+      self
     end
 
     # `send_data data, type:, disposition:` — a binary response body

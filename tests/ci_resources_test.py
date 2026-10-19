@@ -18,6 +18,13 @@ resources = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(resources)
 
 
+def fixture_environment(root):
+    return os.environ | {
+        "GITHUB_STEP_SUMMARY": str(root / "summary"),
+        "CARGO_TARGET_DIR": str(root / "target"),
+    }
+
+
 class ResourcesTests(unittest.TestCase):
     def test_cpu_deltas_separate_busy_idle_and_iowait(self):
         before = [100, 10, 20, 400, 50, 2, 3, 4]
@@ -43,7 +50,9 @@ class ResourcesTests(unittest.TestCase):
 
     def test_intermediate_pressure_is_retained_when_the_command_recovers(self):
         with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory) / "phase"
+            root = Path(directory)
+            (root / "target/debug/deps").mkdir(parents=True)
+            out = root / "phase"
             samples = [
                 {"elapsed_s": t, "machine_mem_available_bytes": ram,
                  "disk_available_bytes": disk, "disk_used_bytes": 100 - disk}
@@ -53,7 +62,7 @@ class ResourcesTests(unittest.TestCase):
                  patch.object(resources, "sample", side_effect=[(r, [0] * 8) for r in samples]), \
                  patch.object(subprocess, "Popen") as popen, \
                  patch.object(subprocess, "check_output", return_value="4096\ttarget\n"), \
-                 patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}), \
+                 patch.dict(os.environ, fixture_environment(root)), \
                  patch.object(sys, "stdout", io.StringIO()):
                 popen.return_value.wait.side_effect = [subprocess.TimeoutExpired("probe", 5), 0, 0]
                 self.assertEqual(resources.main(), 0)
@@ -72,7 +81,12 @@ class ResourcesTests(unittest.TestCase):
     def test_command_output_exit_and_failure_reports_are_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            env = os.environ | {"GITHUB_STEP_SUMMARY": str(root / "summary")}
+            inherited_target = root / "inherited-workspace-target"
+            (inherited_target / "debug/deps").mkdir(parents=True)
+            (inherited_target / "debug/deps/archive-payload").write_bytes(b"archive payload")
+            # Changing cwd does not override an absolute inherited Cargo target.
+            with patch.dict(os.environ, {"CARGO_TARGET_DIR": str(inherited_target)}):
+                env = fixture_environment(root)
             for code, expected in [("print('child-output')", 0), ("raise SystemExit(37)", 37),
                                    ("import os, signal; os.kill(os.getpid(), signal.SIGTERM)", 143)]:
                 out = root / f"phase-{expected}"
@@ -102,7 +116,7 @@ class ResourcesTests(unittest.TestCase):
                     root = Path(directory)
                     (root / "target/debug/deps").mkdir(parents=True)
                     out = root / "phase"
-                    env = os.environ | {"GITHUB_STEP_SUMMARY": str(root / "summary")}
+                    env = fixture_environment(root)
                     if failure == "setup":
                         (root / "blocked").write_text("not a directory")
                         out = root / "blocked/phase"

@@ -670,67 +670,20 @@ fn kt_default(ty: &str) -> &'static str {
     }
 }
 
-/// Find locals needing top-of-method hoisting: first assigned at a nested
-/// scope depth (>0) yet assigned more than once. Returns `(name, kotlin_ty)`
-/// pairs, the type taken from the first assignment's value.
+/// Locals needing top-of-method hoisting (`emit::shared::hoist`), as
+/// `(name, kotlin_ty)` pairs, the type taken from the first assignment's
+/// value.
 fn scan_hoist(body: &Expr) -> Vec<(String, String)> {
-    // name → (first-assignment depth, total assignment count, type)
-    let mut info: std::collections::BTreeMap<String, (usize, usize, String)> =
-        std::collections::BTreeMap::new();
-    walk_hoist(body, 0, &mut info);
-    info.into_iter()
-        .filter(|(_, (depth, count, _))| *depth > 0 && *count > 1)
-        .map(|(n, (_, _, ty))| (n, ty))
+    crate::emit::shared::hoist::hoisted_locals(body)
+        .into_iter()
+        .map(|h| {
+            let ty = match h.tys.first() {
+                Some(Some(t)) => kotlin_ty(t),
+                _ => "Any?".to_string(),
+            };
+            (camel(&h.name), ty)
+        })
         .collect()
-}
-
-fn walk_hoist(
-    e: &Expr,
-    depth: usize,
-    info: &mut std::collections::BTreeMap<String, (usize, usize, String)>,
-) {
-    if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
-        let n = camel(name.as_str());
-        let ty = match value.ty.as_ref() {
-            Some(t) if !matches!(t, crate::ty::Ty::Nil) => kotlin_ty(t),
-            _ => "Any?".to_string(),
-        };
-        let entry = info.entry(n).or_insert((depth, 0, ty));
-        entry.1 += 1;
-    }
-    // Recurse, deepening only into genuinely nested scopes (branch/loop/block
-    // bodies); a `Seq` and an `if` condition stay at the current depth.
-    match &*e.node {
-        ExprNode::Seq { exprs } => {
-            for c in exprs {
-                walk_hoist(c, depth, info);
-            }
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            walk_hoist(cond, depth, info);
-            walk_hoist(then_branch, depth + 1, info);
-            walk_hoist(else_branch, depth + 1, info);
-        }
-        ExprNode::While { cond, body, .. } => {
-            walk_hoist(cond, depth, info);
-            walk_hoist(body, depth + 1, info);
-        }
-        ExprNode::Case { scrutinee, arms } => {
-            walk_hoist(scrutinee, depth, info);
-            for a in arms {
-                walk_hoist(&a.body, depth + 1, info);
-            }
-        }
-        ExprNode::Lambda { body, .. } => walk_hoist(body, depth + 1, info),
-        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
-            walk_hoist(value, depth, info)
-        }
-        _ => {
-            for c in children(e) {
-                walk_hoist(c, depth, info);
-            }
-        }
-    }
 }
 
 /// Infer element types for empty-container locals from how they're later
@@ -1260,12 +1213,13 @@ fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {
         BoolOpKind::And => format!("{l} && {r}"),
         // `||` is logical-or for Bool results, but Ruby's `x || default`
         // nil-coalescing idiom maps to Kotlin's `?:` when the result
-        // isn't a Bool.
+        // isn't a Bool. `?:` binds looser than a call, so the coalesce is
+        // parenthesized to stay whole as a receiver (`(x ?: "").isEmpty()`).
         BoolOpKind::Or => {
             if matches!(e.ty.as_ref(), Some(crate::ty::Ty::Bool)) {
                 format!("{l} || {r}")
             } else {
-                format!("{l} ?: {r}")
+                format!("({l} ?: {r})")
             }
         }
     }
@@ -1555,7 +1509,12 @@ fn emit_slice_range(
 }
 
 fn emit_lambda(params: &[crate::ident::Symbol], body: &Expr, destructure: bool) -> String {
+    // A local the block declares is the block's own (Ruby scopes it the
+    // same way), so a sibling block assigning the same name declares its
+    // own too. See `emit::shared::hoist`.
+    let outer = DECLARED.with(|d| d.borrow().clone());
     let body_s = emit_expr(body);
+    DECLARED.with(|d| *d.borrow_mut() = outer);
     if params.is_empty() {
         format!("{{ {body_s} }}")
     } else {

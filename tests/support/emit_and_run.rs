@@ -72,7 +72,6 @@ pub fn tiny_blog_uuid() -> Overlay {
 /// shape the blog cannot be edited into, such as an app with no views.
 pub fn empty_app() -> Overlay {
     let base = scratch_dir();
-    std::fs::create_dir_all(&base).expect("mkdir");
     Overlay { base, scratch_base: true, edits: Vec::new() }
 }
 
@@ -259,6 +258,24 @@ impl Overlay {
         (scratch, source)
     }
 
+    /// The errors `roundhouse check` reports for the overlaid app: analysis
+    /// alone, with no lowering, so a call the lowering would answer still
+    /// reads as written.
+    pub fn check_errors(self) -> Vec<String> {
+        let (scratch, source) = self.materialize();
+        let (app, ingest_diags) = roundhouse::ingest::prism::scope(|| ingest_app(&source));
+        let mut app = app.expect("ingest the overlaid fixture");
+        roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+        let errors = ingest_diags
+            .into_iter()
+            .chain(diagnose(&app))
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| format!("{:?}: {}", d.span, d.message))
+            .collect();
+        let _ = std::fs::remove_dir_all(&scratch);
+        errors
+    }
+
     /// The warnings ingesting the overlaid app reports.
     pub fn ingest_warnings(self) -> Vec<String> {
         let (scratch, source) = self.materialize();
@@ -269,10 +286,13 @@ impl Overlay {
 
     fn emit_app_tree(self, target: BuildTarget) -> (PathBuf, roundhouse::App, Vec<Diagnostic>) {
         let (scratch, source) = self.materialize();
-        let mut app = ingest_app(&source).expect("ingest the overlaid fixture");
+        // As the CLI does: an error ingest reports gates the emit too.
+        let (app, ingest_diags) = roundhouse::ingest::prism::scope(|| ingest_app(&source));
+        let mut app = app.expect("ingest the overlaid fixture");
         let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
-        let mut errors: Vec<_> = diagnose(&app)
+        let mut errors: Vec<_> = ingest_diags
             .into_iter()
+            .chain(diagnose(&app))
             .chain(lower_diags)
             .filter(|d| d.severity == Severity::Error)
             .collect();
@@ -392,13 +412,22 @@ pub fn ruby() -> Command {
 /// A fresh directory per run: tests in one binary run in parallel.
 fn scratch_dir() -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "roundhouse-emit-and-run-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
+    loop {
+        // Resolved, so paths a child Ruby reports (`__dir__` is a realpath)
+        // match on macOS, where $TMPDIR sits under /var -> /private/var.
+        let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "roundhouse-emit-and-run-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        // Combined suites contain independent copies of this module. Reserve
+        // the path atomically instead of deleting another copy's live tree.
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create scratch directory {}: {error}", dir.display()),
+        }
+    }
 }
 
 fn copy_tree(src: &Path, dst: &Path) {

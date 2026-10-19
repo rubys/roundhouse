@@ -91,6 +91,7 @@ class Routing(unittest.TestCase):
             ci.BASE,
             [
                 "generate-fixture",
+                "unit-build",
                 "unit",
                 "build-roundhouse",
                 "store-check",
@@ -142,6 +143,25 @@ class Routing(unittest.TestCase):
         self.assertFalse(
             any("campfire" in job for job in plan["jobs"] if job not in ci.BASE)
         )
+
+    def test_sidekiq_live_runs_only_when_the_push_or_its_client_changes(self):
+        for path in [
+            "runtime/spinel/sidekiq_push.rb",
+            "runtime/spinel/sidekiq/sidekiq_redis.rb",
+            "runtime/ruby/active_job.rb",
+            "tests/sidekiq_push_live.rs",
+            "tests/sidekiq_push_live/reader.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("sidekiq-live", plan["jobs"])
+                self.assertIn("spinel-build", plan["jobs"])
+                self.assertIn("sidekiq-live", plan["advisory"])
+                self.assertNotIn("sidekiq-live", plan["required"])
+        for path in ["runtime/spinel/sidekiq_redis.rb", "runtime/spinel/db.rb", "src/ingest/app.rs"]:
+            with self.subTest(path=path):
+                self.assertNotIn("sidekiq-live", ci.select([path])["jobs"])
+        self.assertIn("sidekiq-live", ci.select([], full=True)["jobs"])
 
     def test_shared_runtime_rb_and_rbs_select_framework_native_coverage(self):
         for path in ["runtime/ruby/active_record.rb", "runtime/ruby/test/model.rbs"]:
@@ -225,6 +245,7 @@ class Routing(unittest.TestCase):
         needs = {
             "plan": {"result": "success"},
             "generate-fixture": {"result": "success"},
+            "unit-build": {"result": "success"},
             "unit": {"result": "success"},
             "build-roundhouse": {"result": "success"},
             "store-check": {"result": "success"},
@@ -373,6 +394,60 @@ class Routing(unittest.TestCase):
             self.assertTrue(plan["wasm"])
             self.assertIn("compare-extra", plan["jobs"])
             self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+
+    def test_a_ci_full_marker_line_on_a_main_push_plans_full(self):
+        main = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}
+        changed = {"return_value": (["src/emit/go.rs"], None)}
+        # The marker on an earlier commit of a multi-commit push counts.
+        event = {
+            "before": "0" * 40,
+            "commits": [
+                {"id": "a" * 40, "message": "Fix a lowering\n\n[ci full]\n\nCo-Authored-By: x"},
+                {"id": "b" * 40, "message": "Follow-up"},
+            ],
+        }
+        plan = self.run_planner(event, main, changed)["plan"]
+        self.assertIn("compare-extra", plan["jobs"])
+        self.assertEqual(plan["smoke_extra"], list(ci.EXTRA_COMPARE_TARGETS))
+        self.assertTrue(plan["extras_advisory"])
+        self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+        self.assertIn(f"[ci full] in commit {'a' * 12}", plan["reasons"])
+
+    def test_a_ci_full_marker_must_be_a_line_of_its_own(self):
+        main = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}
+        changed = {"return_value": (["src/emit/go.rs"], None)}
+        for message in (
+            "Add the [ci full] marker",
+            "Document it\n\nA line reading `[ci full]` asks for full validation.",
+            "[ci full] in the subject",
+        ):
+            event = {"before": "0" * 40, "head_commit": {"id": "c" * 40, "message": message}}
+            plan = self.run_planner(event, main, changed)["plan"]
+            self.assertEqual(plan["jobs"], ci.SPINEL_LANE, message)
+            self.assertNotIn("compare-extra", plan["jobs"], message)
+
+    def test_a_ci_full_marker_is_ignored_off_a_main_push(self):
+        message = {"id": "d" * 40, "message": "Fix\n\n[ci full]\n"}
+        pr = {
+            "pull_request": {"number": 1, "labels": [], "draft": False},
+            "commits": [message],
+            "head_commit": message,
+        }
+        outputs = self.run_planner(
+            pr,
+            {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/1/merge"},
+            {"return_value": (["src/emit/go.rs"], None)},
+        )
+        self.assertNotIn("campfire-latest", outputs["plan"]["jobs"])
+        self.assertFalse(outputs["plan"]["wasm"])
+        self.assertEqual(outputs["plan"]["smoke_extra"], ["go"])
+        branch = self.run_planner(
+            {"before": "0" * 40, "commits": [message]},
+            {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/topic"},
+            {"return_value": (["src/emit/go.rs"], None)},
+        )
+        self.assertFalse(branch["plan"]["wasm"])
+        self.assertEqual(branch["plan"]["smoke_extra"], ["go"])
 
     def test_unknown_changed_inputs_keep_ruby_and_spinel(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -746,19 +821,29 @@ class Routing(unittest.TestCase):
                 "spinel_web_push_crypto",
                 "rails_compat_vectors_spinel",
                 "active_job_payload",
+                "sidekiq_push",
             ],
-            # The payload gate's driver loads these beside it.
-            "runtime/ruby/active_job.rb": ["framework_tests_spinel", "active_job_payload"],
+            # The payload and Sidekiq push gates' drivers load these beside them.
+            "runtime/ruby/active_job.rb": [
+                "framework_tests_spinel",
+                "active_job_payload",
+                "sidekiq_push",
+            ],
             "runtime/spinel/active_job_serialization.rb": [
                 "framework_tests_spinel",
                 "active_job_payload",
+                "sidekiq_push",
             ],
             "runtime/spinel/global_id_locator.rb": [
                 "framework_tests_spinel",
                 "active_job_payload",
+                "sidekiq_push",
             ],
+            "runtime/spinel/sidekiq_push.rb": ["framework_tests_spinel", "sidekiq_push"],
             "tests/active_job_payload/driver.rb": ["active_job_payload"],
             "tests/active_job_payload/rails.json": ["active_job_payload"],
+            "tests/sidekiq_push/driver.rb": ["sidekiq_push"],
+            "tests/sidekiq_push/sidekiq.json": ["sidekiq_push"],
             "tests/spinel_db_lease.rb": ["spinel_db_lease"],
             "tests/spinel_stmt_cache_lru.rb": ["spinel_stmt_cache_lru"],
             "tests/support/db_concurrency_spinel.rb": ["db_sqlite_concurrency"],
@@ -1039,6 +1124,7 @@ class Results(unittest.TestCase):
                         "shard-0": "success",
                         "shard-1": "success",
                         "shard-2": "success",
+                        "shard-3": "success",
                     },
                 }
                 for j in plan["jobs"]
@@ -1081,7 +1167,7 @@ class Results(unittest.TestCase):
 
     def test_speculative_success_cannot_hide_unit_or_compiler_failure(self):
         plan = ci.select([])
-        for job in ["unit", "build-roundhouse"]:
+        for job in ["unit-build", "unit", "build-roundhouse"]:
             for result in ["failure", "cancelled", "skipped", None]:
                 with self.subTest(job=job, result=result):
                     needs = self.needs(plan)
@@ -1146,11 +1232,11 @@ class Results(unittest.TestCase):
                     self.assertEqual(ci.check_results(plan, needs), ([], False))
 
     def test_each_spinel_toolchain_shard_must_actually_pass_for_completion(self):
-        # The suite is a three-shard matrix; each shard writes its own output
+        # The suite is a four-shard matrix; each shard writes its own output
         # key, so one shard's success cannot stand in for the other's.
         plan = ci.select([], spinel_lane=True)
         self.assertIn("spinel-toolchain", plan["jobs"])
-        for shard in ["shard-0", "shard-1", "shard-2"]:
+        for shard in ["shard-0", "shard-1", "shard-2", "shard-3"]:
             for status in ["failure", "cancelled", "", None]:
                 with self.subTest(shard=shard, status=status):
                     needs = self.needs(plan)
@@ -1163,8 +1249,8 @@ class Results(unittest.TestCase):
 
     def test_each_spinel_framework_shard_must_actually_pass_for_completion(self):
         plan = ci.select([], spinel_lane=True)
-        self.assertEqual(len(plan["spinel_framework_shards"]), 3)
-        for shard in ["shard-0", "shard-1", "shard-2"]:
+        self.assertEqual(len(plan["spinel_framework_shards"]), 4)
+        for shard in ["shard-0", "shard-1", "shard-2", "shard-3"]:
             for status in ["failure", "cancelled", "", None]:
                 with self.subTest(shard=shard, status=status):
                     needs = self.needs(plan)
@@ -1175,9 +1261,115 @@ class Results(unittest.TestCase):
                         outputs[shard] = status
                     self.assertEqual(ci.check_results(plan, needs), ([], False))
 
+    def test_spinel_toolchain_shards_cover_each_test_once_and_split_the_heavy_ones(self):
+        tests = [f"t{i:02}" for i in range(50)] + list(ci.SPINEL_TOOLCHAIN_SECONDS)
+        shards = [ci.spinel_toolchain_shard(tests, k) for k in range(ci.SPINEL_TOOLCHAIN_SHARDS)]
+        self.assertEqual(sorted(t for s in shards for t in s), sorted(tests))
+        self.assertTrue(all(s == sorted(s) for s in shards))
+        heavy = [sum(t in ci.SPINEL_TOOLCHAIN_SECONDS for t in s) for s in shards]
+        self.assertEqual(max(heavy), 1)
+        loads = [
+            sum(ci.SPINEL_TOOLCHAIN_SECONDS.get(t, ci.SPINEL_TOOLCHAIN_DEFAULT_SECONDS) for t in s)
+            for s in shards
+        ]
+        loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS * ci.SPINEL_TOOLCHAIN_THREADS
+        self.assertLess(max(loads) - min(loads), max(ci.SPINEL_TOOLCHAIN_SECONDS.values()))
+
+    def test_toolchain_shard_prints_nothing_for_an_empty_selection(self):
+        out = subprocess.run(
+            ["python3", spec.origin, "toolchain-shard", "--shard", "0"],
+            input="", capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertEqual(out, "")
+
+    def test_recorded_seconds_balance_shards_and_the_tables_cover_the_rest(self):
+        timings = ci.load_spinel_timings(json.dumps({
+            "toolchain": {"t00": 900, "t01": "slow", "t02": -1, "t03": True, "t04": float("inf"), "t05": 10**1000, ci.SPINEL_TOOLCHAIN_TAIL: 1},
+            "framework": {"spinel_pg_db": 2000},
+            "other": {"x": 1},
+        }))
+        self.assertEqual(timings, {"toolchain": {"t00": 900, ci.SPINEL_TOOLCHAIN_TAIL: 1}, "framework": {"spinel_pg_db": 2000}})
+        self.assertEqual(ci.spinel_toolchain_seconds("t00", timings), 900)
+        self.assertEqual(ci.spinel_toolchain_seconds("t01", timings), ci.SPINEL_TOOLCHAIN_DEFAULT_SECONDS)
+        self.assertEqual(
+            ci.spinel_toolchain_seconds("real_blog_spinel_tests_pass", timings),
+            ci.SPINEL_TOOLCHAIN_SECONDS["real_blog_spinel_tests_pass"],
+        )
+        tests = [f"t{i:02}" for i in range(12)]
+        shards = [ci.spinel_toolchain_shard(tests, k, timings=timings) for k in range(4)]
+        self.assertEqual(sorted(t for s in shards for t in s), tests)
+        self.assertIn(["t00"], shards)
+        alone = [s for s in ci.spinel_framework_shards(ci.SPINEL_TESTS, timings=timings) if "spinel_pg_db" in s["tests"]]
+        self.assertEqual(alone[0]["tests"], ["spinel_pg_db"])
+        for raw in ["", "not json", "[]", '{"toolchain": []}']:
+            with self.subTest(raw=raw):
+                self.assertEqual(ci.load_spinel_timings(raw), {})
+                self.assertEqual(
+                    ci.spinel_toolchain_shard(tests, 0, timings=ci.load_spinel_timings(raw)),
+                    ci.spinel_toolchain_shard(tests, 0),
+                )
+
+    def test_merge_averages_passing_records_into_the_last_seconds(self):
+        merged = ci.merge_timings(
+            {"toolchain": {"a": 100, "b": 50}},
+            [
+                {"kind": "toolchain", "name": "a", "seconds": 200, "ok": True},
+                {"kind": "toolchain", "name": "b", "seconds": 5, "ok": False},
+                {"kind": "toolchain", "name": "c", "seconds": 0, "ok": True},
+                {"kind": "framework", "name": "d", "seconds": 30, "ok": True},
+                {"kind": "elsewhere", "name": "e", "seconds": 30, "ok": True},
+                {"kind": "framework", "name": "f", "seconds": "30", "ok": True},
+                {"kind": "framework", "name": "g", "seconds": float("nan"), "ok": True},
+                {"kind": [], "name": "h", "seconds": 30, "ok": True},
+            ],
+        )
+        self.assertEqual(merged, {"toolchain": {"a": 150, "b": 50}, "framework": {"d": 30}})
+
+    def test_timing_commands_record_runs_and_keep_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, "CI_SPINEL_TIMINGS_OUT": f"{tmp}/runs/toolchain-0.jsonl"}
+            run = subprocess.run(
+                ["python3", spec.origin, "run-tests", "--kind", "toolchain", "--parallel", "2",
+                 "--", "sh", "-c", '[ "$2" != b ]', "sh", "--exact"],
+                input="a\nb\n", capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(run.returncode, 1)
+            self.assertIn("::error::b failed", run.stdout)
+            timed = subprocess.run(
+                ["python3", spec.origin, "timed", "--kind", "toolchain", "--name", "tail",
+                 "--", "sh", "-c", "sleep 1"],
+                env=env,
+            )
+            self.assertEqual(timed.returncode, 0)
+            records = [json.loads(line) for line in Path(env["CI_SPINEL_TIMINGS_OUT"]).read_text().splitlines()]
+            self.assertEqual(
+                sorted((r["name"], r["ok"]) for r in records),
+                [("a", True), ("b", False), ("tail", True)],
+            )
+            self.assertTrue(all(r["seconds"] >= 1 for r in records))
+            Path(f"{tmp}/previous.json").write_text('{"toolchain": {"tail": 3}}')
+            for previous in [f"{tmp}/previous.json", f"{tmp}/missing.json"]:
+                with self.subTest(previous=previous):
+                    subprocess.run(
+                        ["python3", spec.origin, "merge-timings", "--previous", previous,
+                         "--records", f"{tmp}/runs", "--out", f"{tmp}/out/merged.json"],
+                        check=True, capture_output=True,
+                    )
+                    merged = json.loads(Path(f"{tmp}/out/merged.json").read_text())
+                    self.assertEqual(merged["toolchain"]["tail"], 2 if previous.endswith("previous.json") else 1)
+
+    def test_toolchain_tests_run_outside_cargo_with_its_stack_size(self):
+        import tomllib
+        root = Path(__file__).parents[1]
+        stack = tomllib.loads((root / ".cargo/config.toml").read_text())["env"]["RUST_MIN_STACK"]
+        workflow = (root / ".github/workflows/ci.yml").read_text()
+        job = re.search(r"(?ms)^  spinel-toolchain:\n(.*?)(?=^  [\w-]+:|\Z)", workflow).group(1)
+        self.assertIn("run-tests --kind toolchain", job)
+        self.assertIn(f'RUST_MIN_STACK: "{stack}"', job)
+
     def test_spinel_framework_shards_cover_each_selected_suite_once(self):
         shards = ci.spinel_framework_shards(ci.SPINEL_TESTS)
-        self.assertEqual([s["shard"] for s in shards], [0, 1, 2])
+        self.assertEqual([s["shard"] for s in shards], [0, 1, 2, 3])
         self.assertEqual(
             sorted(t for s in shards for t in s["tests"]), sorted(ci.SPINEL_TESTS)
         )

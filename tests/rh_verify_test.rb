@@ -4,6 +4,7 @@ require 'fileutils'
 require 'open3'
 require 'json'
 require 'rbconfig'
+require 'etc'
 
 class RhVerifyTest < Minitest::Test
   SOURCE = File.expand_path('..', __dir__)
@@ -11,7 +12,8 @@ class RhVerifyTest < Minitest::Test
     GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX].to_h { |key| [key, nil] }.freeze
 
   def setup
-    @root = Dir.mktmpdir('rh-verify-')
+    # Resolved: the child reports Dir.pwd, a realpath (macOS /var -> /private/var).
+    @root = File.realpath(Dir.mktmpdir('rh-verify-'))
     %w[bin scripts tests src/emit docs/guide fixtures/real-blog fixtures/store mocks].each do |dir|
       FileUtils.mkdir_p(File.join(@root, dir))
     end
@@ -44,11 +46,18 @@ class RhVerifyTest < Minitest::Test
         exit 0
       end
       File.open(ENV.fetch('VERIFY_LOG'), 'a') do |f|
-        f.puts JSON.generate(args: ARGV, cwd: Dir.pwd, jobs: ENV['CARGO_BUILD_JOBS'], debug: ENV['CARGO_PROFILE_TEST_DEBUG'],
+        f.puts JSON.generate(args: ARGV, cwd: Dir.pwd, jobs: ENV['CARGO_BUILD_JOBS'],
+          incremental: ENV['CARGO_INCREMENTAL'], debug: ENV['CARGO_PROFILE_TEST_DEBUG'],
           dev_debug: ENV['CARGO_PROFILE_DEV_DEBUG'],
           dev_strip: ENV['CARGO_PROFILE_DEV_STRIP'], test_strip: ENV['CARGO_PROFILE_TEST_STRIP'],
           dev_opt: ENV['CARGO_PROFILE_DEV_OPT_LEVEL'], test_opt: ENV['CARGO_PROFILE_TEST_OPT_LEVEL'],
           git_dir: ENV['GIT_DIR'], git_work_tree: ENV['GIT_WORK_TREE'])
+      end
+      if (exact = ARGV.index('--exact'))
+        ARGV[(exact + 1)..].take_while { |arg| !arg.start_with?('--') }.each do |name|
+          next if ENV['VERIFY_OMIT_EXACT'] == name
+          puts "test \#{name} ... ok"
+        end
       end
       puts 'child stdout'
       warn 'child stderr'
@@ -89,7 +98,7 @@ class RhVerifyTest < Minitest::Test
 
   def invoke(*args, env: {})
     Open3.capture3(GIT_LOCATION_ENV.merge('PATH' => "#{@root}/mocks:#{ENV.fetch('PATH')}", 'VERIFY_LOG' => @log,
-      'CARGO_BUILD_JOBS' => nil, 'CARGO_PROFILE_DEV_DEBUG' => nil, 'CARGO_PROFILE_TEST_DEBUG' => nil,
+      'CARGO_BUILD_JOBS' => nil, 'CARGO_INCREMENTAL' => nil, 'CARGO_PROFILE_DEV_DEBUG' => nil, 'CARGO_PROFILE_TEST_DEBUG' => nil,
       'CARGO_PROFILE_DEV_STRIP' => nil, 'CARGO_PROFILE_TEST_STRIP' => nil,
       'CARGO_PROFILE_DEV_OPT_LEVEL' => nil, 'CARGO_PROFILE_TEST_OPT_LEVEL' => nil).merge(env),
       RbConfig.ruby, File.join(@root, 'bin/rh'), 'verify', *args, chdir: '/')
@@ -126,7 +135,8 @@ class RhVerifyTest < Minitest::Test
       assert_nil report['hosted_coverage']
       assert_includes report['hosted_coverage_error'], 'python3'
     end
-    assert_equal %w[not-run not-run], report['checks'].map { |c| c['status'] }
+    assert_equal %w[not-run], report['checks'].map { |c| c['status'] }
+    assert_equal [%w[cargo test --locked --test example -- --test-threads=1]], report['checks'].map { |c| c['command'] }
     assert_empty calls
     assert_nil report['disk_space']['before']
     assert_nil report['disk_space']['after']
@@ -146,7 +156,7 @@ class RhVerifyTest < Minitest::Test
       env = { 'GIT_DIR' => foreign_git, 'GIT_COMMON_DIR' => foreign_git, 'GIT_WORK_TREE' => foreign,
         'GIT_INDEX_FILE' => File.join(foreign_git, 'index'), 'GIT_OBJECT_DIRECTORY' => File.join(foreign_git, 'objects'),
         'GIT_ALTERNATE_OBJECT_DIRECTORIES' => File.join(foreign_git, 'objects'), 'GIT_PREFIX' => 'foreign/' }
-      out, err, status = invoke('--json', env: env)
+      out, err, status = invoke('--json', '--lib', env: env)
       assert status.success?, err
       report = JSON.parse(out)
       assert_equal @base, report['head']
@@ -166,11 +176,10 @@ class RhVerifyTest < Minitest::Test
     report = JSON.parse(out)
     assert_equal 'passed', report['status']
     assert_equal [
-      %w[test --locked --lib -- --test-threads=1],
       %w[test --locked --test example -- --test-threads=1],
       %w[test --locked --test ruby_toolchain -- --ignored --test-threads=1]
     ], calls.map { |c| c['args'] }
-    assert calls.all? { |c| c['cwd'] == @root && c['jobs'] == '2' && c['debug'].nil? && c['dev_debug'].nil? }
+    assert calls.all? { |c| c['cwd'] == @root && c['jobs'] == '2' && c['incremental'].nil? && c['debug'].nil? && c['dev_debug'].nil? }
     assert report['checks'].all? { |c| c['status'] == 'passed' && c['exit'] == 0 && c['seconds'] >= 0 }
     assert_includes err, 'child stdout'
     assert_includes report['scope'], 'not executed'
@@ -180,7 +189,6 @@ class RhVerifyTest < Minitest::Test
     out, err, status = invoke('--json', '--ignored', '--test', 'example', '--toolchain', 'ruby')
     assert status.success?, err
     assert_equal [
-      %w[test --locked --lib -- --test-threads=1],
       %w[test --locked --test example -- --ignored --test-threads=1],
       %w[test --locked --test ruby_toolchain -- --ignored --test-threads=1]
     ], calls.map { |c| c['args'] }
@@ -188,7 +196,7 @@ class RhVerifyTest < Minitest::Test
   end
 
   def test_failure_stops_execution_preserves_exit_and_leaves_remaining_check_unrun
-    out, _err, status = invoke('--json', '--test', 'example', env: { 'VERIFY_FAIL' => '--lib' })
+    out, _err, status = invoke('--json', '--test', 'example', '--lib', env: { 'VERIFY_FAIL' => 'example' })
     assert_equal 17, status.exitstatus
     report = JSON.parse(out)
     assert_equal 'failed', report['status']
@@ -197,8 +205,26 @@ class RhVerifyTest < Minitest::Test
     assert_equal 24_000_000 * 1024, report['disk_space']['after']['workspace']['available_bytes']
   end
 
+  def test_full_suite_failures_preserve_exit_status_and_release_the_lock
+    { 'nextest' => %w[failed not-run], '--doc' => %w[passed failed] }.each do |failure, statuses|
+      out, err, status = invoke('--all', '--json', env: { 'VERIFY_FAIL' => failure })
+      assert_equal 17, status.exitstatus, err
+      report = JSON.parse(out)
+      assert_equal 'failed', report['status']
+      assert_equal statuses, report['checks'].map { |check| check['status'] }
+      assert_includes report['scope'], 'complete default suite'
+      assert_includes report['scope'], 'ignored tests excluded'
+    end
+    out, err, status = invoke('--all', '--json')
+    assert status.success?, err
+    report = JSON.parse(out)
+    assert_equal 'passed', report['status']
+    assert_equal '1', report['build_environment']['CARGO_INCREMENTAL']
+    assert_equal @root, report['build_environment']['ROUNDHOUSE_TEST_BUNDLE_ROOT']
+  end
+
   def test_explicit_environment_is_respected
-    out, err, status = invoke('--json', env: { 'CARGO_BUILD_JOBS' => '3', 'CARGO_PROFILE_TEST_DEBUG' => '1' })
+    out, err, status = invoke('--json', '--lib', env: { 'CARGO_BUILD_JOBS' => '3', 'CARGO_PROFILE_TEST_DEBUG' => '1' })
     assert status.success?, err
     assert_equal '3', JSON.parse(out)['build_environment']['CARGO_BUILD_JOBS']
     assert calls.all? { |c| c['jobs'] == '3' && c['debug'] == '1' }
@@ -212,8 +238,12 @@ class RhVerifyTest < Minitest::Test
     }
     out, err, status = invoke('--plan', '--json')
     assert status.success?, err
-    settings.each_key { |key| refute JSON.parse(out)['build_environment'].key?(key) }
-    out, err, status = invoke('--json', env: settings)
+    report = JSON.parse(out)
+    assert_equal 'planned', report['status']
+    assert_empty report['checks']
+    settings.each_key { |key| refute report['build_environment'].key?(key) }
+    refute report['build_environment'].key?('CARGO_INCREMENTAL')
+    out, err, status = invoke('--json', '--lib', env: settings)
     assert status.success?, err
     settings.each { |key, value| assert_equal value, JSON.parse(out)['build_environment'][key] }
     assert_equal ['2', 'line-tables-only', 'none', 'symbols', '2', '1'],
@@ -222,7 +252,7 @@ class RhVerifyTest < Minitest::Test
 
   def test_missing_fixtures_are_reported_without_blocking_unrelated_checks
     FileUtils.remove_entry(File.join(@root, 'fixtures/store'))
-    out, err, status = invoke('--json')
+    out, err, status = invoke('--json', '--lib')
     assert status.success?, err
     assert_equal 'passed', JSON.parse(out)['status']
     assert_equal ['store'], JSON.parse(out)['missing_fixtures']
@@ -235,7 +265,7 @@ class RhVerifyTest < Minitest::Test
 
   def test_informational_policy_failure_does_not_block_local_execution
     File.write(File.join(@root, 'scripts/ci-plan.py'), "raise RuntimeError('unavailable policy')\n")
-    out, err, status = invoke('--json')
+    out, err, status = invoke('--json', '--lib')
     assert status.success?, err
     report = JSON.parse(out)
     assert_equal 'passed', report['status']
@@ -246,7 +276,7 @@ class RhVerifyTest < Minitest::Test
 
   def test_changed_policy_format_remains_informational
     File.write(File.join(@root, 'scripts/ci-plan.py'), "def select(paths): return []\n")
-    out, err, status = invoke
+    out, err, status = invoke('--lib')
     assert status.success?, err
     assert_includes out, 'Hosted selection unavailable:'
     assert_includes out, python_available? ? 'unsupported hosted coverage format' : 'python3'
@@ -258,7 +288,7 @@ class RhVerifyTest < Minitest::Test
     parent = File.join(@root, 'external cache')
     target = File.join(parent, 'not created', 'target')
     FileUtils.mkdir_p(parent)
-    out, err, status = invoke('--json', env: { 'VERIFY_TARGET_DIRECTORY' => target, 'VERIFY_TARGET_PARENT' => parent })
+    out, err, status = invoke('--json', '--lib', env: { 'VERIFY_TARGET_DIRECTORY' => target, 'VERIFY_TARGET_PARENT' => parent })
     assert status.success?, err
     report = JSON.parse(out)
     disk = report['disk_space']
@@ -280,14 +310,14 @@ class RhVerifyTest < Minitest::Test
 
   def test_optional_disk_failures_never_block_checks_or_hide_cargo_failure
     [{ 'VERIFY_DF_FAIL' => '1' }, { 'VERIFY_DF_MALFORMED' => '1' }].each do |env|
-      out, err, status = invoke('--json', env: env)
+      out, err, status = invoke('--json', '--lib', env: env)
       assert status.success?, err
       report = JSON.parse(out)
       assert_equal 'passed', report['status']
       assert report['disk_space']['before']['workspace']['error']
       assert report['disk_space']['after']['cargo_target']['error']
     end
-    out, _err, status = invoke('--json', env: { 'VERIFY_METADATA_FAIL' => '1', 'VERIFY_FAIL' => '--lib' })
+    out, _err, status = invoke('--json', '--lib', env: { 'VERIFY_METADATA_FAIL' => '1', 'VERIFY_FAIL' => '--lib' })
     assert_equal 17, status.exitstatus
     report = JSON.parse(out)
     assert_equal 'failed', report['status']
@@ -298,7 +328,7 @@ class RhVerifyTest < Minitest::Test
 
   def test_low_space_warning_boundary_does_not_change_test_results
     [5_242_880, 5_242_879].each do |available_kb|
-      out, err, status = invoke('--json', env: { 'VERIFY_DF_AVAILABLE_KB' => available_kb.to_s })
+      out, err, status = invoke('--json', '--lib', env: { 'VERIFY_DF_AVAILABLE_KB' => available_kb.to_s })
       assert status.success?, err
       report = JSON.parse(out)
       assert_equal available_kb * 1024, report['disk_space']['before']['workspace']['available_bytes']
@@ -312,7 +342,7 @@ class RhVerifyTest < Minitest::Test
       .find { |path| File.executable?(path) && !File.directory?(path) }
     File.symlink(git_path, File.join(@root, 'mocks/git'))
     File.delete(File.join(@root, 'mocks/df'))
-    out, err, status = invoke('--json', env: { 'PATH' => File.join(@root, 'mocks') })
+    out, err, status = invoke('--json', '--lib', env: { 'PATH' => File.join(@root, 'mocks') })
     assert status.success?, err
     report = JSON.parse(out)
     assert_equal 'passed', report['status']
@@ -327,7 +357,7 @@ class RhVerifyTest < Minitest::Test
     assert_includes out, 'Install to unlock more:'
     refute_includes out.split('Install to unlock more:').last, 'Python'
     File.delete(File.join(@root, 'mocks/cargo'))
-    out, _err, status = invoke('--json', env: { 'PATH' => File.join(@root, 'mocks') })
+    out, _err, status = invoke('--json', '--lib', env: { 'PATH' => File.join(@root, 'mocks') })
     assert_equal 127, status.exitstatus
     report = JSON.parse(out)
     assert_equal 'failed', report['status']
@@ -339,14 +369,16 @@ class RhVerifyTest < Minitest::Test
     out, err, status = invoke('--help')
     assert status.success?, err
     assert_includes out, '--plan'
+    assert_includes out, '--contract'
+    assert_includes out, '--lib'
     assert_empty calls
-    out, err, status = invoke
+    out, err, status = invoke('--lib')
     assert status.success?, err
     assert_includes out, 'Local checks: passed'
     assert_includes out, 'not hosted CI'
     assert_includes out, 'Disk before (workspace)'
     assert_includes out, 'Disk after (cargo_target)'
-    out, _err, status = invoke(env: { 'VERIFY_FAIL' => '--lib' })
+    out, _err, status = invoke('--lib', env: { 'VERIFY_FAIL' => '--lib' })
     assert_equal 17, status.exitstatus
     assert_includes out, 'Local checks: failed'
     out, err, status = Open3.capture3({ 'PATH' => "#{@root}/mocks:#{ENV.fetch('PATH')}", 'VERIFY_LOG' => @log },
@@ -373,22 +405,85 @@ class RhVerifyTest < Minitest::Test
 
   def test_invalid_inputs_never_start_cargo
     [%w[--test ../example], %w[--toolchain unknown], %w[--jobs 0],
-     %w[--base nonexistent], %w[--base --help], %w[--ignored], %w[extra]].each do |args|
+     %w[--all --test example], %w[--all --toolchain ruby], %w[--all --ignored],
+     %w[--all --lib], %w[--all --contract],
+     %w[--base nonexistent], %w[--base --help], %w[--ignored], %w[extra],
+     %w[--contract]].each do |args|
       _out, err, status = invoke(*args)
       assert_equal 2, status.exitstatus, args.inspect
       assert_includes err, 'rh verify:'
     end
+    _out, err, status = invoke
+    assert_equal 2, status.exitstatus
+    assert_includes err, 'select --test, --toolchain, --contract, --lib, or --all'
     assert_empty calls
   end
 
   def test_concurrent_run_is_rejected
     File.open(File.join(@root, '.git/rh-verify.lock'), 'w') do |lock|
       lock.flock(File::LOCK_EX)
-      _out, err, status = invoke('--json')
+      _out, err, status = invoke('--json', '--lib')
       assert_equal 2, status.exitstatus
       assert_includes err, 'another verify run'
       assert_empty calls
       refute File.exist?(File.join(@root, 'mocks/metadata.log'))
     end
+  end
+
+  def write_contract_suites
+    %w[real_blog runtime_src_integration].each { |name| File.write(File.join(@root, "tests/#{name}.rs"), '') }
+  end
+
+  def test_contract_plan_is_read_only_and_names_only_the_invariant_filters
+    write_contract_suites
+    out, err, status = invoke('--plan', '--help')
+    assert status.success?, err
+    assert_includes out, '--contract'
+    assert_empty calls
+    refute File.exist?(File.join(@root, '.git/rh-verify.lock'))
+
+    out, err, status = invoke('--plan', '--json', '--contract', '--test', 'example')
+    assert status.success?, err
+    report = JSON.parse(out)
+    assert_equal 'planned', report['status']
+    assert_equal [
+      %w[cargo test --locked --test example -- --test-threads=1],
+      %w[cargo test --locked --test real_blog -- --exact ingests_without_errors type_analysis_coverage --test-threads=1],
+      %w[cargo test --locked --test runtime_src_integration -- --exact every_runtime_method_body_is_fully_typed --test-threads=1]
+    ], report['checks'].map { |c| c['command'] }
+    assert_equal %w[not-run not-run not-run], report['checks'].map { |c| c['status'] }
+    refute report['build_environment'].key?('CARGO_INCREMENTAL')
+    assert_equal Etc.nprocessors.to_s, report['build_environment']['CARGO_BUILD_JOBS']
+    assert_empty calls
+    refute File.exist?(File.join(@root, 'mocks/metadata.log'))
+    refute File.exist?(File.join(@root, '.git/rh-verify.lock'))
+    refute File.exist?(File.join(@root, 'scripts/__pycache__'))
+  end
+
+  def test_contract_executes_its_two_binaries_before_an_opt_in_library_suite
+    write_contract_suites
+    out, err, status = invoke('--json', '--contract', '--lib', env: { 'CARGO_INCREMENTAL' => '1' })
+    assert status.success?, err
+    assert_equal 'passed', JSON.parse(out)['status']
+    assert_equal '1', JSON.parse(out)['build_environment']['CARGO_INCREMENTAL']
+    assert_equal [
+      %w[test --locked --test real_blog -- --exact ingests_without_errors type_analysis_coverage --test-threads=1],
+      %w[test --locked --test runtime_src_integration -- --exact every_runtime_method_body_is_fully_typed --test-threads=1],
+      %w[test --locked --lib -- --test-threads=1]
+    ], calls.map { |c| c['args'] }
+    assert calls.all? { |c| c['incremental'] == '1' && c['jobs'] == Etc.nprocessors.to_s }
+    assert_equal 3, calls.length
+  end
+
+  def test_contract_exact_filter_that_matches_nothing_fails
+    write_contract_suites
+    out, err, status = invoke('--json', '--contract', env: { 'VERIFY_OMIT_EXACT' => 'ingests_without_errors' })
+    assert_equal 1, status.exitstatus
+    report = JSON.parse(out)
+    assert_equal 'failed', report['status']
+    assert_equal %w[failed not-run], report['checks'].map { |check| check['status'] }
+    assert_equal 1, report['checks'].first['exit']
+    assert_includes err, 'contract filter matched no test: ingests_without_errors'
+    assert_equal 1, calls.length
   end
 end

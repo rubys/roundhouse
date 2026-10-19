@@ -34,6 +34,7 @@ module ActionController
     def []=: (String | Symbol key, untyped value) -> String
     def permanent: () -> ActionController::PermanentCookieJar
     def signed: () -> ActionController::SignedCookieJar
+    def encrypted: () -> ActionController::EncryptedCookieJar
     def raw: (String | Symbol key) -> String
     def raw_set: (String | Symbol key, untyped value) -> String
     def record_flags: (String | Symbol key, bool httponly, String | Symbol same_site, bool secure) -> String
@@ -63,6 +64,23 @@ module ActionController
     def self.value_of: (Hash[Symbol, untyped] | String | Integer | Symbol | bool value) -> String
   end
 
+  # `cookies.encrypted`: reads answer what the cookie's JSON holds (a
+  # Hash, a String, an Integer...), so the read is untyped and nilable;
+  # writes take any value JSON can carry.
+  class EncryptedCookieJar
+    @jar: ActionController::CookieJar
+    @permanent: bool
+
+    def initialize: (ActionController::CookieJar jar, ?bool permanent) -> void
+    def []: (String | Symbol key) -> untyped
+    def []=: (String | Symbol key, untyped value) -> untyped
+    def permanent: () -> ActionController::EncryptedCookieJar
+    def delete: (String | Symbol key) -> String
+    def self.value_of: (untyped value) -> untyped
+    def self.parse: (String json) -> untyped
+    def self.permanent_time: () -> ::Time
+  end
+
   class PermanentCookieJar
     @jar: ActionController::CookieJar
 
@@ -74,6 +92,7 @@ module ActionController
     # cookie write takes.
     def []=: (String | Symbol key, Hash[Symbol, untyped] | String | Integer | Symbol | bool value) -> String
     def signed: () -> ActionController::SignedCookieJar
+    def encrypted: () -> ActionController::EncryptedCookieJar
     def delete: (String | Symbol key) -> String
   end
 

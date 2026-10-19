@@ -667,26 +667,21 @@ fn an_unforwarded_anonymous_rest_is_a_represented_formal() {
 
 /// A nested `def` binds its own parameters, so a bare `*` inside it
 /// forwards its own rest and does not make the outer `*` forwarded.
+///
+/// The nested `def` itself is refused (`nested def`, no IR node carries
+/// it): the one error is that refusal, not a forwarding one. This test
+/// used to run the emit too, and passed only because ingest dropped the
+/// nested `def` without a word; `Probe.new.nested` was never there.
 #[test]
 fn a_nested_def_forwarding_its_own_rest_leaves_the_outer_rest_represented() {
     let source = "class Probe; def target(*); def nested(*) = inner(*); 7; end; def inner(*a) = a.size; end";
-    let script = "puts Probe.new.target; puts Probe.new.target(1, 2, 3)";
-    let native = Command::new("ruby")
-        .args(["-e", &format!("{source}; {script}")])
-        .output()
-        .unwrap();
-    assert!(native.status.success());
-    assert_eq!(String::from_utf8_lossy(&native.stdout), "7\n7\n");
-    let errors: Vec<_> = diagnose(&analyzed(source))
+    let errors: Vec<String> = diagnose(&analyzed(source))
         .into_iter()
         .filter(|d| d.severity == Severity::Error)
+        .map(|d| d.message)
         .collect();
-    assert!(errors.is_empty(), "{errors:?}");
-    let run = emit_and_run::real_blog()
-        .write("app/lib/probe.rb", source)
-        .run_ruby(script);
-    run.assert_passes();
-    assert_eq!(run.stdout, "7\n7\n");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("nested def"), "{errors:?}");
 }
 
 /// A body that forwards the anonymous rest (`g(*)`) keeps the recorded

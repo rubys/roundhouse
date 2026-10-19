@@ -15,6 +15,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/emit_and_run.rs"]
+#[allow(dead_code)]
+mod emit_and_run;
+#[path = "support/nested_classes.rs"]
+mod nested_classes;
+#[path = "support/array_methods.rs"]
+mod array_methods;
+#[path = "support/truthiness.rs"]
+mod truthiness;
+
 use roundhouse::emit::typescript;
 use roundhouse::ingest::ingest_app;
 
@@ -253,4 +263,92 @@ fn real_blog_libsql_node_test_passes() {
     let scratch = scratch_dir("real-blog-libsql-node");
     generate_project_with_profile(fixture, &scratch, &DeploymentProfile::node_async());
     assert_node_test_passes("real-blog (libsql)", &scratch);
+}
+
+/// Install the emitted project's packages, run `script` under tsx from its
+/// root, and answer what it printed.
+fn run_under_tsx(emitted: &Path, script: &str) -> String {
+    let install = Command::new("npm")
+        .args(["install", "--silent", "--no-audit", "--no-fund"])
+        .current_dir(emitted)
+        .output()
+        .expect("run npm install");
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    std::fs::write(emitted.join("check.ts"), script).unwrap();
+    let run = Command::new("npx")
+        .args(["tsx", "check.ts"])
+        .current_dir(emitted)
+        .output()
+        .expect("run tsx");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    String::from_utf8_lossy(&run.stdout).trim().to_string()
+}
+
+#[test]
+#[ignore]
+fn real_blog_nested_classes_run_under_tsx() {
+    // Classes nested under a class and a module, raised, rescued and
+    // built from another file, answer as CRuby does.
+    let (emitted, errors) = nested_classes::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Report } from \"./app/models/report.js\";\nconsole.log(Report.summary());\n",
+    );
+    assert_eq!(out, nested_classes::SUMMARY);
+}
+
+#[test]
+#[ignore]
+fn real_blog_array_methods_run_under_tsx() {
+    // The Array methods the emit translates answer as CRuby does,
+    // empty-Array and not-found answers included.
+    let (emitted, errors) = array_methods::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { ArrayProbe } from \"./app/models/array_probe.js\";\nconsole.log(JSON.stringify(ArrayProbe.run([1, 2, 3], [\"a\", \"b\"])));\n",
+    );
+    assert_eq!(out, array_methods::EXPECTED);
+}
+
+#[test]
+#[ignore]
+fn real_blog_number_methods_run_under_tsx() {
+    // Integer and Float methods, the operators Ruby defines differently
+    // (`/`, `%`, `<=>`, half-away rounding) and a chained `<<`.
+    let (emitted, errors) = array_methods::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { NumberProbe } from \"./app/models/number_probe.js\";\nconsole.log(JSON.stringify(NumberProbe.run(7, 2, 2.5, [0])));\n",
+    );
+    assert_eq!(out, array_methods::NUMBER_EXPECTED);
+}
+
+#[test]
+#[ignore]
+fn real_blog_string_methods_run_under_tsx() {
+    // Width padding, character-set specs (`a-z`, `^l`, intersections) and
+    // the not-found answers Ruby gives.
+    let (emitted, errors) = array_methods::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { StringProbe } from \"./app/models/string_probe.js\";\nconsole.log(JSON.stringify(StringProbe.run(\"hello\", \"  aa--bbb-\\n\", \"*\")));\n",
+    );
+    assert_eq!(out, array_methods::STRING_EXPECTED);
+}
+
+#[test]
+#[ignore]
+fn real_blog_ruby_truthiness_runs_under_tsx() {
+    // `0` and `""` are true, `0 || 5` is 0, and a predicate block keeps them.
+    let (emitted, errors) = truthiness::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { TruthProbe } from \"./app/models/truth_probe.js\";\nconsole.log(JSON.stringify(TruthProbe.run(0, \"\", null, false, [], [\"\", \"a\"])));\n",
+    );
+    assert_eq!(out, truthiness::EXPECTED);
 }

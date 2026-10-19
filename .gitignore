@@ -30,9 +30,10 @@
 /bench/results/
 /storage
 
-# Python bytecode cache from the python target's runtime, and the
-# scratch dir used for ad-hoc emit/transpile output during dev.
-/runtime/python/__pycache__/
+# Python bytecode caches (the python target's runtime, and the CI
+# scripts and their tests), and the scratch dir used for ad-hoc
+# emit/transpile output during dev.
+__pycache__/
 /tmp/
 
 # macOS Finder metadata.
@@ -46,4 +47,3 @@
 /*-srv.err
 /bench/probes/
 /scratchpad/
-.codegraph

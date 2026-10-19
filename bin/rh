@@ -68,7 +68,7 @@ def print_usage
       test <target>       Transpile, then run target's native tests (ruby only for now).
       run <target>        Transpile, then run main (ruby only for now).
       compare [<target>]  End-to-end Rails-vs-target HTTP compare (wraps scripts/compare).
-      verify             Sequential local checks; --plan previews without execution.
+      verify             Local checks; --all runs the complete default suite concurrently.
       bench [<target>...] HTTP throughput + RSS benchmark (wraps scripts/bench).
       site                Build the full GitHub Pages site (all targets).
 
@@ -272,6 +272,12 @@ def verify_capture(*command, input: '')
 end
 
 VERIFY_DISK_WARNING_BYTES = 5 * 1024**3
+# Invariant gates only. Filters name functions inside these two binaries
+# so the preset does not build the rest of the integration suite.
+VERIFY_CONTRACT = [
+  ['real_blog', %w[ingests_without_errors type_analysis_coverage]],
+  ['runtime_src_integration', %w[every_runtime_method_body_is_fully_typed]],
+].freeze
 
 # POSIX df is optional (e.g. native Windows). Measure filesystems, not
 # directory sizes; do not walk large caches or create a missing target dir.
@@ -308,32 +314,72 @@ def verify_disk_space(locations, phase, json)
   end
 end
 
+def verify_known_suite!(name)
+  unless name.match?(/\A[A-Za-z0-9_-]+\z/) && File.file?(File.join(ROUNDHOUSE_ROOT, 'tests', "#{name}.rs"))
+    raise ArgumentError, "unknown test suite: #{name.inspect}"
+  end
+end
+
+def verify_exact_filters(command)
+  marker = command.index('--exact')
+  return [] unless marker
+  command[(marker + 1)..].take_while { |arg| !arg.start_with?('--') }
+end
+
 def cmd_verify(argv)
   tests = []
   toolchains = []
-  plan_only = json = ignored_tests = false
+  plan_only = json = ignored_tests = lib_tests = contract = all_tests = false
   base = 'HEAD'
-  jobs = ENV.fetch('CARGO_BUILD_JOBS', [Etc.nprocessors, 4].min.to_s)
+  jobs = ENV.fetch('CARGO_BUILD_JOBS', Etc.nprocessors.to_s)
   OptionParser.new do |o|
-    o.banner = 'Usage: bin/rh verify [--plan] [--base REF] [--test NAME] [--ignored] [--toolchain TARGET] [--json]'
-    o.separator 'Build and run library tests, then only explicit integration/toolchain suites.'
-    o.separator 'This is partial local verification, not the hosted CI floor or merge approval.'
+    o.banner = 'Usage: bin/rh verify [--all | --test NAME] [--plan] [--base REF] [--contract] [--lib] [--ignored] [--toolchain TARGET] [--json]'
+    o.separator 'Build and run the selected integration suites. --lib runs the library suite after them.'
+    o.separator '--contract runs the zero-error and runtime-typing gates without the other integration binaries.'
+    o.separator '--all runs the complete default suite with cargo-nextest, then documentation tests.'
+    o.separator 'This is partial local verification, not the hosted CI floor, the commit bar, or merge approval.'
     o.on('--plan', 'Read-only preview; no Cargo, installs, or test execution') { plan_only = true }
+    o.on('--all', 'Run all targets with cargo-nextest, then documentation tests; skips ignored tests') { all_tests = true }
     o.on('--base REF', 'Compare the working tree with REF (default: HEAD)') { |v| base = v }
     o.on('--test NAME', 'Integration test stem; repeatable; skips ignored tests by default') { |v| tests << v }
-    o.on('--ignored', 'Run only ignored tests in selected --test suites (not library tests)') { ignored_tests = true }
+    o.on('--contract', 'Run real_blog ingest/coverage gates and every_runtime_method_body_is_fully_typed') { contract = true }
+    o.on('--lib', 'Run the library suite after the selected integration suites') { lib_tests = true }
+    o.on('--ignored', 'Run only ignored tests in selected --test suites (not --lib or --contract)') { ignored_tests = true }
     o.on('--toolchain TARGET', 'Run TARGET_toolchain with --ignored; repeatable') { |v| toolchains << v }
-    o.on('--jobs N', 'Cargo workers (default: CARGO_BUILD_JOBS or min(CPUs, 4))') { |v| jobs = v }
+    o.on('--jobs N', 'Cargo workers (default: CARGO_BUILD_JOBS or the machine processor count)') { |v| jobs = v }
     o.on('--json', 'JSON report on stdout; child output on stderr') { json = true }
   end.parse!(argv)
   raise ArgumentError, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
   raise ArgumentError, 'jobs must be a positive integer' unless jobs.match?(/\A[1-9]\d*\z/)
+  if all_tests && (!tests.empty? || !toolchains.empty? || ignored_tests || lib_tests || contract)
+    raise ArgumentError, '--all cannot be combined with --test, --toolchain, --ignored, --lib, or --contract'
+  end
   raise ArgumentError, '--ignored requires at least one --test suite' if ignored_tests && tests.empty?
   suites = tests.map { |name| [name, ignored_tests] } + toolchains.map { |name| ["#{name}_toolchain", true] }
-  suites.uniq.each do |name, _ignored|
-    unless name.match?(/\A[A-Za-z0-9_-]+\z/) && File.file?(File.join(ROUNDHOUSE_ROOT, 'tests', "#{name}.rs"))
-      raise ArgumentError, "unknown test suite: #{name.inspect}"
+  suites.uniq.each { |name, _ignored| verify_known_suite!(name) }
+  VERIFY_CONTRACT.each { |name, _filters| verify_known_suite!(name) } if contract
+  if all_tests
+    commands = [
+      ['cargo', 'nextest', 'run', '--locked', '--lib', '--bins', '--test', 'all_tests',
+       '--no-fail-fast', '--ignore-default-filter'],
+      ['cargo', 'test', '--locked', '--doc']
+    ]
+  else
+    # One thread for every focused suite. Suites share SQLite or the
+    # process-global ingest::survey; do not drop the cap per suite.
+    commands = []
+    suites.uniq.each do |name, ignored|
+      command = ['cargo', 'test', '--locked', '--test', name, '--']
+      command << '--ignored' if ignored
+      commands << command + ['--test-threads=1']
     end
+    if contract
+      VERIFY_CONTRACT.each do |name, filters|
+        commands << ['cargo', 'test', '--locked', '--test', name, '--', '--exact', *filters, '--test-threads=1']
+      end
+    end
+    commands << ['cargo', 'test', '--locked', '--lib', '--', '--test-threads=1'] if lib_tests
+    raise ArgumentError, 'select --test, --toolchain, --contract, --lib, or --all' if commands.empty? && !plan_only
   end
 
   head = verify_capture('git', 'rev-parse', 'HEAD').strip
@@ -361,16 +407,15 @@ def cmd_verify(argv)
     hosted = nil
     hosted_error = e.message
   end
-  commands = [['cargo', 'test', '--locked', '--lib', '--', '--test-threads=1']]
-  suites.uniq.each do |name, ignored|
-    command = ['cargo', 'test', '--locked', '--test', name, '--']
-    command << '--ignored' if ignored
-    commands << command + ['--test-threads=1']
+  build_env = { 'CARGO_BUILD_JOBS' => jobs }
+  if all_tests
+    # Full verification defaults incremental on and still honors an explicit value.
+    build_env['CARGO_INCREMENTAL'] = ENV.fetch('CARGO_INCREMENTAL', '1')
+    build_env['ROUNDHOUSE_TEST_BUNDLE_ROOT'] = ROUNDHOUSE_ROOT
+  elsif ENV.key?('CARGO_INCREMENTAL')
+    # Focused runs do not force a cold build. CI cold builds stay on rust-cache.
+    build_env['CARGO_INCREMENTAL'] = ENV['CARGO_INCREMENTAL']
   end
-  build_env = {
-    'CARGO_BUILD_JOBS' => jobs,
-    'CARGO_INCREMENTAL' => ENV.fetch('CARGO_INCREMENTAL', '0')
-  }
   # Record caller-selected size/speed tradeoffs without inventing a profile
   # or overriding Cargo configuration when these settings are absent.
   %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_PROFILE_DEV_STRIP CARGO_PROFILE_TEST_STRIP
@@ -379,9 +424,10 @@ def cmd_verify(argv)
   end
   missing = %w[real-blog store].reject { |name| File.directory?(File.join(ROUNDHOUSE_ROOT, 'fixtures', name)) }
   report = {
-    scope: 'partial local verification; hosted coverage is informational, not executed',
+    scope: "#{all_tests ? 'complete default suite; ignored tests excluded' : 'partial local verification'}; hosted coverage is informational, not executed",
     head: head, base: base_sha, changes: changes, build_environment: build_env,
-    prerequisites: ['Pinned Rust via rust-toolchain.toml, Ruby and test gems; selected toolchains must be installed'],
+    prerequisites: ['Pinned Rust via rust-toolchain.toml, Ruby and test gems; selected toolchains must be installed'] +
+      (all_tests ? ['cargo-nextest: cargo install cargo-nextest --locked'] : []),
     missing_fixtures: missing, hosted_coverage: hosted, hosted_coverage_error: hosted_error,
     checks: commands.map { |command| { command: command, status: 'not-run' } },
     disk_space: { warning_threshold_bytes: VERIFY_DISK_WARNING_BYTES, before: nil, after: nil },
@@ -417,9 +463,29 @@ def cmd_verify(argv)
       report[:checks].each do |check|
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         begin
-          system(VERIFY_GIT_ENV.merge(build_env), *check[:command], chdir: ROUNDHOUSE_ROOT, out: $stderr, err: $stderr)
-          status = $?
-          rc = status.exitstatus || 128 + status.termsig
+          filters = verify_exact_filters(check[:command])
+          if filters.empty?
+            system(VERIFY_GIT_ENV.merge(build_env), *check[:command], chdir: ROUNDHOUSE_ROOT, out: $stderr, err: $stderr)
+            status = $?
+            rc = status.exitstatus || 128 + status.termsig
+          else
+            # An --exact contract filter that runs no test still exits 0.
+            # Require each named test in the harness output before passing.
+            stdout, stderr, status = Open3.capture3(VERIFY_GIT_ENV.merge(build_env), *check[:command], chdir: ROUNDHOUSE_ROOT)
+            $stderr.write(stdout)
+            $stderr.write(stderr)
+            rc = status.exitstatus || 128 + status.termsig
+            if rc.zero?
+              missing = filters.reject do |name|
+                line = /^test #{Regexp.escape(name)} \.\.\./
+                stdout.match?(line) || stderr.match?(line)
+              end
+              unless missing.empty?
+                warn "rh verify: contract filter matched no test: #{missing.join(', ')}"
+                rc = 1
+              end
+            end
+          end
         rescue Errno::ENOENT => e
           warn e.message
           rc = 127

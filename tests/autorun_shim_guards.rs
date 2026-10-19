@@ -57,6 +57,45 @@ fn shim() -> String {
 }
 
 #[test]
+fn an_app_suite_asks_use_transactional_tests() {
+    let src = shim();
+    assert!(
+        src.contains("if self.class.use_transactional_tests"),
+        "an app suite loads TestBase and must honor the flag:\n{src}",
+    );
+    assert!(src.contains("__t.__txn_test_one"), "{src}");
+}
+
+#[test]
+fn a_framework_file_does_not_call_use_transactional_tests() {
+    let files: HashMap<PathBuf, Vec<u8>> = [
+        (
+            PathBuf::from("db/schema.rb"),
+            b"ActiveRecord::Schema.define do\nend\n".to_vec(),
+        ),
+        (
+            PathBuf::from("test/models/cookies_test.rb"),
+            b"require \"test_helper\"\n\nclass CookiesTest < Minitest::Test\n  def test_one\n    assert true\n  end\nend\n".to_vec(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let mut app = ingest_app_from_tree(files).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_spinel(&app);
+    let src = files
+        .iter()
+        .find(|f| f.path.ends_with("cookies_test.rb"))
+        .map(|f| f.content.as_str())
+        .unwrap_or_else(|| panic!("no cookies test in {:?}", files.iter().map(|f| &f.path).collect::<Vec<_>>()));
+    assert!(
+        !src.contains("use_transactional_tests"),
+        "a framework file never loads the helper that defines the method:\n{src}",
+    );
+    assert!(src.contains("__t.test_one"), "{src}");
+}
+
+#[test]
 fn teardown_runs_inside_a_guard_of_its_own() {
     let src = shim();
     let after_rescue = src

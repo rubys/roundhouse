@@ -11,6 +11,9 @@ import java.time.temporal.ChronoUnit
 
 object Time {
     fun now(): TimeInstant = TimeInstant(OffsetDateTime.now())
+
+    // IR spelling of `Time.now.utc` (`lower::time_calendar`).
+    fun utc(): TimeInstant = now().utc
 }
 
 class TimeInstant(private val dt: OffsetDateTime) {
@@ -23,4 +26,9 @@ class TimeInstant(private val dt: OffsetDateTime) {
     val iso8601: String
         get() = dt.truncatedTo(ChronoUnit.SECONDS)
             .format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX"))
+
+    // Same string as `iso8601`. The lowered name is Crystal's `to_rfc3339`,
+    // which this emitter camel-cases.
+    val toRfc3339: String
+        get() = iso8601
 }

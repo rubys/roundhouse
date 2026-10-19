@@ -1,15 +1,16 @@
-"""Bounded unit batches must cover every target and free only finished tests."""
+"""Archive consumers must retain every active case exactly once across shards."""
 
 from __future__ import annotations
 
+import copy
 import importlib.util
-import io
 import os
-import stat
+from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
-from pathlib import Path
-from unittest import mock
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/ci-unit-tests.py"
 SPEC = importlib.util.spec_from_file_location("ci_unit_tests", SCRIPT)
@@ -17,328 +18,200 @@ unit = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(unit)
 
 
-def write_executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> None:
-    path.write_text(body)
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+def case(ignored=False):
+    return {"kind": "test", "ignored": ignored,
+            "filter-match": {"status": "mismatch", "reason": "ignored"} if ignored else {"status": "matches"}}
 
 
-class UnitBatchTests(unittest.TestCase):
-    def test_chunks_cover_every_name_exactly_once(self):
-        names = [f"t{i:03d}" for i in range(42)]
-        batches = unit.chunks(names, 20)
-        self.assertEqual([len(b) for b in batches], [20, 20, 2])
-        self.assertEqual([name for batch in batches for name in batch], names)
+def inventory():
+    return {
+        "test-count": 5,
+        "rust-suites": {
+            "roundhouse": {"binary-id": "roundhouse", "binary-name": "roundhouse", "kind": "lib",
+                           "status": "listed", "testcases": {
+                               "registry::resolves": case(), "registry::native_only": case(True)}},
+            "roundhouse::all_tests": {"binary-id": "roundhouse::all_tests", "binary-name": "all_tests",
+                                      "kind": "test", "status": "listed", "testcases": {
+                                          "real_blog::zero_errors": case(),
+                                          "emit_and_run::ruby_executes": case(),
+                                          "spinel_toolchain::native": case(True)}},
+        },
+    }
 
-    def test_owned_paths_include_sidecars_but_not_neighbors(self):
-        with tempfile.TemporaryDirectory() as directory:
-            deps = Path(directory)
-            exe = deps / "cli_check-abc123def4567890"
-            sidecar = deps / "cli_check-abc123def4567890.cli_check.x.rcgu.dwo"
-            depfile = deps / "cli_check-abc123def4567890.d"
-            neighbor = deps / "cli_check-abc123def4567890ee"
-            other = deps / "analyze-ffffffffffffffff"
-            other_dwo = deps / "analyze-ffffffffffffffff.analyze.y.rcgu.dwo"
-            helper = deps / "roundhouse-ffffffabcdef0123"
-            for path in (exe, neighbor, other, helper):
-                write_executable(path)
-            for path in (sidecar, depfile, other_dwo):
-                path.write_bytes(b"x" * 8)
-            owned = {p.name for p in unit.owned_integration_paths(exe)}
-            self.assertEqual(owned, {exe.name, sidecar.name, depfile.name})
 
-    def test_integration_executables_match_hash_stems_only(self):
-        with tempfile.TemporaryDirectory() as directory:
-            deps = Path(directory)
-            keep = deps / "cli_check-abc123def4567890"
-            write_executable(keep)
-            (deps / "cli_check-abc123def4567890.d").write_text("d")
-            write_executable(deps / "cli_check-notahashvalue!!")
-            write_executable(deps / "cli_check_extra-abc123def4567890")
-            write_executable(deps / "analyze-abc123def4567890")
-            found = unit.integration_executables(deps, "cli_check")
-            self.assertEqual([p.name for p in found], [keep.name])
-
-    def test_free_removes_only_requested_batch(self):
-        with tempfile.TemporaryDirectory() as directory:
-            deps = Path(directory)
-            keep_exe = deps / "analyze-aaaaaaaaaaaaaaaa"
-            free_exe = deps / "cli_check-bbbbbbbbbbbbbbbb"
-            free_dwo = deps / "cli_check-bbbbbbbbbbbbbbbb.cli_check.dwo"
-            keep_bin = deps / "roundhouse-cccccccccccccccc"
-            for path in (keep_exe, free_exe, keep_bin):
-                write_executable(path)
-            free_dwo.write_bytes(b"dwo")
-            freed = unit.free_integration_targets(deps, ["cli_check"])
-            self.assertGreater(freed, 0)
-            self.assertFalse(free_exe.exists())
-            self.assertFalse(free_dwo.exists())
-            self.assertTrue(keep_exe.exists())
-            self.assertTrue(keep_bin.exists())
-
-    def test_metadata_listing_matches_tests_directory(self):
-        names, _target = unit.package_plan(unit.cargo_metadata())
-        unit.verify_coverage(names)
-        stems = sorted(p.stem for p in Path("tests").glob("*.rs"))
-        self.assertEqual(names, stems)
-
-    def test_failure_propagates_and_skips_reclaim(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            deps = root / "debug" / "deps"
-            deps.mkdir(parents=True)
-            exe = deps / "fails-0123456789abcdef"
-            write_executable(exe)
-            dwo = deps / "fails-0123456789abcdef.fails.dwo"
-            dwo.write_text("dwo")
-            calls: list[list[str]] = []
-
-            def fake_run(args, **_kwargs):
-                calls.append(list(args))
-                if "--test" in args and "--no-run" not in args and "--lib" not in args:
-                    return 17
-                return 0
-
-            with mock.patch.object(unit, "cargo_metadata", return_value={
-                "target_directory": str(root),
-                "packages": [{
-                    "name": "roundhouse",
-                    "targets": [{"name": "fails", "kind": ["test"]}],
-                }],
-            }), mock.patch.object(unit, "verify_coverage"), mock.patch.object(
-                unit, "run_cargo", side_effect=fake_run
-            ):
-                code = unit.main(["--batch-size", "1", "--no-timings"])
-            self.assertEqual(code, 17)
-            self.assertTrue(exe.exists(), "failed batch artifacts must remain")
-            self.assertTrue(dwo.exists())
-            self.assertTrue(any("--lib" in c and "--bins" in c for c in calls))
-
-    def test_successful_batch_reclaims_integration_only(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            deps = root / "debug" / "deps"
-            deps.mkdir(parents=True)
-            test_exe = deps / "ok-0123456789abcdef"
-            write_executable(test_exe)
-            dwo = deps / "ok-0123456789abcdef.ok.dwo"
-            dwo.write_text("dwo")
-            helper = deps / "roundhouse-fedcba9876543210"
-            write_executable(helper)
-
-            def fake_run(args, **_kwargs):
-                return 0
-
-            with mock.patch.object(unit, "cargo_metadata", return_value={
-                "target_directory": str(root),
-                "packages": [{
-                    "name": "roundhouse",
-                    "targets": [{"name": "ok", "kind": ["test"]}],
-                }],
-            }), mock.patch.object(unit, "verify_coverage"), mock.patch.object(
-                unit, "run_cargo", side_effect=fake_run
-            ):
-                code = unit.main(["--batch-size", "1", "--no-timings"])
-            self.assertEqual(code, 0)
-            self.assertFalse(test_exe.exists())
-            self.assertFalse(dwo.exists())
-            self.assertTrue(helper.exists())
-
-    def test_invalid_shard_bounds_do_not_invoke_cargo(self):
-        cases = [
-            ["--shard-count", "0"],
-            ["--shard-count", "-1"],
-            ["--shard-index", "-1"],
-            ["--shard-index", "1", "--shard-count", "1"],
-            ["--shard-index", "3", "--shard-count", "3"],
-        ]
-        for argv in cases:
-            with self.subTest(argv=argv):
-                with mock.patch.object(unit, "cargo_metadata") as meta, mock.patch.object(
-                    unit, "run_cargo"
-                ) as cargo:
-                    with self.assertRaises(SystemExit) as ctx:
-                        unit.main(argv)
-                    self.assertIsInstance(ctx.exception.code, str)
-                    self.assertIn("shard", ctx.exception.code)
-                    meta.assert_not_called()
-                    cargo.assert_not_called()
-
-    def test_select_shard_interleaves_nondivisible_names(self):
-        names = [f"t{i:02d}" for i in range(7)]
-        expected = {
-            0: ["t00", "t03", "t06"],
-            1: ["t01", "t04"],
-            2: ["t02", "t05"],
+class UnitInventoryTests(unittest.TestCase):
+    def setUp(self):
+        self.data = inventory()
+        self.cases = {
+            ("roundhouse", "registry::resolves"): False,
+            ("roundhouse", "registry::native_only"): True,
+            ("roundhouse::all_tests", "real_blog::zero_errors"): False,
+            ("roundhouse::all_tests", "emit_and_run::ruby_executes"): False,
+            ("roundhouse::all_tests", "spinel_toolchain::native"): True,
         }
-        shards = {index: unit.select_shard(names, index, 3) for index in range(3)}
-        self.assertEqual(shards, expected)
-        union = [name for index in range(3) for name in shards[index]]
-        self.assertEqual(sorted(union), names)
-        self.assertEqual(len(union), len(set(union)))
-        for left in range(3):
-            for right in range(left + 1, 3):
-                self.assertTrue(set(shards[left]).isdisjoint(shards[right]))
-        self.assertEqual(unit.select_shard(names, 0, 1), names)
+        self.active = {identity for identity, ignored in self.cases.items() if not ignored}
 
-    def test_select_shard_puts_the_heaviest_target_alone_and_offsets_shard_zero(self):
-        names = ["big", "a", "b", "c", "d"]
-        weights = {"big": 10}
-        self.assertEqual(unit.select_shard(names, 0, 2, weights), ["big"])
-        self.assertEqual(unit.select_shard(names, 1, 2, weights), ["a", "b", "c", "d"])
-        self.assertEqual(unit.select_shard(names, 0, 2, weights, 20), [])
+    def test_inventory_retains_unit_integration_and_ignored_identities(self):
+        identities, selected = unit.parse_inventory(self.data)
+        self.assertEqual(identities, self.cases)
+        self.assertEqual(selected, self.active)
 
-    def test_split_share_gives_each_test_to_one_shard(self):
-        tests = ["c", "a", "e", "b", "d"]
-        shares = [unit.split_share(tests, index, 2) for index in range(2)]
-        self.assertEqual(shares, [["a", "c", "e"], ["b", "d"]])
+    def test_disabled_combined_target_cannot_pass_with_library_tests_alone(self):
+        self.data["rust-suites"]["roundhouse::all_tests"]["testcases"] = {}
+        self.data["test-count"] = 2
+        with self.assertRaises(unit.ContractError):
+            unit.parse_inventory(self.data)
 
-    def test_a_split_target_is_left_out_of_the_shard_batches(self):
-        names = ["alpha", "emit_and_run", "gamma"]
-        meta = {
-            "target_directory": "/tmp",
-            "packages": [{
-                "name": "roundhouse",
-                "targets": [{"name": name, "kind": ["test"]} for name in names],
-            }],
+    def test_missing_combined_target_is_rejected(self):
+        del self.data["rust-suites"]["roundhouse::all_tests"]
+        self.data["test-count"] = 2
+        with self.assertRaises(unit.ContractError):
+            unit.parse_inventory(self.data)
+
+    def test_unlisted_suite_cannot_hide_cases(self):
+        self.data["rust-suites"]["roundhouse"]["status"] = "skipped"
+        with self.assertRaises(unit.ContractError):
+            unit.parse_inventory(self.data)
+
+    def test_unexpected_active_filter_is_rejected(self):
+        self.data["rust-suites"]["roundhouse"]["testcases"]["registry::resolves"]["filter-match"] = {
+            "status": "mismatch", "reason": "default-filter"}
+        with self.assertRaises(unit.ContractError):
+            unit.parse_inventory(self.data)
+
+    def test_ignored_cases_cannot_be_selected(self):
+        self.data["rust-suites"]["roundhouse"]["testcases"]["registry::native_only"]["filter-match"] = {
+            "status": "matches"}
+        with self.assertRaises(unit.ContractError):
+            unit.parse_inventory(self.data)
+
+    def test_inconsistent_count_and_malformed_ignore_state_fail(self):
+        for value in (False, 4, 6):
+            data = copy.deepcopy(self.data)
+            data["test-count"] = value
+            with self.assertRaises(unit.ContractError):
+                unit.parse_inventory(data)
+        self.data["rust-suites"]["roundhouse"]["testcases"]["registry::resolves"]["ignored"] = 0
+        with self.assertRaises(unit.ContractError):
+            unit.parse_inventory(self.data)
+
+    def test_all_ignored_inventory_cannot_become_a_successful_empty_run(self):
+        for suite in self.data["rust-suites"].values():
+            for name in suite["testcases"]:
+                suite["testcases"][name] = case(True)
+        with self.assertRaises(unit.ContractError):
+            unit.parse_inventory(self.data)
+
+    def test_partition_inventory_keeps_nonselected_and_ignored_cases(self):
+        self.data["rust-suites"]["roundhouse"]["testcases"]["registry::resolves"]["filter-match"] = {
+            "status": "mismatch", "reason": "partition"}
+        cases, selected = unit.parse_inventory(self.data, partitioned=True)
+        self.assertEqual(cases, self.cases)
+        self.assertEqual(selected, self.active - {("roundhouse", "registry::resolves")})
+        with self.assertRaises(unit.ContractError):
+            unit.parse_inventory(self.data)
+
+    def test_complete_partitions_exclude_ignored_cases(self):
+        partitions = [{("roundhouse", "registry::resolves")},
+                      {("roundhouse::all_tests", "real_blog::zero_errors")},
+                      {("roundhouse::all_tests", "emit_and_run::ruby_executes")}]
+        unit.check_partition_coverage(self.cases, partitions)
+        for invalid in (
+            partitions[:-1],
+            [*partitions, partitions[0]],
+            [*partitions, {("roundhouse", "registry::native_only")}],
+            [*partitions, {("unknown", "not_in_archive")}],
+        ):
+            with self.assertRaises(unit.ContractError):
+                unit.check_partition_coverage(self.cases, invalid)
+
+    def test_shard_bounds_reject_zero_negative_boolean_and_out_of_range(self):
+        for index, count in ((0, 0), (-1, 4), (4, 4), (0, -1), (0, True), (True, 4)):
+            with self.assertRaises(unit.ContractError):
+                unit.validate_shard(index, count)
+        unit.validate_shard(0, 1)
+        unit.validate_shard(3, 4)
+
+    def test_real_child_failures_preserve_exit_status(self):
+        with self.assertRaises(unit.ChildFailure) as failure:
+            unit.check_command([sys.executable, "-c", "raise SystemExit(7)"])
+        self.assertEqual(failure.exception.status, 7)
+        self.assertEqual(unit.ChildFailure(-9).status, 137)
+
+    def test_inherited_git_locations_cannot_change_archive_provenance(self):
+        expected = unit.source_sha()
+        with tempfile.TemporaryDirectory() as temporary:
+            foreign = Path(temporary)
+            git = ["git", "-c", "user.name=Inventory Test",
+                   "-c", "user.email=inventory@example.invalid", "-c", "commit.gpgsign=false",
+                   "-c", "core.hooksPath=/dev/null", "-c", "maintenance.auto=false", "-c", "gc.auto=0"]
+            subprocess.run([*git, "init", "-q"], cwd=foreign, check=True)
+            subprocess.run([*git, "commit", "--allow-empty", "-qm", "foreign"], cwd=foreign, check=True)
+            with patch.dict(os.environ, {"GIT_DIR": str(foreign / ".git"),
+                                         "GIT_COMMON_DIR": str(foreign / ".git"),
+                                         "GIT_WORK_TREE": str(foreign)}):
+                self.assertEqual(unit.source_sha(), expected)
+
+
+class UnitManifestTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.workspace = Path(self.directory.name).resolve()
+        self.target = self.workspace / "target"
+        self.cases, _selected = unit.parse_inventory(inventory())
+        self.manifest = {
+            "version": 1, "source_sha": "a" * 40, "workspace": str(self.workspace),
+            "target": str(self.target), "archive_sha256": "b" * 64, "shard_count": 4,
+            "tests": unit.encode_cases(self.cases),
         }
-        stdout = io.StringIO()
-        with mock.patch.object(unit, "cargo_metadata", return_value=meta), mock.patch.object(
-            unit, "verify_coverage"
-        ), mock.patch.object(unit, "LIB_BINS_SECONDS", 0), mock.patch(
-            "sys.stdout", stdout
-        ), mock.patch("sys.stderr", io.StringIO()):
-            unit.main(["--list-only", "--shard-index", "0", "--shard-count", "1"])
-        self.assertEqual(stdout.getvalue().splitlines(), ["alpha", "gamma"])
+        self.anchors = {"workspace": self.workspace, "target": self.target,
+                        "source": "a" * 40, "archive_sha256": "b" * 64, "shard_count": 4}
 
-    def test_list_only_prints_selected_shard_after_global_coverage(self):
-        names = [f"t{i:02d}" for i in range(7)]
-        # Shard 0's library and binary tests outweigh seven unlisted targets.
-        expected = ["t00", "t02", "t04", "t06"]
-        meta = {
-            "target_directory": "/tmp",
-            "packages": [{
-                "name": "roundhouse",
-                "targets": [{"name": name, "kind": ["test"]} for name in names],
-            }],
+    def test_valid_manifest_preserves_all_case_states(self):
+        self.assertEqual(unit.validate_manifest(self.manifest, **self.anchors), self.cases)
+
+    def test_archive_source_paths_and_shard_count_must_match(self):
+        invalid = {
+            "workspace": self.workspace / "other-checkout",
+            "target": self.workspace / "other-target",
+            "source": "c" * 40,
+            "archive_sha256": "c" * 64,
+            "shard_count": 3,
         }
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with mock.patch.object(unit, "cargo_metadata", return_value=meta), mock.patch.object(
-            unit, "verify_coverage"
-        ) as coverage, mock.patch.object(unit, "run_cargo") as cargo, mock.patch(
-            "sys.stdout", stdout
-        ), mock.patch("sys.stderr", stderr):
-            code = unit.main(["--list-only", "--shard-index", "1", "--shard-count", "3"])
-        self.assertEqual(code, 0)
-        cargo.assert_not_called()
-        coverage.assert_called_once_with(names)
-        self.assertEqual(stdout.getvalue().splitlines(), expected)
-        err = stderr.getvalue()
-        self.assertIn("shard 1 of 3", err)
-        self.assertIn("4 selected of 7", err)
+        for key, value in invalid.items():
+            anchors = dict(self.anchors, **{key: value})
+            with self.assertRaises(unit.ContractError):
+                unit.validate_manifest(self.manifest, **anchors)
 
-    def test_nonzero_shard_skips_library_and_binary_units(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            deps = root / "debug" / "deps"
-            deps.mkdir(parents=True)
-            alpha = deps / "alpha-aaaaaaaaaaaaaaaa"
-            beta = deps / "beta-bbbbbbbbbbbbbbbb"
-            gamma = deps / "gamma-cccccccccccccccc"
-            for path in (alpha, beta, gamma):
-                write_executable(path)
-            calls: list[list[str]] = []
+    def test_duplicate_identity_is_not_silently_overwritten(self):
+        self.manifest["tests"].append(dict(self.manifest["tests"][0]))
+        with self.assertRaises(unit.ContractError):
+            unit.manifest_cases(self.manifest)
 
-            def fake_run(args, **_kwargs):
-                calls.append(list(args))
-                return 0
+    def test_unknown_versions_fields_and_missing_fields_are_rejected(self):
+        for version in (0, 2, True, "1"):
+            manifest = dict(self.manifest, version=version)
+            with self.assertRaises(unit.ContractError):
+                unit.manifest_cases(manifest)
+        manifest = dict(self.manifest, extra="unexpected")
+        with self.assertRaises(unit.ContractError):
+            unit.manifest_cases(manifest)
+        del self.manifest["source_sha"]
+        with self.assertRaises(unit.ContractError):
+            unit.manifest_cases(self.manifest)
 
-            with mock.patch.object(unit, "cargo_metadata", return_value={
-                "target_directory": str(root),
-                "packages": [{
-                    "name": "roundhouse",
-                    "targets": [
-                        {"name": "alpha", "kind": ["test"]},
-                        {"name": "beta", "kind": ["test"]},
-                        {"name": "gamma", "kind": ["test"]},
-                    ],
-                }],
-            }), mock.patch.object(unit, "verify_coverage"), mock.patch.object(
-                unit, "run_cargo", side_effect=fake_run
-            ), mock.patch.object(unit, "LIB_BINS_SECONDS", 0):
-                code = unit.main(
-                    ["--shard-index", "1", "--shard-count", "2", "--no-timings"]
-                )
-            self.assertEqual(code, 0)
-            self.assertFalse(any("--lib" in call or "--bins" in call for call in calls))
-            self.assertTrue(all("--no-run" not in call for call in calls))
-            tested = [
-                call[call.index("--test") + 1] for call in calls if "--test" in call
-            ]
-            self.assertEqual(tested, ["beta"])
-            self.assertTrue(all("--locked" in call for call in calls))
-            self.assertFalse(beta.exists())
-            self.assertTrue(alpha.exists())
-            self.assertTrue(gamma.exists())
-
-    def test_global_missing_metadata_is_rejected_despite_filtering(self):
-        stems = sorted(p.stem for p in Path("tests").glob("*.rs"))
-        self.assertGreater(len(stems), 3)
-        omitted = stems[0]
-        incomplete = [stem for stem in stems if stem != omitted]
-        with mock.patch.object(unit, "cargo_metadata", return_value={
-            "target_directory": "/tmp",
-            "packages": [{
-                "name": "roundhouse",
-                "targets": [{"name": stem, "kind": ["test"]} for stem in incomplete],
-            }],
-        }), mock.patch.object(unit, "run_cargo") as cargo:
-            with self.assertRaises(SystemExit) as ctx:
-                unit.main(["--list-only", "--shard-index", "1", "--shard-count", "3"])
-            cargo.assert_not_called()
-            message = str(ctx.exception)
-            self.assertIn("missing", message)
-            self.assertIn(omitted, message)
-
-    def test_sharded_failure_propagates_and_skips_reclaim(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            deps = root / "debug" / "deps"
-            deps.mkdir(parents=True)
-            keep = deps / "alpha-aaaaaaaaaaaaaaaa"
-            fails = deps / "beta-bbbbbbbbbbbbbbbb"
-            dwo = deps / "beta-bbbbbbbbbbbbbbbb.beta.dwo"
-            write_executable(keep)
-            write_executable(fails)
-            dwo.write_text("dwo")
-            calls: list[list[str]] = []
-
-            def fake_run(args, **_kwargs):
-                calls.append(list(args))
-                if "--test" in args and "--no-run" not in args:
-                    return 17
-                return 0
-
-            with mock.patch.object(unit, "cargo_metadata", return_value={
-                "target_directory": str(root),
-                "packages": [{
-                    "name": "roundhouse",
-                    "targets": [
-                        {"name": "alpha", "kind": ["test"]},
-                        {"name": "beta", "kind": ["test"]},
-                    ],
-                }],
-            }), mock.patch.object(unit, "verify_coverage"), mock.patch.object(
-                unit, "run_cargo", side_effect=fake_run
-            ), mock.patch.object(unit, "LIB_BINS_SECONDS", 0):
-                code = unit.main(
-                    ["--shard-index", "1", "--shard-count", "2", "--no-timings"]
-                )
-            self.assertEqual(code, 17)
-            self.assertFalse(any("--lib" in call for call in calls))
-            self.assertTrue(fails.exists(), "failed batch artifacts must remain")
-            self.assertTrue(dwo.exists())
-            self.assertTrue(keep.exists())
+    def test_empty_malformed_or_all_ignored_manifest_is_rejected(self):
+        for rows in ([], [{"binary": "x", "name": "y", "ignored": 0}],
+                     [{"binary": "x", "name": "y", "ignored": True}]):
+            manifest = dict(self.manifest, tests=rows)
+            with self.assertRaises(unit.ContractError):
+                unit.manifest_cases(manifest)
+        for key, value in (("source_sha", "not-a-sha"), ("archive_sha256", "z" * 64),
+                           ("workspace", "relative/path"), ("shard_count", False)):
+            manifest = dict(self.manifest, **{key: value})
+            with self.assertRaises(unit.ContractError):
+                unit.manifest_cases(manifest)
 
 
 if __name__ == "__main__":

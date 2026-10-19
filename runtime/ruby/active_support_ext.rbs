@@ -7,6 +7,7 @@ module ActiveSupport
     def self.time_fragment: (::Time? t) -> String
     def self.written: (String text) -> String
     def self.utc_zone?: () -> bool
+    def self.utc_zone_name?: (String name) -> bool
     UTC_ZONE_NAMES: Array[String]
   end
   def self.deep_dup: (untyped value) -> untyped
@@ -143,6 +144,7 @@ module ActiveSupport
   def self.current_zone: () -> TimeZoneData?
   def self.use_zone: (String? zone) { () -> untyped } -> untyped
   def self.present: (Time t) -> Time
+  def self.present_in_zone: (Time t, TimeZoneData zone) -> Time
   def self.present_db: (Time? t) -> Time?
   def self.in_time_zone: (Time t, String? zone) -> Time
   def self.zone_name: (TimeZone? zone) -> String?

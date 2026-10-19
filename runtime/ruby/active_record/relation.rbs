@@ -1,20 +1,10 @@
 module ActiveRecord
-  # Same model handle and include list types as Relation (the Spinel
-  # tree widens `Base` here as it does there).
-  class PendingPreload
-    @model: Base
-    @records: Array[Base]
-    @specs: Array[Symbol | Hash[Symbol, Symbol]]
-    @done: bool
-    def initialize: (Base model, Array[Base] records, Array[Symbol | Hash[Symbol, Symbol]] specs) -> void
-    def run: () -> nil
-  end
-
-  # Lazy chainable query builder. Chain methods return `self` (typed as
-  # Relation); terminals execute and return rows / scalars. Loaded
-  # records are `Base` as an interim (same as first/take) — not
-  # per-model. `Relation[T]` is the later refinement. `preloaded` and
-  # set-operator operands stay `untyped` for Spinel integer-seed arrays.
+  # Lazy chainable query builder. Chain methods answer a new Relation
+  # and leave the receiver unchanged; terminals execute and return
+  # rows / scalars. Loaded records are `Base` as an interim (same as
+  # first/take) — not per-model. `Relation[T]` is the later refinement.
+  # `preloaded` and set-operator operands stay `untyped` for Spinel
+  # integer-seed arrays.
   class Relation
     # Model handle is `Base` (class object collapsed onto `Ty::Class{Base}`
     # in send.rs). Do not spell `Class` — that leaves `@model` as Ty::Var
@@ -27,6 +17,7 @@ module ActiveRecord
     # Rails' Relation#spawn — copy query state onto a fresh Relation so
     # a scope fork cannot mutate its caller's accumulators.
     def spawn: () -> Relation
+    def unloaded_spawn: () -> Relation
     def own_lists: () -> Relation
     def take_query_lists: (
         Array[String] wheres,
@@ -47,6 +38,9 @@ module ActiveRecord
     def copy_scope_attributes: (Hash[Symbol, untyped] attrs) -> Hash[Symbol, untyped]
 
     def where: (?(Hash[String | Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
+    # In-place steps behind the chain methods (each chain method is
+    # `spawn` plus one of these); rest args arrive as one list.
+    def where_args!: (Hash[String | Symbol, untyped] | String | nil condition, Array[untyped] args) -> Relation
 
     # Query ivars the body reads after builders write them. Declared so
     # probes / RBS-seeded typing do not freeze on `initialize`'s `nil`
@@ -68,7 +62,9 @@ module ActiveRecord
     def mark_null!: () -> void
     def hash_has_empty_in?: (Hash[untyped, untyped]) -> bool
     def with_recursive: (Hash[Symbol, Array[Relation]] ctes) -> Relation
+    def with_recursive!: (Hash[Symbol, Array[Relation]] ctes) -> Relation
     def from: (String source) -> Relation
+    def from!: (String source) -> Relation
     def cte_prefix: () -> String
     def from_source: () -> String
 
@@ -84,18 +80,24 @@ module ActiveRecord
     def hash_column_name: (String col) -> String
     @opaque_wheres: bool
     def where_scope: (Hash[Symbol, untyped] condition) -> Relation
+    def where_scope!: (Hash[Symbol, untyped] condition) -> Relation
     def scope_attributes: () -> Hash[Symbol, untyped]
     def merge_seedable_scope: (Hash[String | Symbol, untyped] hash) -> void
     def not: (?(Hash[String | Symbol, untyped] | String | nil) condition, *untyped args) -> Relation
     def excluding: (*untyped records) -> Relation
+    def excluding_value!: (untyped val) -> Relation
     def without: (*untyped records) -> Relation
     def or: (Relation other) -> Relation
+    def or!: (Relation other) -> Relation
     def push_where: (String sql) -> Relation
     def push_where_cols: (String sql, Array[String] cols, ?bool null_clause) -> Relation
     def pop_where: () -> String?
     def add_condition: (Hash[String | Symbol, untyped] | String | nil condition, Array[untyped] args, bool negate) -> bool
     def order: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
+    def order_parts!: (Array[String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]] parts) -> Relation
+    def reorder_parts!: (Array[String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]] parts) -> Relation
     def order_sql: (String fragment) -> Relation
+    def order_sql!: (String fragment) -> Relation
     def reorder_sql: (String fragment) -> Relation
     def clear_ordering: () -> Relation
     # In-memory sort of a LOADED relation. Records are `Base` (same
@@ -119,7 +121,9 @@ module ActiveRecord
     # Request params (`limit(params[:n])`) are Strings; `sql_limit`
     # is Rails' Integer() and rejects SQL. nil clears, as in Rails.
     def limit: (Integer | Float | String | nil n) -> Relation
+    def limit!: (Integer | Float | String | nil n) -> Relation
     def offset: (Integer | String | nil n) -> Relation
+    def offset!: (Integer | String | nil n) -> Relation
     # LIMIT/OFFSET page arithmetic: `page` / `per` / `paginate` take
     # whatever the request handed over (a params String, an Integer or
     # nil) and read it through `to_s`.
@@ -137,8 +141,11 @@ module ActiveRecord
     def next_page: () -> Integer?
     def prev_page: () -> Integer?
     def group: (*(String | Symbol) parts) -> Relation
+    def group_parts!: (Array[String | Symbol] parts) -> Relation
     def having: (String condition, *untyped args) -> Relation
+    def having_args!: (String condition, Array[untyped] args) -> Relation
     def joins: (String | Symbol spec) -> Relation
+    def joins!: (String | Symbol spec) -> Relation
     def join_fragment: (String | Symbol spec) -> String
     def left_outer_joins: (String | Symbol spec) -> Relation
     def left_joins: (String | Symbol spec) -> Relation
@@ -151,19 +158,25 @@ module ActiveRecord
     # same method under Ruby's other name and DOES declare the block
     # shape, so a strict target that needs it has a spelling.
     def select: (*(String | Symbol) specs) -> Relation
+    def select_specs!: (Array[String | Symbol] specs) -> Relation
     def distinct: (?(bool | Symbol | String) value) -> Relation
+    def distinct!: (?(bool | Symbol | String) value) -> Relation
     def all: () -> Relation
     def includes: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
     def preload: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
     def eager_load: (*(Symbol | Hash[Symbol, Symbol]) names) -> Relation
+    def include_names!: (Array[Symbol | Hash[Symbol, Symbol]] names) -> Relation
     def skip_preloading!: () -> Relation
     def preload_associations: (Array[Base] records) -> Array[Base]
     def references: (*Symbol names) -> Relation
     def merge: (Relation other) -> Relation
+    def merge!: (Relation other) -> Relation
     def where_clauses: () -> Array[String]
     def unscope: (?where: Symbol | String | Array[Symbol | String]?) -> Relation
+    def unscope!: (?where: Symbol | String | Array[Symbol | String]?) -> Relation
     def arel: () -> Arel::SelectManager
     def none: () -> Relation
+    def none!: () -> Relation
     def reload: () -> Relation
     def load: () -> Relation
     def load_async: () -> Relation
@@ -286,6 +299,7 @@ module ActiveRecord
     def find: (Integer | Float | String | Array[Integer | Float | String] | nil id) -> untyped
     def find_primary_key: (Integer | Float | String | Array[Integer | Float | String] | nil id) -> (Base | Array[Base])
     def friendly: () -> Relation
+    def friendly!: () -> Relation
     def friendly_find: (?(Integer | Float | String | Array[Integer | Float | String] | nil) id) -> (Base | Array[Base])
     def friendly_first: (?String id) -> Base?
     def friendly_history_first: (?String id) -> Base?

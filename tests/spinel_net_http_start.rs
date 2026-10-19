@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const CHECKS: usize = 23;
+const CHECKS: usize = 27;
 
 fn scratch_dir() -> PathBuf {
     let base = option_env!("CARGO_TARGET_TMPDIR")

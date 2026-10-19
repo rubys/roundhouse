@@ -2,6 +2,9 @@ import Foundation
 
 enum Time {
     static func now() -> TimeInstant { TimeInstant(Date()) }
+
+    // IR spelling of `Time.now.utc` (`lower::time_calendar`).
+    static func utc() -> TimeInstant { now().utc }
 }
 
 struct TimeInstant {
@@ -20,4 +23,7 @@ struct TimeInstant {
             c.year!, c.month!, c.day!, c.hour!, c.minute!, c.second!
         )
     }
+
+    // Same string as `iso8601`. The lowered name is Crystal's `to_rfc3339`.
+    var toRfc3339: String { iso8601 }
 }

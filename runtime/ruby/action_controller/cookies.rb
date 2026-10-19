@@ -72,6 +72,16 @@ module ActionController
       ActionController::SignedCookieJar.new(self)
     end
 
+    # `cookies.encrypted[:k]`: the same delegation as `signed`, through
+    # AES-256-GCM rather than an HMAC (ActionController::MessageEncryptor).
+    # Its reads answer the value as JSON gives it back, so this is the
+    # view that reads the session cookie: Action Cable connections
+    # authorize with `cookies.encrypted[Rails.application.config
+    # .session_options[:key]]`.
+    def encrypted
+      ActionController::EncryptedCookieJar.new(self)
+    end
+
     # Storage, under the signing view above. `[]`/`[]=` are the same
     # pair without signing.
     def raw(key)
@@ -303,6 +313,87 @@ module ActionController
     end
   end
 
+  # The `cookies.encrypted` view: same storage, encrypted on the way out
+  # and decrypted on the way in. Rails' EncryptedKeyRotatingCookieJar,
+  # minus the rotation.
+  #
+  # Unlike the signed view, a read answers the VALUE, not its text: the
+  # cookie carries JSON (`cookies_serializer :json`), so a Hash comes back
+  # a Hash with String keys and an Integer an Integer. That is what makes
+  # this the reader of the session cookie, whose value is the whole
+  # session Hash. nil for an absent cookie and for one that does not
+  # decrypt for this name, as Rails answers (see MessageEncryptor for
+  # what does not).
+  class EncryptedCookieJar
+    def initialize(jar, permanent = false)
+      @jar = jar
+      @permanent = permanent
+    end
+
+    def [](key)
+      raw = @jar.raw(key)
+      return nil if raw == ""
+      json = ActionController::MessageEncryptor.decrypted_json(
+        Rails.application.secret_key_base, raw, "cookie." + key.to_s
+      )
+      return nil if json == ""
+      ActionController::EncryptedCookieJar.parse(json)
+    end
+
+    # A bare value or Rails' options Hash, as the signed view takes them.
+    # The value is written as ActiveSupport's JSON; a permanent write puts
+    # its twenty years inside the envelope too, where Rails' jar records
+    # `expires` as metadata.
+    def []=(key, value)
+      exp = "null"
+      exp = "\"" + ActionController::MessageVerifier.iso8601_ms(ActionController::EncryptedCookieJar.permanent_time) + "\"" if @permanent
+      encrypted = ActionController::MessageEncryptor.encrypt(
+        Rails.application.secret_key_base,
+        ActiveSupport::JSON.encode(ActionController::EncryptedCookieJar.value_of(value)),
+        "cookie." + key.to_s, exp
+      )
+      @jar.raw_set(key, encrypted)
+      @jar.record_permanent(key) if @permanent
+      if value.is_a?(Hash)
+        ss = value[:same_site]
+        ss = "" if ss.nil?
+        @jar.record_flags(key, value[:httponly] != false, ss.to_s, value[:secure] == true)
+      end
+      value
+    end
+
+    def permanent
+      ActionController::EncryptedCookieJar.new(@jar, true)
+    end
+
+    def delete(key)
+      @jar.delete(key)
+    end
+
+    # The value out of either write form, untouched: unlike the signed
+    # view's, it is not made a String, because JSON keeps its type.
+    def self.value_of(value)
+      return value[:value] if value.is_a?(Hash)
+      value
+    end
+
+    # The JSON text a cookie decrypted to, as a value; nil when it does
+    # not parse, which is what Rails answers for a cookie whose message
+    # is not JSON (a Marshal-serialized one, say).
+    def self.parse(json)
+      ActiveSupport::JSON.decode(json)
+    rescue StandardError
+      nil
+    end
+
+    # The instant a permanent write expires at: twenty calendar years
+    # out, the moment `CookieJar.permanent_expires` formats for the header.
+    def self.permanent_time
+      n = Time.now.utc
+      Time.utc(n.year + 20, n.month, n.day, n.hour, n.min, n.sec)
+    end
+  end
+
   # The `cookies.permanent` view: the unsigned jar's reads and writes,
   # with each write recorded as expiring in twenty years. Rails'
   # PermanentCookieJar, which is also where `cookies.permanent.signed`
@@ -324,6 +415,10 @@ module ActionController
 
     def signed
       ActionController::SignedCookieJar.new(@jar, true)
+    end
+
+    def encrypted
+      ActionController::EncryptedCookieJar.new(@jar, true)
     end
 
     def delete(key)

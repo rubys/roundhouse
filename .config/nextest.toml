@@ -1,0 +1,10 @@
+nextest-version = { required = "0.9.148" }
+
+[profile.ci]
+retries = 0
+fail-fast = false
+test-threads = "num-cpus"
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+path = "junit.xml"

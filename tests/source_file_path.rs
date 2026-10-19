@@ -41,7 +41,8 @@ puts Dir.pwd != Locator::ROOT
 const EXPECTED: &str = "true\ntrue\ntrue\ntrue\ntrue\n";
 
 fn elsewhere(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("roundhouse-cwd-{tag}-{}", std::process::id()));
+    // `__dir__` is a realpath; resolve macOS's /var -> /private/var link.
+    let dir = std::env::temp_dir().canonicalize().unwrap().join(format!("roundhouse-cwd-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

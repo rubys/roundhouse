@@ -101,6 +101,15 @@ pub(crate) fn rewrite_time_current(expr: &mut Expr, formats: &TimeFormats) {
 }
 
 pub(crate) fn rewrite_node(expr: &mut Expr, formats: &TimeFormats) {
+    rewrite_node_inner(expr, formats);
+    // `Time.current` and `to_fs(:iso8601)` just became `Time.now.utc` and
+    // zero-arg `iso8601`. Crystal's spelling is applied here so every
+    // caller of this function (hooks, tests, route helpers, view classes)
+    // lands on one form.
+    super::time_calendar::ground_crystal_time_bridge(expr);
+}
+
+fn rewrite_node_inner(expr: &mut Expr, formats: &TimeFormats) {
     let is_target = matches!(
         &*expr.node,
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
@@ -272,6 +281,8 @@ fn rewrite_to_fs(expr: &mut Expr, formats: &TimeFormats) {
                 }
                 let mut body = method.body.clone();
                 crate::lower::case_lambda::subst(&mut body, &param.name, &recv);
+                // The lambda was not in the tree this walk already grounded.
+                super::time_calendar::ground_crystal_time_bridge_tree(&mut body);
                 // `to_fs` is `formatter.call(self).to_s` — the `.to_s` is
                 // Rails', not ours, and it is what makes campfire's
                 // Integer-returning `:epoch` agree with the Str the

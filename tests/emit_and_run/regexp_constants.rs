@@ -37,3 +37,24 @@ fn regexp_option_constants_are_unsupported_on_strict_targets() {
         assert!(errors.iter().any(|e| e.contains(name)), "{name}: {errors:#?}");
     }
 }
+
+/// `Regexp.new` / `.escape` / `.union` name Ruby's class, which no strict
+/// emit maps (each emitted the call against a name nothing defines);
+/// they are reported there. A regexp literal is not: each target maps it.
+#[test]
+fn regexp_class_methods_are_unsupported_on_strict_targets() {
+    use roundhouse::project::BuildTarget::*;
+    for target in [Rust, Typescript, Go, Python, CSharp, Kotlin, Swift, Elixir, Crystal] {
+        let (_emitted, errors) = emit_and_run::real_blog()
+            .edit(
+                "app/models/article.rb",
+                "  validates :title, presence: true\n",
+                "  validates :title, presence: true\n\n  def self.built(s)\n    Regexp.new(s).match?(\"abc\")\n  end\n\n  def self.escaped(s)\n    Regexp.escape(s)\n  end\n\n  def self.literal(s)\n    /ab/.match?(s)\n  end\n",
+            )
+            .emit(target);
+        for method in ["new", "escape"] {
+            assert!(errors.iter().any(|e| e.contains(&format!("`Regexp.{method}` is Ruby's Regexp class"))), "{target:?} {method}: {errors:#?}");
+        }
+        assert_eq!(errors.len(), 2, "{target:?}: {errors:#?}");
+    }
+}

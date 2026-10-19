@@ -863,10 +863,11 @@ fn check_surveys_effective_model_declarations_without_lowering_or_diagnostic_lea
             "",
             &[false, false],
         ),
+        // The instance `title` over the column's reader is the effective one (a column accessor yields).
         (
             "def self.title(...); 11; end; def title(...); 29; end",
             "",
-            &[false, true],
+            &[false, false],
         ),
         ("def self.create_from_params(...); 11; end", "", &[false]),
         (

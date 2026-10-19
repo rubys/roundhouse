@@ -49,8 +49,7 @@ fn pdf_and_csv_templates_ingest_beside_the_html_template() {
     assert!(names.contains(&("reports/show".to_string(), "pdf".to_string())), "{names:?}");
     assert!(names.contains(&("reports/show".to_string(), "csv".to_string())), "{names:?}");
 
-    // Every one of them is a live, emitted view (not analysis-only —
-    // that's specifically the `.text.erb` mailer-variant carve-out).
+    // Every one of them is a live, emitted view.
     for view in &app.views {
         assert!(
             lowers_through_view_path(view),
@@ -84,8 +83,10 @@ fn txt_template_ingests_and_lowers_beside_the_html_template() {
         .find(|v| v.name.as_str() == "notifications/notice" && v.format.as_str() == "txt")
         .expect("notice.txt.erb ingested");
     assert!(lowers_through_view_path(txt), "txt format should lower through the view path");
-    // `txt` is a distinct format from Rails' `text` mailer-variant
-    // spelling, which stays analysis-only; confirm the two don't
-    // collide on that flag.
-    assert!(!txt.analysis_only, "txt (unlike text) is a fully emitted format");
+    assert!(!txt.analysis_only, "txt is a fully emitted format");
+    // text/plain, so Rails' ERB handler does not escape `<%= %>`
+    // (`escape_ignore_list`); neither does the lowered view.
+    let lowered = roundhouse::lower::view_to_library::lower_view_to_library_class(txt, &app);
+    let body = format!("{:?}", lowered.methods);
+    assert!(!body.contains("html_escape"), "{body}");
 }
