@@ -467,12 +467,14 @@ fn content_helper_assignment(p: &Probe<'_>) -> bool {
     call.arguments().is_some_and(|a| a.arguments().iter().count() == 1)
 }
 
+const ASSET_VERSION_INERT: &str = "without an active Propshaft reader, the emitted app does not use this asset digest salt";
+
 /// The inert allowlist: `(normalized target, reason)`. Add an entry only when you can say why the statement is
 /// inert for the COMPILED app: ingest never reads it, and the thing it
 /// configures does not exist in the emitted program.
 pub const INERT: &[(&str, &str)] = &[
     ("config.action_dispatch.cookies_serializer", "selects how Rails encodes cookie payloads on the wire (:json / :marshal); the emitted runtime owns one session codec and never reads the setting"),
-    ("config.assets.version", "salts the asset digest Sprockets/Propshaft compute; the emitted app serves its own assets and does not read it"),
+    ("config.assets.version", ASSET_VERSION_INERT),
     ("config.generators", "consulted only by `rails generate`, which is not part of a compiled app (a block here only calls `g.<option>`)"),
     ("config.enable_reloading", "code reloading; the compiled app has no autoloader or reloader, every class is resolved at compile time"),
     ("config.cache_classes", "the pre-7.1 spelling of `enable_reloading = false`; same reason"),
@@ -1166,6 +1168,15 @@ pub fn ledger<V: Vfs + ?Sized>(
     }
     if let Some(bytes) = &application_bytes {
         out.push(application_ledger(&application, bytes, &lib_ignores));
+    }
+    if super::propshaft::version_is_consumed(vfs, dir) {
+        for ledger in &mut out {
+            for (_, verdict) in &mut ledger.verdicts {
+                if matches!(verdict, Verdict::Inert(reason) if *reason == ASSET_VERSION_INERT) {
+                    *verdict = Verdict::Consumed("Propshaft asset version");
+                }
+            }
+        }
     }
     for engine_dir in path_gems {
         let lib = engine_dir.join("lib");

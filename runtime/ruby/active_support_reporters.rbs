@@ -94,8 +94,7 @@ module ActiveSupport
     def deliver: (untyped name_or_object, untyped payload, Hash[untyped, untyped] kwargs, bool filter_payload, Integer depth) -> nil
     def payload_filter: () -> ParameterFilter
     def effective_filter_parameters: () -> Array[untyped]
-    def resolve_name: (untyped name_or_object) -> String?
-    def resolve_payload: (untyped name_or_object, untyped payload, Hash[untyped, untyped] kwargs, bool filter) -> untyped
+    def resolve_payload: (bool named, untyped name_or_object, untyped payload, Hash[untyped, untyped] kwargs, bool filter) -> untyped
     def symbolize: (Hash[untyped, untyped] hash) -> Hash[Symbol, untyped]
     def handle_unexpected_args: (untyped name_or_object, untyped payload, Hash[untyped, untyped] kwargs) -> nil
   end
@@ -137,7 +136,6 @@ module ActiveSupport
     def add_middleware: (untyped middleware) -> Array[untyped]
     def report: (untyped error, ?handled: bool, ?severity: Symbol, ?context: Hash[untyped, untyped]?, ?source: String) -> nil
     def log_unsubscribed: (::Exception error, Symbol severity) -> nil
-    def deep_dup: (untyped value) -> untyped
     def disabled_for_thread: () -> Array[untyped]?
     def disabled_subscribers: () -> Array[untyped]
     def ensure_backtrace: (::Exception error) -> nil

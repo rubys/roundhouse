@@ -50,7 +50,7 @@ fn rewrite(e: &Expr) -> Expr {
         ExprNode::Send { recv: Some(_), method, args, .. }
             if matches!(method.as_str(), "push" | "<<")
                 && args.len() == 1
-                && e.hint == Some(crate::expr::IrHint::StringBuilderAppend) =>
+                && e.hint() == &Some(crate::expr::IrHint::StringBuilderAppend) =>
         {
             // `e.clone()` (not `clone_send`, which drops `.hint` via a
             // fresh `syn`) so the emitter still sees the tag.
@@ -129,7 +129,7 @@ fn rewrite(e: &Expr) -> Expr {
                 target: target.clone(),
                 value: rewrite(value),
             });
-            a.hint = e.hint;
+            a.set_hint(*e.hint());
             a
         }
         ExprNode::Return { value } => syn(ExprNode::Return { value: rewrite(value) }),
@@ -352,7 +352,7 @@ mod tests {
     fn string_builder_hints_emit_iolist_and_param_resolves() {
         use crate::expr::IrHint;
         fn hinted(mut e: Expr, h: IrHint) -> Expr {
-            e.hint = Some(h);
+            e.set_hint(Some(h));
             e
         }
         // def article(article)            # param collides with the fn name

@@ -3338,8 +3338,7 @@ fn flatten_seqs(expr: &Expr) -> Expr {
             ty: e.ty.clone(),
             effects: e.effects.clone(),
             leading_blank_line: e.leading_blank_line,
-            diagnostic: e.diagnostic.clone(),
-            hint: e.hint,
+            cold: e.cold.clone(),
             decisions: e.decisions,
         }
     }

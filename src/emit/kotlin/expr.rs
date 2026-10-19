@@ -833,7 +833,7 @@ pub fn emit_expr(e: &Expr) -> String {
 /// Mirrors `crystal::expr::try_string_builder`. Non-hinted sites fall
 /// through to the normal node emit.
 fn try_string_builder(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {

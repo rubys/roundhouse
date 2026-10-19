@@ -2625,11 +2625,11 @@ fn unsupported_expressions_raise_without_breaking_ruby_syntax() {
     let mut expr = Expr::new(Span::synthetic(), ExprNode::Const {
         path: vec![Symbol::from("Missing")],
     });
-    expr.diagnostic = Some(DiagnosticKind::Unsupported {
+    expr.set_diagnostic(Some(DiagnosticKind::Unsupported {
         target: None,
         construct: Symbol::from("constant"),
         detail: "Missing".into(),
-    });
+    }));
     let stub = ruby::emit_expr(&expr);
     for context in [
         format!("[1] + {stub}"),

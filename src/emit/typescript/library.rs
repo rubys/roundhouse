@@ -1889,8 +1889,7 @@ fn rewrite_free(e: &Expr) -> Expr {
         ty: e.ty.clone(),
         effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
-        diagnostic: e.diagnostic.clone(),
-        hint: e.hint,
+        cold: e.cold.clone(),
         decisions: e.decisions,
     }
 }
@@ -2189,8 +2188,7 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
         ty: e.ty.clone(),
         effects: e.effects.clone(),
         leading_blank_line: e.leading_blank_line,
-        diagnostic: e.diagnostic.clone(),
-        hint: e.hint,
+        cold: e.cold.clone(),
         decisions: e.decisions,
     }
 }

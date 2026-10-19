@@ -245,7 +245,7 @@ fn writer_body_with(
     // Init/Result stamps, as the jbuilder lowerer leaves them: the
     // accumulator triple every target's string-builder emit keys on.
     let mut result = var_ref(ACC);
-    result.hint = Some(IrHint::StringBuilderResult);
+    result.set_hint(Some(IrHint::StringBuilderResult));
     out.push(result);
     Ok(out)
 }
@@ -307,13 +307,13 @@ fn date_column_text(raw: Expr) -> Expr {
 
 fn io_append_lit(s: &str) -> Expr {
     let mut e = with_ty(send(Some(var_ref(ACC)), "<<", vec![lit_str(s)], false), Ty::Str);
-    e.hint = Some(IrHint::StringBuilderAppend);
+    e.set_hint(Some(IrHint::StringBuilderAppend));
     e
 }
 
 fn io_append_call(call: Expr) -> Expr {
     let mut e = with_ty(send(Some(var_ref(ACC)), "<<", vec![call], false), Ty::Str);
-    e.hint = Some(IrHint::StringBuilderAppend);
+    e.set_hint(Some(IrHint::StringBuilderAppend));
     e
 }
 
@@ -370,7 +370,7 @@ fn assign_local(name: &str, value: Expr) -> Expr {
         ),
         Ty::Str,
     );
-    e.hint = Some(IrHint::StringBuilderInit);
+    e.set_hint(Some(IrHint::StringBuilderInit));
     e
 }
 

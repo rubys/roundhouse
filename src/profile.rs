@@ -64,7 +64,7 @@ pub fn active_http_shim() -> HttpShim {
 /// Mirrors the per-target emitters under `src/emit/`.
 ///
 /// This is the emitter-facing target list; it is a *distinct* enum from
-/// [`crate::project::BuildTarget`], which is the build/site-archive
+/// [`crate::build_target::BuildTarget`], which is the build/site-archive
 /// dimension (and additionally carries `Blog`, `Jruby`, and
 /// `TypescriptWorker` — deployment/packaging distinctions that are not
 /// separate emitters). Keep this enum in sync with `src/emit/`: every

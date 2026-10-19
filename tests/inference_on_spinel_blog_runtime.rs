@@ -274,10 +274,8 @@ fn untyped_subexpressions_baseline() {
         app.library_classes.len()
     );
 
-    // Loose ceiling — current measurement plus headroom. Tighten as
-    // inference improves; failing low is a good thing (un-pin and
-    // record the new lower bound). The point of the bound is to
-    // catch regressions, not to lock in today's number.
+    // The constants sit on the measured residual. A later drop lowers
+    // them in the same commit; they are not a budget with headroom.
     // 2026-10-05: 500 -> 505, MEASURED after the request-key finder
     // refresh onto 132a26c7. With this same analyzer and collector,
     // pristine 4f5a1239 / 132a26c7 runtimes measure 470 / 476; the
@@ -385,9 +383,13 @@ fn untyped_subexpressions_baseline() {
     // `Nil`, which is the honest "unknown" the RBS already says
     // (`?untyped`) rather than a type that silently zeroed `presence`.
 
-    // This uncalled API adds 27 nodes without its String parameter RBS.
-    // Keep the existing-method ceiling and RBS-aware typing gates intact.
-    const LIKE_CEILING: usize = 27;
+    // `sanitize_sql_like` itself, without its String parameter RBS.
+    // MEASURED 4 on 2026-10-19 (the old 27 counted the helper bodies,
+    // which the existing ledger now owns). Remeasured 3 after merging
+    // main: the `source = value` assign, the `value` read, and the
+    // escape call's `value`. The wildcard call's `source` is no longer
+    // a var on this analyzer.
+    const LIKE_CEILING: usize = 3;
     let existing_untyped = all_untyped.len() - like_untyped;
     eprintln!("inference-only ledger: existing={existing_untyped}, sanitize_sql_like={like_untyped}");
     // Transactional saves (connection.rb: `save`/`destroy`/`touch` in a
@@ -414,17 +416,24 @@ fn untyped_subexpressions_baseline() {
     // The seven new sites are that branch's `Db.transaction_open?`,
     // `Db._txn_depth`, and `Db.exec` calls, unmodeled here like the
     // other `Db` reads. The RBS-paired gate types the method.
-    // `ActiveRecord::Tasks` and the Rake subset in tasks.rb: 794 -> 835,
-    // MEASURED 2026-10-19. This probe does not seed parameter types, so
-    // those bodies contribute 181 untyped sub-expressions (unseeded
-    // parameters, `Db.database_path`, `Rails.env_name`). The 794 ceiling
-    // had unused room; the measured total is 835. The RBS-paired probe
-    // types the same file at its own ceiling.
-    // Refusing CHECK/COLLATE/AUTOINCREMENT/GENERATED and a composite
-    // primary key: 835 -> 846, MEASURED 2026-10-19. `keyword?` reads
-    // its unseeded `ddl`/`word` parameters. The RBS-paired probe types
-    // that method.
-    const CEILING: usize = 846;
+    // Remeasured 780 on 2026-10-19 against this tree: the 794 constant
+    // had headroom the later runtime no longer uses.
+    // MEASURED 766 on 2026-10-19: commit and rollback share
+    // `_take_enlisted`, so the `Db._txn_records` slice is read once.
+    // MEASURED 765 on 2026-10-19: the savepoint ROLLBACK TO / RELEASE
+    // pair lives in `RawConnection._rollback_savepoint`, called from
+    // the raw transaction and both rescue arms of `Base.transaction`.
+    // Remeasured 634 on 2026-10-19 after merging main. The analyzer's
+    // narrowing and the pluck rest-arg removed sites this constant
+    // still counted; 765 had that headroom.
+    // MEASURED 631 on 2026-10-19: save and destroy share
+    // `_enlist_or_run`, so the `Db._txn_depth` / `Db._txn_records`
+    // walk is read once.
+    // MEASURED 828 on 2026-10-19 after merging main (`sanitize_sql_like`
+    // stays 3). Main's ledger was 631. `ActiveRecord::Tasks` and the
+    // Rake subset add the unseeded-parameter and `Db` reads this probe
+    // does not type; the RBS-paired probe types the same file.
+    const CEILING: usize = 828;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

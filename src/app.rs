@@ -184,7 +184,9 @@ pub struct App {
     /// file's content is a `String`, so an app's images, fonts and
     /// binary test fixtures were silently dropped on the floor. Carried
     /// as `(relative path, bytes)` and copied VERBATIM into the emitted
-    /// tree; there is nothing to transpile in a JPEG.
+    /// tree; there is nothing to transpile in a JPEG. Compiled Propshaft
+    /// assets use the same byte channel so binary and text assets are
+    /// copied together.
     ///
     /// `serde(skip)`: these are a passthrough concern, not IR. The app
     /// JSON round-trip feeds the analyzer and the browser IDE, and

@@ -58,10 +58,10 @@ fn is_preloader_const(expr: &Expr) -> bool {
 /// Drop the refusals typing left on `Preloader` and its `new`, once the call is known to lower.
 pub(crate) fn clear_refusals(new: &mut Expr) {
     let preloader = Ty::Class { id: ClassId(Symbol::from("ActiveRecord::Associations::Preloader")), args: vec![].into() };
-    new.diagnostic = None;
+    new.set_diagnostic(None);
     new.ty = Some(preloader.clone());
     if let ExprNode::Send { recv: Some(konst), .. } = &mut *new.node {
-        konst.diagnostic = None;
+        konst.set_diagnostic(None);
         konst.ty = Some(preloader);
     }
 }

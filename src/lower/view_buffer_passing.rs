@@ -72,8 +72,8 @@ fn accumulator_name(m: &MethodDef) -> Option<String> {
     if exprs.len() < 2 {
         return None;
     }
-    if first.hint != Some(IrHint::StringBuilderInit)
-        || last.hint != Some(IrHint::StringBuilderResult)
+    if first.hint() != &Some(IrHint::StringBuilderInit)
+        || last.hint() != &Some(IrHint::StringBuilderResult)
     {
         return None;
     }
@@ -263,12 +263,12 @@ fn split(m: &MethodDef, module_path: &[Symbol], acc: &str) -> (MethodDef, Method
             value: view_buffer_cap_call("alloc", vec![key.clone()]),
         },
     );
-    init.hint = Some(IrHint::StringBuilderInit);
+    init.set_hint(Some(IrHint::StringBuilderInit));
     let mut args = vec![var(acc)];
     args.extend(m.params.iter().map(|p| var(p.name.as_str())));
     let store = view_buffer_cap_call("store", vec![key, bytesize_of(acc)]);
     let mut tail = var(acc);
-    tail.hint = Some(IrHint::StringBuilderResult);
+    tail.set_hint(Some(IrHint::StringBuilderResult));
     let mut wrapper = m.clone();
     let mut wbody = Expr::new(
         Span::synthetic(),

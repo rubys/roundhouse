@@ -297,11 +297,11 @@ fn diagnostic_nil_block_is_not_discarded() {
     else {
         panic!("expected the literal-nil byte call");
     };
-    block.diagnostic = Some(DiagnosticKind::Unsupported {
+    block.set_diagnostic(Some(DiagnosticKind::Unsupported {
         target: None,
         construct: "forwarded operand".into(),
         detail: "preserve this refusal".into(),
-    });
+    }));
     assert!(!string_bytes::materializes_array(&call));
     let ruby = emit::ruby::emit_expr(&call);
     assert!(

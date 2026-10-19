@@ -266,7 +266,7 @@ end
                 assert_eq!(actual.body.span, original.body.span);
                 assert_eq!(actual.body.ty, original.body.ty);
                 assert_eq!(actual.body.effects, original.body.effects);
-                assert_eq!(actual.body.diagnostic, original.body.diagnostic);
+                assert_eq!(actual.body.diagnostic(), original.body.diagnostic());
             }
         }
     }

@@ -643,7 +643,7 @@ end
                         expr.ty.as_ref().is_some_and(|ty| !ty.is_unknown()),
                         "{expr:?}"
                     );
-                    assert!(expr.diagnostic.is_none(), "{expr:?}");
+                    assert!(expr.diagnostic().is_none(), "{expr:?}");
                 }
                 expr.node.for_each_child(&mut check_values);
             }

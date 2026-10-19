@@ -652,7 +652,7 @@ fn emit_case(
 /// invisible to surrounding code.
 fn try_string_builder(ctx: &EmitCtx, e: &Expr) -> Option<String> {
     use crate::expr::LValue;
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign {

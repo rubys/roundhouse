@@ -95,7 +95,7 @@ fn collect_var_reads(
             // `collect_var_read_counts`). `hint` lives on the outer
             // `Expr`, not the Send variant.
             let skip_recv = matches!(
-                e.hint,
+                e.hint(),
                 Some(crate::expr::IrHint::StringBuilderAppend)
             );
             if !skip_recv {
@@ -279,7 +279,7 @@ fn stamp_var_reads(
 ) {
     // Local copy to stamp on after recursing into children.
     let outer_skip_recv = matches!(
-        e.hint,
+        e.hint(),
         Some(crate::expr::IrHint::StringBuilderAppend)
     );
     match &mut *e.node {

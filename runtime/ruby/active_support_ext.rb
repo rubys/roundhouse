@@ -125,21 +125,47 @@ module ActiveSupport
     end
   end
 
-  # ActiveSupport's `deep_dup` (core_ext/object/deep_dup.rb), for a typed
-  # Hash or Array receiver (`lower::symbolize_keys` routes the call here).
-  # A Hash copies each value and, for keys that are neither String nor
-  # Symbol, the key too — re-inserted after the String/Symbol ones, as
-  # Rails' delete-and-store does. An Array copies each element. Any other
-  # value is its `dup` (an Integer's, nil's or a Symbol's is itself).
+  # ActiveSupport's `deep_dup` (core_ext/object/deep_dup.rb). One walk,
+  # also what `ErrorReporter` hands each subscriber. A Hash is copied
+  # into a fresh Hash: String and Symbol keys first, every other key
+  # after them, which is where Rails' delete-and-store lands. An Array
+  # copies each element. A Method, an UnboundMethod, a Singleton, or
+  # anything that answers `duplicable?` with false is itself; anything
+  # else is its `dup` (an Integer's, nil's or a Symbol's is itself).
+  # `lower::symbolize_keys` routes a typed Hash or Array receiver here.
   def self.deep_dup(value)
     case value
     when Array then value.map { |item| ActiveSupport.deep_dup(item) }
     when Hash
+      # A fresh Hash, not `dup`: String and Symbol keys first, every
+      # other key after them. The key class is read once; the second
+      # pass used to ask it again.
       out = {}
-      value.each { |key, item| out[key] = ActiveSupport.deep_dup(item) if key.is_a?(String) || key.is_a?(Symbol) }
-      value.each { |key, item| out[ActiveSupport.deep_dup(key)] = ActiveSupport.deep_dup(item) unless key.is_a?(String) || key.is_a?(Symbol) }
+      deferred_keys = []
+      deferred_items = []
+      value.each do |key, item|
+        if key.is_a?(String) || key.is_a?(Symbol)
+          out[key] = ActiveSupport.deep_dup(item)
+        else
+          deferred_keys << key
+          deferred_items << item
+        end
+      end
+      i = 0
+      while i < deferred_keys.length
+        out[ActiveSupport.deep_dup(deferred_keys[i])] = ActiveSupport.deep_dup(deferred_items[i])
+        i += 1
+      end
       out
-    else value.dup
+    else
+      # Not duplicable? (core_ext/object/duplicable.rb): the value itself.
+      if value.is_a?(Method) || value.is_a?(UnboundMethod) || (defined?(::Singleton) && value.is_a?(::Singleton))
+        value
+      elsif value.respond_to?(:duplicable?) && !value.duplicable?
+        value
+      else
+        value.dup
+      end
     end
   end
 
@@ -209,7 +235,9 @@ module ActiveSupport
     hash.each do |key, item|
       empty_container = (item.is_a?(Hash) && item.empty?) || (item.is_a?(Array) && item.empty?)
       next if empty_container
-      name = namespace.empty? ? key.to_s : "#{namespace}[#{key.to_s}]"
+      # One `to_s` of the untyped key. The ceiling counts each read.
+      key_text = key.to_s
+      name = namespace.empty? ? key_text : "#{namespace}[#{key_text}]"
       pairs << query_value(name, item)
     end
     pairs = pairs.sort unless namespace.include?("[]")

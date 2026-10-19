@@ -936,7 +936,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                         ExprNode::Lit { value: Literal::Str { .. } }
                     ) {
                         let mut lit = recv.unwrap();
-                        lit.hint = Some(crate::expr::IrHint::MutableStringLiteral);
+                        lit.set_hint(Some(crate::expr::IrHint::MutableStringLiteral));
                         return Ok(lit);
                     }
                 }
@@ -2692,14 +2692,14 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let def = n.as_def_node().unwrap();
             let name = String::from_utf8_lossy(def.name().as_slice()).into_owned();
             let mut stub = Expr::new(span, ExprNode::Lit { value: Literal::Nil });
-            stub.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+            stub.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
                 target: None,
                 construct: Symbol::from(crate::diagnostic::NESTED_DEF),
                 detail: format!(
                     "`def {name}` nested in a block or method body defines a method at run time; \
                      no IR node carries it, so the site raises"
                 ),
-            });
+            }));
             return Ok(stub);
         }
         // Backticks / `%x{…}` - a shell-out. Ruby evaluates the literal

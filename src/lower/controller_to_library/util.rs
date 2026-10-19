@@ -381,8 +381,7 @@ where
         ty: expr.ty.clone(),
         effects: expr.effects.clone(),
         leading_blank_line: expr.leading_blank_line,
-        diagnostic: expr.diagnostic.clone(),
-        hint: expr.hint,
+        cold: expr.cold.clone(),
         decisions: expr.decisions,
     }
 }

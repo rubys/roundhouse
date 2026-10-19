@@ -126,7 +126,7 @@ fn rust_return_ty(ty: &Ty) -> String {
 fn rt_emit_expr(e: &Expr) -> String {
     // Analyzer-set diagnostic annotations short-circuit to a target
     // raise-equivalent (preserves Ruby's runtime-raise semantics).
-    if let Some(kind) = &e.diagnostic {
+    if let Some(kind) = &e.diagnostic() {
         return crate::emit::diagnostics::StubStyle::RustPanic
             .render(&crate::diagnostic::Diagnostic::stub_text(kind));
     }

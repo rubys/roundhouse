@@ -48,7 +48,7 @@ pub fn apply_nested_def_test_stub(app: &mut App) -> Vec<Diagnostic> {
 
 /// The first stamped site in `expr`, as the warning it reports.
 fn first_stamp(expr: &Expr) -> Option<Diagnostic> {
-    if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic
+    if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic()
         && construct.as_str() == NESTED_DEF
     {
         let mut d = Diagnostic::unsupported(expr.span, target.clone(), NESTED_DEF, detail.clone());
@@ -67,6 +67,6 @@ fn first_stamp(expr: &Expr) -> Option<Diagnostic> {
 /// A nil carrying the report — the ruby emitter renders it as the raise.
 fn stub_expr(span: crate::span::Span, d: &Diagnostic) -> Expr {
     let mut e = Expr::new(span, ExprNode::Lit { value: Literal::Nil });
-    e.diagnostic = Some(d.kind.clone());
+    e.set_diagnostic(Some(d.kind.clone()));
     e
 }

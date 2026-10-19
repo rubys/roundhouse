@@ -18,6 +18,7 @@
 mod alba;
 mod unreachable_views;
 mod uncalled_helper_copies;
+mod written_names;
 mod pagy;
 mod graphql_ruby;
 mod guarded_include;
@@ -64,6 +65,7 @@ mod column_accessors;
 mod model_macros;
 pub mod on_load_reopen;
 pub mod prism;
+mod propshaft;
 pub mod rbi;
 pub mod rate_limit;
 pub mod inertia;

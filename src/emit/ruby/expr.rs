@@ -145,7 +145,7 @@ pub fn emit_expr(e: &Expr) -> String {
     // rather than compiling a construct no target can run. Only the
     // `Unsupported` kind: an `IncompatibleBinop` the analyzer stamps is
     // left to Ruby itself, which raises at the same site on its own.
-    if let Some(kind @ DiagnosticKind::Unsupported { .. }) = &e.diagnostic {
+    if let Some(kind @ DiagnosticKind::Unsupported { .. }) = &e.diagnostic() {
         // This is an expression, including in a rescue list or a binary
         // operand. A bare command-style `raise` is not valid there.
         let stub = crate::emit::diagnostics::StubStyle::Raise
@@ -181,7 +181,7 @@ pub fn emit_expr(e: &Expr) -> String {
 fn is_locked_external_gem_constant(expr: &Expr) -> bool {
     let Some(DiagnosticKind::Unsupported {
         construct, detail, ..
-    }) = &expr.diagnostic
+    }) = &expr.diagnostic()
     else {
         return false;
     };
@@ -200,7 +200,7 @@ fn is_locked_external_gem_constant(expr: &Expr) -> bool {
 /// `+`: spinel freezes a bare literal, and the source made this copy
 /// because it mutates it.
 fn is_mutable_string_literal(e: &Expr) -> bool {
-    e.hint == Some(crate::expr::IrHint::MutableStringLiteral)
+    e.hint() == &Some(crate::expr::IrHint::MutableStringLiteral)
         && matches!(&*e.node, ExprNode::Lit { value: Literal::Str { .. } })
 }
 

@@ -580,17 +580,17 @@ impl<'a> BodyTyper<'a> {
         let ty = self.compute(expr, ctx);
         expr.ty = Some(ty.clone());
         // Not accepted silently: the runtime's setter keeps nothing, so every save would still stamp.
-        if expr.diagnostic.is_none()
+        if expr.diagnostic().is_none()
             && let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node
             && method.as_str() == "record_timestamps="
             && !matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Bool { value: true } }))
             && self.is_model_class(recv.ty.as_ref())
         {
-            expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+            expr.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
                 target: None,
                 construct: Symbol::from("record_timestamps"),
                 detail: "turning a model's timestamp stamping off is not modeled: its saves would still stamp them (`upsert_all(…, record_timestamps: false)` is)".to_string(),
-            });
+            }));
         }
         expr.decisions &= !crate::expr::CLASS_OBJECT_VALUE;
         if self.is_class_object(expr, ctx) { expr.decisions |= crate::expr::CLASS_OBJECT_VALUE; }
@@ -900,7 +900,7 @@ impl<'a> BodyTyper<'a> {
             ExprNode::Const { path } => {
                 // A later typing pass may resolve a value constant whose
                 // owner was unknown in an earlier constant fixpoint round.
-                expr.diagnostic = None;
+                crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
                 let generated = expr_span.file.0 == 0
                     || expr.decisions & crate::expr::GENERATED_CONST_REF != 0;
                 // A real FileId outside the snapshot is an indexing
@@ -908,12 +908,12 @@ impl<'a> BodyTyper<'a> {
                 if !generated && self.const_resolver.as_ref()
                     .is_some_and(|resolver| !resolver.has_registered_source(expr_span.file))
                 {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("constant"),
                         detail: format!("{}: missing source document for FileId({})",
                             written_class_id(path).0, expr_span.file.0),
-                    });
+                    }));
                     return unknown();
                 }
                 // Never search by suffix or borrow another scope's
@@ -1049,18 +1049,18 @@ impl<'a> BodyTyper<'a> {
                 };
                 // Not a class the emitted program has: the indifferent hash is a plain Hash there, so only its `new` is supported.
                 if matches!(&ty, Ty::Class { id, args } if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS) {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("constant"),
                         detail: written_class_id(path).0.as_str().to_string(),
-                    });
+                    }));
                 }
                 if indexed_source && matches!(ty, Ty::Var { .. }) {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("constant"),
                         detail: written_class_id(path).0.as_str().to_string(),
-                    });
+                    }));
                 }
                 ty
             }
@@ -1471,7 +1471,7 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Send { recv, method, args, block, parenthesized } => {
                 if let Some(ty) = self.class_factories.and_then(|factories| factories.get(&expr_span)) {
-                    expr.diagnostic = None;
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
                     if let Some(recv) = recv { self.analyze_expr(recv, ctx); }
                     // A literal superclass is declaration metadata, just as
                     // in an ordinary class header. An external parent need
@@ -1481,19 +1481,19 @@ impl<'a> BodyTyper<'a> {
                     {
                         for arg in args.iter_mut() {
                             arg.ty = Some(Ty::Class { id: parent.clone(), args: vec![].into() });
-                            arg.diagnostic = None;
+                            arg.set_diagnostic(None);
                         }
                     }
                     return ty.clone();
                 }
-                if matches!(&expr.diagnostic, Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
+                if matches!(&crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
                     if matches!(construct.as_str(), "Module protocol" | "ActiveModel::Errors" | "ActiveModel::Error" | "Rails" | "ActiveRecord::Base" | "String extension" | "Hash extension" | "not_nil!" | "Object extension" | "Module callback argument"))
-                { expr.diagnostic = None; }
+                { crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None); }
                 expr.decisions &= !crate::expr::RESOLVED_DATA_FACTORY;
                 if let Some(ty) = self.data_factories.and_then(|factories| factories.get(&expr_span)) {
                     // Only admitted declarations establish a Data class identity.
                     expr.decisions |= crate::expr::RESOLVED_DATA_FACTORY;
-                    expr.diagnostic = None;
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
                     if let Some(recv) = recv { self.analyze_expr(recv, ctx); }
                     for arg in args.iter_mut() { self.analyze_expr(arg, ctx); }
                     return ty.clone();
@@ -1587,8 +1587,7 @@ impl<'a> BodyTyper<'a> {
                         ty: ctx.self_ty.clone(),
                         effects: crate::effect::EffectSet::default(),
                         leading_blank_line: false,
-                        diagnostic: None,
-                        hint: None,
+                        cold: None,
                         decisions: 0,
                     });
                 }
@@ -1612,7 +1611,7 @@ impl<'a> BodyTyper<'a> {
                     && matches!(&*r.node, ExprNode::Const { .. })
                     && matches!(&r.ty, Some(Ty::Class { id, args }) if args.is_empty() && id.0.as_str() == crate::analyze::indifferent::CLASS)
                 {
-                    r.diagnostic = None;
+                    r.set_diagnostic(None);
                 }
                 // Not a value: Rails' `call` answers the loaders, which `preload_associations` does not.
                 if method.as_str() == "call" && args.is_empty() && block.is_none()
@@ -1679,13 +1678,13 @@ impl<'a> BodyTyper<'a> {
                     let mut refusal = None;
                     if let Some(ty) = self.pagy_call_ty(args, ctx, &mut refusal) {
                         if refusal.is_some() {
-                            expr.diagnostic = refusal;
+                            expr.set_diagnostic(refusal);
                         }
                         return ty;
                     }
                 }
                 if let Some(refusal) = self.pagy_object_refusal(recv_ty.as_ref(), method, args) {
-                    expr.diagnostic = Some(refusal);
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(refusal));
                 }
                 if let Some(r) = recv.as_mut() {
                     if promotes_to_param_value(r, recv_ty.as_ref(), method, args, &ctx.local_bindings) {
@@ -1698,10 +1697,10 @@ impl<'a> BodyTyper<'a> {
                 if self.is_module_callback(recv_ty.as_ref(), method) {
                     if let Some(arg) = args.first() {
                         if !self.is_class_object(arg, ctx) {
-                            expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                            crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                                 target: None, construct: Symbol::from("Module callback argument"),
                                 detail: format!("{} requires a proven class/module object argument", method),
-                            });
+                            }));
                         }
                     }
                 }
@@ -1757,21 +1756,21 @@ impl<'a> BodyTyper<'a> {
                     && let ExprNode::Lambda { body, .. } = &*b.node
                     && bytes_block_has_escaping_break(body)
                 {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("String#bytes block break"),
                         detail: "an escaping break can replace the receiver result; its return type is not modeled".into(),
-                    });
+                    }));
                 }
                 if method.as_str() == "new"
                     && matches!(&recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "Data")
                     && self.const_resolver.as_ref().is_some_and(|resolver| !resolver.has_source_namespace("Data"))
                 {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    expr.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("Data.new"),
                         detail: "Data is abstract; construct a class returned by Data.define".into(),
-                    });
+                    }));
                     return unknown();
                 }
                 let unsupported_deep_merge = match method.as_str() {
@@ -1800,11 +1799,11 @@ impl<'a> BodyTyper<'a> {
                 if let Some((construct, detail)) = unsupported_deep_merge
                     && matches!(recv_ty, Some(Ty::Hash { .. }))
                 {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    expr.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from(construct),
                         detail: detail.into(),
-                    });
+                    }));
                     return unknown();
                 }
                 // Force `parenthesized: true` when dispatch resolves
@@ -1978,15 +1977,15 @@ impl<'a> BodyTyper<'a> {
                 }
                 // Not left to the positional constructor: since Ruby 3.2 a Struct takes keywords too, which it would bind to its first member.
                 if method.as_str() == "new"
-                    && expr.diagnostic.is_none()
+                    && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
                     && matches!(args.last().map(|a| &*a.node), Some(ExprNode::Hash { kwargs: true, .. }))
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if self.classes.get(id).is_some_and(|c| c.positional_struct))
                 {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("Struct keyword construction"),
                         detail: "a `Struct.new(...)` superclass is built positionally; keyword arguments would land in its first member".to_string(),
-                    });
+                    }));
                 }
                 // `PTY.spawn(..., &maybe)` when `maybe` is nilable: Ruby
                 // may take the block (nil) or not (tuple). Presence was
@@ -2091,27 +2090,27 @@ impl<'a> BodyTyper<'a> {
                     catalog, recv.as_ref(), method.as_str(), args, block.as_ref(), site,
                 ) {
                     if let Err(reason) = resolved {
-                        if expr.diagnostic.is_none() {
-                            expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        if crate::expr::ExprCold::diagnostic(&expr.cold).is_none() {
+                            crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                                 target: None,
                                 construct: Symbol::from("I18n"),
                                 detail: format!("`{method}` cannot be resolved from the app's locale: {reason}"),
-                            });
+                            }));
                         }
                     }
                     return Ty::Str;
                 }
                 if matches!(recv_ty.as_ref(), Some(Ty::Class { args: model, .. }) if !model.is_empty())
                     && crate::lower::view::wraps_field_errors(method.as_str())
-                    && expr.diagnostic.is_none()
+                    && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
                 {
                     let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c);
                     if let Some(file) = &catalog.field_error_proc {
-                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                             target: None,
                             construct: Symbol::from("field_with_errors"),
                             detail: format!("`{method}` renders through the `field_error_proc` {file} sets, which is not modeled"),
-                        });
+                        }));
                     }
                 }
                 if method.as_str() == "human_attribute_name"
@@ -2201,11 +2200,11 @@ impl<'a> BodyTyper<'a> {
                                 if !matches!(id.0.as_str(), "Class" | "Module")));
                     if module_only && !class_object
                         && !self.owns_operator(recv_ty.as_ref(), method, false) {
-                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                             target: None,
                             construct: Symbol::from("Module protocol"),
                             detail: format!("{} requires a proven class/module object receiver", method),
-                        });
+                        }));
                         return dispatched;
                     }
                     if let Some(t) = send::object_protocol_method(recv_ty.as_ref(), method, block_ret.as_ref(), class_object) {
@@ -2254,17 +2253,17 @@ impl<'a> BodyTyper<'a> {
                     let gem_ancestry = recv_ty
                         .clone()
                         .filter(|ty| gap == Some("Object extension") && matches!(ty, Ty::Class { id, .. } if self.has_unknown_ancestor(id)));
-                    if let Some(recv_ty) = gem_ancestry.filter(|_| expr.diagnostic.is_none()) {
-                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::SendDispatchFailed {
+                    if let Some(recv_ty) = gem_ancestry.filter(|_| crate::expr::ExprCold::diagnostic(&expr.cold).is_none()) {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::SendDispatchFailed {
                             method: method.clone(),
                             recv_ty,
-                        });
-                    } else if let Some(owner) = gap.filter(|_| expr.diagnostic.is_none()) {
-                        expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        }));
+                    } else if let Some(owner) = gap.filter(|_| crate::expr::ExprCold::diagnostic(&expr.cold).is_none()) {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                             target: None,
                             construct: Symbol::from(owner),
                             detail: format!("{} lacks a shared runtime/lowering implementation", method),
-                        });
+                        }));
                     }
                 }
                 dispatched
@@ -3025,13 +3024,13 @@ impl<'a> BodyTyper<'a> {
                 }
                 let missing = missing.into_inner();
                 if !missing.is_empty() {
-                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    expr.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("declared type"),
                         detail: format!("{} has no indexed declaration or modeled dependency", missing.join(", ")),
-                    });
-                } else if matches!(&expr.diagnostic, Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "declared type") {
-                    expr.diagnostic = None;
+                    }));
+                } else if matches!(&expr.diagnostic(), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "declared type") {
+                    expr.set_diagnostic(None);
                 }
                 resolved
             }
@@ -4613,7 +4612,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        let diag = expr.diagnostic().as_ref().expect("diagnostic set");
         match diag {
             crate::diagnostic::DiagnosticKind::IncompatibleBinop {
                 op,
@@ -4649,7 +4648,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        let diag = expr.diagnostic().as_ref().expect("diagnostic set");
         match diag {
             crate::diagnostic::DiagnosticKind::IncompatibleBinop {
                 op,
@@ -4682,7 +4681,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        assert!(expr.diagnostic.is_none());
+        assert!(expr.diagnostic().is_none());
     }
 
     #[test]
@@ -4703,7 +4702,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        let diag = expr.diagnostic().as_ref().expect("diagnostic set");
         match diag {
             crate::diagnostic::DiagnosticKind::IncompatibleBinop {
                 op, lhs_ty, rhs_ty,
@@ -4734,7 +4733,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        assert!(expr.diagnostic.is_none());
+        assert!(expr.diagnostic().is_none());
     }
 
     #[test]
@@ -4764,7 +4763,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        let diag = expr.diagnostic().as_ref().expect("diagnostic set");
         assert!(matches!(
             diag,
             crate::diagnostic::DiagnosticKind::IncompatibleBinop { op, .. } if op.as_str() == "*"
@@ -4789,7 +4788,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        let diag = expr.diagnostic.as_ref().expect("diagnostic set");
+        let diag = expr.diagnostic().as_ref().expect("diagnostic set");
         assert!(matches!(
             diag,
             crate::diagnostic::DiagnosticKind::IncompatibleBinop { op, .. } if op.as_str() == "/"
@@ -4814,7 +4813,7 @@ mod tests {
         let typer = BodyTyper::new(&classes);
         typer.analyze_expr(&mut expr, &Ctx::default());
 
-        assert!(expr.diagnostic.is_none());
+        assert!(expr.diagnostic().is_none());
     }
 
     // ── union_of lattice laws ────────────────────────────────────────
@@ -5698,7 +5697,7 @@ fn is_ivar_params_rooted(e: &crate::expr::Expr, locals: &HashMap<Symbol, Ty>) ->
 fn rooted_in_refused_constant(expr: &Expr) -> bool {
     match &*expr.node {
         ExprNode::Const { .. } => matches!(
-            &expr.diagnostic,
+            &expr.diagnostic(),
             Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "constant"
         ),
         ExprNode::Send { recv: Some(recv), .. } => rooted_in_refused_constant(recv),

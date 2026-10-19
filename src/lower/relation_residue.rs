@@ -159,13 +159,12 @@ fn walk(e: &Expr, in_chain: bool, ctx: &FoldCtx, diags: &mut Vec<Diagnostic>) {
 /// The invariant: a residue that predicts "unsupported at emit" for the
 /// target being emitted must fail that emit.
 ///
-/// Host-only, like the `project::BuildTarget` it reads and the CLI that
-/// calls it: the wasm build excludes `project` (see `lib.rs`), and the
+/// Host-only: the CLI is the emit gate that raises these, and the
 /// playground has no emit gate to raise anything for.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn elevate_dynamic_relation_for_target(
     diags: &mut [Diagnostic],
-    target: crate::project::BuildTarget,
+    target: crate::build_target::BuildTarget,
 ) {
     if target.has_runtime_relation() {
         return;

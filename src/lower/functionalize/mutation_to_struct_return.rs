@@ -1137,7 +1137,7 @@ fn has_nested_mutation_or_loop(e: &Expr) -> bool {
 
 /// The string-builder tags (`io = String.new`, `io << chunk`) a writer reading `self` comes through here with; without them `local_accumulation` turns the appends into a list `++`.
 fn keep_hint(from: &Expr, mut to: Expr) -> Expr {
-    to.hint = from.hint;
+    to.set_hint(*from.hint());
     to
 }
 

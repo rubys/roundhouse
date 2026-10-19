@@ -62,7 +62,6 @@ pub(super) fn dirty_classes_for_retype(
     inferred_params: &HashMap<super::ParamKey, Vec<Ty>>,
     callers_by_target: &HashMap<(ClassId, Symbol), HashSet<ClassId>>,
     hints: &DirtyHints,
-    lexical_parent: impl Fn(&ClassId, &ClassId) -> ClassId,
 ) -> Option<HashSet<ClassId>> {
     let prev = &hints.sig;
     let prev_block_value = &hints.block_value;
@@ -104,7 +103,7 @@ pub(super) fn dirty_classes_for_retype(
     for (id, cls) in classes {
         if let Some(parent) = &cls.parent {
             children
-                .entry(lexical_parent(id, parent))
+                .entry(parent.clone())
                 .or_default()
                 .push(id.clone());
         }
@@ -158,7 +157,7 @@ pub(super) fn dirty_classes_for_retype(
                     queue.push(module.clone());
                 }
             }
-            cursor = cls.parent.as_ref().map(|p| lexical_parent(&cid, p));
+            cursor = cls.parent.clone();
         }
     }
 

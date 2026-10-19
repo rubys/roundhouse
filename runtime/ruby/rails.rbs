@@ -74,6 +74,7 @@ module Rails
 
   class Application
     def session_cookie_key: () -> String
+    def propshaft_asset_path: (String source) -> String
     def forgery_protection_verification_strategy: () -> String
     def public_file_server_headers: () -> Hash[String, String]
     def action_cable_origin_listed?: (String origin) -> bool

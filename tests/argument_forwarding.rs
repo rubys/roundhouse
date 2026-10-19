@@ -797,7 +797,7 @@ fn model_formal_rejection_survives_body_rewriting() {
         .unwrap();
     assert_eq!(declaration.unsupported_formals, expected);
     assert!(
-        declaration.body.diagnostic.is_none(),
+        declaration.body.diagnostic().is_none(),
         "formal provenance is not a body annotation"
     );
     let (_, emission) = roundhouse::emit::diagnostics::scope(|| {

@@ -75,6 +75,8 @@ mod class_new_constants;
 mod i18n_subtree;
 #[path = "emit_and_run/i18n_values.rs"]
 mod i18n_values;
+#[path = "emit_and_run/i18n_locale_tag.rs"]
+mod i18n_locale_tag;
 #[path = "emit_and_run/i18n_plural_rules.rs"]
 mod i18n_plural_rules;
 #[path = "emit_and_run/rails_i18n_locales.rs"]

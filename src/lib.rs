@@ -58,6 +58,10 @@ pub mod lsp;
 pub mod mcp;
 pub mod naming;
 pub mod profile;
+/// Target identity and the policies lowering reads (`param_binds_enabled`,
+/// `has_runtime_relation`). Compiled for wasm: `project` is host-only, but
+/// `lower` and `emit::ruby` still name a [`build_target::BuildTarget`].
+pub mod build_target;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod project;
 /// Embedded Ruby sources for constant lookup on all targets, plus the
