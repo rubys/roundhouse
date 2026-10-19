@@ -101,6 +101,47 @@ end
     assert_eq!(run.stdout, "x\n");
 }
 
+/// The hook follows `banner` and the constant-defining call is before
+/// the next method. The include has to run after `banner` and before
+/// that call, which is what defines `LABEL`.
+#[test]
+fn a_hooked_include_runs_before_the_call_that_follows_it() {
+    let hook = r#"module Outer
+  module Hook
+    def self.included(base)
+      base.banner
+      raise "LABEL already defined" if base.const_defined?(:LABEL, false)
+    end
+  end
+end
+"#;
+    let handler = r#"module Outer
+  class Handler < Base
+    def self.banner
+      "class"
+    end
+
+    include Hook
+
+    setup do |t|
+      LABEL = t.option("x") #: String
+    end
+
+    #: -> String
+    def self.label = LABEL
+  end
+end
+"#;
+    let run = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"probes\" do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("app/models/outer/base.rb", BASE)
+        .write("app/models/outer/hook.rb", hook)
+        .write("app/models/outer/handler.rb", handler)
+        .run_ruby("puts Outer::Handler.label\n");
+    run.assert_passes();
+    assert_eq!(run.stdout, "x\n");
+}
+
 #[test]
 fn a_constant_no_block_writes_stays_refused() {
     use std::collections::HashMap;

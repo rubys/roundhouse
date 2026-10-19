@@ -7783,10 +7783,6 @@ fn emit_library_class_decl_inner(
         .then_some(init.span.file)
     }).or_else(|| replayed_in_place.first().map(|call| call.span.file))
         .or_else(|| constant_calls.first().map(|call| call.span.file));
-    // A method written in this file has to exist when the block runs.
-    // A hooked include that belongs between two of those methods moves
-    // with them: leaving it for the later method loop writes it after
-    // every method the call already pulled forward.
     let same_file_method = |m: &MethodDef| {
         !ordered_body
             && !constant_calls.is_empty()
@@ -7802,26 +7798,8 @@ fn emit_library_class_decl_inner(
             }
         }
     }
-    let mut method_moves = vec![false; lc.methods.len()];
-    let mut include_moves = vec![false; positioned.len()];
-    for (index, method) in lc.methods.iter().enumerate() {
-        let blocked = positioned.iter().enumerate().any(|(slot, (at, _))| *at < index && !include_moves[slot]);
-        if same_file_method(method) && !blocked {
-            method_moves[index] = true;
-            for (slot, (at, _)) in positioned.iter().enumerate() {
-                if *at == index {
-                    include_moves[slot] = true;
-                }
-            }
-        }
-    }
-    if lc.methods.iter().enumerate().all(|(index, _)| method_moves[index]) {
-        for (slot, (at, _)) in positioned.iter().enumerate() {
-            if *at >= lc.methods.len() {
-                include_moves[slot] = true;
-            }
-        }
-    }
+    let (moved_methods, moved_includes) =
+        methods_traveling_with_constant_call(lc, &positioned, same_file_method);
     let method_in_ordered_body = |m: &MethodDef| {
         ordered_body
             && !m.name_span.is_synthetic()
@@ -7835,20 +7813,13 @@ fn emit_library_class_decl_inner(
                 .map(|m| (m.name_span.start, BodyItem::Method(m))),
         );
     }
-    // The include shares the following method's offset and is pushed
-    // first, so a stable sort keeps it ahead of that method.
-    for (slot, (at, inc)) in positioned.iter().enumerate() {
-        if !include_moves[slot] {
-            continue;
-        }
-        let start = lc.methods.get(*at).map(|m| m.name_span.start).unwrap_or_else(|| {
-            lc.methods.last().map(|m| m.name_span.start.saturating_add(1)).unwrap_or(0)
-        });
-        body.push((start, BodyItem::Include(inc)));
+    for (slot, start) in &moved_includes {
+        body.push((*start, BodyItem::Include(positioned[*slot].1)));
     }
-    body.extend(lc.methods.iter().enumerate().filter(|(index, _)| method_moves[*index]).map(|(_, m)| {
-        (m.name_span.start, BodyItem::Method(m))
-    }));
+    for index in &moved_methods {
+        let method = &lc.methods[*index];
+        body.push((method.name_span.start, BodyItem::Method(method)));
+    }
     body.sort_by_key(|(start, _)| *start);
     // Every require the file needs at its TOP: the class-body calls and
     // deferred constants (both run at load), and the method bodies.
@@ -8291,20 +8262,20 @@ fn emit_library_class_decl_inner(
             }
             first = false;
             for (slot, (_, inc)) in positioned.iter().enumerate().filter(|(_, (at, _))| *at == index) {
-                if include_moves[slot] {
+                if moved_includes.iter().any(|(moved, _)| *moved == slot) {
                     continue;
                 }
                 nested.borrow_mut().write_include(&mut s, depth, lc, inc);
                 writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
                 writeln!(s).unwrap();
             }
-            if method_moves[index] {
+            if moved_methods.binary_search(&index).is_ok() {
                 continue;
             }
             render_method(&mut s, m);
         }
         for (slot, (_, inc)) in positioned.iter().enumerate().filter(|(_, (at, _))| *at >= lc.methods.len()) {
-            if include_moves[slot] {
+            if moved_includes.iter().any(|(moved, _)| *moved == slot) {
                 continue;
             }
             writeln!(s).unwrap();
@@ -8353,6 +8324,55 @@ fn emit_library_class_decl_inner(
     }
 
     EmittedFile { path: out_path, content: s }
+}
+
+/// Same-file methods a constant-defining call must see, and the hooked
+/// includes that sit between them.
+///
+/// Returns method indices (ascending) and `(slot, anchor)` into
+/// `positioned`. The anchor is the end of the method the include
+/// follows, so a call written before the next `def` stays after the
+/// hook. An include that cannot move stays with the later method loop,
+/// and so does every method that would otherwise pass it.
+fn methods_traveling_with_constant_call<'a>(
+    lc: &'a LibraryClass,
+    positioned: &[(usize, &'a ClassId)],
+    same_file: impl Fn(&MethodDef) -> bool,
+) -> (Vec<usize>, Vec<(usize, u32)>) {
+    let mut method_moves = vec![false; lc.methods.len()];
+    let mut include_moves = vec![false; positioned.len()];
+    for (index, method) in lc.methods.iter().enumerate() {
+        let blocked = positioned
+            .iter()
+            .enumerate()
+            .any(|(slot, (at, _))| *at <= index && !include_moves[slot]);
+        if !same_file(method) || blocked {
+            continue;
+        }
+        method_moves[index] = true;
+        for (slot, (at, _)) in positioned.iter().enumerate() {
+            if at.checked_sub(1) == Some(index) {
+                include_moves[slot] = true;
+            }
+        }
+    }
+    let methods: Vec<usize> = method_moves
+        .iter()
+        .enumerate()
+        .filter(|(_, moves)| **moves)
+        .map(|(index, _)| index)
+        .collect();
+    let includes = include_moves
+        .iter()
+        .enumerate()
+        .filter(|(_, moves)| **moves)
+        .map(|(slot, _)| {
+            let followed = &lc.methods[positioned[slot].0 - 1];
+            let anchor = followed.name_span.end.max(followed.name_span.start.saturating_add(1));
+            (slot, anchor)
+        })
+        .collect();
+    (methods, includes)
 }
 
 /// Where `include inc` must be written in `lc`'s body when the source's
