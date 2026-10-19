@@ -6,10 +6,27 @@
 module Rake
   class Task
     def self.define(name, prerequisites, kind)
-      task = Task.new(name, prerequisites, kind)
-      task.chain(@head)
-      @head = task
-      task
+      # CRuby loads the rake gem over this class. Its `initialize` is
+      # `(task_name, app)`, and `define_task` keeps the block. Spinel
+      # has no gem: `Rake::TaskManager` stays undefined and the list
+      # below is the task.
+      unless defined?(Rake::TaskManager).nil?
+        define_task({name => prerequisites}) do
+          ActiveRecord::Tasks::DatabaseTasks.dispatch(kind)
+          nil
+        end
+      else
+        task = Task.new(name, prerequisites, kind)
+        task.chain(@head)
+        @head = task
+        task
+      end
+    end
+
+    # The gem replaces this. The signature types the call above; Spinel
+    # never reaches it, because `TaskManager` is absent there.
+    def self.define_task(args)
+      raise "rake define_task is provided by the rake gem"
     end
 
     def self.[](name)

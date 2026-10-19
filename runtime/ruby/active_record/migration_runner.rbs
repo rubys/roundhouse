@@ -11,6 +11,7 @@ module ActiveRecord
       def self.version_at_most?: (String version, String limit) -> bool
       def self.numeric_version: (String version) -> String
       def self.apply_pending: (String target) -> nil
+      def self.pending?: (Array[MigrationFile] files, String target) -> bool
       def self.version_recorded?: (String version) -> bool
       def self.migration_files: () -> Array[MigrationFile]
       def self.leading_digits: (String name) -> String

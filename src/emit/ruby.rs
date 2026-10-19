@@ -1367,15 +1367,6 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
                 writeln!(preamble, "require_relative \"../fixtures/{stem}\"").unwrap();
             }
             emitted.content = format!("{preamble}{}", emitted.content);
-            // File-scope `Rails.application.load_tasks` is dropped with
-            // the other statements that are not the test class. The
-            // call is idempotent (`@tasks_loaded`) and registers the
-            // rake graph before examples, including when the source
-            // call sat inside a module that wraps the class.
-            emitted.content = splice_after_requires(
-                &emitted.content,
-                "Rails.application.load_tasks",
-            );
             // A base with no tests of its own is loaded by its subclasses'
             // files; a driver there would report on it once per require.
             let is_bare_base = test_parents.contains(class_name)
@@ -1855,7 +1846,11 @@ fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -
          # `config.action_controller.allow_forgery_protection = false`.\n\
          # boot.rb loaded the ruby family's forgery check; a test posts\n\
          # without a token, as Rails' own integration tests do.\n\
-         ActionController::Base.allow_forgery_protection = false",
+         ActionController::Base.allow_forgery_protection = false\n\
+         # One call for the process. `load_rake_tasks!` returns immediately\n\
+         # once the graph exists, so a file-scope `load_tasks` in a test\n\
+         # is not copied into the emit.\n\
+         Rails.application.load_tasks",
     );
 
     // (2)

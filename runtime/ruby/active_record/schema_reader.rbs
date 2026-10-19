@@ -3,7 +3,7 @@ module ActiveRecord
     module DatabaseTasks
       def self.load_ruby_schema: (String text) -> nil
       def self.version_token: (String line) -> String
-      def self.read_create_table: (Array[String] lines, Integer index) -> Integer
+      def self.plan_create_table: (Array[String] lines, Integer index, Array[String] statements) -> Integer
       def self.table_name_from: (String line) -> String
       def self.column_def: (String line) -> String
       def self.token_at: (String text) -> String

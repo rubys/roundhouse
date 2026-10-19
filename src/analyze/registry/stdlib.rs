@@ -298,6 +298,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Rake::Task", &[
         ("[]", Ty::Untyped),
         ("task_defined?", Ty::Bool),
+        // App code may call the gem. The runtime's own `define_task`
+        // is the typed fallback in `rake/task.rbs`; the gem replaces it.
+        ("define_task", Ty::Untyped),
     ], &[
         ("reenable", Ty::Nil),
         ("all_prerequisite_tasks", Ty::Untyped),

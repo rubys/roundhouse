@@ -1,6 +1,7 @@
 module Rake
   class Task
     def self.define: (String name, Array[String] prerequisites, String kind) -> Task
+    def self.define_task: (Hash[String, Array[String]] args) ?{ () -> nil } -> nil
     def self.[]: (String name) -> Task?
     def self.task_defined?: (String name) -> bool
     def self.find: (String name) -> Task?

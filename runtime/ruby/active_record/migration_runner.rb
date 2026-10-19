@@ -59,7 +59,12 @@ module ActiveRecord
       def self.apply_pending(target)
         ensure_schema_migrations
         files = migration_files
-        ran = false
+        # The dump is not implemented. Raising after a rewrite would
+        # leave the table rebuilt, its triggers gone, and the version
+        # recorded, while `super.tap { repair }` never reaches the repair.
+        if dump_schema_after_migration && pending?(files, target)
+          raise "schema dump after migration is not supported"
+        end
         i = 0
         while i < files.length
           file = files[i]
@@ -70,12 +75,22 @@ module ActiveRecord
           next if version_recorded?(version)
           apply_migration(File.read(file.path))
           record_version(version)
-          ran = true
-        end
-        if ran && dump_schema_after_migration
-          raise "schema dump after migration is not supported"
         end
         nil
+      end
+
+      def self.pending?(files, target)
+        i = 0
+        while i < files.length
+          file = files[i]
+          i += 1
+          next if file.nil?
+          version = file.version
+          next if !target.empty? && version > target
+          next if version_recorded?(version)
+          return true
+        end
+        false
       end
 
       def self.version_recorded?(version)

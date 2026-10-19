@@ -433,7 +433,10 @@ fn untyped_subexpressions_baseline() {
     // stays 3). Main's ledger was 631. `ActiveRecord::Tasks` and the
     // Rake subset add the unseeded-parameter and `Db` reads this probe
     // does not type; the RBS-paired probe types the same files.
-    const CEILING: usize = 837;
+    // MEASURED 844 on 2026-10-19: schema load plans every statement
+    // before the first DROP, and migrate refuses a schema dump before
+    // it rewrites a table. Those helpers are unseeded here.
+    const CEILING: usize = 844;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

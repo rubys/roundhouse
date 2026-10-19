@@ -10,6 +10,11 @@ module ActiveRecord
       def self.load_ruby_schema(text)
         lines = text.split("\n")
         version = ""
+        # Plan every statement before the first DROP. A `force:` table
+        # is replaced as soon as its SQL runs, and each statement is its
+        # own autocommit, so a later unsupported line must raise while
+        # the database is still untouched.
+        statements = []
         i = 0
         while i < lines.length
           raw = lines[i]
@@ -20,11 +25,16 @@ module ActiveRecord
           found = version_token(line)
           version = found unless found.empty?
           if line.start_with?("create_table")
-            i = read_create_table(lines, i - 1)
+            i = plan_create_table(lines, i - 1, statements)
             next
           end
           next if line == "end" || line.start_with?("ActiveRecord::Schema") || line.include?(".define")
           raise "unsupported schema statement: #{line}"
+        end
+        k = 0
+        while k < statements.length
+          execute_sql(statements[k].to_s)
+          k += 1
         end
         ensure_schema_migrations
         record_version(version)
@@ -53,10 +63,9 @@ module ActiveRecord
         out
       end
 
-      def self.read_create_table(lines, index)
+      def self.plan_create_table(lines, index, statements)
         header = lines[index].to_s.strip
         name = table_name_from(header)
-        execute_sql("DROP TABLE IF EXISTS #{quote_ident(name)}") if header.include?("force:")
         cols = []
         cols << "id integer PRIMARY KEY" unless header.include?("id: false")
         index += 1
@@ -67,7 +76,9 @@ module ActiveRecord
           break if line == "end"
           cols << column_def(line)
         end
-        execute_sql("CREATE TABLE #{quote_ident(name)} (#{cols.join(", ")})")
+        quoted = quote_ident(name)
+        statements << "DROP TABLE IF EXISTS #{quoted}" if header.include?("force:")
+        statements << "CREATE TABLE #{quoted} (#{cols.join(", ")})"
         index
       end
 
