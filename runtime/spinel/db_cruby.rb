@@ -475,6 +475,7 @@ module Db
       return result
     end
     h = nil
+    lease_pool = nil
     adopt_after_fork
     @mutex.synchronize do
       while @pool.available_count == 0
@@ -484,6 +485,7 @@ module Db
           @cv.wait(@mutex)
         end
       end
+      lease_pool = @pool
       h = @pool.checkout
     end
     Fiber[:db_handle] = h
@@ -522,12 +524,20 @@ module Db
         Fiber[:db_handle] = nil
         Fiber[:db_owner] = nil
         begin
-          if (open.nil? || open.empty?) && !h.transaction_active?
+          # `Db.close` inside the lease nils `@pool` and closes `h`.
+          # Checking that handle into a pool `configure` opened afterwards
+          # would put a closed connection on the new pool. Quarantine
+          # also uses `@pool`, so skip it when the pool is no longer the
+          # one that issued this lease.
+          same_pool = !h.nil? && !h.closed? && !lease_pool.nil? && !@pool.nil? && @pool.equal?(lease_pool)
+          if same_pool && (open.nil? || open.empty?) && !h.transaction_active?
             @mutex.synchronize do
-              @pool.checkin(h)
-              @cv.signal
+              if !h.closed? && !@pool.nil? && @pool.equal?(lease_pool)
+                @pool.checkin(h)
+                @cv.signal
+              end
             end
-          else
+          elsif same_pool
             quarantine_connection(h)
           end
         rescue StandardError => e

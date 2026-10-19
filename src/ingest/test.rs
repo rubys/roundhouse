@@ -113,16 +113,33 @@ fn collect_preamble(root: &Node<'_>, file: &str) -> IngestResult<Vec<Expr>> {
     let Some(program) = root.as_program_node() else {
         return Ok(out);
     };
-    for stmt in flatten_statements(program.statements().as_node()) {
-        if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() || is_require(&stmt) {
-            continue;
-        }
-        if !statement_calls_load_tasks(&stmt) {
-            continue;
-        }
-        out.push(ingest_expr(&stmt, file)?);
-    }
+    collect_load_tasks_statements(program.statements().as_node(), file, &mut out)?;
     Ok(out)
+}
+
+/// `load_tasks` at file scope, including a statement inside a module
+/// that wraps the test class. The emitted preamble stays at file scope.
+/// Class bodies are the test itself, so they are not walked.
+fn collect_load_tasks_statements<'pr>(
+    node: Node<'pr>,
+    file: &str,
+    out: &mut Vec<Expr>,
+) -> IngestResult<()> {
+    for stmt in flatten_statements(node) {
+        if is_require(&stmt) || stmt.as_class_node().is_some() {
+            continue;
+        }
+        if let Some(module) = stmt.as_module_node() {
+            if let Some(body) = module.body() {
+                collect_load_tasks_statements(body, file, out)?;
+            }
+            continue;
+        }
+        if statement_calls_load_tasks(&stmt) {
+            out.push(ingest_expr(&stmt, file)?);
+        }
+    }
+    Ok(())
 }
 
 /// The call `load_tasks`, wherever it sits in the statement
@@ -978,6 +995,29 @@ end
     // A test class that a `module` wraps is the same class as
     // `class Models::PostTest`. Ingest used to read only the file's
     // top-level classes, so it lost this one and reported nothing.
+    #[test]
+    fn load_tasks_inside_a_wrapping_module_stays_on_the_preamble() {
+        let src = r#"
+module Room
+  Rails.application.load_tasks unless Rake::Task.task_defined?("room_messages_count:ensure")
+
+  class MessagesCountTasksTest < ActiveSupport::TestCase
+    test "truth" do
+      assert true
+    end
+  end
+end
+"#;
+        let tms = ingest_test_files(src.as_bytes(), "messages_count_tasks_test.rb").expect("ingest");
+        assert_eq!(tms.len(), 1);
+        assert_eq!(tms[0].name.0.as_str(), "Room::MessagesCountTasksTest");
+        let rendered = format!("{:?}", tms[0].preamble);
+        assert!(
+            rendered.contains("load_tasks"),
+            "module-wrapped load_tasks dropped: {rendered}"
+        );
+    }
+
     #[test]
     fn a_test_class_inside_a_module_keeps_its_namespace() {
         let src = r#"

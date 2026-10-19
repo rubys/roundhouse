@@ -414,7 +414,13 @@ fn untyped_subexpressions_baseline() {
     // The seven new sites are that branch's `Db.transaction_open?`,
     // `Db._txn_depth`, and `Db.exec` calls, unmodeled here like the
     // other `Db` reads. The RBS-paired gate types the method.
-    const CEILING: usize = 794;
+    // `ActiveRecord::Tasks` and the Rake subset in tasks.rb: 794 -> 835,
+    // MEASURED 2026-10-19. This probe does not seed parameter types, so
+    // those bodies contribute 181 untyped sub-expressions (unseeded
+    // parameters, `Db.database_path`, `Rails.env_name`). The 794 ceiling
+    // had unused room; the measured total is 835. The RBS-paired probe
+    // types the same file at its own ceiling.
+    const CEILING: usize = 835;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

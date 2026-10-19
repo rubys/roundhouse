@@ -1,0 +1,15 @@
+class File
+  def self.exist?: (String path) -> bool
+  def self.delete: (String path) -> Integer
+  def self.read: (String path) -> String
+  def self.directory?: (String path) -> bool
+  def self.join: (String a, String b) -> String
+end
+
+class Dir
+  def self.entries: (String path) -> Array[String]
+end
+
+class ENV
+  def self.[]: (String key) -> String?
+end

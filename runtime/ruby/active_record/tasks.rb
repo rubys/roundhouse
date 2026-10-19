@@ -71,6 +71,14 @@ module Rake
 
     def all_prerequisite_tasks
       out = []
+      collect_prerequisites(out)
+      out
+    end
+
+    # Walk prerequisite names. Indexing an Array of tasks would dispatch
+    # `Task#[]` (the class lookup copied onto the instance) instead of
+    # `Array#[]`.
+    def collect_prerequisites(out)
       deps = @prerequisites
       i = 0
       while i < deps.length
@@ -78,24 +86,22 @@ module Rake
         i += 1
         pre = Rake::Task[dep]
         next if pre.nil?
-        nested = pre.all_prerequisite_tasks
-        j = 0
-        while j < nested.length
-          out << nested[j]
-          j += 1
-        end
+        pre.collect_prerequisites(out)
         out << pre
       end
-      out
+      nil
     end
 
     def invoke
       return nil if @invoked == true
-      deps = all_prerequisite_tasks
+      deps = @prerequisites
       i = 0
       while i < deps.length
-        deps[i].invoke
+        dep = deps[i].to_s
         i += 1
+        pre = Rake::Task[dep]
+        next if pre.nil?
+        pre.invoke
       end
       @invoked = true
       ActiveRecord::Tasks::DatabaseTasks.dispatch(@kind)
@@ -306,17 +312,18 @@ module ActiveRecord
 
       def self.purge(db_config)
         path = db_config.database
-        if Db.database_path == path
-          Db.close
-        end
+        # Reopen whenever this method closed the process pool. `@config_set`
+        # is about the task's selected config, not about the file Db still
+        # has open, so a purge of the live path must configure again even
+        # when no task config is current.
+        reopened = Db.database_path == path
+        Db.close if reopened
         File.delete(path) if File.exist?(path)
         wal = "#{path}-wal"
         shm = "#{path}-shm"
         File.delete(wal) if File.exist?(wal)
         File.delete(shm) if File.exist?(shm)
-        if @config_set == true && !@current.nil? && @current.database == path
-          Db.configure(path)
-        end
+        Db.configure(path) if reopened
         nil
       end
 
@@ -736,7 +743,10 @@ module ActiveRecord
 
       def self.apply_change_column(line)
         parts = parts_of(line[13, line.length].to_s)
-        raise "unsupported migration statement: #{line}" if parts.length < 3
+        # Options (`null:`, `default:`, `limit:`) are not copied onto the
+        # rebuilt column. Recording the version after ignoring them would
+        # mark a migration applied that did not run.
+        raise "unsupported migration statement: #{line}" if parts.length != 3
         table = parts[0].to_s
         column = parts[1].to_s
         type_name = parts[2].to_s
@@ -818,22 +828,54 @@ module ActiveRecord
       # migration applied after throwing those away. Triggers are dropped
       # on purpose: Rails does not put them back, and the prepended hook
       # is what repairs the ones the app owns.
+      #
+      # `PRAGMA index_list` origin `pk` is the rowid primary key. Origin
+      # `u` is a UNIQUE autoindex (often named `sqlite_autoindex_*`) and
+      # origin `c` is a CREATE INDEX. Skipping every `sqlite_*` name would
+      # hide the UNIQUE one. Incoming foreign keys are not on this table's
+      # own `foreign_key_list`; with foreign keys on, DROP TABLE cascades
+      # through them.
       def self.refuse_unpreserved(table)
-        quoted = ActiveRecord::Base.connection.quote(table)
-        stmt = Db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = #{quoted}")
+        quoted = quote_ident(table)
+        stmt = Db.prepare("PRAGMA index_list(#{quoted})")
         while Db.step?(stmt)
-          name = Db.column_text(stmt, 0)
-          next if name.start_with?("sqlite_")
+          name = Db.column_text(stmt, 1)
+          origin = Db.column_text(stmt, 3)
+          next if origin == "pk"
           Db.finalize(stmt)
           raise "change_column cannot preserve index #{name}"
         end
         Db.finalize(stmt)
-        listed = Db.prepare("PRAGMA foreign_key_list(#{quote_ident(table)})")
+        listed = Db.prepare("PRAGMA foreign_key_list(#{quoted})")
         if Db.step?(listed)
           Db.finalize(listed)
           raise "change_column cannot preserve foreign keys on #{table}"
         end
         Db.finalize(listed)
+        refuse_incoming_foreign_keys(table)
+        nil
+      end
+
+      def self.refuse_incoming_foreign_keys(table)
+        master = Db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        names = []
+        while Db.step?(master)
+          names << Db.column_text(master, 0)
+        end
+        Db.finalize(master)
+        i = 0
+        while i < names.length
+          other = names[i].to_s
+          i += 1
+          next if other == table || other.start_with?("sqlite_")
+          listed = Db.prepare("PRAGMA foreign_key_list(#{quote_ident(other)})")
+          hit = false
+          while Db.step?(listed)
+            hit = true if Db.column_text(listed, 2) == table
+          end
+          Db.finalize(listed)
+          raise "change_column cannot preserve foreign keys referencing #{table}" if hit
+        end
         nil
       end
 
