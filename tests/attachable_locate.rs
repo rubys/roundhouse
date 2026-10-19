@@ -543,6 +543,142 @@ fn a_helper_block_parameter_keeps_its_name() {
     );
 }
 
+/// `one.extend(other.extend(mod))` leaves the inner call in value
+/// position. Spinel does not yield the receiver from that expression.
+#[test]
+fn a_nested_extend_stays_unsupported() {
+    assert_extend_stub(
+        "test_nested_extend",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"nested extend\" do\n    failing = Module.new { def begin_transport = :closed }\n    other = Box.new\n    one = Box.new\n    assert_equal :closed, one.extend(other.extend(failing)).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// Binding `a` to the caller's local `b` must not then rewrite that
+/// local when parameter `b` is substituted.
+#[test]
+fn a_helper_argument_is_not_rewritten_by_a_later_parameter() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  attr_accessor :note\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\nend\n",
+        ),
+        (
+            "test/test_helpers/open_helper.rb",
+            "module OpenHelper\n  def opened(a, b)\n    Box.new.tap do |box|\n      box.note = a\n    end\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  include OpenHelper\n  test \"two parameters\" do\n    failing = Module.new { def begin_transport = :closed }\n    b = \"kept\"\n    assert_equal :closed, opened(b, \"other\").extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        diags.iter().all(|d| !d.message.contains("Object#extend")),
+        "two parameters still extend:\n{diags:?}\n{test}"
+    );
+    assert!(
+        test.contains(".note = b"),
+        "the setter reads the caller's local:\n{test}"
+    );
+    assert!(
+        !test.contains(".note = \"other\""),
+        "the second parameter does not replace it:\n{test}"
+    );
+}
+
+/// `include` order is Ruby's: the later module's method is the one called.
+#[test]
+fn the_later_include_supplies_the_helper() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  attr_accessor :note\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\nend\n",
+        ),
+        (
+            "test/test_helpers/open_helper.rb",
+            "module FirstHelper\n  def opened(tag)\n    Box.new.tap do |box|\n      box.note = \"from-a\"\n    end\n  end\nend\nmodule SecondHelper\n  def opened(tag)\n    Box.new.tap do |box|\n      box.note = \"from-b\"\n    end\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  include FirstHelper\n  include SecondHelper\n  test \"later include\" do\n    failing = Module.new { def begin_transport = :closed }\n    assert_equal :closed, opened(\"a\").extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        diags.iter().all(|d| !d.message.contains("Object#extend")),
+        "the later helper still extends:\n{diags:?}\n{test}"
+    );
+    assert!(
+        test.contains("__rh_extend_object_1.note = \"from-b\""),
+        "the later include is the helper:\n{test}"
+    );
+    assert!(
+        !test.contains("__rh_extend_object_1.note = \"from-a\""),
+        "the earlier include is not the setter:\n{test}"
+    );
+}
+
+/// An `extend` brought in by `include` is that method, not `Object#extend`.
+#[test]
+fn an_extend_from_an_included_module_stays_unsupported() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "module CustomExtend\n  def extend(_mod)\n    :custom\n  end\nend\nclass Box\n  include CustomExtend\n  def ping\n    :open\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"included extend\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    assert_equal :custom, one.extend(failing)\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        diags.iter().any(|d| d.message.contains("Object#extend")),
+        "an included extend is reported:\n{diags:?}\n{test}"
+    );
+    assert!(
+        test.contains("def test_included_extend\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"),
+        "the test is the raise:\n{test}"
+    );
+    assert!(
+        !test.contains(".extend"),
+        "the call is not rewritten into Object#extend:\n{test}"
+    );
+}
+
+/// The assignment that follows the extend is not the value it reads.
+#[test]
+fn an_extend_before_its_assignment_stays_unsupported() {
+    assert_extend_stub(
+        "test_assign_after",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"assign after\" do\n    failing = Module.new { def begin_transport = :closed }\n    one.extend(failing).ping\n    one = Box.new\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
 /// The same test without the extend: what `ActionText::Attachable#
 /// attachable_sgid` computes, written out as the `to_sgid(for:)` it is.
 /// A shape every target compiles, and Rails mints the identical bytes

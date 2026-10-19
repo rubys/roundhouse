@@ -321,11 +321,11 @@ fn explode_receiver(recv: &Expr, helpers: &[Factory]) -> Option<Built> {
         qualify(&mut body, &factory.owner, &factory.constants);
     }
     let mut built = explode_expr(&body)?;
-    for (name, value) in &bound {
-        subst_name(&mut built.new_call, name, value);
-        for set in &mut built.sets {
-            subst_name(set, name, value);
-        }
+    // One walk, so a value that is a later parameter (`a` bound to the
+    // local `b`) is not substituted again when `b` is bound.
+    subst_names(&mut built.new_call, &bound);
+    for set in &mut built.sets {
+        subst_names(set, &bound);
     }
     Some(built)
 }
@@ -462,6 +462,38 @@ fn value_of(expr: &Expr) -> &Expr {
         ExprNode::Return { value } => value_of(value),
         _ => expr,
     }
+}
+
+fn subst_names(expr: &mut Expr, bound: &[(Symbol, Expr)]) {
+    if let Some((_, value)) = bound.iter().find(|(name, _)| var_is(expr, name)) {
+        let span = expr.span;
+        *expr = value.clone();
+        if expr.span.is_synthetic() {
+            expr.span = span;
+        }
+        return;
+    }
+    let shadowed = matches!(&*expr.node, ExprNode::Lambda { .. });
+    if shadowed {
+        let keep: Vec<(Symbol, Expr)> = bound
+            .iter()
+            .filter(|(name, _)| !lambda_binds(expr, name))
+            .cloned()
+            .collect();
+        if let ExprNode::Lambda {
+            extra_params, body, ..
+        } = &mut *expr.node
+        {
+            for param in extra_params.iter_mut() {
+                if let Some(default) = &mut param.default {
+                    subst_names(default, bound);
+                }
+            }
+            subst_names(body, &keep);
+        }
+        return;
+    }
+    expr.node.for_each_child_mut(&mut |c| subst_names(c, bound));
 }
 
 fn subst_name(expr: &mut Expr, name: &Symbol, replacement: &Expr) {

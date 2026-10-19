@@ -77,7 +77,11 @@ pub fn apply_object_extend_stub(app: &mut App) -> Vec<Diagnostic> {
                     .parent
                     .as_ref()
                     .is_some_and(|p| extend_defined.contains(p.0.as_str()));
-                if defines_instance_extend(lc) || parent_defines {
+                let include_defines = lc
+                    .includes
+                    .iter()
+                    .any(|inc| extend_defined.contains(inc.0.as_str()));
+                if defines_instance_extend(lc) || parent_defines || include_defines {
                     extend_defined.insert(name);
                     grew = true;
                 }
@@ -159,7 +163,8 @@ fn extend_defined_names(classes: &[LibraryClass]) -> HashSet<String> {
                 .parent
                 .as_ref()
                 .is_some_and(|p| out.contains(p.0.as_str()));
-            if defines_instance_extend(lc) || parent_defines {
+            let include_defines = lc.includes.iter().any(|inc| out.contains(inc.0.as_str()));
+            if defines_instance_extend(lc) || parent_defines || include_defines {
                 out.insert(name);
                 grew = true;
             }
@@ -215,7 +220,8 @@ fn factories(tm: &crate::dialect::TestModule) -> Vec<Factory> {
             constants: Vec::new(),
         });
     }
-    for inc in &tm.includes {
+    // The last `include` wins, as Ruby's ancestor chain does.
+    for inc in tm.includes.iter().rev() {
         let Some(lc) = tm.inner_classes.iter().find(|c| &c.name == inc) else {
             continue;
         };
@@ -544,52 +550,61 @@ fn first_untraced(
     // The body is a statement list. An earlier statement is not a
     // reason to refuse an extend in a later one. A `Seq` nested under
     // a statement is one expression, and order inside it counts.
-    visit_statement_list(body, &mut |e| {
+    visit_statement_list(body, &mut |e, is_stmt| {
         if found.is_some() {
             return;
         }
-        if let Some(d) = untraced_at(e, body, classes, modules, extend_defined) {
+        if let Some(d) = untraced_at(e, is_stmt, body, classes, modules, extend_defined) {
             found = Some(d);
         }
     });
     found
 }
 
-fn visit_statement_list(body: &Expr, f: &mut impl FnMut(&Expr)) {
+fn visit_statement_list(body: &Expr, f: &mut impl FnMut(&Expr, bool)) {
     match &*body.node {
         ExprNode::Seq { exprs } => {
             for stmt in exprs {
-                visit_expr(stmt, f);
+                visit_expr(stmt, true, f);
             }
         }
-        _ => visit_expr(body, f),
+        _ => visit_expr(body, true, f),
     }
 }
 
-fn visit_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
-    f(expr);
+fn visit_expr(expr: &Expr, is_stmt: bool, f: &mut impl FnMut(&Expr, bool)) {
+    f(expr, is_stmt);
     if let ExprNode::Lambda {
         extra_params, body, ..
     } = &*expr.node
     {
         for param in extra_params {
             if let Some(default) = &param.default {
-                visit_expr(default, f);
+                visit_expr(default, false, f);
             }
         }
         visit_statement_list(body, f);
         return;
     }
-    expr.node.for_each_child(&mut |c| visit_expr(c, f));
+    expr.node.for_each_child(&mut |c| visit_expr(c, false, f));
 }
 
 fn untraced_at(
     expr: &Expr,
+    is_stmt: bool,
     root: &Expr,
     classes: &HashSet<String>,
     modules: &HashSet<String>,
     extend_defined: &HashSet<String>,
 ) -> Option<Diagnostic> {
+    // Spinel flips the class at an `extend` statement. One that is still
+    // the receiver or an argument (`one.extend(other.extend(mod))`) does
+    // not yield the object.
+    if !is_stmt && instance_extend(expr).is_some() {
+        let mut d = Diagnostic::unsupported(expr.span, None, CONSTRUCT, DETAIL);
+        d.severity = Severity::Warning;
+        return Some(d);
+    }
     if rewrite::gates_control(expr) || rewrite::effect_precedes_extend(expr) {
         if let Some(site) =
             extend_outside_a_block(expr).or_else(|| instance_extend(expr).map(|(e, _)| e))
@@ -663,10 +678,20 @@ fn traced(
     };
     let mut values = Vec::new();
     let others = std::cell::Cell::new(false);
+    // A write after the extend is a later assignment. It is not the
+    // value the extend reads. A write before it, in this scope, is.
+    let seen = std::cell::Cell::new(false);
     visit_scoped(
         root,
         &|e| contains_expr(e, extend_expr),
         &mut |e| {
+            if std::ptr::eq(e, extend_expr) {
+                seen.set(true);
+                return;
+            }
+            if seen.get() {
+                return;
+            }
             if let ExprNode::Assign {
                 target: LValue::Var { name, .. },
                 value,
@@ -680,6 +705,9 @@ fn traced(
             }
         },
         &mut |e| {
+            if seen.get() {
+                return;
+            }
             if is_plain_assign_to(e, &local) || is_other_write(e, &local) {
                 others.set(true);
             }
