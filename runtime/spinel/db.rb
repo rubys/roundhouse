@@ -1630,22 +1630,27 @@ module Db
     Thread.current[:db_pool] = nil
     # A pin left set would `release(0)` on the pool `configure` opens next.
     Thread.current[:db_txn_pin] = false
-    return if @pools.nil?
     error = nil
-    begin
-      i = 0
-      while i < @pools.length
-        begin
-          @pools[i].close_all
-          @pools[i].dump_stmt_stats("close", i) if DbConn::STMT_STATS
-        rescue StandardError => e
-          error = e if error.nil?
+    if !@pools.nil?
+      begin
+        i = 0
+        while i < @pools.length
+          begin
+            @pools[i].close_all
+            @pools[i].dump_stmt_stats("close", i) if DbConn::STMT_STATS
+          rescue StandardError => e
+            error = e if error.nil?
+          end
+          i += 1
         end
-        i += 1
+      ensure
+        @pools = nil
       end
-    ensure
-      @pools = nil
     end
+    # Lease cleanup skips `release_abandoned_write` once this pool is
+    # gone. An open BEGIN would otherwise leave `@permit_held` set, and
+    # the next write waits out the permit timeout.
+    release_permit
     raise error if !error.nil?
   end
 

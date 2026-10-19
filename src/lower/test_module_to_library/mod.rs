@@ -36,9 +36,6 @@ pub struct LoweredTestModule {
     /// Per-target emit hoists them to file scope (TS: `const NAME =
     /// <value>`) so test methods can reference them by bare name.
     pub constants: Vec<(crate::ident::Symbol, crate::expr::Expr)>,
-    /// File-level statements ingested ahead of the test class
-    /// (`Rails.application.load_tasks unless ...`).
-    pub preamble: Vec<crate::expr::Expr>,
 }
 
 /// A test body's `x_url(…)` as the Ruby family answers it:
@@ -471,7 +468,6 @@ pub fn lower_test_modules_with_inner_opts(
             test_class: lc,
             inner_classes: std::mem::take(&mut typed_inner_per_module[idx]),
             constants: test_modules[idx].constants.clone(),
-            preamble: test_modules[idx].preamble.clone(),
         });
     }
     out

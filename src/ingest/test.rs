@@ -82,7 +82,6 @@ fn ingest_test_classes(
     if top_classes.is_empty() {
         return Ok(Vec::new());
     }
-    let preamble = collect_preamble(&root, file)?;
     let (mut test_nodes, helper_nodes): (Vec<_>, Vec<_>) =
         top_classes.into_iter().partition(|(_, c)| is_test_class_node(c));
     // No candidate matches: the historical single-class shape, where
@@ -98,83 +97,18 @@ fn ingest_test_classes(
             return Ok(Vec::new());
         };
         test_nodes.push(helper_nodes.remove(first));
-        return ingest_test_class(&test_nodes[0], &helper_nodes, file, &preamble).map(|tm| vec![tm]);
+        return ingest_test_class(&test_nodes[0], &helper_nodes, file).map(|tm| vec![tm]);
     }
     test_nodes
         .iter()
-        .map(|class| ingest_test_class(class, &helper_nodes, file, &preamble))
+        .map(|class| ingest_test_class(class, &helper_nodes, file))
         .collect()
-}
-
-/// `Rails.application.load_tasks unless Rake::Task.task_defined?(...)`
-/// sits outside the test class. Requires stay on the emit's own header.
-fn collect_preamble(root: &Node<'_>, file: &str) -> IngestResult<Vec<Expr>> {
-    let mut out = Vec::new();
-    let Some(program) = root.as_program_node() else {
-        return Ok(out);
-    };
-    collect_load_tasks_statements(program.statements().as_node(), file, &mut out)?;
-    Ok(out)
-}
-
-/// `load_tasks` at file scope, including a statement inside a module
-/// that wraps the test class. The emitted preamble stays at file scope.
-/// Class bodies are the test itself, so they are not walked.
-fn collect_load_tasks_statements<'pr>(
-    node: Node<'pr>,
-    file: &str,
-    out: &mut Vec<Expr>,
-) -> IngestResult<()> {
-    for stmt in flatten_statements(node) {
-        if is_require(&stmt) || stmt.as_class_node().is_some() {
-            continue;
-        }
-        if let Some(module) = stmt.as_module_node() {
-            if let Some(body) = module.body() {
-                collect_load_tasks_statements(body, file, out)?;
-            }
-            continue;
-        }
-        if statement_calls_load_tasks(&stmt) {
-            out.push(ingest_expr(&stmt, file)?);
-        }
-    }
-    Ok(())
-}
-
-/// The call `load_tasks`, wherever it sits in the statement
-/// (`Rails.application.load_tasks unless ...`). A string that happens
-/// to contain the letters is not the call.
-fn statement_calls_load_tasks(stmt: &Node<'_>) -> bool {
-    struct Find(bool);
-    impl<'pr> ruby_prism::Visit<'pr> for Find {
-        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-            if super::util::constant_id_str(&node.name()) == "load_tasks" {
-                self.0 = true;
-                return;
-            }
-            ruby_prism::visit_call_node(self, node);
-        }
-    }
-    let mut find = Find(false);
-    ruby_prism::Visit::visit(&mut find, stmt);
-    find.0
-}
-
-fn is_require(stmt: &Node<'_>) -> bool {
-    let Some(call) = stmt.as_call_node() else { return false };
-    if call.receiver().is_some() {
-        return false;
-    }
-    let name = constant_id_str(&call.name());
-    name == "require" || name == "require_relative"
 }
 
 fn ingest_test_class(
     (scope, class): &ScopedClass<'_>,
     top_level_helper_nodes: &[ScopedClass<'_>],
     file: &str,
-    preamble: &[Expr],
 ) -> IngestResult<TestModule> {
     let mut name_path = scope.clone();
     name_path.extend(class_name_path(class).ok_or_else(|| IngestError::Unsupported {
@@ -492,7 +426,6 @@ fn ingest_test_class(
         helpers,
         constants,
         includes,
-        preamble: preamble.to_vec(),
     })
 }
 
@@ -995,29 +928,6 @@ end
     // A test class that a `module` wraps is the same class as
     // `class Models::PostTest`. Ingest used to read only the file's
     // top-level classes, so it lost this one and reported nothing.
-    #[test]
-    fn load_tasks_inside_a_wrapping_module_stays_on_the_preamble() {
-        let src = r#"
-module Room
-  Rails.application.load_tasks unless Rake::Task.task_defined?("room_messages_count:ensure")
-
-  class MessagesCountTasksTest < ActiveSupport::TestCase
-    test "truth" do
-      assert true
-    end
-  end
-end
-"#;
-        let tms = ingest_test_files(src.as_bytes(), "messages_count_tasks_test.rb").expect("ingest");
-        assert_eq!(tms.len(), 1);
-        assert_eq!(tms[0].name.0.as_str(), "Room::MessagesCountTasksTest");
-        let rendered = format!("{:?}", tms[0].preamble);
-        assert!(
-            rendered.contains("load_tasks"),
-            "module-wrapped load_tasks dropped: {rendered}"
-        );
-    }
-
     #[test]
     fn a_test_class_inside_a_module_keeps_its_namespace() {
         let src = r#"

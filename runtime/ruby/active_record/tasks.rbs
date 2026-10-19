@@ -1,20 +1,3 @@
-module Rake
-  class Task
-    def self.define: (String name, Array[String] prerequisites, String kind) -> Task
-    def self.[]: (String name) -> Task?
-    def self.task_defined?: (String name) -> bool
-    def self.find: (String name) -> Task?
-    def initialize: (String name, Array[String] prerequisites, String kind) -> void
-    def chain: (Task? rest) -> Task
-    def rest: () -> Task?
-    def name: () -> String
-    def reenable: () -> nil
-    def all_prerequisite_tasks: () -> Array[Task]
-    def collect_prerequisites: (Array[Task] out) -> nil
-    def invoke: () -> nil
-  end
-end
-
 module ActiveRecord
   def self.dump_schema_after_migration: () -> bool
   def self.dump_schema_after_migration=: (bool value) -> bool
@@ -22,12 +5,6 @@ module ActiveRecord
   module Tasks
     class SeedLoader
       def load_seed: () -> nil
-    end
-
-    class MigrationFile
-      def initialize: (String version, String path) -> void
-      def version: () -> String
-      def path: () -> String
     end
 
     class SchemaMigration
@@ -66,40 +43,14 @@ module ActiveRecord
       def self.load_schema: (ActiveRecord::DatabaseConfigurations::HashConfig db_config, ?String format, ?String file) -> nil
       def self.load_schema_current: (String format, String file) -> nil
       def self.load_test_schemas: () -> nil
-      def self.load_ruby_schema: (String text) -> nil
-      def self.version_token: (String line) -> String
-      def self.read_create_table: (Array[String] lines, Integer index) -> Integer
-      def self.table_name_from: (String line) -> String
-      def self.column_def: (String line) -> String
-      def self.token_at: (String text) -> String
-      def self.sql_type: (String name) -> String
-      def self.literal_sql: (String raw) -> String
-      def self.integer_token?: (String raw) -> bool
-      def self.quote_ident: (String text) -> String
-      def self.ident?: (String text) -> bool
-      def self.execute_sql: (String sql) -> nil
-      def self.ensure_schema_migrations: () -> nil
-      def self.record_version: (String version) -> nil
       def self.initialize_database: (ActiveRecord::DatabaseConfigurations::HashConfig db_config) -> bool
       def self.prepare_all: () -> nil
       def self.migrate: (?String version) -> nil
-      def self.apply_pending: (String target) -> nil
       def self.dump_schema_after_migration: () -> bool
-      def self.version_recorded?: (String version) -> bool
-      def self.migration_files: () -> Array[MigrationFile]
-      def self.leading_digits: (String name) -> String
-      def self.sort_migrations: (Array[MigrationFile] files) -> Array[MigrationFile]
-      def self.apply_migration: (String text) -> nil
-      def self.leading_spaces: (String raw) -> Integer
-      def self.method_name: (String line) -> String
-      def self.apply_change_column: (String line) -> nil
-      def self.parts_of: (String text) -> Array[String]
-      def self.clean_token: (String piece) -> String
-      def self.rebuild_column: (String table, String column, String type_name) -> nil
-      def self.refuse_unpreserved: (String table) -> nil
-      def self.keyword?: (String ddl, String word) -> bool
-      def self.refuse_incoming_foreign_keys: (String table) -> nil
       def self.check_protected!: () -> nil
+      def self.protected_configs: () -> Array[ActiveRecord::DatabaseConfigurations::HashConfig]
+      def self.config_listed?: (Array[ActiveRecord::DatabaseConfigurations::HashConfig] configs, ActiveRecord::DatabaseConfigurations::HashConfig candidate) -> bool
+      def self.check_open_connection!: () -> nil
       def self.load_seed: () -> nil
       def self.migration_connection_pool: () -> ConnectionPoolView
       def self.dispatch: (String kind) -> nil

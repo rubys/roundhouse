@@ -53,6 +53,9 @@ const DEPENDENCY_RBS: &[&str] = &[
     // match a method in the paired .rb). This probe does not load the
     // stdlib registry, so the calls in tasks.rb need a sidecar.
     "tests/fixtures/task_stdlib.rbs",
+    // `Rake::Task` lives beside ActiveRecord, not in this directory.
+    // `define_framework_tasks!` calls it.
+    "runtime/ruby/rake/task.rbs",
 ];
 
 /// Walk a typed expression tree, collecting every node whose `ty` is

@@ -6696,6 +6696,8 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         "action_view",
         "action_controller",
         "action_dispatch",
+        // `Rake::Task`. `active_record.rb` requires `rake/task`.
+        "rake",
     ] {
         crate::runtime_files::walk_partitioned(
             &format!("runtime/ruby/{sub}"),

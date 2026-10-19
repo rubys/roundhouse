@@ -2138,12 +2138,6 @@ pub struct TestModule {
     /// import-stripper, so the field is informational only there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub includes: Vec<ClassId>,
-    /// Top-level statements that are not a class, module, or require.
-    /// Campfire's counter task test calls `Rails.application.load_tasks`
-    /// before the class; dropping it skips the rake graph the examples
-    /// invoke. Emitted after the file's requires.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub preamble: Vec<Expr>,
 }
 
 impl TestModule {

@@ -1367,17 +1367,15 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
                 writeln!(preamble, "require_relative \"../fixtures/{stem}\"").unwrap();
             }
             emitted.content = format!("{preamble}{}", emitted.content);
-            if !lowered.preamble.is_empty() {
-                let mut block = String::new();
-                for expr in &lowered.preamble {
-                    let line = expr::with_emitted_file(&test_rb_path, || {
-                        super::ruby::expr::emit_expr(expr)
-                    });
-                    block.push_str(&line);
-                    block.push('\n');
-                }
-                emitted.content = splice_after_requires(&emitted.content, &block);
-            }
+            // File-scope `Rails.application.load_tasks` is dropped with
+            // the other statements that are not the test class. The
+            // call is idempotent (`@tasks_loaded`) and registers the
+            // rake graph before examples, including when the source
+            // call sat inside a module that wraps the class.
+            emitted.content = splice_after_requires(
+                &emitted.content,
+                "Rails.application.load_tasks",
+            );
             // A base with no tests of its own is loaded by its subclasses'
             // files; a driver there would report on it once per require.
             let is_bare_base = test_parents.contains(class_name)

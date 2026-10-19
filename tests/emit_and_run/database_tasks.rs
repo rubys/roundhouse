@@ -168,6 +168,38 @@ class Room::MessagesCountTasksTest < ActiveSupport::TestCase
     end
   end
 
+  test "schema load marks earlier migrations applied" do
+    config = configuration("test")
+    File.write(File.join(@migrations, "20200101000000_create_rooms.rb"), <<~RUBY)
+      class CreateRooms < ActiveRecord::Migration[8.2]
+        def change
+          create_table :rooms do |t|
+            t.integer :messages_count
+          end
+        end
+      end
+    RUBY
+    File.write(@schema, <<~RUBY)
+      ActiveRecord::Schema[8.2].define(version: 2020_01_01_000000) do
+        create_table :rooms, force: true do |t|
+          t.integer :messages_count, default: 0, null: false
+        end
+        create_table :messages, force: true do |t|
+          t.integer :room_id
+          t.string :client_message_id
+        end
+      end
+    RUBY
+
+    @tasks.with_temporary_connection(config) do |connection|
+      @tasks.load_schema(config)
+      recorded = connection.select_value("SELECT version FROM schema_migrations WHERE version = '20200101000000'")
+      raise "schema load left the older migration pending" if recorded.nil?
+      @tasks.migrate
+      raise "rooms table missing" unless connection.data_source_exists?("rooms")
+    end
+  end
+
   test "migrate repairs rebuilt message tables and repeats repair with no new migration" do
     config = configuration("test")
     File.write(File.join(@migrations, "20261008000100_change_counter_task_message_column.rb"), <<~RUBY)

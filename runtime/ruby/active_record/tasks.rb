@@ -6,109 +6,14 @@
 # `db:schema:load`, `db:test:load_schema`, `prepare_all`, and `migrate`.
 # Those have to switch the process database, load a `schema.rb`, purge
 # the file, and rebuild a column — and they have to do it as real method
-# calls, because Spinel bakes the ancestor chain at compile time and
-# cannot `Kernel#load` a schema someone wrote into a temp file.
+# calls, because Spinel bakes the ancestor chain at compile time.
 #
-# The schema and migration readers accept the dump subset those tasks
-# write (create_table, change_column) and raise on anything else, so a
-# statement we do not run cannot look applied.
+# The schema reader, the migration runner, and `Rake::Task` live in
+# their own files. This one switches the pool and dispatches the task.
 #
 # `Dir.mktmpdir` and `FileUtils.remove_entry` stay the stdlib (and
 # Spinel's packages). This file is on the ActiveRecord boot path, so a
 # reopen here would replace the block form those libraries already have.
-
-module Rake
-  class Task
-    def self.define(name, prerequisites, kind)
-      task = Task.new(name, prerequisites, kind)
-      task.chain(@head)
-      @head = task
-      task
-    end
-
-    def self.[](name)
-      find(name)
-    end
-
-    def self.task_defined?(name)
-      !find(name).nil?
-    end
-
-    def self.find(name)
-      current = @head
-      while !current.nil?
-        return current if current.name == name
-        current = current.rest
-      end
-      nil
-    end
-
-    def initialize(name, prerequisites, kind)
-      @name = name
-      @prerequisites = prerequisites
-      @kind = kind
-      @invoked = false
-      @rest = nil
-    end
-
-    def chain(rest)
-      @rest = rest
-      self
-    end
-
-    def rest
-      @rest
-    end
-
-    def name
-      @name
-    end
-
-    def reenable
-      @invoked = false
-      nil
-    end
-
-    def all_prerequisite_tasks
-      out = []
-      collect_prerequisites(out)
-      out
-    end
-
-    # Walk prerequisite names. Indexing an Array of tasks would dispatch
-    # `Task#[]` (the class lookup copied onto the instance) instead of
-    # `Array#[]`.
-    def collect_prerequisites(out)
-      deps = @prerequisites
-      i = 0
-      while i < deps.length
-        dep = deps[i].to_s
-        i += 1
-        pre = Rake::Task[dep]
-        next if pre.nil?
-        pre.collect_prerequisites(out)
-        out << pre
-      end
-      nil
-    end
-
-    def invoke
-      return nil if @invoked == true
-      deps = @prerequisites
-      i = 0
-      while i < deps.length
-        dep = deps[i].to_s
-        i += 1
-        pre = Rake::Task[dep]
-        next if pre.nil?
-        pre.invoke
-      end
-      @invoked = true
-      ActiveRecord::Tasks::DatabaseTasks.dispatch(@kind)
-      nil
-    end
-  end
-end
 
 module ActiveRecord
   def self.dump_schema_after_migration
@@ -126,21 +31,6 @@ module ActiveRecord
     class SeedLoader
       def load_seed
         nil
-      end
-    end
-
-    class MigrationFile
-      def initialize(version, path)
-        @version = version
-        @path = path
-      end
-
-      def version
-        @version
-      end
-
-      def path
-        @path
       end
     end
 
@@ -386,188 +276,6 @@ module ActiveRecord
         nil
       end
 
-      def self.load_ruby_schema(text)
-        lines = text.split("\n")
-        version = ""
-        i = 0
-        while i < lines.length
-          raw = lines[i]
-          i += 1
-          next if raw.nil?
-          line = raw.strip
-          next if line.empty? || line.start_with?("#")
-          found = version_token(line)
-          version = found unless found.empty?
-          if line.start_with?("create_table")
-            i = read_create_table(lines, i - 1)
-            next
-          end
-          next if line == "end" || line.start_with?("ActiveRecord::Schema") || line.include?(".define")
-          raise "unsupported schema statement: #{line}"
-        end
-        ensure_schema_migrations
-        record_version(version)
-        nil
-      end
-
-      def self.version_token(line)
-        marker = "version:"
-        at = line.index(marker)
-        return "" if at.nil?
-        rest = line[at + marker.length, line.length].to_s.strip
-        out = ""
-        i = 0
-        while i < rest.length
-          ch = rest[i].to_s
-          if ch >= "0" && ch <= "9"
-            out += ch
-          elsif ch != "_"
-            break
-          end
-          i += 1
-        end
-        out
-      end
-
-      def self.read_create_table(lines, index)
-        header = lines[index].to_s.strip
-        name = table_name_from(header)
-        execute_sql("DROP TABLE IF EXISTS #{quote_ident(name)}") if header.include?("force:")
-        cols = []
-        cols << "id integer PRIMARY KEY" unless header.include?("id: false")
-        index += 1
-        while index < lines.length
-          line = lines[index].to_s.strip
-          index += 1
-          next if line.empty? || line.start_with?("#")
-          break if line == "end"
-          cols << column_def(line)
-        end
-        execute_sql("CREATE TABLE #{quote_ident(name)} (#{cols.join(", ")})")
-        index
-      end
-
-      def self.table_name_from(line)
-        rest = line[12, line.length].to_s.strip
-        token_at(rest)
-      end
-
-      def self.column_def(line)
-        raise "unsupported schema statement: #{line}" unless line.start_with?("t.")
-        rest = line[2, line.length].to_s.strip
-        space = rest.index(" ")
-        raise "unsupported schema statement: #{line}" if space.nil?
-        type_name = rest[0, space].to_s
-        name = token_at(rest[space + 1, rest.length].to_s)
-        default_sql = ""
-        at = line.index("default:")
-        if !at.nil?
-          raw = line[at + 8, line.length].to_s.strip
-          cut = raw.index(",")
-          raw = raw[0, cut].to_s.strip unless cut.nil?
-          default_sql = " DEFAULT #{literal_sql(raw)}" unless raw.empty? || raw == "nil"
-        end
-        null_sql = line.include?("null: false") ? " NOT NULL" : ""
-        "#{quote_ident(name)} #{sql_type(type_name)}#{default_sql}#{null_sql}"
-      end
-
-      def self.token_at(text)
-        token = ""
-        i = 0
-        while i < text.length
-          ch = text[i].to_s
-          break if ch == " " || ch == "," || ch == ""
-          token += ch
-          i += 1
-        end
-        token = token[1, token.length].to_s if token.start_with?(":")
-        token = token.gsub("\"", "")
-        token.gsub("'", "")
-      end
-
-      def self.sql_type(name)
-        case name
-        when "integer", "bigint", "primary_key"
-          "integer"
-        when "string"
-          "varchar"
-        when "text"
-          "text"
-        when "boolean"
-          "boolean"
-        when "float", "decimal"
-          "float"
-        when "binary", "blob"
-          "blob"
-        when "datetime", "timestamp", "date", "time", "json"
-          "datetime"
-        else
-          raise "unsupported column type #{name}"
-        end
-      end
-
-      def self.literal_sql(raw)
-        if raw == "true"
-          "1"
-        elsif raw == "false"
-          "0"
-        elsif raw.start_with?("\"") || raw.start_with?("'")
-          raw
-        elsif integer_token?(raw)
-          raw
-        else
-          raise "unsupported column default #{raw}"
-        end
-      end
-
-      def self.integer_token?(raw)
-        i = 0
-        i = 1 if raw.start_with?("-")
-        return false if i >= raw.length
-        while i < raw.length
-          ch = raw[i].to_s
-          return false if ch < "0" || ch > "9"
-          i += 1
-        end
-        true
-      end
-
-      def self.quote_ident(text)
-        raise "unsupported sql identifier #{text}" unless ident?(text)
-        text
-      end
-
-      def self.ident?(text)
-        return false if text.empty?
-        i = 0
-        while i < text.length
-          ch = text[i].to_s
-          letter = (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_"
-          digit = i > 0 && ch >= "0" && ch <= "9"
-          return false unless letter || digit
-          i += 1
-        end
-        true
-      end
-
-      def self.execute_sql(sql)
-        ActiveRecord::Base.connection.execute(sql)
-        nil
-      end
-
-      def self.ensure_schema_migrations
-        return nil if ActiveRecord::Base.connection.data_source_exists?("schema_migrations")
-        execute_sql("CREATE TABLE schema_migrations (version varchar NOT NULL PRIMARY KEY)")
-        nil
-      end
-
-      def self.record_version(version)
-        return nil if version.empty?
-        quoted = ActiveRecord::Base.connection.quote(version)
-        execute_sql("INSERT OR IGNORE INTO schema_migrations (version) VALUES (#{quoted})")
-        nil
-      end
-
       def self.initialize_database(db_config)
         return false unless db_config.database_tasks?
         return false if ActiveRecord::Base.connection.data_source_exists?("schema_migrations")
@@ -611,312 +319,53 @@ module ActiveRecord
         nil
       end
 
-      def self.apply_pending(target)
-        ensure_schema_migrations
-        files = migration_files
-        ran = false
-        i = 0
-        while i < files.length
-          file = files[i]
-          i += 1
-          next if file.nil?
-          version = file.version
-          next if !target.empty? && version > target
-          next if version_recorded?(version)
-          apply_migration(File.read(file.path))
-          record_version(version)
-          ran = true
-        end
-        if ran && dump_schema_after_migration
-          raise "schema dump after migration is not supported"
-        end
-        nil
-      end
-
       def self.dump_schema_after_migration
         ActiveRecord.dump_schema_after_migration
       end
 
-      def self.version_recorded?(version)
-        quoted = ActiveRecord::Base.connection.quote(version)
-        stmt = Db.prepare("SELECT version FROM schema_migrations WHERE version = #{quoted}")
-        found = Db.step?(stmt)
-        Db.finalize(stmt)
-        found
-      end
-
-      def self.migration_files
-        dirs = migrations_paths
-        found = []
+      def self.check_protected!
+        configs = protected_configs
         i = 0
-        while i < dirs.length
-          dir = dirs[i].to_s
+        while i < configs.length
+          config = configs[i]
           i += 1
-          next unless File.directory?(dir)
-          names = Dir.entries(dir)
-          j = 0
-          while j < names.length
-            name = names[j].to_s
-            j += 1
-            next unless name.end_with?(".rb")
-            version = leading_digits(name)
-            next if version.empty?
-            found << MigrationFile.new(version, File.join(dir, name))
-          end
-        end
-        sort_migrations(found)
-      end
-
-      def self.leading_digits(name)
-        out = ""
-        i = 0
-        while i < name.length
-          ch = name[i].to_s
-          break if ch < "0" || ch > "9"
-          out += ch
-          i += 1
-        end
-        out
-      end
-
-      def self.sort_migrations(files)
-        i = 1
-        while i < files.length
-          current = files[i]
-          j = i
-          while j > 0 && !files[j - 1].nil? && !current.nil? && files[j - 1].version > current.version
-            files[j] = files[j - 1]
-            j -= 1
-          end
-          files[j] = current
-          i += 1
-        end
-        files
-      end
-
-      def self.apply_migration(text)
-        lines = text.split("\n")
-        applying = false
-        method_indent = -1
-        i = 0
-        while i < lines.length
-          raw = lines[i]
-          i += 1
-          next if raw.nil?
-          indent = leading_spaces(raw)
-          line = raw.strip
-          next if line.empty? || line.start_with?("#")
-          if line.start_with?("def ")
-            name = method_name(line)
-            applying = name == "change" || name == "up"
-            method_indent = indent
-            next
-          end
-          if applying && indent <= method_indent && (line == "end" || line.start_with?("end "))
-            applying = false
-            next
-          end
-          next if line.start_with?("class ") || line.start_with?("module ") || line == "end" || line.start_with?("end ")
-          next unless applying
-          if line.start_with?("change_column")
-            apply_change_column(line)
-          else
-            raise "unsupported migration statement: #{line}"
+          next if config.nil?
+          with_temporary_connection(config) do
+            check_open_connection!
+            nil
           end
         end
         nil
       end
 
-      def self.leading_spaces(raw)
-        n = 0
-        while n < raw.length && raw[n].to_s == " "
-          n += 1
-        end
-        n
-      end
-
-      def self.method_name(line)
-        rest = line[4, line.length].to_s.strip
-        paren = rest.index("(")
-        rest = rest[0, paren].to_s.strip unless paren.nil?
-        token_at(rest)
-      end
-
-      def self.apply_change_column(line)
-        parts = parts_of(line[13, line.length].to_s)
-        # Options (`null:`, `default:`, `limit:`) are not copied onto the
-        # rebuilt column. Recording the version after ignoring them would
-        # mark a migration applied that did not run.
-        raise "unsupported migration statement: #{line}" if parts.length != 3
-        table = parts[0].to_s
-        column = parts[1].to_s
-        type_name = parts[2].to_s
-        rebuild_column(table, column, type_name)
-        nil
-      end
-
-      def self.parts_of(text)
-        parts = []
-        rest = text.strip
-        while !rest.empty?
-          comma = rest.index(",")
-          piece = comma.nil? ? rest : rest[0, comma].to_s
-          parts << clean_token(piece)
-          if comma.nil?
-            rest = ""
-          else
-            rest = rest[comma + 1, rest.length].to_s.strip
-          end
-        end
-        parts
-      end
-
-      def self.clean_token(piece)
-        token = piece.strip
-        token = token[1, token.length].to_s if token.start_with?(":")
-        token = token.gsub("\"", "")
-        token.gsub("'", "")
-      end
-
-      def self.rebuild_column(table, column, type_name)
-        quoted = quote_ident(table)
-        stmt = Db.prepare("PRAGMA table_info(#{quoted})")
-        names = []
-        types = []
-        notnulls = []
-        defaults = []
-        pks = []
-        while Db.step?(stmt)
-          name = Db.column_text(stmt, 1)
-          names << name
-          if name == column
-            types << sql_type(type_name)
-          else
-            types << Db.column_text(stmt, 2)
-          end
-          notnulls << Db.column_int(stmt, 3)
-          defaults << Db.column_text(stmt, 4)
-          pks << Db.column_int(stmt, 5)
-        end
-        Db.finalize(stmt)
-        raise "no such table #{table}" if names.empty?
-        raise "no such column #{column}" unless names.include?(column)
-        refuse_unpreserved(table)
-        k = 0
-        while k < pks.length
-          pk = pks[k]
-          raise "change_column cannot preserve composite primary key on #{table}" if pk != 0 && pk != 1
-          k += 1
-        end
-        defs = []
-        selected = []
+      # Schema load in development also opens the test database, and
+      # `db:test:purge` deletes every test file. The marker has to be
+      # read on those files, not only on the connection already open.
+      def self.protected_configs
+        configs = configs_for_current(env)
+        extra = configs_for("test")
         i = 0
-        while i < names.length
-          piece = quote_ident(names[i].to_s)
-          dflt = defaults[i].to_s
-          default_sql = dflt.empty? ? "" : " DEFAULT #{dflt}"
-          null_sql = notnulls[i] == 1 ? " NOT NULL" : ""
-          pk_sql = pks[i] == 1 ? " PRIMARY KEY" : ""
-          defs << "#{piece} #{types[i]}#{default_sql}#{null_sql}#{pk_sql}"
-          selected << piece
+        while i < extra.length
+          candidate = extra[i]
           i += 1
+          next if candidate.nil?
+          configs << candidate unless config_listed?(configs, candidate)
         end
-        tmp = quote_ident("#{table}__rh_new")
-        joined = selected.join(", ")
-        execute_sql("CREATE TABLE #{tmp} (#{defs.join(", ")})")
-        execute_sql("INSERT INTO #{tmp} (#{joined}) SELECT #{joined} FROM #{quoted}")
-        execute_sql("DROP TABLE #{quoted}")
-        execute_sql("ALTER TABLE #{tmp} RENAME TO #{quoted}")
-        nil
+        configs
       end
 
-      # SQLite's table rewrite drops indexes and foreign keys. Rails copies
-      # them back. Recording the version without that copy would mark a
-      # migration applied after throwing those away. Triggers are dropped
-      # on purpose: Rails does not put them back, and the prepended hook
-      # is what repairs the ones the app owns.
-      #
-      # `PRAGMA index_list` origin `pk` is the rowid primary key. Origin
-      # `u` is a UNIQUE autoindex (often named `sqlite_autoindex_*`) and
-      # origin `c` is a CREATE INDEX. Skipping every `sqlite_*` name would
-      # hide the UNIQUE one. Incoming foreign keys are not on this table's
-      # own `foreign_key_list`; with foreign keys on, DROP TABLE cascades
-      # through them.
-      def self.refuse_unpreserved(table)
-        quoted = quote_ident(table)
-        # `table_info` does not report CHECK, COLLATE, AUTOINCREMENT, or
-        # generated columns. Recording the version after dropping them
-        # would mark a migration applied that did not run.
-        ddl_stmt = Db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = #{ActiveRecord::Base.connection.quote(table)}")
-        ddl = ""
-        if Db.step?(ddl_stmt)
-          ddl = Db.column_text(ddl_stmt, 0).upcase
-        end
-        Db.finalize(ddl_stmt)
-        if keyword?(ddl, "CHECK") || keyword?(ddl, "COLLATE") || keyword?(ddl, "AUTOINCREMENT") || keyword?(ddl, "GENERATED")
-          raise "change_column cannot preserve table constraints on #{table}"
-        end
-        stmt = Db.prepare("PRAGMA index_list(#{quoted})")
-        while Db.step?(stmt)
-          name = Db.column_text(stmt, 1)
-          origin = Db.column_text(stmt, 3)
-          next if origin == "pk"
-          Db.finalize(stmt)
-          raise "change_column cannot preserve index #{name}"
-        end
-        Db.finalize(stmt)
-        listed = Db.prepare("PRAGMA foreign_key_list(#{quoted})")
-        if Db.step?(listed)
-          Db.finalize(listed)
-          raise "change_column cannot preserve foreign keys on #{table}"
-        end
-        Db.finalize(listed)
-        refuse_incoming_foreign_keys(table)
-        nil
-      end
-
-      # `word` as a SQL keyword. A column named `checked` contains the
-      # letters CHECK and is not a constraint.
-      def self.keyword?(ddl, word)
+      def self.config_listed?(configs, candidate)
+        path = candidate.database
         i = 0
-        while i < ddl.length
-          at = ddl.index(word, i)
-          return false if at.nil?
-          before = at == 0 ? " " : ddl[at - 1].to_s
-          after_at = at + word.length
-          after = after_at >= ddl.length ? " " : ddl[after_at].to_s
-          ident_before = (before >= "A" && before <= "Z") || (before >= "0" && before <= "9") || before == "_"
-          ident_after = (after >= "A" && after <= "Z") || (after >= "0" && after <= "9") || after == "_"
-          return true unless ident_before || ident_after
-          i = at + word.length
+        while i < configs.length
+          config = configs[i]
+          i += 1
+          return true if !config.nil? && config.database == path
         end
         false
       end
 
-      def self.refuse_incoming_foreign_keys(table)
-        master = Db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-        names = []
-        while Db.step?(master)
-          names << Db.column_text(master, 0)
-        end
-        Db.finalize(master)
-        i = 0
-        while i < names.length
-          other = names[i].to_s
-          i += 1
-          next if other == table || other.start_with?("sqlite_")
-          listed = Db.prepare("PRAGMA foreign_key_list(#{quote_ident(other)})")
-          hit = false
-          while Db.step?(listed)
-            hit = true if Db.column_text(listed, 2) == table
-          end
-          Db.finalize(listed)
-          raise "change_column cannot preserve foreign keys referencing #{table}" if hit
-        end
-        nil
-      end
-
-      def self.check_protected!
+      def self.check_open_connection!
         return nil unless ActiveRecord::Base.connection.data_source_exists?("ar_internal_metadata")
         stmt = Db.prepare("SELECT value FROM ar_internal_metadata WHERE key = 'environment'")
         value = ""
@@ -994,5 +443,6 @@ end
 
 # After DatabaseTasks exists: an app file prepends onto the singleton
 # at load, which Spinel only honors for a prepend written in the file
-# (not one performed later from a method).
+# (not one performed later from a method). The schema reader and the
+# migration runner are already loaded, so the prepend sees their methods.
 require_relative "app_rake_tasks"
