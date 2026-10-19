@@ -235,10 +235,9 @@ module ActionDispatch
           # `match_parts` only reads these strings (`split`, `empty?`).
           # Spinel will not pass the attr-reader String into that call
           # while another name can append to it: the reader does not
-          # carry the shared handle. `clone` is a new string with the
-          # same characters. The Rust emitter lowers it to `String::clone`;
-          # `dup` is not a method on that String.
-          params = match_parts(route.pattern_parts, path_parts, route.int_params.clone, format, route.seg_constraints.clone)
+          # carry the shared handle. Concatenating "" is a new string
+          # with the same characters on every target.
+          params = match_parts(route.pattern_parts, path_parts, route.int_params + "", format, route.seg_constraints + "")
           unless params.nil?
             return ActionDispatch::Router::MatchResult.new(route.controller, route.action, params, route.req_format)
           end
