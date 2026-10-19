@@ -7823,6 +7823,12 @@ fn source_method(app: &App, owner: &ClassId, name: &str, side: crate::dialect::M
                 for arg in args {
                     let ExprNode::Const { path } = &*arg.node else { continue };
                     let include = mixin_target(owner, path, arg.decisions & crate::expr::RESOLVED_MIXIN != 0, classes);
+                    let segs: Vec<&str> = include.0.as_str().split("::").collect();
+                    if crate::ingest::util::is_active_model_marker_include(&segs)
+                        || crate::ingest::util::is_view_helper_marker_include(&segs)
+                    {
+                        continue;
+                    }
                     if lookup(app, &include, name, side, seen, classes) {
                         return true;
                     }
