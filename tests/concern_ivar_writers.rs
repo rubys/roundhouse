@@ -155,3 +155,50 @@ end
     ]);
     assert!(o.is_empty(), "{o:#?}");
 }
+
+/// A module the controller never includes does not seed ivars, and a
+/// module reached only through another included module does.
+#[test]
+fn transitive_concern_ivars_are_seeded_and_an_unincluded_module_is_not() {
+    let o = ivar_errors(&[
+        APPLICATION,
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get 'show' => 'things#show'\nend\n",
+        ),
+        (
+            "app/controllers/concerns/extra.rb",
+            "module Extra\n  def set_extra\n    @from_extra = 'e'\n  end\nend\n",
+        ),
+        (
+            "app/controllers/concerns/bundle.rb",
+            "module Bundle\n  include Extra\n  def set_bundle\n    @from_bundle = 'b'\n  end\nend\n",
+        ),
+        (
+            "app/controllers/concerns/orphan.rb",
+            "module Orphan\n  def set_orphan\n    @from_orphan = 'o'\n  end\nend\n",
+        ),
+        (
+            "app/controllers/things_controller.rb",
+            r#"
+class ThingsController < ApplicationController
+  include Bundle
+
+  def show
+    set_extra
+    render plain: @from_extra
+    render plain: @from_orphan
+  end
+end
+"#,
+        ),
+    ]);
+    assert!(
+        !o.iter().any(|d| d.contains("from_extra")),
+        "included concern chain should type @from_extra; got {o:#?}"
+    );
+    assert!(
+        o.iter().any(|d| d.contains("from_orphan")),
+        "an unincluded module should not seed @from_orphan; got {o:#?}"
+    );
+}

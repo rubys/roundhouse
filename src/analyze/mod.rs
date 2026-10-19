@@ -1387,21 +1387,20 @@ impl Analyzer {
         }
         let existing_view_names: std::collections::HashSet<Symbol> =
             app.views.iter().map(|v| v.name.clone()).collect();
-        // Module method tables and controller parent links are invariant
-        // across fixpoint rounds — clone once instead of rebuilding them
-        // on every `run_typing_passes` (Campfire: 1 initial + 8 rounds).
-        let module_methods: HashMap<ClassId, Vec<MethodDef>> = app
-            .library_classes
-            .iter()
-            .filter(|lc| lc.is_module)
-            .map(|lc| (lc.name.clone(), lc.methods.clone()))
-            .collect();
+        // Module includes and controller parent links are invariant
+        // across fixpoint rounds. Method bodies are too, but typing
+        // rewrites the live library-class methods, so this pass keeps
+        // a clone for the whole fixpoint (Campfire: 1 initial + 8
+        // rounds) instead of borrowing them. The controller loop reads
+        // only modules named by `include`/`prepend`, closed over
+        // `module_includes`, so modules nothing includes are not copied.
         let module_includes: HashMap<ClassId, Vec<ClassId>> = app
             .library_classes
             .iter()
             .filter(|lc| lc.is_module)
             .map(|lc| (lc.name.clone(), lc.includes.clone()))
             .collect();
+        let module_methods = controller_concern_method_snapshot(app, &module_includes);
         let parent_link_by_name: HashMap<ClassId, Option<ClassId>> = app
             .controllers
             .iter()
@@ -2760,20 +2759,7 @@ impl Analyzer {
             // the filter seeding consults. Includes close transitively
             // (concerns include concerns); the controller's own
             // definitions win on a name clash.
-            let mut mixed_in: Vec<ClassId> = controller_includes(controller);
-            let mut seen_modules: BTreeSet<ClassId> = mixed_in.iter().cloned().collect();
-            let mut qi = 0;
-            while qi < mixed_in.len() {
-                let m = mixed_in[qi].clone();
-                qi += 1;
-                if let Some(nested) = module_includes.get(&m) {
-                    for n in nested {
-                        if seen_modules.insert(n.clone()) {
-                            mixed_in.push(n.clone());
-                        }
-                    }
-                }
-            }
+            let mixed_in = controller_mixed_in_modules(controller, module_includes);
             if retype {
                 for module_id in &mixed_in {
                     let Some(methods) = module_methods.get(module_id) else { continue };
@@ -8002,6 +7988,53 @@ fn param_ty_with_default(observed: Option<Ty>, param: &crate::dialect::Param) ->
     }
 }
 
+/// Modules whose methods `type_production_bodies` reads for one controller.
+///
+/// The controller's own `include` and `prepend` arguments, then each
+/// module's includes. Parent controllers are not walked: a parent's
+/// modules are visited when that parent is typed. Order is the order
+/// the typing pass consults, so the first definition of a name wins.
+fn controller_mixed_in_modules(
+    controller: &Controller,
+    module_includes: &HashMap<ClassId, Vec<ClassId>>,
+) -> Vec<ClassId> {
+    let mut mixed_in = controller_includes(controller);
+    let mut seen: BTreeSet<ClassId> = mixed_in.iter().cloned().collect();
+    let mut qi = 0;
+    while qi < mixed_in.len() {
+        let module = mixed_in[qi].clone();
+        qi += 1;
+        if let Some(nested) = module_includes.get(&module) {
+            for include in nested {
+                if seen.insert(include.clone()) {
+                    mixed_in.push(include.clone());
+                }
+            }
+        }
+    }
+    mixed_in
+}
+
+/// Owned method bodies for [`controller_mixed_in_modules`] across every
+/// controller. A later reopening of one module name wins, matching the
+/// includes map. The clone is the pre-typing snapshot: typing writes
+/// the live `library_classes` methods while this map stays in use
+/// across fixpoint rounds, so the entries cannot be borrows.
+fn controller_concern_method_snapshot(
+    app: &App,
+    module_includes: &HashMap<ClassId, Vec<ClassId>>,
+) -> HashMap<ClassId, Vec<MethodDef>> {
+    let mut wanted: BTreeSet<ClassId> = BTreeSet::new();
+    for controller in &app.controllers {
+        wanted.extend(controller_mixed_in_modules(controller, module_includes));
+    }
+    app.library_classes
+        .iter()
+        .filter(|lc| lc.is_module && wanted.contains(&lc.name))
+        .map(|lc| (lc.name.clone(), lc.methods.clone()))
+        .collect()
+}
+
 pub(crate) fn controller_includes(controller: &Controller) -> Vec<ClassId> {
     controller_include_groups(controller).into_iter().flatten().collect()
 }
@@ -9666,4 +9699,141 @@ fn expr_calls_super(body: &Expr) -> bool {
     let mut found = matches!(&*body.node, ExprNode::Super { .. });
     body.node.for_each_child(&mut |c| found = found || expr_calls_super(c));
     found
+}
+
+#[cfg(test)]
+mod concern_method_snapshot_tests {
+    use super::*;
+    use crate::dialect::{AccessorKind, LibraryClass, MethodReceiver, MethodVisibility};
+    use crate::effect::EffectSet;
+    use crate::span::Span;
+
+    fn nil() -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil })
+    }
+
+    fn method(name: &str) -> MethodDef {
+        MethodDef {
+            visibility: MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            name_span: Span::synthetic(),
+            name: Symbol::from(name),
+            receiver: MethodReceiver::Instance,
+            params: vec![],
+            body: nil(),
+            signature: None,
+            effects: EffectSet::default(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        }
+    }
+
+    fn module(name: &str, includes: &[&str], methods: Vec<MethodDef>) -> LibraryClass {
+        LibraryClass {
+            name: ClassId(Symbol::from(name)),
+            is_module: true,
+            parent: None,
+            parent_span: Span::synthetic(),
+            includes: includes.iter().map(|n| ClassId(Symbol::from(*n))).collect(),
+            include_spans: Vec::new(),
+            methods,
+            nullable_columns: Vec::new(),
+            origin: None,
+            constants: Vec::new(),
+            unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
+        }
+    }
+
+    fn mixin_item(kind: &str, name: &str) -> ControllerBodyItem {
+        ControllerBodyItem::Unknown {
+            expr: Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from(kind),
+                    args: vec![Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Const { path: vec![Symbol::from(name)] },
+                    )],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            leading_comments: vec![],
+            leading_blank_line: false,
+        }
+    }
+
+    fn controller(name: &str, includes: &[&str]) -> Controller {
+        Controller {
+            name: ClassId(Symbol::from(name)),
+            parent: None,
+            parent_span: Span::synthetic(),
+            body: includes.iter().map(|n| mixin_item("include", n)).collect(),
+            layout: LayoutDecl::Inherit,
+            sibling_classes: vec![],
+        }
+    }
+
+    fn includes_of(app: &App) -> HashMap<ClassId, Vec<ClassId>> {
+        app.library_classes
+            .iter()
+            .filter(|lc| lc.is_module)
+            .map(|lc| (lc.name.clone(), lc.includes.clone()))
+            .collect()
+    }
+
+    fn names(snapshot: &HashMap<ClassId, Vec<MethodDef>>) -> BTreeSet<String> {
+        snapshot.keys().map(|id| id.0.as_str().to_string()).collect()
+    }
+
+    #[test]
+    fn snapshot_clones_only_the_controller_include_closure() {
+        let mut app = App::default();
+        app.library_classes = vec![
+            module("Auth", &[], vec![method("keep")]),
+            module("Bundle", &["Extra"], vec![method("early")]),
+            module("Extra", &[], vec![method("from_extra")]),
+            module("Prepended", &[], vec![method("prepended")]),
+            module("Orphan", &[], vec![method("from_orphan")]),
+            LibraryClass {
+                is_module: false,
+                ..module("Service", &[], vec![method("service_method")])
+            },
+            module("Bundle", &["Extra"], vec![method("later_wins")]),
+        ];
+        app.controllers = vec![
+            controller("ApplicationController", &["Auth"]),
+            controller("WidgetsController", &["Bundle", "Service"]),
+        ];
+        app.controllers[1].body.push(mixin_item("prepend", "Prepended"));
+        let includes = includes_of(&app);
+        let snapshot = controller_concern_method_snapshot(&app, &includes);
+        assert_eq!(
+            names(&snapshot),
+            BTreeSet::from(["Auth".into(), "Bundle".into(), "Extra".into(), "Prepended".into()])
+        );
+        assert_eq!(snapshot[&ClassId(Symbol::from("Bundle"))][0].name.as_str(), "later_wins");
+        app.library_classes[2].methods[0].name = Symbol::from("mutated");
+        assert_eq!(snapshot[&ClassId(Symbol::from("Extra"))][0].name.as_str(), "from_extra");
+    }
+
+    #[test]
+    fn a_later_reopening_without_includes_drops_the_earlier_include() {
+        let mut app = App::default();
+        app.library_classes = vec![
+            module("A", &["B"], vec![method("first")]),
+            module("B", &[], vec![method("bee")]),
+            module("A", &[], vec![method("second")]),
+        ];
+        app.controllers = vec![controller("ThingsController", &["A"])];
+        let snapshot = controller_concern_method_snapshot(&app, &includes_of(&app));
+        assert_eq!(names(&snapshot), BTreeSet::from(["A".into()]));
+        assert_eq!(snapshot[&ClassId(Symbol::from("A"))][0].name.as_str(), "second");
+    }
 }

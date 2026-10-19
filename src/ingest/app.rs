@@ -4026,30 +4026,14 @@ fn report_unrecognized_controller_macros(app: &App) {
 /// whose body holds one statement this can't read stays Unknown, whole,
 /// and is recorded as a gap.
 fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
-    use crate::dialect::{ControllerBodyItem, MethodReceiver};
+    use crate::dialect::{ControllerBodyItem, MethodDef, MethodReceiver};
     use crate::expr::ExprNode;
 
-    // Class-side methods of every module, by name — the macro table.
-    // Populated from library classes because that is where a concern's
-    // `class_methods do` / `module ClassMethods` bodies land.
-    let mut macros: HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>> = HashMap::new();
-    for lc in &app.library_classes {
-        let class_side: Vec<crate::dialect::MethodDef> = lc
-            .methods
-            .iter()
-            .filter(|m| matches!(m.receiver, MethodReceiver::Class))
-            .cloned()
-            .collect();
-        for method in class_side {
-            let methods = macros.entry(lc.name.clone()).or_default();
-            if let Some(prior) = methods.iter_mut().find(|m| m.name == method.name) {
-                *prior = method;
-            } else {
-                methods.push(method);
-            }
-        }
-    }
-    if macros.is_empty() {
+    // No class-side method means no macro to expand. Checked before the
+    // concern surface is built so an app with none skips that walk.
+    if !app.library_classes.iter().any(|lc| {
+        lc.methods.iter().any(|m| matches!(m.receiver, MethodReceiver::Class))
+    }) {
         return Ok(());
     }
 
@@ -4077,6 +4061,28 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
             (controller.name.clone(), methods)
         })
         .collect();
+
+    // Class-side methods per library class — the macro table. Borrowed,
+    // not copied: this indexes every library class, most of which no
+    // controller includes, and a macro that expands substitutes from
+    // the borrowed body. A later reopening of the same name replaces
+    // the earlier def, as the owned table did. Library classes are only
+    // read here; the loop below mutates controllers.
+    let mut macros: HashMap<crate::ident::ClassId, Vec<&MethodDef>> = HashMap::new();
+    for lc in &app.library_classes {
+        for method in lc
+            .methods
+            .iter()
+            .filter(|m| matches!(m.receiver, MethodReceiver::Class))
+        {
+            let methods = macros.entry(lc.name.clone()).or_default();
+            if let Some(prior) = methods.iter_mut().find(|m| m.name == method.name) {
+                *prior = method;
+            } else {
+                methods.push(method);
+            }
+        }
+    }
 
     for controller in &mut app.controllers {
         let includes = &surfaces.controllers[&controller.name].direct_includes;
@@ -4123,8 +4129,8 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
             let found = includes.iter().find_map(|inc| {
                 macros
                     .get(inc)
-                    .and_then(|ms| ms.iter().find(|m| &m.name == method))
-                    .map(|m| (inc.clone(), m.clone()))
+                    .and_then(|ms| ms.iter().copied().find(|m| &m.name == method))
+                    .map(|m| (inc.clone(), m))
             });
             let Some((module, macro_def)) = found else {
                 expanded.push(item);
@@ -4146,10 +4152,10 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
                 else {
                     return false;
                 };
-                other_method == method && stored_options_init(other_expr, &macro_def).is_none() && !args.is_empty()
+                other_method == method && stored_options_init(other_expr, macro_def).is_none() && !args.is_empty()
             });
-            if method_stores_keyword_rest(&macro_def) && !another_unreadable {
-                if let Some(init) = stored_options_init(expr, &macro_def) {
+            if method_stores_keyword_rest(macro_def) && !another_unreadable {
+                if let Some(init) = stored_options_init(expr, macro_def) {
                     survey::record(&IngestError::Unsupported {
                         file: controller.name.0.as_str().to_string(),
                         message: format!(
@@ -4168,7 +4174,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
             }
             // A keyword shape that can't be bound (see `substitute_params`) refuses the macro, like any other
             // statement that isn't filter DSL.
-            let Some(body) = substitute_params(&macro_def, args) else {
+            let Some(body) = substitute_params(macro_def, args) else {
                 survey::record(&IngestError::Unsupported {
                     file: format!("{}", controller.name.0.as_str()),
                     message: format!(
@@ -4332,7 +4338,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
 fn expand_nested_filter_macros(
     body: &crate::expr::Expr,
     module: &crate::ident::ClassId,
-    macros: &HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
+    macros: &HashMap<crate::ident::ClassId, Vec<&crate::dialect::MethodDef>>,
     shadowed: &std::collections::HashSet<crate::ident::Symbol>,
     stack: &mut Vec<crate::ident::Symbol>,
 ) -> Option<crate::expr::Expr> {
@@ -4343,7 +4349,7 @@ fn expand_nested_filter_macros(
     fn expand_statements(
         body: &Expr,
         module: &crate::ident::ClassId,
-        macros: &HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
+        macros: &HashMap<crate::ident::ClassId, Vec<&crate::dialect::MethodDef>>,
         shadowed: &std::collections::HashSet<crate::ident::Symbol>,
         stack: &mut Vec<crate::ident::Symbol>,
         remaining: &mut usize,
