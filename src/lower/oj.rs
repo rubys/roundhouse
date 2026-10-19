@@ -13,10 +13,10 @@
 //! check cannot claim the reference.
 
 use crate::App;
+use crate::build_target::BuildTarget;
 use crate::dialect::LibraryClassOrigin;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
-use crate::project::BuildTarget;
 
 /// Targets that emit the stand-in and execute it as Ruby.
 pub fn stand_in_runs(target: BuildTarget) -> bool {
