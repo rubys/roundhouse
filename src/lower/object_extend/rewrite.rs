@@ -59,9 +59,12 @@ fn rewrite_lambdas(
     helpers: &[Factory],
     seq: &mut u32,
 ) {
-    // `->` runs later, and so does `lambda` / `proc` / `Proc.new`.
-    // Acceptance rejects every delayed site, so those bodies are not
-    // rewritten. An immediate block (`map`, `tap`) still is.
+    // Acceptance rejects a delayed site and a site under `if` / `&&` /
+    // `case`. Those subtrees are not rewritten. An immediate block
+    // (`map`, `tap`) that is not under a gate still is.
+    if super::gates_control(expr) {
+        return;
+    }
     let skip_block = match &*expr.node {
         ExprNode::Lambda { .. } => return,
         ExprNode::Send {
