@@ -670,6 +670,85 @@ fn an_extend_from_an_included_module_stays_unsupported() {
     );
 }
 
+/// `|failing|` is not the module local. Hoisting would extend the
+/// hoisted module from inside the block.
+#[test]
+fn a_block_parameter_is_not_the_module_local() {
+    assert_extend_stub(
+        "test_shadowed_module",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"shadowed module\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    [failing].each { |failing| one.extend(failing) }\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// The assignment is the argument. Replacing it with nil would change
+/// what `identity` receives.
+#[test]
+fn an_assignment_used_as_a_value_stays_unsupported() {
+    assert_extend_stub(
+        "test_assign_value",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"assign value\" do\n    def identity(mod) = mod\n    one = Box.new\n    identity(failing = Module.new { def begin_transport = :closed })\n    one.extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// `map` uses the block's value. An `extend` expression does not answer
+/// the object, so the block answers the local.
+#[test]
+fn a_block_extend_answers_the_local() {
+    let (_diags, test) = box_extend_app(
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"map\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    assert_equal [one], [0].map { one.extend(failing) }\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+    assert!(
+        test.contains(".extend("),
+        "the extend stays a statement:\n{test}"
+    );
+    assert!(
+        test.contains("one.extend(RhInstanceExtend1)\n    one }"),
+        "the block answers the local:\n{test}"
+    );
+}
+
+/// A proc called later does not see the write that exists at the
+/// `extend` line. The test stays the raise.
+#[test]
+fn an_extend_inside_a_proc_stays_unsupported() {
+    assert_extend_stub(
+        "test_proc",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"proc\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    cb = -> { one.extend(failing) }\n    one = Box.new\n    cb.call\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// `prepend` puts the module's `extend` ahead of `Object#extend`.
+#[test]
+fn an_extend_from_a_prepended_module_stays_unsupported() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "module CustomExtend\n  def extend(_mod)\n    :custom\n  end\nend\nclass Box\n  prepend CustomExtend\n  def ping\n    :open\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"prepended extend\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    assert_equal :custom, one.extend(failing)\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        diags.iter().any(|d| d.message.contains("Object#extend")),
+        "a prepended extend is reported:\n{diags:?}\n{test}"
+    );
+    assert!(
+        test.contains("def test_prepended_extend\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"),
+        "the test is the raise:\n{test}"
+    );
+}
+
 /// The assignment that follows the extend is not the value it reads.
 #[test]
 fn an_extend_before_its_assignment_stays_unsupported() {

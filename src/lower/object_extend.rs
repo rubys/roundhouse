@@ -81,7 +81,11 @@ pub fn apply_object_extend_stub(app: &mut App) -> Vec<Diagnostic> {
                     .includes
                     .iter()
                     .any(|inc| extend_defined.contains(inc.0.as_str()));
-                if defines_instance_extend(lc) || parent_defines || include_defines {
+                if defines_instance_extend(lc)
+                    || parent_defines
+                    || include_defines
+                    || prepends_defined_extend(lc, &extend_defined)
+                {
                     extend_defined.insert(name);
                     grew = true;
                 }
@@ -148,6 +152,25 @@ fn defines_instance_extend(lc: &LibraryClass) -> bool {
         .any(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "extend")
 }
 
+/// `prepend Mod` is not an `include` entry. The prepended `extend` is
+/// still the method the instance calls.
+fn prepends_defined_extend(lc: &LibraryClass, defined: &HashSet<String>) -> bool {
+    lc.unknown_calls.iter().any(|call| {
+        let ExprNode::Send {
+            recv: None,
+            method,
+            args,
+            ..
+        } = &*call.node
+        else {
+            return false;
+        };
+        method.as_str() == "prepend"
+            && args.len() == 1
+            && const_name(&args[0]).is_some_and(|name| defined.contains(&name))
+    })
+}
+
 /// A class, and any class under it, whose `extend` is not `Object#extend`.
 fn extend_defined_names(classes: &[LibraryClass]) -> HashSet<String> {
     let mut out = HashSet::new();
@@ -164,7 +187,11 @@ fn extend_defined_names(classes: &[LibraryClass]) -> HashSet<String> {
                 .as_ref()
                 .is_some_and(|p| out.contains(p.0.as_str()));
             let include_defines = lc.includes.iter().any(|inc| out.contains(inc.0.as_str()));
-            if defines_instance_extend(lc) || parent_defines || include_defines {
+            if defines_instance_extend(lc)
+                || parent_defines
+                || include_defines
+                || prepends_defined_extend(lc, &out)
+            {
                 out.insert(name);
                 grew = true;
             }
@@ -334,6 +361,31 @@ fn collect_module_assigns(
     sources: &[SourceFile],
     out: &mut Vec<(Symbol, Vec<(MethodVisibility, Span)>)>,
 ) {
+    collect_module_statements(expr, sources, out);
+}
+
+/// Only a statement assignment is hoisted. `foo(failing = Module.new { ... })`
+/// uses the assignment's value; replacing it with nil would change `foo`.
+fn collect_module_statements(
+    expr: &Expr,
+    sources: &[SourceFile],
+    out: &mut Vec<(Symbol, Vec<(MethodVisibility, Span)>)>,
+) {
+    match &*expr.node {
+        ExprNode::Seq { exprs } => {
+            for stmt in exprs {
+                collect_one_statement(stmt, sources, out);
+            }
+        }
+        _ => collect_one_statement(expr, sources, out),
+    }
+}
+
+fn collect_one_statement(
+    expr: &Expr,
+    sources: &[SourceFile],
+    out: &mut Vec<(Symbol, Vec<(MethodVisibility, Span)>)>,
+) {
     if let ExprNode::Assign {
         target: LValue::Var { name, .. },
         value,
@@ -348,8 +400,15 @@ fn collect_module_assigns(
             }
         }
     }
-    expr.node
-        .for_each_child(&mut |c| collect_module_assigns(c, sources, out));
+    if let ExprNode::Lambda { body, .. } = &*expr.node {
+        collect_module_statements(body, sources, out);
+        return;
+    }
+    if let ExprNode::Send { block, .. } = &*expr.node {
+        if let Some(block) = block {
+            collect_module_statements(block, sources, out);
+        }
+    }
 }
 
 fn module_new_methods(expr: &Expr) -> Option<Vec<(MethodVisibility, Span)>> {
@@ -429,6 +488,9 @@ fn is_nested_def(expr: &Expr) -> bool {
 }
 
 fn sole_extend_local(body: &Expr, name: &Symbol) -> bool {
+    if lambda_rebinds(body, name) {
+        return false;
+    }
     let mut writes = 0u32;
     let reads = std::cell::Cell::new(0u32);
     let mut extend_reads = 0u32;
@@ -463,6 +525,30 @@ fn sole_extend_local(body: &Expr, name: &Symbol) -> bool {
     );
     let reads = reads.get();
     !foreign && writes == 1 && reads > 0 && reads == extend_reads
+}
+
+fn lambda_rebinds(expr: &Expr, name: &Symbol) -> bool {
+    let mut found = false;
+    walk(expr, &mut |e| {
+        let ExprNode::Lambda {
+            params,
+            rest_param,
+            extra_params,
+            block_param,
+            ..
+        } = &*e.node
+        else {
+            return;
+        };
+        if params.iter().any(|p| p == name)
+            || rest_param.as_ref() == Some(name)
+            || block_param.as_ref() == Some(name)
+            || extra_params.iter().any(|p| &p.name == name)
+        {
+            found = true;
+        }
+    });
+    found
 }
 
 fn is_extend_read(expr: &Expr, name: &Symbol) -> bool {
@@ -550,53 +636,32 @@ fn first_untraced(
     // The body is a statement list. An earlier statement is not a
     // reason to refuse an extend in a later one. A `Seq` nested under
     // a statement is one expression, and order inside it counts.
-    visit_statement_list(body, &mut |e, is_stmt| {
+    rewrite::visit_statement_list(body, false, &mut |e, is_stmt, delayed| {
         if found.is_some() {
             return;
         }
-        if let Some(d) = untraced_at(e, is_stmt, body, classes, modules, extend_defined) {
+        if let Some(d) = untraced_at(e, is_stmt, delayed, body, classes, modules, extend_defined) {
             found = Some(d);
         }
     });
     found
 }
 
-fn visit_statement_list(body: &Expr, f: &mut impl FnMut(&Expr, bool)) {
-    match &*body.node {
-        ExprNode::Seq { exprs } => {
-            for stmt in exprs {
-                visit_expr(stmt, true, f);
-            }
-        }
-        _ => visit_expr(body, true, f),
-    }
-}
-
-fn visit_expr(expr: &Expr, is_stmt: bool, f: &mut impl FnMut(&Expr, bool)) {
-    f(expr, is_stmt);
-    if let ExprNode::Lambda {
-        extra_params, body, ..
-    } = &*expr.node
-    {
-        for param in extra_params {
-            if let Some(default) = &param.default {
-                visit_expr(default, false, f);
-            }
-        }
-        visit_statement_list(body, f);
-        return;
-    }
-    expr.node.for_each_child(&mut |c| visit_expr(c, false, f));
-}
-
 fn untraced_at(
     expr: &Expr,
     is_stmt: bool,
+    delayed: bool,
     root: &Expr,
     classes: &HashSet<String>,
     modules: &HashSet<String>,
     extend_defined: &HashSet<String>,
 ) -> Option<Diagnostic> {
+    // A proc that runs later is not the statement Spinel can see.
+    if delayed && instance_extend(expr).is_some() {
+        let mut d = Diagnostic::unsupported(expr.span, None, CONSTRUCT, DETAIL);
+        d.severity = Severity::Warning;
+        return Some(d);
+    }
     // Spinel flips the class at an `extend` statement. One that is still
     // the receiver or an argument (`one.extend(other.extend(mod))`) does
     // not yield the object.
@@ -692,6 +757,15 @@ fn traced(
             if seen.get() {
                 return;
             }
+            // `expr => one` binds `one`. It is not a plain assignment,
+            // and a later `extend` must not treat an earlier `one = Box.new`
+            // as the only write.
+            if matches!(
+                &*e.node,
+                ExprNode::MatchRequired { .. } | ExprNode::MatchPredicate { .. }
+            ) {
+                others.set(true);
+            }
             if let ExprNode::Assign {
                 target: LValue::Var { name, .. },
                 value,
@@ -771,7 +845,13 @@ fn method_from_source(text: &str, owner: &ClassId) -> Option<MethodDef> {
         .iter()
         .next()?;
     let def = stmt.as_def_node()?;
-    crate::ingest::library_class::ingest_library_method(&def, owner, "<instance-extend>").ok()
+    crate::ingest::library_class::ingest_library_method_with_keywords(
+        &def,
+        owner,
+        "<instance-extend>",
+        true,
+    )
+    .ok()
 }
 
 fn source_slice(sources: &[SourceFile], span: Span) -> Option<&str> {

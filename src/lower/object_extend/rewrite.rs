@@ -26,10 +26,16 @@ pub(super) fn rewrite_scope(
     } else {
         vec![body.clone()]
     };
+    let total = exprs.len();
+    let mut seen = 0usize;
     let mut i = 0;
     while i < exprs.len() {
+        // The last statement's value is the scope's value. `map { one.extend(mod) }`
+        // has to answer the object, and an `extend` expression does not.
+        let value_used = seen + 1 == total;
+        seen += 1;
         rewrite_lambdas(&mut exprs[i], classes, modules, helpers, seq);
-        let setups = pull_setups(&mut exprs[i], classes, modules, helpers, seq, false);
+        let setups = pull_setups(&mut exprs[i], classes, modules, helpers, seq, value_used);
         let n = setups.len();
         if n > 0 {
             for (k, setup) in setups.into_iter().enumerate() {
@@ -486,7 +492,9 @@ fn subst_names(expr: &mut Expr, bound: &[(Symbol, Expr)]) {
         {
             for param in extra_params.iter_mut() {
                 if let Some(default) = &mut param.default {
-                    subst_names(default, bound);
+                    // `|tag, extra = tag|` reads the earlier block
+                    // parameter, not the helper argument of the same name.
+                    subst_names(default, &keep);
                 }
             }
             subst_names(body, &keep);
@@ -554,4 +562,76 @@ fn qualify(expr: &mut Expr, owner: &ClassId, constants: &[Symbol]) {
     }
     expr.node
         .for_each_child_mut(&mut |c| qualify(c, owner, constants));
+}
+
+pub(super) fn visit_statement_list(
+    body: &Expr,
+    delayed: bool,
+    f: &mut impl FnMut(&Expr, bool, bool),
+) {
+    match &*body.node {
+        ExprNode::Seq { exprs } => {
+            for stmt in exprs {
+                visit_expr(stmt, true, delayed, f);
+            }
+        }
+        _ => visit_expr(body, true, delayed, f),
+    }
+}
+
+pub(super) fn visit_expr(
+    expr: &Expr,
+    is_stmt: bool,
+    delayed: bool,
+    f: &mut impl FnMut(&Expr, bool, bool),
+) {
+    f(expr, is_stmt, delayed);
+    if let ExprNode::Send { block, .. } = &*expr.node {
+        if let ExprNode::Send { recv, args, .. } = &*expr.node {
+            if let Some(recv) = recv {
+                visit_expr(recv, false, delayed, f);
+            }
+            for arg in args {
+                visit_expr(arg, false, delayed, f);
+            }
+        }
+        // A call's block runs during the call. A `->` stored and
+        // called later does not: an assignment after the lambda can
+        // change the local the extend reads.
+        if let Some(block) = block {
+            visit_call_block(block, f);
+        }
+        return;
+    }
+    if let ExprNode::Lambda {
+        extra_params, body, ..
+    } = &*expr.node
+    {
+        for param in extra_params {
+            if let Some(default) = &param.default {
+                visit_expr(default, false, true, f);
+            }
+        }
+        visit_statement_list(body, true, f);
+        return;
+    }
+    expr.node
+        .for_each_child(&mut |c| visit_expr(c, false, delayed, f));
+}
+
+pub(super) fn visit_call_block(expr: &Expr, f: &mut impl FnMut(&Expr, bool, bool)) {
+    f(expr, false, false);
+    if let ExprNode::Lambda {
+        extra_params, body, ..
+    } = &*expr.node
+    {
+        for param in extra_params {
+            if let Some(default) = &param.default {
+                visit_expr(default, false, false, f);
+            }
+        }
+        visit_statement_list(body, false, f);
+        return;
+    }
+    visit_expr(expr, false, false, f);
 }
