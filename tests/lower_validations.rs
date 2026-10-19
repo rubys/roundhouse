@@ -61,6 +61,8 @@ fn length_rule_fans_out_into_min_and_max_checks() {
                     message: None,
                     allow_nil: None,
                 }],
+                if_method: None,
+                unless_method: None,
             },
             leading_comments: vec![],
             leading_blank_line: false,
@@ -100,6 +102,8 @@ fn multiple_rules_on_one_attribute_stay_grouped() {
                     ValidationRule::Presence,
                     ValidationRule::Length { min: Some(3), max: None, message: None, allow_nil: None },
                 ],
+                if_method: None,
+                unless_method: None,
             },
             leading_comments: vec![],
             leading_blank_line: false,
@@ -111,6 +115,49 @@ fn multiple_rules_on_one_attribute_stay_grouped() {
     assert_eq!(lowered[0].checks.len(), 2);
     assert!(matches!(lowered[0].checks[0], Check::Presence));
     assert!(matches!(lowered[0].checks[1], Check::MinLength { n: 3, message: None }));
+}
+
+#[test]
+fn inclusion_range_lowers_to_a_cover_check() {
+    use roundhouse::{
+        ClassId, InclusionRange, Model, ModelBodyItem, Row, Symbol, TableRef, Validation,
+        ValidationRule,
+    };
+    let model = Model {
+        name: ClassId(Symbol::from("Widget")),
+        parent: None,
+        parent_span: Default::default(),
+        table: TableRef(Symbol::from("widgets")),
+        primary_key: None,
+        attributes: Row::closed(),
+        enums: Default::default(),
+        enum_defaults: Default::default(),
+        class_attr_defaults: Default::default(),
+        lexical_json_shadow: false,
+        sti_subclass_names: Vec::new(),
+        i18n: Default::default(),
+        span: roundhouse::span::Span::synthetic(),
+        body: vec![ModelBodyItem::Validation {
+            validation: Validation {
+                attribute: Symbol::from("score"),
+                rules: vec![ValidationRule::Inclusion {
+                    values: vec![],
+                    range: Some(InclusionRange { begin: 1.0, end: 3.0, exclusive: false }),
+                }],
+                if_method: None,
+                unless_method: None,
+            },
+            leading_comments: vec![],
+            leading_blank_line: false,
+            span: roundhouse::span::Span::synthetic(),
+        }],
+    };
+    let lowered = lower_validations(&model);
+    assert_eq!(lowered.len(), 1);
+    assert!(matches!(
+        lowered[0].checks[0],
+        Check::Cover { begin, end, exclusive: false } if begin == 1.0 && end == 3.0
+    ));
 }
 
 #[test]

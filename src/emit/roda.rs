@@ -305,6 +305,16 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                 lines.push(format!("  {}", association_line(assoc)));
             }
             ModelBodyItem::Validation { validation, .. } => {
+                // A Symbol `if:` / `unless:` is lowered on the library
+                // path. Emitting the Sequel helper with no guard would
+                // check records Rails skips.
+                if validation.if_method.is_some() || validation.unless_method.is_some() {
+                    validate_lines.push(format!(
+                        "    # ROUNDHOUSE-TODO: conditional validation on :{} not emitted",
+                        validation.attribute
+                    ));
+                    continue;
+                }
                 for rule in &validation.rules {
                     match rule {
                         ValidationRule::Presence => {
@@ -340,27 +350,58 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                             ));
                         }
                         ValidationRule::Format { pattern } => {
+                            let body = crate::emit::shared::regex_literal::escape_regex_delimiters(pattern);
                             validate_lines.push(format!(
-                                "    validates_format /{pattern}/, :{}",
+                                "    validates_format /{body}/, :{}",
                                 validation.attribute
                             ));
                         }
-                        ValidationRule::Numericality { only_integer, .. } => {
+                        ValidationRule::Numericality { only_integer, gt, lt, gte, lte } => {
                             let helper =
                                 if *only_integer { "validates_integer" } else { "validates_numeric" };
                             validate_lines.push(format!(
                                 "    {helper} :{}",
                                 validation.attribute
                             ));
+                            // `validates_numeric` ignores `:greater_than`.
+                            // `validates_operator` is the comparison Sequel runs.
+                            if let Some(n) = gt {
+                                validate_lines.push(format!(
+                                    "    validates_operator :>, {n}, :{}",
+                                    validation.attribute
+                                ));
+                            }
+                            if let Some(n) = lt {
+                                validate_lines.push(format!(
+                                    "    validates_operator :<, {n}, :{}",
+                                    validation.attribute
+                                ));
+                            }
+                            if let Some(n) = gte {
+                                validate_lines.push(format!(
+                                    "    validates_operator :>=, {n}, :{}",
+                                    validation.attribute
+                                ));
+                            }
+                            if let Some(n) = lte {
+                                validate_lines.push(format!(
+                                    "    validates_operator :<=, {n}, :{}",
+                                    validation.attribute
+                                ));
+                            }
                         }
-                        ValidationRule::Inclusion { values } => {
-                            let list = values
-                                .iter()
-                                .map(literal_src)
-                                .collect::<Vec<_>>()
-                                .join(", ");
+                        ValidationRule::Inclusion { values, range } => {
+                            let list = if let Some(range) = range {
+                                let dots = if range.exclusive { "..." } else { ".." };
+                                format!("({}{}{})", range.begin, dots, range.end)
+                            } else {
+                                format!(
+                                    "[{}]",
+                                    values.iter().map(literal_src).collect::<Vec<_>>().join(", ")
+                                )
+                            };
                             validate_lines.push(format!(
-                                "    validates_includes [{list}], :{}",
+                                "    validates_includes {list}, :{}",
                                 validation.attribute
                             ));
                         }

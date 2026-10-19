@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/active_model_attributes.rs"]
+mod active_model_attributes;
 #[path = "emit_and_run/database_tasks.rs"]
 mod database_tasks;
 #[path = "emit_and_run/date_calendar_duration.rs"]
@@ -254,6 +256,8 @@ mod job_payload;
 mod sidekiq_adapter;
 #[path = "emit_and_run/silent_lowerings.rs"]
 mod silent_lowerings;
+#[path = "emit_and_run/validates_options.rs"]
+mod validates_options;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {

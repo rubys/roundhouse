@@ -587,6 +587,25 @@ pub enum Dependent {
 pub struct Validation {
     pub attribute: Symbol,
     pub rules: Vec<ValidationRule>,
+    /// `validates :attr, …, if: :pred` — a Symbol condition, the same
+    /// form `validate :method, if: :pred` already lowers. `None` runs
+    /// the rules on every save. A lambda or any other condition is not
+    /// stored here; ingest refuses the whole call instead of checking
+    /// unconditionally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_method: Option<Symbol>,
+    /// `unless: :pred`. When both are set, the rules run only when
+    /// `if:` holds and `unless:` does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless_method: Option<Symbol>,
+}
+
+/// Inclusive or exclusive numeric range from `inclusion: { in: 1..3 }`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InclusionRange {
+    pub begin: f64,
+    pub end: f64,
+    pub exclusive: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -613,8 +632,28 @@ pub enum ValidationRule {
         allow_nil: Option<bool>,
     },
     Format { pattern: String },
-    Numericality { only_integer: bool, gt: Option<f64>, lt: Option<f64> },
-    Inclusion { values: Vec<Literal> },
+    Numericality {
+        only_integer: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gt: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lt: Option<f64>,
+        /// `greater_than_or_equal_to:` / `less_than_or_equal_to:`.
+        /// The store guide uses the inclusive floor. Strict bounds stay
+        /// `gt` / `lt`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gte: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lte: Option<f64>,
+    },
+    Inclusion {
+        values: Vec<Literal>,
+        /// `in: 1..3` / `1...3`. Numeric `Range#include?` is `cover?`,
+        /// so the endpoints stay a range instead of an expanded list.
+        /// `values` is empty when this is set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<InclusionRange>,
+    },
     Custom {
         method: Symbol,
         /// `validate :m, if: :pred` / `unless: :pred` — the instance
