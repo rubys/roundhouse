@@ -3227,7 +3227,7 @@ pub(crate) fn ingest_library_method(
 /// Ingest a library method, optionally retaining keyword parameters even where
 /// ordinary library ingestion would flatten them. Data initializers require this
 /// to preserve Ruby's keyword binding and forwarding through `super`.
-pub(crate) fn ingest_library_method_with_keywords(
+pub(super) fn ingest_library_method_with_keywords(
     def: &ruby_prism::DefNode<'_>,
     owner: &ClassId,
     file: &str,

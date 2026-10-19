@@ -2700,6 +2700,16 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                      no IR node carries it, so the site raises"
                 ),
             }));
+            // The stamp stays a nil. The method parsed here is what a hoist
+            // copies; the owner is filled in when that module exists.
+            if let Ok(method) = super::library_class::ingest_library_method_with_keywords(
+                &def,
+                &crate::ident::ClassId(Symbol::from("")),
+                file,
+                true,
+            ) {
+                stub.set_nested_def(method);
+            }
             return Ok(stub);
         }
         // Backticks / `%x{…}` - a shell-out. Ruby evaluates the literal

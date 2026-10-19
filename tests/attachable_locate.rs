@@ -717,6 +717,118 @@ fn an_extend_inside_a_proc_stays_unsupported() {
     );
 }
 
+/// `lambda`, `proc`, and `Proc.new` run when called, same as `->`.
+#[test]
+fn an_extend_inside_lambda_proc_or_proc_new_stays_unsupported() {
+    for (name, maker) in [
+        ("test_lambda", "lambda"),
+        ("test_proc_method", "proc"),
+        ("test_proc_new", "Proc.new"),
+    ] {
+        assert_extend_stub(
+            name,
+            &format!(
+                "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"{label}\" do\n    failing = Module.new {{ def begin_transport = :closed }}\n    one = Box.new\n    cb = {maker} {{ one.extend(failing) }}\n    one = Box.new\n    cb.call\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+                label = name.trim_start_matches("test_"),
+            ),
+        );
+    }
+}
+
+/// `in one` binds `one` to the scrutinee. The earlier `.new` is not the object MRI extends.
+#[test]
+fn a_pattern_bind_before_extend_stays_unsupported() {
+    assert_extend_stub(
+        "test_case_in",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"case in\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    other = Box.new\n    case other\n    in one\n    end\n    one.extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+    assert_extend_stub(
+        "test_match_required",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"match required\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    other = Box.new\n    other => one\n    one.extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// The helper's `yield` is the caller's block. Copying it into the test method runs the test block.
+#[test]
+fn a_helper_that_yields_stays_unsupported() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  attr_accessor :note\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\nend\n",
+        ),
+        (
+            "test/test_helpers/open_helper.rb",
+            "module OpenHelper\n  def opened(tag)\n    Box.new.tap do |box|\n      box.note = yield\n    end\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  include OpenHelper\n  test \"yields\" do\n    failing = Module.new { def begin_transport = :closed }\n    assert_equal :closed, opened(\"a\") { \"from-block\" }.extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        diags.iter().any(|d| d.message.contains("Object#extend")),
+        "a yielding helper is reported:\n{diags:?}\n{test}"
+    );
+    assert!(
+        test.contains("def test_yields\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"),
+        "the test is the raise:\n{test}"
+    );
+}
+
+/// A block passed to the helper is not the tap block. Inlining would drop it.
+#[test]
+fn a_helper_call_with_a_block_stays_unsupported() {
+    assert_extend_stub(
+        "test_helper_block",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  include OpenHelper\n  test \"helper block\" do\n    failing = Module.new { def begin_transport = :closed }\n    assert_equal :closed, opened(\"a\") { |box| box }.extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// The nested `def` keeps the keyword it was parsed with.
+#[test]
+fn a_hoisted_def_keeps_its_keyword() {
+    let (_diags, test) = box_extend_app(
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"keyword\" do\n    failing = Module.new { def ping(note: \"x\") = note }\n    one = Box.new\n    one.extend(failing)\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+    assert!(
+        test.contains("note:"),
+        "the keyword is not flattened:\n{test}"
+    );
+    assert!(
+        test.contains(".extend("),
+        "the module still extends:\n{test}"
+    );
+}
+
+/// `Box` in an included helper is `::Box`, not a constant the test class defines.
+#[test]
+fn an_included_helper_constant_stays_absolute() {
+    let (_diags, test) = box_extend_app(
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  Box = String\n  include OpenHelper\n  test \"lexical constant\" do\n    failing = Module.new { def begin_transport = :closed }\n    assert_equal :closed, opened(\"a\").extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, ::Box.new.ping\n  end\nend\n",
+    );
+    assert!(
+        test.contains("::Box.new"),
+        "the helper's Box is absolute:\n{test}"
+    );
+    assert!(
+        test.contains(".extend("),
+        "the absolute constant still extends:\n{test}"
+    );
+    assert!(
+        !test.contains("__rh_extend_object_1 = Box.new"),
+        "the copied receiver is not the test class constant:\n{test}"
+    );
+}
+
 /// `prepend` puts the module's `extend` ahead of `Object#extend`.
 #[test]
 fn an_extend_from_a_prepended_module_stays_unsupported() {

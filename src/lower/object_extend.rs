@@ -34,12 +34,13 @@
 use std::collections::HashSet;
 
 use crate::app::App;
-use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity, NESTED_DEF};
+use crate::diagnostic::{Diagnostic, DiagnosticKind, NESTED_DEF, Severity};
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, MethodVisibility, Param};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
-use crate::span::{SourceFile, Span};
+use crate::span::Span;
 
+mod region;
 mod rewrite;
 
 const CONSTRUCT: &str = "Object#extend";
@@ -52,8 +53,10 @@ pub fn apply_object_extend_stub(app: &mut App) -> Vec<Diagnostic> {
     for view in &mut app.views {
         stub_sites(&mut view.body, &mut diags);
     }
-    let sources = app.sources.clone();
     let library = library_index(app);
+    // One closure over library classes and this file's classes. The
+    // inner loop used to repeat the parent / include / prepend walk.
+    let library_classes = app.library_classes.clone();
     for tm in &mut app.test_modules {
         if let Some(setup) = &mut tm.setup {
             stub_sites(setup, &mut diags);
@@ -61,40 +64,14 @@ pub fn apply_object_extend_stub(app: &mut App) -> Vec<Diagnostic> {
         let helpers = factories(tm);
         let mut classes = library.classes.clone();
         let mut base_modules = library.modules.clone();
-        let mut extend_defined = library.extend_defined.clone();
-        // A parent declared later in the file still defines `extend`
-        // for the classes under it.
-        let mut grew = true;
-        while grew {
-            grew = false;
-            for lc in &tm.inner_classes {
-                note_class(lc, &library.models, &mut classes, &mut base_modules);
-                let name = lc.name.0.as_str().to_string();
-                if extend_defined.contains(&name) {
-                    continue;
-                }
-                let parent_defines = lc
-                    .parent
-                    .as_ref()
-                    .is_some_and(|p| extend_defined.contains(p.0.as_str()));
-                let include_defines = lc
-                    .includes
-                    .iter()
-                    .any(|inc| extend_defined.contains(inc.0.as_str()));
-                if defines_instance_extend(lc)
-                    || parent_defines
-                    || include_defines
-                    || prepends_defined_extend(lc, &extend_defined)
-                {
-                    extend_defined.insert(name);
-                    grew = true;
-                }
-            }
+        for lc in &tm.inner_classes {
+            note_class(lc, &library.models, &mut classes, &mut base_modules);
         }
+        let extend_defined =
+            extend_defined_names(library_classes.iter().chain(tm.inner_classes.iter()));
         for t in &mut tm.tests {
             let mut modules = base_modules.clone();
-            let added =
-                hoist_anonymous_modules(&mut t.body, &sources, &mut tm.inner_classes, &mut modules);
+            let added = hoist_anonymous_modules(&mut t.body, &mut tm.inner_classes, &mut modules);
             let mut seq = 0u32;
             rewrite::rewrite_scope(&mut t.body, &classes, &modules, &helpers, &mut seq);
             if let Some(d) = first_untraced(&t.body, &classes, &modules, &extend_defined) {
@@ -121,9 +98,6 @@ struct LibraryIndex {
     /// defines `self.extended` is refused by Spinel: the hook would
     /// have to run at the call.
     modules: HashSet<String>,
-    /// Classes that define their own `extend`. The call is that method,
-    /// and its return value is not the receiver.
-    extend_defined: HashSet<String>,
 }
 
 fn library_index(app: &App) -> LibraryIndex {
@@ -137,12 +111,10 @@ fn library_index(app: &App) -> LibraryIndex {
     for lc in &app.library_classes {
         note_class(lc, &models, &mut classes, &mut modules);
     }
-    let extend_defined = extend_defined_names(&app.library_classes);
     LibraryIndex {
         models,
         classes,
         modules,
-        extend_defined,
     }
 }
 
@@ -172,12 +144,15 @@ fn prepends_defined_extend(lc: &LibraryClass, defined: &HashSet<String>) -> bool
 }
 
 /// A class, and any class under it, whose `extend` is not `Object#extend`.
-fn extend_defined_names(classes: &[LibraryClass]) -> HashSet<String> {
+fn extend_defined_names<'a>(
+    classes: impl IntoIterator<Item = &'a LibraryClass>,
+) -> HashSet<String> {
+    let classes: Vec<&LibraryClass> = classes.into_iter().collect();
     let mut out = HashSet::new();
     let mut grew = true;
     while grew {
         grew = false;
-        for lc in classes {
+        for lc in &classes {
             let name = lc.name.0.as_str().to_string();
             if out.contains(&name) {
                 continue;
@@ -226,10 +201,33 @@ struct Factory {
     name: Symbol,
     params: Vec<Param>,
     body: Expr,
+    /// Class or module whose lexical scope the body was written in.
     owner: ClassId,
-    /// Bare constants of `owner` that a body copied onto the test
-    /// class would no longer resolve lexically.
+    /// Class the body is copied into. Differs from `owner` for an
+    /// included module, where a bare constant is not the test class's.
+    home: ClassId,
+    /// Constants assigned on `owner`.
     constants: Vec<Symbol>,
+    /// The method `yield`s or takes a block. Copying the body would
+    /// run that against the test method.
+    yields: bool,
+}
+
+fn yields_to_caller(method: &MethodDef) -> bool {
+    method.block_param.is_some() || method.has_anonymous_block || expr_yields(&method.body)
+}
+
+fn expr_yields(expr: &Expr) -> bool {
+    if matches!(&*expr.node, ExprNode::Yield { .. }) {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |child| {
+        if !found {
+            found = expr_yields(child);
+        }
+    });
+    found
 }
 
 fn factories(tm: &crate::dialect::TestModule) -> Vec<Factory> {
@@ -244,7 +242,9 @@ fn factories(tm: &crate::dialect::TestModule) -> Vec<Factory> {
             params: m.params.clone(),
             body: m.body.clone(),
             owner: tm.name.clone(),
+            home: tm.name.clone(),
             constants: Vec::new(),
+            yields: yields_to_caller(m),
         });
     }
     // The last `include` wins, as Ruby's ancestor chain does.
@@ -266,7 +266,9 @@ fn factories(tm: &crate::dialect::TestModule) -> Vec<Factory> {
                 params: m.params.clone(),
                 body: m.body.clone(),
                 owner: lc.name.clone(),
+                home: tm.name.clone(),
                 constants: constants.clone(),
+                yields: yields_to_caller(m),
             });
         }
     }
@@ -278,16 +280,16 @@ fn factories(tm: &crate::dialect::TestModule) -> Vec<Factory> {
 /// how many modules were appended to `inner`.
 fn hoist_anonymous_modules(
     body: &mut Expr,
-    sources: &[SourceFile],
     inner: &mut Vec<LibraryClass>,
     modules: &mut HashSet<String>,
 ) -> usize {
     let mut found = Vec::new();
-    collect_module_assigns(body, sources, &mut found);
+    collect_module_assigns(body, &mut found);
     let before = inner.len();
+    let reads = region::survey(body);
     let mut n = 0u32;
     for (local, methods) in found {
-        if !sole_extend_local(body, &local) {
+        if !reads.sole_local(&local) {
             continue;
         }
         let name = fresh_const(&mut n, |c| {
@@ -295,20 +297,12 @@ fn hoist_anonymous_modules(
         });
         let id = ClassId(Symbol::from(name.as_str()));
         let mut defs = Vec::new();
-        let mut ok = true;
-        for (vis, span) in &methods {
-            let Some(text) = source_slice(sources, *span) else {
-                ok = false;
-                break;
-            };
-            let Some(mut def) = method_from_source(text, &id) else {
-                ok = false;
-                break;
-            };
-            def.visibility = *vis;
+        for (vis, mut def) in methods {
+            def.visibility = vis;
+            def.enclosing_class = Some(id.0.clone());
             defs.push(def);
         }
-        if !ok || defs.is_empty() {
+        if defs.is_empty() {
             continue;
         }
         // `self.extended` runs at the call. Spinel refuses the module,
@@ -358,60 +352,49 @@ fn fresh_const(n: &mut u32, taken: impl Fn(&str) -> bool) -> String {
 
 fn collect_module_assigns(
     expr: &Expr,
-    sources: &[SourceFile],
-    out: &mut Vec<(Symbol, Vec<(MethodVisibility, Span)>)>,
+    out: &mut Vec<(Symbol, Vec<(MethodVisibility, MethodDef)>)>,
 ) {
-    collect_module_statements(expr, sources, out);
+    collect_module_statements(expr, out);
 }
 
 /// Only a statement assignment is hoisted. `foo(failing = Module.new { ... })`
 /// uses the assignment's value; replacing it with nil would change `foo`.
 fn collect_module_statements(
     expr: &Expr,
-    sources: &[SourceFile],
-    out: &mut Vec<(Symbol, Vec<(MethodVisibility, Span)>)>,
+    out: &mut Vec<(Symbol, Vec<(MethodVisibility, MethodDef)>)>,
 ) {
     match &*expr.node {
         ExprNode::Seq { exprs } => {
             for stmt in exprs {
-                collect_one_statement(stmt, sources, out);
+                collect_one_statement(stmt, out);
             }
         }
-        _ => collect_one_statement(expr, sources, out),
+        _ => collect_one_statement(expr, out),
     }
 }
 
-fn collect_one_statement(
-    expr: &Expr,
-    sources: &[SourceFile],
-    out: &mut Vec<(Symbol, Vec<(MethodVisibility, Span)>)>,
-) {
+fn collect_one_statement(expr: &Expr, out: &mut Vec<(Symbol, Vec<(MethodVisibility, MethodDef)>)>) {
     if let ExprNode::Assign {
         target: LValue::Var { name, .. },
         value,
     } = &*expr.node
     {
         if let Some(methods) = module_new_methods(value) {
-            if methods
-                .iter()
-                .all(|(_, span)| source_slice(sources, *span).is_some())
-            {
-                out.push((name.clone(), methods));
-            }
+            out.push((name.clone(), methods));
         }
     }
     if let ExprNode::Lambda { body, .. } = &*expr.node {
-        collect_module_statements(body, sources, out);
+        collect_module_statements(body, out);
         return;
     }
     if let ExprNode::Send { block, .. } = &*expr.node {
         if let Some(block) = block {
-            collect_module_statements(block, sources, out);
+            collect_module_statements(block, out);
         }
     }
 }
 
-fn module_new_methods(expr: &Expr) -> Option<Vec<(MethodVisibility, Span)>> {
+fn module_new_methods(expr: &Expr) -> Option<Vec<(MethodVisibility, MethodDef)>> {
     let ExprNode::Send {
         recv: Some(recv),
         method,
@@ -461,17 +444,13 @@ fn module_new_methods(expr: &Expr) -> Option<Vec<(MethodVisibility, Span)>> {
                 let Some(v) = visibility_name(method.as_str()) else {
                     return None;
                 };
-                out.push((v, args[0].span));
+                out.push((v, args[0].nested_def()?.clone()));
             }
-            _ if is_nested_def(stmt) => out.push((vis, stmt.span)),
+            _ if is_nested_def(stmt) => out.push((vis, stmt.nested_def()?.clone())),
             _ => return None,
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn visibility_name(name: &str) -> Option<MethodVisibility> {
@@ -485,118 +464,6 @@ fn visibility_name(name: &str) -> Option<MethodVisibility> {
 
 fn is_nested_def(expr: &Expr) -> bool {
     matches!(expr.diagnostic(), Some(DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == NESTED_DEF)
-}
-
-fn sole_extend_local(body: &Expr, name: &Symbol) -> bool {
-    if lambda_rebinds(body, name) {
-        return false;
-    }
-    let mut writes = 0u32;
-    let reads = std::cell::Cell::new(0u32);
-    let mut extend_reads = 0u32;
-    let mut foreign = false;
-    let total = extend_reads_of(body, name);
-    visit_scoped(
-        body,
-        &|e| total > 0 && extend_reads_of(e, name) == total,
-        &mut |e| {
-            if is_plain_assign_to(e, name) {
-                writes += 1;
-            } else if is_other_write(e, name) {
-                writes += 2;
-            }
-            if is_extend_read(e, name) {
-                extend_reads += 1;
-            }
-            if var_is(e, name) {
-                reads.set(reads.get() + 1);
-            }
-        },
-        &mut |e| {
-            if is_plain_assign_to(e, name) || is_other_write(e, name) {
-                foreign = true;
-            }
-            // A read in a scope that does not extend still uses the
-            // local. Deleting the assignment would leave a NameError.
-            if var_is(e, name) {
-                reads.set(reads.get() + 1);
-            }
-        },
-    );
-    let reads = reads.get();
-    !foreign && writes == 1 && reads > 0 && reads == extend_reads
-}
-
-fn lambda_rebinds(expr: &Expr, name: &Symbol) -> bool {
-    let mut found = false;
-    walk(expr, &mut |e| {
-        let ExprNode::Lambda {
-            params,
-            rest_param,
-            extra_params,
-            block_param,
-            ..
-        } = &*e.node
-        else {
-            return;
-        };
-        if params.iter().any(|p| p == name)
-            || rest_param.as_ref() == Some(name)
-            || block_param.as_ref() == Some(name)
-            || extra_params.iter().any(|p| &p.name == name)
-        {
-            found = true;
-        }
-    });
-    found
-}
-
-fn is_extend_read(expr: &Expr, name: &Symbol) -> bool {
-    matches!(&*expr.node, ExprNode::Send { method, args, .. }
-        if method.as_str() == "extend" && args.len() == 1 && var_is(&args[0], name))
-}
-
-fn extend_reads_of(expr: &Expr, name: &Symbol) -> u32 {
-    let mut n = 0u32;
-    walk(expr, &mut |e| {
-        if is_extend_read(e, name) {
-            n += 1;
-        }
-    });
-    n
-}
-
-/// A gate or a block is its own scope. Enter it only when `contains`
-/// says the extend being judged is inside. A write in a skipped scope
-/// is `on_foreign`: it is not the one unconditional definition.
-fn visit_scoped(
-    expr: &Expr,
-    contains: &impl Fn(&Expr) -> bool,
-    on_node: &mut impl FnMut(&Expr),
-    on_foreign: &mut impl FnMut(&Expr),
-) {
-    let boundary = rewrite::gates_control(expr) || matches!(&*expr.node, ExprNode::Lambda { .. });
-    if boundary && !contains(expr) {
-        walk(expr, on_foreign);
-        return;
-    }
-    on_node(expr);
-    expr.node.for_each_child(&mut |child| {
-        visit_scoped(child, contains, on_node, on_foreign);
-    });
-}
-
-fn contains_expr(hay: &Expr, needle: &Expr) -> bool {
-    if std::ptr::eq(hay, needle) {
-        return true;
-    }
-    let mut found = false;
-    hay.node.for_each_child(&mut |child| {
-        if !found {
-            found = contains_expr(child, needle);
-        }
-    });
-    found
 }
 
 fn replace_extend_arg(expr: &mut Expr, name: &Symbol, constant: &Expr) {
@@ -632,103 +499,34 @@ fn first_untraced(
     modules: &HashSet<String>,
     extend_defined: &HashSet<String>,
 ) -> Option<Diagnostic> {
-    let mut found = None;
-    // The body is a statement list. An earlier statement is not a
-    // reason to refuse an extend in a later one. A `Seq` nested under
-    // a statement is one expression, and order inside it counts.
-    rewrite::visit_statement_list(body, false, &mut |e, is_stmt, delayed| {
-        if found.is_some() {
-            return;
+    let survey = region::survey(body);
+    for site in survey.instance_extends() {
+        if site_supported(&site, classes, modules, extend_defined) {
+            continue;
         }
-        if let Some(d) = untraced_at(e, is_stmt, delayed, body, classes, modules, extend_defined) {
-            found = Some(d);
-        }
-    });
-    found
-}
-
-fn untraced_at(
-    expr: &Expr,
-    is_stmt: bool,
-    delayed: bool,
-    root: &Expr,
-    classes: &HashSet<String>,
-    modules: &HashSet<String>,
-    extend_defined: &HashSet<String>,
-) -> Option<Diagnostic> {
-    // A proc that runs later is not the statement Spinel can see.
-    if delayed && instance_extend(expr).is_some() {
-        let mut d = Diagnostic::unsupported(expr.span, None, CONSTRUCT, DETAIL);
+        let mut d = Diagnostic::unsupported(site.expr.span, None, CONSTRUCT, DETAIL);
         d.severity = Severity::Warning;
         return Some(d);
     }
-    // Spinel flips the class at an `extend` statement. One that is still
-    // the receiver or an argument (`one.extend(other.extend(mod))`) does
-    // not yield the object.
-    if !is_stmt && instance_extend(expr).is_some() {
-        let mut d = Diagnostic::unsupported(expr.span, None, CONSTRUCT, DETAIL);
-        d.severity = Severity::Warning;
-        return Some(d);
-    }
-    if rewrite::gates_control(expr) || rewrite::effect_precedes_extend(expr) {
-        if let Some(site) =
-            extend_outside_a_block(expr).or_else(|| instance_extend(expr).map(|(e, _)| e))
-        {
-            let mut d = Diagnostic::unsupported(site.span, None, CONSTRUCT, DETAIL);
-            d.severity = Severity::Warning;
-            return Some(d);
-        }
-    }
-    let (recv, _) = instance_extend(expr)?;
-    if traced(recv, expr, root, classes, modules, extend_defined) {
-        return None;
-    }
-    let mut d = Diagnostic::unsupported(expr.span, None, CONSTRUCT, DETAIL);
-    d.severity = Severity::Warning;
-    Some(d)
+    None
 }
 
-/// An `extend` in this arm, not one inside a block. A block is its own
-/// scope: its setups stay inside it, so they run when the block runs.
-fn extend_outside_a_block(expr: &Expr) -> Option<&Expr> {
-    let mut found = None;
-    expr.node.for_each_child(&mut |child| {
-        if found.is_none() {
-            found = extend_in_arm(child);
-        }
-    });
-    found
-}
-
-fn extend_in_arm(expr: &Expr) -> Option<&Expr> {
-    if matches!(&*expr.node, ExprNode::Lambda { .. }) {
-        return None;
-    }
-    if instance_extend(expr).is_some() {
-        return Some(expr);
-    }
-    let mut found = None;
-    expr.node.for_each_child(&mut |child| {
-        if found.is_none() {
-            found = extend_in_arm(child);
-        }
-    });
-    found
-}
-
-fn traced(
-    recv: &Expr,
-    extend_expr: &Expr,
-    root: &Expr,
+/// Spinel flips the class at one `extend` statement whose receiver is
+/// the single straight-line `.new` and whose argument is one module.
+fn site_supported(
+    site: &region::ExtendSite<'_>,
     classes: &HashSet<String>,
     modules: &HashSet<String>,
     extend_defined: &HashSet<String>,
 ) -> bool {
-    let ExprNode::Send { args, .. } = &*extend_expr.node else {
+    if site.delayed || !site.is_stmt || site.preceded || site.gated {
+        return false;
+    }
+    let ExprNode::Send { args, .. } = &*site.expr.node else {
         return false;
     };
-    // One module. A second argument (`extend(Mod, other)`) is not the
-    // call Spinel transplants, and leaving it in the file refuses the link.
+    // A second argument (`extend(Mod, other)`) is not the call Spinel
+    // transplants, and leaving it in the file refuses the link.
     if args.len() != 1 {
         return false;
     }
@@ -738,67 +536,33 @@ fn traced(
     if !modules.contains(&mod_name) {
         return false;
     }
-    let Some(local) = var_name(recv) else {
-        return false;
-    };
-    let mut values = Vec::new();
-    let others = std::cell::Cell::new(false);
-    // A write after the extend is a later assignment. It is not the
-    // value the extend reads. A write before it, in this scope, is.
-    let seen = std::cell::Cell::new(false);
-    visit_scoped(
-        root,
-        &|e| contains_expr(e, extend_expr),
-        &mut |e| {
-            if std::ptr::eq(e, extend_expr) {
-                seen.set(true);
-                return;
-            }
-            if seen.get() {
-                return;
-            }
-            // `expr => one` binds `one`. It is not a plain assignment,
-            // and a later `extend` must not treat an earlier `one = Box.new`
-            // as the only write.
-            if matches!(
-                &*e.node,
-                ExprNode::MatchRequired { .. } | ExprNode::MatchPredicate { .. }
-            ) {
-                others.set(true);
-            }
-            if let ExprNode::Assign {
-                target: LValue::Var { name, .. },
-                value,
-            } = &*e.node
-            {
-                if name == &local {
-                    values.push(value.clone());
-                }
-            } else if is_other_write(e, &local) {
-                others.set(true);
-            }
-        },
-        &mut |e| {
-            if seen.get() {
-                return;
-            }
-            if is_plain_assign_to(e, &local) || is_other_write(e, &local) {
-                others.set(true);
-            }
-        },
-    );
-    if others.get() || values.len() != 1 {
-        return false;
-    }
-    let Some(class_name) = plain_new_class(&values[0]) else {
+    let Some(class_name) = site.reaching_class.as_deref() else {
         return false;
     };
     // `def extend` on the class is that method. Replacing the call with
     // the receiver drops the value it returns.
-    if extend_defined.contains(&class_name) {
-        return false;
+    !extend_defined.contains(class_name) && classes.contains(class_name)
+}
+
+/// `if` / `&&` / `||` (and the other short-circuit forms) run only some
+/// of their children. A write there is not the one straight-line definition.
+pub(super) fn gates_control(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::If { .. }
+        | ExprNode::BoolOp { .. }
+        | ExprNode::Case { .. }
+        | ExprNode::CaseMatch { .. }
+        | ExprNode::While { .. }
+        | ExprNode::RescueModifier { .. }
+        | ExprNode::BeginRescue { .. } => true,
+        ExprNode::OpAssign { op, .. } => {
+            matches!(
+                op,
+                crate::expr::OpAssignOp::OrOr | crate::expr::OpAssignOp::AndAnd
+            )
+        }
+        _ => false,
     }
-    classes.contains(&class_name)
 }
 
 fn instance_extend(expr: &Expr) -> Option<(&Expr, ())> {
@@ -835,40 +599,11 @@ fn plain_new_class(expr: &Expr) -> Option<String> {
     const_name(recv)
 }
 
-fn method_from_source(text: &str, owner: &ClassId) -> Option<MethodDef> {
-    let result = ruby_prism::parse(text.as_bytes());
-    let stmt = result
-        .node()
-        .as_program_node()?
-        .statements()
-        .body()
-        .iter()
-        .next()?;
-    let def = stmt.as_def_node()?;
-    crate::ingest::library_class::ingest_library_method_with_keywords(
-        &def,
-        owner,
-        "<instance-extend>",
-        true,
-    )
-    .ok()
-}
-
-fn source_slice(sources: &[SourceFile], span: Span) -> Option<&str> {
-    let file = sources.get(span.file.0.checked_sub(1)? as usize)?;
-    file.text.get(span.start as usize..span.end as usize)
-}
-
 fn statements(expr: &Expr) -> Vec<&Expr> {
     match &*expr.node {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
         _ => vec![expr],
     }
-}
-
-fn walk(expr: &Expr, f: &mut impl FnMut(&Expr)) {
-    f(expr);
-    expr.node.for_each_child(&mut |c| walk(c, f));
 }
 
 fn const_name(expr: &Expr) -> Option<String> {
@@ -904,19 +639,6 @@ fn var_is(expr: &Expr, name: &Symbol) -> bool {
 
 fn is_plain_assign_to(expr: &Expr, name: &Symbol) -> bool {
     matches!(&*expr.node, ExprNode::Assign { target: LValue::Var { name: n, .. }, .. } if n == name)
-}
-
-fn is_other_write(expr: &Expr, name: &Symbol) -> bool {
-    match &*expr.node {
-        ExprNode::OpAssign {
-            target: LValue::Var { name: n, .. },
-            ..
-        } => n == name,
-        ExprNode::MultiAssign { targets, .. } => targets
-            .iter()
-            .any(|t| matches!(t, LValue::Var { name: n, .. } if n == name)),
-        _ => false,
-    }
 }
 
 fn stub_sites(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {

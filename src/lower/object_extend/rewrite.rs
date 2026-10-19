@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use super::{const_name, instance_extend, plain_new_class, statements, var_is, var_name, Factory};
+use super::{Factory, const_name, plain_new_class, statements, var_is, var_name};
 use crate::dialect::Param;
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::{ClassId, Symbol, VarId};
@@ -79,72 +79,12 @@ fn pull_setups(
 ) -> Vec<Expr> {
     // Hoisting in front of this statement would run the extend before
     // an effect that Ruby evaluates first (`foo(bar(), obj.extend(mod))`).
-    if effect_precedes_extend(expr) {
+    if super::region::effect_before_extend(expr) {
         return Vec::new();
     }
     let mut out = Vec::new();
     pull_one(expr, classes, modules, helpers, seq, value_used, &mut out);
     out
-}
-
-/// True when some call or write is evaluated before an `extend` in this
-/// expression. The extend's own receiver does not count: it is moved
-/// into the setup, immediately before the extend.
-pub(super) fn effect_precedes_extend(expr: &Expr) -> bool {
-    let mut effect = false;
-    let mut preceded = false;
-    scan_eval_order(expr, &mut effect, &mut preceded);
-    preceded
-}
-
-fn scan_eval_order(expr: &Expr, effect: &mut bool, preceded: &mut bool) {
-    if *preceded || matches!(&*expr.node, ExprNode::Lambda { .. }) {
-        return;
-    }
-    // A parenthesized or `begin` list is one expression (`(side();
-    // obj.extend(mod))`). Children share the effect flag, so `side`
-    // precedes the extend. Statement lists are not scanned as one
-    // node: `first_untraced` visits each statement on its own.
-    if gates_control(expr) {
-        *effect = true;
-        return;
-    }
-    // `obj.n += expr` reads `obj.n` before `expr`. That read is not a
-    // child node, so an extend in the right-hand side is preceded.
-    if let ExprNode::OpAssign { value, .. } = &*expr.node {
-        *effect = true;
-        scan_eval_order(value, effect, preceded);
-        return;
-    }
-    if instance_extend(expr).is_some() {
-        if *effect {
-            *preceded = true;
-        }
-        *effect = true;
-        return;
-    }
-    expr.node.for_each_child(&mut |child| {
-        if !*preceded {
-            scan_eval_order(child, effect, preceded);
-        }
-    });
-    if is_effect(expr) {
-        *effect = true;
-    }
-}
-
-fn is_effect(expr: &Expr) -> bool {
-    matches!(
-        &*expr.node,
-        ExprNode::Send { .. }
-            | ExprNode::Assign { .. }
-            | ExprNode::OpAssign { .. }
-            | ExprNode::MultiAssign { .. }
-            | ExprNode::Yield { .. }
-            | ExprNode::Raise { .. }
-            | ExprNode::Super { .. }
-            | ExprNode::Return { .. }
-    )
 }
 
 fn pull_one(
@@ -156,7 +96,7 @@ fn pull_one(
     value_used: bool,
     out: &mut Vec<Expr>,
 ) {
-    if matches!(&*expr.node, ExprNode::Lambda { .. }) || gates_control(expr) {
+    if matches!(&*expr.node, ExprNode::Lambda { .. }) || super::gates_control(expr) {
         return;
     }
     if let Some(setups) = explode_extend(expr, classes, modules, helpers, seq, value_used) {
@@ -165,30 +105,6 @@ fn pull_one(
     expr.node.for_each_child_mut(&mut |c| {
         pull_one(c, classes, modules, helpers, seq, true, out);
     });
-}
-
-/// `if` / `&&` / `||` (and the other short-circuit forms) run only some
-/// of their children. Setups have to stay in that arm. Pulling them out
-/// to the enclosing statement would extend the object when the branch
-/// did not run, so an `extend` written there is left in place and the
-/// test is stubbed.
-pub(super) fn gates_control(expr: &Expr) -> bool {
-    match &*expr.node {
-        ExprNode::If { .. }
-        | ExprNode::BoolOp { .. }
-        | ExprNode::Case { .. }
-        | ExprNode::CaseMatch { .. }
-        | ExprNode::While { .. }
-        | ExprNode::RescueModifier { .. }
-        | ExprNode::BeginRescue { .. } => true,
-        ExprNode::OpAssign { op, .. } => {
-            matches!(
-                op,
-                crate::expr::OpAssignOp::OrOr | crate::expr::OpAssignOp::AndAnd
-            )
-        }
-        _ => false,
-    }
 }
 
 struct Built {
@@ -319,11 +235,18 @@ fn explode_receiver(recv: &Expr, helpers: &[Factory]) -> Option<Built> {
     if bound.iter().any(|(_, value)| !pure_binding(value)) {
         return None;
     }
+    // `yield` and a block parameter belong to the helper's caller.
+    // The call above has no block; copying either would run them in
+    // the test method. A call that does pass a block never matches.
+    if factory.yields {
+        return None;
+    }
     let mut body = value_of(&factory.body).clone();
-    // Qualify and rename the tap parameter before the caller's
-    // arguments are spliced in. Otherwise an argument named `box`, or
-    // a bare constant that matches the helper, is rewritten too.
-    if !factory.constants.is_empty() {
+    // The included module's bare `Box` is `::Box`, not a constant the
+    // test class defines under the same name. Qualify before the
+    // caller's arguments are spliced in, or an argument named `box`
+    // is rewritten too.
+    if factory.owner != factory.home {
         qualify(&mut body, &factory.owner, &factory.constants);
     }
     let mut built = explode_expr(&body)?;
@@ -448,11 +371,7 @@ fn bind_params(params: &[Param], args: &[Expr]) -> Option<Vec<(Symbol, Expr)>> {
             return None;
         }
     }
-    if i != args.len() {
-        None
-    } else {
-        Some(bound)
-    }
+    if i != args.len() { None } else { Some(bound) }
 }
 
 fn pure_binding(expr: &Expr) -> bool {
@@ -548,90 +467,22 @@ fn lambda_binds(expr: &Expr, name: &Symbol) -> bool {
 
 fn qualify(expr: &mut Expr, owner: &ClassId, constants: &[Symbol]) {
     if let ExprNode::Const { path } = &mut *expr.node {
-        if path.len() == 1 && constants.iter().any(|c| c == &path[0]) {
-            let mut full: Vec<Symbol> = owner
-                .0
-                .as_str()
-                .split("::")
-                .filter(|s| !s.is_empty())
-                .map(Symbol::from)
-                .collect();
-            full.push(path[0].clone());
-            *path = full;
+        if path.len() == 1 && !path[0].as_str().is_empty() {
+            if constants.iter().any(|c| c == &path[0]) {
+                let mut full: Vec<Symbol> = owner
+                    .0
+                    .as_str()
+                    .split("::")
+                    .filter(|s| !s.is_empty())
+                    .map(Symbol::from)
+                    .collect();
+                full.push(path[0].clone());
+                *path = full;
+            } else {
+                *path = vec![Symbol::from(""), path[0].clone()];
+            }
         }
     }
     expr.node
         .for_each_child_mut(&mut |c| qualify(c, owner, constants));
-}
-
-pub(super) fn visit_statement_list(
-    body: &Expr,
-    delayed: bool,
-    f: &mut impl FnMut(&Expr, bool, bool),
-) {
-    match &*body.node {
-        ExprNode::Seq { exprs } => {
-            for stmt in exprs {
-                visit_expr(stmt, true, delayed, f);
-            }
-        }
-        _ => visit_expr(body, true, delayed, f),
-    }
-}
-
-pub(super) fn visit_expr(
-    expr: &Expr,
-    is_stmt: bool,
-    delayed: bool,
-    f: &mut impl FnMut(&Expr, bool, bool),
-) {
-    f(expr, is_stmt, delayed);
-    if let ExprNode::Send { block, .. } = &*expr.node {
-        if let ExprNode::Send { recv, args, .. } = &*expr.node {
-            if let Some(recv) = recv {
-                visit_expr(recv, false, delayed, f);
-            }
-            for arg in args {
-                visit_expr(arg, false, delayed, f);
-            }
-        }
-        // A call's block runs during the call. A `->` stored and
-        // called later does not: an assignment after the lambda can
-        // change the local the extend reads.
-        if let Some(block) = block {
-            visit_call_block(block, f);
-        }
-        return;
-    }
-    if let ExprNode::Lambda {
-        extra_params, body, ..
-    } = &*expr.node
-    {
-        for param in extra_params {
-            if let Some(default) = &param.default {
-                visit_expr(default, false, true, f);
-            }
-        }
-        visit_statement_list(body, true, f);
-        return;
-    }
-    expr.node
-        .for_each_child(&mut |c| visit_expr(c, false, delayed, f));
-}
-
-pub(super) fn visit_call_block(expr: &Expr, f: &mut impl FnMut(&Expr, bool, bool)) {
-    f(expr, false, false);
-    if let ExprNode::Lambda {
-        extra_params, body, ..
-    } = &*expr.node
-    {
-        for param in extra_params {
-            if let Some(default) = &param.default {
-                visit_expr(default, false, false, f);
-            }
-        }
-        visit_statement_list(body, false, f);
-        return;
-    }
-    visit_expr(expr, false, false, f);
 }
