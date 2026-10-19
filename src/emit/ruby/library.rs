@@ -7746,6 +7746,7 @@ fn emit_library_class_decl_inner(
     enum BodyItem<'a> {
         Constant(usize, &'a Expr),
         Initializer(&'a Expr),
+        Call(&'a Expr),
         Method(&'a MethodDef),
     }
     let mut body: Vec<_> = eager.iter().map(|&i| {
@@ -7767,8 +7768,8 @@ fn emit_library_class_decl_inner(
         body.extend(replayed_in_place.iter().map(|call| (call.span.start, BodyItem::Initializer(call))));
     }
     body.extend(constant_calls.iter().filter(|call| {
-        !replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, **call))
-    }).map(|call| (call.span.start, BodyItem::Initializer(call))));
+        !(ordered_body && replayed_in_place.iter().any(|kept| std::ptr::eq(*kept, **call)))
+    }).map(|call| (call.span.start, BodyItem::Call(call))));
     // Concern-spliced and other foreign-file methods keep foreign
     // `name_span` offsets; interleave only same-file declarations.
     let body_file = lc.class_ivar_initializers.iter().find_map(|init| {
@@ -7839,7 +7840,9 @@ fn emit_library_class_decl_inner(
     // load-time code reads one of the constants above it.
     let per_body: Vec<BTreeSet<String>> =
         body.iter().map(|(_, item)| match item {
-            BodyItem::Constant(_, expr) | BodyItem::Initializer(expr) => resolve_all(expr, true),
+            BodyItem::Constant(_, expr) | BodyItem::Initializer(expr) | BodyItem::Call(expr) => {
+                resolve_all(expr, true)
+            }
             BodyItem::Method(_) => BTreeSet::new(),
         }).collect();
     let readers = constant_readers(lc, app, classes, &resolve);
@@ -8114,9 +8117,13 @@ fn emit_library_class_decl_inner(
         for (_, item) in items {
             match item {
                 BodyItem::Constant(i, _) => render_constants(s, &[*i]),
-                BodyItem::Initializer(expr) if ordered_body
-                    || constant_calls.iter().any(|call| std::ptr::eq(*call, *expr)) =>
-                {
+                BodyItem::Call(expr) => {
+                    nested.borrow_mut().write_expr(s, depth, lc, expr);
+                    for line in super::emit_expr(&top_level(expr)).lines() {
+                        writeln!(s, "{body_pad}{line}").unwrap();
+                    }
+                }
+                BodyItem::Initializer(expr) if ordered_body => {
                     nested.borrow_mut().write_expr(s, depth, lc, expr);
                     for line in super::emit_expr(&top_level(expr)).lines() {
                         writeln!(s, "{body_pad}{line}").unwrap();
@@ -8985,13 +8992,11 @@ fn block_assigns_bare_constant(call: &Expr) -> bool {
     })
 }
 
-/// This fragment's own class methods, then ancestors. Another reopen of
-/// the same class is a different file and is not loaded above this call.
+/// An ancestor's class method. This fragment's own `def self` is emitted
+/// with the methods, after this call, so it is not loaded yet. Another
+/// reopen of this class is a different file.
 fn singleton_method_visible(app: &App, classes: &[LibraryClass], lc: &LibraryClass, method: &Symbol) -> bool {
     let defines = |m: &MethodDef| m.receiver == MethodReceiver::Class && m.name == *method;
-    if lc.methods.iter().any(defines) {
-        return true;
-    }
     let mut current = lc.parent.clone();
     let mut seen = BTreeSet::new();
     seen.insert(lc.name.clone());
@@ -8999,16 +9004,22 @@ fn singleton_method_visible(app: &App, classes: &[LibraryClass], lc: &LibraryCla
         if !seen.insert(id.clone()) {
             return false;
         }
-        if classes.iter().any(|class| class.name == id && class.methods.iter().any(defines))
-            || app.models.iter().any(|model| model.name == id && model.methods().any(defines))
-        {
-            return true;
+        // The require loads the ancestor's anchor file, the first fragment.
+        if let Some(class) = classes.iter().find(|class| class.name == id) {
+            if class.methods.iter().any(defines) {
+                return true;
+            }
+            current = class.parent.clone();
+            continue;
         }
-        current = classes
-            .iter()
-            .find(|class| class.name == id)
-            .and_then(|class| class.parent.clone())
-            .or_else(|| app.models.iter().find(|model| model.name == id).and_then(|model| model.parent.clone()));
+        if let Some(model) = app.models.iter().find(|model| model.name == id) {
+            if model.methods().any(defines) {
+                return true;
+            }
+            current = model.parent.clone();
+            continue;
+        }
+        return false;
     }
     false
 }
