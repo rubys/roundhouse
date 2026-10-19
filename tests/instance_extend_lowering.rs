@@ -816,14 +816,18 @@ fn an_extend_inside_kernel_lambda_stays_unsupported() {
     }
 }
 
-/// `define_method`, `Thread.new`, and `module_eval` hide the extend in a
-/// block. Spinel only links a straight-line extend statement.
+/// A block that does not run before the call returns hides the extend.
+/// Spinel only links a straight-line extend statement.
 #[test]
-fn an_extend_inside_define_method_thread_or_module_eval_stays_unsupported() {
+fn an_extend_inside_a_block_that_runs_later_stays_unsupported() {
     for (name, maker) in [
         ("test_define_method", "define_method(:go)"),
         ("test_thread_new", "Thread.new"),
         ("test_module_eval", "Module.new.module_eval"),
+        ("test_fiber_new", "Fiber.new"),
+        ("test_enumerator_new", "Enumerator.new"),
+        ("test_ractor_new", "Ractor.new"),
+        ("test_at_exit", "at_exit"),
     ] {
         assert_extend_stub(
             name,

@@ -2,10 +2,9 @@
 //!
 //! Straight-line code, a gate (`if` / `case` / `&&`), and a block are
 //! regions. A write in a region that does not contain the read is not
-//! the value that read sees. A `lambda` / `proc` / `Proc.new` / `->`,
-//! and a `define_method` / `Thread.new` / `module_eval` block, is not a
-//! straight-line extend. An effect earlier in the same expression runs
-//! before an `extend` there.
+//! the value that read sees. A block is not a straight-line extend
+//! unless the call runs it before returning (`map`, `tap`). An effect
+//! earlier in the same expression runs before an `extend` there.
 //!
 //! Hoisting a module local and accepting an `extend` both read this
 //! walk. They do not walk the tree again.
@@ -458,36 +457,41 @@ fn note_rebind(rebinds: &mut HashSet<Symbol>, name: &Symbol) {
     }
 }
 
-pub(super) fn block_runs_later(recv: Option<&Expr>, method: &str) -> bool {
-    // The block is not a straight-line statement Spinel can link.
-    // `lambda` / `proc` run when called. `define_method` and
-    // `module_eval` (and the eval/exec family) hide the `extend` in a
-    // block the same way.
-    if matches!(
+pub(super) fn block_runs_later(_recv: Option<&Expr>, method: &str) -> bool {
+    // A block hides the `extend` unless the call runs it before
+    // returning. `map` and `tap` do. `Fiber.new`, `at_exit`,
+    // `define_method`, and `lambda` do not, and a leftover `extend`
+    // there keeps the Spinel file from linking.
+    !runs_during_call(method)
+}
+
+fn runs_during_call(method: &str) -> bool {
+    matches!(
         method,
-        "lambda"
-            | "proc"
-            | "define_method"
-            | "define_singleton_method"
-            | "module_eval"
-            | "class_eval"
-            | "instance_eval"
-            | "module_exec"
-            | "class_exec"
-            | "instance_exec"
-    ) {
-        return true;
-    }
-    let Some(name) = recv.and_then(super::const_name) else {
-        return false;
-    };
-    let thread = name == "Thread" || name.ends_with("::Thread");
-    let proc = name == "Proc" || name.ends_with("::Proc");
-    match method {
-        "new" | "start" | "fork" if thread => true,
-        "new" if proc => true,
-        _ => false,
-    }
+        "tap"
+            | "map"
+            | "collect"
+            | "flat_map"
+            | "each"
+            | "each_with_index"
+            | "each_with_object"
+            | "reverse_each"
+            | "select"
+            | "filter"
+            | "reject"
+            | "find"
+            | "detect"
+            | "any?"
+            | "all?"
+            | "none?"
+            | "one?"
+            | "inject"
+            | "reduce"
+            | "times"
+            | "upto"
+            | "downto"
+            | "loop"
+    )
 }
 
 fn push_lambda_writes(events: &mut Vec<Event>, expr: &Expr) {
