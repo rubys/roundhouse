@@ -69,9 +69,19 @@ pub fn apply_object_extend_stub(app: &mut App) -> Vec<Diagnostic> {
         }
         let extend_defined =
             extend_defined_names(library_classes.iter().chain(tm.inner_classes.iter()));
+        let home_constants: Vec<Symbol> = tm.constants.iter().map(|(name, _)| name.clone()).collect();
         for t in &mut tm.tests {
             let mut modules = base_modules.clone();
-            let added = hoist_anonymous_modules(&mut t.body, &mut tm.inner_classes, &mut modules);
+            let mut absolute = classes.clone();
+            absolute.extend(modules.iter().cloned());
+            let added = hoist_anonymous_modules(
+                &mut t.body,
+                &mut tm.inner_classes,
+                &mut modules,
+                &tm.name,
+                &home_constants,
+                &absolute,
+            );
             let mut seq = 0u32;
             rewrite::rewrite_scope(&mut t.body, &classes, &modules, &helpers, &mut seq);
             if let Some(d) = first_untraced(&t.body, &classes, &modules, &extend_defined) {
@@ -208,8 +218,8 @@ struct Factory {
     home: ClassId,
     /// Constants assigned on `owner`.
     constants: Vec<Symbol>,
-    /// The method `yield`s or takes a block. Copying the body would
-    /// run that against the test method.
+    /// The method `yield`s, calls `super`, or takes a block. Copying
+    /// the body would run that against the test method.
     yields: bool,
 }
 
@@ -218,7 +228,7 @@ fn yields_to_caller(method: &MethodDef) -> bool {
 }
 
 fn expr_yields(expr: &Expr) -> bool {
-    if matches!(&*expr.node, ExprNode::Yield { .. }) {
+    if matches!(&*expr.node, ExprNode::Yield { .. } | ExprNode::Super { .. }) {
         return true;
     }
     let mut found = false;
@@ -282,6 +292,9 @@ fn hoist_anonymous_modules(
     body: &mut Expr,
     inner: &mut Vec<LibraryClass>,
     modules: &mut HashSet<String>,
+    home: &ClassId,
+    home_constants: &[Symbol],
+    absolute: &HashSet<String>,
 ) -> usize {
     let mut found = Vec::new();
     collect_module_assigns(body, &mut found);
@@ -297,12 +310,19 @@ fn hoist_anonymous_modules(
         });
         let id = ClassId(Symbol::from(name.as_str()));
         let mut defs = Vec::new();
+        let mut anchored = true;
         for (vis, mut def) in methods {
+            // The module is emitted at file scope. A bare `LABEL` written
+            // in the test class would otherwise resolve at the top level.
+            if !anchor_method(&mut def, home, home_constants, absolute) {
+                anchored = false;
+                break;
+            }
             def.visibility = vis;
             def.enclosing_class = Some(id.0.clone());
             defs.push(def);
         }
-        if defs.is_empty() {
+        if !anchored || defs.is_empty() {
             continue;
         }
         // `self.extended` runs at the call. Spinel refuses the module,
@@ -338,6 +358,29 @@ fn hoist_anonymous_modules(
         delete_assign(body, &local);
     }
     inner.len() - before
+}
+
+fn anchor_method(
+    def: &mut MethodDef,
+    home: &ClassId,
+    constants: &[Symbol],
+    absolute: &HashSet<String>,
+) -> bool {
+    for param in &mut def.params {
+        if let Some(default) = &mut param.default {
+            if !rewrite::anchor_constants(default, home, constants, absolute) {
+                return false;
+            }
+        }
+    }
+    if let Some(param) = &mut def.block_param {
+        if let Some(default) = &mut param.default {
+            if !rewrite::anchor_constants(default, home, constants, absolute) {
+                return false;
+            }
+        }
+    }
+    rewrite::anchor_constants(&mut def.body, home, constants, absolute)
 }
 
 fn fresh_const(n: &mut u32, taken: impl Fn(&str) -> bool) -> String {

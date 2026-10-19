@@ -829,6 +829,236 @@ fn an_included_helper_constant_stays_absolute() {
     );
 }
 
+/// The module assignment that follows the extend is not the value it reads.
+#[test]
+fn a_module_assigned_after_extend_stays_unsupported() {
+    assert_extend_stub(
+        "test_module_after",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"module after\" do\n    one = Box.new\n    one.extend(failing).ping\n    failing = Module.new { def begin_transport = :closed }\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// `|one|` is the object MRI extends, not the `.new` before the block.
+#[test]
+fn a_block_parameter_before_extend_stays_unsupported() {
+    assert_extend_stub(
+        "test_block_param",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"block param\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    other = Box.new\n    [other].each { |one| one.extend(failing) }\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// `rescue => one` binds the exception. The earlier `.new` is not that object.
+#[test]
+fn a_rescue_binding_before_extend_stays_unsupported() {
+    assert_extend_stub(
+        "test_rescue_binding",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"rescue binding\" do\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    begin\n      raise \"x\"\n    rescue => one\n    end\n    one.extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// `Kernel.lambda`, `Kernel.proc`, and `Kernel::Proc.new` run when called.
+#[test]
+fn an_extend_inside_kernel_lambda_stays_unsupported() {
+    for (name, maker) in [
+        ("test_kernel_lambda", "Kernel.lambda"),
+        ("test_kernel_proc", "Kernel.proc"),
+        ("test_kernel_proc_new", "Kernel::Proc.new"),
+    ] {
+        assert_extend_stub(
+            name,
+            &format!(
+                "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"{label}\" do\n    failing = Module.new {{ def begin_transport = :closed }}\n    one = Box.new\n    cb = {maker} {{ one.extend(failing) }}\n    one = Box.new\n    cb.call\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+                label = name.trim_start_matches("test_"),
+            ),
+        );
+    }
+}
+
+/// `super` in the helper calls the helper's ancestor, not the test class's.
+#[test]
+fn a_helper_that_calls_super_stays_unsupported() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  attr_accessor :note\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\nend\n",
+        ),
+        (
+            "test/test_helpers/open_helper.rb",
+            "module OpenHelper\n  def opened(tag)\n    Box.new.tap do |box|\n      box.note = super\n    end\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  include OpenHelper\n  test \"super\" do\n    failing = Module.new { def begin_transport = :closed }\n    assert_equal :closed, opened(\"a\").extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        diags.iter().any(|d| d.message.contains("Object#extend")),
+        "a helper that calls super is reported:\n{diags:?}\n{test}"
+    );
+    assert!(
+        test.contains("def test_super\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"),
+        "the test is the raise:\n{test}"
+    );
+    assert!(
+        !test.contains("__rh_extend_object_"),
+        "super is not copied into an inlined receiver:\n{test}"
+    );
+}
+
+/// `LABEL` in the hoisted method is the test class's constant.
+#[test]
+fn a_hoisted_method_keeps_the_test_class_constant() {
+    let (_diags, test) = box_extend_app(
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  LABEL = \"from-test\"\n  test \"class constant\" do\n    failing = Module.new { def begin_transport = LABEL }\n    one = Box.new\n    one.extend(failing)\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+    assert!(
+        test.contains("BoxTest::LABEL"),
+        "the hoisted method reads the test constant:\n{test}"
+    );
+    assert!(
+        test.contains(".extend("),
+        "the module still extends:\n{test}"
+    );
+}
+
+/// A name the hoisted method cannot place keeps the test a raise.
+#[test]
+fn a_hoisted_method_with_an_unresolved_constant_stays_unsupported() {
+    assert_extend_stub(
+        "test_mystery",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"mystery\" do\n    failing = Module.new { def begin_transport = Mystery }\n    one = Box.new\n    one.extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
+/// The helper default `Note` is the module's constant, not the test class's.
+#[test]
+fn an_included_helper_default_stays_on_the_module() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  attr_accessor :note\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\nend\n",
+        ),
+        (
+            "test/test_helpers/open_helper.rb",
+            "module OpenHelper\n  Note = \"helper\"\n  def opened(tag = Note)\n    Box.new.tap do |box|\n      box.note = tag\n    end\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  Note = \"test\"\n  include OpenHelper\n  test \"default constant\" do\n    failing = Module.new { def begin_transport = :closed }\n    assert_equal :closed, opened.extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        diags.iter().all(|d| !d.message.contains("Object#extend")),
+        "the default still extends:\n{diags:?}\n{test}"
+    );
+    assert!(
+        test.contains("OpenHelper::Note"),
+        "the default is the helper constant:\n{test}"
+    );
+    assert!(
+        !test.contains(".note = Note"),
+        "the default is not the test class constant:\n{test}"
+    );
+}
+
+/// `Box::NOTE` in the helper is the top-level class, not `BoxTest::Box`.
+#[test]
+fn an_included_helper_nested_constant_stays_absolute() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  NOTE = \"top\"\n  attr_accessor :note\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\nend\n",
+        ),
+        (
+            "test/test_helpers/open_helper.rb",
+            "module OpenHelper\n  def opened(tag)\n    Box.new.tap do |box|\n      box.note = Box::NOTE\n    end\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  Box = String\n  include OpenHelper\n  test \"nested constant\" do\n    failing = Module.new { def begin_transport = :closed }\n    assert_equal :closed, opened(\"a\").extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, ::Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        test.contains("::Box::NOTE"),
+        "the nested constant is absolute:\n{test}"
+    );
+    assert!(
+        test.contains("::Box.new"),
+        "the receiver class is absolute:\n{test}"
+    );
+    assert!(
+        diags.iter().all(|d| !d.message.contains("Object#extend")),
+        "the nested constant still extends:\n{diags:?}\n{test}"
+    );
+}
+
+/// `Note` from an included ancestor is not `::Note`. The test stays a raise.
+#[test]
+fn an_included_helper_ancestor_constant_stays_unsupported() {
+    let mut app = app_with(vec![
+        ("db/schema.rb", SCHEMA),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        (
+            "lib/box.rb",
+            "class Box\n  attr_accessor :note\n  def begin_transport\n    :open\n  end\n  def ping\n    begin_transport\n  end\nend\n",
+        ),
+        (
+            "test/test_helpers/open_helper.rb",
+            "module Base\n  Note = \"base\"\nend\nmodule OpenHelper\n  include Base\n  def opened(tag)\n    Box.new.tap do |box|\n      box.note = Note\n    end\n  end\nend\n",
+        ),
+        (
+            "test/lib/box_test.rb",
+            "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  include OpenHelper\n  test \"ancestor constant\" do\n    failing = Module.new { def begin_transport = :closed }\n    assert_equal :closed, opened(\"a\").extend(failing).ping\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+        ),
+    ]);
+    let diags = roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_spinel(&app);
+    let test = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("box_test.rb"))
+        .map(|f| f.content.clone())
+        .expect("the emitted test");
+    assert!(
+        diags.iter().any(|d| d.message.contains("Object#extend")),
+        "an ancestor constant is reported:\n{diags:?}\n{test}"
+    );
+    assert!(
+        test.contains("def test_ancestor_constant\n    (raise \"roundhouse: Object#extend not supported (all targets)\")\n  end\n"),
+        "the test is the raise:\n{test}"
+    );
+    assert!(
+        !test.contains("::Note"),
+        "the ancestor constant is not emitted as absolute:\n{test}"
+    );
+}
+
 /// `prepend` puts the module's `extend` ahead of `Object#extend`.
 #[test]
 fn an_extend_from_a_prepended_module_stays_unsupported() {

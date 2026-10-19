@@ -57,6 +57,15 @@ enum WriteKind {
     Other,
 }
 
+/// Where the one home write of a hoisted module local sits relative to
+/// the `extend` that reads it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Order {
+    Before,
+    Wrote,
+    Bad,
+}
+
 struct Builder {
     sites: Vec<Site>,
     rebinds: HashSet<Symbol>,
@@ -97,27 +106,30 @@ fn top_preceded(events: &[Event], sites: &[Site]) -> bool {
 }
 
 impl Survey {
+    /// The one plain write of `name` happens before every `extend` that
+    /// reads it. A read first, a second write, or a write in another
+    /// region keeps the assignment: deleting it would extend `nil`.
     pub(super) fn sole_local(&self, name: &Symbol) -> bool {
         if self.rebinds.contains(name) {
             return false;
         }
         let total = extend_reads(&self.events, name);
         let mut reads = 0u32;
-        let mut extend_reads = 0u32;
-        let mut home_writes = 0u32;
+        let mut matched = 0u32;
         let mut foreign = false;
-        tally(
+        let mut order = Order::Before;
+        ordered(
             &self.events,
             name,
             total,
             false,
             false,
             &mut reads,
-            &mut extend_reads,
-            &mut home_writes,
+            &mut matched,
             &mut foreign,
+            &mut order,
         );
-        !foreign && home_writes == 1 && reads > 0 && reads == extend_reads
+        !foreign && order == Order::Wrote && reads > 0 && reads == matched
     }
 
     pub(super) fn instance_extends(&self) -> Vec<ExtendSite<'_>> {
@@ -355,7 +367,11 @@ impl Builder {
                 self.survey(default, false, delayed, false, false, &mut effect, events);
             }
         }
+        // `|one|` is a write of `one` for the block body. An `extend`
+        // inside sees the parameter, and one outside sees a write it
+        // cannot place, so both stay untraced.
         let mut child = Vec::new();
+        push_lambda_writes(&mut child, expr);
         self.statements(body, delayed, &mut child);
         events.push(Event::Child(child));
     }
@@ -396,6 +412,37 @@ impl Builder {
                     self.survey(&arm.body, false, delayed, true, false, &mut effect, events);
                 }
             }
+            ExprNode::BeginRescue {
+                body,
+                rescues,
+                else_branch,
+                ensure,
+                ..
+            } => {
+                let mut effect = false;
+                self.survey(body, false, delayed, true, false, &mut effect, events);
+                for clause in rescues {
+                    // `rescue => one` binds before the clause body. The
+                    // binding is not an `Expr`, so the child walk misses it.
+                    if let Some(name) = &clause.binding {
+                        note_write(events, name.clone());
+                    }
+                    for class in &clause.classes {
+                        let mut effect = false;
+                        self.survey(class, false, delayed, true, false, &mut effect, events);
+                    }
+                    let mut effect = false;
+                    self.survey(&clause.body, false, delayed, true, false, &mut effect, events);
+                }
+                if let Some(else_body) = else_branch {
+                    let mut effect = false;
+                    self.survey(else_body, false, delayed, true, false, &mut effect, events);
+                }
+                if let Some(ensure) = ensure {
+                    let mut effect = false;
+                    self.survey(ensure, false, delayed, true, false, &mut effect, events);
+                }
+            }
             _ => expr.node.for_each_child(&mut |child| {
                 let mut effect = false;
                 self.survey(child, false, delayed, true, false, &mut effect, events);
@@ -411,14 +458,40 @@ fn note_rebind(rebinds: &mut HashSet<Symbol>, name: &Symbol) {
 }
 
 fn block_runs_later(recv: Option<&Expr>, method: &str) -> bool {
-    let implicit = match recv {
-        None => true,
-        Some(recv) => matches!(&*recv.node, ExprNode::SelfRef),
-    };
-    if implicit && matches!(method, "lambda" | "proc") {
+    // `Kernel.lambda` and `obj.lambda` run when called, same as `lambda`.
+    if matches!(method, "lambda" | "proc") {
         return true;
     }
-    method == "new" && recv.is_some_and(|recv| super::const_is(recv, "Proc"))
+    // `Proc.new`, `::Proc.new`, and `Kernel::Proc.new`.
+    method == "new"
+        && recv.and_then(super::const_name).is_some_and(|name| {
+            name == "Proc" || name.ends_with("::Proc")
+        })
+}
+
+fn push_lambda_writes(events: &mut Vec<Event>, expr: &Expr) {
+    let ExprNode::Lambda {
+        params,
+        rest_param,
+        extra_params,
+        block_param,
+        ..
+    } = &*expr.node
+    else {
+        return;
+    };
+    for name in params {
+        note_write(events, name.clone());
+    }
+    if let Some(name) = rest_param {
+        note_write(events, name.clone());
+    }
+    if let Some(name) = block_param {
+        note_write(events, name.clone());
+    }
+    for param in extra_params {
+        note_write(events, param.name.clone());
+    }
 }
 
 fn push_binds(events: &mut Vec<Event>, pattern: &MatchPattern) {
@@ -493,7 +566,7 @@ fn extend_reads(events: &[Event], name: &Symbol) -> u32 {
     n
 }
 
-fn tally(
+fn ordered(
     events: &[Event],
     name: &Symbol,
     total: u32,
@@ -501,8 +574,8 @@ fn tally(
     inherited_foreign: bool,
     reads: &mut u32,
     matched: &mut u32,
-    home_writes: &mut u32,
     foreign: &mut bool,
+    order: &mut Order,
 ) {
     let covers = total > 0 && extend_reads(events, name) == total;
     let foreign_here = inherited_foreign || (boundary && !covers);
@@ -514,7 +587,11 @@ fn tally(
             } if read == name => {
                 *reads += 1;
                 if *extend_arg && !foreign_here {
-                    *matched += 1;
+                    if *order == Order::Wrote {
+                        *matched += 1;
+                    } else {
+                        *order = Order::Bad;
+                    }
                 }
             }
             Event::Write {
@@ -524,13 +601,15 @@ fn tally(
                 if foreign_here {
                     *foreign = true;
                 } else {
-                    match kind {
-                        WriteKind::PlainNew(_) | WriteKind::Plain => *home_writes += 1,
-                        WriteKind::Other => *home_writes += 2,
-                    }
+                    *order = match kind {
+                        WriteKind::PlainNew(_) | WriteKind::Plain if *order == Order::Before => {
+                            Order::Wrote
+                        }
+                        _ => Order::Bad,
+                    };
                 }
             }
-            Event::Child(child) => tally(
+            Event::Child(child) => ordered(
                 child,
                 name,
                 total,
@@ -538,8 +617,8 @@ fn tally(
                 foreign_here,
                 reads,
                 matched,
-                home_writes,
                 foreign,
+                order,
             ),
             _ => {}
         }

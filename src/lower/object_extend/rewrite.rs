@@ -158,7 +158,7 @@ fn explode_extend(
         else {
             return None;
         };
-        explode_receiver(recv, helpers)?
+        explode_receiver(recv, helpers, classes, modules)?
     };
     let class_name = plain_new_class(&built.new_call)?;
     if !classes.contains(&class_name) {
@@ -204,7 +204,12 @@ fn explode_extend(
     Some(setups)
 }
 
-fn explode_receiver(recv: &Expr, helpers: &[Factory]) -> Option<Built> {
+fn explode_receiver(
+    recv: &Expr,
+    helpers: &[Factory],
+    classes: &HashSet<String>,
+    modules: &HashSet<String>,
+) -> Option<Built> {
     if let Some(built) = explode_expr(recv) {
         return Some(built);
     }
@@ -228,26 +233,32 @@ fn explode_receiver(recv: &Expr, helpers: &[Factory]) -> Option<Built> {
     let factory = helpers
         .iter()
         .find(|f| f.name.as_str() == method.as_str())?;
-    let bound = bind_params(&factory.params, args)?;
-    // An argument with a call has to run before `Class.new`. Splicing
-    // it into the body runs it at the use, which is later, and a second
-    // use runs it twice. A literal, constant, or local can move.
-    if bound.iter().any(|(_, value)| !pure_binding(value)) {
-        return None;
-    }
-    // `yield` and a block parameter belong to the helper's caller.
+    // `yield`, `super`, and a block parameter belong to the helper.
     // The call above has no block; copying either would run them in
     // the test method. A call that does pass a block never matches.
     if factory.yields {
         return None;
     }
+    let mut params = factory.params.clone();
     let mut body = value_of(&factory.body).clone();
-    // The included module's bare `Box` is `::Box`, not a constant the
-    // test class defines under the same name. Qualify before the
-    // caller's arguments are spliced in, or an argument named `box`
-    // is rewritten too.
+    // The included module's `Note` and `Box::NOTE` are not the test
+    // class's constants of those names. Anchor the body and the
+    // defaults before the caller's arguments are spliced in.
     if factory.owner != factory.home {
-        qualify(&mut body, &factory.owner, &factory.constants);
+        let mut absolute = classes.clone();
+        absolute.extend(modules.iter().cloned());
+        if !anchor_params(&mut params, &factory.owner, &factory.constants, &absolute)
+            || !anchor_constants(&mut body, &factory.owner, &factory.constants, &absolute)
+        {
+            return None;
+        }
+    }
+    let bound = bind_params(&params, args)?;
+    // An argument with a call has to run before `Class.new`. Splicing
+    // it into the body runs it at the use, which is later, and a second
+    // use runs it twice. A literal, constant, or local can move.
+    if bound.iter().any(|(_, value)| !pure_binding(value)) {
+        return None;
     }
     let mut built = explode_expr(&body)?;
     // One walk, so a value that is a later parameter (`a` bound to the
@@ -465,24 +476,73 @@ fn lambda_binds(expr: &Expr, name: &Symbol) -> bool {
         || extra_params.iter().any(|p| &p.name == name)
 }
 
-fn qualify(expr: &mut Expr, owner: &ClassId, constants: &[Symbol]) {
+/// A constant copied out of `owner` is anchored to that class, or to a
+/// known top-level class or module. Anything else refuses the copy:
+/// emitting the bare name would bind a different constant.
+pub(super) fn anchor_constants(
+    expr: &mut Expr,
+    owner: &ClassId,
+    constants: &[Symbol],
+    absolute: &HashSet<String>,
+) -> bool {
+    let mut ok = true;
+    anchor(expr, owner, constants, absolute, &mut ok);
+    ok
+}
+
+fn anchor_params(
+    params: &mut [Param],
+    owner: &ClassId,
+    constants: &[Symbol],
+    absolute: &HashSet<String>,
+) -> bool {
+    for param in params {
+        if let Some(default) = &mut param.default {
+            if !anchor_constants(default, owner, constants, absolute) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn anchor(
+    expr: &mut Expr,
+    owner: &ClassId,
+    constants: &[Symbol],
+    absolute: &HashSet<String>,
+    ok: &mut bool,
+) {
+    if !*ok {
+        return;
+    }
     if let ExprNode::Const { path } = &mut *expr.node {
-        if path.len() == 1 && !path[0].as_str().is_empty() {
-            if constants.iter().any(|c| c == &path[0]) {
-                let mut full: Vec<Symbol> = owner
-                    .0
-                    .as_str()
-                    .split("::")
-                    .filter(|s| !s.is_empty())
-                    .map(Symbol::from)
-                    .collect();
-                full.push(path[0].clone());
+        if path.first().is_some_and(|seg| !seg.as_str().is_empty()) {
+            let head = path[0].clone();
+            if constants.iter().any(|c| c == &head) {
+                let mut full = const_prefix(owner);
+                full.extend(path.iter().cloned());
+                *path = full;
+            } else if absolute.contains(head.as_str()) {
+                let mut full = vec![Symbol::from("")];
+                full.extend(path.iter().cloned());
                 *path = full;
             } else {
-                *path = vec![Symbol::from(""), path[0].clone()];
+                *ok = false;
+                return;
             }
         }
     }
     expr.node
-        .for_each_child_mut(&mut |c| qualify(c, owner, constants));
+        .for_each_child_mut(&mut |c| anchor(c, owner, constants, absolute, ok));
+}
+
+fn const_prefix(owner: &ClassId) -> Vec<Symbol> {
+    owner
+        .0
+        .as_str()
+        .split("::")
+        .filter(|seg| !seg.is_empty())
+        .map(Symbol::from)
+        .collect()
 }
