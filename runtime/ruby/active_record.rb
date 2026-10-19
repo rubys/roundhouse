@@ -20,3 +20,6 @@ require_relative "active_record/friendly_id"
 require_relative "active_record/arel"
 require_relative "active_record/relation"
 require_relative "active_record/preloading"
+# Database tasks (`db:schema:load`, `prepare_all`, `migrate`). After
+# connection.rb: the task runner calls `Connection`.
+require_relative "active_record/tasks"

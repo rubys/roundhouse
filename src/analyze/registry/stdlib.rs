@@ -292,7 +292,33 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Dir", &[
         ("entries", str_arr()), ("glob", str_arr()), ("[]", str_arr()),
         ("exist?", Ty::Bool), ("exists?", Ty::Bool), ("mkdir", Ty::Int),
+        ("rmdir", Ty::Int), ("mktmpdir", Ty::Str),
         ("pwd", Ty::Str), ("home", Ty::Str),
+    ], &[]);
+    register_stdlib_class(classes, "Rake::Task", &[
+        ("[]", Ty::Untyped),
+        ("task_defined?", Ty::Bool),
+    ], &[
+        ("reenable", Ty::Nil),
+        ("all_prerequisite_tasks", Ty::Untyped),
+        ("invoke", Ty::Nil),
+    ]);
+    register_stdlib_class(classes, "ActiveRecord", &[
+        ("dump_schema_after_migration", Ty::Bool),
+        ("dump_schema_after_migration=", Ty::Bool),
+    ], &[]);
+    register_stdlib_class(classes, "ActiveRecord::Tasks::DatabaseTasks", &[
+        ("env", Ty::Str),
+        ("env=", Ty::Str),
+        ("migrations_paths", Ty::Untyped),
+        ("migrations_paths=", Ty::Untyped),
+        ("seed_loader", Ty::Untyped),
+        ("seed_loader=", Ty::Untyped),
+        ("with_temporary_connection", Ty::Untyped),
+        ("load_schema", Ty::Nil),
+        ("prepare_all", Ty::Nil),
+        ("migrate", Ty::Nil),
+        ("migration_connection_pool", Ty::Untyped),
     ], &[]);
     // Psych/YAML — campfire's Purchaser loads `config/purchased_by.yml`
     // via `YAML.load_file`. Register the class-side surface the corpus

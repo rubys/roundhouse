@@ -994,6 +994,26 @@ pub fn insert_db_stub(
         Symbol::from("close"),
         fn_sig(vec![], Ty::Nil),
     );
+    db_info.class_methods.insert(
+        Symbol::from("database_path"),
+        fn_sig(vec![], Ty::Str),
+    );
+    let hash_config = ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig"));
+    let hash_config_methods = [
+        ("database", Ty::Str),
+        ("adapter", Ty::Str),
+        ("name", Ty::Str),
+        ("env_name", Ty::Str),
+        ("schema_dump", Ty::Str),
+        ("seeds?", Ty::Bool),
+        ("database_tasks?", Ty::Bool),
+    ];
+    for id in [hash_config.clone(), ClassId(Symbol::from("HashConfig"))] {
+        let info = classes.entry(id).or_default();
+        for (name, ty) in &hash_config_methods {
+            info.instance_methods.entry(Symbol::from(*name)).or_insert_with(|| ty.clone());
+        }
+    }
     // The per-request replay cache, which `ActiveRecord::Base.uncached`
     // (active_record/connection.rb, ruby family) suspends for a block.
     for (name, ret) in [

@@ -126,6 +126,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         base.class_methods
             .entry(Symbol::from("connection"))
             .or_insert_with(connection_ty);
+        base.class_methods.entry(Symbol::from("configurations")).or_insert(Ty::Untyped);
+        base.class_methods.entry(Symbol::from("configurations=")).or_insert(Ty::Untyped);
         for m in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_like"] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
         }
@@ -151,8 +153,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let config = classes
             .entry(ClassId(Symbol::from("ActiveRecord::DatabaseConfigurations::HashConfig")))
             .or_default();
-        for m in ["database", "adapter", "name", "env_name"] {
+        for m in ["database", "adapter", "name", "env_name", "schema_dump"] {
             config.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
+        }
+        config.instance_methods.entry(Symbol::from("configuration_hash")).or_insert(Ty::Untyped);
+        for m in ["seeds?", "database_tasks?"] {
+            config.instance_methods.entry(Symbol::from(m)).or_insert(Ty::Bool);
         }
         // The block's value: whatever the caller computes from the connection.
         classes

@@ -1096,10 +1096,16 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 793 on 2026-10-19: the class-side query fallbacks
     // (`Model.maximum(:x)` through `all`, connection.rb) answer the column's
     // value as `Relation#maximum` / `#pick` do, whatever the column holds (+2).
-    const CEILING: usize = 793;
+    // MEASURED 797 on 2026-10-19: `ActiveRecord::Tasks` yields the
+    // connection (or nothing) to the caller's block. A `yield` outside
+    // a view is untyped, the same block-return escape `transaction`
+    // carries (+4 in active_record/tasks.rb: `with_connection`,
+    // `with_temporary_connection`, and `with_temporary_pool`'s yield
+    // plus the begin that answers it).
+    const CEILING: usize = 797;
     assert!(
         total_gradual <= CEILING,
-        "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
+        "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
     );
 }
 

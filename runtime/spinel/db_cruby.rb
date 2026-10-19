@@ -588,6 +588,8 @@ module Db
   end
 
   def self.close
+    Thread.current[:db_conn] = nil
+    Thread.current[:db_pool] = nil
     return if @pool.nil? && @quarantined.empty?
     conns = @quarantined.dup
     conns.concat(@pool.free) unless @pool.nil?

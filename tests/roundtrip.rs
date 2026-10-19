@@ -189,6 +189,8 @@ fn tiny_blog_round_trips() {
         time_formats: std::collections::BTreeMap::new(),
         generated_helper_methods: std::collections::BTreeMap::new(),
         module_mixins: Vec::new(),
+        rake_tasks_source: None,
+        rake_task_gaps: Vec::new(),
         rails_application: None,
         concern_filters: std::collections::HashMap::new(),
         graphql_types: Vec::new(),

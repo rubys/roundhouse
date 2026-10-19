@@ -82,6 +82,7 @@ fn ingest_test_classes(
     if top_classes.is_empty() {
         return Ok(Vec::new());
     }
+    let preamble = collect_preamble(&root, file)?;
     let (mut test_nodes, helper_nodes): (Vec<_>, Vec<_>) =
         top_classes.into_iter().partition(|(_, c)| is_test_class_node(c));
     // No candidate matches: the historical single-class shape, where
@@ -97,18 +98,48 @@ fn ingest_test_classes(
             return Ok(Vec::new());
         };
         test_nodes.push(helper_nodes.remove(first));
-        return ingest_test_class(&test_nodes[0], &helper_nodes, file).map(|tm| vec![tm]);
+        return ingest_test_class(&test_nodes[0], &helper_nodes, file, &preamble).map(|tm| vec![tm]);
     }
     test_nodes
         .iter()
-        .map(|class| ingest_test_class(class, &helper_nodes, file))
+        .map(|class| ingest_test_class(class, &helper_nodes, file, &preamble))
         .collect()
+}
+
+/// `Rails.application.load_tasks unless Rake::Task.task_defined?(...)`
+/// sits outside the test class. Requires stay on the emit's own header.
+fn collect_preamble(root: &Node<'_>, file: &str) -> IngestResult<Vec<Expr>> {
+    let mut out = Vec::new();
+    let Some(program) = root.as_program_node() else {
+        return Ok(out);
+    };
+    for stmt in flatten_statements(program.statements().as_node()) {
+        if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() || is_require(&stmt) {
+            continue;
+        }
+        let text = std::str::from_utf8(stmt.location().as_slice()).unwrap_or("");
+        if !text.contains("load_tasks") {
+            continue;
+        }
+        out.push(ingest_expr(&stmt, file)?);
+    }
+    Ok(out)
+}
+
+fn is_require(stmt: &Node<'_>) -> bool {
+    let Some(call) = stmt.as_call_node() else { return false };
+    if call.receiver().is_some() {
+        return false;
+    }
+    let name = constant_id_str(&call.name());
+    name == "require" || name == "require_relative"
 }
 
 fn ingest_test_class(
     (scope, class): &ScopedClass<'_>,
     top_level_helper_nodes: &[ScopedClass<'_>],
     file: &str,
+    preamble: &[Expr],
 ) -> IngestResult<TestModule> {
     let mut name_path = scope.clone();
     name_path.extend(class_name_path(class).ok_or_else(|| IngestError::Unsupported {
@@ -426,6 +457,7 @@ fn ingest_test_class(
         helpers,
         constants,
         includes,
+        preamble: preamble.to_vec(),
     })
 }
 

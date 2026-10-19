@@ -1484,6 +1484,10 @@ module Db
   end
 
   def self.close
+    # A closed handle left in the thread slot is the next statement's
+    # connection. Schema purge closes and reopens the same path.
+    Thread.current[:db_conn] = nil
+    Thread.current[:db_pool] = nil
     return if @pools.nil?
     error = nil
     begin

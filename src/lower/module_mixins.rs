@@ -35,6 +35,19 @@ use crate::span::Span;
 /// Drop the mixins this tree cannot perform, reporting each one.
 pub fn apply_module_mixins_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
+    for path in &app.rake_task_gaps {
+        let mut d = Diagnostic::unsupported(
+            Span::synthetic(),
+            None,
+            "rake task",
+            format!(
+                "`{path}` was left out of boot: it does not prepend a hook onto \
+                 ActiveRecord::Tasks::DatabaseTasks, so its tasks are not installed"
+            ),
+        );
+        d.severity = crate::diagnostic::Severity::Warning;
+        diags.push(d);
+    }
     // `ActionView::PartialRenderer.collection_cache = Store.reader`: kept
     // when the store's reader resolves at boot (`Rails.cache`, or a class
     // method an ingested class defines), dropped and reported otherwise,
