@@ -28,33 +28,6 @@ use super::ir::{
 
 const DB_MOD: &str = "Db";
 
-/// Prototype gate for placeholder-bind emit (roundhouse#12, the
-/// "planned follow-on" the Db shims name). When
-/// `ROUNDHOUSE_PARAM_BINDS=1`, the `Db.prepare` read paths
-/// (single/multi hydrate, count, exists) render *runtime* WHERE values
-/// as `?` placeholders plus `Db.bind_*` calls after prepare — so the
-/// prepared-statement cache keys on the static query shape
-/// (`WHERE id = ?`) instead of per-value (`WHERE id = 3`). Compile-time
-/// literals stay inline (they're already part of the static shape).
-///
-/// Default OFF ⇒ byte-identical inline-escape emit for every target.
-/// Only the spinel + cruby `Db` shims implement `bind_*` today; the
-/// other targets gain it on real rollout, at which point this gate is
-/// replaced by a per-target capability flag threaded from the driver.
-/// Env-var gating is deliberate prototype scaffolding: it keeps the
-/// change behind one switch so it can be measured on the spinel lane
-/// without touching the other ten targets' shims.
-///
-/// Write paths (INSERT/UPDATE/DELETE) are intentionally NOT
-/// parameterized: they go through `Db.exec` (`sqlite3_exec`), which
-/// never populates the prepared-statement cache — so binding them buys
-/// nothing here.
-pub(crate) fn param_binds_enabled() -> bool {
-    std::env::var("ROUNDHOUSE_PARAM_BINDS")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-}
-
 /// A typed pending bind. Nullable predicates also select an SQL fragment.
 /// Their runtime branch reserves a position together with the `= ?` fragment;
 /// position zero means `IS NULL` and no bind. The RHS is evaluated just once.
@@ -188,7 +161,12 @@ pub trait ArelVisitor {
 /// Visitor for the sqlite backend (CRuby `sqlite3-ruby` + spinel FFI
 /// `libsqlite3`). Emits the same Expr shapes today's `adapter_emit`
 /// produces.
-pub struct SqliteVisitor;
+#[derive(Clone, Copy, Default)]
+pub struct SqliteVisitor {
+    /// The selected target's Db shim supports typed positional binds.
+    /// Only runtime read predicates are bound; literals and writes stay inline.
+    pub param_binds: bool,
+}
 
 impl SqliteVisitor {
     /// Execute an insert that returns selected columns from that same
@@ -233,7 +211,7 @@ impl SqliteVisitor {
 impl ArelVisitor for SqliteVisitor {
     fn visit(&self, op: &ArelOp, schema: &Schema, owner: &ClassId) -> Expr {
         match op {
-            ArelOp::Select(s) => visit_select(s, schema, owner),
+            ArelOp::Select(s) => visit_select(s, schema, owner, self.param_binds),
             ArelOp::Insert(i) => visit_insert(i, schema),
             ArelOp::Update(u) => visit_update(u, schema),
             ArelOp::Delete(d) => visit_delete(d, schema),
@@ -245,12 +223,8 @@ impl ArelVisitor for SqliteVisitor {
 // Select — four result shapes, dispatched by ColumnSpec + LimitSpec
 // ---------------------------------------------------------------------------
 
-fn visit_select(sel: &Select, schema: &Schema, owner: &ClassId) -> Expr {
+fn visit_select(sel: &Select, schema: &Schema, owner: &ClassId, param: bool) -> Expr {
     let table = lookup_table(schema, &sel.table.0);
-    // Read the placeholder-bind gate once per Select. All four prepare
-    // paths honor it; a false value reproduces the inline-escape emit
-    // byte-for-byte.
-    let param = param_binds_enabled();
     match &sel.columns {
         ColumnSpec::Count => emit_count(sel, table, param),
         ColumnSpec::Exists => emit_exists(sel, table, param),
@@ -1492,7 +1466,7 @@ mod tests {
             joins: vec![],
             preloads: vec![],
         });
-        let body = SqliteVisitor.visit(&op, &schema, &owner);
+        let body = SqliteVisitor::default().visit(&op, &schema, &owner);
         // stmt = prepare ; results = [] ; while step? { ... } ; finalize ; results
         assert_eq!(outer_kind(&body), "seq");
         assert_eq!(seq_len(&body), 5);
@@ -1514,7 +1488,7 @@ mod tests {
             joins: vec![],
             preloads: vec![],
         });
-        let body = SqliteVisitor.visit(&op, &schema, &owner);
+        let body = SqliteVisitor::default().visit(&op, &schema, &owner);
         // stmt = prepare ; result = nil ; if step? { ... } ; finalize ; result
         assert_eq!(outer_kind(&body), "seq");
         assert_eq!(seq_len(&body), 5);
@@ -1538,7 +1512,7 @@ mod tests {
             joins: vec![],
             preloads: vec![],
         });
-        let body = SqliteVisitor.visit(&op, &schema, &owner);
+        let body = SqliteVisitor::default().visit(&op, &schema, &owner);
         // Both shapes are 5 statements, so length proves nothing. What
         // separates them is the accumulator: the array hydrate seeds
         // `results = []`, the single hydrate `result = nil`.
@@ -1567,7 +1541,7 @@ mod tests {
             joins: vec![],
             preloads: vec![],
         });
-        let body = SqliteVisitor.visit(&op, &schema, &owner);
+        let body = SqliteVisitor::default().visit(&op, &schema, &owner);
         // stmt = prepare ; step? ; result = column_int ; finalize ; result
         assert_eq!(outer_kind(&body), "seq");
         assert_eq!(seq_len(&body), 5);
@@ -1589,7 +1563,7 @@ mod tests {
             joins: vec![],
             preloads: vec![],
         });
-        let body = SqliteVisitor.visit(&op, &schema, &owner);
+        let body = SqliteVisitor::default().visit(&op, &schema, &owner);
         // stmt = prepare ; result = step? ; finalize ; result
         assert_eq!(outer_kind(&body), "seq");
         assert_eq!(seq_len(&body), 4);
@@ -1609,7 +1583,7 @@ mod tests {
             }],
             returns_rowid: true,
         });
-        let body = SqliteVisitor.visit(&op, &schema, &ClassId(Symbol::from("Article")));
+        let body = SqliteVisitor::default().visit(&op, &schema, &ClassId(Symbol::from("Article")));
         // exec ; last_insert_rowid
         assert_eq!(outer_kind(&body), "seq");
         assert_eq!(seq_len(&body), 2);
@@ -1624,7 +1598,7 @@ mod tests {
                 assignments: vec![],
                 returns_rowid,
             });
-            let body = SqliteVisitor.visit(&op, &schema, &owner);
+            let body = SqliteVisitor::default().visit(&op, &schema, &owner);
             let exec = if returns_rowid {
                 let ExprNode::Seq { exprs } = body.node.as_ref() else {
                     panic!("insert must return the last row id");
@@ -1661,7 +1635,7 @@ mod tests {
                 Value::Runtime { expr: var_ref(&Symbol::from("id")), ty: ValueType::Int },
             )),
         });
-        let body = SqliteVisitor.visit(&op, &schema, &ClassId(Symbol::from("Article")));
+        let body = SqliteVisitor::default().visit(&op, &schema, &ClassId(Symbol::from("Article")));
         // single Db.exec(...) Send
         assert_eq!(outer_kind(&body), "send");
     }
@@ -1676,7 +1650,7 @@ mod tests {
                 Value::Runtime { expr: var_ref(&Symbol::from("id")), ty: ValueType::Int },
             )),
         });
-        let body = SqliteVisitor.visit(&op, &schema, &ClassId(Symbol::from("Article")));
+        let body = SqliteVisitor::default().visit(&op, &schema, &ClassId(Symbol::from("Article")));
         assert_eq!(outer_kind(&body), "send");
     }
 
@@ -1692,7 +1666,7 @@ mod tests {
             table: TableRef(Symbol::from("articles")),
             conditions: None,
         });
-        let body = SqliteVisitor.visit(&op, &schema, &ClassId(Symbol::from("Article")));
+        let body = SqliteVisitor::default().visit(&op, &schema, &ClassId(Symbol::from("Article")));
         assert_eq!(outer_kind(&body), "seq");
         assert_eq!(seq_len(&body), 2);
     }
@@ -1720,7 +1694,7 @@ mod tests {
             joins: vec![],
             preloads: vec![],
         });
-        let body = SqliteVisitor.visit(&op, &schema, &owner);
+        let body = SqliteVisitor::default().visit(&op, &schema, &owner);
         // Walk the body to the prepare call's SQL literal and assert
         // it carries " ORDER BY title DESC". The body is a Seq whose
         // first stmt is `stmt = Db.prepare(<sql>)`.
@@ -1778,7 +1752,7 @@ mod tests {
             joins: vec![],
             preloads: vec![],
         });
-        let body = SqliteVisitor.visit(&op, &schema, &owner);
+        let body = SqliteVisitor::default().visit(&op, &schema, &owner);
         let ExprNode::Seq { exprs } = body.node.as_ref() else { panic!() };
         let ExprNode::Assign { value: prepare_call, .. } = exprs[0].node.as_ref() else { panic!() };
         let ExprNode::Send { args, .. } = prepare_call.node.as_ref() else { panic!() };
@@ -1818,17 +1792,14 @@ mod tests {
         });
         // No-limit + ColumnSpec::All + WHERE → multi-hydrate (the
         // has_many proxy shape: `Comment.where(article_id: @id)`).
-        let body = SqliteVisitor.visit(&op, &schema, &owner);
+        let body = SqliteVisitor::default().visit(&op, &schema, &owner);
         assert_eq!(outer_kind(&body), "seq");
         assert_eq!(seq_len(&body), 5);
     }
 
-    // ---- placeholder-bind emit (ROUNDHOUSE_PARAM_BINDS) -------------
-    //
-    // These drive the emitters directly with `param = true` rather than
-    // flipping the process-global env var (which would race the other
-    // tests in this binary). `param_binds_enabled()` selects the same
-    // code path at runtime.
+    // ---- placeholder-bind emit ------------------------------------
+    // The visitor receives the capability explicitly, so these exercise
+    // the production entry point without mutating the process environment.
 
     /// Flatten the literal-string segments of a `+` concat chain into
     /// `out`; non-literal segments (escape calls, bind exprs) render as
@@ -1894,8 +1865,7 @@ mod tests {
             joins: vec![],
             preloads: vec![],
         };
-        let table = &schema.tables[&Symbol::from("articles")];
-        let body = emit_single_hydrate(&sel, table, &owner, true);
+        let body = SqliteVisitor { param_binds: true }.visit(&ArelOp::Select(sel), &schema, &owner);
 
         // SQL keys on the static shape — placeholder, no inline escape call.
         let sql = prepare_sql(&body);
@@ -1932,8 +1902,7 @@ mod tests {
             joins: vec![],
             preloads: vec![],
         };
-        let table = &schema.tables[&Symbol::from("articles")];
-        let body = emit_single_hydrate(&sel, table, &owner, false);
+        let body = SqliteVisitor::default().visit(&ArelOp::Select(sel), &schema, &owner);
 
         let sql = prepare_sql(&body);
         assert!(!sql.contains('?'), "no placeholder when gate off; got:\n{sql}");
@@ -1962,8 +1931,9 @@ mod tests {
             joins: vec![],
             preloads: vec![],
         };
-        let table = &schema.tables[&Symbol::from("articles")];
-        let body = emit_count(&sel, table, true);
+        let body = SqliteVisitor { param_binds: true }.visit(
+            &ArelOp::Select(sel), &schema, &ClassId(Symbol::from("Article")),
+        );
         let sql = prepare_sql(&body);
         assert!(sql.contains("COUNT(*)") && sql.contains("WHERE id = ?"), "got:\n{sql}");
         assert!(db_stmt_calls(&body).iter().any(|(m, _)| m == "bind_int"), "expected bind_int");
@@ -1987,9 +1957,55 @@ mod tests {
             joins: vec![],
             preloads: vec![],
         };
-        let table = &schema.tables[&Symbol::from("articles")];
-        let body = emit_exists(&sel, table, true);
+        let body = SqliteVisitor { param_binds: true }.visit(
+            &ArelOp::Select(sel), &schema, &ClassId(Symbol::from("Article")),
+        );
         assert!(prepare_sql(&body).contains("WHERE title = ?"));
         assert!(db_stmt_calls(&body).iter().any(|(m, _)| m == "bind_text"), "expected bind_text");
     }
+    #[test]
+    fn param_binds_follow_placeholder_order_across_predicates() {
+        let (schema, owner) = fixture_schema();
+        let runtime = |column: &str, name: &str, ty| Predicate::Eq(
+            ColRef { table: TableRef(Symbol::from("articles")), column: Symbol::from(column) },
+            Value::Runtime { expr: var_ref(&Symbol::from(name)), ty },
+        );
+        let sel = Select {
+            table: TableRef(Symbol::from("articles")),
+            columns: ColumnSpec::Count,
+            conditions: Some(Predicate::And(
+                Box::new(runtime("id", "lookup_id", ValueType::Int)),
+                Box::new(Predicate::Or(
+                    Box::new(runtime("title", "lookup_title", ValueType::Str)),
+                    Box::new(runtime("published", "lookup_published", ValueType::Bool)),
+                )),
+            )),
+            single_record: false,
+            orders: vec![], limit: None, joins: vec![], preloads: vec![],
+        };
+        let body = SqliteVisitor { param_binds: true }.visit(&ArelOp::Select(sel), &schema, &owner);
+        assert_eq!(prepare_sql(&body),
+            "SELECT COUNT(*) FROM articles WHERE id = ? AND (title = ? OR published = ?)");
+        let calls = db_stmt_calls(&body);
+        let binds: Vec<_> = calls.iter().filter(|(m, _)| m.starts_with("bind_")).collect();
+        assert_eq!(binds.len(), 3);
+        for (index, ((method, args), (expected_method, expected_value))) in binds.iter().zip([
+            ("bind_int", "lookup_id"),
+            ("bind_text", "lookup_title"),
+            ("bind_bool", "lookup_published"),
+        ]).enumerate() {
+            assert_eq!(method, expected_method);
+            assert!(matches!(args[1].node.as_ref(),
+                ExprNode::Lit { value: Literal::Int { value } } if *value == index as i64 + 1));
+            assert!(matches!(args[2].node.as_ref(),
+                ExprNode::Var { name, .. } if name.as_str() == expected_value));
+        }
+        // All binds must execute directly after prepare, before any step.
+        let ExprNode::Seq { exprs } = body.node.as_ref() else { panic!("expected Seq") };
+        for expr in &exprs[1..=3] {
+            assert!(matches!(expr.node.as_ref(), ExprNode::Send { method, .. }
+                if method.as_str().starts_with("bind_")));
+        }
+    }
+
 }

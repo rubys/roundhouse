@@ -63,6 +63,7 @@ pub(super) fn push_schema_methods(
     model: &Model,
     models: &[Model],
     table: &Table,
+    through_joins: &super::associations::ThroughJoins,
 ) {
     let owner = &model.name;
 
@@ -98,6 +99,10 @@ pub(super) fn push_schema_methods(
     let mut demanded: Option<std::rc::Rc<std::collections::HashSet<Symbol>>> = None;
     for col in &table.columns {
         let slot = ColumnSlot::classify(col, model);
+        // Always synthesize the column reader. A source `def` of the same
+        // name renames this one to `_read_<col>_raw` in `push_user_methods`,
+        // which is what `super` in that def calls. Skipping it here leaves
+        // that call with no method.
         methods.push(synth_attr_reader(owner, col, model));
         if model.enums.contains_key(&col.name) {
             methods.push(synth_enum_storage_writer(owner, col));
@@ -233,10 +238,13 @@ pub(super) fn push_schema_methods(
         });
     }
 
-    // def self.primary_key — emitted ONLY when the model overrode
+    // def self.primary_key — emitted ONLY when the model or schema overrode
     // Rails' default, so the runtime Base's `"id"` answers for everyone
     // else and no target pays a per-model method for the common case.
-    if let Some(pk) = &model.primary_key {
+    let primary_key = model.primary_key.as_ref().or_else(|| {
+        table.columns.iter().find(|col| col.primary_key && col.name.as_str() != "id").map(|col| &col.name)
+    });
+    if let Some(pk) = primary_key {
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
@@ -258,7 +266,7 @@ pub(super) fn push_schema_methods(
 
     // String/UUID keys must not use Base's Integer finder cast. Derive
     // this from the key column, not an example value or the caller's ID.
-    let key_name = model.primary_key.as_ref().map_or("id", |k| k.as_str());
+    let key_name = primary_key.map_or("id", |k| k.as_str());
     if table.columns.iter().any(|c| c.name.as_str() == key_name && ty_of_column(&c.col_type) == Ty::Str) {
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
@@ -415,16 +423,27 @@ pub(super) fn push_schema_methods(
     // lobsters emits.)
 
     // def initialize(attrs = {}); super(); per-column self.col = attrs[:col] [|| 0 for id]; end
-    methods.push(synth_initialize(owner, table, model, models));
+    methods.push(synth_initialize(owner, table, model, through_joins));
 
     // def id; @identifier; end / def id=(value); @identifier = value; end
-    // — when the key column is not called `id`. Rails' `record.id`
-    // reads the primary-key attribute whatever its column is named,
-    // and the base's `attr_accessor :id` would answer the unsaved
-    // sentinel instead (#90).
-    if let Some(key) = table.columns.iter().find(|c| c.primary_key && c.name.as_str() != "id") {
+    // — when the key column is not called `id` and the table has no
+    // `id` column. That alias is `record.id` for a renamed key (#90).
+    // An `id` column that sits beside the key keeps its own reader and
+    // writer; `pluck(:id)` and `record.id` are that column.
+    let has_id_column = table.columns.iter().any(|c| c.name.as_str() == "id");
+    if !has_id_column
+        && let Some(key) = table.columns.iter().find(|c| c.primary_key && c.name.as_str() != "id")
+    {
         methods.push(synth_key_alias_reader(owner, key));
         methods.push(synth_key_alias_writer(owner, key));
+    }
+    // Loaded `ids` reads `_primary_key_value`, not `id`, so the key
+    // and a coexisting `id` column stay distinct.
+    if key_name != "id"
+        && !super::associations::model_defines_instance_method(model, &Symbol::from("_primary_key_value"))
+        && let Some(col) = table.columns.iter().find(|c| c.name.as_str() == key_name)
+    {
+        methods.push(synth_primary_key_value(owner, col));
     }
 
     // def attributes; { col: @col, ... } excluding id; end
@@ -1168,6 +1187,33 @@ fn synth_key_alias_reader(owner: &ClassId, key: &Column) -> MethodDef {
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeReader,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
+/// `def _primary_key_value; @<key>; end` — loaded `ids` reads this,
+/// so a coexisting `id` column is not the key.
+fn synth_primary_key_value(owner: &ClassId, key: &Column) -> MethodDef {
+    let key_ty = super::ty_of_column_slot(key);
+    let body = with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(key) }),
+        key_ty.clone(),
+    );
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("_primary_key_value"),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body,
+        signature: Some(fn_sig(vec![], key_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
         is_async: false,
         mutates_self: false,
         block_param: None,
@@ -2335,7 +2381,12 @@ fn guard_unless_nil(lookup: Expr, action: Expr) -> Expr {
     )
 }
 
-fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Model]) -> MethodDef {
+fn synth_initialize(
+    owner: &ClassId,
+    table: &Table,
+    model: &Model,
+    through_joins: &super::associations::ThroughJoins,
+) -> MethodDef {
     let attrs = Symbol::from("attrs");
 
     let mut stmts: Vec<Expr> = Vec::new();
@@ -2871,19 +2922,13 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             ));
             continue;
         }
-        if let Association::HasMany { name, target, through, .. } = assoc {
+        if let Association::HasMany { name, target, .. } = assoc {
             // `has_many :through` collection writers stage into the
             // cache and flag the join rows stale — init the flag on
             // every construction path (mirrors cache/loaded below).
-            // Only when the writer itself will exist: a nested chain
-            // gets no writer (see `through_writer_join`), so no flag.
-            let writer_synthesized = through.as_ref().is_some_and(|thr_name| {
-                matches!(
-                    super::associations::through_writer_join(model, models, thr_name, target),
-                    super::associations::ThroughWriterJoin::Resolved(..)
-                )
-            });
-            if writer_synthesized {
+            // The flag exists only when `through_joins` already decided
+            // a writer. This block does not resolve the join again.
+            if through_joins.writer(name) {
                 let false_lit = with_ty(
                     Expr::new(
                         Span::synthetic(),

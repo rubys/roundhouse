@@ -10,8 +10,9 @@
 //! Rails DSL.
 //!
 //! This module is pure: input is one `Model` plus the app `Schema`, output
-//! is one `LibraryClass`. No side-effects, no per-target choices. Per-Rails-
-//! idiom lowering is a separate function so each can be tested in
+//! is one `LibraryClass`. No side-effects; target capabilities are supplied
+//! by the caller. Per-Rails-idiom lowering is a separate function so each
+//! can be tested in
 //! isolation (skeleton, schema columns, has_many, belongs_to, validates,
 //! callbacks, …).
 //!
@@ -41,7 +42,8 @@ use crate::schema::{Column, ColumnType, Schema, Table};
 use crate::span::Span;
 use crate::ty::{Row, Ty};
 
-use self::associations::{push_association_methods, push_dependent_destroy};
+use self::associations::{push_association_methods, push_dependent_destroy, ThroughJoins};
+pub(crate) use self::associations::{ThroughWriterJoin, through_writer_join};
 pub(crate) use self::associations::model_defines_instance_method;
 pub(crate) use self::markers::attribute_api_decls;
 pub(crate) use self::markers::block_callback_shape;
@@ -254,7 +256,7 @@ pub(crate) fn lower_models_inner(
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     lower_models_inner_with_ruby_values(
         models, schema, extra_class_infos, params_specs, unfolded, materialization,
-        finder_inputs, false, ErrorsReaders::FieldRead,
+        finder_inputs, false, false, ErrorsReaders::FieldRead,
     )
 }
 
@@ -267,13 +269,14 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     materialization: Materialization<'_>,
     finder_inputs: FinderInputs,
     ruby_read_values: bool,
+    param_binds: bool,
     errors_readers: ErrorsReaders,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
     let _body_names = schema::share_model_body_names(models, &Default::default());
     for model in models {
-        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, errors_readers);
+        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, param_binds, errors_readers);
         let table = schema.tables.get(&model.table.0);
         // Register actual production definitions, even for unselected
         // models and when source overrides hide framework ownership.
@@ -292,7 +295,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                             if matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer")),
                     _ => true,
                 });
-                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, errors_readers);
+                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, param_binds, errors_readers);
                 // Preserve original source inputs for late derivations
                 // (e.g. raw helpers) without treating them as framework
                 // claims. Both kinds traverse the canonical Arel/typer.
@@ -412,6 +415,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                 crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                     &mut method.body, schema, &classes, &[], ruby_read_values,
                     &HashSet::new(),
+                    crate::lower::arel::SqliteVisitor { param_binds },
                 );
             }
             type_method_body(method, &classes, table, Some(model));
@@ -1167,7 +1171,7 @@ pub(crate) fn build_methods(
     schema: &Schema,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<MethodDef> {
-    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, ErrorsReaders::FieldRead)
+    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, false, ErrorsReaders::FieldRead)
 }
 
 /// Return the instance method surface synthesized for a model, for ingest
@@ -1192,12 +1196,14 @@ fn build_methods_with_finder_inputs(
     schema: &Schema,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
     finder_inputs: FinderInputs,
+    param_binds: bool,
     errors_readers: ErrorsReaders,
 ) -> Vec<MethodDef> {
     // No-op outside an emit diagnostics scope, so the many direct
     // test callers of the lowering entries are unaffected.
     report_unclaimed_unknowns(model, schema);
 
+    let through_joins = ThroughJoins::decide(model, models);
     let mut methods: Vec<MethodDef> = Vec::new();
 
     if let Some(table) = schema.tables.get(&model.table.0) {
@@ -1218,7 +1224,7 @@ fn build_methods_with_finder_inputs(
         let writable_fields =
             permitted_fields.map(|fields| writable_permit_fields(model, table, fields));
         let permitted_fields = writable_fields.as_deref();
-        push_schema_methods(&mut methods, model, models, table);
+        push_schema_methods(&mut methods, model, models, table, &through_joins);
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
         // — typed methods that go directly from SQL composition to typed
         // model instances over the `Sqlite` primitive surface. See
@@ -1227,7 +1233,7 @@ fn build_methods_with_finder_inputs(
             methods.push(adapter_emit::synth_find_primary_key_input(&model.name, table));
             methods.push(adapter_emit::synth_exists_primary_key_input(&model.name, table));
         }
-        push_adapter_methods(&mut methods, model, table, schema);
+        push_adapter_methods(&mut methods, model, table, schema, param_binds);
         // `from_params(p: <Resource>Params)` — typed factory matching the
         // (resource, fields) tuple a controller's `permit(...)` declared.
         // Skipped silently when the model isn't permitted by any
@@ -1291,8 +1297,8 @@ fn build_methods_with_finder_inputs(
     }
 
     push_validate_method(&mut methods, model, models, errors_readers);
-    push_association_methods(&mut methods, model, models);
-    push_dependent_destroy(&mut methods, model);
+    push_association_methods(&mut methods, model, models, &through_joins);
+    push_dependent_destroy(&mut methods, model, &through_joins);
     push_unknown_marker_methods(&mut methods, model);
     push_attr_accessor_methods(&mut methods, model);
     // AFTER the accessors: the constructor assigns exactly what they
@@ -1416,7 +1422,7 @@ fn build_methods_with_finder_inputs(
 ///     `def parsed_url; … URI.parse …; end`; keeping the bare
 ///     `@parsed_url` reader left the ivar untyped/unread and Spinel's
 ///     strict emit failed with `error[ivar_unresolved]`.
-///   * Column / association / scope synthesizers still win over a
+///   * Column writers / association / scope synthesizers still win over a
 ///     duplicate body name. A later source-level `delegate` may replace
 ///     an earlier real method, but only when that method was already
 ///     selected from the model body; generated framework methods are not
@@ -1435,9 +1441,8 @@ fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model, columns: &Hash
             let incoming_is_real = matches!(method.kind, AccessorKind::Method);
             // Only bare-ivar attr_* halves (attr_accessor/reader/writer
             // synth, which carry no signature) yield to a later real
-            // `def`. Schema column AttributeReaders are also bare
-            // `@col` reads for scalar columns, but they stamp a
-            // signature — keep those winning (documented above).
+            // `def`. Schema column writers carry a signature and keep
+            // their storage casts.
             let existing_is_attr_half = existing.signature.is_none()
                 && match existing.kind {
                     AccessorKind::AttributeReader => {
@@ -2161,6 +2166,19 @@ fn build_class_info_with_finder_inputs(
     let mut info = crate::analyze::ClassInfo::default();
     info.table = Some(model.table.clone());
     info.parent = model.parent.clone();
+    // The analyzer's registry is not this map. Arel's `ids` / `pluck`
+    // and the source-method decline read these two fields, so they have
+    // to be filled here or a model method inlines `SELECT id` and a
+    // `def self.pluck` becomes SQL.
+    info.primary_key = model.primary_key.clone().or_else(|| {
+        table.and_then(|t| t.columns.iter().find(|column| column.primary_key).map(|column| column.name.clone()))
+    });
+    for item in &model.body {
+        let crate::dialect::ModelBodyItem::Method { method, .. } = item else { continue };
+        if method.receiver == MethodReceiver::Class {
+            info.source_class_methods.insert(method.name.clone());
+        }
+    }
 
     // Attributes row from schema columns.
     if let Some(t) = table {
@@ -2808,7 +2826,10 @@ fn type_method_body(
     // Opt-in to `recv: Some(SelfRef)` rewriting on bare Sends —
     // matches the pattern view_to_library uses.
     ctx.annotate_self_dispatch = true;
-    let body_ty = typer.analyze_expr(&mut method.body, &ctx);
+    let mut body_ty = typer.analyze_expr(&mut method.body, &ctx);
+    if crate::lower::enumerable_ext::rewrite_squish_body(&mut method.body) {
+        body_ty = typer.analyze_expr(&mut method.body, &ctx);
+    }
     backfill_scalar_signature(method, body_ty);
 }
 

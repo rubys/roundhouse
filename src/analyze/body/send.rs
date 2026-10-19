@@ -58,7 +58,7 @@ impl<'a> BodyTyper<'a> {
     /// The class-side registration in `analyze/mod.rs` types these
     /// `Array<Untyped>` because "column type unknowable from the name
     /// alone" — true of the METHOD, false of the CALL. Here the column
-    /// is a Symbol literal and the model is known, so the schema
+    /// is a literal Symbol or String and the model is known, so the schema
     /// answers: `sessions.pluck(:ip_address)` is `Array[Str]`, not an
     /// open var.
     ///
@@ -70,10 +70,8 @@ impl<'a> BodyTyper<'a> {
     /// strict target cannot compile ([[feedback_types_are_performance_
     /// avoid_bags]]).
     ///
-    /// MULTI-COLUMN `pluck(:a, :b)` is not claimed: Rails answers an
-    /// Array of tuples, which is `Ty::Array<Ty::Array<...>>` only if
-    /// the columns share a type. The registered `Array<Untyped>`
-    /// stands for that form.
+    /// Multiple columns produce a tuple in argument order, preserving
+    /// each column's type even when the columns have different types.
     fn column_projection(
         &self,
         model: &ClassId,
@@ -83,18 +81,73 @@ impl<'a> BodyTyper<'a> {
         if !matches!(method.as_str(), "pluck" | "pick") {
             return None;
         }
-        let [arg] = args else { return None };
-        let ExprNode::Lit { value: crate::expr::Literal::Sym { value: col } } = &*arg.node else {
+        if args.is_empty() {
             return None;
-        };
+        }
         let cls = self.classes().get(model)?;
-        let col_ty = cls.instance_methods.get(col)?.clone();
+        let columns = args
+            .iter()
+            .map(|arg| {
+                let name = match &*arg.node {
+                    ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value.clone(),
+                    ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Symbol::from(value.as_str()),
+                    _ => return None,
+                };
+                let name = crate::schema::pluck_argument(
+                    name,
+                    cls.attributes.fields.contains_key(&Symbol::from("id")),
+                    cls.primary_key.as_ref(),
+                );
+                if cls.attributes.fields.is_empty() {
+                    cls.instance_methods.get(&name).cloned()
+                } else {
+                    cls.attributes.fields.get(&name).cloned()
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let col_ty = if columns.len() == 1 {
+            columns.into_iter().next()?
+        } else {
+            Ty::Tuple { elems: columns.into() }
+        };
         Some(match method.as_str() {
             // `pick` is `pluck(...).first` — the column value, or nil
             // when the relation is empty.
             "pick" => Ty::Union { variants: vec![col_ty, Ty::Nil].into() },
             _ => Ty::Array { elem: std::sync::Arc::new(col_ty) },
         })
+    }
+
+    pub(super) fn reader_projection(&self, recv: &Ty, columns: &[Symbol]) -> Option<Ty> {
+        let id = match recv {
+            Ty::Array { elem } => match elem.as_ref() {
+                Ty::Class { id, .. } => id,
+                _ => return None,
+            },
+            Ty::Relation { of } => of,
+            Ty::Union { variants } => {
+                let projected = variants.iter().map(|ty| self.reader_projection(ty, columns))
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(union_many(projected));
+            }
+            _ => return None,
+        };
+        let fields = columns.iter().map(|name| {
+            let mut current = Some(id);
+            for _ in 0..32 {
+                let class = self.classes().get(current?)?;
+                if let Some(ty) = class.instance_methods.get(name) {
+                    return Some(match ty {
+                        Ty::Fn { ret, .. } => ret.as_ref().clone(),
+                        value => value.clone(),
+                    });
+                }
+                current = class.parent.as_ref();
+            }
+            None
+        }).collect::<Option<Vec<_>>>()?;
+        let elem = if fields.len() == 1 { fields.into_iter().next()? } else { Ty::Tuple { elems: fields.into() } };
+        Some(Ty::Array { elem: std::sync::Arc::new(elem) })
     }
 
     /// Rails' per-column dynamic finders (`find_by_<attr>`,
@@ -965,6 +1018,19 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    fn source_ancestor(&self, of: &ClassId, method: &Symbol) -> Option<ClassId> {
+        let mut current = self.classes().get(of)?.parent.clone();
+        for _ in 0..32 {
+            let id = current?;
+            let cls = self.classes().get(&id)?;
+            if cls.source_class_methods.contains(method) {
+                return Some(id);
+            }
+            current = cls.parent.clone();
+        }
+        None
+    }
+
     fn defines_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
         let mut current = Some(of.clone());
         for _ in 0..32 {
@@ -1636,6 +1702,34 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     if !instance_side && let Some(ty) = cls.class_methods.get(method) {
+                        // Same projection the relation arm uses. A source
+                        // `def self.pluck` / `pick` declines only this
+                        // class send; `Model.all.pluck` is still the
+                        // relation method.
+                        let source_here = cls.source_class_methods.contains(method);
+                        let source_ancestor = self.source_ancestor(id, method);
+                        if cid == id
+                            && !source_here
+                            && source_ancestor.is_none()
+                            && let Some(projected) = self.column_projection(id, method, call_args)
+                        {
+                            return projected;
+                        }
+                        // The catalog seed lives on every model, so the
+                        // walk stops here even when the source method is
+                        // an ancestor's. That ancestor's harvested return
+                        // is the call.
+                        if cid == id
+                            && !source_here
+                            && let Some(defined) = source_ancestor
+                            && let Some(ancestor_ty) = self
+                                .classes()
+                                .get(&defined)
+                                .and_then(|ancestor| ancestor.class_methods.get(method))
+                            && !gradual_array(ancestor_ty)
+                        {
+                            return unwrap_fn_ret(&subst(ancestor_ty));
+                        }
                         return unwrap_fn_ret(&subst(ty));
                     }
                     if let Some(ty) = cls.instance_methods.get(method) {
@@ -3680,6 +3774,18 @@ pub(super) fn float_method(method: &Symbol) -> Ty {
 /// `parse_app_signatures` stores full function types
 /// (`Ty::Fn { ret: ..., .. }`). Dispatch wants the return-type form
 /// in both cases.
+/// `[]` harvests as `Array[Var]`, the same gradual answer as the
+/// catalog `Array[Untyped]` seed. A caller learns nothing from the swap.
+/// A real return (`7`, an `Array[Str]`) is not this.
+fn gradual_array(ty: &Ty) -> bool {
+    match ty {
+        Ty::Untyped | Ty::Var { .. } => true,
+        Ty::Array { elem } => matches!(elem.as_ref(), Ty::Untyped | Ty::Var { .. }),
+        Ty::Fn { ret, .. } => gradual_array(ret),
+        _ => false,
+    }
+}
+
 fn unwrap_fn_ret(ty: &Ty) -> Ty {
     match ty {
         Ty::Fn { ret, .. } => (**ret).clone(),

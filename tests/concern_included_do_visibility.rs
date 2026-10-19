@@ -12,12 +12,11 @@
 //! `polish`/`shine` do, but because `private` appears below the class
 //! body at all.
 //!
-//! Splicing `included do`'s defs onto the includer's own emitted body is
-//! a separate, pre-existing gap this fix does not touch — confirmed
-//! below (`gadget_rb` contains neither `polish` nor `shine` even once
-//! ingest succeeds, with or without the marker) — so the regression
-//! proof here is ingest succeeding where it used to fail loud, which is
-//! the whole of what `src/ingest/visibility.rs` controls.
+//! Splicing `included do`'s defs onto the includer's emitted body (with
+//! visibility) is covered by `included_do_defs_are_spliced_into_the_model_body`
+//! and `emit_and_run::defs_in_an_included_block_run_on_the_includer`. The
+//! regression proof in the marker tests here is ingest succeeding where it
+//! used to fail loud, which is what `src/ingest/visibility.rs` controls.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -83,13 +82,8 @@ fn included_do_protected_is_applied_not_rejected() {
 /// def domain_match_confirmed?; …; end; end`) `marker_mixed_with_unmodeled_call`
 /// otherwise rejected: not because `desc`/`long_desc` generate
 /// anything, just because they weren't on its allowlist. Like the three
-/// `included_do_*_is_applied_not_rejected` tests above, and for the same
-/// reason (`included_do_defs_are_not_yet_spliced_into_the_model_body`'s
-/// pre-existing, unrelated gap — confirmed by probing `GadgetTools`'s own
-/// `LibraryClass.methods`, which stays empty whether or not a def's
-/// `included do` block ingests clean), the regression proof available
-/// today is ingest succeeding where it used to fail loud, not a
-/// per-method visibility read-back.
+/// `included_do_*_is_applied_not_rejected` tests above, the regression
+/// proof available today is ingest succeeding where it used to fail loud.
 #[test]
 fn included_do_marker_coexists_with_bare_thor_annotations() {
     gadget_app(
@@ -164,14 +158,11 @@ fn included_do_marker_mixed_with_an_untracked_call_inside_a_conditional_stays_re
     );
 }
 
-/// Splicing `included do`'s plain defs onto the includer's own emitted
-/// body is a separate, pre-existing gap (reproduces identically with no
-/// marker at all, e.g. the `Hooked` module in
-/// `tests/binop_member_guard.rs`) — not something this fix changes.
-/// Documented here so a future fix to THAT gap does not mistake this
-/// test's silence for a claim it already works.
+/// `included do`'s plain defs land on the includer's own emitted body,
+/// with their visibility. That they run is
+/// `emit_and_run::defs_in_an_included_block_run_on_the_includer`.
 #[test]
-fn included_do_defs_are_not_yet_spliced_into_the_model_body() {
+fn included_do_defs_are_spliced_into_the_model_body() {
     use roundhouse::emit::ruby;
 
     let app = gadget_app("    def polish = \"#{shine}!\"\n\n    private\n\n    def shine = \"shiny\"\n")
@@ -182,9 +173,6 @@ fn included_do_defs_are_not_yet_spliced_into_the_model_body() {
         .find(|f| f.path.to_string_lossy().ends_with("app/models/gadget.rb"))
         .map(|f| f.content.clone())
         .expect("gadget.rb");
-    assert!(
-        !gadget_rb.contains("def polish") && !gadget_rb.contains("def shine"),
-        "if this starts failing, `included do` splicing has landed — update/remove this test \
-         and add a true CRuby `Gadget.new.polish == \"shiny!\"` / private-`shine` proof instead:\n{gadget_rb}"
-    );
+    assert!(gadget_rb.contains("def polish") && gadget_rb.contains("def shine"), "{gadget_rb}");
+    assert!(gadget_rb.contains("private :shine") && !gadget_rb.contains("private :polish"), "{gadget_rb}");
 }

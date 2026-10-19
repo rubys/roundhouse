@@ -672,4 +672,16 @@ fn register_inertia(classes: &mut HashMap<ClassId, ClassInfo>, app_ctrl: &mut Cl
             effects: crate::effect::EffectSet::default(),
         },
     );
+    // A literal props hash never leaves `InertiaRails.optional` / `.defer`
+    // in the tree: ingest unwraps them. A helper that returns those
+    // wrappers, or `InertiaRails.always`, calls them for real, and that
+    // call has to resolve.
+    let inertia_rails = classes
+        .entry(ClassId(Symbol::from("InertiaRails")))
+        .or_default();
+    for name in ["optional", "defer", "always"] {
+        inertia_rails
+            .class_methods
+            .insert(Symbol::from(name), Ty::Untyped);
+    }
 }

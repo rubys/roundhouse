@@ -39,7 +39,12 @@ module Tep
       # sphttp_recv_into_frame fill may contain several complete
       # frames; Connection consumes them all before parking again.
       #
-      # The caller (Tep::Server::Scheduled.write_response) owns the
+      # `pending` is the suffix Parser already took off the socket with
+      # the upgrade request (the first frame often shares that recv).
+      # Those bytes are the WebSocket stream, so they are parsed before
+      # the loop waits for anything further.
+      #
+      # The caller (Tep::Server::Threaded.write_response) owns the
       # fd lifecycle -- run() never calls sphttp_close. On clean
       # close OR error the server's handle_connection closes the fd
       # via its usual exit path, after retiring the driver. Every exit
@@ -47,7 +52,7 @@ module Tep
       # registry drops this fd's subscriptions while the number is still
       # this connection's; a timed-out socket used to skip that and leave
       # entries behind for the number's next owner.
-      def run
+      def run(pending = +"".b)
         # Synthetic open event before the first recv -- handlers
         # often want to send a welcome message.
         Connection.dispatch_open(@driver)
@@ -57,25 +62,10 @@ module Tep
         # whole frames as the buffer holds, carrying any partial trailing
         # frame forward via byteslice. Replaces the old static recv buffer
         # + per-byte C accessor (sphttp.c is retired — matz/spinel#1466).
-        inbuf = +""
+        inbuf = pending.b
         while true
-          ready = @io.wait_readable(@idle_timeout_seconds)
-          if ready.nil?
-            # Timeout: close 1001 going-away.
-            @driver.close(Tep::WebSocket::CLOSE_GOING_AWAY, "idle timeout")
-            Connection.dispatch_close(@driver, Tep::WebSocket::CLOSE_GOING_AWAY, "idle timeout")
-            return 0
-          end
-
-          chunk = Sock.sp_net_recv_some(@fd, 65536)
-          if chunk.bytesize == 0
-            # EOF / peer gone: dispatch close without sending one back.
-            Connection.dispatch_close(@driver, Tep::WebSocket::CLOSE_GOING_AWAY, "")
-            return 0
-          end
-          inbuf = inbuf + chunk
-
-          # Parse + dispatch every complete frame the buffer now holds.
+          # Parse + dispatch every complete frame the buffer now holds,
+          # including a frame that arrived in the same recv as the upgrade.
           while true
             # bytesize, not length: inbuf is masked binary, and char-count
             # arithmetic under-reports avail (complete frames report "need")
@@ -108,6 +98,22 @@ module Tep
             end
             inbuf = inbuf.byteslice(r.consumed, inbuf.bytesize - r.consumed)
           end
+
+          ready = @io.wait_readable(@idle_timeout_seconds)
+          if ready.nil?
+            # Timeout: close 1001 going-away.
+            @driver.close(Tep::WebSocket::CLOSE_GOING_AWAY, "idle timeout")
+            Connection.dispatch_close(@driver, Tep::WebSocket::CLOSE_GOING_AWAY, "idle timeout")
+            return 0
+          end
+
+          chunk = Sock.sp_net_recv_some(@fd, 65536)
+          if chunk.bytesize == 0
+            # EOF / peer gone: dispatch close without sending one back.
+            Connection.dispatch_close(@driver, Tep::WebSocket::CLOSE_GOING_AWAY, "")
+            return 0
+          end
+          inbuf = inbuf + chunk
         end
         0
       end

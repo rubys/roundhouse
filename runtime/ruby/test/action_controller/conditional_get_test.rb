@@ -102,7 +102,7 @@ class ConditionalGetTest < Minitest::Test
 
   def test_fresh_when_gets_the_default_cache_control
     c = TestController.new
-    # The tag itself is fresh_when's (base.rb); this pins the header beside it.
+    # The tag itself is fresh_when's (conditional_get.rb); this pins the header beside it.
     c.fresh_when(etag: "abc")
     c.render("st")
     c.commit_conditional_get!("GET", "")

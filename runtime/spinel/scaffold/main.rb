@@ -524,6 +524,14 @@ module Main
     req.req_headers.each do |name, value|
       request_obj.env[ActionDispatch::Http::Headers.env_name(name)] = value
     end
+    # config.assume_ssl: TLS ends at a proxy that forwards plain http.
+    # Rails' AssumeSSL marks the request https before the action, so
+    # secure cookies and absolute redirects use https.
+    if AppEnvironment.serving_assume_ssl?
+      request_obj.env["HTTPS"] = "on"
+      request_obj.env["HTTP_X_FORWARDED_PROTO"] = "https"
+      request_obj.env["rack.url_scheme"] = "https"
+    end
     # `user_agent` is ALSO a separate reader slot. The overlay twin's
     # `user_agent` reads `@env["HTTP_USER_AGENT"]`; the shared runtime's
     # (`runtime/ruby/action_dispatch/request.rb`) returns `@user_agent`,
@@ -633,6 +641,7 @@ module Main
     # changes all three.
     controller.commit_cache_control!
     controller.commit_conditional_get!(req.verb, req.req_headers.fetch("if-none-match", ""))
+    controller.commit_default_headers!
 
     res.status = controller.status
     # The layout wrap happens at the controller's render call sites

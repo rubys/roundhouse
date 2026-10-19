@@ -916,6 +916,11 @@ module ActionController
     # Location on another origin.
     def redirect_to(path, notice: nil, alert: nil, status: :found)
       loc = ActionController.sanitize_location(path)
+      # Rails' `_compute_redirect_to_location`: a path becomes the
+      # request's absolute URL. `head location:` does not come through
+      # here, so a 201 Location stays as the action wrote it. With no
+      # host in scope `url_from_path` returns the path unchanged.
+      loc = absolute_redirect_location(loc)
       loc = same_host_location(loc)
       @location = loc
       @status   = resolve_status(status)
@@ -991,8 +996,8 @@ module ActionController
     # ---- conditional GET (strict-target stubs) ---------------------
     #
     # Full `fresh_when` / `stale?` / If-None-Match matching lives in
-    # `current.rb`'s Base reopen, next to `attr_accessor :request`.
-    # Strict targets have no Request seat on Base yet; always-render /
+    # `conditional_get.rb`'s Base reopen (ruby family only). Strict
+    # targets have no Request seat on Base yet; always-render /
     # always-stale is the same contract these stubs had before #829,
     # and keeps rust/kotlin/… emit compiling. The Ruby/Spinel path
     # overrides the stubs when a Request is parked.
@@ -1119,6 +1124,14 @@ module ActionController
 
     def request_for_csrf
       nil
+    end
+
+    # A single-slash path (`/login`, not protocol-relative `//host`)
+    # joined to the request's protocol and host. Anything else — an
+    # absolute URL, `//host`, a path with no host to join — is unchanged.
+    def absolute_redirect_location(loc)
+      return loc unless loc.start_with?("/") && !loc.start_with?("//")
+      url_from_path(loc)
     end
 
     # Relative locations (`/path`, not `//host`) pass. An absolute URL

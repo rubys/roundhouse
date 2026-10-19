@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use super::super::EmittedFile;
 use crate::dialect::{
-    AccessorKind, LibraryClass, LibraryClassOrigin, MethodDef, MethodReceiver, MethodVisibility,
+    AccessorKind, LibraryClass, MethodDef, MethodReceiver, MethodVisibility,
 };
 use crate::expr::{Expr, ExprNode, Literal, RESOLVED_DATA_FACTORY};
 use crate::ty::{Param, ParamKind, Ty};
@@ -43,18 +43,20 @@ impl Drop for ClassSideGuard {
 /// path mirrors `rb_path` under a top-level `sig/` tree with the
 /// extension swapped to `.rbs`.
 pub(super) fn emit_library_class_rbs(lc: &LibraryClass, rb_path: &Path) -> EmittedFile {
-    emit_library_class_rbs_with_factories(lc, rb_path, &[])
+    emit_library_class_rbs_with_factories(lc, rb_path, &[], &[])
 }
 
 /// Emit the `sig/` sidecar for an owner and its Data factory constants. `classes`
-/// supplies lifted custom methods, matched to declarations by their source spans.
+/// supplies lifted custom methods. `factories` is the one owner-constant
+/// association built for this emit; an empty list falls back to a span scan.
 pub(super) fn emit_library_class_rbs_with_factories(
     lc: &LibraryClass,
     rb_path: &Path,
     classes: &[LibraryClass],
+    factories: &[super::library::DataFactoryOwner],
 ) -> EmittedFile {
     let path = sig_path_for(rb_path);
-    let content = render_class(lc, classes);
+    let content = render_class(lc, classes, factories);
     EmittedFile { path, content }
 }
 
@@ -73,7 +75,11 @@ fn sig_path_for(rb_path: &Path) -> PathBuf {
 
 /// Render a library class or module with enclosing namespaces, includes, method
 /// signatures, and admitted Data factories nested under their constant owner.
-fn render_class(lc: &LibraryClass, classes: &[LibraryClass]) -> String {
+fn render_class(
+    lc: &LibraryClass,
+    classes: &[LibraryClass],
+    factories: &[super::library::DataFactoryOwner],
+) -> String {
     let mut s = String::new();
     let name = lc.name.0.as_str();
     let segments: Vec<&str> = name.split("::").collect();
@@ -118,10 +124,7 @@ fn render_class(lc: &LibraryClass, classes: &[LibraryClass]) -> String {
     }
 
     for (name, value) in &lc.constants {
-        let factory = classes.iter().find(|class| {
-            matches!(class.origin, Some(LibraryClassOrigin::DataFactory { declaration_span })
-                if declaration_span == value.span)
-        });
+        let factory = super::library::lifted_data_factory(lc, name.as_str(), classes, factories);
         render_data_factory(&mut s, lc, name.as_str(), value, &body_pad, factory);
     }
 

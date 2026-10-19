@@ -379,6 +379,17 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         }
     }
 
+    if let Ok(entries) = vfs.read_dir(&dir.join("config/environments")) {
+        let mut envs: Vec<String> = entries
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "rb"))
+            .filter(|p| vfs.read_to_string(p).is_ok_and(|text| sets_assume_ssl(&text)))
+            .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+            .collect();
+        envs.sort();
+        app.assume_ssl_envs = envs;
+    }
+
     let schema_path = dir.join("db/schema.rb");
     let structure_path = dir.join("db/structure.sql");
     if vfs.exists(&schema_path) {
@@ -1586,7 +1597,7 @@ end
                     app.controllers.push(synthesize_redirect_controller(&routes.redirects));
                     // The inherited runtime calls this helper, outside app call-site inference.
                     let signatures = crate::rbs::parse_app_signatures(
-                        "class RoundhouseRedirectsController\n  def same_host_location: (String location) -> String\nend\n",
+                        "class RoundhouseRedirectsController\n  def same_host_location: (String location) -> String\n  def absolute_redirect_location: (String location) -> String\nend\n",
                     ).expect("routing redirect policy signature parses");
                     for (owner, methods) in signatures {
                         app.rbs_signatures.entry(owner).or_default().extend(methods);
@@ -2163,6 +2174,19 @@ end
     })?;
     // After it: a contract result's `to_monad` is a Result.
     super::dry_monads::lower_dry_monads(&mut app, &sources)?;
+    // Oj reads its mode from the initializers (`Oj.mimic_JSON`).
+    {
+        let init_dir = dir.join("config/initializers");
+        let mut initializers = Vec::new();
+        if vfs.is_dir(&init_dir) {
+            for entry in read_rb_files(vfs, &init_dir)? {
+                if let Ok(text) = vfs.read_to_string(&entry) {
+                    initializers.push(text);
+                }
+            }
+        }
+        super::oj::lower_oj(&mut app, &sources, &initializers)?;
+    }
     super::dry_initializer::drop_type_constants(&mut app, &sources);
     // graphql-ruby object types: analyzer-only field methods, so
     // inference carries each type's record class down the schema.
@@ -8410,7 +8434,7 @@ fn synthesize_redirect_controller(
     // Routing redirects do not use ActionController's open-redirect policy.
     // Keep the exception on this controller instead of weakening redirect_to.
     let policy = super::controller::ingest_controller(
-        b"class RoundhouseRedirectsController < ActionController::Base\nprivate\ndef same_host_location(location)\n  location\nend\nend\n",
+        b"class RoundhouseRedirectsController < ActionController::Base\nprivate\ndef same_host_location(location)\n  location\nend\ndef absolute_redirect_location(location)\n  location\nend\nend\n",
         "<routing-redirect>",
     )
     .expect("routing redirect policy parses")
@@ -11178,6 +11202,19 @@ fn locale_literal(value: &str) -> Option<String> {
         _ => return None,
     };
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// `config.assume_ssl = true` on an uncommented line of an environment
+/// file. A trailing `#` comment after the value is Ruby, so it is cut
+/// before the comparison; a line that is itself a comment is not.
+pub(crate) fn sets_assume_ssl(text: &str) -> bool {
+    text.lines().any(|line| {
+        let t = line.trim();
+        t.strip_prefix("config.assume_ssl")
+            .map(|rest| rest.trim_start())
+            .and_then(|rest| rest.strip_prefix('='))
+            .is_some_and(|rest| rest.split('#').next().unwrap_or("").trim() == "true")
+    })
 }
 
 #[cfg(test)]
