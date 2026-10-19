@@ -7780,7 +7780,17 @@ fn emit_library_class_decl_inner(
                     | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. }
             ))
         .then_some(init.span.file)
-    }).or_else(|| replayed_in_place.first().map(|call| call.span.file));
+    }).or_else(|| replayed_in_place.first().map(|call| call.span.file))
+        .or_else(|| constant_calls.first().map(|call| call.span.file));
+    // A method written above the call has to exist when the block runs.
+    // Only that file's methods move; `ordered_body` stays off so includes
+    // are not pulled forward with them.
+    let method_with_call = |m: &MethodDef| {
+        !ordered_body
+            && !constant_calls.is_empty()
+            && !m.name_span.is_synthetic()
+            && constant_calls.first().is_some_and(|call| m.name_span.file == call.span.file)
+    };
     let method_in_ordered_body = |m: &MethodDef| {
         ordered_body
             && !m.name_span.is_synthetic()
@@ -7794,6 +7804,12 @@ fn emit_library_class_decl_inner(
                 .map(|m| (m.name_span.start, BodyItem::Method(m))),
         );
     }
+    body.extend(
+        lc.methods
+            .iter()
+            .filter(|m| method_with_call(m))
+            .map(|m| (m.name_span.start, BodyItem::Method(m))),
+    );
     body.sort_by_key(|(start, _)| *start);
     // Every require the file needs at its TOP: the class-body calls and
     // deferred constants (both run at load), and the method bodies.
@@ -8244,6 +8260,9 @@ fn emit_library_class_decl_inner(
                 nested.borrow_mut().write_include(&mut s, depth, lc, inc);
                 writeln!(s, "{body_pad}{}", include_line(inc)).unwrap();
                 writeln!(s).unwrap();
+            }
+            if method_with_call(m) {
+                continue;
             }
             render_method(&mut s, m);
         }

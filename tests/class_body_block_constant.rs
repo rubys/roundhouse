@@ -21,8 +21,12 @@ end
 
 const HANDLER: &str = r#"module Outer
   class Handler < Base
+    def self.prefix
+      "run"
+    end
+
     setup do |t|
-      LABEL = t.option("run.opt") #: String
+      LABEL = t.option(prefix + ".opt") #: String
     end
 
     #: -> String
