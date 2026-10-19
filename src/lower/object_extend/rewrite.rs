@@ -59,14 +59,52 @@ fn rewrite_lambdas(
     helpers: &[Factory],
     seq: &mut u32,
 ) {
-    if matches!(&*expr.node, ExprNode::Lambda { .. }) {
-        if let ExprNode::Lambda { body, .. } = &mut *expr.node {
-            rewrite_scope(body, classes, modules, helpers, seq);
+    // `->` runs later, and so does `lambda` / `proc` / `Proc.new`.
+    // Acceptance rejects every delayed site, so those bodies are not
+    // rewritten. An immediate block (`map`, `tap`) still is.
+    let skip_block = match &*expr.node {
+        ExprNode::Lambda { .. } => return,
+        ExprNode::Send {
+            recv,
+            method,
+            block: Some(_),
+            ..
+        } => super::region::block_runs_later(recv.as_ref(), method.as_str()),
+        _ => false,
+    };
+    if let ExprNode::Send {
+        recv, args, block, ..
+    } = &mut *expr.node
+    {
+        if let Some(recv) = recv {
+            rewrite_lambdas(recv, classes, modules, helpers, seq);
+        }
+        for arg in args {
+            rewrite_lambdas(arg, classes, modules, helpers, seq);
+        }
+        if !skip_block {
+            if let Some(block) = block {
+                rewrite_block(block, classes, modules, helpers, seq);
+            }
         }
         return;
     }
     expr.node
         .for_each_child_mut(&mut |c| rewrite_lambdas(c, classes, modules, helpers, seq));
+}
+
+fn rewrite_block(
+    block: &mut Expr,
+    classes: &HashSet<String>,
+    modules: &HashSet<String>,
+    helpers: &[Factory],
+    seq: &mut u32,
+) {
+    if let ExprNode::Lambda { body, .. } = &mut *block.node {
+        rewrite_scope(body, classes, modules, helpers, seq);
+        return;
+    }
+    rewrite_lambdas(block, classes, modules, helpers, seq);
 }
 
 fn pull_setups(

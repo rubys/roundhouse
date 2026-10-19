@@ -15,14 +15,14 @@ use super::{instance_extend, plain_new_class, var_name};
 use crate::expr::{Expr, ExprNode, LValue, MatchPattern, Pattern};
 use crate::ident::Symbol;
 
-pub(super) struct Survey {
+pub(super) struct Survey<'a> {
     events: Vec<Event>,
-    sites: Vec<Site>,
+    sites: Vec<Site<'a>>,
     rebinds: HashSet<Symbol>,
 }
 
-struct Site {
-    expr: Expr,
+struct Site<'a> {
+    expr: &'a Expr,
     is_stmt: bool,
     delayed: bool,
     preceded: bool,
@@ -66,12 +66,12 @@ enum Order {
     Bad,
 }
 
-struct Builder {
-    sites: Vec<Site>,
+struct Builder<'a> {
+    sites: Vec<Site<'a>>,
     rebinds: HashSet<Symbol>,
 }
 
-pub(super) fn survey(body: &Expr) -> Survey {
+pub(super) fn survey(body: &Expr) -> Survey<'_> {
     let mut builder = Builder {
         sites: Vec::new(),
         rebinds: HashSet::new(),
@@ -99,13 +99,13 @@ pub(super) fn effect_before_extend(expr: &Expr) -> bool {
     top_preceded(&events, &builder.sites)
 }
 
-fn top_preceded(events: &[Event], sites: &[Site]) -> bool {
+fn top_preceded(events: &[Event], sites: &[Site<'_>]) -> bool {
     events
         .iter()
         .any(|event| matches!(event, Event::Site(id) if sites[*id].preceded))
 }
 
-impl Survey {
+impl Survey<'_> {
     /// The one plain write of `name` happens before every `extend` that
     /// reads it. A read first, a second write, or a write in another
     /// region keeps the assignment: deleting it would extend `nil`.
@@ -137,10 +137,10 @@ impl Survey {
             .iter()
             .enumerate()
             .map(|(id, site)| {
-                let reaching_class = var_name_of_receiver(&site.expr)
+                let reaching_class = var_name_of_receiver(site.expr)
                     .and_then(|local| reaching(&self.events, id, &local));
                 ExtendSite {
-                    expr: &site.expr,
+                    expr: site.expr,
                     is_stmt: site.is_stmt,
                     delayed: site.delayed,
                     preceded: site.preceded,
@@ -156,8 +156,8 @@ fn var_name_of_receiver(expr: &Expr) -> Option<Symbol> {
     instance_extend(expr).and_then(|(recv, _)| var_name(recv))
 }
 
-impl Builder {
-    fn statements(&mut self, body: &Expr, delayed: bool, events: &mut Vec<Event>) {
+impl<'a> Builder<'a> {
+    fn statements(&mut self, body: &'a Expr, delayed: bool, events: &mut Vec<Event>) {
         match &*body.node {
             ExprNode::Seq { exprs } => {
                 for stmt in exprs {
@@ -174,7 +174,7 @@ impl Builder {
 
     fn survey(
         &mut self,
-        expr: &Expr,
+        expr: &'a Expr,
         is_stmt: bool,
         delayed: bool,
         gated: bool,
@@ -275,7 +275,7 @@ impl Builder {
 
     fn send(
         &mut self,
-        expr: &Expr,
+        expr: &'a Expr,
         is_stmt: bool,
         delayed: bool,
         gated: bool,
@@ -296,7 +296,7 @@ impl Builder {
             let preceded = *effect;
             let id = self.sites.len();
             self.sites.push(Site {
-                expr: expr.clone(),
+                expr,
                 is_stmt,
                 delayed,
                 preceded,
@@ -337,7 +337,7 @@ impl Builder {
 
     /// `delayed` is true for `->` and for `lambda` / `proc` / `Proc.new`.
     /// A call's block is false: it runs during the call.
-    fn lambda(&mut self, expr: &Expr, delayed: bool, events: &mut Vec<Event>) {
+    fn lambda(&mut self, expr: &'a Expr, delayed: bool, events: &mut Vec<Event>) {
         let ExprNode::Lambda {
             params,
             rest_param,
@@ -376,7 +376,7 @@ impl Builder {
         events.push(Event::Child(child));
     }
 
-    fn gate(&mut self, expr: &Expr, delayed: bool, events: &mut Vec<Event>) {
+    fn gate(&mut self, expr: &'a Expr, delayed: bool, events: &mut Vec<Event>) {
         match &*expr.node {
             ExprNode::CaseMatch {
                 scrutinee,
@@ -457,7 +457,7 @@ fn note_rebind(rebinds: &mut HashSet<Symbol>, name: &Symbol) {
     }
 }
 
-fn block_runs_later(recv: Option<&Expr>, method: &str) -> bool {
+pub(super) fn block_runs_later(recv: Option<&Expr>, method: &str) -> bool {
     // `Kernel.lambda` and `obj.lambda` run when called, same as `lambda`.
     if matches!(method, "lambda" | "proc") {
         return true;

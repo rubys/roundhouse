@@ -3216,7 +3216,7 @@ pub(crate) fn synth_attr_writer(owner: &ClassId, name: &Symbol, receiver: Method
 
 /// Ingest a method with the ordinary library keyword-flattening policy.
 /// Callers that need to retain the keyword contract use the explicit variant.
-pub(crate) fn ingest_library_method(
+pub(super) fn ingest_library_method(
     def: &ruby_prism::DefNode<'_>,
     owner: &ClassId,
     file: &str,

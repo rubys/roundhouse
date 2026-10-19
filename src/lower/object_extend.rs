@@ -299,10 +299,19 @@ fn hoist_anonymous_modules(
     let mut found = Vec::new();
     collect_module_assigns(body, &mut found);
     let before = inner.len();
-    let reads = region::survey(body);
+    // The survey borrows `body`. The names are taken before the loop
+    // rewrites the statements.
+    let sole: HashSet<Symbol> = {
+        let reads = region::survey(body);
+        found
+            .iter()
+            .filter(|(local, _)| reads.sole_local(local))
+            .map(|(local, _)| local.clone())
+            .collect()
+    };
     let mut n = 0u32;
     for (local, methods) in found {
-        if !reads.sole_local(&local) {
+        if !sole.contains(&local) {
             continue;
         }
         let name = fresh_const(&mut n, |c| {
