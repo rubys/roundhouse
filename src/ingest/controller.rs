@@ -20,20 +20,6 @@ use super::util::{
 use super::{IngestError, IngestResult};
 
 pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Controller>> {
-    Ok(ingest_controller_with_nesting(source, file)?.map(|(controller, _)| controller))
-}
-
-/// `ingest_controller`, plus the lexical nesting the superclass is
-/// looked up in (`Module.nesting` at the `class` keyword, innermost
-/// first). `Controller` doesn't carry it, and the name can't stand in
-/// for it: `class Admin::XController < BaseController` at top level
-/// looks up `::BaseController`, while the same class written inside
-/// `module Admin` looks up `Admin::BaseController` first. Empty when
-/// the superclass is rooted (`< ::BaseController`).
-pub(super) fn ingest_controller_with_nesting(
-    source: &[u8],
-    file: &str,
-) -> IngestResult<Option<(Controller, Vec<String>)>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -91,18 +77,18 @@ pub(super) fn ingest_controller_with_nesting(
     // `Admin::StatusesController`, not collide with the top-level
     // `StatusesController` (which merges two controllers' actions and
     // poisons both metas' ivar seeding).
-    let (scope, nesting, class) = match chosen_idx {
+    let (scope, class) = match chosen_idx {
         Some(i) => {
-            let (s, n, c) = all_classes.into_iter().nth(i).expect("chosen index in range");
-            (s, n, Some(c))
+            let (s, _, c) = all_classes.into_iter().nth(i).expect("chosen index in range");
+            (s, Some(c))
         }
         None => {
             match all_classes
                 .into_iter()
                 .find(|(_, _, c)| descends_from_controller(c))
             {
-                Some((s, n, c)) => (s, n, Some(c)),
-                None => (Vec::new(), Vec::new(), None),
+                Some((s, _, c)) => (s, Some(c)),
+                None => (Vec::new(), None),
             }
         }
     };
@@ -123,13 +109,6 @@ pub(super) fn ingest_controller_with_nesting(
     let parent = class.superclass().and_then(|n| {
         constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
     });
-    // `< ::BaseController` names the top level whatever the nesting;
-    // the path above has already dropped the leading `::`.
-    let rooted = class
-        .superclass()
-        .and_then(|n| n.as_constant_path_node().map(|p| p.parent().is_none()))
-        .unwrap_or(false);
-    let nesting = if rooted { Vec::new() } else { nesting };
 
     let mut comments = collect_comments(&result);
     drain_comments_before(&mut comments, class.location().start_offset());
@@ -434,17 +413,14 @@ pub(super) fn ingest_controller_with_nesting(
         }
     }
 
-    Ok(Some((
-        Controller {
-            name: ClassId(Symbol::from(name_path.join("::"))),
-            parent,
-            parent_span,
-            body: body_items,
-            layout,
-            sibling_classes,
-        },
-        nesting,
-    )))
+    Ok(Some(Controller {
+        name: ClassId(Symbol::from(name_path.join("::"))),
+        parent,
+        parent_span,
+        body: body_items,
+        layout,
+        sibling_classes,
+    }))
 }
 
 /// Recognize a `layout` class-body call. Returns `Some(decl)` if this
@@ -1139,7 +1115,7 @@ fn deep_merge_filter_options(
 /// caught and skipped per statement. A controller filter that silently
 /// lost its guard because a SIBLING statement in the same block was
 /// unsupported would be the #785 bug again, one level down; the caller
-/// (`ingest_controller_with_nesting`) is the one place this bubbles up
+/// (`ingest_controller`) is the one place this bubbles up
 /// to and turns into a single gap plus a single whole-statement
 /// `Unknown` round-trip — matching `expand_class_body_macros`'s own
 /// ALL-OR-NOTHING reasoning for a concern macro's body.
@@ -1375,7 +1351,7 @@ pub(crate) fn is_lambda_filter_macro(method: &str) -> bool {
 ///
 /// One function so the two places that need it — this file's own
 /// hand-written block-form `around_action` pass
-/// (`ingest_controller_with_nesting`) and `app::
+/// (`ingest_controller`) and `app::
 /// expand_class_body_macros`'s macro-expanded one — agree on the same
 /// encoding instead of drifting apart.
 pub(super) fn around_block_owner_ident(name: &ClassId) -> String {
@@ -1385,7 +1361,7 @@ pub(super) fn around_block_owner_ident(name: &ClassId) -> String {
 /// The sequence number `around_block_filter` should start COUNTING UP
 /// FROM for `owner_ident` on this controller — one past the highest
 /// `__rh_around_<owner_ident>_<n>` suffix any EARLIER pass already
-/// placed in `body`. `ingest_controller_with_nesting`'s own hand-written
+/// placed in `body`. `ingest_controller`'s own hand-written
 /// block-form `around_action` pass always runs first and starts its own
 /// counter at 0; `app::expand_class_body_macros` runs afterward, over
 /// the same controller, for whatever block-form `around_action` a

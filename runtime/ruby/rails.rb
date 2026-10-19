@@ -462,6 +462,10 @@ module Rails
       "_session"
     end
 
+    def propshaft_asset_path(source)
+      "/assets/#{source}"
+    end
+
     # `config.action_controller.forgery_protection_verification_strategy`,
     # as the forgery check reads it (runtime/spinel/
     # request_forgery_protection.rb). Rails' class default; ingest lifts

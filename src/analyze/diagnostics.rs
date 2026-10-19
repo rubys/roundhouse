@@ -94,7 +94,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         }
     }
     fn collect_constants(expr: &Expr, out: &mut Vec<Diagnostic>) {
-        if let Some(kind @ DiagnosticKind::IncompatibleBinop { op, lhs_ty, .. }) = &expr.diagnostic {
+        if let Some(kind @ DiagnosticKind::IncompatibleBinop { op, lhs_ty, .. }) = &expr.diagnostic() {
             if nominal_class_operand(lhs_ty) {
             out.push(Diagnostic {
                 span: expr.span,
@@ -104,17 +104,17 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
             });
             }
         }
-        if matches!(&expr.diagnostic,
+        if matches!(&expr.diagnostic(),
             Some(DiagnosticKind::Unsupported { .. }))
         {
-            if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic
+            if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic()
                 && construct.as_str() != crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
             {
                 out.push(Diagnostic::unsupported(expr.span, target.clone(), construct.as_str(), detail.clone()));
             }
         }
         // Not dropped with the policy's other misses: the typer stamps it only in place of an Object-extension refusal.
-        if let Some(kind @ DiagnosticKind::SendDispatchFailed { method, recv_ty }) = &expr.diagnostic {
+        if let Some(kind @ DiagnosticKind::SendDispatchFailed { method, recv_ty }) = &expr.diagnostic() {
             out.push(Diagnostic {
                 span: expr.span,
                 severity: Diagnostic::default_severity(kind),
@@ -142,7 +142,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     for model in &app.models {
         for item in &model.body {
             if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item {
-                if let Some(DiagnosticKind::Unsupported { construct, detail, .. }) = &expr.diagnostic {
+                if let Some(DiagnosticKind::Unsupported { construct, detail, .. }) = &expr.diagnostic() {
                     if construct.as_str() == "include" {
                         out.push(Diagnostic::unsupported(expr.span, None, "include", detail.clone()));
                     }
@@ -453,7 +453,7 @@ pub fn unknown_receiver_sends(app: &App, classes: &HashMap<ClassId, ClassInfo>) 
                 && is_unknown_ty(expr.ty.as_ref())
                 && !method_registered_on(classes, r.ty.as_ref(), method);
             if (gradual || known_receiver || unknown)
-                && expr.diagnostic.is_none()
+                && expr.diagnostic().is_none()
                 && !expr.span.is_synthetic()
             {
                 out.push(UnknownReceiverSend { span: expr.span, method: method.clone(), gradual, known_receiver });
@@ -516,7 +516,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // These are the IR-carried path: detection happens once at the
     // point of typing, and every reader (including this walker) sees
     // the same set.
-    if let Some(kind) = &expr.diagnostic {
+    if let Some(kind) = &expr.diagnostic() {
         let message = match kind {
             // Types render as a Ruby developer reads them (`Integer?`,
             // `Product`), not as the IR's Debug form — the message is
@@ -674,7 +674,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // A node the compiler synthesized (an `attr_writer`'s `value`) has no
     // source position: there is nothing for the author to look at or fix.
     if is_unknown_ty(expr.ty.as_ref()) && !expr.span.is_synthetic()
-        && !matches!(expr.diagnostic, Some(DiagnosticKind::Unsupported { .. }))
+        && !matches!(expr.diagnostic(), Some(DiagnosticKind::Unsupported { .. }))
     {
         let report = matches!(
             &*expr.node,

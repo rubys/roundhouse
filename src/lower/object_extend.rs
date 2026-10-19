@@ -406,7 +406,7 @@ fn visibility_name(name: &str) -> Option<MethodVisibility> {
 }
 
 fn is_nested_def(expr: &Expr) -> bool {
-    matches!(&expr.diagnostic, Some(DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == NESTED_DEF)
+    matches!(expr.diagnostic(), Some(DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == NESTED_DEF)
 }
 
 fn sole_extend_local(body: &Expr, name: &Symbol) -> bool {
@@ -1269,17 +1269,17 @@ fn stub_sites(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
 }
 
 /// A nil carrying the report — the ruby emitter renders it as the raise.
-fn stub_expr(span: Span) -> Expr {
+fn stub_expr(span: crate::span::Span) -> Expr {
     let mut e = Expr::new(
         span,
         ExprNode::Lit {
             value: Literal::Nil,
         },
     );
-    e.diagnostic = Some(DiagnosticKind::Unsupported {
+    e.set_diagnostic(Some(DiagnosticKind::Unsupported {
         target: None,
         construct: Symbol::from(CONSTRUCT),
         detail: DETAIL.to_string(),
-    });
+    }));
     e
 }

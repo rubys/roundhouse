@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/active_model_attributes.rs"]
+mod active_model_attributes;
 #[path = "emit_and_run/date_calendar_duration.rs"]
 mod date_calendar_duration;
 #[path = "emit_and_run/branch_local_join.rs"]
@@ -71,6 +73,8 @@ mod class_new_constants;
 mod i18n_subtree;
 #[path = "emit_and_run/i18n_values.rs"]
 mod i18n_values;
+#[path = "emit_and_run/i18n_locale_tag.rs"]
+mod i18n_locale_tag;
 #[path = "emit_and_run/i18n_plural_rules.rs"]
 mod i18n_plural_rules;
 #[path = "emit_and_run/rails_i18n_locales.rs"]
@@ -254,6 +258,8 @@ mod job_payload;
 mod sidekiq_adapter;
 #[path = "emit_and_run/silent_lowerings.rs"]
 mod silent_lowerings;
+#[path = "emit_and_run/validates_options.rs"]
+mod validates_options;
 
 #[test]
 fn markdown_templates_render_with_their_mime_type_and_erb_escaping() {

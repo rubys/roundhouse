@@ -141,6 +141,7 @@ pub const GEM_CATALOG: &[GemClass] = &[
             // `with_locale` returns its block's value — opaque here.
             ("with_locale", GemTy::Untyped),
             ("available_locales", GemTy::Untyped),
+            ("locale_available?", GemTy::Bool),
             ("exists?", GemTy::Bool),
         ],
         instance_methods: &[],

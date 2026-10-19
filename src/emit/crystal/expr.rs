@@ -277,7 +277,7 @@ fn rewrite_stdlib_const(name: &str) -> Option<&'static str> {
 /// still take the legacy `String + String` path — the hint is the
 /// signal that the lowerer guarantees Builder semantics are safe.
 fn try_string_builder(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign {

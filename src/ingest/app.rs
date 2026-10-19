@@ -19,7 +19,7 @@ use crate::Symbol;
 use crate::dialect::{LibraryClass, MethodReceiver, TestModule};
 use crate::vfs::{FsVfs, MapVfs, Vfs};
 
-use super::controller::ingest_controller_with_nesting;
+use super::controller::ingest_controller;
 use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
 use super::jbuilder::ingest_jbuilder;
@@ -1461,10 +1461,6 @@ end
     // the Db shim's own (see `database_yml`).
     app.database_pragmas = super::database_yml::database_pragmas(vfs, dir);
 
-    // Each controller's lexical nesting, for resolving its superclass
-    // once every controller is known (see
-    // `qualify_relative_controller_superclasses`).
-    let mut controller_nesting = std::collections::HashMap::new();
     for root in &roots {
         let controllers_dir = dir.join(root).join("controllers");
         if !vfs.is_dir(&controllers_dir) {
@@ -1474,10 +1470,9 @@ end
             let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
             let path_str = entry.display().to_string();
             if let Some(maybe_controller) =
-                unwrap_or_record(ingest_controller_with_nesting(&source, &path_str))?
+                unwrap_or_record(ingest_controller(&source, &path_str))?
             {
-                if let Some((controller, nesting)) = maybe_controller {
-                    controller_nesting.insert(controller.name.clone(), nesting);
+                if let Some(controller) = maybe_controller {
                     // `helper_method :x` exposes controller methods to
                     // templates. The ARG-PURE ones (no ivar reads)
                     // register like app-helper functions — the bare
@@ -2080,6 +2075,7 @@ end
     keep_initializer_defined(&mut app, dir, &sources, initializer_defined);
     // `self.queue_adapter =` on ApplicationJob (see `App::queue_adapter`).
     apply_application_job_queue_adapter(&mut app);
+    super::propshaft::ingest(vfs, dir, &mut app)?;
     // The ledger of boot statements no recognizer above read. A warning
     // per statement, in the ingest diagnostic channel; no `App` field.
     super::initializer_ledger::record(
@@ -2100,14 +2096,6 @@ end
     // Registered source paths are prefixed with this (the fs walk
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
-
-    // A module-nested controller's relative superclass
-    // (`module Ns; class XController < BaseController`) names
-    // `Ns::BaseController` under Ruby's lexical lookup. Left bare, the
-    // parent matched no controller, the ancestry walk came back empty,
-    // and the whole filter chain (its own base's before_action AND
-    // ApplicationController's) vanished from the synthesized dispatcher.
-    qualify_relative_controller_superclasses(&mut app, &controller_nesting);
 
     // `app/models/post/summary.rb` often reopens `class Post` only to
     // hold `Post::Summary`. That reopen is a namespace, not a class of
@@ -2135,12 +2123,19 @@ end
     // `include`s (or nothing), now that every module of the app is
     // known; before the qualification below, which reads them.
     super::guarded_include::splice_guarded_includes(&mut app);
-    // Before the splice: it (and every later consumer) looks concerns up
-    // by ClassId, so the lexical-scope resolution has to have happened.
-    qualify_relative_includes(&mut app);
+    // Every superclass and mixin, as Rubydex resolved it, before the
+    // concern splices and every later consumer look them up by ClassId.
+    // A module-nested `class XController < BaseController` names
+    // `Ns::BaseController`; `include Avatar` inside `class User` names
+    // `User::Avatar`. The passes above leave both as written.
+    let const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
+    super::written_names::resolve(&mut app, &sources, &const_resolver.for_sources(&sources));
     // Before the concern splices: they read `library_classes`, and this
     // turns `Current`'s metaprogrammed surface into real methods first.
     super::current_attributes::lower_current_attributes(&mut app);
+    // `attribute :x, :type` under `include ActiveModel::Attributes` -> real
+    // casting accessors, before anything reads the class's methods.
+    super::active_model_attributes::lower_active_model_attributes(&mut app);
     super::thread_mattr::lower_thread_mattr(&mut app);
     // Alba declarations become ordinary property-reading methods before
     // inference; validate complete original resource bodies, not just IR.
@@ -2293,7 +2288,7 @@ end
     }
     super::model_delegate::lower_model_delegates(&mut app);
     super::on_load_reopen::drain_pending(&mut app);
-    app.const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
+    app.const_resolver = const_resolver;
     // Admission needs complete controller permit demand and model DSL,
     // including declarations contributed by either kind of Concern,
     // and reuses the prepared resolver rather than rebuilding it.
@@ -2992,8 +2987,11 @@ fn splice_concerns_into_controllers(app: &mut App) {
     use crate::ty::{Row, Ty};
 
     // Instance methods per concern module, the constants those bodies
-    // resolve lexically, and the modules it includes.
-    let mut module_methods: HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>> =
+    // resolve lexically, and the modules it includes. The methods are
+    // borrowed, not copied: this indexes every library class, most of
+    // which no controller includes, and a method that is spliced has
+    // its body cloned below anyway.
+    let mut module_methods: HashMap<crate::ident::ClassId, Vec<&crate::dialect::MethodDef>> =
         HashMap::new();
     let mut module_constants: HashMap<
         crate::ident::ClassId,
@@ -3007,7 +3005,6 @@ fn splice_concerns_into_controllers(app: &mut App) {
             lc.methods
                 .iter()
                 .filter(|m| matches!(m.receiver, MethodReceiver::Instance))
-                .cloned()
                 .collect(),
         );
         module_constants
@@ -4020,30 +4017,14 @@ fn report_unrecognized_controller_macros(app: &App) {
 /// whose body holds one statement this can't read stays Unknown, whole,
 /// and is recorded as a gap.
 fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
-    use crate::dialect::{ControllerBodyItem, MethodReceiver};
+    use crate::dialect::{ControllerBodyItem, MethodDef, MethodReceiver};
     use crate::expr::ExprNode;
 
-    // Class-side methods of every module, by name — the macro table.
-    // Populated from library classes because that is where a concern's
-    // `class_methods do` / `module ClassMethods` bodies land.
-    let mut macros: HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>> = HashMap::new();
-    for lc in &app.library_classes {
-        let class_side: Vec<crate::dialect::MethodDef> = lc
-            .methods
-            .iter()
-            .filter(|m| matches!(m.receiver, MethodReceiver::Class))
-            .cloned()
-            .collect();
-        for method in class_side {
-            let methods = macros.entry(lc.name.clone()).or_default();
-            if let Some(prior) = methods.iter_mut().find(|m| m.name == method.name) {
-                *prior = method;
-            } else {
-                methods.push(method);
-            }
-        }
-    }
-    if macros.is_empty() {
+    // No class-side method means no macro to expand. Checked before the
+    // concern surface is built so an app with none skips that walk.
+    if !app.library_classes.iter().any(|lc| {
+        lc.methods.iter().any(|m| matches!(m.receiver, MethodReceiver::Class))
+    }) {
         return Ok(());
     }
 
@@ -4072,6 +4053,28 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
         })
         .collect();
 
+    // Class-side methods per library class — the macro table. Borrowed,
+    // not copied: this indexes every library class, most of which no
+    // controller includes, and a macro that expands substitutes from
+    // the borrowed body. A later reopening of the same name replaces
+    // the earlier def, as the owned table did. Library classes are only
+    // read here; the loop below mutates controllers.
+    let mut macros: HashMap<crate::ident::ClassId, Vec<&MethodDef>> = HashMap::new();
+    for lc in &app.library_classes {
+        for method in lc
+            .methods
+            .iter()
+            .filter(|m| matches!(m.receiver, MethodReceiver::Class))
+        {
+            let methods = macros.entry(lc.name.clone()).or_default();
+            if let Some(prior) = methods.iter_mut().find(|m| m.name == method.name) {
+                *prior = method;
+            } else {
+                methods.push(method);
+            }
+        }
+    }
+
     for controller in &mut app.controllers {
         let includes = &surfaces.controllers[&controller.name].direct_includes;
         if includes.is_empty() {
@@ -4093,7 +4096,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
         shadowed_macros.extend(inherited_class_methods[&controller.name].iter().cloned());
         // Shared with this controller's own hand-written block-form
         // `around_action` pass (`ingest::controller::
-        // ingest_controller_with_nesting`), which always runs first:
+        // ingest_controller`), which always runs first:
         // same owner-ident encoding, and a starting sequence number
         // picked up AFTER whatever it already placed, so a macro's own
         // block-form `around_action` never synthesizes the same method
@@ -4117,8 +4120,8 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
             let found = includes.iter().find_map(|inc| {
                 macros
                     .get(inc)
-                    .and_then(|ms| ms.iter().find(|m| &m.name == method))
-                    .map(|m| (inc.clone(), m.clone()))
+                    .and_then(|ms| ms.iter().copied().find(|m| &m.name == method))
+                    .map(|m| (inc.clone(), m))
             });
             let Some((module, macro_def)) = found else {
                 expanded.push(item);
@@ -4140,10 +4143,10 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
                 else {
                     return false;
                 };
-                other_method == method && stored_options_init(other_expr, &macro_def).is_none() && !args.is_empty()
+                other_method == method && stored_options_init(other_expr, macro_def).is_none() && !args.is_empty()
             });
-            if method_stores_keyword_rest(&macro_def) && !another_unreadable {
-                if let Some(init) = stored_options_init(expr, &macro_def) {
+            if method_stores_keyword_rest(macro_def) && !another_unreadable {
+                if let Some(init) = stored_options_init(expr, macro_def) {
                     survey::record(&IngestError::Unsupported {
                         file: controller.name.0.as_str().to_string(),
                         message: format!(
@@ -4162,7 +4165,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
             }
             // A keyword shape that can't be bound (see `substitute_params`) refuses the macro, like any other
             // statement that isn't filter DSL.
-            let Some(body) = substitute_params(&macro_def, args) else {
+            let Some(body) = substitute_params(macro_def, args) else {
                 survey::record(&IngestError::Unsupported {
                     file: format!("{}", controller.name.0.as_str()),
                     message: format!(
@@ -4326,7 +4329,7 @@ fn expand_class_body_macros(app: &mut App) -> IngestResult<()> {
 fn expand_nested_filter_macros(
     body: &crate::expr::Expr,
     module: &crate::ident::ClassId,
-    macros: &HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
+    macros: &HashMap<crate::ident::ClassId, Vec<&crate::dialect::MethodDef>>,
     shadowed: &std::collections::HashSet<crate::ident::Symbol>,
     stack: &mut Vec<crate::ident::Symbol>,
 ) -> Option<crate::expr::Expr> {
@@ -4337,7 +4340,7 @@ fn expand_nested_filter_macros(
     fn expand_statements(
         body: &Expr,
         module: &crate::ident::ClassId,
-        macros: &HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>>,
+        macros: &HashMap<crate::ident::ClassId, Vec<&crate::dialect::MethodDef>>,
         shadowed: &std::collections::HashSet<crate::ident::Symbol>,
         stack: &mut Vec<crate::ident::Symbol>,
         remaining: &mut usize,
@@ -6029,187 +6032,6 @@ fn map_enum_labels(app: &mut App) {
         }
     }
     crate::lower::for_each_hook_body(app, &mut |expr| map_const_receiver_sites(expr, &tables));
-}
-
-/// Resolve a controller's relative superclass against Ruby's lexical
-/// scope. The superclass expression is evaluated in the nesting around
-/// the `class` keyword, so `module Ns; class XController <
-/// BaseController` tries `Ns::BaseController` before a top-level
-/// `BaseController`, while a top-level `class Ns::XController <
-/// BaseController` has only the top level in scope: the `Ns::` prefix
-/// names the class without opening `Ns`. Hence `nesting` (recorded at
-/// ingest, innermost first), never the segments of the class's name.
-///
-/// Rewrites only when a candidate names an ingested controller, so
-/// `ApplicationController` inside `module Ns` stays top-level. A
-/// superclass written qualified (`Admin::BaseController`) or rooted
-/// (`::BaseController`, recorded with an empty nesting) is left alone.
-fn qualify_relative_controller_superclasses(
-    app: &mut App,
-    nesting: &std::collections::HashMap<crate::ident::ClassId, Vec<String>>,
-) {
-    let known: std::collections::HashSet<crate::ident::ClassId> =
-        app.controllers.iter().map(|c| c.name.clone()).collect();
-    for controller in &mut app.controllers {
-        let Some(parent) = controller.parent.clone() else { continue };
-        let raw = parent.0.as_str();
-        if raw.contains("::") {
-            continue;
-        }
-        for scope in nesting.get(&controller.name).into_iter().flatten() {
-            let id = crate::ident::ClassId(crate::ident::Symbol::from(format!("{scope}::{raw}")));
-            // `module Admin; class NotesController < NotesController`
-            // names the top-level one: a class is never its own
-            // superclass.
-            if id == controller.name {
-                continue;
-            }
-            if known.contains(&id) {
-                controller.parent = Some(id);
-                break;
-            }
-        }
-    }
-}
-
-/// Resolve an `include <Const>` against Ruby's lexical scope.
-///
-/// Inside `class User`, `include Avatar` names `User::Avatar` when such
-/// a module exists, and only falls back to a top-level `Avatar`. The
-/// same walk covers a namespaced owner: in `module Auth; class
-/// SessionsController`, `include Concerns::RequireClient` names
-/// `Auth::SessionsController::Concerns::RequireClient`, then
-/// `Auth::Concerns::RequireClient`, then `Concerns::RequireClient`,
-/// innermost first, the way `Module.nesting` is consulted.
-///
-/// Campfire keeps every model concern that way —
-/// `app/models/user/{avatar,bannable,bot,mentionable,role,transferable}.rb`
-/// each declare `module User::Avatar` and friends — so the unqualified
-/// ClassId matched no ingested module and the whole mixed-in surface
-/// (`ban`, `create_bot!`, `active_bots`, `from_avatar_token`) dispatched
-/// into nothing. Shopify's customer-authentication controllers keep
-/// theirs one namespace up (`Auth::Concerns::RequireClient`, included
-/// as `Concerns::RequireClient`), so every ivar those concerns write
-/// (`@client_id`, `@redirect_uri`) read as `has no known type` in the
-/// includer.
-///
-/// Rewrites the IR node rather than resolving at each consumer:
-/// `model_includes` / `controller_includes` (analyze),
-/// `splice_concerns_into_models` above, and every emitter that
-/// re-emits the line then read one qualified path. Narrow trigger —
-/// only when some `<scope>::<Const>` actually names an ingested module,
-/// so apps whose concerns live at the top level
-/// (`app/models/concerns/…`) are untouched.
-fn qualify_relative_includes(app: &mut App) {
-    use crate::dialect::{ControllerBodyItem, ModelBodyItem};
-    use crate::expr::ExprNode;
-
-    let known: std::collections::HashSet<crate::ident::ClassId> = app
-        .library_classes
-        .iter()
-        .map(|lc| lc.name.clone())
-        .chain(app.concern_model_items.keys().cloned())
-        .collect();
-
-    /// `path` as written inside `owner`, when a nesting scope above it
-    /// (innermost first) defines it. `None` leaves the node alone.
-    fn resolve(
-        owner: &str,
-        path: &[crate::ident::Symbol],
-        known: &std::collections::HashSet<crate::ident::ClassId>,
-    ) -> Option<Vec<crate::ident::Symbol>> {
-        let scope: Vec<&str> = owner.split("::").collect();
-        let tail = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-        for depth in (1..=scope.len()).rev() {
-            let candidate = format!("{}::{tail}", scope[..depth].join("::"));
-            if known.contains(&crate::ident::ClassId(crate::ident::Symbol::from(
-                candidate.as_str(),
-            ))) {
-                return Some(candidate.split("::").map(crate::ident::Symbol::from).collect());
-            }
-        }
-        None
-    }
-
-    fn rewrite_include(
-        expr: &mut crate::expr::Expr,
-        owner: &str,
-        known: &std::collections::HashSet<crate::ident::ClassId>,
-    ) {
-        let ExprNode::Send { recv: None, method, args, .. } = &mut *expr.node else {
-            return;
-        };
-        if method.as_str() != "include" {
-            return;
-        }
-        for arg in args.iter_mut() {
-            let ExprNode::Const { path } = &mut *arg.node else { continue };
-            if let Some(qualified) = resolve(owner, path, known) {
-                *path = qualified;
-            }
-        }
-    }
-
-    for model in &mut app.models {
-        let model_name = model.name.0.as_str().to_string();
-        for item in &mut model.body {
-            let ModelBodyItem::Unknown { expr, .. } = item else { continue };
-            rewrite_include(expr, &model_name, &known);
-        }
-    }
-
-    for controller in &mut app.controllers {
-        let name = controller.name.0.as_str().to_string();
-        for item in &mut controller.body {
-            let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
-            rewrite_include(expr, &name, &known);
-        }
-    }
-
-    // Same rule for a module's own includes. campfire's
-    // `Authentication` concern opens with `include SessionLookup`,
-    // which is `Authentication::SessionLookup` — under Ruby's lexical
-    // lookup, and on disk at
-    // app/controllers/concerns/authentication/session_lookup.rb.
-    // Unqualified, the emitted `include SessionLookup` raises NameError
-    // at load time (and nothing pulls the file into the require graph).
-    //
-    // Past the lexical scopes Ruby searches the class's ancestors before
-    // the top level: `class Child < Base::Entity` opening with
-    // `include(WithIds)` means `Base::Entity::WithIds`.
-    let parents: HashMap<String, crate::ident::ClassId> = app
-        .library_classes
-        .iter()
-        .filter_map(|lc| Some((lc.name.0.as_str().to_string(), lc.parent.clone()?)))
-        .collect();
-    let join = |path: &[crate::ident::Symbol]| path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-    // A `Data.define` block resolves constants from the top level, so
-    // its includes are already absolute.
-    for lc in app.library_classes.iter_mut().filter(|lc| lc.data_define().is_none()) {
-        let owner = lc.name.0.as_str().to_string();
-        for inc in &mut lc.includes {
-            let path: Vec<crate::ident::Symbol> =
-                inc.0.as_str().split("::").map(crate::ident::Symbol::from).collect();
-            if let Some(qualified) = resolve(&owner, &path, &known) {
-                *inc = crate::ident::ClassId(crate::ident::Symbol::from(join(&qualified)));
-                continue;
-            }
-            let mut class = owner.clone();
-            // A cycle guard on the superclass walk.
-            for _ in 0..32 {
-                let Some(parent) = parents.get(&class) else { break };
-                let written: Vec<crate::ident::Symbol> =
-                    parent.0.as_str().split("::").map(crate::ident::Symbol::from).collect();
-                let ancestor = resolve(&class, &written, &known).map(|p| join(&p)).unwrap_or_else(|| join(&written));
-                let candidate = crate::ident::ClassId(crate::ident::Symbol::from(format!("{ancestor}::{}", inc.0)));
-                if known.contains(&candidate) {
-                    *inc = candidate;
-                    break;
-                }
-                class = ancestor;
-            }
-        }
-    }
 }
 
 /// Fill each `belongs_to …, polymorphic: true` association's target

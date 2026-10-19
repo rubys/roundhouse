@@ -277,6 +277,21 @@ jobs:
           set -euo pipefail
           target/debug/roundhouse check --continue fixtures/store 2>&1 | tee /tmp/store-check.txt
           grep -E "^roundhouse-check: .* 0 error\(s\), 0 warning\(s\), 0 gap-attributed note\(s\), 0 survey gap\(s\)" /tmp/store-check.txt
+      # Use the actual dev profile and reuse the Store library build.
+      # These checks also run when the Store analysis result is reused.
+      - name: Build the unoptimized development bench driver
+        run: |
+          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/store-check-resources/dev-build" -- \
+            cargo build --locked --profile dev --bin emit_preview
+      - name: Emit every bench lane in the debug profile (scripts/bench's shape)
+        run: |
+          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/store-check-resources/bench" -- \
+            bash -euo pipefail -c "
+              test -x target/debug/emit_preview
+              for target in typescript crystal rust python elixir go kotlin swift csharp; do
+                target/debug/emit_preview --target \"\$target\" fixtures/real-blog >/dev/null
+              done
+            "
       - name: Record actual successful execution
         id: execution
         if: success() && steps.reuse.outputs.eligible == 'true' && steps.build.outcome == 'success' && steps.check.outcome == 'success'
@@ -291,6 +306,13 @@ jobs:
           path: ${{ steps.reuse.outputs.bundle }}
           retention-days: 7
           if-no-files-found: error
+      - name: Upload Store bench resource samples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: store-check-resources-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/store-check-resources/
+          if-no-files-found: ignore
 
   # -------------------------------------------------------------------
   # Build the in-browser compiler wasm (roundhouse_wasm.wasm) from source
@@ -523,23 +545,8 @@ jobs:
       - name: Check documentation tests
         run: |
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-build-resources/docs" -- \
-            cargo test --locked --doc
-      # Test-profile binaries use opt-level=1. Rebuild this driver in the
-      # actual dev profile so the independent debug stack gate stays honest.
-      # Run after archiving: the test archive retains its own helper binaries.
-      - name: Build the unoptimized development bench driver
-        run: |
-          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-build-resources/dev-build" -- \
-            cargo build --locked --profile dev --bin emit_preview
-      - name: Emit every bench lane in the debug profile (scripts/bench's shape)
-        run: |
-          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-build-resources/bench" -- \
-            bash -euo pipefail -c "
-              test -x target/debug/emit_preview
-              for target in typescript crystal rust python elixir go kotlin swift csharp; do
-                target/debug/emit_preview --target \"\$target\" fixtures/real-blog >/dev/null
-              done
-            "
+            cargo test --locked --doc \
+              --config 'profile.test.package.roundhouse.opt-level=0'
       - name: Upload current-run test bundle
         id: unit-tests
         uses: actions/upload-artifact@v7

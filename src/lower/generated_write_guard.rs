@@ -251,7 +251,7 @@ fn rewrite(
                 value: Literal::Nil,
             },
         );
-        stub.diagnostic = Some(diagnostic.kind.clone());
+        stub.set_diagnostic(Some(diagnostic.kind.clone()));
         *expr = stub;
         diagnostics.push(diagnostic);
         return;

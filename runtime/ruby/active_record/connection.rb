@@ -211,6 +211,18 @@ module ActiveRecord
     # open. `Room::MessagesCount.with_immediate_write` takes this path
     # inside a fixture example, because that frame is hidden from
     # `transaction_open?` (see active_record_db_config.rb).
+    # ROLLBACK TO plus RELEASE. A SQLite error here means the transaction
+    # already ended; the caller's exception is the one that matters.
+    def self._rollback_savepoint(name)
+      begin
+        Db.exec("ROLLBACK TO SAVEPOINT #{name}")
+        Db.exec("RELEASE SAVEPOINT #{name}")
+      rescue StandardError
+        # SQLite may already have ended the transaction itself.
+      end
+      nil
+    end
+
     def transaction(mode = :deferred)
       if Db.transaction_open?
         name = "rh_raw_#{Db._txn_depth}"
@@ -218,12 +230,7 @@ module ActiveRecord
         begin
           result = yield
         rescue Exception => e
-          begin
-            Db.exec("ROLLBACK TO SAVEPOINT #{name}")
-            Db.exec("RELEASE SAVEPOINT #{name}")
-          rescue StandardError
-            # SQLite may have ended the transaction itself already.
-          end
+          RawConnection._rollback_savepoint(name)
           raise e
         end
         Db.exec("RELEASE SAVEPOINT #{name}")
@@ -650,26 +657,14 @@ module ActiveRecord
             # outer transaction carries on and commits.
             Db._txn_depth = depth
             unless savepoint.nil?
-              begin
-                Db.exec("ROLLBACK TO SAVEPOINT #{savepoint}")
-                Db.exec("RELEASE SAVEPOINT #{savepoint}")
-              rescue StandardError
-                # SQLite may already have ended the whole transaction; the
-                # Rollback still answers nil, as the outer ROLLBACK's does.
-              end
+              RawConnection._rollback_savepoint(savepoint)
               ActiveRecord::Base._rollback_enlisted(mark)
             end
             result = nil
           rescue Exception => e
             Db._txn_depth = depth
             unless savepoint.nil?
-              begin
-                Db.exec("ROLLBACK TO SAVEPOINT #{savepoint}")
-                Db.exec("RELEASE SAVEPOINT #{savepoint}")
-              rescue StandardError
-                # SQLite may already have ended the whole transaction (see
-                # the outer ROLLBACK below); that must not hide `e`.
-              end
+              RawConnection._rollback_savepoint(savepoint)
               ActiveRecord::Base._rollback_enlisted(mark)
             end
             raise e
@@ -1367,20 +1362,21 @@ module ActiveRecord
     # so an `after_create_commit` that enqueues a job never queues one
     # for a row a rollback removed.
     def _save_committed(was_new)
-      kind = was_new ? 0 : 1
+      _enlist_or_run(was_new ? 0 : 1)
+    end
+
+    def _destroy_committed
+      _enlist_or_run(2)
+    end
+
+    # Outside a transaction the commit callbacks run now. Inside one the
+    # write is enlisted until the outermost COMMIT. Save and destroy
+    # share this `Db` walk; only the callback kind differs.
+    def _enlist_or_run(kind)
       if Db._txn_depth == 0
         _run_commit_callbacks(kind)
       else
         Db._txn_records << ActiveRecord::EnlistedRecord.new(self, kind)
-      end
-      nil
-    end
-
-    def _destroy_committed
-      if Db._txn_depth == 0
-        _run_commit_callbacks(2)
-      else
-        Db._txn_records << ActiveRecord::EnlistedRecord.new(self, 2)
       end
       nil
     end
@@ -1408,15 +1404,23 @@ module ActiveRecord
       _commit_enlisted_from(0)
     end
 
-    # Run commit callbacks for the writes enlisted at and after `from`,
-    # and drop them from the list. Writes enlisted earlier stay for the
-    # parent transaction. Called for the outermost COMMIT (`from` 0)
-    # and for a savepoint whose parent is not joinable.
-    def self._commit_enlisted_from(from)
+    # The writes enlisted at and after `from`, dropped from the list.
+    # nil when that range is empty. Commit and rollback both start here.
+    def self._take_enlisted(from)
       records = Db._txn_records
       return nil if records.length <= from
       held = records[from, records.length - from]
       records.pop while records.length > from
+      held
+    end
+
+    # Run commit callbacks for the writes enlisted at and after `from`.
+    # Writes enlisted earlier stay for the parent transaction. Called
+    # for the outermost COMMIT (`from` 0) and for a savepoint whose
+    # parent is not joinable.
+    def self._commit_enlisted_from(from)
+      held = _take_enlisted(from)
+      return nil if held.nil?
       seen = []
       held.each do |entry|
         record = entry.record
@@ -1438,10 +1442,8 @@ module ActiveRecord
     # the database now has it -- a create is a new record again, a
     # destroy persisted again -- as Rails' `rolledback!` restores them.
     def self._rollback_enlisted(from)
-      records = Db._txn_records
-      return nil if records.length <= from
-      undone = records[from, records.length - from]
-      records.pop while records.length > from
+      undone = _take_enlisted(from)
+      return nil if undone.nil?
       undone.each { |entry| entry.record._restore_after_rollback(entry.kind) }
       nil
     end

@@ -366,7 +366,7 @@ fn build_library_class(
     body_stmts.push(assign_accumulator_string_new(&ctx.accumulator));
     body_stmts.extend(walk_template(&rewritten, &ctx));
     let mut result = var_ref(Symbol::from(ctx.accumulator.as_str()));
-    result.hint = Some(IrHint::StringBuilderResult);
+    result.set_hint(Some(IrHint::StringBuilderResult));
     body_stmts.push(result);
 
     let mut body = seq(body_stmts);
@@ -842,7 +842,7 @@ fn walk_cached_template(body: &Expr, ctx: &Ctx) -> Option<Vec<Expr>> {
     let mut miss = vec![assign_accumulator_string_new(&cap)];
     miss.extend(emit_object(&inner_stmts, &cap_ctx));
     let mut cap_result = var_ref(Symbol::from(cap.as_str()));
-    cap_result.hint = Some(IrHint::StringBuilderResult);
+    cap_result.set_hint(Some(IrHint::StringBuilderResult));
     miss.push(io_append_call(
         &ctx.accumulator,
         send(Some(helpers()), "jbuilder_fragment_write", vec![var_ref(key_var.clone()), cap_result], None, true),
@@ -1111,11 +1111,11 @@ fn emit_merged_partial(call: Expr, ctx: &Ctx, out: &mut Vec<Expr>, sep: Sep) -> 
 /// survey lists it and the Ruby emit raises it where it stood.
 fn unsupported_stmt(span: Span, construct: &str, detail: &str) -> Expr {
     let mut e = Expr::new(span, ExprNode::Lit { value: Literal::Nil });
-    e.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+    e.set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
         target: None,
         construct: Symbol::from(construct),
         detail: detail.to_string(),
-    });
+    }));
     e
 }
 
@@ -2332,7 +2332,7 @@ fn emit_array_block(collection: &Expr, item_var: &Symbol, body: &Expr, ctx: &Ctx
             filled = always;
             exprs.extend(object);
             let mut result = var_ref(Symbol::from(inner.accumulator.as_str()));
-            result.hint = Some(IrHint::StringBuilderResult);
+            result.set_hint(Some(IrHint::StringBuilderResult));
             exprs.push(result);
             seq(exprs)
         }
@@ -3179,21 +3179,21 @@ fn assign_accumulator_string_new(name: &str) -> Expr {
             value: new_call,
         },
     );
-    e.hint = Some(IrHint::StringBuilderInit);
+    e.set_hint(Some(IrHint::StringBuilderInit));
     e
 }
 
 fn io_append_lit(accumulator: &str, s: &str) -> Expr {
     let recv = var_ref(Symbol::from(accumulator));
     let mut e = send(Some(recv), "<<", vec![lit_str(s.to_string())], None, false);
-    e.hint = Some(IrHint::StringBuilderAppend);
+    e.set_hint(Some(IrHint::StringBuilderAppend));
     e
 }
 
 fn io_append_call(accumulator: &str, call: Expr) -> Expr {
     let recv = var_ref(Symbol::from(accumulator));
     let mut e = send(Some(recv), "<<", vec![call], None, false);
-    e.hint = Some(IrHint::StringBuilderAppend);
+    e.set_hint(Some(IrHint::StringBuilderAppend));
     e
 }
 

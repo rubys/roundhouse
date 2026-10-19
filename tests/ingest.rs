@@ -1372,6 +1372,160 @@ end
     ));
 }
 
+fn ingest_widget(source: &str) -> (roundhouse::Model, Vec<String>, Vec<String>) {
+    roundhouse::ingest::survey::activate();
+    let (model, diags) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_model(
+            source.as_bytes(),
+            "app/models/widget.rb",
+            &roundhouse::schema::Schema::default(),
+            &Default::default(),
+        )
+        .unwrap()
+        .unwrap()
+    });
+    let warnings = diags
+        .into_iter()
+        .filter(|d| d.severity == roundhouse::diagnostic::Severity::Warning)
+        .map(|d| d.message)
+        .collect();
+    let gaps = roundhouse::ingest::survey::drain()
+        .into_iter()
+        .map(|gap| gap.to_string())
+        .collect();
+    (model, warnings, gaps)
+}
+
+fn validation_rules(model: &roundhouse::Model) -> Vec<&roundhouse::Validation> {
+    model
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            roundhouse::ModelBodyItem::Validation { validation, .. } => Some(validation),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn numericality_inclusion_and_format_are_ingested() {
+    use roundhouse::ValidationRule;
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :price, numericality: { only_integer: true, greater_than: 0, less_than: 10 }
+  validates :color, inclusion: { in: %w[red blue] }
+  validates :code, format: { with: /\A[A-Z]{3}\z/ }
+  validates :stock, inclusion: { in: 1..3 }
+  validates_numericality_of :max_stock, greater_than: 0, less_than: 50
+  validates :inventory_count, numericality: { greater_than_or_equal_to: 0 }
+  validates_numericality_of :cap, less_than_or_equal_to: 5
+  validates_inclusion_of :kind, in: %w[one two]
+  validates_format_of :sku, with: /\A\d{2}\z/
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(gaps.is_empty(), "{gaps:?}");
+    let rules = validation_rules(&model);
+    let price = rules.iter().find(|v| v.attribute.as_str() == "price").unwrap();
+    assert!(matches!(
+        &price.rules[0],
+        ValidationRule::Numericality { only_integer: true, gt: Some(n), lt: Some(m), .. }
+            if *n == 0.0 && *m == 10.0
+    ));
+    let color = rules.iter().find(|v| v.attribute.as_str() == "color").unwrap();
+    match &color.rules[0] {
+        ValidationRule::Inclusion { values, .. } => {
+            assert_eq!(values.len(), 2);
+        }
+        other => panic!("expected inclusion, got {other:?}"),
+    }
+    let code = rules.iter().find(|v| v.attribute.as_str() == "code").unwrap();
+    assert!(matches!(&code.rules[0], ValidationRule::Format { pattern } if pattern == r"\A[A-Z]{3}\z"));
+    let stock = rules.iter().find(|v| v.attribute.as_str() == "stock").unwrap();
+    match &stock.rules[0] {
+        ValidationRule::Inclusion { values, range: Some(range) } => {
+            assert!(values.is_empty());
+            assert_eq!(range.begin, 1.0);
+            assert_eq!(range.end, 3.0);
+            assert!(!range.exclusive);
+        }
+        other => panic!("expected a numeric range, got {other:?}"),
+    }
+    let inventory = rules.iter().find(|v| v.attribute.as_str() == "inventory_count").unwrap();
+    assert!(matches!(
+        &inventory.rules[0],
+        ValidationRule::Numericality { gte: Some(n), lte: None, .. } if *n == 0.0
+    ));
+    let cap = rules.iter().find(|v| v.attribute.as_str() == "cap").unwrap();
+    assert!(matches!(
+        &cap.rules[0],
+        ValidationRule::Numericality { lte: Some(n), gte: None, .. } if *n == 5.0
+    ));
+    assert!(rules.iter().any(|v| v.attribute.as_str() == "max_stock"));
+    assert!(rules.iter().any(|v| v.attribute.as_str() == "kind"));
+    assert!(rules.iter().any(|v| v.attribute.as_str() == "sku"));
+}
+
+#[test]
+fn symbol_if_and_unless_guard_the_validation() {
+    let (model, warnings, _) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :label, presence: true, if: :live?
+  validates :extra, presence: true, unless: :draft?
+  validates :note, presence: { if: :live? }
+end
+"#,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rules = validation_rules(&model);
+    let label = rules.iter().find(|v| v.attribute.as_str() == "label").unwrap();
+    assert_eq!(label.if_method.as_ref().map(|s| s.as_str()), Some("live?"));
+    assert!(label.unless_method.is_none());
+    let extra = rules.iter().find(|v| v.attribute.as_str() == "extra").unwrap();
+    assert_eq!(extra.unless_method.as_ref().map(|s| s.as_str()), Some("draft?"));
+    let note = rules.iter().find(|v| v.attribute.as_str() == "note").unwrap();
+    assert_eq!(note.if_method.as_ref().map(|s| s.as_str()), Some("live?"));
+}
+
+#[test]
+fn unmodeled_validates_options_warn_and_drop_the_whole_call() {
+    let (model, warnings, gaps) = ingest_widget(
+        r#"
+class Widget < ApplicationRecord
+  validates :name, presence: true, uniqueness: true
+  validates :stock, comparison: { less_than_or_equal_to: :max_stock }
+  validates :price, numericality: { greater_than: 0, odd: true }
+  validates :bounded, numericality: { equal_to: 1, other_than: 2 }
+  validates :tag, presence: true, length: { maximum: 4, is: 2 }
+  validates :note, presence: true, if: -> { status == "live" }
+  validates :color, presence: true, unless: -> { false }
+end
+"#,
+    );
+    assert!(
+        validation_rules(&model).is_empty(),
+        "a dropped option must not leave the sibling rules running: {:?}",
+        validation_rules(&model).iter().map(|v| v.attribute.as_str()).collect::<Vec<_>>()
+    );
+    for needle in [
+        "uniqueness",
+        "comparison",
+        "numericality: odd",
+        "numericality: equal_to",
+        "numericality: other_than",
+        "length: is",
+        "if:",
+        "unless:",
+    ] {
+        assert!(warnings.iter().any(|message| message.contains(needle)), "missing warning {needle} in {warnings:?}");
+        assert!(gaps.iter().any(|message| message.contains(needle)), "missing survey gap {needle} in {gaps:?}");
+    }
+    assert!(warnings.iter().all(|message| message.contains("not supported")), "{warnings:?}");
+}
+
 #[test]
 fn model_body_preserves_source_order_with_unknown_fallback() {
     use roundhouse::ModelBodyItem;

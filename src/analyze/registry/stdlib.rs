@@ -366,6 +366,27 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("browser", Ty::Str), ("version", Ty::Str), ("os", Ty::Str),
         ("match?", Ty::Bool), ("user_agent", user_agent_ty),
     ]);
+    // The i18n gem's `I18n::Locale::Tag`, ported into
+    // `runtime/ruby/i18n_locale_tag.rb`; that file's `.rbs` by hand, not
+    // parsed, because the parsed table does not tell a class's singleton
+    // methods from its instance methods.
+    let simple = Ty::Class { id: ClassId(Symbol::from("I18n::Locale::Tag::Simple")), args: vec![].into() };
+    let rfc = Ty::Class { id: ClassId(Symbol::from("I18n::Locale::Tag::Rfc4646")), args: vec![].into() };
+    let subtag = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
+    let strs = |elem: Ty| Ty::Array { elem: std::sync::Arc::new(elem) };
+    register_stdlib_class(classes, "I18n::Locale::Tag", &[("tag", simple.clone())], &[]);
+    register_stdlib_class(classes, "I18n::Locale::Tag::Simple", &[("tag", simple)], &[
+        ("subtags", strs(Ty::Str)), ("to_sym", Ty::Sym),
+        ("to_s", Ty::Str), ("to_a", strs(Ty::Str)),
+    ]);
+    register_stdlib_class(classes, "I18n::Locale::Tag::Rfc4646", &[
+        ("tag", Ty::Union { variants: vec![rfc, Ty::Nil].into() }),
+    ], &[
+        ("language", subtag.clone()), ("script", subtag.clone()), ("region", subtag.clone()),
+        ("variant", subtag.clone()), ("extension", subtag.clone()), ("privateuse", subtag.clone()),
+        ("grandfathered", subtag.clone()), ("to_sym", Ty::Sym), ("to_s", Ty::Str),
+        ("to_a", strs(subtag)),
+    ]);
     // `typeid`, PORTED into `runtime/ruby/typeid.rb` as a module whose
     // `new` answers a plain String (the gem's `TypeID < String` is a
     // builtin subclass the strict targets do not carry). Registered so

@@ -885,7 +885,7 @@ pub fn emit_expr_for_runtime(e: &Expr) -> String {
 ///   - `Append` `io << chunk`     → `io.Append(chunk)`
 ///   - `Result` terminal `io`     → `io.ToString()`
 fn try_string_builder(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {

@@ -920,45 +920,36 @@ module ActionView
     end
   
     def self.stylesheet_link_tag(name, opts = EMPTY_HTML_OPTS)
-      href = "/assets/#{name}.css"
+      href = digested_asset_path("#{name}.css")
       attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts.to_h))
       "<link#{attrs}>"
     end
 
     # `<script src>` include for a JS source. The source resolves through
-    # the same undigested `/assets/<name>.js` convention as
-    # `javascript_path` (see the `image_path` note on why no digests);
-    # absolute paths and URLs pass verbatim. Rails takes a Symbol source
+    # the same emitted asset table as `image_path`.
+    # Absolute paths and URLs pass verbatim. Rails takes a Symbol source
     # too, and a value can hold one, so the source becomes a String here.
     def self.javascript_include_tag(source, opts = EMPTY_HTML_OPTS)
       source_s = source.to_s
       name = source_s.include?(".") ? source_s : "#{source_s}.js"
-      src = name.start_with?("/") || name.include?("://") ? name : "/assets/#{name}"
+      src = name.start_with?("/") || name.include?("://") ? name : digested_asset_path(name)
       attrs = render_attrs({ src: src }.merge(opts.to_h))
       "<script#{attrs}></script>"
     end
 
     # Asset path for an image source. `skip_pipeline: true` (and any
     # already-absolute or protocol-relative source) returns the source
-    # verbatim — Rails bypasses the pipeline for those, and the lobsters
-    # benchmark (production, `config.assets.compile = false`, no manifest)
-    # has no digests to apply anyway, so the undigested `/assets/<name>`
-    # prefix below matches its Rails output. Fingerprinting belongs to an
-    # app that actually precompiles assets, not here.
+    # verbatim, since neither belongs to the emitted logical-asset table.
     def self.image_path(source, skip_pipeline: false)
       return source if skip_pipeline
       return source if source.start_with?("/")
       return source if source.include?("://")
-      "/assets/#{source}"
+      digested_asset_path(source)
     end
 
     # `asset_path` — the GENERAL one. In Rails `image_path` is
-    # `asset_path(source, type: :image)`, so the body above is this body
-    # with a type that only ever picked a subdirectory in the
-    # sprockets-era layout; under Propshaft (and under the
-    # no-manifest benchmark posture both share) the answer is the same
-    # `/assets/<source>`, so the two are spelled out separately rather
-    # than one delegating and paying a kwarg forward.
+    # `asset_path(source, type: :image)`; Propshaft uses a logical name
+    # independent of the asset type.
     #
     # campfire reaches it for the /sounds/*.mp3 a `/play` message
     # renders — `asset_path(sound.asset_path)` inside
@@ -968,6 +959,10 @@ module ActionView
       return source if skip_pipeline
       return source if source.start_with?("/")
       return source if source.include?("://")
+      digested_asset_path(source)
+    end
+
+    def self.digested_asset_path(source)
       "/assets/#{source}"
     end
 
@@ -991,7 +986,7 @@ module ActionView
       return source if skip_pipeline
       return source if source.start_with?("/")
       return source if source.include?("://")
-      "/assets/#{source}"
+      digested_asset_path(source)
     end
 
     # `path_to_javascript "application"` → the asset path for a JS source.
@@ -1004,7 +999,7 @@ module ActionView
       return source if source.start_with?("/")
       return source if source.include?("://")
       name = source.include?(".") ? source : "#{source}.js"
-      "/assets/#{name}"
+      digested_asset_path(name)
     end
 
     # Alias of `path_to_javascript`. Inlined rather than delegating, so no
@@ -1016,7 +1011,7 @@ module ActionView
       return source if source.start_with?("/")
       return source if source.include?("://")
       name = source.include?(".") ? source : "#{source}.js"
-      "/assets/#{name}"
+      digested_asset_path(name)
     end
 
     # `<img>` tag for a source path + attribute opts. The source flows

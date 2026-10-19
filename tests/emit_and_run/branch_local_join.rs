@@ -29,6 +29,12 @@ fn a_local_assigned_on_some_paths_reads_as_the_join_of_them() {
         ("modifier_unless", union(vec![Ty::Int, Ty::Nil])),
         ("while_body", union(vec![Ty::Int, Ty::Nil])),
         ("and_right", union(vec![Ty::Int, Ty::Nil])),
+        // The condition's own write, narrowed on the side that continues.
+        ("guard_assigned", Ty::Int),
+        ("guard_assigned_compound", Ty::Int),
+        // ... including when the other side does not exit: `d` is the
+        // condition's non-nil write or the branch's 2.
+        ("assigned_or_default", Ty::Int),
     ];
     for (name, want) in expected {
         let method = class

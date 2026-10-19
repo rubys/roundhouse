@@ -1,4 +1,5 @@
 # frozen_string_literal: true
+require_relative "i18n_locale_tag"
 # `I18n.locale` / `I18n.default_locale` / `I18n.available_locales`, the
 # locale a request runs in, and the answers for a key the locale lacks.
 #
@@ -26,6 +27,11 @@ module I18n
 
   def self.available_locales
     app_available_locales
+  end
+
+  # The gem's set holds each locale as a String and a Symbol, so "en" and :en answer alike.
+  def self.locale_available?(locale)
+    !locale.nil? && app_available_locales.include?(locale.to_s.to_sym)
   end
 
   # The locale set for this thread, by name ("" when none is): a Symbol

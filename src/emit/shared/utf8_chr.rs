@@ -46,7 +46,7 @@ pub fn emit(
     target: Target,
     emit_receiver: impl FnOnce(&Expr) -> String,
 ) -> Option<String> {
-    if e.diagnostic.is_some() {
+    if e.diagnostic().is_some() {
         return None;
     }
     let ExprNode::Send {
@@ -71,7 +71,7 @@ pub fn emit(
         Some(
             "the shared UTF-8 constructor does not implement supplied blocks or forwarded operands",
         )
-    } else if recv.diagnostic.is_some() || args[0].diagnostic.is_some() {
+    } else if recv.diagnostic().is_some() || args[0].diagnostic().is_some() {
         Some("the shared UTF-8 constructor cannot erase an operand diagnostic")
     } else {
         None
@@ -138,11 +138,11 @@ mod tests {
         let ExprNode::Send { args, .. } = &mut *diagnostic.node else {
             panic!("constructor call");
         };
-        args[0].diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+        args[0].set_diagnostic(Some(crate::diagnostic::DiagnosticKind::Unsupported {
             target: None,
             construct: crate::ident::Symbol::new("encoding_operand"),
             detail: "encoding operand remains unsupported".into(),
-        });
+        }));
         for target in [
             Target::Rust,
             Target::TypeScript,

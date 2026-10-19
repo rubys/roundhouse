@@ -199,7 +199,11 @@ def build(args: argparse.Namespace) -> int:
     archive = args.archive.resolve()
     inventory = args.inventory.resolve()
     archive.parent.mkdir(parents=True, exist_ok=True)
-    selectors = ["--locked", "--lib", "--bins", "--test", "all_tests"]
+    # Reduce the serial project build while keeping dependencies optimized.
+    selectors = [
+        "--locked", "--lib", "--bins", "--test", "all_tests",
+        "--config", "profile.test.package.roundhouse.opt-level=0",
+    ]
     command = nextest("archive", *selectors, "--profile", "ci", "--archive-file", str(archive))
     if args.timings:
         command.append("--timings")

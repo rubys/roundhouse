@@ -23,7 +23,7 @@
 //! the qualified name to know which associations exist and whose partial
 //! the payload renders. A concern nested under a model can only belong to
 //! that model — the lexical nesting IS the ownership, which
-//! `qualify_relative_includes` already relies on.
+//! the Rubydex-resolved includes already rely on.
 
 use crate::app::App;
 use crate::dialect::{ControllerBodyItem, Model, ModelBodyItem};

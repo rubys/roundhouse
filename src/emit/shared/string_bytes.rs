@@ -42,7 +42,7 @@ enum Call<'a> {
 /// backend dispatch. Literal `&nil` passes no block in Ruby; arbitrary block
 /// operands still need an implementation and must never disappear.
 fn classify(e: &Expr) -> Option<Call<'_>> {
-    if e.diagnostic.is_some() {
+    if e.diagnostic().is_some() {
         return None;
     }
     let ExprNode::Send {
@@ -61,7 +61,7 @@ fn classify(e: &Expr) -> Option<Call<'_>> {
     Some(if !args.is_empty() {
         Call::Unsupported("String#bytes accepts no positional arguments")
     } else if block.as_ref().is_some_and(|block| {
-        block.diagnostic.is_some()
+        block.diagnostic().is_some()
             || !matches!(
                 &*block.node,
                 ExprNode::Lit {

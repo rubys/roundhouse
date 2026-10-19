@@ -23,8 +23,8 @@ pub(super) fn detect_diagnostic(expr: &mut Expr) {
     // Operator ownership/operand types can become known in a later fixpoint
     // round. Recompute this classifier's annotation instead of retaining a
     // refusal from an earlier incomplete registry.
-    if matches!(&expr.diagnostic, Some(crate::diagnostic::DiagnosticKind::IncompatibleBinop { .. })) {
-        expr.diagnostic = None;
+    if matches!(&expr.diagnostic(), Some(crate::diagnostic::DiagnosticKind::IncompatibleBinop { .. })) {
+        expr.set_diagnostic(None);
     }
     if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node {
         if args.len() != 1 {
@@ -62,11 +62,11 @@ pub(super) fn detect_diagnostic(expr: &mut Expr) {
             use crate::diagnostic::DiagnosticKind;
             let lhs_ty = r.ty.clone().unwrap_or(Ty::Nil);
             let rhs_ty = rhs.ty.clone().unwrap_or(Ty::Nil);
-            expr.diagnostic = Some(DiagnosticKind::IncompatibleBinop {
+            expr.set_diagnostic(Some(DiagnosticKind::IncompatibleBinop {
                 op: method.clone(),
                 lhs_ty,
                 rhs_ty,
-            });
+            }));
         }
     }
 }

@@ -212,4 +212,40 @@ module ActiveSupport
     end
     ActiveSupport.present(Time.new(year, mon, mday, parts.fetch(:hour, 0), parts.fetch(:min, 0), sec, parts[:offset]))
   end
+
+  # ActiveModel::Type::DateTime#cast (Rails 8.1), for an `attribute :x, :datetime` writer: the strict
+  # `Time.new` read first, then `Date._parse`. `is_utc?` is `Time.zone_default.name == "UTC"`, so only
+  # config.time_zone `"UTC"` is UTC. `GMT` and `Etc/UTC` are other names and take `Time.local`, the host
+  # process zone. Boot does not pin `ENV["TZ"]`.
+  def self.cast_datetime(value)
+    return nil if value.nil?
+    return value unless value.is_a?(String)
+    return nil if value.empty?
+    utc = Rails.application.config_time_zone == "UTC"
+    if value.include?("-")
+      begin
+        return utc ? Time.new(value, in: "UTC") : Time.new(value)
+      rescue ArgumentError
+      end
+    end
+    parts = begin
+      Date._parse(value)
+    rescue ArgumentError
+      nil
+    end
+    return nil if parts.nil?
+    year, mon, mday, hour, min, sec, offset = parts.values_at(:year, :mon, :mday, :hour, :min, :sec, :offset)
+    usec = parts[:sec_fraction] ? (parts[:sec_fraction] * 1_000_000).to_i : 0
+    return nil if year.nil? || (year == 0 && mon == 0 && mday == 0)
+    if offset
+      t = Time.utc(year, mon, mday, hour, min, sec, usec) rescue nil
+      return nil if t.nil?
+      t -= offset unless offset == 0
+      utc ? t : t.getlocal
+    elsif utc
+      Time.utc(year, mon, mday, hour, min, sec, usec) rescue nil
+    else
+      Time.local(year, mon, mday, hour, min, sec, usec) rescue nil
+    end
+  end
 end

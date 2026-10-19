@@ -234,7 +234,7 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
     else {
         return None;
     };
-    if call.diagnostic.is_some() || method.as_str() != "delegate" {
+    if call.diagnostic().is_some() || method.as_str() != "delegate" {
         return None;
     }
 

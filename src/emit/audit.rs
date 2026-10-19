@@ -285,7 +285,7 @@ pub fn audit(classes: &[crate::dialect::LibraryClass], files: &[(String, String)
 
 fn walk(expr: &Expr, owner: Option<(&str, bool)>, index: &Index, out: &mut Vec<Diagnostic>, seen: &mut HashSet<(crate::span::Span, String, bool, String)>) {
     if let ExprNode::Send { recv, method, .. } = &*expr.node
-        && expr.diagnostic.is_none()
+        && expr.diagnostic().is_none()
     {
         // Not a module's own `self`: a concern's body runs on its includer, whose methods it calls.
         let own = owner.filter(|(c, _)| !index.is_module(c)).map(|(c, side)| (c.to_string(), side));

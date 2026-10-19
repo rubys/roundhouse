@@ -20,6 +20,7 @@ without that shared lowering sequence; see [`src/session.rs`](../../src/session.
 | Method catalog / DB adapter | `src/catalog/`, `src/adapter.rs` |
 | Shared lowering / pass order | `src/lower/mod.rs::POST_ANALYZE_PASS_ORDER` |
 | Target syntax | `src/emit/` |
+| Target identity (`BuildTarget`) | `src/build_target.rs` (wasm-safe; `project` re-exports it) |
 | Project assembly / target dispatch | `src/project.rs::target_files` |
 | Gem requires / Gemfile declarations; project extensions | `src/gems.rs`, `src/extensions.rs` |
 | Framework sources / shared transpile driver | `runtime/ruby/`, `src/runtime_loader.rs` |

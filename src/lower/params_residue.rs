@@ -34,7 +34,10 @@ fn walk(e: &Expr, diags: &mut Vec<Diagnostic>) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn elevate_nested_params_for_target(diags: &mut [Diagnostic], target: crate::project::BuildTarget) {
+pub fn elevate_nested_params_for_target(
+    diags: &mut [Diagnostic],
+    target: crate::build_target::BuildTarget,
+) {
     // Not a predicate of its own: the targets with a runtime Relation are exactly the ruby family, whose params are native hashes.
     if target.has_runtime_relation() {
         return;

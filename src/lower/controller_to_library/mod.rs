@@ -865,8 +865,8 @@ fn apply_alias_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {
             });
             continue;
         };
-        let mut aliased = old;
-        aliased.name = new_name;
+        let mut aliased =
+            crate::ingest::library_class::copy_aliased_method(&old, new_name.as_str());
         aliased.name_span = crate::span::Span::synthetic();
         methods.push(aliased);
     }
@@ -3338,8 +3338,7 @@ fn flatten_seqs(expr: &Expr) -> Expr {
             ty: e.ty.clone(),
             effects: e.effects.clone(),
             leading_blank_line: e.leading_blank_line,
-            diagnostic: e.diagnostic.clone(),
-            hint: e.hint,
+            cold: e.cold.clone(),
             decisions: e.decisions,
         }
     }

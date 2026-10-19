@@ -13,7 +13,25 @@
 use crate::expr::{Expr, ExprNode, Literal};
 
 use super::super::emit_expr;
-use super::super::util::peel_nil;
+use super::super::ivar_field_ty;
+use super::super::util::{is_option_ty, peel_nil};
+
+fn expr_is_option(expr: &Expr) -> bool {
+    column_ty(expr).as_ref().is_some_and(is_option_ty)
+}
+
+fn option_column_is_text(expr: &Expr) -> bool {
+    column_ty(expr)
+        .as_ref()
+        .is_some_and(|ty| matches!(peel_nil(ty), crate::ty::Ty::Str | crate::ty::Ty::Sym))
+}
+
+fn column_ty(expr: &Expr) -> Option<crate::ty::Ty> {
+    let ExprNode::Ivar { name } = &*expr.node else {
+        return None;
+    };
+    ivar_field_ty(name.as_str())
+}
 
 /// Per-method positional-param Tys for hand-written runtime modules
 /// (`Db`, future `Broadcasts`, etc.) that aren't surfaced through
@@ -354,7 +372,26 @@ pub(super) fn dispatch_method_by_recv_ty(
             // bool == bool and String == &str comparisons work; `==`
             // borrows its operands, so non-Copy elements are not moved.
             "include?" | "contains?" if args.len() == 1 => {
-                Some(format!("{recv_s}.iter().any(|__c| *__c == {})", args_s[0]))
+                // A column is `Option<T>`. Compare the `Some` so nil is
+                // simply absent from the list.
+                if expr_is_option(&args[0]) {
+                    // String columns are `Option<String>`; list elements
+                    // are `&str`. `as_deref` compares `&str`. Numbers
+                    // stay `Option<&T> == Some(&T)`.
+                    if option_column_is_text(&args[0]) {
+                        Some(format!(
+                            "{recv_s}.iter().any(|__c| {}.as_deref() == Some(*__c))",
+                            args_s[0]
+                        ))
+                    } else {
+                        Some(format!(
+                            "{recv_s}.iter().any(|__c| {}.as_ref() == Some(__c))",
+                            args_s[0]
+                        ))
+                    }
+                } else {
+                    Some(format!("{recv_s}.iter().any(|__c| *__c == {})", args_s[0]))
+                }
             }
             _ => None,
         },
@@ -391,7 +428,18 @@ pub(super) fn dispatch_method_by_recv_ty(
         // `Regexp#match?(str)` → `re.is_match(str)` when the receiver
         // is already the pattern (validations, flipped call sites).
         Some(Ty::Class { id, .. }) if id.0.as_str() == "Regexp" => match method {
-            "match?" if args.len() == 1 => Some(format!("{recv_s}.is_match(&*({}))", args_s[0])),
+            "match?" if args.len() == 1 => {
+                // `Regexp#match?(nil)` is false. Unwrapping an absent
+                // column panics.
+                if expr_is_option(&args[0]) {
+                    Some(format!(
+                        "{}.as_deref().is_some_and(|__s| {recv_s}.is_match(__s))",
+                        args_s[0]
+                    ))
+                } else {
+                    Some(format!("{recv_s}.is_match(&*({}))", args_s[0]))
+                }
+            }
             _ => None,
         },
         // `Untyped` recv (rust's alias for `serde_json::Value`) +

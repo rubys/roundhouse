@@ -60,6 +60,13 @@ module ActiveSupport
   def self.indifferent_keys: (Array[untyped] keys) -> Array[untyped]
   def self.indifferent_to_hash: (untyped value) -> untyped
   def self.cast_boolean: (untyped value) -> bool?
+  # Any object or nil. The body calls `nil?`, `==`, `is_a?`, `to_s`, and
+  # `class` on that object, and `is_a?` narrows a branch to String, Integer,
+  # or Float before the cast uses that class.
+  def self.cast_string: (::Object? value) -> String?
+  def self.cast_integer: (::Object? value) -> Integer?
+  def self.integer_from_string: (String value) -> Integer?
+  def self.integer_from_bytes: (Array[Integer] raw) -> Integer
   def self.squish: (String text) -> String
   def self.squish!: (String text) -> String
   def self.truncate: (String text, Integer truncate_to, String? omission, String? separator) -> String

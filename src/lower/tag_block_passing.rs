@@ -171,7 +171,7 @@ fn append(acc: &str, value: Expr) -> Expr {
             parenthesized: false,
         },
     );
-    e.hint = Some(IrHint::StringBuilderAppend);
+    e.set_hint(Some(IrHint::StringBuilderAppend));
     e
 }
 
@@ -319,7 +319,7 @@ fn capture_block_acc(body: &Expr) -> Option<String> {
         return None;
     }
     let (first, last) = (&exprs[0], &exprs[exprs.len() - 1]);
-    if first.hint != Some(IrHint::StringBuilderInit) || last.hint != Some(IrHint::StringBuilderResult) {
+    if first.hint() != &Some(IrHint::StringBuilderInit) || last.hint() != &Some(IrHint::StringBuilderResult) {
         return None;
     }
     let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*first.node else { return None };
@@ -445,7 +445,7 @@ fn buffer_name(m: &MethodDef) -> Option<String> {
     }
     let ExprNode::Seq { exprs } = &*m.body.node else { return None };
     let first = exprs.first()?;
-    if first.hint != Some(IrHint::StringBuilderInit) {
+    if first.hint() != &Some(IrHint::StringBuilderInit) {
         return None;
     }
     let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*first.node else { return None };

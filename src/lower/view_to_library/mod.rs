@@ -4534,7 +4534,7 @@ pub(super) fn assign_accumulator_string_new(name: &str) -> Expr {
             value: new_call,
         },
     );
-    e.hint = Some(IrHint::StringBuilderInit);
+    e.set_hint(Some(IrHint::StringBuilderInit));
     e
 }
 
@@ -4552,7 +4552,7 @@ pub(super) fn accumulator_append_call(arg: Expr, ctx: &ViewCtx) -> Expr {
         None,
         false,
     );
-    e.hint = Some(IrHint::StringBuilderAppend);
+    e.set_hint(Some(IrHint::StringBuilderAppend));
     e
 }
 
@@ -4562,7 +4562,7 @@ pub(super) fn accumulator_append_call(arg: Expr, ctx: &ViewCtx) -> Expr {
 /// references to `io` elsewhere stay untagged.
 pub(super) fn accumulator_result_ref(name: &str) -> Expr {
     let mut e = var_ref(Symbol::from(name));
-    e.hint = Some(IrHint::StringBuilderResult);
+    e.set_hint(Some(IrHint::StringBuilderResult));
     e
 }
 

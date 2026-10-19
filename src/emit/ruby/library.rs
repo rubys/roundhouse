@@ -26,9 +26,6 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
     let templates = crate::runtime_src::parse_methods(
         "def reload(options = nil)\n  super(options)\n  self\nend\ndef lock!(lock = true)\n  super(lock)\n  self\nend\n",
     ).expect("receiver-return forwarders parse");
-    let classes: HashMap<ClassId, ()> = app.models.iter().map(|m| &m.name)
-        .chain(app.library_classes.iter().map(|lc| &lc.name))
-        .map(|id| (id.clone(), ())).collect();
     for lc in lcs {
         if !app.models.iter().any(|m| m.name == lc.name && app.schema.tables.contains_key(&m.table.0)) {
             continue;
@@ -36,7 +33,7 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
         let self_ty = Ty::Class { id: lc.name.clone(), args: vec![].into() };
         for template in &templates {
             if lc.methods.iter().any(|m| m.name == template.name && m.receiver == MethodReceiver::Instance)
-                || record_return_overridden(app, &classes, &lc.name, template.name.as_str())
+                || record_return_overridden(app, &lc.name, template.name.as_str())
             {
                 continue;
             }
@@ -67,38 +64,32 @@ pub(super) fn preserve_record_receiver_returns(lcs: &mut [LibraryClass], app: &A
 
 /// Source overrides, including those on ApplicationRecord or a mixin,
 /// may return a different object. Do not interpose a self-returning wrapper.
-fn record_return_overridden(app: &App, classes: &HashMap<ClassId, ()>, class: &ClassId, method: &str) -> bool {
+fn record_return_overridden(app: &App, class: &ClassId, method: &str) -> bool {
     let mut pending = vec![class.clone()];
     let mut seen = BTreeSet::new();
     while let Some(id) = pending.pop() {
         if !seen.insert(id.clone()) { continue; }
-        // Per-file ingest can retain a relative include. Resolve it in
-        // its owner's scope before looking for the concern's override.
-        let resolve = |written: &ClassId| crate::analyze::lexical_class(written, id.0.as_str(), classes)
-            .unwrap_or_else(|| written.clone());
         let relevant = |m: &MethodDef| m.receiver == MethodReceiver::Instance
             && (m.name.as_str() == method || (method == "lock!" && m.name.as_str() == "reload"));
         if let Some(model) = app.models.iter().find(|m| m.name == id) {
             if model.methods().any(relevant) { return true; }
-            // Parents are written relative to the subclass (`< Base` inside
-            // `module Admin`); resolve them the same way includes already are.
-            pending.extend(model.parent.iter().map(resolve));
+            // Ingest stored parents and includes as Rubydex resolved them.
+            pending.extend(model.parent.iter().cloned());
             for item in &model.body {
                 let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
                 let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
                 if method.as_str() != "include" { continue; }
                 for arg in args {
                     if let ExprNode::Const { path } = &*arg.node {
-                        let written = ClassId(Symbol::from(path.iter().map(Symbol::as_str).collect::<Vec<_>>().join("::")));
-                        pending.push(resolve(&written));
+                        pending.push(crate::analyze::mixin_path_id(path));
                     }
                 }
             }
         }
         if let Some(lc) = app.library_classes.iter().find(|lc| lc.name == id) {
             if lc.methods.iter().any(relevant) { return true; }
-            pending.extend(lc.parent.iter().map(resolve));
-            pending.extend(lc.includes.iter().map(resolve));
+            pending.extend(lc.parent.iter().cloned());
+            pending.extend(lc.includes.iter().cloned());
         }
     }
     false
@@ -3639,8 +3630,8 @@ fn is_view_helpers_const(e: &Expr) -> bool {
 /// could mutate it; the three below all interpolate into a new String.
 ///
 /// `stylesheet_link_tag` / `javascript_include_tag` map a literal name to
-/// an undigested `/assets/` path (the `image_path` note explains why no
-/// digests), so they are pure over their literals the way `image_tag`
+/// a path through the immutable emitted asset table, so they are pure
+/// over their literals the way `image_tag`
 /// is; `javascript_importmap_tags` is pure over the importmap table,
 /// which is the one non-literal argument this list admits (see
 /// `HOISTABLE_CONST_READERS`). campfire's layout pays all three on every
@@ -7620,9 +7611,9 @@ fn emit_library_class_decl_inner(
     // project-root-anchored paths; we relpath each one against `out_dir`
     // so emit works correctly from any output directory.
     let mut requires: Vec<String> = Vec::new();
+    // Ingest stored the parent as Rubydex resolved it.
     if let Some(parent) = lc.parent.as_ref() {
-        let parent = lexical_parent(name, parent, app, classes);
-        if let Some(anchor) = require_path_for_parent(&parent, app, classes) {
+        if let Some(anchor) = require_path_for_parent(parent, app, classes) {
             if anchor != self_anchor {
                 requires.push(relpath(&out_dir, &anchor));
             }
@@ -8973,7 +8964,7 @@ fn report_dropped_class_body_call(lc: &LibraryClass, call: &Expr) {
 
 fn is_preserved_external_include(call: &Expr) -> bool {
     matches!(
-        &call.diagnostic,
+        &call.diagnostic(),
         Some(crate::diagnostic::DiagnosticKind::Unsupported {
             construct,
             detail,
@@ -9001,7 +8992,7 @@ fn external_include_is_enabled(detail: &str) -> bool {
 fn include_is_unresolved(lc: &LibraryClass, inc: &ClassId) -> bool {
     let detail = format!("{} includes unresolved {}", lc.name.0, inc.0);
     lc.unknown_calls.iter().any(|call| {
-        matches!(&call.diagnostic,
+        matches!(&call.diagnostic(),
             Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, detail: d, .. })
             if construct.as_str() == "include" && *d == detail)
     })
@@ -9097,30 +9088,29 @@ fn declares_constant_path(path: &str, app: &App, classes: &[LibraryClass]) -> bo
     })
 }
 
-/// An app constant `written` as a class header's superclass or a body's
+/// An app constant `name` as a class header's superclass or a body's
 /// mixin must spell it, given the lexical `scopes` (innermost last) Ruby
 /// searches first: `::Api::Base` inside `module Admin; module Api`, where
-/// a bare `Api` is `Admin::Api`. The ingest records the absolute name
-/// without its `::`, and written bare the header died with
-/// `uninitialized constant Admin::Api::Base`. A name the innermost
-/// shadowing scope does declare in full is that scope's, as Ruby binds
-/// it, and stays as written; so does a name the app does not declare.
-fn lexically_qualified(written: &str, scopes: &[&str], app: &App, classes: &[LibraryClass]) -> String {
-    if written.starts_with("::") || scopes.is_empty() {
-        return written.to_string();
+/// a bare `Api` is `Admin::Api`. Ingest stores the absolute name Rubydex
+/// resolved, without its `::`, and the emitted file nests every segment
+/// of the class it declares, so a source class written compact (`class
+/// Billing::Receipt < Record`, which is `::Record`) is emitted inside
+/// `module Billing` where a bare `Record` would be `Billing::Record`. A
+/// name the app does not declare (a runtime or gem class) stays as
+/// written.
+fn lexically_qualified(name: &str, scopes: &[&str], app: &App, classes: &[LibraryClass]) -> String {
+    if name.starts_with("::") || scopes.is_empty() {
+        return name.to_string();
     }
-    let first = written.split("::").next().unwrap_or(written);
-    let Some(scope) = (1..=scopes.len())
+    let first = name.split("::").next().unwrap_or(name);
+    let shadowed = (1..=scopes.len())
         .rev()
         .map(|i| scopes[..i].join("::"))
-        .find(|scope| declares_constant_path(&format!("{scope}::{first}"), app, classes))
-    else {
-        return written.to_string();
-    };
-    if declares_constant_path(&format!("{scope}::{written}"), app, classes) || !declares_constant_path(written, app, classes) {
-        return written.to_string();
+        .any(|scope| declares_constant_path(&format!("{scope}::{first}"), app, classes));
+    if !shadowed || !declares_constant_path(name, app, classes) {
+        return name.to_string();
     }
-    format!("::{written}")
+    format!("::{name}")
 }
 
 fn is_app_class(name: &str, app: &App, classes: &[LibraryClass]) -> bool {
@@ -9144,37 +9134,6 @@ fn outer_class_parent(name: &str, app: &App, classes: &[LibraryClass]) -> Option
     }
     library_classes_named(name, app, classes).into_iter()
         .find(|c| !c.is_module).and_then(|c| c.parent.clone())
-}
-
-/// The app class a written superclass names, looked up from the child's
-/// namespace outward as Ruby does: `Base` written in
-/// `Outer::Inner::Leaf` is `Outer::Inner::Base`. A name that matches
-/// no app class at any level is returned as written (a runtime or gem
-/// class).
-///
-/// The ingested class keeps only its qualified name, so this reads the
-/// nested form (`module Outer; module Inner`) and tries every enclosing
-/// prefix. The compact form (`module Outer::Inner`) searches only the
-/// innermost one, so an outer match that natively falls through to a
-/// top-level class can add a require the program does not need; the
-/// innermost match, the case that fixes load order, is the same in both
-/// forms. This only orders `require`s; typing uses `ConstResolver`.
-fn lexical_parent(child: &str, parent: &ClassId, app: &App, classes: &[LibraryClass]) -> ClassId {
-    let written = parent.0.as_str();
-    if written.starts_with("::") {
-        return parent.clone();
-    }
-    let defined = |candidate: &str| is_model_or_library_class(candidate, app, classes) || is_controller_named(candidate, app);
-    let mut scope: Vec<&str> = child.split("::").collect();
-    scope.pop();
-    while !scope.is_empty() {
-        let candidate = format!("{}::{written}", scope.join("::"));
-        if defined(&candidate) {
-            return ClassId(crate::ident::Symbol::from(candidate.as_str()));
-        }
-        scope.pop();
-    }
-    parent.clone()
 }
 
 fn require_path_for_parent(parent: &ClassId, app: &App, classes: &[LibraryClass]) -> Option<String> {

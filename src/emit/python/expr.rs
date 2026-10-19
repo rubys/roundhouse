@@ -390,7 +390,7 @@ fn try_emit_raise_stmt(e: &Expr) -> Option<String> {
 /// form for Init/Append; Result is expr-position (the function's return
 /// tail) and is handled in `emit_expr`.
 fn try_string_builder_stmt(e: &Expr) -> Option<String> {
-    match e.hint? {
+    match e.hint().as_ref()? {
         IrHint::MutableStringLiteral => None, // emitted as the plain literal
         IrHint::StringBuilderInit => {
             if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
@@ -814,14 +814,14 @@ pub(super) fn emit_expr(e: &Expr) -> String {
     // (e.g., Incompatible `+`). If so, emit the target raise-
     // equivalent instead of the normal rendering — matches Ruby's
     // behavior of raising at runtime.
-    if let Some(kind) = &e.diagnostic {
+    if let Some(kind) = &e.diagnostic() {
         return crate::emit::diagnostics::StubStyle::PythonThrow
             .render(&crate::diagnostic::Diagnostic::stub_text(kind));
     }
     // String-accumulator hints in expression position: an Append inside a
     // lambda (the partial collection-render shape) and the terminal Result
     // read at the function's return tail.
-    match e.hint {
+    match e.hint() {
         Some(IrHint::StringBuilderAppend) => {
             if let Some(s) = string_builder_append(e) {
                 return s;

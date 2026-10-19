@@ -156,7 +156,7 @@ fn rewrite_attach(e: &mut Expr) {
     }
     if let Some((io, filename, content_type)) = attach_io_hash(&args[0]) {
         let Some(recv_expr) = recv.clone() else { return };
-        e.diagnostic = None;
+        crate::expr::ExprCold::set_diagnostic(&mut e.cold, None);
         e.ty = Some(if on_blob { blob_class_ty() } else { Ty::Nil });
         *e.node = grounded_io_call(recv_expr, name, io, filename, content_type);
         return;
@@ -167,7 +167,7 @@ fn rewrite_attach(e: &mut Expr) {
     // is that same coercion (it already creates the blob).
     if on_blob {
         if expr_is_hash(&args[0]) {
-            e.diagnostic = None;
+            crate::expr::ExprCold::set_diagnostic(&mut e.cold, None);
             *method = Symbol::from("from_attachable");
         }
         return;
@@ -189,7 +189,7 @@ fn rewrite_attach(e: &mut Expr) {
                 step
             })
             .collect();
-        e.diagnostic = None;
+        e.set_diagnostic(None);
         e.ty = Some(Ty::Nil);
         *e.node = ExprNode::Seq { exprs: steps };
         return;
@@ -198,7 +198,7 @@ fn rewrite_attach(e: &mut Expr) {
     // Analyze stamped `SendDispatchFailed` on the one-arg Hash form
     // against the three-String `attach` signature; the rewrite is the
     // supported shape, so drop that annotation with the call.
-    e.diagnostic = None;
+    e.set_diagnostic(None);
     e.ty = Some(Ty::Nil);
     *e.node = attach_blob_from_attachable(recv_expr, attachable);
 }
