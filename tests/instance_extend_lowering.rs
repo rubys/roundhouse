@@ -816,6 +816,25 @@ fn an_extend_inside_kernel_lambda_stays_unsupported() {
     }
 }
 
+/// `define_method`, `Thread.new`, and `module_eval` hide the extend in a
+/// block. Spinel only links a straight-line extend statement.
+#[test]
+fn an_extend_inside_define_method_thread_or_module_eval_stays_unsupported() {
+    for (name, maker) in [
+        ("test_define_method", "define_method(:go)"),
+        ("test_thread_new", "Thread.new"),
+        ("test_module_eval", "Module.new.module_eval"),
+    ] {
+        assert_extend_stub(
+            name,
+            &format!(
+                "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"{label}\" do\n    failing = Module.new {{ def begin_transport = :closed }}\n    one = Box.new\n    {maker} {{ one.extend(failing) }}\n    one = Box.new\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+                label = name.trim_start_matches("test_"),
+            ),
+        );
+    }
+}
+
 /// `super` in the helper calls the helper's ancestor, not the test class's.
 #[test]
 fn a_helper_that_calls_super_stays_unsupported() {

@@ -2,9 +2,10 @@
 //!
 //! Straight-line code, a gate (`if` / `case` / `&&`), and a block are
 //! regions. A write in a region that does not contain the read is not
-//! the value that read sees. A `lambda` / `proc` / `Proc.new` / `->`
-//! runs later than the statement that stores it. An effect earlier in
-//! the same expression runs before an `extend` there.
+//! the value that read sees. A `lambda` / `proc` / `Proc.new` / `->`,
+//! and a `define_method` / `Thread.new` / `module_eval` block, is not a
+//! straight-line extend. An effect earlier in the same expression runs
+//! before an `extend` there.
 //!
 //! Hoisting a module local and accepting an `extend` both read this
 //! walk. They do not walk the tree again.
@@ -458,15 +459,35 @@ fn note_rebind(rebinds: &mut HashSet<Symbol>, name: &Symbol) {
 }
 
 pub(super) fn block_runs_later(recv: Option<&Expr>, method: &str) -> bool {
-    // `Kernel.lambda` and `obj.lambda` run when called, same as `lambda`.
-    if matches!(method, "lambda" | "proc") {
+    // The block is not a straight-line statement Spinel can link.
+    // `lambda` / `proc` run when called. `define_method` and
+    // `module_eval` (and the eval/exec family) hide the `extend` in a
+    // block the same way.
+    if matches!(
+        method,
+        "lambda"
+            | "proc"
+            | "define_method"
+            | "define_singleton_method"
+            | "module_eval"
+            | "class_eval"
+            | "instance_eval"
+            | "module_exec"
+            | "class_exec"
+            | "instance_exec"
+    ) {
         return true;
     }
-    // `Proc.new`, `::Proc.new`, and `Kernel::Proc.new`.
-    method == "new"
-        && recv.and_then(super::const_name).is_some_and(|name| {
-            name == "Proc" || name.ends_with("::Proc")
-        })
+    let Some(name) = recv.and_then(super::const_name) else {
+        return false;
+    };
+    let thread = name == "Thread" || name.ends_with("::Thread");
+    let proc = name == "Proc" || name.ends_with("::Proc");
+    match method {
+        "new" | "start" | "fork" if thread => true,
+        "new" if proc => true,
+        _ => false,
+    }
 }
 
 fn push_lambda_writes(events: &mut Vec<Event>, expr: &Expr) {
