@@ -4,7 +4,9 @@
 Two gates: merge-gate is the Ruby floor (BASE) plus any focus lanes the
 author made required; the Full/extra ledger can stay red without holding
 merge. Extra-language SDKs need a path owner, a focus label, `ci:full`,
-or scheduled full validation. Unknown inputs keep the Ruby floor plus
+or scheduled full validation. Spinel follows the same path/focus/Full
+ladder on PRs and on pushes to main — there is no always-on full Spinel
+suite for unrelated main merges. Unknown inputs keep the Ruby floor plus
 advisory Spinel (unless a focus label is already set).
 """
 
@@ -246,12 +248,12 @@ SPINEL11 = [
     "campfire-smoke-docker",
     "sidekiq-live",
 ]
-# Main-push / unknown-input Spinel suite (advisory). PR `ci:spinel` uses the
+# Unknown-input / explicit spinel_lane advisory suite. PR `ci:spinel` uses the
 # narrower CORE focus lane (built in focus_plan) and makes those jobs required.
-# campfire-latest runs where the advisory Spinel suite does (main push,
-# unknown inputs) and on Full: a same-day signal after every merge. A pull
-# request never plans it, `ci:full` and unknown inputs included
-# (`select(campfire_latest=False)`): the PR's own diff cannot move it.
+# Main pushes no longer force this lane: path ownership, `ci:spinel`, or Full
+# (`full-ci` / `ci:full` / `[ci full]`) select Spinel instead.
+# campfire-latest rides Full and this unknown-input lane (never a PR plan,
+# `select(campfire_latest=False)`): the PR's own diff cannot move it.
 SPINEL_LANE = [*BASE, *SPINEL11, "build-site", "archive-results", "campfire-latest"]
 # campfire-latest tracks basecamp/once-campfire main unpinned: it reports
 # how far main is from CAMPFIRE_SHA and never gates (see the workflow).
@@ -600,8 +602,8 @@ def select(
     # (focus / main Spinel) can silently drop publish=True.
     if publish and not full:
         raise ValueError("publication requires full validation mode")
-    # Focus labels narrow the plan before path ownership or main-push Spinel.
-    # ci:full still falls through to the full ledger below.
+    # Focus labels narrow the plan before path ownership or unknown-input
+    # Spinel. ci:full still falls through to the full ledger below.
     if not full and (focus_extras or focus_jruby or focus_spinel or focus_compare):
         return focus_plan(focus_extras, focus_jruby, focus_spinel, focus_compare)
     if spinel_lane and not full:
@@ -1212,16 +1214,10 @@ def main():
     focus_spinel = coverage.focus_spinel
     focus_compare = coverage.focus_compare
     any_focus = bool(focus_extras or focus_jruby or focus_spinel or focus_compare)
-    # Main-push / unknown-input advisory Spinel suite (not the PR focus lane).
+    # Advisory full Spinel suite for unknown changed inputs only (not every
+    # main push). Ordinary main/PR runs use path ownership; Full / ci:full /
+    # [ci full] still select the broad suite. PR `ci:spinel` is focus_plan.
     spinel_lane = False
-    if (
-        event_name == "push"
-        and os.environ.get("GITHUB_REF") == "refs/heads/main"
-        and not pr
-        and not full
-    ):
-        # Extra-language SDKs are the scheduled full-ci ledger, not every merge.
-        spinel_lane = True
     reason = None
     try:
         # project_scope only narrows path selection; full / focus / spinel

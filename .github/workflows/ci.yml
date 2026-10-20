@@ -26,9 +26,11 @@ on:
         value: ${{ jobs.compact-required.outputs.passed == 'true' && jobs.assemble-site.outputs.ready == 'true' }}
 
 # Separate from the full-ci caller's lock: workflow_call inherits its context.
-# Push-to-main is Ruby+Spinel, not the extra-language matrix; cancel
-# superseded SHAs so merge trains do not stack. Scheduled/manual full-ci
-# is the extra-SDK ledger and keeps its own lock.
+# Push-to-main is the Ruby floor plus path-owned lanes (Spinel when the
+# diff owns it); the broad Spinel suite and extra-language matrix ride
+# Full validation. Cancel superseded SHAs so merge trains do not stack.
+# Scheduled/manual full-ci is the extra-SDK + broad Spinel ledger and
+# keeps its own lock.
 concurrency:
   group: validation-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
