@@ -1148,7 +1148,8 @@ jobs:
         with:
           name: roundhouse-debug-bin
           path: roundhouse-debug-bin
-      - name: Stage shared debug roundhouse binary
+      - &stage-roundhouse-debug-bin
+        name: Stage shared debug roundhouse binary
         run: |
           set -euo pipefail
           chmod +x roundhouse-debug-bin/roundhouse
@@ -1257,21 +1258,7 @@ jobs:
         with:
           name: roundhouse-debug-bin
           path: roundhouse-debug-bin
-      - &stage-roundhouse-debug-bin
-        name: Stage shared debug roundhouse binary
-        run: |
-          set -euo pipefail
-          chmod +x roundhouse-debug-bin/roundhouse
-          test -x roundhouse-debug-bin/roundhouse
-          test -f roundhouse-debug-bin/identity.txt
-          echo "=== producer identity ==="
-          cat roundhouse-debug-bin/identity.txt
-          echo "=== consumer probe ==="
-          ./roundhouse-debug-bin/roundhouse --version
-          grep -q "source_sha=${GITHUB_SHA}" roundhouse-debug-bin/identity.txt
-          grep -q 'profile=debug' roundhouse-debug-bin/identity.txt
-          echo "ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse" >> "$GITHUB_ENV"
-          echo "ROUNDHOUSE_BIN_TRACE=1" >> "$GITHUB_ENV"
+      - *stage-roundhouse-debug-bin
       - uses: actions/download-artifact@v8
         with:
           name: spinel-dist
@@ -1304,7 +1291,8 @@ jobs:
           "$ROUNDHOUSE_BIN" --target spinel /tmp/campfire \
             -o build/campfire-compare-spinel --allow-unsupported 2>&1 | tee campfire-emit.log
           make -C build/campfire-compare-spinel build 2>&1 | tee campfire-build.log
-          tar -czf campfire-compare-spinel.tar.gz -C build campfire-compare-spinel      # Keep the C from the failed invocation, not a second compiler run.
+          tar -czf campfire-compare-spinel.tar.gz -C build campfire-compare-spinel
+      # Keep the C from the failed invocation, not a second compiler run.
       # Logs and inputs are still useful if emission failed before any C existed.
       - name: Capture Campfire compiler failure
         if: failure() && steps.build.outcome == 'failure'
@@ -1999,7 +1987,7 @@ jobs:
         run: |
           test -x "$TINY_API_BIN"
           python3 scripts/ci-plan.py timed --kind toolchain --name tiny_api -- \
-            "$TINY_API_BIN" spinel_gate_ --ignored --nocapture
+            "$TINY_API_BIN" --ignored --nocapture spinel_gate_
       - name: Upload recorded test seconds
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
