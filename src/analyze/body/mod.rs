@@ -3472,11 +3472,17 @@ fn stamp_empty_return_tail(expr: &mut Expr, expected: &Ty) {
             stamp_empty_return_tail(fallback, expected);
         }
         // Loops / attached blocks are not value tails, but `return {}`
-        // inside them exits the enclosing method (Ruby).
+        // inside them exits the enclosing method (Ruby) — except
+        // `lambda` / `define_method` blocks (same carve-out as
+        // `collect_return_types`).
         ExprNode::While { body, .. } => stamp_returns_in_stmts(body, expected),
         ExprNode::Send {
-            block: Some(block), ..
-        } => stamp_returns_in_attached_block(block, expected),
+            method,
+            block: Some(block),
+            ..
+        } if !matches!(method.as_str(), "lambda" | "define_method") => {
+            stamp_returns_in_attached_block(block, expected)
+        }
         ExprNode::Hash { entries, .. } if entries.is_empty() => {
             if empty_container_ty_uninformative(expr) {
                 expr.ty = Some(expected.clone());
@@ -3549,15 +3555,20 @@ fn stamp_returns_in_stmts(expr: &mut Expr, expected: &Ty) {
         }
         ExprNode::While { body, .. } => stamp_returns_in_stmts(body, expected),
         ExprNode::Send {
-            block: Some(block), ..
-        } => stamp_returns_in_attached_block(block, expected),
+            method,
+            block: Some(block),
+            ..
+        } if !matches!(method.as_str(), "lambda" | "define_method") => {
+            stamp_returns_in_attached_block(block, expected)
+        }
         _ => {}
     }
 }
 
 /// Chase `return` inside a method-attached block (`Send.block` holding
-/// a `Lambda`). Do not walk lambda literals passed as ordinary args —
-/// their `return` exits the lambda, not the enclosing method.
+/// a `Lambda`). Caller must already skip `lambda` / `define_method`.
+/// Do not walk lambda literals passed as ordinary args — their `return`
+/// exits the lambda, not the enclosing method.
 fn stamp_returns_in_attached_block(block: &mut Expr, expected: &Ty) {
     if let ExprNode::Lambda { body, .. } = &mut *block.node {
         stamp_returns_in_stmts(body, expected);
@@ -5973,6 +5984,47 @@ mod tests {
             arg_ret.ty.is_none(),
             "arg-position lambda return must not inherit the method Hash return"
         );
+    }
+
+    /// `lambda { return {} }` / `define_method(...) { return {} }` are
+    /// closure-local (same carve-out as `collect_return_types`); do not
+    /// stamp the enclosing method's Hash return onto them.
+    #[test]
+    fn stamp_empty_return_skips_lambda_and_define_method_blocks() {
+        let expected = declared_sym_str_hash();
+        for method in ["lambda", "define_method"] {
+            let block = synth(ExprNode::Lambda {
+                params: vec![],
+                rest_param: None,
+                extra_params: vec![],
+                block_param: None,
+                body: synth(ExprNode::Return {
+                    value: empty_hash_lit(),
+                }),
+                block_style: Default::default(),
+            });
+            let mut body = synth(ExprNode::Send {
+                recv: None,
+                method: Symbol::from(method),
+                args: vec![],
+                block: Some(block),
+                parenthesized: false,
+            });
+            stamp_expected_on_empty_return_tail(&mut body, &expected);
+            let ExprNode::Send { block, .. } = &*body.node else {
+                panic!("expected Send");
+            };
+            let ExprNode::Lambda { body: block_body, .. } = &*block.as_ref().unwrap().node else {
+                panic!("expected block Lambda");
+            };
+            let ExprNode::Return { value } = &*block_body.node else {
+                panic!("expected Return in {method} block");
+            };
+            assert!(
+                value.ty.is_none(),
+                "{method} block return must not inherit the enclosing Hash return"
+            );
+        }
     }
 }
 
