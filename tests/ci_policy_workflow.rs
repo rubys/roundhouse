@@ -201,16 +201,22 @@ fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
             .iter()
             .find(|step| step["name"].as_str() == Some("Stage shared debug roundhouse binary"))
             .unwrap_or_else(|| panic!("{job_name}: stage shared binary"));
-        // YAML merge may leave the run body only on the anchor definition.
-        if let Some(body) = stage["run"].as_str() {
-            assert!(body.contains("chmod +x roundhouse-debug-bin/roundhouse"));
-            assert!(
-                body.contains("ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse")
-            );
-            assert!(body.contains("ROUNDHOUSE_BIN_TRACE=1"));
-            assert!(body.contains("source_sha=${GITHUB_SHA}"));
-            assert!(body.contains("profile=debug"));
-        }
+        // Anchors must expand: every consumer keeps the stage body, not just the
+        // `&stage-roundhouse-debug-bin` definition on campfire-compare.
+        let body = stage["run"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{job_name}: stage step missing run body after YAML load"));
+        assert!(
+            body.contains("chmod +x roundhouse-debug-bin/roundhouse"),
+            "{job_name}"
+        );
+        assert!(
+            body.contains("ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse"),
+            "{job_name}"
+        );
+        assert!(body.contains("ROUNDHOUSE_BIN_TRACE=1"), "{job_name}");
+        assert!(body.contains("source_sha=${GITHUB_SHA}"), "{job_name}");
+        assert!(body.contains("profile=debug"), "{job_name}");
         // No cargo in the job body outside comments.
         let runs: Vec<_> = steps
             .iter()

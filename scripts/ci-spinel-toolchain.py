@@ -5,6 +5,11 @@ Mirrors the unit-build contract: producer and consumer must share the same
 absolute workspace path because `env!("CARGO_BIN_EXE_roundhouse")` and the
 test binary path are baked at compile time. Build artifacts are shared;
 test results are never reused.
+
+Contract helpers (`ContractError`, `digest`, `source_sha`, `target_directory`,
+…) intentionally twin `scripts/ci-unit-tests.py` for now; extracting a shared
+`ci_archive_contract` module is a follow-up once both producers are green on
+this compile-once shape.
 """
 
 from __future__ import annotations

@@ -1846,8 +1846,9 @@ jobs:
   # and the test binary path are compile-time absolute).
   spinel-toolchain-build:
     name: spinel-toolchain-build (binaries)
-    needs: [generate-fixture, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' }}
+    # Compile-only: fixture is a runtime input for shards, not for cargo --no-run.
+    needs: [plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') }}
     outputs:
       artifact-id: ${{ steps.bundle.outputs.artifact-id }}
       execution: ${{ steps.result.outputs.status }}
@@ -1864,11 +1865,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
       - name: Build spinel_toolchain + tiny_api archive
         run: |
           python3 scripts/ci-spinel-toolchain.py build \
