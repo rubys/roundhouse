@@ -172,7 +172,7 @@ Pushes to canonical `main` run the Ruby floor plus the full Spinel suite
 and cancel a superseded SHA on the same ref. They do **not** run Crystal,
 Go, Swift, Kotlin, C#, Elixir, Python, Rust, TypeScript, WASM, or the
 extra-language smoke matrix. Extra-target red is follow-up work on
-the four-hour scheduled Full validation cycle, not a merge gate for later
+the three-hour scheduled Full validation cycle, not a merge gate for later
 Ruby PRs. That schedule remains the extra-language ledger, publication
 path, and floating-pin catch-up.
 
@@ -243,7 +243,7 @@ broaden comparison masks merely to turn CI green.
 ## Publication is separate
 
 PR checks never deploy Pages. Pushes to canonical `main` run Ruby+Spinel
-without publication. The four-hour scheduled cycle on canonical
+without publication. The three-hour scheduled cycle on canonical
 `rubys/roundhouse` main is what runs the extra-language matrix and requests
 publication. Manual publication is opt-in on canonical main.
 

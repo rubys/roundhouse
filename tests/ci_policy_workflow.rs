@@ -1043,7 +1043,7 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
             .unwrap();
     assert_eq!(
         full["on"]["schedule"][0]["cron"].as_str(),
-        Some("17 */4 * * *")
+        Some("17 */3 * * *")
     );
     assert!(full["on"].get("push").is_none());
     assert!(full["on"].get("pull_request").is_none());
