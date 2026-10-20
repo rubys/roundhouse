@@ -1850,12 +1850,59 @@ jobs:
   # emit bug), so the job stays advisory via continue-on-error until that
   # closes. Running it (vs `if: false`) keeps the model-suite progress
   # visible and catches regressions in the compile path.
+  #
+  # Compile once (this producer), then four shards only restore binaries
+  # and run — same path contract as unit-build (CARGO_BIN_EXE_roundhouse
+  # and the test binary path are compile-time absolute).
+  spinel-toolchain-build:
+    name: spinel-toolchain-build (binaries)
+    needs: [generate-fixture, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' }}
+    outputs:
+      artifact-id: ${{ steps.bundle.outputs.artifact-id }}
+      execution: ${{ steps.result.outputs.status }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      # Not the test profile's opt-level 1: Spinel and cc are the run here, and it tripled the crate's compile (44s to 3m35s).
+      CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+      # Keep backtrace line data inside the archived executables.
+      CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: "off"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - name: Build spinel_toolchain + tiny_api archive
+        run: |
+          python3 scripts/ci-spinel-toolchain.py build \
+            --archive "$RUNNER_TEMP/spinel-toolchain/spinel-toolchain.tar.gz" \
+            --inventory "$RUNNER_TEMP/spinel-toolchain/inventory.json"
+      - name: Upload current-run toolchain binaries
+        id: bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: spinel-toolchain-bundle
+          overwrite: true
+          path: |
+            ${{ runner.temp }}/spinel-toolchain/spinel-toolchain.tar.gz
+            ${{ runner.temp }}/spinel-toolchain/inventory.json
+          if-no-files-found: error
+          retention-days: 1
+      - *advisory-result
+
   spinel-toolchain:
     name: spinel-toolchain (suite, ${{ matrix.shard }})
     # Tracks matz/spinel master UNPINNED. Advisory unless ci:spinel focus
     # hardens the CORE lane (spinel-advisory=false).
-    needs: [generate-fixture, spinel-build, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
+    needs: [generate-fixture, spinel-build, spinel-toolchain-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' && needs.spinel-toolchain-build.outputs.artifact-id != '' }}
     # Four shards, balanced by `ci-plan.py toolchain-shard` on recorded
     # seconds: a new test lands on the lightest shard instead of growing a
     # hand-kept catch-all one (two such shards reached 25 of 25 minutes).
@@ -1878,17 +1925,35 @@ jobs:
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
     env:
       MAKEFLAGS: "-j4"
-      # Not the test profile's opt-level 1: Spinel and cc are the run here, and it tripled the crate's compile (44s to 3m35s).
-      CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # No setup-rust: the producer archive restores the test binaries.
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.spinel-toolchain-build.outputs.artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/spinel-toolchain
+      - name: Restore spinel_toolchain binaries
+        run: |
+          python3 scripts/ci-spinel-toolchain.py restore \
+            --archive "$RUNNER_TEMP/spinel-toolchain/spinel-toolchain.tar.gz" \
+            --inventory "$RUNNER_TEMP/spinel-toolchain/inventory.json" \
+            --env-file "$RUNNER_TEMP/spinel-toolchain/bins.env"
+          set -a
+          # shellcheck disable=SC1090
+          . "$RUNNER_TEMP/spinel-toolchain/bins.env"
+          set +a
+          {
+            echo "SPINEL_TOOLCHAIN_BIN=$SPINEL_TOOLCHAIN_BIN"
+            echo "TINY_API_BIN=$TINY_API_BIN"
+            echo "ROUNDHOUSE_BIN=$ROUNDHOUSE_BIN"
+          } >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
         with:
           name: spinel-dist
@@ -1910,27 +1975,29 @@ jobs:
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
       # One process per test, as many as libtest's threads, so each test's seconds are its own.
-      - name: cargo test --test spinel_toolchain -- --ignored (${{ matrix.shard }})
+      - name: run spinel_toolchain ignored suite (${{ matrix.shard }})
         env:
           CI_SPINEL_TIMINGS: ${{ needs.plan.outputs.spinel-timings }}
           CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/toolchain-${{ matrix.shard }}.jsonl
           # The binary runs outside cargo, so .cargo/config.toml's [env] stack size is not applied.
           RUST_MIN_STACK: "33554432"
         run: |
-          mapfile -t mine < <(cargo test --test spinel_toolchain -- --ignored --list --format terse | sed -n 's/: test$//p' | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }})
+          test -x "$SPINEL_TOOLCHAIN_BIN"
+          mapfile -t mine < <("$SPINEL_TOOLCHAIN_BIN" --ignored --list --format terse | sed -n 's/: test$//p' | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }})
           test "${#mine[@]}" -gt 0
-          bin=$(cargo test --test spinel_toolchain --no-run --message-format=json | jq -r 'select(.target.name == "spinel_toolchain" and .executable != null) | .executable')
-          test -x "$bin"
-          printf '%s\n' "${mine[@]}" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$bin" --ignored --nocapture --exact
+          printf '%s\n' "${mine[@]}" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact
       # fixtures/tiny-api, the API-only app (#321): `spin build` of the
       # app entry, HTTP requests to the binary, and the model script
       # compiled natively. Filtered by name, so the ignored test named
       # after an open issue (#163) is not selected.
-      - name: cargo test --test tiny_api spinel_gate_ -- --ignored
+      - name: run tiny_api spinel_gate_ --ignored
         if: ${{ !cancelled() && matrix.shard == 3 }}
         env:
           CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/toolchain-${{ matrix.shard }}.jsonl
-        run: python3 scripts/ci-plan.py timed --kind toolchain --name tiny_api -- cargo test --test tiny_api spinel_gate_ -- --ignored --nocapture
+        run: |
+          test -x "$TINY_API_BIN"
+          python3 scripts/ci-plan.py timed --kind toolchain --name tiny_api -- \
+            "$TINY_API_BIN" spinel_gate_ --ignored --nocapture
       - name: Upload recorded test seconds
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -3809,7 +3876,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, campfire-latest, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, campfire-latest, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

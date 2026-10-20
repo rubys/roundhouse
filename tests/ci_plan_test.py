@@ -1335,9 +1335,15 @@ class Results(unittest.TestCase):
         root = Path(__file__).parents[1]
         stack = tomllib.loads((root / ".cargo/config.toml").read_text())["env"]["RUST_MIN_STACK"]
         workflow = (root / ".github/workflows/ci.yml").read_text()
+        producer = re.search(
+            r"(?ms)^  spinel-toolchain-build:\n(.*?)(?=^  [\w-]+:|\Z)", workflow
+        ).group(1)
         job = re.search(r"(?ms)^  spinel-toolchain:\n(.*?)(?=^  [\w-]+:|\Z)", workflow).group(1)
+        self.assertIn("ci-spinel-toolchain.py build", producer)
+        self.assertIn("ci-spinel-toolchain.py restore", job)
         self.assertIn("run-tests --kind toolchain", job)
         self.assertIn(f'RUST_MIN_STACK: "{stack}"', job)
+        self.assertNotIn("cargo test --test spinel_toolchain --no-run", job)
 
     def test_spinel_framework_shards_cover_each_selected_suite_once(self):
         shards = ci.spinel_framework_shards(ci.SPINEL_TESTS)
