@@ -299,4 +299,46 @@ mod empty_hash_return_tests {
             "must not emit the untyped empty-hash default:\n{out}"
         );
     }
+
+    /// Trailing `if cond; {}; else; {}; end` must stamp both arms so
+    /// Crystal does not fall back to `{} of String => String`.
+    #[test]
+    fn empty_hash_if_branch_return_emits_of_declared_key_and_value() {
+        let ret = Ty::Hash {
+            key: Arc::new(Ty::Sym),
+            value: Arc::new(Ty::Str),
+        };
+        let empty = || {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Hash {
+                    entries: vec![],
+                    kwargs: false,
+                },
+            )
+        };
+        let mut m = empty_hash_method(ret);
+        m.body = Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit {
+                        value: crate::expr::Literal::Bool { value: true },
+                    },
+                ),
+                then_branch: empty(),
+                else_branch: empty(),
+            },
+        );
+        let out = emit_method(&m);
+        assert!(
+            out.contains("{} of Symbol => String"),
+            "If-arm empty hash must honor declared return:\n{out}"
+        );
+        assert!(
+            !out.contains("{} of String => String"),
+            "must not emit String-keyed default from If arms:\n{out}"
+        );
+    }
 }

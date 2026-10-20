@@ -3391,9 +3391,10 @@ fn propagate_expected_to_empty_container(value: &mut Expr, expected: &Ty) {
     }
 }
 
-/// Stamp a method's declared `Hash[K, V]` / `Array[E]` return onto a
-/// bare empty `{}` / `[]` (or `return {}`) tail whose typer-set type
-/// is still uninformative (`Var`/`Untyped`).
+/// Stamp a method's declared `Hash[K, V]` / `Array[E]` return onto
+/// bare empty `{}` / `[]` literals on every value-producing return
+/// path (sequence tail, `If`/`Case` arms, `return {}`) whose typer-set
+/// type is still uninformative (`Var`/`Untyped`).
 ///
 /// Mirrors the Assign-side [`propagate_expected_to_empty_container`]:
 /// without this, `def default_url_options; {}; end` typed
@@ -3409,13 +3410,67 @@ pub fn stamp_expected_on_empty_return_tail(body: &mut Expr, expected: &Ty) {
     stamp_empty_return_tail(body, peeled);
 }
 
+/// Value-position walk: stamp empty containers that are themselves
+/// the method result, and recurse into control-flow that yields a
+/// value. Non-tail statements only contribute via explicit `return`.
 fn stamp_empty_return_tail(expr: &mut Expr, expected: &Ty) {
     match &mut *expr.node {
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
             let last = exprs.len() - 1;
-            stamp_empty_return_tail(&mut exprs[last], expected);
+            for (i, e) in exprs.iter_mut().enumerate() {
+                if i == last {
+                    stamp_empty_return_tail(e, expected);
+                } else {
+                    stamp_returns_in_stmts(e, expected);
+                }
+            }
         }
         ExprNode::Return { value } => stamp_empty_return_tail(value, expected),
+        ExprNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            stamp_empty_return_tail(then_branch, expected);
+            stamp_empty_return_tail(else_branch, expected);
+        }
+        ExprNode::Case { arms, .. } => {
+            for arm in arms.iter_mut() {
+                stamp_empty_return_tail(&mut arm.body, expected);
+            }
+        }
+        ExprNode::CaseMatch {
+            arms, else_body, ..
+        } => {
+            for arm in arms.iter_mut() {
+                stamp_empty_return_tail(&mut arm.body, expected);
+            }
+            if let Some(eb) = else_body {
+                stamp_empty_return_tail(eb, expected);
+            }
+        }
+        ExprNode::BeginRescue {
+            body,
+            rescues,
+            else_branch,
+            ensure,
+            ..
+        } => {
+            stamp_empty_return_tail(body, expected);
+            for clause in rescues.iter_mut() {
+                stamp_empty_return_tail(&mut clause.body, expected);
+            }
+            if let Some(eb) = else_branch {
+                stamp_empty_return_tail(eb, expected);
+            }
+            if let Some(ens) = ensure {
+                stamp_returns_in_stmts(ens, expected);
+            }
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            stamp_empty_return_tail(expr, expected);
+            stamp_empty_return_tail(fallback, expected);
+        }
         ExprNode::Hash { entries, .. } if entries.is_empty() => {
             if empty_container_ty_uninformative(expr) {
                 expr.ty = Some(expected.clone());
@@ -3425,6 +3480,66 @@ fn stamp_empty_return_tail(expr: &mut Expr, expected: &Ty) {
             if empty_container_ty_uninformative(expr) {
                 expr.ty = Some(expected.clone());
             }
+        }
+        _ => {}
+    }
+}
+
+/// Statement-position walk: only chase explicit `return` (and nested
+/// control flow that may contain one). A bare `{}` mid-sequence is not
+/// a return value and must not be stamped.
+fn stamp_returns_in_stmts(expr: &mut Expr, expected: &Ty) {
+    match &mut *expr.node {
+        ExprNode::Seq { exprs } => {
+            for e in exprs.iter_mut() {
+                stamp_returns_in_stmts(e, expected);
+            }
+        }
+        ExprNode::Return { value } => stamp_empty_return_tail(value, expected),
+        ExprNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            stamp_returns_in_stmts(then_branch, expected);
+            stamp_returns_in_stmts(else_branch, expected);
+        }
+        ExprNode::Case { arms, .. } => {
+            for arm in arms.iter_mut() {
+                stamp_returns_in_stmts(&mut arm.body, expected);
+            }
+        }
+        ExprNode::CaseMatch {
+            arms, else_body, ..
+        } => {
+            for arm in arms.iter_mut() {
+                stamp_returns_in_stmts(&mut arm.body, expected);
+            }
+            if let Some(eb) = else_body {
+                stamp_returns_in_stmts(eb, expected);
+            }
+        }
+        ExprNode::BeginRescue {
+            body,
+            rescues,
+            else_branch,
+            ensure,
+            ..
+        } => {
+            stamp_returns_in_stmts(body, expected);
+            for clause in rescues.iter_mut() {
+                stamp_returns_in_stmts(&mut clause.body, expected);
+            }
+            if let Some(eb) = else_branch {
+                stamp_returns_in_stmts(eb, expected);
+            }
+            if let Some(ens) = ensure {
+                stamp_returns_in_stmts(ens, expected);
+            }
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            stamp_returns_in_stmts(expr, expected);
+            stamp_returns_in_stmts(fallback, expected);
         }
         _ => {}
     }
@@ -5687,6 +5802,80 @@ mod tests {
             panic!("expected CaseMatch, got {:?}", expr.node);
         };
         assert_eq!(arms[0].body.ty, Some(Ty::Untyped));
+    }
+
+    fn declared_sym_str_hash() -> Ty {
+        Ty::Hash {
+            key: std::sync::Arc::new(Ty::Sym),
+            value: std::sync::Arc::new(Ty::Str),
+        }
+    }
+
+    fn empty_hash_lit() -> Expr {
+        synth(ExprNode::Hash {
+            entries: vec![],
+            kwargs: false,
+        })
+    }
+
+    fn assert_stamped_sym_str_hash(e: &Expr) {
+        match e.ty.as_ref() {
+            Some(Ty::Hash { key, value }) => {
+                assert!(matches!(key.as_ref(), Ty::Sym), "key={key:?}");
+                assert!(matches!(value.as_ref(), Ty::Str), "value={value:?}");
+            }
+            other => panic!("expected Hash[Symbol, String], got {other:?}"),
+        }
+    }
+
+    /// Declared Hash return must stamp both arms of a trailing `If`
+    /// that yields bare `{}` (CodeRabbit: stop-at-If gap).
+    #[test]
+    fn stamp_empty_return_covers_if_branch_tails() {
+        let expected = declared_sym_str_hash();
+        let mut body = synth(ExprNode::If {
+            cond: var("flag"),
+            then_branch: empty_hash_lit(),
+            else_branch: empty_hash_lit(),
+        });
+        stamp_expected_on_empty_return_tail(&mut body, &expected);
+        let ExprNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } = &*body.node
+        else {
+            panic!("expected If");
+        };
+        assert_stamped_sym_str_hash(then_branch);
+        assert_stamped_sym_str_hash(else_branch);
+    }
+
+    /// An earlier `return {}` in a sequence must be stamped even when
+    /// the value-producing tail is something else.
+    #[test]
+    fn stamp_empty_return_covers_early_return_in_seq() {
+        let expected = declared_sym_str_hash();
+        let mut body = synth(ExprNode::Seq {
+            exprs: vec![
+                synth(ExprNode::Return {
+                    value: empty_hash_lit(),
+                }),
+                nil_lit(),
+            ],
+        });
+        stamp_expected_on_empty_return_tail(&mut body, &expected);
+        let ExprNode::Seq { exprs } = &*body.node else {
+            panic!("expected Seq");
+        };
+        let ExprNode::Return { value } = &*exprs[0].node else {
+            panic!("expected Return");
+        };
+        assert_stamped_sym_str_hash(value);
+        assert!(
+            exprs[1].ty.is_none(),
+            "non-return mid/tail Nil must not be stamped as Hash"
+        );
     }
 }
 
