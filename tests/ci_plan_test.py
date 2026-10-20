@@ -208,14 +208,19 @@ class Routing(unittest.TestCase):
         self.assertIn("generated_columns_spinel", plan["spinel_tests"])
 
     def test_campfire_latest_is_advisory_and_never_in_a_pr_plan(self):
-        # Unpinned basecamp/once-campfire main: reported after every merge
-        # and on Full, advisory, and never part of a PR's own plan.
+        # Unpinned basecamp/once-campfire main: reported on Full and the
+        # unknown-input Spinel lane, advisory, and never part of a PR's plan.
         for plan in (ci.select([], spinel_lane=True), ci.select([], full=True)):
             self.assertIn("campfire-latest", plan["jobs"])
             self.assertIn("campfire-latest", plan["advisory"])
             self.assertNotIn("campfire-latest", plan["required"])
         for paths in (["README.md"], ["src/analyze/call.rs"], ["src/emit/go.rs"]):
             self.assertNotIn("campfire-latest", ci.select(paths)["jobs"])
+        # Path-owned Spinel on main/PR also skips it — Full owns that signal.
+        self.assertNotIn(
+            "campfire-latest",
+            ci.select(["runtime/spinel/db.rb"])["jobs"],
+        )
         # A pull request never plans it, even under ci:full or with unknown
         # inputs (both of which otherwise select it).
         for plan in (
@@ -288,35 +293,40 @@ class Routing(unittest.TestCase):
         self.assertNotIn("archive-results", plan["required"])
         self.assertNotIn("assemble-site", plan["jobs"])
 
-    def test_canonical_main_push_selects_spinel_lane_without_extra_sdks(self):
-        with tempfile.TemporaryDirectory() as directory:
-            event = Path(directory) / "event.json"
-            event.write_text(json.dumps({"before": "0" * 40}))
-            env = {
-                "GITHUB_EVENT_PATH": str(event),
-                "GITHUB_EVENT_NAME": "push",
-                "GITHUB_SHA": "1" * 40,
-                "GITHUB_REF": "refs/heads/main",
-                "CI_SPINEL_REVISION": "2" * 40,
-            }
-            with (
-                patch.dict(os.environ, env, clear=True),
-                patch("sys.argv", ["ci-plan.py", "plan"]),
-                patch.object(
-                    ci, "changed_inputs", return_value=(["src/emit/go.rs"], None)
-                ),
-                patch.object(ci, "write_outputs") as output,
-            ):
-                self.assertEqual(ci.main(), 0)
-            plan = output.call_args.args[0]["plan"]
-            self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
-            self.assertEqual(plan["extra_compare"], [])
-            self.assertEqual(plan["smoke"], [])
-            self.assertFalse(plan["wasm"])
-            self.assertNotIn("compare-extra", plan["jobs"])
-            self.assertNotIn("compare-jruby", plan["jobs"])
-            self.assertNotIn("assemble-site", plan["jobs"])
-            self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+    def test_canonical_main_push_uses_path_ownership_not_always_on_spinel(self):
+        # Unrelated / non-Spinel main merges stay on the Ruby floor (+ path
+        # owners). The broad Spinel suite is Full / unknown-input / focus.
+        main = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}
+        floor = self.run_planner(
+            {"before": "0" * 40},
+            main,
+            {"return_value": (["README.md"], None)},
+        )["plan"]
+        self.assertEqual(floor["jobs"], list(ci.BASE))
+        self.assertFalse(any(job in floor["jobs"] for job in ci.SPINEL11))
+        self.assertNotIn("campfire-latest", floor["jobs"])
+
+        go = self.run_planner(
+            {"before": "0" * 40},
+            main,
+            {"return_value": (["src/emit/go.rs"], None)},
+        )["plan"]
+        self.assertIn("compare-extra", go["jobs"])
+        self.assertEqual(go["extra_compare"], ["go"])
+        self.assertFalse(any(job in go["jobs"] for job in ci.SPINEL11))
+
+        spinel = self.run_planner(
+            {"before": "0" * 40},
+            main,
+            {"return_value": (["runtime/spinel/db.rb"], None)},
+        )["plan"]
+        self.assertTrue(spinel["spinel"])
+        self.assertIn("spinel-build", spinel["jobs"])
+        self.assertIn("spinel-toolchain", spinel["jobs"])
+        self.assertIn("spinel-framework", spinel["jobs"])
+        # Path-owned Spinel is not the always-on SPINEL_LANE (no campfire-latest).
+        self.assertNotIn("campfire-latest", spinel["jobs"])
+        self.assertNotEqual(spinel["jobs"], ci.SPINEL_LANE)
 
     def run_planner(self, event_body, env, changed):
         with tempfile.TemporaryDirectory() as directory:
@@ -338,14 +348,22 @@ class Routing(unittest.TestCase):
                 self.assertEqual(ci.main(), 0)
             return output.call_args.args[0]
 
-    def test_main_push_resolves_campfire_main_for_campfire_latest(self):
-        outputs = self.run_planner(
+    def test_full_and_unknown_main_resolve_campfire_main_for_campfire_latest(self):
+        main = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}
+        full = self.run_planner(
             {"before": "0" * 40},
-            {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"},
-            {"return_value": (["src/emit/go.rs"], None)},
+            {**main, "CI_FULL": "true"},
+            {"return_value": (["README.md"], None)},
         )
-        self.assertIn("campfire-latest", outputs["plan"]["jobs"])
-        self.assertEqual(outputs["campfire-latest-revision"], "3" * 40)
+        self.assertIn("campfire-latest", full["plan"]["jobs"])
+        self.assertEqual(full["campfire-latest-revision"], "3" * 40)
+        unknown = self.run_planner(
+            {"before": "0" * 40},
+            main,
+            {"side_effect": ValueError("no tree")},
+        )
+        self.assertIn("campfire-latest", unknown["plan"]["jobs"])
+        self.assertEqual(unknown["campfire-latest-revision"], "3" * 40)
 
     def test_pull_requests_never_plan_campfire_latest(self):
         pr = {"pull_request": {"number": 1, "labels": [{"name": "ci:full"}], "draft": False}}
@@ -423,8 +441,11 @@ class Routing(unittest.TestCase):
         ):
             event = {"before": "0" * 40, "head_commit": {"id": "c" * 40, "message": message}}
             plan = self.run_planner(event, main, changed)["plan"]
-            self.assertEqual(plan["jobs"], ci.SPINEL_LANE, message)
-            self.assertNotIn("compare-extra", plan["jobs"], message)
+            # Not a Full marker → path ownership only (go), not SPINEL_LANE.
+            self.assertIn("compare-extra", plan["jobs"], message)
+            self.assertEqual(plan["extra_compare"], ["go"], message)
+            self.assertFalse(any(job in plan["jobs"] for job in ci.SPINEL11), message)
+            self.assertNotEqual(plan["jobs"], ci.SPINEL_LANE, message)
 
     def test_a_ci_full_marker_is_ignored_off_a_main_push(self):
         message = {"id": "d" * 40, "message": "Fix\n\n[ci full]\n"}

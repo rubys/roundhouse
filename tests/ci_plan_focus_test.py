@@ -173,7 +173,9 @@ class FocusLabels(unittest.TestCase):
         self.assertEqual(plan["archives"], ["spinel"])
         self.assertIn("build-site", plan["required"])
 
-    def test_main_spinel_lane_stays_advisory_full_suite(self):
+    def test_unknown_input_spinel_lane_stays_advisory_full_suite(self):
+        # spinel_lane is the unknown-input / explicit advisory suite — not
+        # every main push. Full validation selects the same jobs via full=.
         plan = ci.select([], spinel_lane=True)
         self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
         self.assertNotIn("spinel-compare", plan["required"])
