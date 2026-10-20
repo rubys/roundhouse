@@ -840,6 +840,15 @@ fn an_extend_inside_a_block_that_runs_later_stays_unsupported() {
     }
 }
 
+/// A call that returns `Enumerator::Lazy` does not run `map` yet.
+#[test]
+fn an_extend_inside_a_lazy_returning_call_stays_unsupported() {
+    assert_extend_stub(
+        "test_lazy_call",
+        "require \"test_helper\"\nclass BoxTest < ActiveSupport::TestCase\n  test \"lazy call\" do\n    def zeros; [0].lazy; end\n    failing = Module.new { def begin_transport = :closed }\n    one = Box.new\n    zeros.map { one.extend(failing) }\n    one = Box.new\n  end\n  test \"sibling\" do\n    assert_equal :open, Box.new.ping\n  end\nend\n",
+    );
+}
+
 /// `super` in the helper calls the helper's ancestor, not the test class's.
 #[test]
 fn a_helper_that_calls_super_stays_unsupported() {

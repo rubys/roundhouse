@@ -461,7 +461,9 @@ pub(super) fn block_runs_later(recv: Option<&Expr>, method: &str) -> bool {
     // A block hides the `extend` unless the call runs it before
     // returning. `map` and `tap` do. `Fiber.new`, `at_exit`,
     // `define_method`, and `[].lazy.map` do not.
-    if lazy_adapter(method) && receiver_may_be_lazy(recv) {
+    // Only an array, range, or literal is known to run `map` now.
+    // A call, local, or `begin`/`if` may return `Enumerator::Lazy`.
+    if lazy_adapter(method) && !receiver_is_eager(recv) {
         return true;
     }
     !runs_during_call(method)
@@ -476,18 +478,14 @@ fn lazy_adapter(method: &str) -> bool {
     )
 }
 
-fn receiver_may_be_lazy(recv: Option<&Expr>) -> bool {
+fn receiver_is_eager(recv: Option<&Expr>) -> bool {
     let Some(recv) = recv else {
         return false;
     };
-    match &*recv.node {
-        ExprNode::Var { .. } => true,
-        ExprNode::Send { method, recv: inner, .. } => {
-            method.as_str() == "lazy"
-                || (lazy_adapter(method.as_str()) && receiver_may_be_lazy(inner.as_ref()))
-        }
-        _ => false,
-    }
+    matches!(
+        &*recv.node,
+        ExprNode::Array { .. } | ExprNode::Range { .. } | ExprNode::Lit { .. }
+    )
 }
 
 fn runs_during_call(method: &str) -> bool {
