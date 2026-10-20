@@ -626,6 +626,7 @@ pub fn parse_library_with_rbs(
         let empty_ivars: std::collections::HashMap<Symbol, Ty> =
             std::collections::HashMap::new();
         for m in &mut lc.methods {
+            stamp_sig_return_on_empty_tail(m);
             let ctx = build_ctx(m, &empty_ivars);
             typer.analyze_expr(&mut m.body, &ctx);
         }
@@ -667,6 +668,7 @@ pub fn parse_library_with_rbs(
                 .map(|(name, ty)| (name, Ty::Union { variants: vec![ty, Ty::Nil].into() }))
                 .collect();
             for m in &mut lc.methods {
+                stamp_sig_return_on_empty_tail(m);
                 let ctx = build_ctx(m, &reseeded);
                 typer.analyze_expr(&mut m.body, &ctx);
             }
@@ -967,6 +969,7 @@ pub fn parse_methods_with_rbs_in_ctx(
     let empty_ivars: std::collections::HashMap<Symbol, Ty> =
         std::collections::HashMap::new();
     for m in &mut methods {
+        stamp_sig_return_on_empty_tail(m);
         let ctx = build_ctx(m, &empty_ivars);
         typer.analyze_expr(&mut m.body, &ctx);
     }
@@ -983,12 +986,22 @@ pub fn parse_methods_with_rbs_in_ctx(
             .map(|(name, ty)| (name, Ty::Union { variants: vec![ty, Ty::Nil].into() }))
             .collect();
         for m in &mut methods {
+            stamp_sig_return_on_empty_tail(m);
             let ctx = build_ctx(m, &reseeded);
             typer.analyze_expr(&mut m.body, &ctx);
         }
     }
 
     Ok(methods)
+}
+
+/// Forward a method's declared Hash/Array return onto a bare empty
+/// `{}` / `[]` tail before body-typing. See
+/// [`crate::analyze::stamp_expected_on_empty_return_tail`].
+fn stamp_sig_return_on_empty_tail(m: &mut MethodDef) {
+    if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+        crate::analyze::stamp_expected_on_empty_return_tail(&mut m.body, ret);
+    }
 }
 
 fn walk_scope(
@@ -1989,6 +2002,57 @@ mod tests {
         let m = &methods[0];
         // The If as a whole unions its branches (both StringInterp → Str).
         assert_eq!(m.body.ty.as_ref(), Some(&Ty::Str));
+    }
+
+    /// Declared `-> Hash[Symbol, String]` must stamp a bare `{}` return
+    /// so Crystal emit renders `{} of Symbol => String`, not the
+    /// String=>String empty-hash default (FV compare-extra crystal:
+    /// `default_url_options` on ActionController::Base).
+    #[test]
+    fn rbs_return_stamps_empty_hash_on_default_url_options() {
+        let ruby = include_bytes!("../runtime/ruby/action_controller/base.rb");
+        let rbs = include_str!("../runtime/ruby/action_controller/base.rbs");
+        let classes = parse_library_with_rbs(ruby, rbs, "action_controller/base.rb")
+            .expect("action_controller/base parses and types");
+        let base = classes
+            .iter()
+            .find(|c| c.name.0.as_str() == "ActionController::Base")
+            .expect("Base class");
+        let m = base
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == "default_url_options")
+            .expect("default_url_options");
+        match m.body.ty.as_ref() {
+            Some(Ty::Hash { key, value }) => {
+                assert!(
+                    matches!(key.as_ref(), Ty::Sym),
+                    "expected Hash[Symbol, _], key={key:?}"
+                );
+                assert!(
+                    matches!(value.as_ref(), Ty::Str),
+                    "expected Hash[_, String], value={value:?}"
+                );
+            }
+            other => panic!("default_url_options body must be Hash[Symbol, String], got {other:?}"),
+        }
+        // End-to-end Crystal emit (the FV failure surface): annotation
+        // and empty-hash `of` clause must agree on Symbol keys.
+        let crystal = crate::emit::crystal::emit_library_class(base)
+            .expect("Crystal emit of ActionController::Base");
+        let needle = "def default_url_options : Hash(Symbol, String)";
+        let idx = crystal
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing `{needle}` in Crystal emit"));
+        let window = &crystal[idx..crystal.len().min(idx + 200)];
+        assert!(
+            window.contains("{} of Symbol => String"),
+            "Crystal empty-hash return must match declared Hash(Symbol, String):\n{window}"
+        );
+        assert!(
+            !window.contains("{} of String => String"),
+            "Crystal must not emit String-keyed empty hash for default_url_options:\n{window}"
+        );
     }
 
     /// RBS `@keys`/`@vals` must stamp empty `[]` initializers so

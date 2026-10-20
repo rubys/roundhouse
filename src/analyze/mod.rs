@@ -66,7 +66,7 @@ pub use inferred_types::inferred_types;
 pub use inquiry::inquirer_methods;
 pub use diagnostics::{diagnose, diagnose_helper_modules, diagnose_with_coverage, unknown_receiver_sends, UnknownReceiverSend};
 
-pub use body::{BodyTyper, ClassInfo, ConstScope, Ctx};
+pub use body::{stamp_expected_on_empty_return_tail, BodyTyper, ClassInfo, ConstScope, Ctx};
 pub(crate) use body::PARAM_VALUE;
 use render::{
     collect_action_render_views, collect_content_partial_literals,

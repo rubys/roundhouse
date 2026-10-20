@@ -3391,6 +3391,57 @@ fn propagate_expected_to_empty_container(value: &mut Expr, expected: &Ty) {
     }
 }
 
+/// Stamp a method's declared `Hash[K, V]` / `Array[E]` return onto a
+/// bare empty `{}` / `[]` (or `return {}`) tail whose typer-set type
+/// is still uninformative (`Var`/`Untyped`).
+///
+/// Mirrors the Assign-side [`propagate_expected_to_empty_container`]:
+/// without this, `def default_url_options; {}; end` typed
+/// `-> Hash[Symbol, String]` keeps `Hash<Var, Var>` on the literal,
+/// and Crystal emit's empty-hash default (`{} of String => String`)
+/// clashes with the annotated return. Call before body-typing when
+/// the RBS/`signature` return is known (see `runtime_src`).
+pub fn stamp_expected_on_empty_return_tail(body: &mut Expr, expected: &Ty) {
+    let peeled = expected.peel_nilable();
+    if !matches!(peeled, Ty::Hash { .. } | Ty::Array { .. }) {
+        return;
+    }
+    stamp_empty_return_tail(body, peeled);
+}
+
+fn stamp_empty_return_tail(expr: &mut Expr, expected: &Ty) {
+    match &mut *expr.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            let last = exprs.len() - 1;
+            stamp_empty_return_tail(&mut exprs[last], expected);
+        }
+        ExprNode::Return { value } => stamp_empty_return_tail(value, expected),
+        ExprNode::Hash { entries, .. } if entries.is_empty() => {
+            if empty_container_ty_uninformative(expr) {
+                expr.ty = Some(expected.clone());
+            }
+        }
+        ExprNode::Array { elements, .. } if elements.is_empty() => {
+            if empty_container_ty_uninformative(expr) {
+                expr.ty = Some(expected.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// True when an empty container's `e.ty` carries no emit-usable shape
+/// (absent, `Untyped`, `Var`, or `Hash`/`Array` whose params are open).
+fn empty_container_ty_uninformative(e: &Expr) -> bool {
+    match e.ty.as_ref() {
+        None => true,
+        Some(Ty::Untyped) | Some(Ty::Var { .. }) => true,
+        Some(Ty::Hash { key, value }) => key.is_unknown() && value.is_unknown(),
+        Some(Ty::Array { elem }) => elem.is_unknown(),
+        _ => false,
+    }
+}
+
 /// Type a single destructuring target of `a, b, ... = rhs` at
 /// position `index`. Three RHS shapes carry a per-position type:
 ///   - `Array<T>` — every scalar target gets the element type `T`
