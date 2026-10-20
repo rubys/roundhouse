@@ -487,6 +487,7 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
     let spinel_coe = "${{ needs.plan.outputs.spinel-advisory == 'true' }}";
     for name in [
         "spinel-build",
+        "spinel-toolchain-build",
         "spinel-toolchain",
         "spinel-compare",
         "spinel-framework",
@@ -497,6 +498,44 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
             "{name} CoE must follow plan spinel-advisory"
         );
     }
+    let toolchain = &jobs["spinel-toolchain"];
+    let toolchain_needs: Vec<_> = toolchain["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n.as_str())
+        .collect();
+    assert!(
+        toolchain_needs.contains(&"spinel-toolchain-build"),
+        "shards must wait on the compile-once producer: {toolchain_needs:?}"
+    );
+    assert!(
+        toolchain["if"]
+            .as_str()
+            .unwrap()
+            .contains("needs.spinel-toolchain-build.outputs.artifact-id != ''"),
+        "missing toolchain binaries must block shards, not cargo-rebuild"
+    );
+    let producer_steps = jobs["spinel-toolchain-build"]["steps"]
+        .as_sequence()
+        .unwrap();
+    assert!(
+        producer_steps.iter().any(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|u| u.contains("setup-rust"))
+        }),
+        "producer compiles with Rust"
+    );
+    assert!(
+        toolchain["steps"].as_sequence().unwrap().iter().all(|step| {
+            step["uses"]
+                .as_str()
+                .map(|u| !u.contains("setup-rust") && !u.contains("rust-cache"))
+                .unwrap_or(true)
+        }),
+        "toolchain shards must not recompile"
+    );
     assert_eq!(
         ci["jobs"]["plan"]["outputs"]["spinel-advisory"].as_str(),
         Some("${{ steps.plan.outputs.spinel-advisory }}")
