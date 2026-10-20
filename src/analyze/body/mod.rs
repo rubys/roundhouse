@@ -3471,6 +3471,12 @@ fn stamp_empty_return_tail(expr: &mut Expr, expected: &Ty) {
             stamp_empty_return_tail(expr, expected);
             stamp_empty_return_tail(fallback, expected);
         }
+        // Loops / attached blocks are not value tails, but `return {}`
+        // inside them exits the enclosing method (Ruby).
+        ExprNode::While { body, .. } => stamp_returns_in_stmts(body, expected),
+        ExprNode::Send {
+            block: Some(block), ..
+        } => stamp_returns_in_attached_block(block, expected),
         ExprNode::Hash { entries, .. } if entries.is_empty() => {
             if empty_container_ty_uninformative(expr) {
                 expr.ty = Some(expected.clone());
@@ -3541,7 +3547,20 @@ fn stamp_returns_in_stmts(expr: &mut Expr, expected: &Ty) {
             stamp_returns_in_stmts(expr, expected);
             stamp_returns_in_stmts(fallback, expected);
         }
+        ExprNode::While { body, .. } => stamp_returns_in_stmts(body, expected),
+        ExprNode::Send {
+            block: Some(block), ..
+        } => stamp_returns_in_attached_block(block, expected),
         _ => {}
+    }
+}
+
+/// Chase `return` inside a method-attached block (`Send.block` holding
+/// a `Lambda`). Do not walk lambda literals passed as ordinary args —
+/// their `return` exits the lambda, not the enclosing method.
+fn stamp_returns_in_attached_block(block: &mut Expr, expected: &Ty) {
+    if let ExprNode::Lambda { body, .. } = &mut *block.node {
+        stamp_returns_in_stmts(body, expected);
     }
 }
 
@@ -5875,6 +5894,84 @@ mod tests {
         assert!(
             exprs[1].ty.is_none(),
             "non-return mid/tail Nil must not be stamped as Hash"
+        );
+    }
+
+    /// `return {}` inside `while` exits the enclosing method and must
+    /// receive the declared Hash shape (CodeRabbit follow-up).
+    #[test]
+    fn stamp_empty_return_covers_return_inside_while() {
+        let expected = declared_sym_str_hash();
+        let mut body = synth(ExprNode::While {
+            cond: var("flag"),
+            body: synth(ExprNode::Return {
+                value: empty_hash_lit(),
+            }),
+            until_form: false,
+        });
+        stamp_expected_on_empty_return_tail(&mut body, &expected);
+        let ExprNode::While { body: loop_body, .. } = &*body.node else {
+            panic!("expected While");
+        };
+        let ExprNode::Return { value } = &*loop_body.node else {
+            panic!("expected Return in While body");
+        };
+        assert_stamped_sym_str_hash(value);
+    }
+
+    /// `return {}` in an attached method block (`Send.block` Lambda)
+    /// exits the enclosing method; stamp it. A Lambda passed as an
+    /// ordinary arg is left alone.
+    #[test]
+    fn stamp_empty_return_covers_return_in_send_block_not_arg_lambda() {
+        let expected = declared_sym_str_hash();
+        let block_lambda = synth(ExprNode::Lambda {
+            params: vec![],
+            rest_param: None,
+            extra_params: vec![],
+            block_param: None,
+            body: synth(ExprNode::Return {
+                value: empty_hash_lit(),
+            }),
+            block_style: Default::default(),
+        });
+        let arg_lambda = synth(ExprNode::Lambda {
+            params: vec![],
+            rest_param: None,
+            extra_params: vec![],
+            block_param: None,
+            body: synth(ExprNode::Return {
+                value: empty_hash_lit(),
+            }),
+            block_style: Default::default(),
+        });
+        let mut body = synth(ExprNode::Send {
+            recv: None,
+            method: Symbol::from("each"),
+            args: vec![arg_lambda],
+            block: Some(block_lambda),
+            parenthesized: false,
+        });
+        stamp_expected_on_empty_return_tail(&mut body, &expected);
+        let ExprNode::Send { args, block, .. } = &*body.node else {
+            panic!("expected Send");
+        };
+        let ExprNode::Lambda { body: block_body, .. } = &*block.as_ref().unwrap().node else {
+            panic!("expected block Lambda");
+        };
+        let ExprNode::Return { value } = &*block_body.node else {
+            panic!("expected Return in block");
+        };
+        assert_stamped_sym_str_hash(value);
+        let ExprNode::Lambda { body: arg_body, .. } = &*args[0].node else {
+            panic!("expected arg Lambda");
+        };
+        let ExprNode::Return { value: arg_ret } = &*arg_body.node else {
+            panic!("expected Return in arg lambda");
+        };
+        assert!(
+            arg_ret.ty.is_none(),
+            "arg-position lambda return must not inherit the method Hash return"
         );
     }
 }
