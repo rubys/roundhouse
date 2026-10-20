@@ -198,10 +198,31 @@ fn campfire_docker_recipe_avoids_a_frontend_pull_and_ships_executable_boot() {
 }
 
 #[test]
-fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
+fn campfire_docker_smoke_caches_apt_for_eight_hours_and_skips_without_tgz() {
     let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let archive = &workflow["jobs"]["campfire-archive-build"];
+    assert_eq!(
+        archive["outputs"]["docker_tgz"].as_str(),
+        Some("${{ steps.docker-tgz.outputs.present }}")
+    );
+    let mark = archive["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| {
+            step["name"].as_str() == Some("Record whether campfire/docker.tgz was produced")
+        })
+        .expect("producer must mark docker.tgz presence");
+    assert_eq!(mark["id"].as_str(), Some("docker-tgz"));
+    assert_eq!(mark["if"].as_str(), Some("always()"));
+
     let job = &workflow["jobs"]["campfire-smoke-docker"];
+    let gate = job["if"].as_str().unwrap();
+    assert!(
+        gate.contains("needs.campfire-archive-build.outputs.docker_tgz == 'true'"),
+        "smoke-docker must skip when pack did not produce docker.tgz: {gate}"
+    );
     let steps = job["steps"].as_sequence().unwrap();
     let step = |name: &str| {
         steps
@@ -279,6 +300,10 @@ fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
     assert!(
         !script.contains("sccache") && !script.contains("CCACHE"),
         "do not hide the pack compile behind a compiler cache"
+    );
+    assert!(
+        script.contains("despite producer docker_tgz=true"),
+        "missing tgz after a true gate is an error, not a soft pack skip"
     );
 
     let save = step("Save Campfire Docker apt layers");

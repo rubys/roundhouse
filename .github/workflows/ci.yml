@@ -2767,6 +2767,9 @@ jobs:
     name: campfire-archive-build
     needs: [build-roundhouse, spinel-build, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-archive-build') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
+    # Consumers gate on docker_tgz so a pack skip does not red smoke-docker.
+    outputs:
+      docker_tgz: ${{ steps.docker-tgz.outputs.present }}
     runs-on: ubuntu-latest
     # `spin pack` runs Spinel's front end over the whole Campfire tree,
     # including ruby-vips.
@@ -2806,6 +2809,16 @@ jobs:
           tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Build campfire/spinel.tgz + campfire/docker.tgz
         run: scripts/build-campfire-archive --out _site /tmp/campfire
+      - name: Record whether campfire/docker.tgz was produced
+        id: docker-tgz
+        if: always()
+        run: |
+          if [ -f _site/campfire/docker.tgz ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::campfire/docker.tgz not produced (spin pack skipped or failed); campfire-smoke-docker will skip"
+          fi
       - name: Record archive producer evidence
         if: always()
         env:
@@ -2846,7 +2859,9 @@ jobs:
   campfire-smoke-docker:
     name: campfire-smoke-docker
     needs: [campfire-archive-build, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-smoke-docker') && needs.campfire-archive-build.result == 'success' }}
+    # Skip the whole job when pack did not produce docker.tgz — that is a
+    # producer/pack gap, not a Docker smoke failure (see archive notice).
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-smoke-docker') && needs.campfire-archive-build.result == 'success' && needs.campfire-archive-build.outputs.docker_tgz == 'true' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -2879,8 +2894,10 @@ jobs:
         id: smoke
         run: |
           set -euo pipefail
+          # Job if already requires producer docker_tgz=true; fail loudly if
+          # the artifact is still missing (gating bug, not a soft pack skip).
           if [ ! -f campfire/docker.tgz ]; then
-            echo "::warning::no campfire/docker.tgz this run (spinel toolchain missing?)"
+            echo "::error::campfire/docker.tgz missing despite producer docker_tgz=true"
             exit 1
           fi
           tar xzf campfire/docker.tgz

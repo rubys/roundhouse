@@ -128,7 +128,7 @@ class Routing(unittest.TestCase):
                 self.assertTrue(plan["extras_advisory"])
                 self.assertTrue(plan["site"])
                 self.assertTrue(plan["wasm"])
-                self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+                self.assertTrue(set(ci.SPINEL).issubset(plan["jobs"]))
                 self.assertNotIn("writebook-inventory", plan["jobs"])
                 self.assertIn("archive-results", plan["jobs"])
                 self.assertNotIn("archive-results", plan["required"])
@@ -162,6 +162,22 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertNotIn("sidekiq-live", ci.select([path])["jobs"])
         self.assertIn("sidekiq-live", ci.select([], full=True)["jobs"])
+        # Demoted out of the bulk SPINEL / spinel_lane suite.
+        self.assertNotIn("sidekiq-live", ci.SPINEL)
+        self.assertNotIn("sidekiq-live", ci.select([], spinel_lane=True)["jobs"])
+
+    def test_campfire_smoke_is_path_or_full_not_bulk_spinel(self):
+        self.assertNotIn("campfire-smoke", ci.SPINEL)
+        self.assertIn("campfire-archive-build", ci.SPINEL)
+        self.assertIn("campfire-smoke-docker", ci.SPINEL)
+        self.assertEqual(ci.SPINEL_FULL_OR_PATH, ("campfire-smoke", "sidekiq-live"))
+        lane = ci.select([], spinel_lane=True)
+        self.assertNotIn("campfire-smoke", lane["jobs"])
+        self.assertIn("campfire-smoke-docker", lane["jobs"])
+        full = ci.select([], full=True)
+        self.assertIn("campfire-smoke", full["jobs"])
+        self.assertIn("campfire-smoke", full["advisory"])
+        self.assertIn("campfire-smoke", ci.select(["scripts/build-campfire-archive"])["jobs"])
 
     def test_shared_runtime_rb_and_rbs_select_framework_native_coverage(self):
         for path in ["runtime/ruby/active_record.rb", "runtime/ruby/test/model.rbs"]:
@@ -201,7 +217,7 @@ class Routing(unittest.TestCase):
         self.assertFalse(plan["site"])
         self.assertTrue(plan["spinel"])
         self.assertEqual(plan["spinel_tests"], ci.SPINEL_TESTS)
-        self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+        self.assertTrue(set(ci.SPINEL).issubset(plan["jobs"]))
         self.assertNotIn("compare-extra", plan["jobs"])
         self.assertNotIn("compare-jruby", plan["jobs"])
         self.assertNotIn("build-wasm", plan["jobs"])
@@ -264,7 +280,7 @@ class Routing(unittest.TestCase):
         self.assertTrue(plan["extras_advisory"])
         self.assertTrue(plan["site"])
         self.assertTrue(plan["wasm"])
-        self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+        self.assertTrue(set(ci.SPINEL).issubset(plan["jobs"]))
         self.assertIn("build-roundhouse", plan["required"])
         self.assertIn("archive-results", plan["jobs"])
         self.assertNotIn("archive-results", plan["required"])
@@ -280,7 +296,7 @@ class Routing(unittest.TestCase):
             {"return_value": (["README.md"], None)},
         )["plan"]
         self.assertEqual(floor["jobs"], list(ci.BASE))
-        self.assertFalse(any(job in floor["jobs"] for job in ci.SPINEL11))
+        self.assertFalse(any(job in floor["jobs"] for job in ci.SPINEL))
 
         go = self.run_planner(
             {"before": "0" * 40},
@@ -289,7 +305,7 @@ class Routing(unittest.TestCase):
         )["plan"]
         self.assertIn("compare-extra", go["jobs"])
         self.assertEqual(go["extra_compare"], ["go"])
-        self.assertFalse(any(job in go["jobs"] for job in ci.SPINEL11))
+        self.assertFalse(any(job in go["jobs"] for job in ci.SPINEL))
 
         spinel = self.run_planner(
             {"before": "0" * 40},
@@ -348,7 +364,7 @@ class Routing(unittest.TestCase):
             self.assertTrue(plan["extras_advisory"])
             self.assertTrue(plan["wasm"])
             self.assertIn("compare-extra", plan["jobs"])
-            self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+            self.assertTrue(set(ci.SPINEL).issubset(plan["jobs"]))
 
     def test_a_ci_full_marker_line_on_a_main_push_plans_full(self):
         main = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}
@@ -365,7 +381,7 @@ class Routing(unittest.TestCase):
         self.assertIn("compare-extra", plan["jobs"])
         self.assertEqual(plan["smoke_extra"], list(ci.EXTRA_COMPARE_TARGETS))
         self.assertTrue(plan["extras_advisory"])
-        self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+        self.assertTrue(set(ci.SPINEL).issubset(plan["jobs"]))
         self.assertIn(f"[ci full] in commit {'a' * 12}", plan["reasons"])
 
     def test_a_ci_full_marker_must_be_a_line_of_its_own(self):
@@ -381,7 +397,7 @@ class Routing(unittest.TestCase):
             # Not a Full marker → path ownership only (go), not SPINEL_LANE.
             self.assertIn("compare-extra", plan["jobs"], message)
             self.assertEqual(plan["extra_compare"], ["go"], message)
-            self.assertFalse(any(job in plan["jobs"] for job in ci.SPINEL11), message)
+            self.assertFalse(any(job in plan["jobs"] for job in ci.SPINEL), message)
             self.assertNotEqual(plan["jobs"], ci.SPINEL_LANE, message)
 
     def test_a_ci_full_marker_is_ignored_off_a_main_push(self):
@@ -929,11 +945,11 @@ class Routing(unittest.TestCase):
                 self.assertFalse(plan["wasm"])
                 self.assertFalse(plan["site"])
                 if scope == "ruby-family":
-                    self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+                    self.assertTrue(set(ci.SPINEL).issubset(plan["jobs"]))
                     self.assertEqual(plan["spinel_tests"], ci.SPINEL_TESTS)
                     self.assertEqual(plan["archives"], ["ruby", "jruby", "spinel"])
                 else:
-                    self.assertFalse(set(ci.SPINEL11).intersection(plan["jobs"]))
+                    self.assertFalse(set(ci.SPINEL).intersection(plan["jobs"]))
                     self.assertEqual(plan["archives"], ["ruby", "jruby"])
         for paths, options in [
             (["src/project.rs"], {"full": True}),
@@ -966,7 +982,7 @@ class Routing(unittest.TestCase):
         plan = ci.select([], full=True)
         self.assertEqual(plan["spinel_tests"], ci.SPINEL_TESTS)
         self.assertIn("generated_columns_spinel", plan["spinel_tests"])
-        self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+        self.assertTrue(set(ci.SPINEL).issubset(plan["jobs"]))
         self.assertIn("archive-results", plan["jobs"])
         self.assertNotIn("archive-results", plan["required"])
         self.assertNotIn("deploy", plan["jobs"])

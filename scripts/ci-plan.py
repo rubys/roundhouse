@@ -235,7 +235,9 @@ JSON_TYPES_SPINEL_INPUTS = {
     "src/lower/model_to_library/schema.rs",
 }
 
-SPINEL11 = [
+# Bulk advisory Spinel suite (unknown-input spinel_lane, ruby-family
+# project.rs, and Full). Membership drifts — the name is not a job count.
+SPINEL = [
     "spinel-build",
     "spinel-framework",
     "campfire-spinel-build",
@@ -245,16 +247,16 @@ SPINEL11 = [
     "spinel-compare",
     "spinel-smoke",
     "campfire-archive-build",
-    "campfire-smoke",
     "campfire-smoke-docker",
-    "sidekiq-live",
 ]
+# Path-owned or Full-only; not in the bulk SPINEL / spinel_lane suite.
+SPINEL_FULL_OR_PATH = ("campfire-smoke", "sidekiq-live")
 # Unknown-input / explicit spinel_lane advisory suite. PR `ci:spinel` uses the
 # narrower CORE focus lane (built in focus_plan) and makes those jobs required.
 # Main pushes no longer force this lane: path ownership, `ci:spinel`, or Full
 # (`full-ci` / `ci:full` / `[ci full]`) select Spinel instead.
-SPINEL_LANE = [*BASE, *SPINEL11, "build-site", "archive-results"]
-ADVISORY = set(SPINEL11) - {"campfire-archive-build"}
+SPINEL_LANE = [*BASE, *SPINEL, "build-site", "archive-results"]
+ADVISORY = (set(SPINEL) | set(SPINEL_FULL_OR_PATH)) - {"campfire-archive-build"}
 # Extra-language ledger jobs: advisory on Full/path unless a focus label
 # makes them required for a fix round.
 LEDGER_EXTRAS = {"compare-extra", "smoke-extra"}
@@ -340,7 +342,7 @@ def focus_plan(extras=(), jruby=False, spinel=False, compare_targets=()):
 
     Focused extras / jruby / rust / typescript / CORE Spinel are
     merge-gate required for the fix round. Unrelated extras, WASM, and
-    the heavy Spinel11 Campfire suite stay off. `ci:rust` and
+    the heavy Spinel Campfire suite stay off. `ci:rust` and
     `ci:typescript` add only that language's `compare` and floor `smoke`.
     """
     extra = [t for t in EXTRA_COMPARE_TARGETS if t in extras]
@@ -623,7 +625,7 @@ def select(
             smoke.update(("ruby", "jruby"))
             if project_scope == "ruby-family":
                 spinel = True
-                jobs_selected.update(SPINEL11)
+                jobs_selected.update(SPINEL)
                 spinel_tests.update(SPINEL_TESTS)
             reasons.append(f"{path}: proven {project_scope} assembly bodies only")
             continue
@@ -714,7 +716,8 @@ def select(
         smoke.update(TARGETS)
         wasm = site = spinel = True
         reasons.append("full validation requested")
-        jobs_selected.update(SPINEL11)
+        jobs_selected.update(SPINEL)
+        jobs_selected.update(SPINEL_FULL_OR_PATH)
         spinel_tests.update(SPINEL_TESTS)
     if spinel:
         jobs_selected.add("spinel-build")
@@ -747,7 +750,11 @@ def select(
         jobs.append("build-site")
     if "build-site" in jobs or {"build-site", "campfire-archive-build"} & jobs_selected:
         jobs_selected.add("archive-results")
-    jobs.extend(j for j in [*SPINEL11, "archive-results"] if j in jobs_selected)
+    jobs.extend(
+        j
+        for j in [*SPINEL, *SPINEL_FULL_OR_PATH, "archive-results"]
+        if j in jobs_selected
+    )
     if publish:
         if not full:
             raise ValueError("publication requires full validation mode")
@@ -902,7 +909,7 @@ def finish(
         ]
     )
     # ci:spinel focus selects build-site / archive-results without spinel-smoke
-    # (Campfire Spinel11 stays off). Still emit the spinel browse archive so
+    # (Campfire Spinel suite stays off). Still emit the spinel browse archive so
     # `roundhouse --archives` is never called with an empty list (#592).
     if hard_spinel and "build-site" in jobs and "spinel" not in archives:
         archives = [*archives, "spinel"]
