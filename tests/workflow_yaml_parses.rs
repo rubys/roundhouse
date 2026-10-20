@@ -1033,7 +1033,7 @@ fn campfire_failure_capture_keeps_the_original_exit_and_actual_c() {
         .unwrap();
         for (path, body) in [
             (
-                "bin/cargo",
+                "bin/roundhouse",
                 "#!/bin/sh\necho emit-output >&2\nexit \"$EMIT_EXIT\"\n",
             ),
             (
@@ -1060,6 +1060,10 @@ fn campfire_failure_capture_keeps_the_original_exit_and_actual_c() {
                 root.join("bin").display(),
                 std::env::var("PATH").unwrap()
             ),
+        );
+        command.env(
+            "ROUNDHOUSE_BIN",
+            root.join("bin/roundhouse").to_string_lossy().as_ref(),
         );
         command.env("EMIT_EXIT", emit_exit.to_string());
         command.env("BUILD_EXIT", build_exit.to_string());
@@ -1155,9 +1159,32 @@ fn spinel_model_differential_does_not_wait_for_the_gc_comparison_build() {
     let ci: serde_yaml_ng::Value = serde_yaml_ng::from_str(&src).expect("parse CI workflow");
     let jobs = &ci["jobs"];
     let db = &jobs["campfire-spinel-db"];
-    assert_eq!(db["needs"][0].as_str(), Some("spinel-build"));
-    assert_eq!(db["needs"][1].as_str(), Some("plan"));
+    let db_needs: Vec<_> = db["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n.as_str())
+        .collect();
+    assert!(
+        db_needs.contains(&"spinel-build") && db_needs.contains(&"plan"),
+        "db differential still needs the Spinel toolchain and plan: {db_needs:?}"
+    );
+    assert!(
+        db_needs.contains(&"build-roundhouse"),
+        "db differential must reuse the same-run debug binary: {db_needs:?}"
+    );
+    assert!(
+        !db_needs.contains(&"campfire-spinel-build"),
+        "db differential must not wait on the GC comparison producer: {db_needs:?}"
+    );
     assert_eq!(db["continue-on-error"].as_bool(), Some(true));
+    assert!(
+        db["if"]
+            .as_str()
+            .unwrap()
+            .contains("needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != ''"),
+        "missing producer binary must block the db job, not cargo-fallback"
+    );
 
     let command = "scripts/campfire-db-differential --spinel /tmp/campfire";
     let db_steps = db["steps"].as_sequence().expect("DB job steps");

@@ -1233,10 +1233,12 @@ jobs:
   # All GC modes execute the same program; compile it once and preserve
   # its executable bit in a tarball. The DB differential builds its own
   # scenario overlay and must not reuse this binary.
+  # Emission uses the same-run debug binary from build-roundhouse (no
+  # cargo rebuild): same contract as campfire-compare / conformance.
   campfire-spinel-build:
     name: campfire-spinel-build (binary)
-    needs: [spinel-build, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-build') && needs.spinel-build.outputs.artifact-id != '' }}
+    needs: [build-roundhouse, spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-build') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' && needs.spinel-build.outputs.artifact-id != '' }}
     runs-on: ubuntu-latest
     # 60m: apt alone can take 20m; fetch 5m + emit/build 25m still need room.
     timeout-minutes: 60
@@ -1248,8 +1250,26 @@ jobs:
       MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # No setup-rust: emission uses the current-run debug binary.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - &stage-roundhouse-debug-bin
+        name: Stage shared debug roundhouse binary
+        run: |
+          set -euo pipefail
+          chmod +x roundhouse-debug-bin/roundhouse
+          test -x roundhouse-debug-bin/roundhouse
+          test -f roundhouse-debug-bin/identity.txt
+          echo "=== producer identity ==="
+          cat roundhouse-debug-bin/identity.txt
+          echo "=== consumer probe ==="
+          ./roundhouse-debug-bin/roundhouse --version
+          grep -q "source_sha=${GITHUB_SHA}" roundhouse-debug-bin/identity.txt
+          grep -q 'profile=debug' roundhouse-debug-bin/identity.txt
+          echo "ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse" >> "$GITHUB_ENV"
+          echo "ROUNDHOUSE_BIN_TRACE=1" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
         with:
           name: spinel-dist
@@ -1278,11 +1298,11 @@ jobs:
         timeout-minutes: 25
         run: |
           set -o pipefail
-          cargo run --quiet --bin roundhouse -- --target spinel /tmp/campfire \
+          test -x "$ROUNDHOUSE_BIN"
+          "$ROUNDHOUSE_BIN" --target spinel /tmp/campfire \
             -o build/campfire-compare-spinel --allow-unsupported 2>&1 | tee campfire-emit.log
           make -C build/campfire-compare-spinel build 2>&1 | tee campfire-build.log
-          tar -czf campfire-compare-spinel.tar.gz -C build campfire-compare-spinel
-      # Keep the C from the failed invocation, not a second compiler run.
+          tar -czf campfire-compare-spinel.tar.gz -C build campfire-compare-spinel      # Keep the C from the failed invocation, not a second compiler run.
       # Logs and inputs are still useful if emission failed before any C existed.
       - name: Capture Campfire compiler failure
         if: failure() && steps.build.outcome == 'failure'
@@ -1482,10 +1502,12 @@ jobs:
   # A different app (the model-scenario overlay), so it needs its own
   # build, not the comparison binary. Start after the toolchain is ready
   # instead of serializing it behind the shared build and request walk.
+  # ROUNDHOUSE_BIN from build-roundhouse: campfire-db-differential's
+  # roundhouse_run must not fall back to cargo on CI.
   campfire-spinel-db:
     name: campfire-spinel-db (models)
-    needs: [spinel-build, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-db') && needs.spinel-build.outputs.artifact-id != '' }}
+    needs: [build-roundhouse, spinel-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-spinel-db') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' && needs.spinel-build.outputs.artifact-id != '' }}
     outputs: &advisory-outputs
       execution: ${{ steps.result.outputs.status }}
     runs-on: ubuntu-latest
@@ -1503,8 +1525,12 @@ jobs:
       MAKEFLAGS: "-j4"
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # No setup-rust: emission uses the current-run debug binary.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - *stage-roundhouse-debug-bin
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
@@ -1537,7 +1563,6 @@ jobs:
       - name: scripts/campfire-db-differential --spinel
         run: scripts/campfire-db-differential --spinel /tmp/campfire
       - *advisory-result
-
   campfire-conformance:
     needs: [build-roundhouse, plan]
     # Require the producer's debug binary artifact id so a missing
@@ -1554,21 +1579,7 @@ jobs:
         with:
           name: roundhouse-debug-bin
           path: roundhouse-debug-bin
-      - &stage-roundhouse-debug-bin
-        name: Stage shared debug roundhouse binary
-        run: |
-          set -euo pipefail
-          chmod +x roundhouse-debug-bin/roundhouse
-          test -x roundhouse-debug-bin/roundhouse
-          test -f roundhouse-debug-bin/identity.txt
-          echo "=== producer identity ==="
-          cat roundhouse-debug-bin/identity.txt
-          echo "=== consumer probe ==="
-          ./roundhouse-debug-bin/roundhouse --version
-          grep -q "source_sha=${GITHUB_SHA}" roundhouse-debug-bin/identity.txt
-          grep -q 'profile=debug' roundhouse-debug-bin/identity.txt
-          echo "ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse" >> "$GITHUB_ENV"
-          echo "ROUNDHOUSE_BIN_TRACE=1" >> "$GITHUB_ENV"
+      - *stage-roundhouse-debug-bin
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
