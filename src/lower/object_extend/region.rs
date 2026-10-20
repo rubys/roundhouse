@@ -457,12 +457,37 @@ fn note_rebind(rebinds: &mut HashSet<Symbol>, name: &Symbol) {
     }
 }
 
-pub(super) fn block_runs_later(_recv: Option<&Expr>, method: &str) -> bool {
+pub(super) fn block_runs_later(recv: Option<&Expr>, method: &str) -> bool {
     // A block hides the `extend` unless the call runs it before
     // returning. `map` and `tap` do. `Fiber.new`, `at_exit`,
-    // `define_method`, and `lambda` do not, and a leftover `extend`
-    // there keeps the Spinel file from linking.
+    // `define_method`, and `[].lazy.map` do not.
+    if lazy_adapter(method) && receiver_may_be_lazy(recv) {
+        return true;
+    }
     !runs_during_call(method)
+}
+
+/// `Enumerator::Lazy` returns another lazy enum from these, so the
+/// block runs at `force`, not at the call.
+fn lazy_adapter(method: &str) -> bool {
+    matches!(
+        method,
+        "map" | "collect" | "flat_map" | "select" | "filter" | "reject"
+    )
+}
+
+fn receiver_may_be_lazy(recv: Option<&Expr>) -> bool {
+    let Some(recv) = recv else {
+        return false;
+    };
+    match &*recv.node {
+        ExprNode::Var { .. } => true,
+        ExprNode::Send { method, recv: inner, .. } => {
+            method.as_str() == "lazy"
+                || (lazy_adapter(method.as_str()) && receiver_may_be_lazy(inner.as_ref()))
+        }
+        _ => false,
+    }
 }
 
 fn runs_during_call(method: &str) -> bool {

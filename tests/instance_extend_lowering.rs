@@ -828,6 +828,7 @@ fn an_extend_inside_a_block_that_runs_later_stays_unsupported() {
         ("test_enumerator_new", "Enumerator.new"),
         ("test_ractor_new", "Ractor.new"),
         ("test_at_exit", "at_exit"),
+        ("test_lazy_map", "[0].lazy.map"),
     ] {
         assert_extend_stub(
             name,
