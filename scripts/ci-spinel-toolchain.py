@@ -280,12 +280,23 @@ def restore(args: argparse.Namespace) -> int:
     if Path(inventory["target"]).resolve() != target:
         raise ContractError("archive target directory differs from this checkout")
 
+    expected = {inventory[key]["path"] for key in ("spinel_toolchain", "roundhouse", "tiny_api")}
     with tarfile.open(archive, "r:gz") as tar:
-        # Python 3.12+ needs a filter; older runners accept extractall without.
-        try:
-            tar.extractall(ROOT, filter="data")
-        except TypeError:
-            tar.extractall(ROOT)
+        members = tar.getmembers()
+        names = {member.name for member in members}
+        if names != expected or not all(member.isfile() for member in members):
+            raise ContractError("archive members differ from producer inventory")
+        for member in members:
+            # Reject path traversal even if inventory validation was bypassed.
+            if Path(member.name).is_absolute() or ".." in Path(member.name).parts:
+                raise ContractError(f"invalid archive member path: {member.name}")
+            destination = ROOT / member.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source = tar.extractfile(member)
+            if source is None:
+                raise ContractError(f"unreadable archive member: {member.name}")
+            with source, destination.open("wb") as sink:
+                shutil.copyfileobj(source, sink)
 
     for key in ("spinel_toolchain", "roundhouse", "tiny_api"):
         record = inventory[key]

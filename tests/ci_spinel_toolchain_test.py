@@ -201,6 +201,59 @@ class SpinelToolchainRestoreTests(unittest.TestCase):
                 self.assertTrue(path.is_file(), key)
                 self.assertTrue(os.access(path, os.X_OK), key)
 
+    def test_restore_rejects_unexpected_archive_members(self):
+        with tempfile.TemporaryDirectory(prefix="spinel-toolchain-ci-") as tmp:
+            root = Path(tmp)
+            archive = root / "bundle.tar.gz"
+            inventory_path = root / "inventory.json"
+            binary = root / "target/debug/deps/spinel_toolchain-1"
+            roundhouse = root / "target/debug/roundhouse"
+            tiny = root / "target/debug/deps/tiny_api-1"
+            evil = root / "evil.bin"
+            for path, body in (
+                (binary, b"spinel"),
+                (roundhouse, b"rh"),
+                (tiny, b"tiny"),
+                (evil, b"nope"),
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(body)
+                path.chmod(path.stat().st_mode | stat.S_IXUSR)
+            with tarfile.open(archive, "w:gz") as tar:
+                for path in (binary, roundhouse, tiny, evil):
+                    tar.add(path, arcname=path.relative_to(root).as_posix())
+            inventory = {
+                "version": ci.FORMAT_VERSION,
+                "source_sha": "a" * 40,
+                "workspace": str(root),
+                "target": str(root / "target"),
+                "archive_sha256": sha256(archive.read_bytes()),
+                "spinel_toolchain": {
+                    "path": binary.relative_to(root).as_posix(),
+                    "sha256": sha256(b"spinel"),
+                },
+                "roundhouse": {
+                    "path": roundhouse.relative_to(root).as_posix(),
+                    "sha256": sha256(b"rh"),
+                },
+                "tiny_api": {
+                    "path": tiny.relative_to(root).as_posix(),
+                    "sha256": sha256(b"tiny"),
+                },
+                "tests": ["only_test"],
+            }
+            inventory_path.write_text(json.dumps(inventory))
+            for path in (binary, roundhouse, tiny, evil):
+                path.unlink()
+            args = mock.Mock(archive=archive, inventory=inventory_path, env_file=None)
+            with mock.patch.object(ci, "ROOT", root), mock.patch.object(
+                ci, "source_sha", return_value="a" * 40
+            ), mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(root / "target")}, clear=False):
+                with self.assertRaises(ci.ContractError) as caught:
+                    ci.restore(args)
+            self.assertIn("archive members differ", str(caught.exception))
+            self.assertFalse(evil.exists())
+
 
 class SpinelToolchainWorkflowTests(unittest.TestCase):
     def test_producer_and_shards_share_one_compile(self):
