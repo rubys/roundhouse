@@ -1,5 +1,6 @@
 //! `Associations::Preloader` resolves at check and preloads on the
-//! ruby target. A `scope:` keyword is not rewritten away and raises.
+//! ruby target. A `scope:` keyword is not rewritten away; MRI raises
+//! unknown-keyword `ArgumentError`.
 
 use super::emit_and_run;
 

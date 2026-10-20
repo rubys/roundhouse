@@ -1961,7 +1961,9 @@ module ActionText
     # emit is in the table.
     def self.decode_entity(entity)
       known = ENTITIES.fetch(entity, "")
-      return known if known != ""
+      # Copy out of the table: the constant Strings must not leave as
+      # a shared handle another name could append to.
+      return known + "" if known != ""
       if entity.start_with?("&#") && entity.length > 3
         digits = entity[2, entity.length - 3].to_s
         hex = digits.start_with?("x") || digits.start_with?("X")

@@ -2,7 +2,7 @@
 //! checks clean when its value is discarded and its records are one
 //! model's (it lowers to that model's `preload_associations`) or several
 //! models' (`ActiveRecord::Preloading.records`), and keeps its refusal for any other
-//! option. `scope:` stays a `Preloader` call; the runtime class raises.
+//! option. `scope:` stays a `Preloader` call; MRI raises unknown-keyword.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -84,7 +84,8 @@ fn an_app_defined_tap_checks_clean() {
 }
 
 /// `scope:` is not a batch load. The class exists, so check is clean,
-/// and the call stays `Preloader.new`. The runtime raises `ArgumentError`.
+/// and the call stays `Preloader.new`. MRI raises unknown-keyword
+/// `ArgumentError` (message includes "scope").
 #[test]
 fn a_scope_option_is_not_rewritten() {
     let errors = constant_errors(

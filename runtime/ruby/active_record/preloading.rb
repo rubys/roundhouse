@@ -5,12 +5,13 @@ module ActiveRecord
   module Associations
     # `Preloader.new(records:, associations:).call`. The two-keyword
     # form is rewritten to `Preloading.records` before it runs; this
-    # class is the call `check` resolves, and the form that also passes
-    # `scope:`, which the rewrite does not take. A scope is refused
-    # rather than dropped.
+    # class is the call `check` resolves. A call that also names
+    # `scope:` is not rewritten: MRI raises unknown-keyword
+    # `ArgumentError` (message includes "scope"). Spinel has no type
+    # for a `scope: nil` default (`unsupported type nil`), so the
+    # keyword is not part of this signature.
     class Preloader
-      def initialize(records:, associations:, scope: nil)
-        raise ArgumentError, "Preloader scope is not supported" unless scope.nil?
+      def initialize(records:, associations:)
         @records = records
         @associations = associations
       end

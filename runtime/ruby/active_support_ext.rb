@@ -96,7 +96,9 @@ module ActiveSupport
     # taken to be UTC (Rails writes `+00:00` for a non-UTC zone at offset
     # zero, such as London in winter).
     def self.time_json(t)
-      zone = t.zone == "UTC" || (t.utc_offset == 0 && ActiveSupport::JSON.utc_zone?) ? "Z" : t.strftime("%:z")
+      # Concatenate onto a fresh local: Spinel refuses a shared String
+      # written from a conditional into the format append below.
+      zone = (t.zone == "UTC" || (t.utc_offset == 0 && ActiveSupport::JSON.utc_zone?) ? "Z" : t.strftime("%:z")) + ""
       t.strftime("%Y-%m-%dT%H:%M:%S") + format(".%03d", t.usec / 1000) + zone
     end
 

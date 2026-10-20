@@ -48,7 +48,10 @@ module Params
   def self.str(sub, key, fallback)
     value = sub.fetch(key, fallback)
     if value.is_a?(String)
-      value
+      # A fresh string with the same characters. The hash may still
+      # hold a handle another name appends to; this method only answers
+      # the scalar for reading.
+      value + ""
     else
       fallback
     end
