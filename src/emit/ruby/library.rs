@@ -1028,23 +1028,40 @@ fn rewrite_library_partial_render(
     let Some(contract) = contracts.get(&(module_camel.clone(), stem.clone())) else { return };
     let span = expr.span;
     let nil = || sp_expr(ExprNode::Lit { value: Literal::Nil });
-    let lookup = |name: &str| -> Option<Expr> {
+    let locals_lookup = |name: &str| -> Option<Expr> {
         locals
             .iter()
             .find(|(k, _)| k.as_str() == name)
             .map(|(_, v)| v.clone())
-            .or_else(|| {
-                in_scope.iter().find(|p| p.as_str() == name).map(|p| {
-                    Expr::new(span, ExprNode::Var { id: VarId(0), name: p.clone() })
-                })
-            })
+    };
+    let param_lookup = |name: &str| -> Option<Expr> {
+        in_scope.iter().find(|p| p.as_str() == name).map(|p| {
+            Expr::new(span, ExprNode::Var { id: VarId(0), name: p.clone() })
+        })
+    };
+    let lookup = |name: &str| -> Option<Expr> {
+        locals_lookup(name).or_else(|| param_lookup(name))
+    };
+    let caller_flash = [
+        crate::lower::view_to_library::flash_param_in_scope(in_scope, "notice"),
+        crate::lower::view_to_library::flash_param_in_scope(in_scope, "alert"),
+    ];
+    let caller_flash = match (&caller_flash[0], &caller_flash[1]) {
+        (Some(n), Some(a)) => Some([n.clone(), a.clone()]),
+        _ => None,
     };
     let mut view_args: Vec<Expr> = Vec::new();
     view_args.push(lookup(&contract.record).unwrap_or_else(nil));
     for n in &contract.closure {
         view_args.push(lookup(n).unwrap_or_else(nil));
     }
-    view_args.extend(contract.extras_args(lookup, nil, span));
+    view_args.extend(contract.extras_args(
+        locals_lookup,
+        param_lookup,
+        caller_flash.as_ref(),
+        nil,
+        span,
+    ));
     *expr = Expr::new(
         span,
         ExprNode::Send {

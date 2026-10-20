@@ -121,8 +121,15 @@ module ActionView
     # Monomorphic String. Skip gsub when already safe (ERB::Util).
     # Probe with `include?`, not `match?(re)` — Rust/Python have no
     # portable match? emit.
+    #
+    # A safe input is answered as a fresh String (`+ ""`). Returning
+    # `s` kept the caller's handle; Spinel's share analysis then
+    # refused ERB sites that pass `filename.to_s` / `extension` into
+    # the escape (campfire's `active_storage/blobs/_blob`, #9258):
+    # the same characters can still be appended under another name.
+    # The escape's job is text for embedding, not a shared buffer.
     def self.html_escape(s)
-      return s unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("'")
+      return s + "" unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("'")
       s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
     end
 
@@ -140,7 +147,7 @@ module ActionView
     BUILDER_TEXT_PATTERN = /[&<>]/.freeze
 
     def self.builder_text(s)
-      return s unless s.include?("&") || s.include?("<") || s.include?(">")
+      return s + "" unless s.include?("&") || s.include?("<") || s.include?(">")
       s.gsub(BUILDER_TEXT_PATTERN, BUILDER_TEXT_ESCAPES)
     end
 
@@ -158,7 +165,7 @@ module ActionView
     BUILDER_ATTR_PATTERN = /[&<>"\n\r]/.freeze
 
     def self.builder_attr(s)
-      return s unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("\n") || s.include?("\r")
+      return s + "" unless s.include?("&") || s.include?("<") || s.include?(">") || s.include?("\"") || s.include?("\n") || s.include?("\r")
       s.gsub(BUILDER_ATTR_PATTERN, BUILDER_ATTR_ESCAPES)
     end
 

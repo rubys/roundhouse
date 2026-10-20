@@ -977,7 +977,7 @@ module ActiveSupport
     "Bucharest" => "Europe/Bucharest",
     "Cairo" => "Africa/Cairo",
     "Helsinki" => "Europe/Helsinki",
-    "Kyiv" => "Europe/Kiev",
+    "Kyiv" => "Europe/Kyiv",
     "Riga" => "Europe/Riga",
     "Sofia" => "Europe/Sofia",
     "Tallinn" => "Europe/Tallinn",
@@ -1018,7 +1018,7 @@ module ActiveSupport
     "Almaty" => "Asia/Almaty",
     "Astana" => "Asia/Almaty",
     "Novosibirsk" => "Asia/Novosibirsk",
-    "Rangoon" => "Asia/Rangoon",
+    "Rangoon" => "Asia/Yangon",
     "Bangkok" => "Asia/Bangkok",
     "Hanoi" => "Asia/Bangkok",
     "Jakarta" => "Asia/Jakarta",
@@ -1351,10 +1351,17 @@ module ActiveSupport
       end
     end
 
+    # Rails' `zones_map` (`activesupport/lib/active_support/values/time_zone.rb`)
+    # builds this by calling `self[name]` per mapped name and keeping only
+    # the ones that resolve; `[]` itself rescues `TZInfo::InvalidTimezoneIdentifier`
+    # and returns nil for the rest. `lookup` is our spelling of that `[]`.
+    # A host missing a legacy zone file (no `tzdata-legacy`) then just has
+    # fewer zones, not a raise.
     def self.all
       zones = []
       ActiveSupport.rails_zone_names.each do |zone_name|
-        zones << TimeZone.new(zone_name, ActiveSupport.find_zone!(zone_name))
+        zone = lookup(zone_name)
+        zones << zone unless zone.nil?
       end
       # Not `sort { |a, b| … }`: a block's parameters do not type on every target, and 152 zones sort cheaply in place.
       i = 1

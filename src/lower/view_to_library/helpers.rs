@@ -51,6 +51,50 @@ pub(super) fn is_turbo_stream_builder(recv: Option<&Expr>) -> bool {
     }
 }
 
+/// `turbo_stream.<action> target, partial: "…"` with optional `locals:`,
+/// `collection:` and `as:`: the option form, rendering a partial.
+pub(super) struct TurboStreamPartial<'a> {
+    pub target: &'a Expr,
+    pub partial: &'a str,
+    pub locals: Option<&'a [(Expr, Expr)]>,
+    pub collection: Option<&'a Expr>,
+    pub as_name: Option<&'a str>,
+}
+
+/// The option form the walker lowers, for it and for the render graph
+/// alike, so the graph has an edge exactly where a partial is rendered.
+/// None for an option it does not read (`layout:`), a `partial:` or
+/// `locals:` that is not a literal, or `as:` without `collection:` —
+/// dropping any of them would render the partial wrong.
+pub(super) fn turbo_stream_partial<'a>(
+    recv: Option<&Expr>,
+    method: &str,
+    args: &'a [Expr],
+) -> Option<TurboStreamPartial<'a>> {
+    let renders = matches!(method, "append" | "prepend" | "replace" | "update" | "before" | "after");
+    if !renders || !is_turbo_stream_builder(recv) {
+        return None;
+    }
+    let [target, opts] = args else { return None };
+    let ExprNode::Hash { entries, .. } = &*opts.node else { return None };
+    let (mut partial, mut locals, mut collection, mut as_name) = (None, None, None, None);
+    for (k, v) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return None };
+        match (key.as_str(), &*v.node) {
+            ("partial", ExprNode::Lit { value: Literal::Str { value } }) => partial = Some(value.as_str()),
+            ("locals", ExprNode::Hash { entries, .. }) => locals = Some(entries.as_slice()),
+            ("collection", _) => collection = Some(v),
+            ("as", ExprNode::Lit { value: Literal::Sym { value } }) => as_name = Some(value.as_str()),
+            ("as", ExprNode::Lit { value: Literal::Str { value } }) => as_name = Some(value.as_str()),
+            _ => return None,
+        }
+    }
+    if as_name.is_some() && collection.is_none() {
+        return None;
+    }
+    Some(TurboStreamPartial { target, partial: partial?, locals, collection, as_name })
+}
+
 /// The `<turbo-stream target=…>` value for a `turbo_stream.<action>`
 /// call's first argument. Shared by all three spellings — positional,
 /// option-hash and block — so they cannot disagree about what a bare

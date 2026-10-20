@@ -24,6 +24,27 @@ pub fn snake_case(class_name: &str) -> String {
     s
 }
 
+/// ActiveSupport-style word break for a constant segment: like
+/// `snake_case`, but also splits an acronym from the next word
+/// (`HTMLApp` → `html_app`). `snake_case` keeps that as `htmlapp`.
+pub fn underscore_words(name: &str) -> String {
+    let chars: Vec<char> = name.replace("::", "_").chars().collect();
+    let mut out = String::with_capacity(chars.len() + 4);
+    for (i, c) in chars.iter().enumerate() {
+        if c.is_ascii_uppercase()
+            && i > 0
+            && (chars[i - 1].is_ascii_lowercase()
+                || chars[i - 1].is_ascii_digit()
+                || (chars[i - 1].is_ascii_uppercase()
+                    && chars.get(i + 1).is_some_and(char::is_ascii_lowercase)))
+        {
+            out.push('_');
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
 /// Rails `underscore`: like `snake_case`, but `::` becomes a path
 /// separator (`ShortId::CandidateId` → `short_id/candidate_id`). Use for
 /// file placement of possibly-namespaced classes — a literal `::` in a

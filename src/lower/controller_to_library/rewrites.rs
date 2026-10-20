@@ -102,7 +102,7 @@ pub(super) fn partial_view_call_with_record(
     for n in &contract.closure {
         view_args.push(lookup(n).unwrap_or_else(|| ivar(n.as_str(), span)));
     }
-    view_args.extend(contract.extras_args(lookup, || nil_expr(span), span));
+    view_args.extend(contract.extras_args(lookup, |_| None, None, || nil_expr(span), span));
     Some(Expr::new(
         span,
         ExprNode::Send {

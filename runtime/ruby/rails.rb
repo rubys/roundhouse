@@ -451,9 +451,8 @@ module Rails
     # DEFAULT, not a stub for un-ingested app config: Rails always has a
     # session cookie name (it derives one from the app name when the app
     # declares none), and the dispatch has to know it before any app code
-    # runs. `config/initializers/session_store.rb`'s
-    # `config.session_store :cookie_store, key: "..."` is lifted at
-    # ingest into a `session_cookie_key` def on the app's
+    # runs. The application class name and `config.session_store`
+    # declarations are lifted at ingest into a `session_cookie_key` def on the app's
     # `Rails::Application` reopen, which is required right after this
     # file and so overrides this default.
     #

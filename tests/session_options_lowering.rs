@@ -155,12 +155,11 @@ fn one_line_form_lifts() {
 
 #[test]
 fn commented_out_declaration_does_not_lift() {
-    // No app override — the framework default in runtime/ruby/rails.rb
-    // stands, which is what a Rails app with no session_store gets.
+    // A commented declaration keeps the application-derived default.
     assert!(
         lifted_key("# Demo::Application.config.session_store :cookie_store, key: \"nope\"\n")
-            .is_none(),
-        "a commented-out declaration must not lift"
+            .is_some_and(|body| body.contains("_demo_session")),
+        "a commented-out declaration must keep the application default"
     );
 }
 
@@ -171,7 +170,7 @@ fn a_lookalike_option_label_does_not_lift() {
         lifted_key(
             "Demo::Application.config.session_store :cookie_store, secret_key: \"nope\"\n"
         )
-        .is_none(),
-        "only a standalone `key:` label lifts"
+        .is_some_and(|body| body.contains("_session_id")),
+        "an explicit store without a key uses the middleware default"
     );
 }

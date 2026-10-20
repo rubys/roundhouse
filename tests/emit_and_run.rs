@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/session_cookie_key.rs"]
+mod session_cookie_key;
 #[path = "emit_and_run/active_model_attributes.rs"]
 mod active_model_attributes;
 #[path = "emit_and_run/arel_nodes.rs"]
@@ -204,6 +206,8 @@ mod active_support_extensions;
 mod routing_redirect_host;
 #[path = "emit_and_run/time_find_zone.rs"]
 mod time_find_zone;
+#[path = "emit_and_run/time_zone_missing_zonefile.rs"]
+mod time_zone_missing_zonefile;
 #[path = "emit_and_run/time_to_date.rs"]
 mod time_to_date;
 #[path = "emit_and_run/concurrent_map.rs"]

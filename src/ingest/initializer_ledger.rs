@@ -90,7 +90,7 @@ use crate::vfs::Vfs;
 use super::app::{
     available_locales_line, default_locale_line, declares_rails_engine, fallbacks_line, extract_autoload_lib_ignores,
     extract_autoload_path_roots, extract_config_assignments, extract_config_time_zone,
-    extract_collection_cache_store, extract_filter_parameters, extract_initializer_filters, extract_module_mixins, extract_session_cookie_key,
+    extract_collection_cache_store, extract_filter_parameters, extract_initializer_filters, extract_module_mixins,
     extract_time_formats, extract_variable_content_type_exclusions,
     extract_video_preview_arguments, extract_video_previewer_replacement,
     extract_vips_loader_policy, forgery_strategy_line, kaminari_default_per_page,
@@ -152,8 +152,6 @@ struct Probe<'a> {
     /// The whole file: `node`'s offsets index this, not `text`, which
     /// starts at the statement.
     src: &'a str,
-    /// The initializer's file name (`session_store.rb`).
-    file_name: &'a str,
     /// `config.autoload_lib(ignore: …)` directories, before any filtering.
     lib_ignores: &'a [String],
 }
@@ -174,11 +172,11 @@ struct Recognizer {
 /// effect it has on the `App`.
 const RECOGNIZERS: &[Recognizer] = &[
     Recognizer {
-        name: "session_store (config/initializers/session_store.rb: config.session_store key:)",
-        origins: INIT,
+        name: "session_store (config.session_store key:)",
+        origins: INIT_APP,
         levels: ANY,
         reads: |p| {
-            p.file_name == "session_store.rb" && extract_session_cookie_key(p.text.as_bytes()).is_some()
+            super::session_config::reads(p.text.as_bytes())
         },
     },
     Recognizer {
@@ -693,7 +691,7 @@ fn is_not_a_statement(node: &Node<'_>) -> bool {
 }
 
 /// Judge one host statement against the recognizer table.
-fn judge(origin: Origin, st: &Stmt<'_>, file_name: &str, lib_ignores: &[String], src: &str) -> Verdict {
+fn judge(origin: Origin, st: &Stmt<'_>, lib_ignores: &[String], src: &str) -> Verdict {
     if is_not_a_statement(&st.node) {
         return Verdict::NotAStatement;
     }
@@ -701,7 +699,6 @@ fn judge(origin: Origin, st: &Stmt<'_>, file_name: &str, lib_ignores: &[String],
         text: st.text,
         node: &st.node,
         src,
-        file_name,
         lib_ignores,
     };
     if st.level == Level::Inflections {
@@ -853,14 +850,12 @@ fn head_of(node: &Node<'_>, src: &str) -> String {
 }
 
 /// Judge every statement of `statements` and return the ledger.
-#[allow(clippy::too_many_arguments)]
 fn judge_all(
     origin: Origin,
     owner_name: &str,
     path: &str,
     src: &str,
     statements: Vec<Stmt<'_>>,
-    file_name: &str,
     lib_ignores: &[String],
     admitted_isolate: bool,
 ) -> FileLedger {
@@ -880,7 +875,7 @@ fn judge_all(
                 Verdict::Unconsumed
             }
         } else {
-            judge(origin, &st, file_name, lib_ignores, src)
+            judge(origin, &st, lib_ignores, src)
         };
         if verdict == Verdict::Unconsumed {
             // `Const.configure do |c| … end` is a container: nothing reads
@@ -999,7 +994,7 @@ fn initializer_ledger(
         }
         stmts = expanded;
     }
-    judge_all(origin, owner_name, &display_path(path), &src, stmts, file_name, lib_ignores, false)
+    judge_all(origin, owner_name, &display_path(path), &src, stmts, lib_ignores, false)
 }
 
 /// Statements of the `Rails::Application` subclass body in `application.rb`
@@ -1029,7 +1024,6 @@ fn application_ledger(path: &Path, bytes: &[u8], lib_ignores: &[String]) -> File
         &display_path(path),
         &src,
         stmts,
-        "application.rb",
         lib_ignores,
         false,
     )
@@ -1123,7 +1117,6 @@ fn engine_class_ledgers(
             &display_path(path),
             &src,
             stmts,
-            "",
             lib_ignores,
             admitted.contains(&name),
         ));

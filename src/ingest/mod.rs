@@ -32,6 +32,7 @@ mod dry_monads;
 mod dry_validation;
 mod representable;
 mod action_cable_config;
+mod session_config;
 pub(crate) mod database_yml;
 mod public_file_server_config;
 pub mod allow_browser;
