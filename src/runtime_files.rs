@@ -202,4 +202,29 @@ mod tests {
         assert!(flat.iter().all(|(p, _)| p["runtime/".len()..].find('/').is_none()));
         assert!(walk_into("runtime/nope", "", &mut Vec::new()).is_err());
     }
+
+    /// `Tep::Response#headers` must stay a string-keyed Hash under Spinel's
+    /// `--rbs` ingest. The sidecar walks into the emitted tree next to
+    /// `runtime/tep/response.rb`; without `@headers: Hash[String, String]`,
+    /// poly `[]=` on a widened headers slot hands a CString location to
+    /// `sp_poly_as_strbuf` and blog AOT C fails to compile.
+    #[test]
+    fn tep_response_rbs_pins_headers_as_string_hash() {
+        let rbs = read("runtime/spinel/tep/response.rbs")
+            .expect("runtime/spinel/tep/response.rbs must be embedded");
+        assert!(
+            rbs.contains("@headers: Hash[String, String]"),
+            "pin the real Tep.str_hash shape: {rbs}"
+        );
+        assert!(
+            rbs.contains("def headers: () -> Hash[String, String]"),
+            "reader contract must match the ivar: {rbs}"
+        );
+        let mut tep = Vec::new();
+        walk_into("runtime/spinel/tep", "runtime/tep/", &mut tep).unwrap();
+        assert!(
+            tep.iter().any(|(p, _)| p == "runtime/tep/response.rbs"),
+            "walk_into must ship the sidecar beside response.rb"
+        );
+    }
 }
