@@ -252,12 +252,8 @@ SPINEL11 = [
 # narrower CORE focus lane (built in focus_plan) and makes those jobs required.
 # Main pushes no longer force this lane: path ownership, `ci:spinel`, or Full
 # (`full-ci` / `ci:full` / `[ci full]`) select Spinel instead.
-# campfire-latest rides Full and this unknown-input lane (never a PR plan,
-# `select(campfire_latest=False)`): the PR's own diff cannot move it.
-SPINEL_LANE = [*BASE, *SPINEL11, "build-site", "archive-results", "campfire-latest"]
-# campfire-latest tracks basecamp/once-campfire main unpinned: it reports
-# how far main is from CAMPFIRE_SHA and never gates (see the workflow).
-ADVISORY = (set(SPINEL11) - {"campfire-archive-build"}) | {"campfire-latest"}
+SPINEL_LANE = [*BASE, *SPINEL11, "build-site", "archive-results"]
+ADVISORY = set(SPINEL11) - {"campfire-archive-build"}
 # Extra-language ledger jobs: advisory on Full/path unless a focus label
 # makes them required for a fix round.
 LEDGER_EXTRAS = {"compare-extra", "smoke-extra"}
@@ -594,7 +590,6 @@ def select(
     focus_compare=(),
     publish=False,
     project_scope=None,
-    campfire_latest=True,
 ):
     focus_extras = tuple(focus_extras or ())
     focus_compare = tuple(focus_compare or ())
@@ -608,7 +603,7 @@ def select(
         return focus_plan(focus_extras, focus_jruby, focus_spinel, focus_compare)
     if spinel_lane and not full:
         return finish(
-            [j for j in SPINEL_LANE if campfire_latest or j != "campfire-latest"],
+            list(SPINEL_LANE),
             [],
             [],
             False,
@@ -719,8 +714,6 @@ def select(
         wasm = site = spinel = True
         reasons.append("full validation requested")
         jobs_selected.update(SPINEL11)
-        if campfire_latest:
-            jobs_selected.add("campfire-latest")
         spinel_tests.update(SPINEL_TESTS)
     if spinel:
         jobs_selected.add("spinel-build")
@@ -753,9 +746,7 @@ def select(
         jobs.append("build-site")
     if "build-site" in jobs or {"build-site", "campfire-archive-build"} & jobs_selected:
         jobs_selected.add("archive-results")
-    jobs.extend(
-        j for j in [*SPINEL11, "archive-results", "campfire-latest"] if j in jobs_selected
-    )
+    jobs.extend(j for j in [*SPINEL11, "archive-results"] if j in jobs_selected)
     if publish:
         if not full:
             raise ValueError("publication requires full validation mode")
@@ -1261,7 +1252,6 @@ def main():
         focus_compare=focus_compare,
         publish=publish,
         project_scope=project_scope,
-        campfire_latest=not pr,
     )
     if reason:
         plan["reasons"].append(reason)
@@ -1285,20 +1275,6 @@ def main():
             )
     if spinel and spinel != "master" and not SHA.fullmatch(spinel):
         raise ValueError("invalid Spinel revision")
-    campfire = ""
-    if "campfire-latest" in plan["jobs"]:
-        try:
-            campfire = subprocess.check_output(
-                ["gh", "api", "repos/basecamp/once-campfire/commits/main", "--jq", ".sha"],
-                text=True,
-            ).strip()
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            campfire = "main"
-            plan["reasons"].append(
-                "Campfire main lookup unavailable: campfire-latest fetches the branch tip"
-            )
-    if campfire and campfire != "main" and not SHA.fullmatch(campfire):
-        raise ValueError("invalid Campfire revision")
     write_outputs(
         {
             "plan": plan,
@@ -1317,7 +1293,6 @@ def main():
             "site": plan["site"],
             "publish": plan["publish"],
             "spinel-revision": spinel,
-            "campfire-latest-revision": campfire,
         }
     )
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):

@@ -84,7 +84,6 @@ jobs:
       site: ${{ steps.plan.outputs.site }}
       publish: ${{ steps.plan.outputs.publish }}
       spinel-revision: ${{ steps.plan.outputs.spinel-revision }}
-      campfire-latest-revision: ${{ steps.plan.outputs.campfire-latest-revision }}
       spinel-tests: ${{ steps.plan.outputs.spinel-tests }}
       spinel-framework-shards: ${{ steps.plan.outputs.spinel-framework-shards }}
       spinel-timings: ${{ steps.plan.outputs.spinel-timings }}
@@ -1704,108 +1703,6 @@ jobs:
           name: campfire-conformance-summary
           path: /tmp/campfire-suite/summary.json
           if-no-files-found: warn
-
-  # campfire-latest: the same conformance run against basecamp/once-campfire
-  # MAIN as of this run (the planner resolves it once), on the Ruby that
-  # main's own `.ruby-version` names. ADVISORY, and deliberately so: the
-  # blocking job above stays on the pinned CAMPFIRE_SHA, because a moving
-  # input cannot own a ratchet and upstream churn must not turn unrelated
-  # PRs red (the spinel-framework rule). What this job buys is the
-  # same-day signal: every run says how far main is from the pin in gaps,
-  # errors and tests, so a bump starts from a measured list.
-  campfire-latest:
-    needs: [build-roundhouse, plan]
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-latest') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
-    outputs: *advisory-outputs
-    continue-on-error: true
-    runs-on: ubuntu-latest
-    timeout-minutes: 55
-    env:
-      CAMPFIRE_LATEST: ${{ needs.plan.outputs.campfire-latest-revision }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: roundhouse-debug-bin
-          path: roundhouse-debug-bin
-      - *stage-roundhouse-debug-bin
-      - name: Fetch once-campfire main
-        run: |
-          set -euo pipefail
-          test -n "$CAMPFIRE_LATEST"
-          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_LATEST}" -o /tmp/campfire.tar.gz
-          mkdir -p campfire-latest
-          tar -xzf /tmp/campfire.tar.gz -C campfire-latest --strip-components=1
-          echo "campfire main: $CAMPFIRE_LATEST, Ruby $(cat campfire-latest/.ruby-version)"
-      # `default` reads campfire's own `.ruby-version` from working-directory.
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: default
-          working-directory: campfire-latest
-      - *campfire-suite-apt
-      - *campfire-suite-gems
-      - name: Survey the strict emit
-        id: survey
-        run: |
-          set -uo pipefail
-          status=0
-          "$ROUNDHOUSE_BIN" --target spinel --survey campfire-latest -o /tmp/campfire-latest-spinel \
-            > /tmp/campfire-latest-strict.log 2>&1 || status=$?
-          errors=$(grep -c 'error\[' /tmp/campfire-latest-strict.log || true)
-          gaps=$(sed -n 's/.*Survey: \([0-9]*\) ingest gap.*/\1/p' /tmp/campfire-latest-strict.log | head -1)
-          # No survey line means no gap was recorded, but only a run that
-          # finished or stopped at counted errors proves that: a crash with
-          # neither is unknown, and the suite must not run on it.
-          if [ -z "$gaps" ]; then
-            if [ "$status" -ne 0 ] && [ "$errors" -eq 0 ]; then gaps=unknown; else gaps=0; fi
-          fi
-          echo "errors=$errors" >> "$GITHUB_OUTPUT"
-          echo "gaps=$gaps" >> "$GITHUB_OUTPUT"
-          echo "campfire main strict emit: $gaps ingest gap(s), $errors error(s), exit $status"
-          sed -n '/── Survey/,$p' /tmp/campfire-latest-strict.log
-          grep 'error\[' /tmp/campfire-latest-strict.log || true
-      - name: Run campfire's suite against the emit
-        id: suite
-        if: ${{ steps.survey.outputs.gaps == '0' }}
-        run: |
-          scripts/campfire-suite \
-            --tally /tmp/campfire-latest-tally.txt \
-            --fail-log /tmp/campfire-latest-failures.txt \
-            --json /tmp/campfire-latest-suite/summary.json \
-            campfire-latest
-      - name: Report against the pinned floor
-        if: always()
-        env:
-          GAPS: ${{ steps.survey.outputs.gaps }}
-          ERRORS: ${{ steps.survey.outputs.errors }}
-        run: |
-          set -uo pipefail
-          floor=$(awk '/FLOOR_TESTS:/ {print $2; exit}' .github/workflows/ci.yml)
-          if [ -s /tmp/campfire-latest-tally.txt ]; then
-            tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-latest-tally.txt)
-            total=$(awk -F'|' '{t += $4} END {print t+0}' /tmp/campfire-latest-tally.txt)
-            suite="$tests of $total tests green (pinned floor: $floor)"
-          else
-            if [ "${GAPS:-}" = "unknown" ]; then
-              suite="not run: the strict emit failed before a survey (see the step log)"
-            else
-              suite="not run: the emit stops at ${GAPS:-?} ingest gap(s)"
-            fi
-          fi
-          {
-            echo "## Campfire main vs. the pin"
-            echo
-            echo "| | |"
-            echo "|---|---|"
-            echo "| main | \`${CAMPFIRE_LATEST}\` (Ruby $(cat campfire-latest/.ruby-version 2>/dev/null)) |"
-            echo "| pin | \`${CAMPFIRE_SHA}\` |"
-            echo "| ingest gaps | ${GAPS:-?} |"
-            echo "| strict-emit errors | ${ERRORS:-?} (pin ceiling: 0) |"
-            echo "| suite | $suite |"
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "::notice::campfire main: ${GAPS:-?} gap(s), ${ERRORS:-?} error(s); suite $suite"
-      - *advisory-result
-
 
   # -------------------------------------------------------------------
   # (toolchain-ruby retired by the smoke consolidation: smoke-ruby's
@@ -3862,7 +3759,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, campfire-latest, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

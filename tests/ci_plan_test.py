@@ -207,43 +207,20 @@ class Routing(unittest.TestCase):
         self.assertNotIn("build-wasm", plan["jobs"])
         self.assertIn("generated_columns_spinel", plan["spinel_tests"])
 
-    def test_campfire_latest_is_advisory_and_never_in_a_pr_plan(self):
-        # Unpinned basecamp/once-campfire main: reported on Full and the
-        # unknown-input Spinel lane, advisory, and never part of a PR's plan.
-        for plan in (ci.select([], spinel_lane=True), ci.select([], full=True)):
-            self.assertIn("campfire-latest", plan["jobs"])
-            self.assertIn("campfire-latest", plan["advisory"])
-            self.assertNotIn("campfire-latest", plan["required"])
-        for paths in (["README.md"], ["src/analyze/call.rs"], ["src/emit/go.rs"]):
-            self.assertNotIn("campfire-latest", ci.select(paths)["jobs"])
-        # Path-owned Spinel on main/PR also skips it — Full owns that signal.
-        self.assertNotIn(
-            "campfire-latest",
-            ci.select(["runtime/spinel/db.rb"])["jobs"],
-        )
-        # A pull request never plans it, even under ci:full or with unknown
-        # inputs (both of which otherwise select it).
-        for plan in (
-            ci.select([], full=True, campfire_latest=False),
-            ci.select([], spinel_lane=True, campfire_latest=False),
-        ):
-            self.assertNotIn("campfire-latest", plan["jobs"])
+    def test_campfire_latest_is_not_planned(self):
+        # Dropped: tip drift against once-campfire main is not a standing job.
+        self.assertNotIn("campfire-latest", ci.SPINEL_LANE)
+        self.assertNotIn("campfire-latest", ci.ADVISORY)
         self.assertNotIn("campfire-latest", ci.BASE)
         self.assertNotIn("campfire-latest", ci.PUBLICATION)
-
-    def test_campfire_latest_failure_does_not_fail_the_gate(self):
-        plan = ci.select([], spinel_lane=True)
-        needs = {job: {"result": "success", "outputs": {"execution": "success"}} for job in plan["jobs"]}
-        needs["plan"] = {"result": "success"}
-        needs["compact-required"] = {"result": "success"}
-        needs["campfire-spinel-compare"]["outputs"] = {
-            "default": "success", "minor-gc": "success", "verify-gen": "success"
-        }
-        # continue-on-error reports success; the execution output carries the failure.
-        needs["campfire-latest"] = {"result": "success", "outputs": {"execution": "failure"}}
-        failures, complete = ci.check_results(plan, needs)
-        self.assertEqual(failures, [])
-        self.assertFalse(complete)
+        for plan in (
+            ci.select([], spinel_lane=True),
+            ci.select([], full=True),
+            ci.select(["README.md"]),
+            ci.select(["runtime/spinel/db.rb"]),
+            ci.select(["src/emit/go.rs"]),
+        ):
+            self.assertNotIn("campfire-latest", plan["jobs"])
 
     def test_spinel_compact_gate_only_requires_publication_floor(self):
         plan = ci.select([], spinel_lane=True)
@@ -304,7 +281,6 @@ class Routing(unittest.TestCase):
         )["plan"]
         self.assertEqual(floor["jobs"], list(ci.BASE))
         self.assertFalse(any(job in floor["jobs"] for job in ci.SPINEL11))
-        self.assertNotIn("campfire-latest", floor["jobs"])
 
         go = self.run_planner(
             {"before": "0" * 40},
@@ -324,8 +300,7 @@ class Routing(unittest.TestCase):
         self.assertIn("spinel-build", spinel["jobs"])
         self.assertIn("spinel-toolchain", spinel["jobs"])
         self.assertIn("spinel-framework", spinel["jobs"])
-        # Path-owned Spinel is not the always-on SPINEL_LANE (no campfire-latest).
-        self.assertNotIn("campfire-latest", spinel["jobs"])
+        # Path-owned Spinel is not the always-on SPINEL_LANE.
         self.assertNotEqual(spinel["jobs"], ci.SPINEL_LANE)
 
     def run_planner(self, event_body, env, changed):
@@ -347,44 +322,6 @@ class Routing(unittest.TestCase):
             ):
                 self.assertEqual(ci.main(), 0)
             return output.call_args.args[0]
-
-    def test_full_and_unknown_main_resolve_campfire_main_for_campfire_latest(self):
-        main = {"GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main"}
-        full = self.run_planner(
-            {"before": "0" * 40},
-            {**main, "CI_FULL": "true"},
-            {"return_value": (["README.md"], None)},
-        )
-        self.assertIn("campfire-latest", full["plan"]["jobs"])
-        self.assertEqual(full["campfire-latest-revision"], "3" * 40)
-        unknown = self.run_planner(
-            {"before": "0" * 40},
-            main,
-            {"side_effect": ValueError("no tree")},
-        )
-        self.assertIn("campfire-latest", unknown["plan"]["jobs"])
-        self.assertEqual(unknown["campfire-latest-revision"], "3" * 40)
-
-    def test_pull_requests_never_plan_campfire_latest(self):
-        pr = {"pull_request": {"number": 1, "labels": [{"name": "ci:full"}], "draft": False}}
-        for changed in (
-            {"return_value": (["README.md"], None)},
-            {"side_effect": ValueError("unknown inputs")},
-        ):
-            outputs = self.run_planner(
-                pr,
-                {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/1/merge"},
-                changed,
-            )
-            self.assertNotIn("campfire-latest", outputs["plan"]["jobs"])
-            self.assertEqual(outputs["campfire-latest-revision"], "")
-        unknown = self.run_planner(
-            {"pull_request": {"number": 1, "labels": [], "draft": False}},
-            {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/1/merge"},
-            {"side_effect": ValueError("unknown inputs")},
-        )
-        self.assertIn("campfire-conformance", unknown["plan"]["jobs"])
-        self.assertNotIn("campfire-latest", unknown["plan"]["jobs"])
 
     def test_full_input_on_main_still_selects_every_sdk(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -459,7 +396,6 @@ class Routing(unittest.TestCase):
             {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/1/merge"},
             {"return_value": (["src/emit/go.rs"], None)},
         )
-        self.assertNotIn("campfire-latest", outputs["plan"]["jobs"])
         self.assertFalse(outputs["plan"]["wasm"])
         self.assertEqual(outputs["plan"]["smoke_extra"], ["go"])
         branch = self.run_planner(
@@ -488,8 +424,7 @@ class Routing(unittest.TestCase):
             ):
                 self.assertEqual(ci.main(), 0)
             plan = output.call_args.args[0]["plan"]
-            # A pull request: the Spinel lane without campfire-latest.
-            self.assertEqual(plan["jobs"], [j for j in ci.SPINEL_LANE if j != "campfire-latest"])
+            self.assertEqual(plan["jobs"], list(ci.SPINEL_LANE))
             self.assertEqual(plan["extra_compare"], [])
             self.assertFalse(plan["wasm"])
             self.assertTrue(
