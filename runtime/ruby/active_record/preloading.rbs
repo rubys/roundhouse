@@ -4,7 +4,7 @@ module ActiveRecord
       @records: Array[Base]
       @associations: untyped
 
-      def initialize: (records: Array[Base], associations: untyped, ?scope: nil) -> void
+      def initialize: (records: Array[Base], associations: untyped) -> void
       def call: () -> nil
     end
   end
