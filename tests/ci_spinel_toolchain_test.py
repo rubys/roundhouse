@@ -201,6 +201,29 @@ class SpinelToolchainRestoreTests(unittest.TestCase):
                 self.assertTrue(path.is_file(), key)
                 self.assertTrue(os.access(path, os.X_OK), key)
 
+    def test_restore_rejects_duplicate_archive_members(self):
+        with tempfile.TemporaryDirectory(prefix="spinel-toolchain-ci-") as tmp:
+            root = Path(tmp)
+            archive, inventory_path, inventory = self._bundle(root)
+            binary = root / inventory["spinel_toolchain"]["path"]
+            # Rebuild with the spinel binary listed twice under the same name.
+            with tarfile.open(archive, "w:gz") as tar:
+                for key in ("spinel_toolchain", "roundhouse", "tiny_api"):
+                    path = root / inventory[key]["path"]
+                    tar.add(path, arcname=path.relative_to(root).as_posix())
+                tar.add(binary, arcname=binary.relative_to(root).as_posix())
+            inventory["archive_sha256"] = sha256(archive.read_bytes())
+            inventory_path.write_text(json.dumps(inventory))
+            for key in ("spinel_toolchain", "roundhouse", "tiny_api"):
+                (root / inventory[key]["path"]).unlink()
+            args = mock.Mock(archive=archive, inventory=inventory_path, env_file=None)
+            with mock.patch.object(ci, "ROOT", root), mock.patch.object(
+                ci, "source_sha", return_value="a" * 40
+            ), mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(root / "target")}, clear=False):
+                with self.assertRaises(ci.ContractError) as caught:
+                    ci.restore(args)
+            self.assertIn("archive members differ", str(caught.exception))
+
     def test_restore_rejects_unexpected_archive_members(self):
         with tempfile.TemporaryDirectory(prefix="spinel-toolchain-ci-") as tmp:
             root = Path(tmp)

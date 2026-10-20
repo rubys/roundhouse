@@ -284,7 +284,12 @@ def restore(args: argparse.Namespace) -> int:
     with tarfile.open(archive, "r:gz") as tar:
         members = tar.getmembers()
         names = {member.name for member in members}
-        if names != expected or not all(member.isfile() for member in members):
+        # len check rejects duplicate member names (a set alone would not).
+        if (
+            names != expected
+            or len(members) != len(expected)
+            or not all(member.isfile() for member in members)
+        ):
             raise ContractError("archive members differ from producer inventory")
         for member in members:
             # Reject path traversal even if inventory validation was bypassed.
