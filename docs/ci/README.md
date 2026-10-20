@@ -34,13 +34,12 @@ tests, Store analysis, the CRuby comparison against Rails (on `MRI_RUBY`, the
 supported minimum, with its runtime gates repeated on `MRI_RUBY_NEXT` in
 `compare-ruby-next`), and Campfire
 conformance/comparison. Campfire conformance is pinned (`CAMPFIRE_SHA`)
-and blocking. Tip drift against basecamp/once-campfire `main` is checked
-when bumping that pin (manual survey or a Full run that exercises the
-pinned suite), not as a standing CI job. `unit-build` compiles one
-archive of all library, binary, and integration tests. Four unit shards
-partition the active cases; ignored integrations still need selected
-toolchain lanes. Framework and toolchain suites also run inside comparison
-jobs. **Spinel is not part of `BASE`.**
+and blocking. Tip drift against basecamp/once-campfire `main` is not a
+standing CI job; survey tip only when deliberately bumping that pin.
+`unit-build` compiles one archive of all library, binary, and integration
+tests. Four unit shards partition the active cases; ignored integrations
+still need selected toolchain lanes. Framework and toolchain suites also
+run inside comparison jobs. **Spinel is not part of `BASE`.**
 
 That floor is the merge claim for ordinary analyzer, lowerer, and runtime
 work: the Ruby shape runs, and Campfire still matches Rails. Crystal, Go,
@@ -173,8 +172,8 @@ Swift, Kotlin, C#, Elixir, Python, Rust, TypeScript, WASM, or the
 extra-language smoke matrix. Broad Spinel and extra-target red are
 follow-up work on the three-hour scheduled Full validation cycle, not a
 merge gate for later unrelated Ruby PRs. That schedule remains the
-extra-language ledger, broad Spinel poll (unpinned `matz/spinel`),
-publication path, and floating-pin catch-up.
+extra-language ledger, broad Spinel poll (unpinned `matz/spinel`), and
+publication path.
 
 ## Request full, Spinel, focus, or fresh validation
 
