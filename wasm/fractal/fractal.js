@@ -12,11 +12,11 @@
 
 import { createClient } from "../lib/wasm-client.mjs";
 
-// A small app, written to exercise the passes. Nothing here is from a real
-// application.
+// A small app to compile. No pass is registered yet, so the only stage is
+// the source. Nothing here is from a real application.
 const EXAMPLES = {
-  enum: {
-    label: "Enum predicates (inline-enum-predicates)",
+  order: {
+    label: "Order model",
     file: "app/models/order.rb",
     src: {
       "app/models/order.rb": `# frozen_string_literal: true
@@ -24,7 +24,6 @@ const EXAMPLES = {
 class Order < ApplicationRecord
   enum :status, { pending: 0, paid: 1, shipped: 2, refunded: 3 }
   enum :channel, { web: "web", pos: "pos" }, prefix: true
-  include Public::OrderPolicy
 
   def shippable?
     paid? && !refunded?
@@ -42,17 +41,7 @@ end
   primary_abstract_class
 end
 `,
-      // A nested application namespace still belongs to the program.
-      "app/models/public/order_policy.rb": `module Public
-  module OrderPolicy
-    def pending?
-      super && created_at > 1.day.ago
-    end
-  end
-end
-`,
-      // The pass reads the Active Record version from here: change it to
-      // 7.0.8 and it declines.
+      // Passes read gem versions from here.
       "Gemfile.lock": `GEM
   remote: https://rubygems.org/
   specs:
@@ -83,7 +72,7 @@ const els = {
 };
 
 let client = null;
-let exampleKey = "enum";
+let exampleKey = "order";
 let src = {};           // the live, editable source tree
 let srcPath = null;     // the file in the editor
 let file = null;        // the file compiled (--file)
@@ -115,7 +104,7 @@ function writeHash() {
 }
 
 function loadExample(key) {
-  exampleKey = EXAMPLES[key] ? key : "enum";
+  exampleKey = EXAMPLES[key] ? key : "order";
   const ex = EXAMPLES[exampleKey];
   src = { ...ex.src };
   srcPath = ex.file;
@@ -319,7 +308,7 @@ function wire() {
 
 async function boot() {
   wire();
-  loadExample(readHash().example || "enum");
+  loadExample(readHash().example || "order");
   client = createClient({
     workerUrl: new URL("../lib/worker.mjs", import.meta.url),
     wasmUrl: new URL("../lib/roundhouse_wasm.wasm", import.meta.url).href,

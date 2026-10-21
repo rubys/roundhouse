@@ -1,23 +1,23 @@
 //! The pass explorer's view of a build (`fractal::stages`), over an app
 //! held in memory the way the browser holds it: stage 0 is the source,
 //! each later stage the file after one more pass, with what that pass
-//! rewrote and declined. The rewrites themselves are pinned by
-//! `tests/fractal_enum.rs`; this pins the view and `Cx::in_memory`.
+//! rewrote and declined. No pass is registered, so the passes here are
+//! test-only renames; this pins the view and `Cx::in_memory`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use roundhouse::analyze::Analyzer;
-use roundhouse::emit::fractal::{self, Pass, stages::Stages};
+use roundhouse::emit::fractal::{self, Cx, Edit, Pass, Proposal, Scope, Unit, stages::Stages};
 use roundhouse::span::SourceFile;
 
 const ORDER_RB: &str = "app/models/order.rb";
 
 const ORDER: &str = r#"class Order < ApplicationRecord
-  enum :status, { pending: 0, paid: 1 }
+  def state = :todo
 
-  def shippable?
-    paid? && !pending?
+  def next_state
+    :later
   end
 end
 "#;
@@ -28,20 +28,64 @@ fn lock(version: &str) -> String {
     format!("GEM\n  remote: https://rubygems.org/\n  specs:\n    activerecord ({version})\n\nPLATFORMS\n  ruby\n\nDEPENDENCIES\n  activerecord\n\nBUNDLED WITH\n   2.6.9\n")
 }
 
-/// Run the registered passes over `files` of the in-memory app `src`,
-/// as the wasm's `fractal_stages` export does.
-fn stages(src: &[(&str, &str)], files: &[&str], untrusted: &[&str]) -> Stages {
+/// Rewrites the symbol `:<from>` to `:<to>_<activerecord version>`, so a
+/// stage shows which lockfile the pass read. Declines when the lockfile
+/// pins no activerecord, or the app defines a method named `<from>`.
+struct Rename {
+    name: &'static str,
+    from: &'static str,
+    to: &'static str,
+}
+
+impl Pass for Rename {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn summary(&self) -> &'static str {
+        "Renames a symbol (test only)."
+    }
+
+    fn scope(&self) -> Scope {
+        Scope::Files(Vec::new())
+    }
+
+    fn run(&self, cx: &Cx<'_>, unit: &Unit<'_>) -> Proposal {
+        let mut proposal = Proposal::default();
+        let symbol = format!(":{}", self.from);
+        for (start, _) in unit.text.match_indices(&symbol) {
+            let end = start + symbol.len();
+            if unit.text[end..].starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            let span = unit.span(start, end);
+            if let Some(sites) = cx.defined_methods().get(self.from) {
+                proposal.declined.push((span, format!("the app defines `{}` itself ({})", self.from, sites.join(", "))));
+            } else if let Some(version) = cx.gem_version("activerecord") {
+                proposal.edits.push(Edit { span, text: format!(":{}_{}", self.to, version.replace('.', "_")) });
+            } else {
+                proposal.declined.push((span, "Gemfile.lock pins no activerecord".to_string()));
+            }
+        }
+        proposal
+    }
+}
+
+const TODO: Rename = Rename { name: "rename-todo", from: "todo", to: "done" };
+const LATER: Rename = Rename { name: "rename-later", from: "later", to: "soon" };
+
+/// Run `passes` over `files` of the in-memory app `src`, as the wasm's
+/// `fractal_stages` export does with the registered passes.
+fn stages(src: &[(&str, &str)], files: &[&str], untrusted: &[&str], passes: &[&dyn Pass]) -> Stages {
     let sources: Vec<SourceFile> = src.iter().map(|(p, t)| SourceFile { path: p.to_string(), text: t.to_string() }).collect();
     let lockfile = src.iter().find(|(p, _)| *p == "Gemfile.lock").map(|(_, t)| t.to_string());
     let tree: HashMap<PathBuf, Vec<u8>> = src.iter().map(|(p, t)| (PathBuf::from(p), t.as_bytes().to_vec())).collect();
     let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
-    let passes = fractal::pass::registered();
-    let passes: Vec<&dyn Pass> = passes.iter().map(|p| p.as_ref()).collect();
     let cx = fractal::Cx::in_memory(&app, Path::new(""), sources, lockfile.as_deref());
     let files: Vec<String> = files.iter().map(|f| f.to_string()).collect();
     let untrusted: Vec<String> = untrusted.iter().map(|f| f.to_string()).collect();
-    fractal::stages::stages(&app, &cx, &files, &untrusted, &passes).expect("stages")
+    fractal::stages::stages(&app, &cx, &files, &untrusted, passes).expect("stages")
 }
 
 fn content<'a>(s: &'a Stages, stage: usize, path: &str) -> &'a str {
@@ -49,36 +93,57 @@ fn content<'a>(s: &'a Stages, stage: usize, path: &str) -> &'a str {
 }
 
 #[test]
-fn stage_zero_is_the_source_and_each_pass_adds_its_rewrites() {
+fn no_pass_is_registered() {
+    assert!(fractal::pass::registered().is_empty());
+}
+
+#[test]
+fn with_no_passes_the_only_stage_is_the_source() {
     let lock = lock("8.1.4");
-    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ORDER_RB], &[]);
+    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ORDER_RB], &[], &[]);
+    assert_eq!(s.stages.len(), 1);
     assert_eq!(s.stages[0].pass, "source");
     assert_eq!(content(&s, 0, ORDER_RB), ORDER);
+    assert!(s.passes.is_empty() && s.skipped.is_empty());
+}
 
-    let enum_stage = s.stages.iter().position(|st| st.pass == "inline-enum-predicates").expect("pass stage");
-    let after = content(&s, enum_stage, ORDER_RB);
-    assert!(after.contains("(status_for_database == 1) && !(status_for_database == 0)"), "{after}");
-    assert_eq!(after.lines().count(), ORDER.lines().count());
-    let rewrites = &s.stages[enum_stage].rewrites;
-    assert_eq!(rewrites.iter().map(|r| r.from.as_str()).collect::<Vec<_>>(), ["paid?", "pending?"]);
-    assert!(rewrites.iter().all(|r| r.pass == "inline-enum-predicates"));
+#[test]
+fn stage_zero_is_the_source_and_each_pass_adds_its_rewrites() {
+    let lock = lock("8.1.4");
+    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ORDER_RB], &[], &[&TODO, &LATER]);
+    assert_eq!(s.stages.iter().map(|st| st.pass.as_str()).collect::<Vec<_>>(), ["source", "rename-todo", "rename-later"]);
+    assert_eq!(content(&s, 0, ORDER_RB), ORDER);
+
+    // Stage n is passes 1..=n applied together; each lists only its own rewrites.
+    let first = content(&s, 1, ORDER_RB);
+    assert!(first.contains("def state = :done_8_1_4") && first.contains("    :later\n"), "{first}");
+    let second = content(&s, 2, ORDER_RB);
+    assert!(second.contains("def state = :done_8_1_4") && second.contains("    :soon_8_1_4\n"), "{second}");
+    assert_eq!(second.lines().count(), ORDER.lines().count());
+    assert_eq!(s.stages[1].rewrites.iter().map(|r| r.from.as_str()).collect::<Vec<_>>(), [":todo"]);
+    assert_eq!(s.stages[2].rewrites.iter().map(|r| r.from.as_str()).collect::<Vec<_>>(), [":later"]);
+    assert!(s.stages[1].rewrites.iter().all(|r| r.pass == "rename-todo"));
+    assert!(s.stages[2].rewrites.iter().all(|r| r.pass == "rename-later"));
     assert!(s.skipped.is_empty());
 }
 
 #[test]
 fn the_lockfile_comes_from_memory() {
     let lock = lock("7.0.8");
-    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ORDER_RB], &[]);
+    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ORDER_RB], &[], &[&TODO]);
+    assert!(content(&s, 1, ORDER_RB).contains("def state = :done_7_0_8"));
+
+    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE)], &[ORDER_RB], &[], &[&TODO]);
     let last = s.stages.last().unwrap();
     assert!(last.rewrites.is_empty());
-    assert_eq!(content(&s, s.stages.len() - 1, ORDER_RB), ORDER);
-    assert!(last.declined.iter().any(|d| d.reason.contains("7.0.8")), "{:?}", last.declined);
+    assert_eq!(content(&s, 1, ORDER_RB), ORDER);
+    assert!(last.declined.iter().any(|d| d.reason.contains("pins no activerecord")), "{:?}", last.declined);
 }
 
 #[test]
 fn app_definitions_count_only_in_program_sources() {
     let lock = lock("8.1.4");
-    let helper = "module OrderHelpers\n  def paid? = true\nend\n";
+    let helper = "module OrderHelpers\n  def todo = true\nend\n";
     for (path, shadows) in [
         ("app/models/order_helpers.rb", true),
         ("app/models/public/order_helpers.rb", true),
@@ -92,11 +157,12 @@ fn app_definitions_count_only_in_program_sources() {
             &[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), (path, helper), ("Gemfile.lock", &lock)],
             &[ORDER_RB],
             &[],
+            &[&TODO],
         );
         let last = s.stages.last().unwrap();
-        assert_eq!(last.rewrites.iter().any(|r| r.from == "paid?"), !shadows, "{path}: {:?}", last.declined);
+        assert_eq!(last.rewrites.iter().any(|r| r.from == ":todo"), !shadows, "{path}: {:?}", last.declined);
         if shadows {
-            assert!(last.declined.iter().any(|d| d.reason.contains("defines `paid?` itself")), "{path}: {:?}", last.declined);
+            assert!(last.declined.iter().any(|d| d.reason.contains("defines `todo` itself")), "{path}: {:?}", last.declined);
         }
     }
 }
@@ -104,7 +170,7 @@ fn app_definitions_count_only_in_program_sources() {
 #[test]
 fn an_untrusted_file_is_skipped_and_stays_the_source() {
     let lock = lock("8.1.4");
-    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ORDER_RB], &[ORDER_RB]);
+    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ORDER_RB], &[ORDER_RB], &[&TODO]);
     assert_eq!(s.skipped.len(), 1);
     assert_eq!(s.skipped[0].file, ORDER_RB);
     for (i, stage) in s.stages.iter().enumerate() {
@@ -120,9 +186,7 @@ fn a_file_ingest_did_not_read_is_an_error() {
     let tree: HashMap<PathBuf, Vec<u8>> = [(PathBuf::from(ORDER_RB), ORDER.as_bytes().to_vec())].into_iter().collect();
     let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
-    let passes = fractal::pass::registered();
-    let passes: Vec<&dyn Pass> = passes.iter().map(|p| p.as_ref()).collect();
     let cx = fractal::Cx::in_memory(&app, Path::new(""), sources, Some(&lock));
-    let err = fractal::stages::stages(&app, &cx, &["app/models/missing.rb".to_string()], &[], &passes).err().expect("error");
+    let err = fractal::stages::stages(&app, &cx, &["app/models/missing.rb".to_string()], &[], &[&TODO]).err().expect("error");
     assert!(err.contains("app/models/missing.rb"), "{err}");
 }

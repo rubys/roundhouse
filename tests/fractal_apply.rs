@@ -174,7 +174,7 @@ fn emit_keeps_the_base_app_and_apply_rejects_invalid_commands() {
     let decisions: serde_json::Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
     assert_eq!(decisions["compiled"], serde_json::json!(["app/models/widget.rb"]));
     assert_eq!(decisions["methods"][0]["key"], "Widget#label@app/models/widget.rb:2");
-    assert!(!out.join("app").exists(), "the pass leaves non-enum source unchanged");
+    assert!(!out.join("app").exists(), "no pass rewrites the file, so the overlay holds no app files");
     assert_eq!(fs::read(app.join("app/models/widget.rb")).unwrap(), source);
     assert_eq!(fs::read(app.join("public/keep")).unwrap(), b"unchanged");
 

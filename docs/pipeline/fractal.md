@@ -137,48 +137,18 @@ on a large app; this proof of concept does not do them yet.
 
 ## Passes
 
-### `inline-enum-predicates`
+None are registered, so a build compiles the selected files and emits
+only the metadata file.
 
-[`enum_predicates.rs`](../../src/emit/fractal/enum_predicates.rs). Rails
-defines each enum predicate with
-`define_method("#{value_method_name}?") { public_send(:"#{name}_for_database") == value }`
-(unchanged from 7.1 to 8.1). In a compiled file that declares an enum in
-a class body, a call to its predicate inside an instance method of that
-class becomes that comparison:
-
-```ruby
-enum :status, { pending: 0, paid: 1 }
-def shippable? = paid? && !archived?
-# compiled
-def shippable? = (status_for_database == 1) && !archived?
-```
-
-The call no longer goes through a block-backed method, which ZJIT cannot
-call directly, or a `public_send` of a dynamic symbol; `status_for_database`
-is an ordinary `def` Active Record generates. A string value is frozen
-(`"r".freeze`) unless the file freezes its literals, so the comparison
-allocates nothing, as Rails' does not.
-
-It declines, with a reason, when:
-
-- `Gemfile.lock` pins no activerecord, or one older than 7.1;
-- the declaration is not literal (`enum :status, STATUSES`), uses the
-  keyword form removed in 8.0 (`enum status: {...}`), maps a label to a
-  symbol (8.1 compares the symbol's name, earlier versions the symbol),
-  or has an option it does not know;
-- the app's own source defines the predicate or `<name>_for_database`
-  anywhere, by `def`, `define_method`, `alias`, `alias_method`, `attr_*`
-  or `delegate`;
-- another enum in the app produces the same predicate, or the class, a
-  subclass, or a module a subclass includes declares an enum it cannot
-  read or defines methods with computed names, either of which could
-  produce it;
-- the method has a local variable named `<name>_for_database`.
-
-It leaves alone calls with a receiver, arguments or a block; calls
-inside a block or lambda (where `self` may differ), under `defined?`, in
-class methods, and in subclasses' methods; and labels Ruby cannot call
-bare.
+The first pass, `inline-enum-predicates`, was removed. It rewrote a call
+to an Active Record enum predicate inside the enum's own class
+(`paid?`) into the comparison Rails' generated method runs
+(`(status_for_database == 1)`), because Rails defined each predicate as
+a `define_method` block calling `public_send`, which ZJIT cannot call
+directly. [rails/rails#59250](https://github.com/rails/rails/pull/59250)
+changes Rails to define those predicates as plain `def`s, which gives
+every app the same benefit without a build step. The pass, with its
+build and runtime tests, remains in the git history.
 
 ## Writing a pass
 
@@ -193,9 +163,9 @@ descendants, every method name the app defines, and the lockfile's gem
 versions. Decline, with a reason, whatever cannot be shown to behave as
 the original does for every caller of the compiled app. Register the pass
 in `pass::registered()`, pin its rewrites and declines in a build test,
-and add a case to `tests/fractal_runtime.rs`. That test emits and applies
-the overlay against Active Record and SQLite. It compares the app's
-answers before and after apply.
+and add a runtime test that emits and applies the overlay against Active
+Record and SQLite and compares the app's answers before and after apply
+(the removed `inline-enum-predicates` had one to start from).
 
 ## Pass explorer
 
@@ -212,9 +182,7 @@ way a build applies them. It writes nothing. The explorer shows the
 complete selected file at each stage, but `fractal emit` writes only
 changed files. Use `fractal apply` to overwrite those files in the base app.
 
-The example defines `pending?` in `app/models/public/order_policy.rb`.
-The browser and disk source filters both keep this nested namespace.
-The pass declines the app-defined predicate instead of replacing its call.
+With no pass registered, the only stage is the source.
 [`site/fractal.html`](../../site/fractal.html) introduces Fractal and
 links to the explorer.
 

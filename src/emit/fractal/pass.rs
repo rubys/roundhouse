@@ -200,9 +200,10 @@ pub struct Edit {
     pub text: String,
 }
 
-/// The passes a build runs, in order.
+/// The passes a build runs, in order. None yet: see
+/// `docs/pipeline/fractal.md`.
 pub fn registered() -> Vec<Box<dyn Pass>> {
-    vec![Box::new(super::enum_predicates::EnumPredicates::default())]
+    Vec::new()
 }
 
 /// Directories [`Cx::app_sources`] skips only at the app root.

@@ -89,8 +89,11 @@
       gems and line numbers; no complete app copy is created.
     </p>
     <p class="status-line">
-      Status: early. The first pass, <code>inline-enum-predicates</code>, is
-      built, and the <a href="fractal/">pass explorer</a> runs it in your browser.
+      Status: early. The pipeline is built, and the <a href="fractal/">pass
+      explorer</a> runs it in your browser. No pass is registered yet: the
+      first, <code>inline-enum-predicates</code>, was removed because
+      <a href="https://github.com/rails/rails/pull/59250">rails/rails#59250</a>
+      changes Rails to give every app its benefit.
     </p>
     <div class="cta">
       <a href="fractal/">▶ Open the pass explorer</a>
@@ -204,11 +207,11 @@
       be added one at a time.
     </p>
     <figure>
-      <svg viewBox="0 0 760 190" role="img" aria-label="A compiled file's source flows through Fractal's passes in order: inline-enum-predicates first, then later passes. Each pass either edits the file or leaves a site alone and says why.">
+      <svg viewBox="0 0 760 190" role="img" aria-label="A compiled file's source flows through Fractal's passes in order: the first pass, then later passes. Each pass either edits the file or leaves a site alone and says why.">
         <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-arrow"/></marker></defs>
         <text x="380" y="28" class="t" text-anchor="middle">Every pass reads the compiled file, and either proposes its edits or says why not.</text>
         <rect x="20"  y="52" width="120" height="62" rx="10" class="d-step"/><text x="80"  y="80" class="t-b" text-anchor="middle">source</text><text x="80"  y="100" class="t-s" text-anchor="middle">as written</text>
-        <rect x="170" y="52" width="190" height="62" rx="10" class="d-pass"/><text x="265" y="80" class="t-m" text-anchor="middle">inline-enum-predicates</text><text x="265" y="100" class="t-s" text-anchor="middle">pass 1</text>
+        <rect x="170" y="52" width="190" height="62" rx="10" class="d-pass-planned"/><text x="265" y="80" class="t-b" text-anchor="middle">first pass</text><text x="265" y="100" class="t-s" text-anchor="middle">pass 1</text>
         <rect x="400" y="52" width="140" height="62" rx="10" class="d-pass-planned"/><text x="470" y="80" class="t-b" text-anchor="middle">next pass</text><text x="470" y="100" class="t-s" text-anchor="middle">pass 2</text>
         <rect x="580" y="52" width="160" height="62" rx="10" class="d-pass-planned"/><text x="660" y="80" class="t-b" text-anchor="middle">…</text><text x="660" y="100" class="t-s" text-anchor="middle">one kind of edit each</text>
         <line x1="140" y1="83" x2="168" y2="83" class="d-line" marker-end="url(#ar2)"/>
@@ -234,40 +237,18 @@
       parse error or warning the original did not.
     </p>
 
-    <h3>Example: inlining enum predicates</h3>
+    <h3>Why the first pass was removed</h3>
     <p>
-      The first pass, <code>inline-enum-predicates</code>, looks at the
-      predicates an Active Record <code>enum</code> generates:
-    </p>
-<pre><code><span class="k">class</span> Order &lt; ApplicationRecord
-  enum :status, { pending: 0, paid: 1, shipped: 2, refunded: 3 }
-
-  <span class="k">def</span> shippable?
-    <mark>paid?</mark> &amp;&amp; !<mark>refunded?</mark>
-  <span class="k">end</span>
-<span class="k">end</span></code></pre>
-    <p>
-      Rails defines each predicate at boot with a <code>define_method</code>
-      block that runs <code>public_send(:status_for_database) == 1</code>. That
-      is a block-backed method, which ZJIT cannot call directly, sending a
-      dynamic symbol on every call. The mapping is written right there in the
-      class, so the pass writes the comparison in place of the call:
-    </p>
-<pre><code><span class="k">def</span> shippable?
-  <mark>(status_for_database == 1)</mark> &amp;&amp; !<mark>(status_for_database == 3)</mark>
-<span class="k">end</span></code></pre>
-    <ul>
-      <li><strong>Same comparison.</strong> <code>status_for_database</code> is the ordinary <code>def</code> Active Record generates; the predicate's block and the <code>public_send</code> are gone.</li>
-      <li><strong>Checked at build time.</strong> It needs Active Record 7.1 or later in <code>Gemfile.lock</code> (the version whose predicate it reproduces) and an enum declared with literals in a class body of the compiled file.</li>
-      <li><strong>Declines where the app could differ.</strong> If the app defines the predicate or <code>status_for_database</code> itself anywhere, another enum produces the same predicate, or a subclass declares an enum the pass cannot read, the call stays.</li>
-      <li><strong>Only calls it can see are its own.</strong> A call with a receiver, arguments or a block, or one inside a block where <code>self</code> may differ, is left alone.</li>
-    </ul>
-    <p>
-      The <a href="fractal/">pass explorer</a> runs the real pass in your
-      browser. Its example defines <code>pending?</code> under
-      <code>app/models/public/order_policy.rb</code>. The pass sees this nested
-      namespace and declines the call. Edit the model or change the Active
-      Record version in <code>Gemfile.lock</code> to inspect the result.
+      The first pass, <code>inline-enum-predicates</code>, replaced a call to
+      an Active Record enum predicate (<code>paid?</code>) inside the enum's
+      own class with the comparison Rails' generated method runs
+      (<code>(status_for_database == 1)</code>). Rails defined each predicate
+      with a <code>define_method</code> block calling <code>public_send</code>,
+      which ZJIT cannot call directly.
+      <a href="https://github.com/rails/rails/pull/59250">rails/rails#59250</a>
+      changes Rails to define those predicates as plain <code>def</code>s,
+      which gives every app the same benefit without a build step, so the
+      pass no longer earns its place.
     </p>
 
     <h2><span class="n">4</span>What “done” looks like</h2>

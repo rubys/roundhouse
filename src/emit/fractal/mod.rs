@@ -35,7 +35,6 @@
 //! `docs/pipeline/fractal.md`.
 
 mod definitions;
-pub mod enum_predicates;
 pub mod pass;
 pub mod region;
 pub mod rewrite;

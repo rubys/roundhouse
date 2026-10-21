@@ -3,12 +3,10 @@
 // render loop over the compiler wasm's `fractal_stages` export.
 //
 // Asserts:
-//   1. boots, compiles app/models/order.rb, and the last stage is
-//      inline-enum-predicates with its rewrites, on the lines they replace;
-//   2. the app's `pending?` in app/models/public/ is declined, with the reason;
-//   3. editing Gemfile.lock to Active Record 7.0.8 re-runs the passes and
-//      the pass declines instead of rewriting;
-//   4. no console or page errors.
+//   1. boots and compiles app/models/order.rb; with no pass registered the
+//      only stage is the source, shown as written, with no rewrites;
+//   2. editing the model re-runs the passes and shows the edited source;
+//   3. no console or page errors.
 //
 // Serve the PARENT (wasm/) as the web root, since the page imports ../lib/:
 //   python3 -m http.server 8099    # run from wasm/
@@ -42,9 +40,7 @@ process.on("unhandledRejection", bail("unhandled rejection"));
 const state = () => page.evaluate(() => ({
   status: document.getElementById("status").textContent,
   chips: [...document.querySelectorAll(".chip .name")].map((e) => e.textContent),
-  added: [...document.querySelectorAll("#code .line.add .txt")].map((e) => e.textContent),
-  removed: [...document.querySelectorAll("#code .line.del .txt")].map((e) => e.textContent),
-  notes: document.getElementById("notes").innerText,
+  lines: [...document.querySelectorAll("#code .line .txt")].map((e) => e.textContent),
   file: document.getElementById("file").value,
 }));
 
@@ -55,27 +51,23 @@ console.log("=== boot ===");
 let s = await state();
 console.log(s.status, "|", s.chips.join(" → "), "|", s.file);
 if (s.file !== "app/models/order.rb") fail(`expected order.rb to be compiled, got ${s.file}`);
-if (s.chips[0] !== "source" || s.chips.at(-1) !== "inline-enum-predicates") fail(`unexpected stages: ${s.chips.join(", ")}`);
-const rewrites = Number((s.status.match(/^(\d+) rewrite/) || [])[1]);
-if (rewrites !== 4) fail(`expected 4 rewrites and no rewrite of the nested app predicate, got "${s.status}"`);
-if (!s.added.some((t) => t.includes("(status_for_database == 1) && !(status_for_database == 3)")))
-  fail(`shippable? not rewritten: ${JSON.stringify(s.added)}`);
-if (!s.added.some((t) => t.includes('(channel_for_database == "pos")')))
-  fail(`channel_pos? not rewritten: ${JSON.stringify(s.added)}`);
-if (s.added.length !== s.removed.length) fail(`a rewrite moved a line: ${s.added.length} added vs ${s.removed.length} removed`);
-if (!/defines `?pending\?`? itself/.test(s.notes)) fail(`pending? not declined: ${s.notes}`);
+if (s.chips.join(",") !== "source") fail(`expected only the source stage, got: ${s.chips.join(", ")}`);
+if (!/^0 rewrite/.test(s.status)) fail(`expected no rewrites, got "${s.status}"`);
+if (!s.lines.some((t) => t.includes("paid? && !refunded?"))) fail(`source not shown: ${JSON.stringify(s.lines)}`);
 
-console.log("=== edit Gemfile.lock to activerecord 7.0.8 ===");
-await page.click("#srcTabs button[title='Gemfile.lock']");
+console.log("=== edit app/models/order.rb ===");
 await page.evaluate(() => {
   const e = document.getElementById("editor");
-  e.value = e.value.replaceAll("8.1.1", "7.0.8");
+  e.value = e.value.replace("paid? && !refunded?", "paid? && !shipped?");
   e.dispatchEvent(new Event("input"));
 });
-await page.waitForFunction(() => /^0 rewrite/.test(document.getElementById("status").textContent), { timeout: 30000 });
+await page.waitForFunction(
+  () => [...document.querySelectorAll("#code .line .txt")].some((e) => e.textContent.includes("paid? && !shipped?")),
+  { timeout: 30000 },
+);
 s = await state();
-console.log(s.status);
-if (!/7\.0\.8 is older than 7\.1/.test(s.notes)) fail(`no version decline: ${s.notes}`);
+console.log(s.status, "|", s.chips.join(" → "));
+if (s.chips.join(",") !== "source" || !/^0 rewrite/.test(s.status)) fail(`unexpected re-run: ${s.status} | ${s.chips.join(", ")}`);
 
 const realErrors = logs.filter((l) => /pageerror|\[error\]|\[crash\]/.test(l));
 if (realErrors.length) {
@@ -87,4 +79,4 @@ if (realErrors.length) {
 await browser.close();
 
 if (failed) process.exit(1);
-console.log("\nOK: Fractal pass explorer — stages, rewrites, declines and re-run on edit verified in a real browser tab.");
+console.log("\nOK: Fractal pass explorer — source stage and re-run on edit verified in a real browser tab.");
