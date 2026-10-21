@@ -15,26 +15,26 @@ import { createClient } from "../lib/wasm-client.mjs";
 // A small app to compile. No pass is registered yet, so the only stage is
 // the source. Nothing here is from a real application.
 const EXAMPLES = {
-  order: {
-    label: "Order model",
-    file: "app/models/order.rb",
+  article: {
+    label: "Article model",
+    file: "app/models/article.rb",
     src: {
-      "app/models/order.rb": `# frozen_string_literal: true
+      "app/models/article.rb": `# frozen_string_literal: true
 
-class Order < ApplicationRecord
-  enum :status, { pending: 0, paid: 1, shipped: 2, refunded: 3 }
-  enum :channel, { web: "web", pos: "pos" }, prefix: true
+class Article < ApplicationRecord
+  enum :status, { draft: 0, published: 1, archived: 2 }
+  enum :visibility, { everyone: "everyone", members: "members" }, prefix: true
 
-  def shippable?
-    paid? && !refunded?
+  def listed?
+    published? && !archived?
   end
 
-  def label
-    return "done" if shipped?
-    channel_pos? ? "in store" : "online"
+  def badge
+    return "archived" if archived?
+    visibility_members? ? "members only" : "public"
   end
 
-  def waiting? = pending?
+  def unfinished? = draft?
 end
 `,
       "app/models/application_record.rb": `class ApplicationRecord < ActiveRecord::Base
@@ -72,7 +72,7 @@ const els = {
 };
 
 let client = null;
-let exampleKey = "order";
+let exampleKey = "article";
 let src = {};           // the live, editable source tree
 let srcPath = null;     // the file in the editor
 let file = null;        // the file compiled (--file)
@@ -104,7 +104,7 @@ function writeHash() {
 }
 
 function loadExample(key) {
-  exampleKey = EXAMPLES[key] ? key : "order";
+  exampleKey = EXAMPLES[key] ? key : "article";
   const ex = EXAMPLES[exampleKey];
   src = { ...ex.src };
   srcPath = ex.file;
@@ -308,7 +308,7 @@ function wire() {
 
 async function boot() {
   wire();
-  loadExample(readHash().example || "order");
+  loadExample(readHash().example || "article");
   client = createClient({
     workerUrl: new URL("../lib/worker.mjs", import.meta.url),
     wasmUrl: new URL("../lib/roundhouse_wasm.wasm", import.meta.url).href,

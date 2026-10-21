@@ -11,9 +11,9 @@ use roundhouse::analyze::Analyzer;
 use roundhouse::emit::fractal::{self, Cx, Edit, Pass, Proposal, Scope, Unit, stages::Stages};
 use roundhouse::span::SourceFile;
 
-const ORDER_RB: &str = "app/models/order.rb";
+const ARTICLE_RB: &str = "app/models/article.rb";
 
-const ORDER: &str = r#"class Order < ApplicationRecord
+const ARTICLE: &str = r#"class Article < ApplicationRecord
   def state = :todo
 
   def next_state
@@ -100,26 +100,26 @@ fn no_pass_is_registered() {
 #[test]
 fn with_no_passes_the_only_stage_is_the_source() {
     let lock = lock("8.1.4");
-    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ORDER_RB], &[], &[]);
+    let s = stages(&[(ARTICLE_RB, ARTICLE), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ARTICLE_RB], &[], &[]);
     assert_eq!(s.stages.len(), 1);
     assert_eq!(s.stages[0].pass, "source");
-    assert_eq!(content(&s, 0, ORDER_RB), ORDER);
+    assert_eq!(content(&s, 0, ARTICLE_RB), ARTICLE);
     assert!(s.passes.is_empty() && s.skipped.is_empty());
 }
 
 #[test]
 fn stage_zero_is_the_source_and_each_pass_adds_its_rewrites() {
     let lock = lock("8.1.4");
-    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ORDER_RB], &[], &[&TODO, &LATER]);
+    let s = stages(&[(ARTICLE_RB, ARTICLE), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ARTICLE_RB], &[], &[&TODO, &LATER]);
     assert_eq!(s.stages.iter().map(|st| st.pass.as_str()).collect::<Vec<_>>(), ["source", "rename-todo", "rename-later"]);
-    assert_eq!(content(&s, 0, ORDER_RB), ORDER);
+    assert_eq!(content(&s, 0, ARTICLE_RB), ARTICLE);
 
     // Stage n is passes 1..=n applied together; each lists only its own rewrites.
-    let first = content(&s, 1, ORDER_RB);
+    let first = content(&s, 1, ARTICLE_RB);
     assert!(first.contains("def state = :done_8_1_4") && first.contains("    :later\n"), "{first}");
-    let second = content(&s, 2, ORDER_RB);
+    let second = content(&s, 2, ARTICLE_RB);
     assert!(second.contains("def state = :done_8_1_4") && second.contains("    :soon_8_1_4\n"), "{second}");
-    assert_eq!(second.lines().count(), ORDER.lines().count());
+    assert_eq!(second.lines().count(), ARTICLE.lines().count());
     assert_eq!(s.stages[1].rewrites.iter().map(|r| r.from.as_str()).collect::<Vec<_>>(), [":todo"]);
     assert_eq!(s.stages[2].rewrites.iter().map(|r| r.from.as_str()).collect::<Vec<_>>(), [":later"]);
     assert!(s.stages[1].rewrites.iter().all(|r| r.pass == "rename-todo"));
@@ -130,32 +130,32 @@ fn stage_zero_is_the_source_and_each_pass_adds_its_rewrites() {
 #[test]
 fn the_lockfile_comes_from_memory() {
     let lock = lock("7.0.8");
-    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ORDER_RB], &[], &[&TODO]);
-    assert!(content(&s, 1, ORDER_RB).contains("def state = :done_7_0_8"));
+    let s = stages(&[(ARTICLE_RB, ARTICLE), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ARTICLE_RB], &[], &[&TODO]);
+    assert!(content(&s, 1, ARTICLE_RB).contains("def state = :done_7_0_8"));
 
-    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE)], &[ORDER_RB], &[], &[&TODO]);
+    let s = stages(&[(ARTICLE_RB, ARTICLE), ("app/models/application_record.rb", BASE)], &[ARTICLE_RB], &[], &[&TODO]);
     let last = s.stages.last().unwrap();
     assert!(last.rewrites.is_empty());
-    assert_eq!(content(&s, 1, ORDER_RB), ORDER);
+    assert_eq!(content(&s, 1, ARTICLE_RB), ARTICLE);
     assert!(last.declined.iter().any(|d| d.reason.contains("pins no activerecord")), "{:?}", last.declined);
 }
 
 #[test]
 fn app_definitions_count_only_in_program_sources() {
     let lock = lock("8.1.4");
-    let helper = "module OrderHelpers\n  def todo = true\nend\n";
+    let helper = "module ArticleHelpers\n  def todo = true\nend\n";
     for (path, shadows) in [
-        ("app/models/order_helpers.rb", true),
-        ("app/models/public/order_helpers.rb", true),
-        ("app/models/test/order_helpers.rb", true),
-        ("test/support/order_helpers.rb", false),
-        ("node_modules/order_helpers.rb", false),
-        ("app/node_modules/order_helpers.rb", false),
-        ("app/.cache/order_helpers.rb", false),
+        ("app/models/article_helpers.rb", true),
+        ("app/models/public/article_helpers.rb", true),
+        ("app/models/test/article_helpers.rb", true),
+        ("test/support/article_helpers.rb", false),
+        ("node_modules/article_helpers.rb", false),
+        ("app/node_modules/article_helpers.rb", false),
+        ("app/.cache/article_helpers.rb", false),
     ] {
         let s = stages(
-            &[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), (path, helper), ("Gemfile.lock", &lock)],
-            &[ORDER_RB],
+            &[(ARTICLE_RB, ARTICLE), ("app/models/application_record.rb", BASE), (path, helper), ("Gemfile.lock", &lock)],
+            &[ARTICLE_RB],
             &[],
             &[&TODO],
         );
@@ -170,11 +170,11 @@ fn app_definitions_count_only_in_program_sources() {
 #[test]
 fn an_untrusted_file_is_skipped_and_stays_the_source() {
     let lock = lock("8.1.4");
-    let s = stages(&[(ORDER_RB, ORDER), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ORDER_RB], &[ORDER_RB], &[&TODO]);
+    let s = stages(&[(ARTICLE_RB, ARTICLE), ("app/models/application_record.rb", BASE), ("Gemfile.lock", &lock)], &[ARTICLE_RB], &[ARTICLE_RB], &[&TODO]);
     assert_eq!(s.skipped.len(), 1);
-    assert_eq!(s.skipped[0].file, ORDER_RB);
+    assert_eq!(s.skipped[0].file, ARTICLE_RB);
     for (i, stage) in s.stages.iter().enumerate() {
-        assert_eq!(content(&s, i, ORDER_RB), ORDER);
+        assert_eq!(content(&s, i, ARTICLE_RB), ARTICLE);
         assert!(stage.rewrites.is_empty() && stage.declined.is_empty());
     }
 }
@@ -182,8 +182,8 @@ fn an_untrusted_file_is_skipped_and_stays_the_source() {
 #[test]
 fn a_file_ingest_did_not_read_is_an_error() {
     let lock = lock("8.1.4");
-    let sources: Vec<SourceFile> = vec![SourceFile { path: ORDER_RB.into(), text: ORDER.into() }];
-    let tree: HashMap<PathBuf, Vec<u8>> = [(PathBuf::from(ORDER_RB), ORDER.as_bytes().to_vec())].into_iter().collect();
+    let sources: Vec<SourceFile> = vec![SourceFile { path: ARTICLE_RB.into(), text: ARTICLE.into() }];
+    let tree: HashMap<PathBuf, Vec<u8>> = [(PathBuf::from(ARTICLE_RB), ARTICLE.as_bytes().to_vec())].into_iter().collect();
     let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
     let cx = fractal::Cx::in_memory(&app, Path::new(""), sources, Some(&lock));

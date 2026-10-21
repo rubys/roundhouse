@@ -93,14 +93,14 @@
       explorer</a> runs it in your browser. No pass is registered yet: the
       first, <code>inline-enum-predicates</code>, was removed because
       <a href="https://github.com/rails/rails/pull/59250">rails/rails#59250</a>
-      changes Rails to give every app its benefit.
+      proposes plain <code>def</code> predicates. The proposal remains open.
     </p>
     <div class="cta">
       <a href="fractal/">▶ Open the pass explorer</a>
     </div>
     <ol>
       <li>Emit the changed files:
-        <pre><code>fractal emit --file app/models/order.rb path/to/app -o out/fractal</code></pre>
+        <pre><code>fractal emit --file app/models/article.rb path/to/app -o out/fractal</code></pre>
       </li>
       <li>Apply them to the base app:
         <pre><code>fractal apply out/fractal path/to/app</code></pre>
@@ -148,7 +148,7 @@
       </svg>
     </figure>
     <div class="cards">
-      <div class="card"><b>The file</b> is what you compile: <code>--file app/models/order.rb</code>. Emit includes it only when a pass changes it.</div>
+      <div class="card"><b>The file</b> is what you compile: <code>--file app/models/article.rb</code>. Emit includes it only when a pass changes it.</div>
       <div class="card python"><b>An edit</b> is where a rewrite happens: a span of the file replaced, on the same line.</div>
       <div class="card go"><b>Not sure?</b> Fractal leaves the code as written and says why.</div>
     </div>
@@ -240,15 +240,15 @@
     <h3>Why the first pass was removed</h3>
     <p>
       The first pass, <code>inline-enum-predicates</code>, replaced a call to
-      an Active Record enum predicate (<code>paid?</code>) inside the enum's
+      an Active Record enum predicate (<code>published?</code>) inside the enum's
       own class with the comparison Rails' generated method runs
-      (<code>(status_for_database == 1)</code>). Rails defined each predicate
+      (<code>(status_for_database == 1)</code>). Rails defines each predicate
       with a <code>define_method</code> block calling <code>public_send</code>,
       which ZJIT cannot call directly.
       <a href="https://github.com/rails/rails/pull/59250">rails/rails#59250</a>
-      changes Rails to define those predicates as plain <code>def</code>s,
-      which gives every app the same benefit without a build step, so the
-      pass no longer earns its place.
+      proposes plain <code>def</code> predicates so every app can get the
+      benefit without a build step. The proposal remains open; released
+      Rails versions still use block-backed predicates.
     </p>
 
     <h2><span class="n">4</span>What “done” looks like</h2>

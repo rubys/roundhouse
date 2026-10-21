@@ -797,6 +797,14 @@ const RUNTIME_ATTRS_SLOTS: &[&str] = &[
     "destroy_by",
     "delete_by",
     "exists?",
+    // The find-or-build/create family takes the same condition hash, which
+    // is also what the record it builds is given: campfire's push
+    // subscriptions controller moved from `find_by` to
+    // `@push_subscriptions.find_or_initialize_by(push_subscription_params)`
+    // at once-campfire c8f74a0.
+    "find_or_initialize_by",
+    "find_or_create_by",
+    "find_or_create_by!",
 ];
 
 fn convert_attributes_assignments(app: &mut App, specs: &ParamsSpecs) {

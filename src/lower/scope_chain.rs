@@ -2922,6 +2922,13 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
                 // `merge_scope_attributes`', because the query half needs
                 // the same conditions anyway.
                 | "find_or_create_by"
+                // The same lookup, building rather than saving on a miss:
+                // `Relation#find_or_initialize_by` gives the new record the
+                // scope's attributes, as Rails' does through an
+                // association. Campfire's push subscription controller
+                // looks its endpoint up on a parked `Current.user
+                // .push_subscriptions` read this way since c8f74a0.
+                | "find_or_initialize_by"
         ),
     }
 }
@@ -4986,6 +4993,100 @@ fn rewrite_relation_taking_body(
     };
     let mut locals = Locals::default();
     rewrite(body, &ctx, &mut locals);
+}
+
+/// Ivars a class binds, in every method that assigns them, to one and the
+/// same association read: campfire's push-subscriptions controller
+/// opens each action with `@push_subscriptions = Current.user
+/// .push_subscriptions` (its `before_action`, inlined per action) and
+/// reads the ivar again in the private `register_while_signed_in`. Any
+/// other assignment to the ivar, or two different reads, and it is left
+/// out. Compared by emitted text, so an inlined `before_action` (one
+/// source, copied into each action) agrees with itself.
+pub fn class_ivar_assoc_bindings(
+    methods: &[crate::dialect::MethodDef],
+    assocs: &AssocRegistry,
+) -> Vec<(Symbol, Expr)> {
+    fn collect(e: &Expr, assocs: &AssocRegistry, out: &mut Vec<(Symbol, Option<Expr>)>) {
+        if let ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } = &*e.node {
+            let assoc_read = matches!(&*value.node,
+                ExprNode::Send { recv: Some(_), method, args, block: None, .. }
+                    if args.is_empty() && assocs.is_has_many_name(method));
+            out.push((name.clone(), assoc_read.then(|| value.clone())));
+        }
+        e.node.for_each_child(&mut |c| collect(c, assocs, out));
+    }
+    let mut seen: Vec<(Symbol, Option<Expr>)> = Vec::new();
+    for m in methods {
+        collect(&m.body, assocs, &mut seen);
+    }
+    let mut out: Vec<(Symbol, Expr)> = Vec::new();
+    let mut names: Vec<Symbol> = seen.iter().map(|(n, _)| n.clone()).collect();
+    names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    names.dedup();
+    for name in names {
+        let values: Vec<&Option<Expr>> = seen.iter().filter(|(n, _)| *n == name).map(|(_, v)| v).collect();
+        let Some(Some(first)) = values.first().map(|v| v.as_ref()) else { continue };
+        let text = crate::emit::ruby::emit_expr(first);
+        if values.iter().all(|v| v.as_ref().is_some_and(|e| crate::emit::ruby::emit_expr(e) == text)) {
+            out.push((name, first.clone()));
+        }
+    }
+    out
+}
+
+/// The bindings of `class_ivar_assoc_bindings` a body READS without
+/// assigning: a helper the actions call after setting the ivar.
+pub fn ivar_seeds_for(body: &Expr, bindings: &[(Symbol, Expr)]) -> Vec<(Symbol, Expr)> {
+    fn reads(e: &Expr, name: &Symbol) -> bool {
+        let mut found = matches!(&*e.node, ExprNode::Ivar { name: n } if n == name);
+        e.node.for_each_child(&mut |c| found = found || reads(c, name));
+        found
+    }
+    fn assigns(e: &Expr, name: &Symbol) -> bool {
+        let mut found = matches!(&*e.node,
+            ExprNode::Assign { target: crate::expr::LValue::Ivar { name: n }, .. } if n == name);
+        e.node.for_each_child(&mut |c| found = found || assigns(c, name));
+        found
+    }
+    bindings
+        .iter()
+        .filter(|(name, _)| reads(body, name) && !assigns(body, name))
+        .cloned()
+        .collect()
+}
+
+/// `rewrite_call_site` for a body that reads ivars its class bound
+/// elsewhere (`ivar_seeds_for`): the alias the binding would have
+/// recorded is recorded up front, so `@ivar.find_by(…)` seeds the same
+/// relation it does in the action that assigned it.
+pub fn rewrite_call_site_seeded(
+    expr: &mut Expr,
+    regs: &Registries<'_>,
+    class_self: Option<&ClassId>,
+    instance_self: Option<&ClassId>,
+    seeds: &[(Symbol, Expr)],
+) {
+    let ctx = Ctx {
+        scopes: regs.scopes,
+        models: regs.models,
+        assocs: regs.assocs,
+        unique_keys: regs.unique_keys,
+        assoc_class_methods: regs.assoc_class_methods,
+        scope_body: None,
+        self_const_is_implicit: false,
+        class_self: class_self.cloned(),
+        instance_self: instance_self.cloned(),
+        user_returns: regs.user_returns,
+        owner_objects: regs.owner_objects,
+    };
+    let mut locals = Locals::default();
+    for (name, value) in seeds {
+        if let Some(model) = seedable_assoc_read(&ctx, value, value.span) {
+            locals.assoc.insert(alias_key(name, true), (model, value.clone()));
+        }
+    }
+    rewrite(expr, &ctx, &mut locals);
 }
 
 /// Rewrite a non-scope-body expression (controller action, library-class

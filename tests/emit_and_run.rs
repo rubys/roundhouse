@@ -1465,6 +1465,93 @@ end
         .assert_passes();
 }
 
+/// An association parked in an ivar by a `before_action` (campfire's
+/// `@push_subscriptions = Current.user.push_subscriptions`) answers
+/// `find_or_initialize_by(<params>)` as a relation scoped to its owner,
+/// with the params object as the condition hash, and the same ivar read
+/// again in a private helper the action calls answers `find_by` the same
+/// way.
+#[test]
+fn a_parked_association_finds_or_initializes_and_a_helper_reads_it() {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/comments_controller.rb",
+            r##"class CommentsController < ApplicationController
+  before_action :set_article
+  before_action :set_comments
+
+  def create
+    @comment = @comments.find_or_initialize_by(comment_params)
+    if @comment.persisted? || @comment.save
+      redirect_to @article, notice: posted_notice
+    else
+      redirect_to @article, alert: "Could not create comment."
+    end
+  end
+
+  def destroy
+    @comment = @article.comments.find(params.expect(:id))
+    @comment.destroy
+    redirect_to @article, notice: "Comment was successfully deleted."
+  end
+
+  private
+
+    def set_article
+      @article = Article.find(params.expect(:article_id))
+    end
+
+    def set_comments
+      @comments = @article.comments
+    end
+
+    def posted_notice
+      @comments.find_by(commenter: "Twice") ? "Posted by Twice." : "Comment was successfully created."
+    end
+
+    def comment_params
+      params.expect(comment: [ :commenter, :body ])
+    end
+end
+"##,
+        )
+        .write(
+            "test/controllers/comments_find_or_initialize_controller_test.rb",
+            r##"require "test_helper"
+
+class CommentsFindOrInitializeControllerTest < ActionDispatch::IntegrationTest
+  setup do
+    @article = articles(:one)
+    @other = Article.create!(title: "Other article", body: "A sufficiently long article body.")
+  end
+
+  test "the same comment posted twice is one comment, on its own article" do
+    params = { comment: { commenter: "Twice", body: "Said it once." } }
+    assert_difference("Comment.count", 1) do
+      post article_comments_url(@article), params: params
+      post article_comments_url(@article), params: params
+    end
+    comment = Comment.find_by(commenter: "Twice")
+    assert_equal @article.id, comment.article_id
+    follow_redirect!
+    assert_includes response.body, "Posted by Twice."
+  end
+
+  test "another article's comments are another scope" do
+    params = { comment: { commenter: "Twice", body: "Said it once." } }
+    post article_comments_url(@article), params: params
+    assert_difference("Comment.count", 1) do
+      post article_comments_url(@other), params: params
+    end
+    assert_equal [ @article.id, @other.id ].sort, Comment.where(commenter: "Twice").map(&:article_id).sort
+  end
+end
+"##,
+        )
+        .run_test("test/controllers/comments_find_or_initialize_controller_test.rb")
+        .assert_passes();
+}
+
 /// `rescue URI::Error` catches `URI.parse`'s `URI::InvalidURIError`, and
 /// `SocketError` resolves where the app names it without a require (Rails
 /// has loaded socket); both lanes define the classes.

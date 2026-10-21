@@ -1969,6 +1969,10 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // against a seeded Relation. A model's own CLASS methods
         // additionally seed bare implicit-self roots (`where(key: key)`
         // in `Keystore.value_for`), signalled via `class_self`.
+        // Ivars every method that assigns them binds to one association
+        // read, for the methods that only read them (a controller's
+        // private helper after its `before_action`).
+        let ivar_bindings = crate::lower::scope_chain::class_ivar_assoc_bindings(&lc.methods, &assocs);
         for m in &mut lc.methods {
             // A `__scope_` entry's forward body already carries `__rel`
             // exactly once — never re-thread it (re-entrancy guard for
@@ -1976,6 +1980,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             if m.name.as_str().starts_with("__scope_") {
                 continue;
             }
+            let ivar_seeds = crate::lower::scope_chain::ivar_seeds_for(&m.body, &ivar_bindings);
             let class_self = (m.receiver == MethodReceiver::Class)
                 .then(|| if is_model { Some(lc.name.clone()) } else { concern_owner.clone() })
                 .flatten();
@@ -2002,7 +2007,15 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     || (class_self.is_some()
                         && crate::lower::scope_chain::mentions_bare_chain_start(e))
             };
-            if mentions(&m.body) {
+            if !ivar_seeds.is_empty() {
+                crate::lower::scope_chain::rewrite_call_site_seeded(
+                    &mut m.body,
+                    &regs,
+                    class_self.as_ref(),
+                    instance_self.as_ref(),
+                    &ivar_seeds,
+                );
+            } else if mentions(&m.body) {
                 crate::lower::scope_chain::rewrite_call_site(
                     &mut m.body,
                     &regs,

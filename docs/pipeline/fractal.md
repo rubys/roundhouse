@@ -30,7 +30,7 @@ time) are the same kind of edit, applied the same way.
 1. Emit the file overlay:
 
    ```sh
-   fractal emit --file app/models/order.rb path/to/app -o out/fractal
+   fractal emit --file app/models/article.rb path/to/app -o out/fractal
    ```
 
 2. Apply the overlay to the base app:
@@ -142,13 +142,14 @@ only the metadata file.
 
 The first pass, `inline-enum-predicates`, was removed. It rewrote a call
 to an Active Record enum predicate inside the enum's own class
-(`paid?`) into the comparison Rails' generated method runs
-(`(status_for_database == 1)`), because Rails defined each predicate as
+(`published?`) into the comparison Rails' generated method runs
+(`(status_for_database == 1)`), because Rails defines each predicate as
 a `define_method` block calling `public_send`, which ZJIT cannot call
 directly. [rails/rails#59250](https://github.com/rails/rails/pull/59250)
-changes Rails to define those predicates as plain `def`s, which gives
-every app the same benefit without a build step. The pass, with its
-build and runtime tests, remains in the git history.
+proposes plain `def` predicates so every app can get the benefit without
+a build step. The proposal remains open; released Rails versions still
+use block-backed predicates. The pass, with its build and runtime tests,
+remains in the git history.
 
 ## Writing a pass
 

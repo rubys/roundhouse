@@ -1,7 +1,7 @@
 //! `--target fractal`: compile a Rails app by rewriting its own source,
 //! one file at a time.
 //!
-//! A person names the files to compile (`--file app/models/order.rb`).
+//! A person names the files to compile (`--file app/models/article.rb`).
 //! Roundhouse ingests and analyzes those files and what its passes say
 //! they need ([`scope`]), so it knows what Rails cannot see from one call
 //! site (types, effects, which definitions exist), and passes use that

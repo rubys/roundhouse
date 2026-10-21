@@ -3,7 +3,7 @@
 // render loop over the compiler wasm's `fractal_stages` export.
 //
 // Asserts:
-//   1. boots and compiles app/models/order.rb; with no pass registered the
+//   1. boots and compiles app/models/article.rb; with no pass registered the
 //      only stage is the source, shown as written, with no rewrites;
 //   2. editing the model re-runs the passes and shows the edited source;
 //   3. no console or page errors.
@@ -50,19 +50,19 @@ await page.waitForSelector("#status.ok", { timeout: 60000 });
 console.log("=== boot ===");
 let s = await state();
 console.log(s.status, "|", s.chips.join(" → "), "|", s.file);
-if (s.file !== "app/models/order.rb") fail(`expected order.rb to be compiled, got ${s.file}`);
+if (s.file !== "app/models/article.rb") fail(`expected article.rb to be compiled, got ${s.file}`);
 if (s.chips.join(",") !== "source") fail(`expected only the source stage, got: ${s.chips.join(", ")}`);
 if (!/^0 rewrite/.test(s.status)) fail(`expected no rewrites, got "${s.status}"`);
-if (!s.lines.some((t) => t.includes("paid? && !refunded?"))) fail(`source not shown: ${JSON.stringify(s.lines)}`);
+if (!s.lines.some((t) => t.includes("published? && !archived?"))) fail(`source not shown: ${JSON.stringify(s.lines)}`);
 
-console.log("=== edit app/models/order.rb ===");
+console.log("=== edit app/models/article.rb ===");
 await page.evaluate(() => {
   const e = document.getElementById("editor");
-  e.value = e.value.replace("paid? && !refunded?", "paid? && !shipped?");
+  e.value = e.value.replace("published? && !archived?", "published? && !draft?");
   e.dispatchEvent(new Event("input"));
 });
 await page.waitForFunction(
-  () => [...document.querySelectorAll("#code .line .txt")].some((e) => e.textContent.includes("paid? && !shipped?")),
+  () => [...document.querySelectorAll("#code .line .txt")].some((e) => e.textContent.includes("published? && !draft?")),
   { timeout: 30000 },
 );
 s = await state();
