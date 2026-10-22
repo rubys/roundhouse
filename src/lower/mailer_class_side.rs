@@ -242,7 +242,7 @@ fn parameterized_mailers(app: &App, mailers: &BTreeSet<String>) -> BTreeSet<Stri
 fn parameterized_constructor(mailer: &crate::ident::ClassId) -> crate::dialect::MethodDef {
     let span = crate::span::Span::synthetic();
     let instance = Ty::Class { id: mailer.clone(), args: vec![].into() };
-    let params_ty = Ty::Hash { key: Ty::Sym.into(), value: Ty::Untyped.into() };
+    let params_ty = Ty::Hash { key: Ty::Sym.into(), value: Ty::untyped().into() };
     let params = Symbol::from("params");
     let mut arg = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: params.clone() });
     arg.ty = Some(params_ty.clone());

@@ -484,7 +484,7 @@ enum Truth {
 
 fn truth_of(ty: Option<&Ty>) -> Truth {
     match ty {
-        None | Some(Ty::Untyped | Ty::Var { .. }) => Truth::Full,
+        None | Some(Ty::Untyped { .. } | Ty::Var { .. }) => Truth::Full,
         Some(Ty::Int | Ty::Float | Ty::Str | Ty::Sym) => Truth::NotNil,
         Some(Ty::Class { id, .. }) => match id.0.as_str() {
             "String" | "Integer" | "Float" | "Numeric" | "Symbol" => Truth::NotNil,
@@ -510,7 +510,7 @@ fn expr_truth(e: &Expr) -> Truth {
     let truth = truth_of(e.ty.as_ref());
     // An untyped predicate call still answers true, false or nil (`nonzero?` a non-zero number).
     let predicate = matches!(&*e.node, ExprNode::Send { method, .. } if method.as_str().ends_with('?'));
-    if truth == Truth::Full && predicate && matches!(e.ty, None | Some(Ty::Untyped)) {
+    if truth == Truth::Full && predicate && matches!(e.ty, None | Some(Ty::Untyped { .. })) {
         return Truth::Js;
     }
     truth

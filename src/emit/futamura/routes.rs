@@ -1815,7 +1815,7 @@ fn classes_of(ty: &Ty) -> Vec<String> {
             out
         }
         // Primitives, containers and the like: runtime methods only.
-        Ty::Untyped | Ty::Var { .. } => Vec::new(),
+        Ty::Untyped { .. } | Ty::Var { .. } => Vec::new(),
         _ => vec![String::from("\0none")],
     }
 }

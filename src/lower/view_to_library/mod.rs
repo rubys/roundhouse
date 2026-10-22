@@ -605,7 +605,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         // is live — thread it as a param when the template reads it bare
         // (`flash[f]`). The layout wrap passes `@flash`.
         if is_layout && view_uses_bare_name(&rewritten, "flash") {
-            typed.push(("flash".to_string(), crate::ty::Ty::Untyped));
+            typed.push(("flash".to_string(), crate::ty::Ty::untyped()));
         }
     }
 
@@ -639,7 +639,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     let mut nullable: std::collections::HashSet<String> =
         extra_params.iter().cloned().collect();
     for (n, ty) in &typed {
-        if matches!(ty, crate::ty::Ty::Untyped) {
+        if matches!(ty, crate::ty::Ty::Untyped { .. }) {
             nullable.insert(n.clone());
         }
     }
@@ -735,7 +735,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             .map(|p| p.name.as_str().to_string())
             .collect();
         for tp in &sig_params {
-            if matches!(*tp.ty, crate::ty::Ty::Untyped) {
+            if matches!(*tp.ty, crate::ty::Ty::Untyped { .. }) {
                 nullable.insert(tp.name.as_str().to_string());
             }
         }
@@ -1132,7 +1132,7 @@ pub fn insert_db_stub(
         Symbol::from("column_value"),
         fn_sig(
             vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
-            Ty::Untyped,
+            Ty::untyped(),
         ),
     );
     db_info.class_methods.insert(
@@ -1290,7 +1290,7 @@ pub fn insert_db_stub(
     );
     as_info.class_methods.insert(
         Symbol::from("format_db_time"),
-        fn_sig(vec![(Symbol::from("value"), Ty::Untyped)], str_or_nil()),
+        fn_sig(vec![(Symbol::from("value"), Ty::untyped())], str_or_nil()),
     );
     as_info
         .class_methods
@@ -1334,7 +1334,7 @@ pub(crate) fn insert_route_helper_stubs(
     for f in &funcs {
         let name = Symbol::from(f.name.as_str());
         info.class_methods.entry(name.clone()).or_insert_with(|| {
-            fn_sig(vec![(Symbol::from("args"), Ty::Untyped)], Ty::Str)
+            fn_sig(vec![(Symbol::from("args"), Ty::untyped())], Ty::Str)
         });
         info.class_method_kinds.entry(name).or_insert(AccessorKind::Method);
     }
@@ -1361,8 +1361,8 @@ pub(crate) fn insert_framework_stubs(
 
     // ViewHelpers — every output helper returns String; setters return Nil.
     let mut vh = crate::analyze::ClassInfo::default();
-    let untyped = Ty::Untyped;
-    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let untyped = Ty::untyped();
+    let any_hash = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) };
     let html_helpers = [
         "turbo_stream_from",
         "link_to",
@@ -1480,7 +1480,7 @@ pub(crate) fn insert_framework_stubs(
     vh.class_methods.insert(
         Symbol::from("optional_value_attr"),
         fn_sig(
-            vec![(Symbol::from("value"), Ty::Untyped)],
+            vec![(Symbol::from("value"), Ty::untyped())],
             Ty::Str,
         ),
     );
@@ -1491,7 +1491,7 @@ pub(crate) fn insert_framework_stubs(
     vh.class_methods.insert(
         Symbol::from("escape_or_empty"),
         fn_sig(
-            vec![(Symbol::from("value"), Ty::Untyped)],
+            vec![(Symbol::from("value"), Ty::untyped())],
             Ty::Str,
         ),
     );
@@ -1606,7 +1606,7 @@ pub(crate) fn insert_framework_stubs(
     let mut jb = crate::analyze::ClassInfo::default();
     jb.class_methods.insert(
         Symbol::from("encode_value"),
-        fn_sig(vec![(Symbol::from("v"), Ty::Untyped)], Ty::Str),
+        fn_sig(vec![(Symbol::from("v"), Ty::untyped())], Ty::Str),
     );
     jb.class_methods.insert(
         Symbol::from("encode_string"),
@@ -1674,7 +1674,7 @@ pub(crate) fn insert_framework_stubs(
     // marking the param `KeywordRest` so the body-typer's
     // normalize_trailing_kwargs leaves the call's `kwargs: true` flag
     // alone (preserves the bare named-args call shape across targets).
-    let opts_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let opts_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) };
     let bc_sig = Ty::Fn {
         params: vec![crate::ty::Param {
             name: Symbol::from("opts"),
@@ -1845,20 +1845,20 @@ pub(crate) fn insert_framework_stubs(
     let mut session_cls = crate::analyze::ClassInfo::default();
     session_cls.instance_methods.insert(
         Symbol::from("[]"),
-        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Untyped),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::untyped()),
     );
     session_cls.instance_methods.insert(
         Symbol::from("[]="),
         fn_sig(
-            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("value"), Ty::Untyped)],
-            Ty::Untyped,
+            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("value"), Ty::untyped())],
+            Ty::untyped(),
         ),
     );
     session_cls.instance_methods.insert(
         Symbol::from("fetch"),
         fn_sig(
-            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("default"), Ty::Untyped)],
-            Ty::Untyped,
+            vec![(Symbol::from("key"), Ty::Sym), (Symbol::from("default"), Ty::untyped())],
+            Ty::untyped(),
         ),
     );
     session_cls.instance_methods.insert(
@@ -1871,7 +1871,7 @@ pub(crate) fn insert_framework_stubs(
     );
     session_cls.instance_methods.insert(
         Symbol::from("delete"),
-        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::Untyped),
+        fn_sig(vec![(Symbol::from("key"), Ty::Sym)], Ty::untyped()),
     );
     session_cls.instance_methods.insert(
         Symbol::from("length"),
@@ -1889,7 +1889,7 @@ pub(crate) fn insert_framework_stubs(
         Symbol::from("to_h"),
         fn_sig(
             vec![],
-            Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
+            Ty::Hash { key: std::sync::Arc::new(Ty::untyped()), value: std::sync::Arc::new(Ty::untyped()) },
         ),
     );
     tag_all_method(&mut session_cls);
@@ -1994,7 +1994,7 @@ pub(crate) fn build_view_signature(
                 }),
             })
         } else {
-            Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) })
+            Some(Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) })
         }
     } else {
         // Show / edit / new / partial: arg is the model itself.
@@ -2004,7 +2004,7 @@ pub(crate) fn build_view_signature(
                 args: vec![].into(),
             })
         } else {
-            Some(Ty::Untyped)
+            Some(Ty::untyped())
         }
     };
 
@@ -3504,7 +3504,7 @@ fn declared_local_ty(
         .partial_local_types
         .get(&view.name)
         .and_then(|locals| locals.get(&Symbol::from(name)))
-        .filter(|t| !matches!(t, crate::ty::Ty::Untyped))
+        .filter(|t| !matches!(t, crate::ty::Ty::Untyped { .. }))
         .filter(|t| !mentions_relation(t))
         .cloned();
     // The name is a convention; a render site handing a String is a
@@ -3513,7 +3513,7 @@ fn declared_local_ty(
     if let Some(crate::ty::Ty::Str) = at_render {
         return crate::ty::Ty::Str;
     }
-    if !matches!(by_name, crate::ty::Ty::Untyped) {
+    if !matches!(by_name, crate::ty::Ty::Untyped { .. }) {
         return by_name;
     }
     at_render.unwrap_or(by_name)
@@ -3529,13 +3529,13 @@ fn declared_local_ty(
 /// (`ms.comments.build`) was gradual.
 fn closure_ivar_ty(view: &View, name: &str, known_models: &[String], app: &App) -> crate::ty::Ty {
     let by_name = ivar_ty(name, known_models);
-    if !matches!(by_name, crate::ty::Ty::Untyped) {
+    if !matches!(by_name, crate::ty::Ty::Untyped { .. }) {
         return by_name;
     }
     app.view_ivar_types
         .get(&view.name)
         .and_then(|ivars| ivars.get(&Symbol::from(name)))
-        .filter(|t| !matches!(t, crate::ty::Ty::Untyped | crate::ty::Ty::Var { .. }))
+        .filter(|t| !matches!(t, crate::ty::Ty::Untyped { .. } | crate::ty::Ty::Var { .. }))
         .filter(|t| !mentions_relation(t))
         .cloned()
         .unwrap_or(by_name)
@@ -3605,7 +3605,7 @@ pub(crate) fn ivar_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
             model
         }
     } else {
-        Ty::Untyped
+        Ty::untyped()
     }
 }
 
@@ -3624,7 +3624,7 @@ pub(crate) fn record_arg_ty(dir: &str, is_layout: bool, known_models: &[String])
             args: vec![].into(),
         }
     } else {
-        Ty::Untyped
+        Ty::untyped()
     }
 }
 

@@ -243,7 +243,7 @@ fn build_fixture_class(
         }],
         body: build_by_label_body(&f.class, &f.records),
         signature: Some(fn_sig(
-            vec![(Symbol::from("label"), Ty::Untyped)],
+            vec![(Symbol::from("label"), Ty::untyped())],
             class_ty.clone(),
         )),
         effects: EffectSet::default(),
@@ -307,7 +307,7 @@ fn build_by_label_body(cls: &ClassId, records: &[LoweredFixtureRecord]) -> Expr 
             Span::synthetic(),
             ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("label") },
         ),
-        Ty::Untyped,
+        Ty::untyped(),
     );
     let key = with_ty(
         Expr::new(

@@ -135,7 +135,7 @@ impl<'a> ColumnSlot<'a> {
                 let ret = Ty::Union { variants: vec![logical.ty(), Ty::Nil].into() };
                 Some((self.temporal_reader(logical), ret))
             }
-            Codec::Json => Some((self.json_load(), Ty::Untyped)),
+            Codec::Json => Some((self.json_load(), Ty::untyped())),
         }
     }
 
@@ -242,7 +242,7 @@ impl<'a> ColumnSlot<'a> {
             Expr::new(Span::synthetic(), ExprNode::Ivar { name: self.storage_name() }),
             super::model_to_library::ty_of_column_slot(self.col),
         );
-        json_column(Span::synthetic(), "load", vec![stored], Ty::Untyped)
+        json_column(Span::synthetic(), "load", vec![stored], Ty::untyped())
     }
 }
 

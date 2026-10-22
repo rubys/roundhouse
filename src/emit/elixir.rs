@@ -521,7 +521,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
                                 if model_names.contains(&camel) {
                                     class_ty(&camel)
                                 } else {
-                                    crate::ty::Ty::Untyped
+                                    crate::ty::Ty::untyped()
                                 }
                             }
                         };

@@ -991,9 +991,9 @@ fn read_rest(codec: &Codec, from: usize) -> String {
 /// (`src/bin/roundhouse.rs`), as `elevate_nested_params_for_target` is.
 pub fn sidekiq_adapter_target_warning(
     app: &App,
-    target: crate::project::BuildTarget,
+    target: crate::build_target::BuildTarget,
 ) -> Option<crate::diagnostic::Diagnostic> {
-    use crate::project::BuildTarget;
+    use crate::build_target::BuildTarget;
     if app.queue_adapter.as_deref() != Some("sidekiq") || app.job_plans.is_empty() {
         return None;
     }

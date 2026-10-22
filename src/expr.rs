@@ -118,6 +118,11 @@ pub const RESOLVED_MIXIN: u64 = 1 << 22;
 /// can ask; `project::report_unsupported_bundled_constants` reports it elsewhere.
 pub const MODULE_QUERY: u64 = 1 << 23;
 
+/// An opaque source `&expr` block argument (excluding the modeled symbol
+/// adapter). Lambda shape alone does not prove the
+/// directly attached block ABI (strict arity/nonlocal returns may differ).
+pub const FORWARDED_BLOCK: u64 = 1 << 24;
+
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {
     expr.decisions & SELF_BINDING != 0

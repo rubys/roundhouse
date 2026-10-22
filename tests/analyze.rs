@@ -2957,7 +2957,7 @@ end
         .find(|m| m.name.as_str() == "shift")
         .expect("shift");
     match shift.body.ty.as_ref() {
-        Some(Ty::Untyped) => {}
+        Some(Ty::Untyped { .. }) => {}
         other => panic!("Date − Untyped must stay Untyped, got {other:?}"),
     }
 }
@@ -2996,7 +2996,7 @@ end
         .find(|m| m.name.as_str() == "shift")
         .expect("shift");
     match shift.body.ty.as_ref() {
-        Some(Ty::Untyped) => {}
+        Some(Ty::Untyped { .. }) => {}
         other => panic!("Date + Untyped must stay Untyped, got {other:?}"),
     }
 }
@@ -3036,7 +3036,7 @@ end
     for name in ["shift_right", "shift_left"] {
         let m = thing.methods().find(|m| m.name.as_str() == name).expect(name);
         match m.body.ty.as_ref() {
-            Some(Ty::Untyped) => {}
+            Some(Ty::Untyped { .. }) => {}
             other => panic!("Date {name} with Untyped must stay Untyped, got {other:?}"),
         }
     }
@@ -5948,7 +5948,7 @@ fn a_method_reference_to_a_computed_name_reads_untyped() {
     ]);
     let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").expect("Article");
     let limits = article.methods().find(|m| m.name.as_str() == "limits").expect("limits");
-    assert_eq!(limits.body.ty, Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }), "{:?}", limits.body.ty);
+    assert_eq!(limits.body.ty, Some(Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) }), "{:?}", limits.body.ty);
 }
 
 #[test]

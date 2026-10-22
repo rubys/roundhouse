@@ -645,7 +645,7 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
     // The Bool arm sits after `pure_read` so a nullable read keeps nil.
     let value_is_poly = matches!(
         value.ty.as_ref(),
-        Some(Ty::Untyped) | Some(Ty::Union { .. })
+        Some(Ty::Untyped { .. }) | Some(Ty::Union { .. })
     );
     if !value_is_poly && !is_bool_target(target_ty) {
         return inner;

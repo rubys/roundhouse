@@ -213,7 +213,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                     );
                     v.ty = ty.clone();
                     if p.rest {
-                        v.ty = Some(Ty::Array { elem: std::sync::Arc::new(ty.clone().unwrap_or(Ty::Untyped)) });
+                        v.ty = Some(Ty::Array { elem: std::sync::Arc::new(ty.clone().unwrap_or(Ty::untyped())) });
                         return Expr::new(span, ExprNode::Splat { value: v });
                     }
                     v
@@ -457,7 +457,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
         // than claim an instance it does not return.
         if !is_worker && !class_side.contains("set") && unfolded.contains(lc.name.0.as_str()) {
             let mut body = Expr::new(span, ExprNode::SelfRef);
-            body.ty = Some(Ty::Untyped);
+            body.ty = Some(Ty::untyped());
             let mut w = perform.clone();
             w.name = Symbol::from("set");
             w.receiver = crate::dialect::MethodReceiver::Class;
@@ -465,11 +465,11 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             w.signature = Some(Ty::Fn {
                 params: vec![crate::ty::Param {
                     name: Symbol::from("options"),
-                    ty: Ty::Untyped.into(),
+                    ty: Ty::untyped().into(),
                     kind: crate::ty::ParamKind::Required,
                 }].into(),
                 block: None,
-                ret: std::sync::Arc::new(Ty::Untyped),
+                ret: std::sync::Arc::new(Ty::untyped()),
                 effects: crate::effect::EffectSet::pure(),
             });
             w.body = body;

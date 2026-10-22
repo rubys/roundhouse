@@ -440,7 +440,7 @@ fn empty_array(span: crate::span::Span) -> Expr {
     // A later pass reads assignment types. An untyped `[]` is invisible
     // to it, so a controller ivar assigned both this and a Relation
     // would keep the Relation.
-    empty.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+    empty.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) });
     empty
 }
 
@@ -451,7 +451,7 @@ fn fold_array_wrap(span: crate::span::Span, arg: &Expr) -> Option<Expr> {
             span,
             ExprNode::Array { elements: vec![value], style: Default::default() },
         );
-        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) });
         wrapped
     };
     match arg.ty.as_ref() {
@@ -470,7 +470,7 @@ fn fold_array_wrap(span: crate::span::Span, arg: &Expr) -> Option<Expr> {
 /// A type that says nothing about the value's shape: wrapping it as
 /// one element would wrap an Array a second time.
 fn is_open(ty: &Ty) -> bool {
-    matches!(ty, Ty::Untyped | Ty::Var { .. })
+    matches!(ty, Ty::Untyped { .. } | Ty::Var { .. })
 }
 
 /// `Array | Nil` is `[]` or the array. `String | Nil` is `[]` or
@@ -518,19 +518,19 @@ fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Opti
             span,
             ExprNode::Array { elements: vec![read.clone()], style: Default::default() },
         );
-        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) });
         let mut branch = Expr::new(
             span,
             ExprNode::If { cond: test, then_branch: read.clone(), else_branch: wrapped },
         );
-        branch.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        branch.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) });
         branch
     } else {
         let mut wrapped = Expr::new(
             span,
             ExprNode::Array { elements: vec![read.clone()], style: Default::default() },
         );
-        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        wrapped.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) });
         wrapped
     };
     let mut cond = Expr::new(
@@ -552,7 +552,7 @@ fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Opti
             else_branch: when_present,
         },
     );
-    branch.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+    branch.ty = Some(Ty::Array { elem: std::sync::Arc::new(Ty::untyped()) });
     Some(Expr::new(
         span,
         ExprNode::Seq { exprs: vec![bound.assign, branch] },
@@ -736,7 +736,7 @@ fn sentence_connectors(arg: &Expr) -> Option<[String; 3]> {
 fn is_relation_or_array_union(ty: Option<&Ty>) -> bool {
     let Some(Ty::Union { variants }) = ty else { return false };
     variants.iter().any(|v| matches!(v, Ty::Array { .. }))
-        && variants.iter().all(|v| matches!(v, Ty::Array { .. } | Ty::Relation { .. } | Ty::Untyped))
+        && variants.iter().all(|v| matches!(v, Ty::Array { .. } | Ty::Relation { .. } | Ty::Untyped { .. }))
 }
 
 /// A block `map`/`collect`/`filter_map`/`flat_map` — an Array whatever
@@ -828,7 +828,7 @@ mod tests {
     #[test]
     fn index_with_on_an_unknown_or_untyped_receiver_stays_as_written() {
         // Gradual receivers may be a Hash; rewriting would key by the element alone.
-        for (ty, v) in [(None, int(0)), (None, var("default")), (Some(Ty::Untyped), int(0))] {
+        for (ty, v) in [(None, int(0)), (None, var("default")), (Some(Ty::untyped()), int(0))] {
             let mut e = index_with_on(ty, v);
             assert!(!rewrite_node(&mut e));
             assert_eq!(method_of(&e), "index_with");
@@ -953,7 +953,7 @@ mod tests {
     /// `Array | untyped`, and the Array half has no `many?` on spinel.
     #[test]
     fn many_on_an_array_or_untyped_union_is_a_size_test() {
-        let mut e = many_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped].into() });
+        let mut e = many_on(Ty::Union { variants: vec![array_of_users(), Ty::untyped()].into() });
         rewrite(&mut e);
         assert_eq!(method_of(&e), ">");
         let ExprNode::Send { recv: Some(size), .. } = &*e.node else { panic!() };
@@ -1060,7 +1060,7 @@ mod tests {
     /// `Array | untyped` union reads through `to_a`, typed as the Array half.
     #[test]
     fn first_n_on_an_array_or_untyped_union_reads_through_to_a() {
-        let mut e = first_n_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped].into() });
+        let mut e = first_n_on(Ty::Union { variants: vec![array_of_users(), Ty::untyped()].into() });
         rewrite(&mut e);
         assert_eq!(method_of(&e), "first");
         let ExprNode::Send { recv: Some(to_a), args, .. } = &*e.node else { panic!() };
@@ -1143,7 +1143,7 @@ mod tests {
             Span::synthetic(),
             ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("members") },
         );
-        members.ty = Some(Ty::Untyped);
+        members.ty = Some(Ty::untyped());
         let block = Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil });
         *r = Expr::new(
             Span::synthetic(),
@@ -1155,7 +1155,7 @@ mod tests {
                 parenthesized: false,
             },
         );
-        r.ty = Some(Ty::Untyped);
+        r.ty = Some(Ty::untyped());
         rewrite(&mut e);
         let ExprNode::Send { recv: Some(r), .. } = &*e.node else { panic!() };
         assert!(matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));
@@ -1224,7 +1224,7 @@ mod tests {
     #[test]
     fn string_truncate_stays_as_written_when_grounding_would_change_it() {
         // Not proven a String: a model or an adapter may own `truncate`.
-        for ty in [None, Some(Ty::Untyped)] {
+        for ty in [None, Some(Ty::untyped())] {
             let mut e = truncate_on(ty, vec![]);
             assert!(!rewrite_node(&mut e));
         }

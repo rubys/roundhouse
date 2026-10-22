@@ -22,7 +22,7 @@ pub fn ts_ty(ty: &Ty) -> String {
         // runtime, not the first-class `Ty::Time` column type.)
         Ty::Time => "Date".into(),
         Ty::Date => crate::emit::diagnostics::unsupported_date_ty("typescript"),
-        Ty::Untyped => "any".into(),
+        Ty::Untyped { .. } => "any".into(),
         Ty::Bottom => "never".into(),
         // A self type the analyzer should have substituted with
         // the receiving class (see `Ty::SelfInstance`). Reaching

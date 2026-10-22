@@ -121,8 +121,8 @@ fn rewrite_node(span: Span, decisions: u64, node: &mut ExprNode) -> Option<Expr>
 // Not every untyped value: only one read out of an indifferent hash, where every nested Hash is indifferent too.
 fn read_from_indifferent(expr: &Expr) -> bool {
     let untyped = match &expr.ty {
-        Some(Ty::Untyped) => true,
-        Some(ty @ Ty::Union { .. }) => leaves(ty).contains(&&Ty::Untyped),
+        Some(Ty::Untyped { .. }) => true,
+        Some(ty @ Ty::Union { .. }) => leaves(ty).contains(&&Ty::untyped()),
         _ => false,
     };
     if !untyped {
@@ -211,7 +211,7 @@ fn convert_key(key: &mut Expr) {
 
 fn may_be_symbol(ty: &Ty) -> bool {
     match ty {
-        Ty::Sym | Ty::Untyped | Ty::Var { .. } => true,
+        Ty::Sym | Ty::Untyped { .. } | Ty::Var { .. } => true,
         Ty::Union { variants } => variants.iter().any(may_be_symbol),
         _ => false,
     }
@@ -231,7 +231,7 @@ fn convert_assigned(value: &mut Expr) {
 
 fn may_hold_hash(ty: &Ty) -> bool {
     match ty {
-        Ty::Hash { .. } | Ty::Array { .. } | Ty::Untyped | Ty::Var { .. } | Ty::Record { .. } | Ty::Tuple { .. } => true,
+        Ty::Hash { .. } | Ty::Array { .. } | Ty::Untyped { .. } | Ty::Var { .. } | Ty::Record { .. } | Ty::Tuple { .. } => true,
         Ty::Union { variants } => variants.iter().any(may_hold_hash),
         _ => false,
     }

@@ -3900,7 +3900,7 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         // boundary (`JsonColumn`); analysis uses the deliberate gradual
         // type. A `has_json` declaration adds its stronger per-key schema
         // separately in `lower::has_json`.
-        ColumnType::Json | ColumnType::Jsonb => Ty::Untyped,
+        ColumnType::Json | ColumnType::Jsonb => Ty::untyped(),
         ColumnType::Uuid => Ty::Str,
         // Rails casts a PostgreSQL interval to ActiveSupport::Duration.
         // Storage stays text (`lower::model_to_library::ty_of_column`).

@@ -828,7 +828,7 @@ mod array_literal_tests {
         let actual = call(var("message"), "mentionees", None);
         let out = materialised_for_array_literal(&arr(vec![var("user")]), actual);
         assert_eq!(method_of(&out), "to_a");
-        let actual = call(var("message"), "mentionees", Some(crate::ty::Ty::Untyped));
+        let actual = call(var("message"), "mentionees", Some(crate::ty::Ty::untyped()));
         let out = materialised_for_array_literal(&arr(vec![]), actual);
         assert_eq!(method_of(&out), "to_a", "an empty literal too — `[]` vs a relation is the same refusal");
         let rel = crate::ty::Ty::Relation { of: crate::ident::ClassId(Symbol::from("Message")) };
@@ -849,7 +849,7 @@ mod array_literal_tests {
         let out = materialised_for_array_literal(&var("expected"), call(var("m"), "mentionees", None));
         assert_eq!(method_of(&out), "mentionees", "an expected side of unknown type is left alone");
         let mut typed = var("messages");
-        typed.ty = Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::Untyped) });
+        typed.ty = Some(crate::ty::Ty::Array { elem: std::sync::Arc::new(crate::ty::Ty::untyped()) });
         let out = materialised_for_array_literal(&typed, call(var("m"), "search", None));
         assert_eq!(method_of(&out), "to_a", "a local the typer knows holds an Array counts as the literal does");
     }

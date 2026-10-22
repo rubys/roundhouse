@@ -116,7 +116,7 @@ pub(super) fn rewrite_predicates(
                     let guarded = crate::lower::blank::or_empty_string(
                         span,
                         rewritten_recv,
-                        crate::ty::Ty::Untyped,
+                        crate::ty::Ty::untyped(),
                     );
                     let empty_call = send(Some(guarded), "empty?", Vec::new(), None, false);
                     return if method.as_str() == "present?" {

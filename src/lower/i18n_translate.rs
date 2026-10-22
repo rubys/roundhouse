@@ -791,7 +791,7 @@ fn rewrite_one(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
         }
     };
     if let Some(full) = tree_answer(catalog, recv.as_ref(), method.as_str(), args, block.as_ref()) {
-        let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+        let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) };
         *expr = tree_call(expr.span, "translate_tree", hash_ty, &full, args.get(1));
         return;
     }
@@ -912,7 +912,7 @@ fn tree_call(span: Span, method: &str, ty: Ty, full: &str, options: Option<&Expr
         r.0.push(span);
         r.1.push(span);
     });
-    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) };
     let options = match options {
         Some(opts) => {
             let mut opts = opts.clone();
@@ -944,7 +944,7 @@ fn runtime_call(span: Span, args: &[Expr], catalog: &Catalog, site: Site<'_>) ->
             opts
         }
         None => Expr {
-            ty: Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }),
+            ty: Some(Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) }),
             ..Expr::new(span, ExprNode::Hash { entries: Vec::new(), kwargs: false })
         },
     };
@@ -1242,7 +1242,7 @@ fn with_locale(e: &Expr) -> Option<Expr> {
                 block: None,
                 parenthesized: false,
             });
-            call.ty = Some(Ty::Untyped);
+            call.ty = Some(Ty::untyped());
             call
         }
         _ => return None,

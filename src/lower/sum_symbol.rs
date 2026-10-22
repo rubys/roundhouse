@@ -57,7 +57,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     // the block sum is left untyped rather than still claiming the query.
     let materialized = match receiver.ty.as_ref() {
         Some(crate::ty::Ty::Array { .. }) => receiver.ty.clone(),
-        _ => Some(crate::ty::Ty::Untyped),
+        _ => Some(crate::ty::Ty::untyped()),
     };
     let mut to_a = Expr::new(
         span,
@@ -100,5 +100,5 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         block: Some(lambda),
         parenthesized: false,
     };
-    expr.ty = Some(crate::ty::Ty::Untyped);
+    expr.ty = Some(crate::ty::Ty::untyped());
 }

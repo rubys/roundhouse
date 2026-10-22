@@ -250,7 +250,7 @@ fn half_variant(m: &MethodDef, half: &str, parts: Vec<InterpPart>) -> MethodDef 
     }];
     out.extend(names.into_iter().map(|name| crate::ty::Param {
         name,
-        ty: Ty::Untyped.into(),
+        ty: Ty::untyped().into(),
         kind: ParamKind::Required,
     }));
     let signature = Some(Ty::Fn { params: out.into(), block, ret: std::sync::Arc::new(Ty::Nil), effects });

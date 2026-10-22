@@ -236,8 +236,8 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     //    Hash-literal shapes (the two arg shapes shim calls receive in
     //    practice).
     if let ExprNode::Cast { value, target_ty } = &*arg.node {
-        if matches!(target_ty, Ty::Hash { value: pv, .. } if matches!(pv.as_ref(), Ty::Untyped))
-            && matches!(param_ty, Ty::Hash { value: pv, .. } if matches!(pv.as_ref(), Ty::Untyped))
+        if matches!(target_ty, Ty::Hash { value: pv, .. } if matches!(pv.as_ref(), Ty::Untyped { .. }))
+            && matches!(param_ty, Ty::Hash { value: pv, .. } if matches!(pv.as_ref(), Ty::Untyped { .. }))
         {
             let inner_raw = emit_expr(value);
             return format!(
@@ -246,7 +246,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         }
     }
     if let Ty::Hash { value: pv, .. } = param_ty {
-        if matches!(pv.as_ref(), Ty::Untyped)
+        if matches!(pv.as_ref(), Ty::Untyped { .. })
             && !matches!(&*arg.node, ExprNode::Cast { .. })
         {
             if arg_hash_var_local_ty(arg).is_some()
@@ -642,7 +642,7 @@ pub(crate) fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> S
         // result as `Union<ParamValue, Nil>` even when the actual Rust
         // emit produces an `unwrap_or(...)`-flattened `Value`.
         let inner = super::super::util::peel_nil(t);
-        matches!(inner, Ty::Untyped | Ty::Record { .. })
+        matches!(inner, Ty::Untyped { .. } | Ty::Record { .. })
             || matches!(
                 inner,
                 Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"
@@ -673,7 +673,7 @@ pub(crate) fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> S
     if arg_renders_as_value {
         if let Ty::Hash { key, value } = field_ty {
             if key.is_stringish() {
-                let value_is_value_shaped = matches!(**value, Ty::Untyped | Ty::Record { .. })
+                let value_is_value_shaped = matches!(**value, Ty::Untyped { .. } | Ty::Record { .. })
                     || matches!(
                         &**value,
                         Ty::Class { id, .. } if id.0.as_str() == "Roundhouse::ParamValue"

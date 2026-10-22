@@ -209,7 +209,7 @@ end
     let methods =
         parse_methods_with_rbs_in_ctx(ruby, rbs, &HashMap::new()).expect("runtime parses");
     let pick = method(&methods, "pick");
-    assert_eq!(pick.body.ty, Some(Ty::Untyped));
+    assert_eq!(pick.body.ty, Some(Ty::untyped()));
     assert_no_inference_gaps(&pick.body);
     assert_emitted_ruby(
         &methods,

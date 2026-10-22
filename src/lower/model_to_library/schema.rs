@@ -583,7 +583,7 @@ fn synth_attributes_before_type_cast(owner: &ClassId, table: &Table) -> MethodDe
             (key, value)
         })
         .collect();
-    let ret = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
+    let ret = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::untyped()) };
     let body = with_ty(Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: false }), ret.clone());
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
@@ -1260,7 +1260,7 @@ fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
     // Hydration uses `_write_<col>_json_raw` so DB text never goes through dump.
     let col_ty = super::ty_of_column_slot(col);
     let slot = ColumnSlot::classify(col, model);
-    let value_ty = if slot.is_json() { Ty::Untyped } else { col_ty.clone() };
+    let value_ty = if slot.is_json() { Ty::untyped() } else { col_ty.clone() };
     let value = with_ty(var_ref(value_param.clone()), value_ty.clone());
     let rhs = if let Some(dumped) = slot.json_dump(value.clone()) {
         dumped
@@ -1446,7 +1446,7 @@ fn synth_instantiate(owner: &ClassId, fire_after_initialize: bool) -> MethodDef 
     // dynamically create Symbols at runtime; Spinel adapters skip the
     // historical `to_sym` step). Matches `synth_row_from_raw`. Internal
     // narrowing happens in the body.
-    let row_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
+    let row_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::untyped()) };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
@@ -2052,7 +2052,7 @@ fn synth_column_prev_was(owner: &ClassId, col: &Column) -> MethodDef {
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body,
-        signature: Some(fn_sig(vec![], Ty::Untyped)),
+        signature: Some(fn_sig(vec![], Ty::untyped())),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -2073,7 +2073,7 @@ fn pending_change_methods(col: &Column) -> Vec<(Symbol, &'static str, Ty)> {
     vec![
         (Symbol::from(format!("{n}_changed?")), "attribute_changed?", Ty::Bool),
         (Symbol::from(format!("will_save_change_to_{n}?")), "attribute_changed?", Ty::Bool),
-        (Symbol::from(format!("{n}_was")), "attribute_was", Ty::Untyped),
+        (Symbol::from(format!("{n}_was")), "attribute_was", Ty::untyped()),
     ]
 }
 
@@ -3041,7 +3041,7 @@ fn synth_initialize(
         Span::synthetic(),
         ExprNode::Hash { entries: Vec::new(), kwargs: false },
     );
-    let attrs_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let attrs_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) };
     let signature = Ty::Fn {
         params: vec![crate::ty::Param {
             name: attrs.clone(), ty: attrs_ty.into(), kind: crate::ty::ParamKind::Optional,
@@ -3103,7 +3103,7 @@ fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     // Hash<Str, ?> — value type is a union of column types; collapsing to
     // Untyped is the conservative approximation. Refining to a Record
     // (row-polymorphic) is a follow-up if downstream wants per-key types.
-    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::untyped()) };
     let body = with_ty(
         Expr::new(
             Span::synthetic(),
@@ -3203,7 +3203,7 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
         params: vec![Param::positional(name.clone())],
         body,
         // Heterogeneous return (per-column type union); approximate as Untyped.
-        signature: Some(fn_sig(vec![(name, Ty::Sym)], Ty::Untyped)),
+        signature: Some(fn_sig(vec![(name, Ty::Sym)], Ty::untyped())),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -4150,7 +4150,7 @@ fn synth_update_hash(
         stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
     }
 
-    let attrs_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) };
+    let attrs_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::untyped()) };
     let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![].into() } } else { Ty::Bool };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,

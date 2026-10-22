@@ -124,7 +124,7 @@ pub fn type_method_body(
         let block_ty = declared_block.unwrap_or_else(|| Ty::Fn {
             params: vec![].into(),
             block: None,
-            ret: std::sync::Arc::new(Ty::Untyped),
+            ret: std::sync::Arc::new(Ty::untyped()),
             effects: crate::effect::EffectSet::default(),
         });
         ctx.local_bindings.insert(block_param.name.clone(), block_ty);

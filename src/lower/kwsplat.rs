@@ -512,7 +512,7 @@ fn expand(args: &mut Vec<Expr>, splat: ErasedSplat, diags: &mut Vec<Diagnostic>)
     let hash = args.pop().expect("checked above");
     let value_ty = match &read.ty {
         Some(Ty::Hash { value, .. }) => (**value).clone(),
-        _ => Ty::Untyped,
+        _ => Ty::untyped(),
     };
     // A keyword the literal names takes the literal's value — evaluated
     // once, as Ruby's `**` would; the rest are read off the bundle, an
@@ -719,7 +719,7 @@ fn sym_key(name: &Symbol, span: crate::span::Span) -> Expr {
 /// and a raw Var stamp on `[]` was misread as "no known method".
 fn index(hash: &Expr, key: &Symbol, value_ty: Ty) -> Expr {
     let ty = match &value_ty {
-        Ty::Var { .. } | Ty::Untyped => Ty::Untyped,
+        Ty::Var { .. } | Ty::Untyped { .. } => Ty::untyped(),
         other => Ty::Union {
             variants: vec![other.clone(), Ty::Nil].into(),
         },
@@ -747,11 +747,11 @@ fn fetch(hash: &Expr, key: &Symbol, default: &Expr, value_ty: Ty) -> Expr {
     // default is the shape this read answers, the same rule
     // `hash_method` uses for a closed default.
     let ty = match default.ty.as_ref() {
-        Some(default_ty) if !default_ty.is_open() && matches!(value_ty, Ty::Untyped | Ty::Var { .. }) => {
+        Some(default_ty) if !default_ty.is_open() && matches!(value_ty, Ty::Untyped { .. } | Ty::Var { .. }) => {
             default_ty.clone()
         }
         Some(default_ty) if !default_ty.is_open() => crate::analyze::union_of(value_ty, default_ty.clone()),
-        _ if matches!(value_ty, Ty::Untyped | Ty::Var { .. }) => {
+        _ if matches!(value_ty, Ty::Untyped { .. } | Ty::Var { .. }) => {
             default.ty.clone().unwrap_or(value_ty)
         }
         _ => value_ty,

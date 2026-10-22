@@ -166,7 +166,7 @@ fn into_param_ty(ty: &Ty) -> Ty {
     match ty {
         Ty::Class { .. } => ty.clone(),
         Ty::Array { elem } if matches!(**elem, Ty::Class { .. }) => ty.clone(),
-        _ => Ty::Untyped,
+        _ => Ty::untyped(),
     }
 }
 

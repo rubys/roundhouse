@@ -47,8 +47,8 @@ fn a_generic_method_reads_with_its_type_parameter_untyped() {
         "def m(value); end",
     );
     let (params, ret) = signature(&ty);
-    assert_eq!(params[0], Ty::Untyped);
-    assert_eq!(ret, Ty::Untyped);
+    assert_eq!(params[0], Ty::untyped());
+    assert_eq!(ret, Ty::untyped());
 }
 
 #[test]
@@ -58,9 +58,9 @@ fn noreturn_anything_and_all() {
         "def m(a, b, c); end",
     );
     let (params, ret) = signature(&ty);
-    assert_eq!(params[0], Ty::Untyped);
+    assert_eq!(params[0], Ty::untyped());
     assert_eq!(params[1], class("Cart"), "Kernel adds nothing");
-    assert_eq!(params[2], Ty::Untyped, "two real surfaces: claim neither");
+    assert_eq!(params[2], Ty::untyped(), "two real surfaces: claim neither");
     assert_eq!(ret, Ty::Bottom);
 }
 

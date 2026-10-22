@@ -13569,7 +13569,7 @@ puts "Data factory identity, aliases, constructors, values and immutability pass
         assert!(factory.contains_key(&Symbol::from("new")), "{sidecar}");
         for reader in readers {
             let signature = &factory[&Symbol::from(reader)];
-            assert!(matches!(signature, Ty::Fn { ret, .. } if **ret == Ty::Untyped), "{sidecar}");
+            assert!(matches!(signature, Ty::Fn { ret, .. } if **ret == Ty::untyped()), "{sidecar}");
             assert!(!factory.contains_key(&Symbol::from(format!("{reader}="))), "{sidecar}");
         }
         let owner_methods = &signatures[&ClassId(Symbol::from(owner))];
