@@ -9869,6 +9869,78 @@ puts "ok"
         .assert_passes();
 }
 
+#[test]
+fn an_app_tag_helper_override_owns_helper_and_view_calls() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/tag_defaults.rb",
+            r#"module TagDefaults
+  def content_tag(name, text)
+    "default tag"
+  end
+
+  def safe_join(parts, separator)
+    separator
+  end
+end
+"#,
+        )
+        .write(
+            "app/helpers/application_helper.rb",
+            r#"module ApplicationHelper
+  include TagDefaults
+
+  def content_tag(name, text)
+    37
+  end
+
+  def override_value
+    content_tag(:span, "ignored") + 3
+  end
+end
+"#,
+        )
+        .write(
+            "app/views/articles/_custom_tag.html.erb",
+            "<%= content_tag(:span, \"ignored\").div(2) %>|<%= \"nested #{content_tag(:i, 'ignored') + 5}\" %>|<%= override_value %>|<%= safe_join([\"a\", \"b\"], 11).div(2) %>",
+        )
+        .run_ruby(
+            r#"raise "helper override lost" unless ApplicationHelper.override_value == 40
+raise "view override lost" unless Views::Articles.custom_tag(nil) == "18|nested 42|40|5"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn promoted_module_helpers_and_controller_helpers_keep_their_view_dispatch() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/bare_helper.rb",
+            "module BareHelper\n  module_function\n  def bare_value\n    17\n  end\nend\n",
+        )
+        .write(
+            "app/helpers/named_helper.rb",
+            "module NamedHelper\n  def named_value\n    19\n  end\n  module_function :named_value\nend\n",
+        )
+        .write(
+            "app/helpers/extended_helper.rb",
+            "module ExtendedHelper\n  extend self\n  def extended_value\n    23\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  helper_method :content_tag\n  def content_tag(name, text)\n    37\n  end\nend\n",
+        )
+        .write(
+            "app/views/articles/_helper_channels.html.erb",
+            "<%= bare_value.div(2) %>|<%= named_value.div(2) %>|<%= extended_value.div(2) %>|<%= content_tag(:span, \"ignored\").div(2) %>",
+        )
+        .run_ruby(
+            "raise \"helper dispatch lost\" unless Views::Articles.helper_channels(nil) == \"8|9|11|18\"\n",
+        )
+        .assert_passes();
+}
+
 /// #139 typed `Model.human_attribute_name` as a String, but no runtime
 /// defined it, so every page rendering the form raised `undefined method
 /// 'human_attribute_name' for class Article` (#147). A literal attribute

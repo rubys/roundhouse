@@ -12,6 +12,17 @@ use crate::App;
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
+// The index also contains singleton defs and promoted module functions.
+// Only a retained instance body overrides the catalog's instance return;
+// the other spellings keep their existing concern-fold behavior.
+pub(in crate::analyze) fn has_instance_helper(app: &App, name: &Symbol, owner: &ClassId) -> bool {
+    app.library_classes.iter().any(|class| &class.name == owner && class.methods.iter().any(|method| {
+        &method.name == name && method.receiver == crate::dialect::MethodReceiver::Instance
+    })) || app.controllers.iter().any(|controller| {
+        &controller.name == owner && controller.actions().any(|action| &action.name == name)
+    })
+}
+
 pub(in crate::analyze) fn register(
     classes: &mut HashMap<ClassId, ClassInfo>,
     app: &App,
@@ -243,16 +254,16 @@ pub(in crate::analyze) fn register(
             .entry(Symbol::from(m))
             .or_insert_with(|| super::block_fn(&Ty::Untyped, Ty::Str));
     }
-    // Helper-fold: Rails mixes EVERY module under app/helpers into
-    // every view (`helpers :all` default). Declaring them as
-    // `include`s of the view context lets `fold_concern_surfaces`
-    // copy each helper's typed surface onto `ActionView::Base` at
-    // every harvest round — so a bare `material_symbol(…)` in a
-    // template resolves exactly like a concern method on a model,
-    // refining as the fixpoint types helper bodies. Hardcoded
-    // framework entries above win over a same-named app helper
-    // (own-entry-wins in the fold); acceptable, both are Str-shaped
-    // in practice.
+    // Rails mixes app helpers into every view (`helpers :all` default).
+    // Keep their includes for context, but the helper index selects each
+    // method's owner. Until harvest_returns_to_registry projects that
+    // owner's return, calls are gradual, not the framework's answer or
+    // another module's signature selected by the generic concern fold.
+    for (name, owner) in &app.helper_method_index {
+        if has_instance_helper(app, name, owner) {
+            action_view.instance_methods.insert(name.clone(), Ty::Untyped);
+        }
+    }
     let helper_modules: BTreeSet<ClassId> =
         app.helper_method_index.values().cloned().collect();
     action_view.includes.extend(helper_modules);

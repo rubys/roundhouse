@@ -140,3 +140,85 @@ fn untyped_view_args_are_no_evidence_not_absorption() {
         params[0].ty
     );
 }
+
+#[test]
+fn a_cataloged_helper_uses_the_selected_owner_not_another_helpers_signature() {
+    use roundhouse::analyze::{diagnose, DiagnosticKind, Severity};
+    use roundhouse::ingest::ingest_app_from_tree;
+    use std::{collections::HashMap, path::PathBuf};
+
+    // AHelper remains included through `marker`, but neither its instance
+    // signature nor its singleton method answers the view's content_tag.
+    // Without an RBS for ZHelper, its return must refine from the view arg.
+    // An explicit sidecar for the view context still overrides inference.
+    for (signature, view_signature, expected) in [
+        ("", "", Ty::Int),
+        ("module ZHelper\n  def content_tag: (Integer value) -> Integer\nend\n", "", Ty::Int),
+        ("", "class ActionView::Base\n  def content_tag: (Integer value) -> String\nend\n", Ty::Str),
+    ] {
+        for operation in ["div(2)", "length"] {
+            let view = format!("<%= content_tag(37).{operation} %>");
+            let files = [
+                ("app/helpers/a_helper.rb", "module AHelper\n  def content_tag(value)\n    \"wrong owner\"\n  end\n  def self.content_tag(value)\n    \"singleton\"\n  end\n  def marker\n    \"a\"\n  end\nend\n"),
+                ("app/helpers/z_helper.rb", "module ZHelper\n  def content_tag(value)\n    value\n  end\nend\n"),
+                ("sig/a_helper.rbs", "module AHelper\n  def content_tag: (Integer value) -> String\nend\n"),
+                ("sig/z_helper.rbs", signature),
+                ("sig/action_view/base.rbs", view_signature),
+                ("app/views/articles/index.html.erb", view.as_str()),
+            ];
+            let tree: HashMap<PathBuf, Vec<u8>> = files.into_iter()
+                .map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec()))
+                .collect();
+            let mut app = ingest_app_from_tree(tree).expect("ingest helpers");
+            let mut analyzer = Analyzer::for_source(&app);
+            analyzer.analyze(&mut app);
+            let entry = &analyzer.class_registry()[&ClassId(Symbol::from("ActionView::Base"))]
+                .instance_methods[&Symbol::from("content_tag")];
+            let actual = match entry {
+                Ty::Fn { ret, .. } => ret.as_ref(),
+                ty => ty,
+            };
+            assert_eq!(actual, &expected);
+            let errors: Vec<_> = diagnose(&app).into_iter()
+                .filter(|d| d.severity == Severity::Error).collect();
+            let invalid = (operation == "length") == (expected == Ty::Int);
+            if invalid {
+                assert!(errors.iter().any(|d| matches!(&d.kind,
+                    DiagnosticKind::SendDispatchFailed { method, recv_ty }
+                        if method.as_str() == operation.trim_end_matches("(2)") && recv_ty == &expected)),
+                    "{expected:?} must not silently accept {operation}: {errors:?}");
+            } else {
+                assert!(errors.is_empty(), "valid {expected:?} operation rejected: {errors:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_singleton_only_helper_does_not_erase_framework_instance_typing() {
+    use roundhouse::analyze::{diagnose, DiagnosticKind, Severity};
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    for helper in [
+        "module ApplicationHelper\n  def self.content_tag(name, text)\n    \"singleton\"\n  end\nend\n",
+        "module ApplicationHelper\n  include TagDefaults\nend\n",
+    ] {
+        let tree = [
+            ("app/helpers/application_helper.rb", helper),
+            ("lib/tag_defaults.rb", "module TagDefaults\n  def self.content_tag(name, text)\n    \"singleton\"\n  end\nend\n"),
+            ("app/views/articles/index.html.erb", "<%= content_tag(:span, \"text\").div(2) %>"),
+        ].into_iter().map(|(path, source)| (path.into(), source.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).expect("ingest helpers");
+        let mut analyzer = Analyzer::for_source(&app);
+        analyzer.analyze(&mut app);
+        assert_eq!(
+            analyzer.class_registry()[&ClassId(Symbol::from("ActionView::Base"))]
+                .instance_methods[&Symbol::from("content_tag")],
+            Ty::Str,
+        );
+        assert!(diagnose(&app).iter().any(|d| d.severity == Severity::Error && matches!(
+            &d.kind, DiagnosticKind::SendDispatchFailed { method, recv_ty }
+                if method.as_str() == "div" && recv_ty == &Ty::Str
+        )), "a singleton definition must not turn String#div into a gradual escape");
+    }
+}
