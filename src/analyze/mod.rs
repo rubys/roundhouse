@@ -3385,16 +3385,13 @@ impl Analyzer {
                 };
                 extract_ivar_assignments_in(&action.body, &mut ivars, &env);
                 bind_framework_assigned_ivars(&action.body, &mut ivars);
-                for (filter, _, _) in &chained_filters {
-                    if matches!(filter.kind, FilterKind::Before | FilterKind::Around)
-                        && before_filter_applies(filter, &action.name)
-                    {
-                        if let Some(fivars) = chained_bindings.get(&filter.target) {
-                            for (k, v) in fivars {
-                                ivars.entry(k.clone()).or_insert_with(|| v.clone());
-                            }
-                        }
-                    }
+                for (k, v) in view_filter_seed(
+                    &chained_filters,
+                    &action.name,
+                    &chained_bindings,
+                    &chained_bodies,
+                ) {
+                    ivars.entry(k).or_insert(v);
                 }
                 // Ivars written by same-controller helper methods this
                 // action explicitly *calls* (`def standing; flag_warning;
@@ -3601,16 +3598,13 @@ impl Analyzer {
                         // rule as the own-actions loop: action bindings
                         // win over filter contributions).
                         let mut ivars = binds.clone();
-                        for (filter, _, _) in &chained_filters {
-                            if matches!(filter.kind, FilterKind::Before | FilterKind::Around)
-                                && before_filter_applies(filter, name)
-                            {
-                                if let Some(fivars) = chained_bindings.get(&filter.target) {
-                                    for (k, v) in fivars {
-                                        ivars.entry(k.clone()).or_insert_with(|| v.clone());
-                                    }
-                                }
-                            }
+                        for (k, v) in view_filter_seed(
+                            &chained_filters,
+                            name,
+                            &chained_bindings,
+                            &chained_bodies,
+                        ) {
+                            ivars.entry(k).or_insert(v);
                         }
                         view_feeders
                             .entry(view_name.clone())
@@ -7224,6 +7218,107 @@ fn merged_before_seed(
         }
     }
     seed
+}
+
+/// The filter ivars an action's view starts from, replayed in the order
+/// Rails runs the chain. A filter that runs at its declared position and
+/// always assigns the ivar replaces what earlier filters wrote; behind a
+/// runtime `if:`/`unless:` it joins them, since it may not run.
+/// `only:`/`except:` are decided per action by [`before_filter_applies`].
+/// The replay cannot place any other write: an around callback's (it may
+/// follow `yield`), one in a filter prepended or named again later (by a
+/// skip or a second declaration), one the body may skip, or one with no
+/// shape. An ivar with such a write after its replayed value, and no
+/// guaranteed write after that, keeps its first writer, the rule before
+/// this replay.
+fn view_filter_seed(
+    chained_filters: &[(Filter, ClassId, ClassId)],
+    action_name: &Symbol,
+    bindings: &HashMap<Symbol, HashMap<Symbol, Ty>>,
+    bodies: &HashMap<Symbol, &Expr>,
+) -> HashMap<Symbol, Ty> {
+    let mut first: HashMap<Symbol, Ty> = HashMap::new();
+    // `None` once a write the replay does not model has followed it.
+    let mut replayed: HashMap<Symbol, Option<Ty>> = HashMap::new();
+    for (i, (filter, _, _)) in chained_filters.iter().enumerate() {
+        if !matches!(filter.kind, FilterKind::Before | FilterKind::Around)
+            || !before_filter_applies(filter, action_name)
+        {
+            continue;
+        }
+        let Some(fivars) = bindings.get(&filter.target) else {
+            continue;
+        };
+        let placed = matches!(filter.kind, FilterKind::Before)
+            && !filter.prepend
+            && !chained_filters[i + 1..]
+                .iter()
+                .any(|(f, _, _)| f.target == filter.target);
+        let always = match bodies.get(&filter.target) {
+            Some(body) if placed => ivars_always_assigned(body),
+            _ => Vec::new(),
+        };
+        let guarded = filter.if_cond.is_some()
+            || filter.unless_cond.is_some()
+            || filter.if_cond_expr.is_some()
+            || filter.unless_cond_expr.is_some();
+        for (k, v) in fivars {
+            let modeled = always.contains(k) && !v.is_unknown() && !v.is_open();
+            let join = |prev: &Ty| crate::analyze::body::join_ivar_slot(prev.clone(), v.clone());
+            let next = match (modeled, guarded, replayed.get(k)) {
+                (false, _, None) => None,
+                (false, _, Some(_)) => Some(None),
+                (true, false, _) => Some(Some(v.clone())),
+                (true, true, Some(Some(prev))) => Some(Some(join(prev))),
+                (true, true, Some(None)) => None,
+                (true, true, None) => Some(Some(first.get(k).map_or_else(|| v.clone(), join))),
+            };
+            first.entry(k.clone()).or_insert_with(|| v.clone());
+            if let Some(next) = next {
+                replayed.insert(k.clone(), next);
+            }
+        }
+    }
+    first
+        .into_iter()
+        .map(|(k, ty)| match replayed.remove(&k) {
+            Some(Some(replayed)) => (k, replayed),
+            _ => (k, ty),
+        })
+        .collect()
+}
+
+/// The ivars `body` assigns as statements of its own (see
+/// [`ivars_assigned_by_statement`]) before any statement that can leave
+/// it early: a `return`, or a `next`/`break` outside a loop or block (a
+/// block filter's body is itself a block). A write after such a
+/// statement may never run.
+fn ivars_always_assigned(body: &Expr) -> Vec<Symbol> {
+    fn leaves_early(e: &Expr, in_loop: bool) -> bool {
+        match &*e.node {
+            ExprNode::Return { .. } => return true,
+            ExprNode::Next { .. } | ExprNode::Break { .. } if !in_loop => return true,
+            _ => {}
+        }
+        let in_loop =
+            in_loop || matches!(&*e.node, ExprNode::While { .. } | ExprNode::Lambda { .. });
+        let mut found = false;
+        e.node
+            .for_each_child(&mut |c| found = found || leaves_early(c, in_loop));
+        found
+    }
+    let statements: Vec<&Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![body],
+    };
+    let mut out = Vec::new();
+    for stmt in statements {
+        if leaves_early(stmt, false) {
+            break;
+        }
+        out.extend(ivars_assigned_by_statement(stmt));
+    }
+    out
 }
 
 /// Build one controller's own segment of the resolved filter chain,
