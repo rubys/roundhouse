@@ -30,6 +30,15 @@ use super::expr::{begin_method, emit_expr, wrap_return};
 use super::naming::{camel, type_name};
 use super::ty::swift_ty;
 
+thread_local! {
+    static INDEXER_KEYS: std::cell::RefCell<crate::emit::shared::indexer::IndexerKeys> =
+        std::cell::RefCell::new(Default::default());
+}
+
+pub(super) fn reset_indexer_keys() {
+    INDEXER_KEYS.with(|keys| *keys.borrow_mut() = Default::default());
+}
+
 /// Register every method's ORDERED camelCased param names under
 /// "Receiver.method" — the call-site kwargs-splat decision (see
 /// `expr::METHOD_PARAMS`).
@@ -341,6 +350,7 @@ pub fn register_throws_contract(class: &str, method_camel: &str) {
 /// (via the swift_units transform) and the models; `swift::emit` resets
 /// the registries once at start.
 pub fn register_classes(lcs: &[LibraryClass]) {
+    INDEXER_KEYS.with(|keys| keys.borrow_mut().register(lcs));
     for lc in lcs {
         let cls = type_name(lc.name.0.as_str());
         // Pure readers collapse into properties, so they're NOT methods
@@ -685,7 +695,10 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     });
     if sub_get.is_some() || sub_set.is_some() {
         let needs_override = super::expr::ancestor_has(&class_name, "__subscript__", false);
-        out.push_str(&indent_method(&emit_subscript(sub_get, sub_set, needs_override)));
+        let inherited_key = INDEXER_KEYS.with(|keys| {
+            keys.borrow().inherited(lc.name.0.as_str()).map(swift_ty)
+        });
+        out.push_str(&indent_method(&emit_subscript(sub_get, sub_set, needs_override, inherited_key)));
         out.push('\n');
     }
 
@@ -783,6 +796,7 @@ fn emit_subscript(
     getter: Option<&MethodDef>,
     setter: Option<&MethodDef>,
     needs_override: bool,
+    inherited_key: Option<String>,
 ) -> String {
     let model = getter.or(setter).expect("subscript needs at least one of []/[]=");
     let (param_name, mut param_ty) = match m_sig_params(model).and_then(|p| p.first()) {
@@ -796,12 +810,10 @@ fn emit_subscript(
             .and_then(|p| p.get(1).map(|p| swift_ty(&p.ty)))
             .unwrap_or_else(|| "Any?".to_string()),
     };
-    // An override must MATCH the AR Base indexer's signature exactly
-    // (`(String) -> Any?`) — an untyped test-scope `[]` would render
-    // `(Any?) -> Any?` and fail to override. The same key→String pin
-    // the Kotlin gate needed.
+    // Match the ancestor's key contract, including AR Base's dynamic
+    // String | Symbol key, without changing unrelated union-typed APIs.
     if needs_override {
-        param_ty = "String".to_string();
+        param_ty = inherited_key.unwrap_or_else(|| "String".to_string());
         elem_ty = "Any?".to_string();
     }
     let mut out = format!(

@@ -3150,10 +3150,8 @@ fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     // hash with String keys and got `{}`, and `assert_equal` said only
     // that it failed.
     //
-    // The `[]` / `[]=` indexers stay monomorphic on Symbol: those are a
-    // different API, deliberately narrowed
-    // ([[feedback_monomorphize_polymorphic_apis]]), and a String call
-    // site coerces at the lowering.
+    // The `[]` reader accepts the same public column names, normalizing
+    // Symbols to Strings before its dispatch.
     //
     // Values normally read the storage ivar (`@col_raw` for temporal
     // columns). JSON/JSONB reads through its decode boundary because Rails'
@@ -3203,10 +3201,34 @@ fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     }
 }
 
+// A merged native indexer shares one key type between its reader and
+// writer. Keep both bodies on String dispatch; a String | Symbol parameter
+// remains dynamic on the soft-strict targets.
+fn index_name_ty() -> Ty {
+    Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() }
+}
+
+fn index_name_string(name: &Symbol) -> Expr {
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(with_ty(var_ref(name.clone()), index_name_ty())),
+                method: Symbol::from("to_s"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        Ty::Str,
+    )
+}
+
 fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     let name = Symbol::from("name");
+    let name_ty = index_name_ty();
 
-    // Patterns match the PUBLIC column symbol; bodies read the storage
+    // Patterns match the PUBLIC column name; bodies read the storage
     // ivar (`@col_raw` for timestamps). Date instead uses its native
     // reader, matching literal-key analysis and Rails' []/read_attribute.
     // `attributes` and the raw Date reader still expose stored text.
@@ -3218,7 +3240,7 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
         .iter()
         .map(|c| crate::expr::Arm {
             pattern: crate::expr::Pattern::Lit {
-                value: Literal::Sym { value: c.name.clone() },
+                value: Literal::Str { value: c.name.as_str().to_string() },
             },
             guard: None,
             // NULLABLE columns only: wrap in `Cast` carrying the slot
@@ -3259,7 +3281,7 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
         Expr::new(
             Span::synthetic(),
             ExprNode::Case {
-                scrutinee: var_ref(name.clone()),
+                scrutinee: index_name_string(&name),
                 arms,
             },
         )
@@ -3275,7 +3297,7 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
         params: vec![Param::positional(name.clone())],
         body,
         // Heterogeneous return (per-column type union); approximate as Untyped.
-        signature: Some(fn_sig(vec![(name, Ty::Sym)], Ty::Untyped)),
+        signature: Some(fn_sig(vec![(name, name_ty)], Ty::Untyped)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -3642,7 +3664,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
             };
             crate::expr::Arm {
                 pattern: crate::expr::Pattern::Lit {
-                    value: Literal::Sym { value: c.name.clone() },
+                    value: Literal::Str { value: c.name.as_str().to_string() },
                 },
                 guard: None,
                 body,
@@ -3676,7 +3698,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
         Expr::new(
             Span::synthetic(),
             ExprNode::Case {
-                scrutinee: var_ref(name.clone()),
+                scrutinee: index_name_string(&name),
                 arms,
             },
         )
@@ -3715,7 +3737,7 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
         params: vec![Param::positional(name.clone()), Param::positional(value.clone())],
         body,
         signature: Some(fn_sig(
-            vec![(name, Ty::Sym), (value, value_ty)],
+            vec![(name, index_name_ty()), (value, value_ty)],
             return_ty,
         )),
         effects: EffectSet::default(),

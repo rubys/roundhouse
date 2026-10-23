@@ -7,7 +7,7 @@
 //!     coalesced in the body.
 //!   - Instance `Method`s → methods; class methods (`def self.x`) → `static`
 //!     methods (C# has no `companion object`).
-//!   - Ruby `[]` / `[]=` collapse into a single C# indexer (`this[string …]`).
+//!   - Ruby `[]` / `[]=` collapse into a single C# indexer.
 //!   - `attr_*` accessors collapse into auto-properties.
 //!   - Ruby's implicit return becomes an explicit `return` on the final
 //!     statement of value-returning methods.
@@ -33,6 +33,20 @@ use super::expr::{
 };
 use super::naming::{camel, pascal, pascal_of_camel, type_name};
 use super::ty::csharp_ty;
+
+thread_local! {
+    static INDEXER_KEYS: std::cell::RefCell<crate::emit::shared::indexer::IndexerKeys> =
+        std::cell::RefCell::new(Default::default());
+}
+
+pub(super) fn reset_indexer_keys() {
+    INDEXER_KEYS.with(|keys| *keys.borrow_mut() = Default::default());
+}
+
+/// Test helpers need indexer ancestry without changing ordinary member hiding.
+pub(super) fn register_helper_indexers(classes: &[LibraryClass]) {
+    INDEXER_KEYS.with(|keys| keys.borrow_mut().register(classes));
+}
 
 /// The `using` + `namespace` header every emitted C# file carries.
 const FILE_HEADER: &str = "using System;\n\
@@ -149,6 +163,10 @@ pub fn emit_test_class(
     let class_name = type_name(lc.name.0.as_str());
 
     let mut out = String::new();
+
+    // Register every helper's indexer contract before emission, including
+    // children declared before their parent.
+    register_helper_indexers(inner_classes);
 
     // Inner helper classes declared inline in the test file (a non-test
     // model/controller paired with the `*Test` class). Ingest lifts them onto
@@ -547,12 +565,29 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         m.receiver == MethodReceiver::Instance && m.name.as_str() == "[]="
     });
     if getter.is_some() || setter.is_some() {
-        let modifier = if inherited.contains("get") || inherited.contains("set") {
+        // A helper chain can reach a registered runtime/model indexer through
+        // several unregistered helpers. Helper-only indexers keep their own
+        // element types and hide one another, just like ordinary methods.
+        let (inherited_key, inherited_indexer) = INDEXER_KEYS.with(|keys| {
+            let keys = keys.borrow();
+            (
+                keys.inherited(lc.name.0.as_str()).map(csharp_ty),
+                keys.inherited_class(lc.name.0.as_str()).map(type_name),
+            )
+        });
+        let indexer_members = inherited_indexer
+            .map(|name| super::expr::ancestor_members(&name))
+            .unwrap_or_default();
+        let modifier = if inherited.contains("get")
+            || inherited.contains("set")
+            || indexer_members.contains("get")
+            || indexer_members.contains("set")
+        {
             "override "
         } else {
             "virtual "
         };
-        out.push_str(&indent_method(&emit_indexer(modifier, getter, setter)));
+        out.push_str(&indent_method(&emit_indexer(modifier, getter, setter, inherited_key)));
         out.push('\n');
     }
 
@@ -804,6 +839,7 @@ fn instance_member_names(lc: &LibraryClass) -> HashSet<String> {
 }
 
 pub fn register_class_hierarchy(classes: &[LibraryClass]) {
+    INDEXER_KEYS.with(|keys| keys.borrow_mut().register(classes));
     for lc in classes {
         if lc.is_module {
             continue;
@@ -880,19 +916,23 @@ fn emit_constructor(class_name: &str, m: &MethodDef) -> String {
 }
 
 /// Emit a C# indexer from the lowered `[]`/`[]=` methods.
-fn emit_indexer(modifier: &str, getter: Option<&MethodDef>, setter: Option<&MethodDef>) -> String {
+fn emit_indexer(
+    modifier: &str,
+    getter: Option<&MethodDef>,
+    setter: Option<&MethodDef>,
+    inherited_key: Option<String>,
+) -> String {
     let key = getter
         .or(setter)
         .and_then(|m| m.params.first())
         .map(|p| camel(p.name.as_str()))
         .unwrap_or_else(|| "name".to_string());
-    // Key + element types. An `override` indexer must match the base's
-    // `object? this[string]`; a class defining its own (Flash → `string?`
-    // values over `untyped` keys, Session → `object?`) takes them from its
-    // own signature (getter return = element type, first param = key type).
+    // An override must share the ancestor's native key contract. In
+    // particular, AR Base's String | Symbol key remains object?, so its
+    // overrides cannot keep the old string-only parameter.
     let is_override = modifier.contains("override");
     let key_ty = if is_override {
-        "string".to_string()
+        inherited_key.unwrap_or_else(|| "string".to_string())
     } else {
         getter
             .or(setter)

@@ -459,7 +459,24 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
         };
         return crate::emit::diagnostics::report_unsupported(span, "rust", "Case", "");
     }
-    let scrutinee_s = emit_expr(scrutinee);
+    let mut scrutinee_s = emit_expr(scrutinee);
+    // Calls, interpolation and field reads produce owned Strings. A
+    // string-literal pattern matches &str; borrow the value once for
+    // the match. Binding patterns keep their original ownership.
+    if scrutinee.ty.as_ref().is_some_and(crate::ty::Ty::is_stringish)
+        && matches!(&*scrutinee.node, ExprNode::Send { .. } | ExprNode::StringInterp { .. } | ExprNode::Ivar { .. })
+        && arms.iter().any(|arm| matches!(
+            &arm.pattern,
+            crate::expr::Pattern::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+        ))
+        && arms.iter().all(|arm| matches!(
+            &arm.pattern,
+            crate::expr::Pattern::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                | crate::expr::Pattern::Wildcard
+        ))
+    {
+        scrutinee_s = format!("({scrutinee_s}).as_ref()");
+    }
     let return_ty = current_return_ty();
     let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped));
     let arm_strs: Vec<String> = arms
@@ -683,6 +700,102 @@ mod tests {
 
     fn emit(e: &Expr) -> String {
         with_emit_ctx(EmitCtx::default(), || emit_expr(e))
+    }
+
+    #[test]
+    fn an_owned_string_scrutinee_compiles_and_matches_literals() {
+        let span = Span::synthetic();
+        let mut name = Expr::new(
+            span,
+            ExprNode::Var {
+                id: VarId(0),
+                name: Symbol::from("name"),
+            },
+        );
+        name.ty = Some(Ty::Str);
+        let mut scrutinee = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(name),
+                method: Symbol::from("to_s"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        scrutinee.ty = Some(Ty::Str);
+        let case = Expr::new(
+            span,
+            ExprNode::Case {
+                scrutinee,
+                arms: vec![
+                    crate::expr::Arm {
+                        pattern: crate::expr::Pattern::Lit {
+                            value: Literal::Str {
+                                value: "email".to_string(),
+                            },
+                        },
+                        guard: None,
+                        body: Expr::new(
+                            span,
+                            ExprNode::Lit {
+                                value: Literal::Bool { value: true },
+                            },
+                        ),
+                    },
+                    crate::expr::Arm {
+                        pattern: crate::expr::Pattern::Wildcard,
+                        guard: None,
+                        body: Expr::new(
+                            span,
+                            ExprNode::Lit {
+                                value: Literal::Bool { value: false },
+                            },
+                        ),
+                    },
+                ],
+            },
+        );
+        let mut fallback = case.clone();
+        if let ExprNode::Case { arms, .. } = &mut *fallback.node {
+            arms.remove(0);
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "roundhouse-owned-string-case-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let source = dir.join("main.rs");
+        let binary = dir.join("contract");
+        std::fs::write(&source, format!(
+            "fn probe(name: &str) -> bool {{ {} }}\n\
+             fn fallback(name: &str) -> bool {{ {} }}\n\
+             fn main() {{ assert!(probe(\"email\")); assert!(!probe(\"missing\")); assert!(!fallback(\"email\")); }}\n",
+            emit(&case), emit(&fallback),
+        )).unwrap();
+        let compiled = std::process::Command::new("rustc")
+            .args(["--edition", "2024"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        assert!(
+            std::process::Command::new(&binary)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

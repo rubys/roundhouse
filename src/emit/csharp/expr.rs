@@ -37,6 +37,9 @@ thread_local! {
     /// Local names already declared in the current method body (so the
     /// first `Assign` emits a declaration and later ones a bare `=`).
     static DECLARED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// All source locals, including later declarations and lambda formals.
+    /// C# forbids shadowing an enclosing local even before it is declared.
+    static LOCAL_NAMES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// For locals first assigned `nil`, the nullable C# type taken from a
     /// later non-nil assignment — so `var x = null` (illegal in C#) becomes
     /// `T? x = null`. Also filled for the first typed assign with a `?`
@@ -599,6 +602,23 @@ pub(super) fn set_returns_unit(b: bool) {
 /// Reset per-method local-decl tracking and pre-scan the body for the
 /// container/nil/hoist signals. Called by `library::emit_method`.
 pub(super) fn begin_method(body: &Expr) {
+    fn collect_names(e: &Expr, names: &mut HashSet<String>) {
+        match &*e.node {
+            ExprNode::Var { name, .. }
+            | ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => {
+                names.insert(camel(name.as_str()));
+            }
+            ExprNode::Lambda { params, .. } => {
+                names.extend(params.iter().map(|name| camel(name.as_str())));
+            }
+            _ => {}
+        }
+        e.node.for_each_child(&mut |child| collect_names(child, names));
+    }
+    let mut names = HashSet::new();
+    collect_names(body, &mut names);
+    LOCAL_NAMES.with(|locals| *locals.borrow_mut() = names);
     let mut counts: HashMap<String, usize> = HashMap::new();
     let mut nil_types: HashMap<String, String> = HashMap::new();
     let mut saw_nil: HashSet<String> = HashSet::new();
@@ -2036,14 +2056,23 @@ fn rename_word(body: &str, from: &str, to: &str) -> String {
 
 /// `case` in statement position → an `if`/`else if` chain on scrutinee
 /// equality (arms have statement bodies, which a switch-expression can't
-/// hold).
+/// hold). Keep a block rather than a switch statement so a Ruby `break`
+/// still exits the enclosing loop, not the case dispatch.
 fn emit_case_stmt(scrutinee: &Expr, arms: &[Arm]) -> String {
     let s = emit_expr(scrutinee);
+    let bodies: Vec<String> = arms.iter().map(|arm| indent(&emit_stmt(&arm.body))).collect();
+    let mut binding = "__rhCaseValue".to_string();
+    while s.contains(&binding)
+        || bodies.iter().any(|body| body.contains(&binding))
+        || LOCAL_NAMES.with(|locals| locals.borrow().contains(&binding))
+        || PARAM_NAMES.with(|params| params.borrow().contains(&binding))
+    {
+        binding.push('_');
+    }
     let mut out = String::new();
     let mut first = true;
     let mut else_body: Option<String> = None;
-    for arm in arms {
-        let body = indent(&emit_stmt(&arm.body));
+    for (arm, body) in arms.iter().zip(bodies) {
         match &arm.pattern {
             Pattern::Wildcard | Pattern::Bind { .. } => {
                 if !body.trim().is_empty() {
@@ -2053,7 +2082,28 @@ fn emit_case_stmt(scrutinee: &Expr, arms: &[Arm]) -> String {
             Pattern::Lit { value } => {
                 let kw = if first { "if" } else { "else if" };
                 first = false;
-                out.push_str(&format!("{kw} ({s} == {}) {{\n{body}\n}} ", emit_literal(value)));
+                // object? == String compares references. Equals preserves
+                // literal value matching at the dynamic indexer boundary.
+                let mut condition = format!("object.Equals({binding}, {})", emit_literal(value));
+                // Preserve Ruby's Integer/Float equality after boxing. A
+                // non-representable large Integer has no equal Double.
+                let numeric_peer = match value {
+                    Literal::Int { value } if (*value as f64) as i128 == *value as i128 => {
+                        Some(Literal::Float { value: *value as f64 })
+                    }
+                    Literal::Float { value }
+                        if value.fract() == 0.0
+                            && *value >= i64::MIN as f64
+                            && *value < i64::MAX as f64 =>
+                    {
+                        Some(Literal::Int { value: *value as i64 })
+                    }
+                    _ => None,
+                };
+                if let Some(peer) = numeric_peer {
+                    condition.push_str(&format!(" || object.Equals({binding}, {})", emit_literal(&peer)));
+                }
+                out.push_str(&format!("{kw} ({condition}) {{\n{body}\n}} "));
             }
             other => {
                 let kw = if first { "if" } else { "else if" };
@@ -2067,11 +2117,11 @@ fn emit_case_stmt(scrutinee: &Expr, arms: &[Arm]) -> String {
     if let Some(eb) = else_body {
         if first {
             // Only a default arm.
-            return eb;
+            return format!("{{\n    object? {binding} = {s};\n{eb}\n}}");
         }
         out.push_str(&format!("else {{\n{eb}\n}}"));
     }
-    out.trim_end().to_string()
+    format!("{{\n    object? {binding} = {s};\n{}\n}}", indent(out.trim_end()))
 }
 
 fn emit_assign(target: &LValue, value: &Expr) -> String {

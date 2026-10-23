@@ -15,6 +15,7 @@ pub mod div_pow;
 pub mod eq;
 pub mod fn_call;
 pub mod hoist;
+pub(crate) mod indexer;
 pub mod interp;
 pub mod modulo;
 pub mod mul;

@@ -1921,18 +1921,58 @@ fn isa_narrow_cond(cond: &Expr) -> Option<String> {
 /// `case` without `else` evaluates to nil).
 fn emit_case(scrutinee: &Expr, arms: &[Arm], returning: bool) -> String {
     let s = emit_expr(scrutinee);
-    let render = |e: &Expr| if returning { wrap_return(e) } else { emit_expr(e) };
+    let render = |e: &Expr| {
+        if returning {
+            wrap_return(e)
+        } else {
+            emit_expr(e)
+        }
+    };
+    let bodies: Vec<String> = arms.iter().map(|arm| indent(&render(&arm.body))).collect();
+    // Literal expression patterns require Equatable, which Any? is not.
+    // Match the native scalar through a conditional cast instead. Do not
+    // stringify: an integer or nil must not match a String key. A switch
+    // still evaluates an effectful scrutinee exactly once. The emitted
+    // body check avoids capturing source locals, including in nested cases.
+    let mut binding = "__rhCaseValue".to_string();
+    while s.contains(&binding) || bodies.iter().any(|body| body.contains(&binding)) {
+        binding.push('_');
+    }
     let mut lines = Vec::new();
     let mut has_default = false;
-    for arm in arms {
-        let body = indent(&render(&arm.body));
+    for (arm, body) in arms.iter().zip(bodies) {
         match &arm.pattern {
             Pattern::Wildcard | Pattern::Bind { .. } => {
                 has_default = true;
                 lines.push(format!("default:\n{body}"));
             }
             Pattern::Lit { value } => {
-                lines.push(format!("case {}:\n{body}", emit_literal(value)));
+                let literal = emit_literal(value);
+                let condition = match value {
+                    Literal::Str { .. } | Literal::Sym { .. } => {
+                        Some(format!("({binding} as? String) == {literal}"))
+                    }
+                    Literal::Bool { .. } => Some(format!("({binding} as? Bool) == {literal}")),
+                    Literal::Int { .. } | Literal::Float { .. } => {
+                        // Ruby numeric literal matching accepts both Integer
+                        // and Float. Comparing as Double alone would round
+                        // large Ints, so keep the integer comparison exact.
+                        Some(match value {
+                            Literal::Int { .. } => format!(
+                                "({binding} as? Int) == {literal} || ({binding} as? Double).flatMap {{ Int(exactly: $0) }} == {literal}"
+                            ),
+                            _ => format!(
+                                "({binding} as? Int).map {{ Int(exactly: {literal}) == $0 }} == true || ({binding} as? Double) == {literal}"
+                            ),
+                        })
+                    }
+                    Literal::Nil | Literal::Regex { .. } => None,
+                };
+                if let Some(condition) = condition {
+                    lines.push(format!("case let {binding} where {condition}:\n{body}"));
+                } else {
+                    lines.push(format!("case {literal}:\n{body}"));
+                }
             }
             other => {
                 lines.push(format!("/* TODO pattern {other:?} */ default:\n{body}"));
@@ -1941,10 +1981,14 @@ fn emit_case(scrutinee: &Expr, arms: &[Arm], returning: bool) -> String {
         }
     }
     if !has_default {
-        let fallback = if returning { "default:\n    return nil" } else { "default:\n    break" };
+        let fallback = if returning {
+            "default:\n    return nil"
+        } else {
+            "default:\n    break"
+        };
         lines.push(fallback.to_string());
     }
-    format!("switch {s} {{\n{}\n}}", lines.join("\n"))
+    format!("switch ({s} as Any?) {{\n{}\n}}", lines.join("\n"))
 }
 
 /// Emit a statement sequence. Fuses the `x = <optional>; if x.nil?

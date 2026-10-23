@@ -50,6 +50,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // conformance, throwing methods, object accessors) before that entry
     // renders, so call sites resolve regardless of order.
     expr::reset_registries();
+    library::reset_indexer_keys();
     // `processAction` is the dispatch boundary the server catches at —
     // its Base declaration carries `throws` by contract so the throwing
     // controller overrides are legal.
@@ -221,6 +222,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             test_extras,
             &crate::lower::routes::helper_id_segments(app),
         );
+        // Resolve helper ancestry independently of test-file emission order.
+        for lowered in &test_lowered {
+            library::register_classes(&lowered.inner_classes);
+        }
         for lowered in &test_lowered {
             let name = lowered.test_class.name.0.as_str();
             let last = name.rsplit("::").next().unwrap_or(name);

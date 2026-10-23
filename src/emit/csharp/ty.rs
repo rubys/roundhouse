@@ -181,3 +181,25 @@ pub fn has_untyped(t: &Ty) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn string_symbol_unions_preserve_dynamic_boundaries_in_nested_types() {
+        let key = Ty::Union { variants: vec![Ty::Str, Ty::Sym].into() };
+        for ty in [
+            key.clone(),
+            Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() },
+            Ty::Union { variants: vec![key.clone(), Ty::Nil].into() },
+            Ty::Union { variants: vec![key.clone(), Ty::Int].into() },
+        ] {
+            assert_eq!(csharp_ty(&ty), "object?");
+        }
+        assert_eq!(csharp_ty(&Ty::Array { elem: key.clone().into() }), "List<object?>");
+        assert_eq!(csharp_ty(&Ty::Hash { key: Ty::Str.into(), value: key.clone().into() }),
+            "Dictionary<string, object?>");
+        assert_eq!(csharp_ty(&Ty::Tuple { elems: vec![key, Ty::Str].into() }), "(object?, string)");
+    }
+}

@@ -44,6 +44,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     // Reset the per-emit registries.
     expr::reset_class_hierarchy();
+    library::reset_indexer_keys();
     expr::reset_object_accessors();
     expr::reset_method_params();
 
@@ -224,6 +225,10 @@ fn emit_tests(
         test_extras,
         &crate::lower::routes::helper_id_segments(app),
     );
+    // Resolve helper ancestry independently of test-file emission order.
+    for lowered in &test_lowered {
+        library::register_helper_indexers(&lowered.inner_classes);
+    }
     for lowered in &test_lowered {
         files.push(library::emit_test_class_file(
             &lowered.test_class,

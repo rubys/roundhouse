@@ -9204,14 +9204,17 @@ fn defines_constant(src: &str, konst: &str) -> bool {
 /// `packages/erb` (a `class`) collided with the shim (a `module`). The
 /// lobsters AOT lane was red for ten days on that comment.
 fn requires_feature(src: &str, require_line: &str) -> bool {
-    if !src.contains(require_line) {
+    let single_quoted = require_line.replace('"', "'");
+    if !src.contains(require_line) && !src.contains(&single_quoted) {
         return false;
     }
     src.lines().any(|line| {
         let trimmed = line.trim_start();
-        trimmed
-            .strip_prefix(require_line)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        [require_line, single_quoted.as_str()].iter().any(|candidate| {
+            trimmed
+                .strip_prefix(*candidate)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        })
     })
 }
 
@@ -9370,6 +9373,28 @@ const BUNDLED: [(&str, &str); 27] = [
     ("REXML", "rexml/document"),
 ];
 
+fn calls_to_set(src: &str) -> bool {
+    if !src.contains("to_set") {
+        return false;
+    }
+    // Enumerable#to_set needs the library even when no Set constant is
+    // named. Parse the candidate so prose and methods like to_setter do
+    // not acquire a dependency merely for containing the same text.
+    struct CallsSet(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for CallsSet {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            self.0 |= node.name().as_slice() == b"to_set";
+            if !self.0 {
+                ruby_prism::visit_call_node(self, node);
+            }
+        }
+    }
+    let parsed = ruby_prism::parse(src.as_bytes());
+    let mut calls = CallsSet(false);
+    ruby_prism::Visit::visit(&mut calls, &parsed.node());
+    calls.0
+}
+
 /// Every gap in a tree, as `(file index, require line)`. One walk,
 /// read by both the pass that writes the requires and the gate that
 /// checks a tree for missing ones — a second copy is how the rule
@@ -9400,7 +9425,7 @@ fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
         }
         for (i, (path, content)) in files.iter().enumerate() {
             if path.ends_with(".rb")
-                && names_constant(content, konst)
+                && (names_constant(content, konst) || (konst == "Set" && calls_to_set(content)))
                 && !requires_feature(content, &require_line)
                 && !gaps.contains(&(i, require_line.clone()))
             {
@@ -11919,6 +11944,24 @@ mod tests {
         .unwrap();
         assert_eq!(get(&without, "runtime/active_storage_processor.rb"), "# stub\n");
         assert!(!get(&without, "spin.toml").contains("ruby-vips"));
+    }
+
+    #[test]
+    fn to_set_requires_the_bundled_set_library() {
+        let mut files = vec![
+            ("app/models/ids.rb".to_string(), "[1, 2, 2].to_set\n".to_string()),
+            ("app/models/loaded.rb".to_string(), "require 'set'\n[1, 2, 2].to_set\n".to_string()),
+            ("app/models/prose.rb".to_string(), "# ids.to_set\nlabel = \"ids.to_set\"\nids.to_setter\n".to_string()),
+        ];
+        assert_eq!(missing_bundled_requires(&files), vec!["app/models/ids.rb: require \"set\""]);
+        write_bundled_requires(&mut files);
+        assert!(files[0].1.starts_with("require \"set\"\n"));
+        assert_eq!(files[1].1, "require 'set'\n[1, 2, 2].to_set\n");
+        assert!(!files[2].1.contains("require"));
+        assert!(missing_bundled_requires(&files).is_empty());
+        let once = files.clone();
+        write_bundled_requires(&mut files);
+        assert_eq!(files, once);
     }
 
     /// spinel will not resolve `Set` or `StringIO` without the require,
