@@ -208,8 +208,8 @@ fn an_alias_of_another_resources_params_does_not_select_a_missing_factory() {
 #[test]
 fn emitted_builds_preserve_inputs_owner_evaluation_and_assignment_results() {
     let body = r#"
-    __rh_build_owner_0 = "written local"
-    __rh_build_record_0 = "written record"
+    rh_build_owner_0 = "written local"
+    rh_build_record_0 = "written record"
     attributes = { body: "hash", to_pty_session_id: 999 }
     message = @pty_session.received_messages.new(attributes)
     message.save!
@@ -231,8 +231,8 @@ fn emitted_builds_preserve_inputs_owner_evaluation_and_assignment_results() {
     result = (assigned = @pty_session.received_messages.new(message_params))
     @result = result
     @assigned = assigned
-    @written_owner = __rh_build_owner_0
-    @written_record = __rh_build_record_0
+    @written_owner = rh_build_owner_0
+    @written_record = rh_build_record_0
     head :ok
 "#;
     let mut overlay = emit_and_run::empty_app();
