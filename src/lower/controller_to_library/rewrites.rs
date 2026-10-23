@@ -1731,8 +1731,12 @@ fn build_target_read(target: &LValue, span: Span) -> Expr {
 }
 
 fn fresh_build_local(role: &str, names: &mut HashSet<Symbol>) -> Symbol {
+    // No leading underscore: Elixir reads `_name` as "deliberately
+    // ignored" and warns when the body then uses it; the elixir
+    // toolchain compiles with `--warnings-as-errors`. Same rule as
+    // `synth_has_many_id_reader`'s `rh_id_record`.
     for n in 0.. {
-        let name = Symbol::from(format!("__rh_build_{role}_{n}"));
+        let name = Symbol::from(format!("rh_build_{role}_{n}"));
         if names.insert(name.clone()) { return name; }
     }
     unreachable!("local name space exhausted")

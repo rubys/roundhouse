@@ -6,7 +6,7 @@
 //! `let owner = self.widget;` of a non-Copy model is E0507 ("cannot
 //! move out of `self.widget` which is behind a mutable reference").
 //! The association-build lowering binds the owner this way
-//! (`__rh_build_owner_N = @widget`), so every `@x = @widget.gadgets.build(...)`
+//! (`rh_build_owner_N = @widget`), so every `@x = @widget.gadgets.build(...)`
 //! hit it, including real-blog's comments controller.
 
 use std::collections::HashMap;
@@ -75,7 +75,7 @@ fn local_bound_to_a_model_ivar_copies_instead_of_moving_out_of_self() {
         "a local bound to a model ivar must clone the field:\n{src}"
     );
     assert!(
-        src.contains("__rh_build_owner_0 = self.widget.clone();"),
+        src.contains("rh_build_owner_0 = self.widget.clone();"),
         "the association build's owner temp must clone the field:\n{src}"
     );
     assert!(

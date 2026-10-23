@@ -532,8 +532,8 @@ fn a_nested_build_on_an_untyped_parent_named_after_a_declarer_uses_its_key() {
     let controller = std::fs::read_to_string(emitted.join("app/controllers/comments_controller.rb"))
         .expect("emitted controller");
     assert!(controller.contains("Comment.from_params"), "{controller}");
-    assert!(controller.contains("__rh_build_owner_0 = @story"), "{controller}");
-    assert!(controller.contains("__rh_build_record_0.story_id = __rh_build_owner_0.id"), "{controller}");
+    assert!(controller.contains("rh_build_owner_0 = @story"), "{controller}");
+    assert!(controller.contains("rh_build_record_0.story_id = rh_build_owner_0.id"), "{controller}");
     assert!(!controller.contains("@story.comments.build("), "{controller}");
 }
 
@@ -585,8 +585,8 @@ fn a_new_through_an_inherited_association_is_build() {
     let controller = std::fs::read_to_string(emitted.join("app/controllers/comments_controller.rb"))
         .expect("emitted controller");
     assert!(
-        controller.contains("__rh_build_owner_1 = @article")
-            && controller.contains("draft = Comment.new({ commenter: \"amy\" }.merge(article_id: __rh_build_owner_1.id))"),
+        controller.contains("rh_build_owner_1 = @article")
+            && controller.contains("draft = Comment.new({ commenter: \"amy\" }.merge(article_id: rh_build_owner_1.id))"),
         "{controller}"
     );
 }

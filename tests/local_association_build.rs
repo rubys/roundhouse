@@ -108,7 +108,7 @@ fn aliases_and_except_use_the_params_factory_and_request_a_copying_filter() {
 "#, ASSOCIATION);
     assert!(controller.contains("Message.from_params(alias_attributes.except(:in_reply_to_id))"), "{controller}");
     assert!(controller.contains("Message.from_params(copied_attributes)"), "{controller}");
-    assert!(controller.contains(".to_pty_session_id = __rh_build_owner_"), "{controller}");
+    assert!(controller.contains(".to_pty_session_id = rh_build_owner_"), "{controller}");
     assert!(!controller.contains("received_messages.build("), "{controller}");
     assert!(params.contains("def except(*keys)"), "{params}");
     assert!(params.contains("result.in_reply_to_id_provided = false"), "{params}");
@@ -180,7 +180,7 @@ fn a_reassignment_or_conditional_binding_is_not_a_params_proof() {
         assert!(!controller.contains("Message.from_params("), "false params proof:\n{controller}");
         if !proven_hash {
             assert!(!controller.contains(".merge(to_pty_session_id:"), "unproven Hash:\n{controller}");
-            assert!(!controller.contains("__rh_build_owner_"), "unproven build capture:\n{controller}");
+            assert!(!controller.contains("rh_build_owner_"), "unproven build capture:\n{controller}");
         }
     }
 }
@@ -191,7 +191,7 @@ fn a_declared_row_changing_scope_still_declines_local_build_expansion() {
     let (controller, _) = emitted("    attributes = message_params\n    message = @pty_session.received_messages.new(attributes)", scoped);
     assert!(controller.contains("received_messages."), "{controller}");
     assert!(!controller.contains("Message.from_params("), "{controller}");
-    assert!(!controller.contains("__rh_build_owner_"), "{controller}");
+    assert!(!controller.contains("rh_build_owner_"), "{controller}");
 }
 
 #[test]

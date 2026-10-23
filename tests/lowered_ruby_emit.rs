@@ -1210,13 +1210,13 @@ fn comments_create_expands_assoc_build_to_typed_factory_with_fk() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "comments_controller.rb");
     assert!(
-        src.contains("__rh_build_record_0 = Comment.from_params(self.comment_params)"),
+        src.contains("rh_build_record_0 = Comment.from_params(self.comment_params)"),
         "expected typed-factory in build; got:\n{src}",
     );
     assert!(
-        src.contains("__rh_build_owner_0 = @article")
-            && src.contains("__rh_build_record_0.article_id = __rh_build_owner_0.id")
-            && src.contains("@comment = __rh_build_record_0"),
+        src.contains("rh_build_owner_0 = @article")
+            && src.contains("rh_build_record_0.article_id = rh_build_owner_0.id")
+            && src.contains("@comment = rh_build_record_0"),
         "expected FK setter after typed factory; got:\n{src}",
     );
     assert!(
