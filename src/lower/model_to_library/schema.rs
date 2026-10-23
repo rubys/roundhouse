@@ -3075,6 +3075,76 @@ fn synth_initialize(
         }
     }
 
+    // The other virtual writers `update` routes through (`attr_accessor` /
+    // `attr_writer`, `typed_store`, the Attributes API, a hand-written
+    // `def <field>=`): `Member.new(nickname: "n")` assigns `nickname` in
+    // Rails (`assign_attributes` sends each key's writer). The constructor
+    // covered only the columns and the keys above, so a virtual given to
+    // `new`/`create` was dropped. The same nil guard `update` uses; the
+    // keys the blocks above route (belongs_to, password, rich text,
+    // attachments) are skipped here.
+    {
+        let handled: std::collections::BTreeSet<Symbol> = model
+            .associations()
+            .into_iter()
+            .filter_map(|a| match a {
+                crate::dialect::Association::BelongsTo { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .chain(crate::lower::rich_text::rich_text_attrs(model).into_iter().map(|(_s, a)| a))
+            .chain(crate::lower::plain_text_attr::plain_text_attrs(model).into_iter().map(|(_s, a)| a))
+            .chain(crate::lower::attached::attached_attrs(model).into_iter().map(|(_s, a)| a))
+            .chain(crate::lower::secure_password::secure_password_attr(&model.body).into_iter().flat_map(|attr| {
+                [
+                    Symbol::from(format!("{}_confirmation", attr.as_str())),
+                    Symbol::from(format!("{}_challenge", attr.as_str())),
+                    attr,
+                ]
+            }))
+            .collect();
+        for field in virtual_writer_fields(model, table) {
+            if handled.contains(&field) {
+                continue;
+            }
+            let lookup = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(attrs.clone())),
+                    method: Symbol::from("[]"),
+                    args: vec![lit_sym(field.clone())],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            let assign = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(self_ref()),
+                    method: Symbol::from(format!("{}=", field.as_str())),
+                    args: vec![lookup],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            // `attrs.key?`, not the nil guard: Rails' `new(x: nil)`
+            // calls `x=(nil)`, and an omitted key calls nothing.
+            let cond = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(attrs.clone())),
+                    method: Symbol::from("key?"),
+                    args: vec![lit_sym(field.clone())],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::If { cond, then_branch: assign, else_branch: nil_lit() },
+            ));
+        }
+    }
+
     // `after_initialize` tail — Rails fires the hook after construction
     // (and after find; the hydration factories append their own call,
     // after the columns are set). Runs LAST so the hook observes the
@@ -4039,6 +4109,42 @@ fn synth_update_typed(
 /// `update!` differs only in the tail: `save!` (Base raises on invalid)
 /// and an explicit `self` read, so the call's value keeps the concrete
 /// model type instead of `save!`'s Base-typed return.
+/// Every name the model is assigned through other than a column: the
+/// `writable_field_set` virtuals (`attr_accessor` / `attr_writer`,
+/// `typed_store` attrs, the Attributes API, `has_secure_password`'s
+/// plaintext keys, `has_rich_text` attrs) and each public hand-written
+/// `def <field>=`. `writable_field_set` deliberately leaves the
+/// hand-written writers out (its callers hold a field name and ask
+/// `model_defines_writer` per field), but mass assignment has to
+/// ENUMERATE, and a user-defined writer is exactly as assignable as a
+/// synthesized one (lobsters' `def category_name=`; `permit_writer_filter`
+/// holds the pair together). A `belongs_to` name is in the set too; the
+/// callers that route it differently skip it themselves.
+fn virtual_writer_fields(model: &Model, table: &Table) -> std::collections::BTreeSet<Symbol> {
+    let mut virtuals = super::writable_field_set(model, table);
+    for item in &model.body {
+        let crate::dialect::ModelBodyItem::Method { method, .. } = item else { continue };
+        // Rails assigns through `public_send`: a private or protected
+        // writer is not a mass-assignment key.
+        if method.receiver != MethodReceiver::Instance
+            || method.visibility != crate::dialect::MethodVisibility::Public
+        {
+            continue;
+        }
+        // An identifier writer only: `==`, `!=`, `[]=` and `<=` end in
+        // `=` too, and name no attribute.
+        let Some(base) = method.name.as_str().strip_suffix('=') else { continue };
+        let mut chars = base.chars();
+        if chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            virtuals.insert(Symbol::from(base));
+        }
+    }
+    virtuals.retain(|field| !table.columns.iter().any(|c| c.name == *field));
+    virtuals
+}
+
 fn synth_update_hash(
     owner: &ClassId,
     model: &Model,
@@ -4222,24 +4328,8 @@ fn synth_update_hash(
     .map(|(_s, a)| a)
     .collect();
     let secure_password = crate::lower::secure_password::secure_password_attr(&model.body);
-    let mut virtuals = super::writable_field_set(model, table);
-    // Hand-written `def <field>=` in the model body. `writable_field_set`
-    // deliberately leaves these out — its callers hold a field name and
-    // ask `model_defines_writer` per-field — but `update` has to
-    // ENUMERATE, and a user-defined writer is exactly as assignable as a
-    // synthesized one. lobsters' `def category_name=` is the shape, and
-    // `permit_writer_filter` is the test that holds this pair together.
-    for item in &model.body {
-        let crate::dialect::ModelBodyItem::Method { method, .. } = item else { continue };
-        if method.receiver != MethodReceiver::Instance {
-            continue;
-        }
-        if let Some(base) = method.name.as_str().strip_suffix('=') {
-            virtuals.insert(Symbol::from(base));
-        }
-    }
-    for field in virtuals {
-        if table.columns.iter().any(|c| c.name == field) || assoc_names.contains(&field) {
+    for field in virtual_writer_fields(model, table) {
+        if assoc_names.contains(&field) {
             continue;
         }
         // `Cast` to `Str` bridges the untyped attrs value into the
