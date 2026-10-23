@@ -246,6 +246,100 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile]) {
         }
         model.body = body;
     }
+    // A plain class's body call to its own (or an ancestor's) `def self.` macro
+    // runs as the class loads, as a model's does (#1281). Replayed instead, a
+    // `define_method` with a computed name is one the Spinel target refuses.
+    // Only a run that just defines methods expands; a call that can't is
+    // reported once, here, and not replayed.
+    for lc_index in 0..app.library_classes.len() {
+        let lc = &app.library_classes[lc_index];
+        if lc.is_module || lc.origin.is_some() || lc.unknown_calls.is_empty() {
+            continue;
+        }
+        let mut lineage = vec![lc.name.clone()];
+        lineage.extend(ancestors(app, &parents, &lc.name));
+        let table = class_method_table(app, &lineage);
+        let macros: HashSet<Symbol> = table.keys().filter(|name| reaches_definition(name, &table, 0)).cloned().collect();
+        if macros.is_empty() {
+            continue;
+        }
+        let constants = literal_constants(app, &lineage);
+        let redefined = table.contains_key(&Symbol::from("define_method")) || table.contains_key(&Symbol::from("define_singleton_method"));
+        let own: HashSet<(Symbol, MethodReceiver)> = lc.methods.iter().map(|m| (m.name.clone(), m.receiver)).collect();
+        let prefix = slot_prefix(lc.name.0.as_str());
+        let included: Vec<String> = lineage
+            .iter()
+            .flat_map(|id| app.library_classes.iter().filter(move |c| &c.name == id))
+            .flat_map(|c| c.includes.iter().map(|i| i.0.as_str().trim_start_matches("::").to_string()))
+            .collect();
+        let mut counter = 0usize;
+        let mut defined: HashSet<(Symbol, MethodReceiver)> = HashSet::new();
+        let mut added: Vec<MethodDef> = Vec::new();
+        let mut consumed: HashSet<usize> = HashSet::new();
+        let mut expanded: HashMap<Symbol, usize> = HashMap::new();
+        let mut failed: HashSet<Symbol> = HashSet::new();
+        for (index, expr) in lc.unknown_calls.iter().enumerate() {
+            let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else { continue };
+            if !macros.contains(method) || recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
+                continue;
+            }
+            let mut run = Run { table: &table, constants: &constants, frozen: &frozen, cvar_readers: &cvar_readers, included: included.clone(), module_methods: &module_methods, extended: HashMap::new(), evaluated: Vec::new(), known: &known, scope: None, prefix: &prefix, counter, out: Vec::new(), replayed: HashSet::new(), class_attrs: HashMap::new(), unset_cattrs: HashMap::new(), methods: Vec::new(), aliases: Vec::new(), strings: HashMap::new(), owner: lc.name.0.clone(), sources };
+            let result = if block.is_some() {
+                Err("it is passed a block".to_string())
+            } else if redefined {
+                Err("the class redefines `define_method`".to_string())
+            } else if !call_syntax_kept(expr, sources) {
+                Err("its arguments use a splat or a block argument".to_string())
+            } else {
+                run.call(method, args, &HashMap::new(), 0)
+            }
+            .and_then(|()| {
+                // Not a plain class's to carry: what a model's expansion places in its body.
+                if !run.out.is_empty() || !run.evaluated.is_empty() || !run.aliases.is_empty() || !run.extended.is_empty() || !run.class_attrs.is_empty() {
+                    return Err("it does more than define methods".to_string());
+                }
+                for m in &run.methods {
+                    let key = (m.name.clone(), m.receiver);
+                    if own.contains(&key) || !defined.insert(key) {
+                        return Err(format!("`{}` is defined twice", m.name.as_str()));
+                    }
+                }
+                Ok(())
+            });
+            consumed.insert(index);
+            match result {
+                Ok(()) => {
+                    counter = run.counter;
+                    added.extend(run.methods);
+                    *expanded.entry(method.clone()).or_default() += 1;
+                }
+                Err(why) => {
+                    failed.insert(method.clone());
+                    super::prism::push(crate::diagnostic::Diagnostic::unsupported(
+                        expr.span,
+                        None,
+                        "class macro",
+                        format!("`{}` defines methods this call does not expand ({why}), so they are missing", method.as_str()),
+                    ));
+                }
+            }
+        }
+        if consumed.is_empty() {
+            continue;
+        }
+        // The class's own macro goes too once every mention of it is a call that expanded: its body
+        // (`define_method(meth, …)` over a name known only when it runs) is what a target refuses.
+        let spent: HashSet<Symbol> = expanded
+            .iter()
+            .filter(|(name, calls)| !failed.contains(*name) && mentions(name.as_str(), sources) == **calls)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let lc = &mut app.library_classes[lc_index];
+        lc.methods.retain(|m| !(m.receiver == MethodReceiver::Class && spent.contains(&m.name)));
+        lc.methods.extend(added);
+        let calls = std::mem::take(&mut lc.unknown_calls);
+        lc.unknown_calls = calls.into_iter().enumerate().filter(|(i, _)| !consumed.contains(i)).map(|(_, e)| e).collect();
+    }
 }
 
 pub(crate) fn hook_macro_calls(app: &App) -> HashSet<Symbol> {
@@ -462,15 +556,27 @@ fn implicitly_called(name: &str) -> bool {
 }
 
 fn mentioned(name: &str, sources: &[SourceFile]) -> bool {
-    sources.iter().any(|source| {
-        source.text.match_indices(name).any(|(at, _)| {
-            let before = &source.text[..at];
-            let after = &source.text[at + name.len()..];
-            let word = !before.ends_with(|c: char| c.is_alphanumeric() || c == '_')
-                && !after.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '?' || c == '!' || c == '=');
-            word && !before.ends_with("def ") && !before.ends_with("def self.")
+    mentions(name, sources) > 0
+}
+
+/// How many times the sources name `name` as a word, outside its `def`.
+fn mentions(name: &str, sources: &[SourceFile]) -> usize {
+    sources
+        .iter()
+        .map(|source| {
+            source
+                .text
+                .match_indices(name)
+                .filter(|(at, _)| {
+                    let before = &source.text[..*at];
+                    let after = &source.text[at + name.len()..];
+                    let word = !before.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+                        && !after.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '?' || c == '!' || c == '=');
+                    word && !before.ends_with("def ") && !before.ends_with("def self.")
+                })
+                .count()
         })
-    })
+        .sum()
 }
 
 /// Whether `text` calls one of `setters` (`Owner.name = v`, `send(:name=, v)`)
@@ -826,6 +932,13 @@ impl Run<'_> {
                 match method.as_str() {
                     "define_method" | "define_singleton_method" => {
                         let receiver = if method.as_str() == "define_method" { MethodReceiver::Instance } else { MethodReceiver::Class };
+                        // `define_method(:label, Mod.instance_method(:label))`: a copy of the app module's method.
+                        if let [name, value] = args.as_slice()
+                            && block.is_none()
+                            && receiver == MethodReceiver::Instance
+                        {
+                            return self.define_from_instance_method(name, value, env).map(|()| false);
+                        }
                         let [name] = args.as_slice() else { return Err("a definition is given other than one name".into()) };
                         let Some(block) = block else { return Err("a definition has no block".into()) };
                         if !definition_syntax_kept(st, self.sources) {
@@ -1113,6 +1226,44 @@ impl Run<'_> {
         }
     }
 
+    /// `define_method(name, Mod.instance_method(name2))` where `Mod` is an app
+    /// module that defines `name2`: that method's `def`, copied in as `name`.
+    fn define_from_instance_method(&mut self, name: &Expr, value: &Expr, env: &Env) -> Result<(), String> {
+        let ExprNode::Send { recv: Some(module), method, args, block: None, .. } = &*value.node else {
+            return Err("a definition is given other than one name".into());
+        };
+        let [source] = args.as_slice() else { return Err("a definition is given other than one name".into()) };
+        if method.as_str() != "instance_method" {
+            return Err("a definition is given other than one name".into());
+        }
+        let path = match self.fold(module, env) {
+            Some(Val::Lit(e)) => match &*e.node {
+                ExprNode::Const { path } => path.clone(),
+                _ => return Err("an `instance_method` receiver is not a module".into()),
+            },
+            _ => return Err("an `instance_method` receiver is known only when it runs".into()),
+        };
+        let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+        let Some(resolved) = self.resolve_module(&path) else {
+            return Err(format!("its `{written}` is not a module this program defines"));
+        };
+        let full = resolved.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+        let source = self.literal_name(source, env)?;
+        let name = self.literal_name(name, env)?;
+        if !valid_def_name(&name) {
+            return Err(format!("`{}` is not a method name", name.as_str()));
+        }
+        let Some(found) = self.module_methods.get(&full).and_then(|methods| methods.iter().find(|m| m.name == source)) else {
+            return Err(format!("`{full}` defines no `{}`", source.as_str()));
+        };
+        let mut def = found.clone();
+        def.name = name;
+        def.receiver = MethodReceiver::Instance;
+        def.enclosing_class = Some(self.owner.clone());
+        self.methods.push(def);
+        Ok(())
+    }
+
     fn define(&mut self, receiver: MethodReceiver, name: &Expr, block: &Expr, env: &Env) -> Result<(), String> {
         let name = self.literal_name(name, env)?;
         if !valid_def_name(&name) {
@@ -1180,6 +1331,8 @@ impl Run<'_> {
     fn fold(&mut self, e: &Expr, env: &Env) -> Option<Val> {
         match &*e.node {
             ExprNode::Lit { .. } | ExprNode::SelfRef => Some(Val::Lit(e.clone())),
+            // A module this program defines is itself (`borrow(Gadget, :label)`).
+            ExprNode::Const { path } if self.resolve_module(path).is_some() => Some(Val::Lit(e.clone())),
             ExprNode::Var { name, .. } => env.get(name).cloned(),
             ExprNode::Send { recv: Some(r), method, args, block: None, .. }
                 if args.is_empty()
