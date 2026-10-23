@@ -58,6 +58,7 @@ fn forwarded_block_may_be_nil(ty: &Ty) -> bool {
     matches!(ty, Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)))
 }
 
+mod class_side_miss;
 mod diagnostic;
 mod const_resolution;
 mod lambda_local;
@@ -318,6 +319,10 @@ pub struct ClassInfo {
     /// mixin, an ancestor the RBI could not name): a lookup that misses
     /// is unknown, not wrong.
     pub open: bool,
+    /// An app library class whose class-side surface the registry holds
+    /// whole (`registry::class_side`). A class-side call it does not
+    /// answer is a NoMethodError, not a gradual escape.
+    pub class_side_closed: bool,
     /// Declared in the app's own source (a model, controller, or
     /// library class), as opposed to the framework catalog. An app class
     /// is reachable from a bare name only through Ruby's constant
@@ -1748,6 +1753,7 @@ impl<'a> BodyTyper<'a> {
                 }
                 if matches!(&crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
                     if matches!(construct.as_str(), "Module protocol" | "ActiveModel::Errors" | "ActiveModel::Error" | "Rails" | "ActiveRecord::Base" | "String extension" | "Hash extension" | "not_nil!" | "Object extension" | "Module callback argument" | RUNTIME_MIXIN))
+                    || matches!(&crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::SendDispatchFailed { .. }))
                 { crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None); }
                 if self.inquirers.is_some()
                     && matches!(crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. })
@@ -2567,6 +2573,11 @@ impl<'a> BodyTyper<'a> {
                             construct: Symbol::from(owner),
                             detail: format!("{} lacks a shared runtime/lowering implementation", method),
                         }));
+                    }
+                }
+                if matches!(dispatched, Ty::Var { .. }) && self.inquirers.is_some() && crate::expr::ExprCold::diagnostic(&expr.cold).is_none() {
+                    if let Some(kind) = self.class_side_miss(recv.as_ref(), recv_ty.as_ref(), method, ctx) {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(kind));
                     }
                 }
                 dispatched

@@ -6,6 +6,7 @@
 
 pub(super) mod activemodel;
 pub(super) mod ar;
+pub(super) mod class_side;
 pub(super) mod controllers;
 pub(super) mod gem_boundary;
 pub(super) mod library;
