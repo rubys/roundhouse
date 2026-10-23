@@ -2395,6 +2395,21 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
                         return format!("{kw} {n}: {ct} = {lit}");
                     }
                 }
+                // An association build's owner temp (`rh_build_owner_0 =
+                // @article`) stands in for the `@article.x` it replaced, which
+                // unwrapped the implicitly-unwrapped ivar (`var article:
+                // Article!`). Inferred, the temp is an `Article?`; given the
+                // ivar's own type it unwraps as that read did. Only this temp:
+                // a user's local from an ivar may well hold its nil.
+                if crate::lower::controller_to_library::rewrites::is_build_owner_local(name.as_str())
+                    && let ExprNode::Ivar { name } = &*value.node
+                    && let Some(ty) = instance_prop_ty(name.as_str()).or_else(|| value.ty.clone())
+                {
+                    let st = swift_ty(&ty);
+                    if !st.ends_with('?') && !st.contains("Any") {
+                        return format!("{kw} {n}: {st} = {val}");
+                    }
+                }
                 format!("{kw} {n} = {val}")
             }
         }

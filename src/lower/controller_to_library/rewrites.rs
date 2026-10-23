@@ -1730,6 +1730,13 @@ fn build_target_read(target: &LValue, span: Span) -> Expr {
     })
 }
 
+/// Whether `name` is the owner temp an association build binds
+/// (`rh_build_owner_N = @article`): the owner the original `@article.x`
+/// read in place, unconditionally.
+pub(crate) fn is_build_owner_local(name: &str) -> bool {
+    name.strip_prefix("rh_build_owner_").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 fn fresh_build_local(role: &str, names: &mut HashSet<Symbol>) -> Symbol {
     // No leading underscore: Elixir reads `_name` as "deliberately
     // ignored" and warns when the body then uses it; the elixir
