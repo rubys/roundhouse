@@ -7862,11 +7862,10 @@ pub(crate) fn source_instance_method(app: &App, owner: &ClassId, name: &str) -> 
     source_method(app, owner, name, crate::dialect::MethodReceiver::Instance)
 }
 
-/// The class-side twin: a `def self.<name>` (or `class << self` def) on the
-/// class or its superclass chain. Included modules contribute instance
-/// methods only, so they are not walked here.
+/// The class-side twin, including instance methods installed on the
+/// singleton class by `extend` (or `class << self; include M; end`).
 pub(crate) fn source_class_method(app: &App, owner: &ClassId, name: &str) -> bool {
-    source_method(app, owner, name, crate::dialect::MethodReceiver::Class)
+    SourceMethods::new(app).lookup(owner, name, crate::dialect::MethodReceiver::Class).is_some()
 }
 
 /// A mixin path as Ruby binds it. A rooted path, and a path
@@ -7899,44 +7898,130 @@ fn stored_target(scope: &ClassId, written: &ClassId, classes: &HashMap<ClassId, 
     }
 }
 
-fn source_method(app: &App, owner: &ClassId, name: &str, side: crate::dialect::MethodReceiver) -> bool {
-    use crate::dialect::MethodReceiver::Instance;
-    let classes = source_class_names(app);
-    fn lookup(
-        app: &App,
-        owner: &ClassId,
-        name: &str,
-        side: crate::dialect::MethodReceiver,
-        seen: &mut BTreeSet<ClassId>,
-        classes: &HashMap<ClassId, ()>,
-    ) -> bool {
-        if !seen.insert(owner.clone()) {
-            return false;
-        }
-        let walk_includes = side == Instance;
-        if let Some(model) = app.models.iter().find(|model| &model.name == owner) {
-            if model.methods().any(|method| method.receiver == side && method.name.as_str() == name) {
-                return true;
+type SourceSide = (ClassId, crate::dialect::MethodReceiver);
+
+/// Source-only Ruby lookup, shared by dispatch guards and relation-return
+/// tracking. Framework catalog methods never prove a source override.
+/// An `extend` edge changes sides: it imports the module's instance methods.
+pub(crate) struct SourceMethods<'a> {
+    methods: HashMap<SourceSide, HashMap<Symbol, &'a crate::dialect::MethodDef>>,
+    ancestors: HashMap<SourceSide, Vec<SourceSide>>,
+}
+
+impl<'a> SourceMethods<'a> {
+    pub(crate) fn new(app: &'a App) -> Self {
+        use crate::dialect::MethodReceiver::{Class, Instance};
+        let classes = source_class_names(app);
+        let modules: BTreeSet<_> = app.library_classes.iter().filter(|class| class.is_module)
+            .map(|class| class.name.clone()).collect();
+        let mut out = Self { methods: HashMap::new(), ancestors: HashMap::new() };
+        let mut parents = HashMap::new();
+        let mut mixins: HashMap<SourceSide, Vec<Vec<SourceSide>>> = HashMap::new();
+        let mixin_calls = |owner: &ClassId, calls: &[&Expr], name: &str| {
+            calls.iter().filter_map(|call| {
+                let ExprNode::Send { recv, method, args, .. } = &*call.node else { return None };
+                if method.as_str() != name
+                    || recv.as_ref().is_some_and(|recv| !matches!(&*recv.node, ExprNode::SelfRef))
+                { return None; }
+                Some(args.iter().filter_map(|arg| {
+                    let ExprNode::Const { path } = &*arg.node else { return None };
+                    let id = mixin_target(owner, path, arg.decisions & crate::expr::RESOLVED_MIXIN != 0, &classes);
+                    modules.contains(&id).then_some((id, Instance))
+                }).collect::<Vec<_>>())
+            }).collect::<Vec<_>>()
+        };
+        let mut add = |owner: &ClassId, parent: Option<&ClassId>, methods: Vec<&'a crate::dialect::MethodDef>,
+                       includes: Vec<Vec<SourceSide>>, calls: Vec<&Expr>| {
+            for method in methods {
+                out.methods.entry((owner.clone(), method.receiver)).or_default()
+                    .insert(method.name.clone(), method);
             }
-            return model.parent.as_ref().is_some_and(|parent| {
-                lookup(app, &stored_target(owner, parent, classes), name, side, seen, classes)
-            }) || (walk_includes
-                && model_includes_in(model, classes)
-                    .iter()
-                    .any(|include| lookup(app, include, name, side, seen, classes)));
+            for side in [Instance, Class] {
+                if let Some(parent) = parent {
+                    parents.insert((owner.clone(), side), (stored_target(owner, parent, &classes), side));
+                }
+            }
+            mixins.entry((owner.clone(), Instance)).or_default().extend(includes);
+            mixins.entry((owner.clone(), Class)).or_default().extend(mixin_calls(owner, &calls, "extend"));
+        };
+        for model in &app.models {
+            let calls: Vec<_> = model.body.iter().filter_map(|item| match item {
+                ModelBodyItem::Unknown { expr, .. } => Some(expr),
+                _ => None,
+            }).collect();
+            let includes = mixin_calls(&model.name, &calls, "include");
+            add(&model.name, model.parent.as_ref(), model.methods().collect(), includes, calls);
         }
-        app.library_classes.iter().filter(|class| &class.name == owner).any(|class| {
-            class.methods.iter().any(|method| method.receiver == side && method.name.as_str() == name)
-                || class.parent.as_ref().is_some_and(|parent| {
-                    lookup(app, &stored_target(owner, parent, classes), name, side, seen, classes)
-                })
-                || (walk_includes
-                    && class.includes.iter().any(|include| {
-                        lookup(app, &stored_target(owner, include, classes), name, side, seen, classes)
-                    }))
-        })
+        for class in &app.library_classes {
+            // Includes are stored in source order. Keep a call's argument
+            // list together: `include A, B` gives A precedence, while a
+            // later include call precedes an earlier one.
+            let mut includes: Vec<Vec<SourceSide>> = Vec::new();
+            for (i, id) in class.includes.iter().enumerate() {
+                if i == 0 || class.include_spans.get(i) != class.include_spans.get(i - 1) {
+                    includes.push(Vec::new());
+                }
+                includes.last_mut().unwrap().push((stored_target(&class.name, id, &classes), Instance));
+            }
+            add(&class.name, class.parent.as_ref(), class.methods.iter().collect(), includes,
+                class.unknown_calls.iter().collect());
+        }
+        fn ancestors(
+            key: &SourceSide, parents: &HashMap<SourceSide, SourceSide>,
+            mixins: &HashMap<SourceSide, Vec<Vec<SourceSide>>>,
+            cache: &mut HashMap<SourceSide, Vec<SourceSide>>, active: &mut BTreeSet<SourceSide>,
+        ) -> Vec<SourceSide> {
+            if let Some(found) = cache.get(key) { return found.clone(); }
+            if !active.insert(key.clone()) { return Vec::new(); }
+            let mut order = vec![key.clone()];
+            if let Some(parent) = parents.get(key) {
+                order.extend(ancestors(parent, parents, mixins, cache, active));
+            }
+            for group in mixins.get(key).into_iter().flatten() {
+                for module in group.iter().rev() {
+                    // Re-extending a module does not move an existing
+                    // ancestor, including one supplied by a superclass.
+                    if order.contains(module) { continue; }
+                    let mut at = 0;
+                    for ancestor in ancestors(module, parents, mixins, cache, active) {
+                        if let Some(existing) = order.iter().position(|entry| *entry == ancestor) {
+                            at = existing;
+                        } else {
+                            at += 1;
+                            order.insert(at, ancestor);
+                        }
+                    }
+                }
+            }
+            active.remove(key);
+            cache.insert(key.clone(), order.clone());
+            order
+        }
+        for key in out.methods.keys().chain(parents.keys()).chain(mixins.keys()) {
+            ancestors(key, &parents, &mixins, &mut out.ancestors, &mut BTreeSet::new());
+        }
+        out
     }
-    lookup(app, owner, name, side, &mut BTreeSet::new(), &classes)
+
+    pub(crate) fn class_methods(&self, owner: &ClassId) -> HashMap<Symbol, &'a crate::dialect::MethodDef> {
+        let mut out = HashMap::new();
+        let key = (owner.clone(), crate::dialect::MethodReceiver::Class);
+        for ancestor in self.ancestors.get(&key).into_iter().flatten() {
+            if let Some(methods) = self.methods.get(ancestor) {
+                for (name, method) in methods { out.entry(name.clone()).or_insert(*method); }
+            }
+        }
+        out
+    }
+
+    pub(crate) fn lookup(&self, owner: &ClassId, name: &str, side: crate::dialect::MethodReceiver) -> Option<&'a crate::dialect::MethodDef> {
+        self.ancestors.get(&(owner.clone(), side))?.iter()
+            .find_map(|key| self.methods.get(key)?.get(&Symbol::from(name)).copied())
+    }
+}
+
+fn source_method(app: &App, owner: &ClassId, name: &str, side: crate::dialect::MethodReceiver) -> bool {
+    SourceMethods::new(app).lookup(owner, name, side).is_some()
 }
 
 /// `**{k: v, …}.merge(h)`, `h` a `Hash[Symbol, V]` and the literal's

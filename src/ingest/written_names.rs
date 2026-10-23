@@ -65,7 +65,7 @@ pub(super) fn resolve(app: &mut App, sources: &[SourceFile], resolver: &ConstRes
         }
         for item in &mut model.body {
             if let ModelBodyItem::Unknown { expr, .. } = item {
-                names.rewrite_mixin_call(expr, &["include"]);
+                names.rewrite_mixin_call(expr, &["include", "extend", "prepend"]);
             }
         }
     }

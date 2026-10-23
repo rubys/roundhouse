@@ -1761,7 +1761,11 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // declares no scopes. Otherwise `Widget.order(...)` reaches no method
     // and `Widget.where.not(...)` reaches Base.where with no argument.
     // Keep the whole-app gate consistent with the per-body gate below.
-    let mut wants_model_chain = false;
+    // Emitted tests and their inner classes are supplied in `lcs`, not
+    // app hook bodies. Their queries must admit the same lowering pass.
+    let mut wants_model_chain = lcs.iter().flat_map(|lc| &lc.methods).any(|method| {
+        crate::lower::scope_chain::mentions_model_chain_start(&method.body, &models)
+    });
     crate::lower::for_each_hook_body_ref(app, &mut |body| {
         wants_model_chain = wants_model_chain
             || crate::lower::scope_chain::mentions_model_chain_start(body, &models);
@@ -1796,7 +1800,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         return;
     }
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
-    let user_returns = crate::lower::scope_chain::build_user_method_returns(&app.models);
+    let user_returns = crate::lower::scope_chain::build_user_method_returns(app);
     let unique_keys = crate::lower::scope_chain::build_unique_keys(&app.models, &app.schema);
     let regs = crate::lower::scope_chain::Registries {
         scopes: &scopes,
@@ -1862,6 +1866,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 &scopes,
                 &models,
                 &assocs,
+                &user_returns,
             );
         }
         // User-written class methods the registry admitted as
@@ -1887,13 +1892,14 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     && !m.params.iter().any(|p| p.as_str() == "__rel")
                 {
                     if !insert_rel_param(m, &rel_param, &lc.name) { continue; }
-                    crate::lower::scope_chain::rewrite_scope_body(
+                    crate::lower::scope_chain::rewrite_class_scope_body(
                         &mut m.body,
                         &lc.name,
                         &rel_param,
                         &scopes,
                         &models,
                         &assocs,
+                        &user_returns,
                     );
                 }
             }
@@ -1941,6 +1947,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         &scopes,
                         &models,
                         &assocs,
+                        &user_returns,
                     );
                 }
             }

@@ -73,6 +73,15 @@ pub fn try_build_arel_with_assocs(
         return None;
     };
 
+    // Class-root SQL folding must honor the same source singleton lookup
+    // as runtime Relation seeding. This includes overrides supplied by
+    // extended modules; a genuine Relation receiver keeps its builtins.
+    if let Some(owner) = const_to_class_id(recv, registry)
+        && ClassInfo::source_class_method(registry, &owner, method)
+    {
+        return None;
+    }
+
     // Chain-modifier arm — recurse into recv, layer this method on top.
     // `try_chain_recv` lets a bare Const recv act as an implicit
     // `Const.all` so `Article.order(...)` (Rails-style) and
@@ -105,11 +114,6 @@ pub fn try_build_arel_with_assocs(
         // `Room.where(type: "Rooms::Open").pluck(:id)` from `sti_scope`.
         "pluck" | "ids" => {
             let (op, owner) = try_chain_recv(recv, schema, registry, assocs)?;
-            if matches!(&*recv.node, ExprNode::Const { .. })
-                && ClassInfo::source_class_method(registry, &owner, method)
-            {
-                return None;
-            }
             let primary_key = registry.get(&owner).and_then(|class| class.primary_key.as_ref());
             return apply_pluck(op, method, args, schema, primary_key).map(|op| (op, owner));
         }
@@ -140,6 +144,14 @@ pub fn try_build_arel_with_assocs(
                     return None;
                 }
                 let base = grouped.base?;
+                // The pair matcher skips over the `group` send itself.
+                // Do not let that shortcut bypass a source override that
+                // the ordinary class-root arm above would preserve.
+                if let Some(owner) = const_to_class_id(base, registry)
+                    && ClassInfo::source_class_method(registry, &owner, &Symbol::from("group"))
+                {
+                    return None;
+                }
                 let (op, owner) = try_chain_recv(base, schema, registry, assocs)?;
                 return apply_group_count(op, grouped.group_args, schema)
                     .map(|op| (op, owner));

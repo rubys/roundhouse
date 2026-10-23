@@ -228,6 +228,31 @@ class BaseTest < Minitest::Test
     refute_equal 0, item.id
   end
 
+  class KeylessItem < Item
+    def self.table_name = "keyless_items"
+    def self.schema_columns = [:title]
+    def self.primary_key = nil
+
+    def id=(_value)
+      raise "unexpected id writer on a keyless model"
+    end
+
+    def _adapter_insert
+      ActiveRecord.adapter.insert(KeylessItem.table_name, attributes())
+    end
+  end
+
+  def test_save_without_a_primary_key_inserts_without_assigning_id
+    Db.exec("CREATE TABLE keyless_items (title TEXT)")
+    item = KeylessItem.new
+    item.title = "Keyless"
+
+    assert item.save()
+    assert_predicate item, :persisted?
+    refute_predicate item, :new_record?
+    assert_equal [{ "title" => "Keyless" }], ActiveRecord.adapter.select_rows("SELECT title FROM keyless_items")
+  end
+
   # ── class-level finders ─────────────────────────────────────
 
   def test_find_returns_instance_for_existing_row

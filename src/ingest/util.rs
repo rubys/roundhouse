@@ -467,6 +467,23 @@ fn module_has_direct_def(m: &ruby_prism::ModuleNode<'_>) -> bool {
         || body_has_included_block(m.body())
         || body_has_constant_decl(m.body())
         || body_has_route_helpers_include(m.body())
+        || body_has_included_module(m.body())
+}
+
+/// An include-only module still contributes its ancestors' methods. Keep
+/// it in the source graph so extending it does not erase that dispatch.
+fn body_has_included_module(body: Option<Node<'_>>) -> bool {
+    let Some(body) = body else { return false };
+    flatten_statements(body).iter().any(|stmt| {
+        if let Some(singleton) = stmt.as_singleton_class_node() {
+            return body_has_included_module(singleton.body());
+        }
+        let Some(call) = stmt.as_call_node() else { return false };
+        call.receiver().is_none_or(|recv| recv.as_self_node().is_some())
+            && constant_id_str(&call.name()) == "include"
+            && call.arguments().is_some_and(|args| args.arguments().iter()
+                .any(|arg| constant_path_of(&arg).is_some()))
+    })
 }
 
 /// A module whose whole content is the route-helper mixin — core's

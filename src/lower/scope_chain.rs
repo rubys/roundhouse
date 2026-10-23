@@ -291,16 +291,15 @@ pub fn scope_variant_name(name: &Symbol, k: usize, subset: &[&Param]) -> Symbol 
 pub struct UserMethodReturns {
     pub instance: HashMap<Symbol, Option<ClassId>>,
     pub class: HashMap<(ClassId, Symbol), ClassId>,
-    /// Class methods defined on that model itself. Ancestors stay on
-    /// the ancestor: [`UserMethodReturns::defines_class_method`] walks
-    /// [`Self::parents`], the same question `ClassInfo::source_class_method`
-    /// answers for the typer. Copying every ancestor method onto each
-    /// descendant made the two indexes disagree about who defined it.
+    /// Effective source singleton methods, including inherited methods
+    /// and extended modules. Return tracking uses the same winning
+    /// definition as the dispatch guard.
     pub class_methods: HashSet<(ClassId, Symbol)>,
     pub parents: HashMap<ClassId, ClassId>,
     /// Scopes whose body answers something OTHER than a relation (see
     /// [`non_relation_scopes`]). A call to one ends the chain's model.
     pub non_relation_scopes: HashSet<(ClassId, Symbol)>,
+    declared_scopes: HashSet<(ClassId, Symbol)>,
 }
 
 impl UserMethodReturns {
@@ -308,7 +307,7 @@ impl UserMethodReturns {
         Self::default()
     }
 
-    /// A source `def self.<method>` on `model` or one of its parents.
+    /// A source singleton method on `model`, its extensions or ancestors.
     pub fn defines_class_method(&self, model: &ClassId, method: &Symbol) -> bool {
         let mut current = Some(model);
         for _ in 0..32 {
@@ -320,21 +319,63 @@ impl UserMethodReturns {
         }
         false
     }
+
+    /// Return tracking follows the same nearest source definition as
+    /// dispatch; a child's non-relation override stops the ancestor walk.
+    pub(crate) fn class_return_model(&self, model: &ClassId, method: &Symbol) -> Option<ClassId> {
+        let mut current = Some(model);
+        for _ in 0..32 {
+            let id = current?;
+            let key = (id.clone(), method.clone());
+            if self.class_methods.contains(&key) {
+                return self.class.get(&key).cloned();
+            }
+            current = self.parents.get(id);
+        }
+        None
+    }
+
+    pub(crate) fn returns_non_relation(&self, model: &ClassId, method: &Symbol) -> bool {
+        let mut current = Some(model);
+        for _ in 0..32 {
+            let Some(id) = current else { return false };
+            let key = (id.clone(), method.clone());
+            if self.non_relation_scopes.contains(&key) { return true; }
+            if self.class_methods.contains(&key) || self.declared_scopes.contains(&key) { return false; }
+            current = self.parents.get(id);
+        }
+        false
+    }
 }
 
-pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
+pub fn build_user_method_returns(app: &crate::app::App) -> UserMethodReturns {
+    let models = &app.models;
+    let source = crate::analyze::SourceMethods::new(app);
     let model_ids: HashSet<ClassId> = models.iter().map(|m| m.name.clone()).collect();
     let mut reg = UserMethodReturns::new();
+    let scopes = build_scope_registry(models);
+    reg.non_relation_scopes = non_relation_scopes(models, &model_ids);
     for m in models {
-        for item in &m.body {
-            let ModelBodyItem::Method { method, .. } = item else { continue };
-            if method.receiver == crate::dialect::MethodReceiver::Class {
-                reg.class_methods.insert((m.name.clone(), method.name.clone()));
-                if let Some(target) = relation_return_model(&method.body, &model_ids) {
-                    reg.class.insert((m.name.clone(), method.name.clone()), target);
-                }
-                continue;
+        let effective = source.class_methods(&m.name);
+        let bodies = effective.iter().map(|(name, method)| (name, &method.body)).collect();
+        for (name, method) in &effective {
+            let non_relation = method.body.ty.as_ref().is_some_and(definitely_non_relation_type)
+                || tail_is_non_relation(&method.body, &bodies, &model_ids, &m.name, false, 0);
+            if non_relation { reg.non_relation_scopes.insert((m.name.clone(), name.clone())); }
+        }
+        for (name, method) in effective {
+            reg.class_methods.insert((m.name.clone(), name.clone()));
+            if let Some(target) = class_relation_return_model(
+                &method.body, &m.name, &model_ids, &source, &scopes, &reg.non_relation_scopes, &mut HashSet::new(),
+            ) {
+                reg.class.insert((m.name.clone(), name), target);
             }
+        }
+        for item in &m.body {
+            if let ModelBodyItem::Scope { scope, .. } = item {
+                reg.declared_scopes.insert((m.name.clone(), scope.name.clone()));
+            }
+            let ModelBodyItem::Method { method, .. } = item else { continue };
             if method.receiver != crate::dialect::MethodReceiver::Instance {
                 continue;
             }
@@ -355,20 +396,20 @@ pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
             reg.parents.insert(model.name.clone(), parent.clone());
         }
     }
-    reg.non_relation_scopes = non_relation_scopes(models, &model_ids);
+    reg.class.retain(|key, _| !reg.non_relation_scopes.contains(key));
     reg
 }
 
-/// Scopes that answer a non-relation VALUE — campfire's `scope
+/// Scopes and source class methods that answer a non-relation VALUE — campfire's `scope
 /// :last_page, -> { last_page_of(PAGE_SIZE) }`, whose class method ends
 /// in `Page.load(…)`, an Array subclass. Rails returns a scope body's
 /// value as-is when it is not nil, so such a call is not a relation and
 /// `page.first(2)` on it is `Array#first`, not the counted terminal.
 ///
-/// Proved, not guessed: the body's tail — followed through same-model
-/// bare calls to scopes and class methods — must end in a call on a
-/// constant that names no model. Anything else stays a relation, as
-/// before.
+/// The body's tail may prove a literal/container result or call a
+/// non-model constant, including through sibling class methods. Source
+/// bodies also retain definite non-relation types. A scope's nil/false
+/// result instead falls back to the input relation, as Rails does.
 fn non_relation_scopes(models: &[Model], model_ids: &HashSet<ClassId>) -> HashSet<(ClassId, Symbol)> {
     let mut out = HashSet::new();
     for m in models {
@@ -387,19 +428,40 @@ fn non_relation_scopes(models: &[Model], model_ids: &HashSet<ClassId>) -> HashSe
             }
         }
         for item in &m.body {
-            let ModelBodyItem::Scope { scope, .. } = item else { continue };
-            if tail_is_foreign_const_call(&scope.body, &bodies, model_ids, 0) {
-                out.insert((m.name.clone(), scope.name.clone()));
+            let (name, body, scope_fallback) = match item {
+                ModelBodyItem::Scope { scope, .. } => (&scope.name, &scope.body, true),
+                ModelBodyItem::Method { method, .. }
+                    if method.receiver == crate::dialect::MethodReceiver::Class =>
+                { (&method.name, &method.body, false) }
+                _ => continue,
+            };
+            let non_relation_type = !scope_fallback && body.ty.as_ref().is_some_and(definitely_non_relation_type);
+            if non_relation_type || tail_is_non_relation(body, &bodies, model_ids, &m.name, scope_fallback, 0) {
+                out.insert((m.name.clone(), name.clone()));
             }
         }
     }
     out
 }
 
-fn tail_is_foreign_const_call(
+fn definitely_non_relation_type(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Relation { .. } | Ty::Untyped | Ty::Var { .. } => false,
+        // Queries share the Array-of-record representation; only other
+        // element shapes prove that a source result is an actual Array.
+        Ty::Array { elem } => !matches!(&**elem, Ty::Class { .. } | Ty::Untyped | Ty::Var { .. }),
+        Ty::Union { variants } => variants.iter().all(definitely_non_relation_type),
+        _ => true,
+    }
+}
+
+fn tail_is_non_relation(
     body: &Expr,
     bodies: &HashMap<&Symbol, &Expr>,
     model_ids: &HashSet<ClassId>,
+    self_model: &ClassId,
+    scope_fallback: bool,
     depth: usize,
 ) -> bool {
     if depth > 8 {
@@ -412,13 +474,29 @@ fn tail_is_foreign_const_call(
         },
         _ => body,
     };
-    let ExprNode::Send { recv, method, .. } = &*tail.node else {
-        return false;
+    let (recv, method) = match &*tail.node {
+        ExprNode::Array { .. } | ExprNode::Hash { .. } | ExprNode::StringInterp { .. } => return true,
+        ExprNode::Lit { value } => return !scope_fallback
+            || !matches!(value, Literal::Nil | Literal::Bool { value: false }),
+        ExprNode::Send { recv, method, .. } => (recv, method),
+        _ => return false,
     };
+    // A scope lambda's bare/self builtin dispatches on the Relation,
+    // even if a model class method has the same name.
+    if scope_fallback && (recv.is_none() || recv.as_ref().is_some_and(|recv| matches!(&*recv.node, ExprNode::SelfRef)))
+        && (is_relation_chain_method(method.as_str()) || method.as_str() == "all")
+    {
+        return false;
+    }
     match recv.as_ref().map(|r| &*r.node) {
         Some(ExprNode::Const { path }) => {
             let name = path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::");
             let last = path.last().map(|p| p.as_str()).unwrap_or("");
+            if name == self_model.0.as_str() {
+                if let Some(body) = bodies.get(method) {
+                    return tail_is_non_relation(body, bodies, model_ids, self_model, scope_fallback, depth + 1);
+                }
+            }
             !model_ids.iter().any(|id| {
                 id.0.as_str() == name || id.0.as_str().rsplit("::").next() == Some(last)
             })
@@ -427,7 +505,7 @@ fn tail_is_foreign_const_call(
         // (`before(m).last_page`): follow the named sibling's body.
         _ => bodies
             .get(method)
-            .is_some_and(|b| tail_is_foreign_const_call(b, bodies, model_ids, depth + 1)),
+            .is_some_and(|b| tail_is_non_relation(b, bodies, model_ids, self_model, scope_fallback, depth + 1)),
     }
 }
 
@@ -1187,6 +1265,48 @@ fn relation_return_model(expr: &Expr, models: &HashSet<ClassId>) -> Option<Class
             _ => return None,
         }
     }
+}
+
+/// Query-return proof for a source singleton method. An extended module's
+/// bare/self calls run on the receiving model, not on the module where the
+/// body was declared. Follow the same effective source definitions as the
+/// dispatch guard before treating a query-shaped name as a framework call.
+fn class_relation_return_model(
+    expr: &Expr, owner: &ClassId, models: &HashSet<ClassId>, source: &crate::analyze::SourceMethods<'_>,
+    scopes: &ScopeRegistry, non_relation: &HashSet<(ClassId, Symbol)>,
+    active: &mut HashSet<(ClassId, Symbol)>,
+) -> Option<ClassId> {
+    let tail = match &*expr.node {
+        ExprNode::Seq { exprs } => exprs.last()?,
+        _ => expr,
+    };
+    let ExprNode::Send { recv, method, block: None, .. } = &*tail.node else { return None };
+    if method.as_str() == "new" {
+        return relation_return_model(tail, models);
+    }
+    let root = match recv.as_ref().map(|recv| &*recv.node) {
+        None | Some(ExprNode::SelfRef) => Some(owner.clone()),
+        Some(ExprNode::Const { .. }) => recv.as_ref().and_then(|recv| const_model(recv, models)),
+        _ => None,
+    };
+    if let Some(model) = root {
+        let key = (model.clone(), method.clone());
+        if !active.insert(key.clone()) { return None; }
+        let result = if let Some(definition) = source.lookup(&model, method.as_str(), crate::dialect::MethodReceiver::Class) {
+            class_relation_return_model(&definition.body, &model, models, source, scopes, non_relation, active)
+        } else if (is_relation_chain_method(method.as_str()) || method.as_str() == "all"
+            || scopes.get(&model).is_some_and(|scopes| scopes.contains_key(method)))
+            && !non_relation.contains(&key)
+        {
+            Some(model)
+        } else { None };
+        active.remove(&key);
+        return result;
+    }
+    if is_relation_chain_method(method.as_str()) {
+        return class_relation_return_model(recv.as_ref()?, owner, models, source, scopes, non_relation, active);
+    }
+    None
 }
 
 /// Per-model association facts the chain rewriter consumes once a chain's
@@ -2686,7 +2806,9 @@ fn is_relation_expr(e: &Expr, ctx: &Ctx, locals: &Locals) -> bool {
         }
         ExprNode::Send { method, recv: Some(r), args, block: None, .. } => {
             if let Some(m) = const_model(r, ctx.models) {
-                if ctx.scope_of(&m, method) {
+                if ctx.scope_of(&m, method) && ctx.scope_keeps_relation(&m, method)
+                    && !(method.as_str() == "group" && ctx.user_returns.defines_class_method(&m, method))
+                {
                     return true;
                 }
             }
@@ -2764,10 +2886,7 @@ impl Ctx<'_> {
     /// for a scope proved to answer some other value
     /// ([`UserMethodReturns::non_relation_scopes`]).
     fn scope_keeps_relation(&self, model: &ClassId, method: &Symbol) -> bool {
-        !self
-            .user_returns
-            .non_relation_scopes
-            .contains(&(model.clone(), method.clone()))
+        !self.user_returns.returns_non_relation(model, method)
     }
     fn scope_of(&self, model: &ClassId, method: &Symbol) -> bool {
         self.scopes.get(model).is_some_and(|s| s.contains_key(method))
@@ -3820,7 +3939,7 @@ fn const_model(expr: &Expr, models: &HashSet<ClassId>) -> Option<ClassId> {
 
 /// What the names in scope stand for, accumulated as a method body's
 /// statements are processed in order.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Locals {
     /// Local variable -> relation model, so `q = Story.base(u);
     /// q.not_deleted` resolves `not_deleted` against `q`'s Story
@@ -3864,6 +3983,23 @@ fn alias_key(name: &Symbol, ivar: bool) -> Symbol {
 /// the whole expression when it evaluates to a Relation of a known model.
 pub(crate) fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<ClassId> {
     match &*expr.node {
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, .. } => {
+            // Block parameters shadow outer query aliases. Captured
+            // aliases keep their proof only when the block leaves it
+            // intact; a block need not execute, so new bindings do not
+            // establish an unconditional relation in the outer body.
+            let bound: HashSet<Symbol> = params.iter().chain(rest_param).chain(block_param)
+                .chain(extra_params.iter().map(|param| &param.name)).cloned().collect();
+            let mut inner = locals.clone();
+            for name in &bound {
+                inner.rel.remove(name);
+                inner.assoc.remove(name);
+            }
+            expr.node.for_each_child_mut(&mut |child| { rewrite(child, ctx, &mut inner); });
+            locals.rel.retain(|name, model| bound.contains(name) || inner.rel.get(name) == Some(model));
+            locals.assoc.retain(|name, assoc| bound.contains(name) || inner.assoc.get(name) == Some(assoc));
+            None
+        }
         // Statement sequence: thread `locals` left-to-right; the Seq's value
         // (and model) is its last statement.
         ExprNode::Seq { .. } => {
@@ -3952,9 +4088,11 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 ctx.scope_body.as_ref().map(|(m, _)| m).or(ctx.class_self.as_ref());
             match self_model {
                 Some(m)
-                    if is_relation_chain_method(method.as_str())
+                    if (ctx.scope_body.is_some() && ctx.class_self.is_none()
+                        || !ctx.user_returns.defines_class_method(m, &method) || ctx.scope_of(m, &method))
+                        && (is_relation_chain_method(method.as_str())
                         || method.as_str() == "all"
-                        || ctx.scope_of(m, &method) =>
+                        || ctx.scope_of(m, &method)) =>
                 {
                     None
                 }
@@ -4014,13 +4152,41 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
 
     match recv {
         None => {
+            // Source methods retain Ruby lookup precedence at every
+            // implicit class root, just as at an explicit model constant.
+            if let Some(model) = ctx.scope_body.as_ref().map(|(model, _)| model).or(ctx.class_self.as_ref()) {
+                if ctx.user_returns.defines_class_method(model, &method)
+                    && (ctx.scope_body.is_none() || ctx.class_self.is_some()
+                        || !(is_relation_chain_method(method.as_str()) || method.as_str() == "all"
+                            || is_relation_terminal(method.as_str(), &args, block.as_ref())))
+                    && (ctx.scope_body.is_none() || !ctx.scope_of(model, &method))
+                {
+                    let returns = if ctx.scope_of(model, &method) {
+                        ctx.scope_keeps_relation(model, &method).then(|| model.clone())
+                    } else { ctx.user_returns.class_return_model(model, &method) };
+                    *expr = put(span, None, method, args, block, parenthesized);
+                    return returns;
+                }
+            }
             if let Some((self_model, rel)) = &ctx.scope_body {
-                // Bare `all` inside a scope body IS the current relation —
-                // not `Model.all` (which would hit Base.all and return an
-                // Array, breaking the chain). Replace with the rel param.
-                if method.as_str() == "all" && args.is_empty() && block.is_none() {
-                    *expr = var_expr(span, rel);
-                    return Some(self_model.clone());
+                // A declared scope lambda runs on a Relation. Its own
+                // builtins win over model singleton overrides; a source
+                // class method instead runs with the model class as self.
+                if ctx.class_self.is_none() {
+                    if method.as_str() == "all" && args.is_empty() && block.is_none() {
+                        *expr = var_expr(span, rel);
+                        return Some(self_model.clone());
+                    }
+                    if is_relation_chain_method(method.as_str()) {
+                        let _ = lower_relation_args(self_model, &method, &mut args, ctx);
+                        *expr = put(span, Some(var_expr(span, rel)), method, args, block, parenthesized);
+                        return Some(self_model.clone());
+                    }
+                    if is_relation_terminal(method.as_str(), &args, block.as_ref()) {
+                        let method = counted_terminal(&method, &args, block.as_ref()).unwrap_or(method);
+                        *expr = put(span, Some(var_expr(span, rel)), method, args, block, parenthesized);
+                        return None;
+                    }
                 }
                 if ctx.scope_of(self_model, &method) {
                     let leading = ctx.scope_params(self_model, &method);
@@ -4028,6 +4194,12 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     let new_args = thread_rel(args, var_expr(span, rel), leading, span);
                     *expr = put(span, Some(const_expr(span, self_model)), method, new_args, block, true);
                     return keeps.then(|| self_model.clone());
+                }
+                // Bare `all` is the current relation unless source lookup
+                // above resolved an actual scope/class method of that name.
+                if method.as_str() == "all" && args.is_empty() && block.is_none() {
+                    *expr = var_expr(span, rel);
+                    return Some(self_model.clone());
                 }
                 // One of the model's own class methods that takes the
                 // relation (`last_page_of(PAGE_SIZE)` in campfire's
@@ -4093,8 +4265,30 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             None
         }
         Some(r) => {
+            // A written Relation seed proves a query just as one minted by
+            // this pass does. Keep that proof when the seed is parked in a
+            // local, even when the model overrides a builder's class name.
+            if method.as_str() == "new" && args.len() == 1 && block.is_none()
+                && matches!(&*r.node, ExprNode::Const { path }
+                    if path.iter().map(Symbol::as_str).filter(|part| !part.is_empty())
+                        .eq(["ActiveRecord", "Relation"]))
+            {
+                let model = const_model(&args[0], ctx.models);
+                *expr = put(span, Some(r), method, args, block, parenthesized);
+                return model;
+            }
             // Class-level call on a model constant.
             if let Some(m) = const_model(&r, ctx.models) {
+                // A catalog name does not override a source class method.
+                // Guard before builders, terminals, counted forms, and
+                // bulk-insert expansion, including inherited definitions.
+                if ctx.user_returns.defines_class_method(&m, &method) {
+                    let returns = if ctx.scope_of(&m, &method) {
+                        ctx.scope_keeps_relation(&m, &method).then(|| m.clone())
+                    } else { ctx.user_returns.class_return_model(&m, &method) };
+                    *expr = put(span, Some(r), method, args, block, parenthesized);
+                    return returns;
+                }
                 // `<Model>.insert_all(rows)` — Rails' bulk insert over an
                 // Array of attribute Hashes. INLINED at the call site
                 // rather than synthesized as a per-model method: an
@@ -4317,13 +4511,6 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return keeps.then_some(m);
                 }
-                if matches!(method.as_str(), "pluck" | "pick")
-                    && ctx.user_returns.defines_class_method(&m, &method)
-                {
-                    let returns = ctx.user_returns.class.get(&(m.clone(), method.clone())).cloned();
-                    *expr = put(span, Some(r), method, args, block, parenthesized);
-                    return returns;
-                }
                 if is_relation_chain_method(method.as_str())
                     || method.as_str() == "all"
                     || CLASS_ROOT_TERMINALS.contains(&method.as_str())
@@ -4347,7 +4534,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(relation_new(span, &m)), counted, args, block, parenthesized);
                     return None;
                 }
-                let returns = ctx.user_returns.class.get(&(m.clone(), method.clone())).cloned();
+                let returns = ctx.user_returns.class_return_model(&m, &method);
                 *expr = put(span, Some(r), method, args, block, parenthesized);
                 return returns;
             }
@@ -4616,16 +4803,17 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                                 return None;
                             }
                         }
-                        let is_scope = ctx.scope_of(&target, &method);
                         let is_chain = is_relation_chain_method(method.as_str());
                         let is_term =
                             is_relation_terminal(method.as_str(), &args, block.as_ref());
+                        let is_scope = ctx.scope_of(&target, &method) && !is_chain && !is_term;
                         // A registered class method takes the same
                         // threaded relation a scope does, but reads it as
                         // its CREATE scope rather than as a filter — so
                         // the seed is spelled `where_scope`, which records
                         // the foreign key as `scope_attributes` too.
-                        let assoc_cm = ctx.assoc_class_method_params(&target, &method);
+                        let assoc_cm = if is_chain || is_term { None }
+                            else { ctx.assoc_class_method_params(&target, &method) };
                         if is_scope || is_chain || is_term || assoc_cm.is_some() {
                             // An owner key other than `id` can be NULL, and
                             // `where(fk: nil)` would match the child rows
@@ -4839,6 +5027,20 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             });
 
             if let Some(mr) = r_model {
+                // A parked query can have the same analyzed Array type as
+                // actual records. Our relation/alias tracking proves the
+                // receiver after rooting it; the grouped-count pass owns
+                // the terminal spelling and type, as at direct call sites.
+                if method.as_str() == "count" && args.is_empty() && block.is_none()
+                    && super::group_count::group_in_relation_chain(&r).is_some()
+                    && is_relation_expr(&r, ctx, locals)
+                {
+                    let ty = expr.ty.clone();
+                    *expr = put(span, Some(r), method, args, block, parenthesized);
+                    expr.ty = ty;
+                    super::group_count::rewrite_grouped_query(expr);
+                    return None;
+                }
                 // `<relation>.new(…)` — Rails builds a record THROUGH a
                 // relation (`User.active_bots.new`), seeded from the
                 // relation's create-scope. There is no `Relation#new`
@@ -4911,7 +5113,20 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(r), counted, args, block, parenthesized);
                     return None;
                 }
-                if ctx.scope_of(&mr, &method) {
+                // Relation methods precede delegated model methods, even
+                // when a source method was registered for scope threading.
+                if is_relation_chain_method(method.as_str())
+                    || crate::catalog::is_relation_context_builder(method.as_str())
+                {
+                    let aliases = lower_relation_args(&mr, &method, &mut args, ctx);
+                    let mut r = r;
+                    apply_join_aliases(&mut r, &mr, &aliases, ctx);
+                    *expr = put(span, Some(r), method, args, block, parenthesized);
+                    return Some(mr);
+                }
+                if ctx.scope_of(&mr, &method)
+                    && !is_relation_terminal(method.as_str(), &args, block.as_ref())
+                {
                     let leading = ctx.scope_params(&mr, &method);
                     let keeps = ctx.scope_keeps_relation(&mr, &method);
                     let new_args = thread_rel(args, r, leading, span);
@@ -4925,19 +5140,12 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 // threaded as-is rather than seeded. Unlike a scope it
                 // returns whatever its body returns — an Array, a boolean
                 // — so the model does not survive the call.
-                if let Some(leading) = ctx.assoc_class_method_params(&mr, &method) {
+                if let Some(leading) = ctx.assoc_class_method_params(&mr, &method)
+                    .filter(|_| !is_relation_terminal(method.as_str(), &args, block.as_ref()))
+                {
                     let new_args = thread_rel(args, r, Some(leading), span);
                     *expr = put(span, Some(const_expr(span, &mr)), method, new_args, block, true);
                     return None;
-                }
-                if is_relation_chain_method(method.as_str())
-                    || crate::catalog::is_relation_context_builder(method.as_str())
-                {
-                    let aliases = lower_relation_args(&mr, &method, &mut args, ctx);
-                    let mut r = r;
-                    apply_join_aliases(&mut r, &mr, &aliases, ctx);
-                    *expr = put(span, Some(r), method, args, block, parenthesized);
-                    return Some(mr);
                 }
                 *expr = put(span, Some(r), method, args, block, parenthesized);
                 return None;
@@ -4996,7 +5204,10 @@ pub fn thread_rel_into_class_method_calls(
     fn walk(e: &mut Expr, rel: &Symbol, per_model: &HashMap<Symbol, AssocScopedMethod>) {
         e.node.for_each_child_mut(&mut |c| walk(c, rel, per_model));
         let span = e.span;
-        if let ExprNode::Send { recv: None, method, args, .. } = &mut *e.node {
+        if let ExprNode::Send { recv, method, args, .. } = &mut *e.node {
+            if recv.as_ref().is_some_and(|recv| !matches!(&*recv.node, ExprNode::SelfRef)) {
+                return;
+            }
             if let Some(entry) = per_model.get(method) {
                 let already = args.iter().any(|a| matches!(&*a.node, ExprNode::Var { name, .. } if name == rel));
                 if !already {
@@ -5017,8 +5228,23 @@ pub fn rewrite_scope_body(
     scopes: &ScopeRegistry,
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
+    user_returns: &UserMethodReturns,
 ) {
-    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, false);
+    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, user_returns, false, false);
+}
+
+/// A relation-taking source class method still has the MODEL as self;
+/// unlike a scope lambda, its own class methods precede Relation builtins.
+pub fn rewrite_class_scope_body(
+    body: &mut Expr,
+    self_model: &ClassId,
+    rel_param: &Symbol,
+    scopes: &ScopeRegistry,
+    models: &HashSet<ClassId>,
+    assocs: &AssocRegistry,
+    user_returns: &UserMethodReturns,
+) {
+    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, user_returns, false, true);
 }
 
 /// The same rewrite for an ASSOCIATION-scoped class method's body, which
@@ -5032,8 +5258,9 @@ pub fn rewrite_assoc_scope_body(
     scopes: &ScopeRegistry,
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
+    user_returns: &UserMethodReturns,
 ) {
-    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, true);
+    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, user_returns, true, true);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5044,13 +5271,13 @@ fn rewrite_relation_taking_body(
     scopes: &ScopeRegistry,
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
+    user_returns: &UserMethodReturns,
     self_const_is_implicit: bool,
+    class_self: bool,
 ) {
-    // Scope bodies don't consult user-method return types (none
-    // exercised there yet), nor the association-scoped class methods
-    // (those are resolved from call-site demand, which is collected
-    // after this runs) — conservative empty registries.
-    let empty_returns = UserMethodReturns::new();
+    // Source lookup must survive the first body rewrite too; a later
+    // call-site guard cannot recover an override already put on __rel.
+    // Association-scoped methods are resolved after this initial rewrite.
     let empty_assoc_cm = AssocClassMethods::new();
     // A scope body's `insert_all` (none in the corpus) keeps the
     // unguarded inline: this entry point takes registries, not the app,
@@ -5064,9 +5291,9 @@ fn rewrite_relation_taking_body(
         assoc_class_methods: &empty_assoc_cm,
         scope_body: Some((self_model.clone(), rel_param.clone())),
         self_const_is_implicit,
-        class_self: None,
+        class_self: class_self.then(|| self_model.clone()),
         instance_self: None,
-        user_returns: &empty_returns,
+        user_returns,
         owner_objects: false,
     };
     let mut locals = Locals::default();
@@ -5460,6 +5687,185 @@ mod tests {
             user_returns: empty_returns(),
             owner_objects: false,
         }
+    }
+
+    #[test]
+    fn source_class_methods_keep_dispatch_for_every_query_entrypoint() {
+        let mut names: HashSet<&str> = crate::catalog::AR_CATALOG.iter()
+            .map(|entry| entry.name).filter(|name| is_relation_chain_method(name)).collect();
+        names.extend(crate::catalog::BUILDER_ALIASES.iter().map(|(alias, _)| *alias));
+        names.extend(CLASS_ROOT_TERMINALS.iter().copied());
+        names.extend(["all", "first", "last", "insert_all", "insert_all!"]);
+        let model = ClassId(Symbol::from("Widget"));
+        let parent = ClassId(Symbol::from("Parent"));
+        let scopes = ScopeRegistry::new();
+        let models = HashSet::from([model.clone()]);
+        let assocs = AssocRegistry::default();
+        for inherited in [false, true] {
+            for name in &names {
+                let mut returns = UserMethodReturns::new();
+                let defining = if inherited { &parent } else { &model };
+                returns.class_methods.insert((defining.clone(), Symbol::from(*name)));
+                if inherited { returns.parents.insert(model.clone(), parent.clone()); }
+                let mut ctx = ctx_with(&scopes, &models, &assocs);
+                ctx.class_self = Some(model.clone());
+                ctx.user_returns = &returns;
+                for recv in [None, Some(const_expr(span(), &model)), Some(syn(span(), ExprNode::SelfRef))] {
+                    for arity in 0..=2 {
+                        for blocked in [false, true] {
+                            let mut expr = syn(span(), ExprNode::Send {
+                                recv: recv.clone(), method: Symbol::from(*name),
+                                args: (0..arity).map(int_lit).collect(),
+                                block: blocked.then(|| int_lit(1)), parenthesized: true,
+                            });
+                            let source = expr.clone();
+                            rewrite(&mut expr, &ctx, &mut Locals::default());
+                            assert_eq!(expr, source,
+                                "source {name}, inherited={inherited}, arity={arity}, block={blocked}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extended_methods_keep_dispatch_for_every_query_entrypoint() {
+        let mut names: HashSet<&str> = crate::catalog::AR_CATALOG.iter()
+            .map(|entry| entry.name).filter(|name| is_relation_chain_method(name)).collect();
+        names.extend(crate::catalog::BUILDER_ALIASES.iter().map(|(alias, _)| *alias));
+        names.extend(CLASS_ROOT_TERMINALS.iter().copied());
+        names.extend(["all", "first", "last", "insert_all", "insert_all!"]);
+        let methods = names.iter().map(|name| format!("def {name}(*args); [9, 8]; end\n")).collect::<String>();
+        for (body, parent, mixin) in [
+            ("extend Overrides", "", "module Overrides; include Methods; end"),
+            ("class << self; include Overrides; end", "", "module Overrides; include Methods; end"),
+            ("", "extend Overrides", "module Overrides; include Methods; end"),
+        ] {
+            let tree = [
+                ("db/schema.rb", "ActiveRecord::Schema.define do; create_table(\"widgets\") do |t|; t.integer \"owner_id\"; end; end".to_string()),
+                ("app/models/application_record.rb", format!("class ApplicationRecord < ActiveRecord::Base; primary_abstract_class; {parent}; end")),
+                ("app/models/widget.rb", format!("class Widget < ApplicationRecord; {body}; end")),
+                ("app/models/methods.rb", format!("module Methods\n{methods}end")),
+                ("app/models/overrides.rb", mixin.to_string()),
+            ].into_iter().map(|(path, source)| (std::path::PathBuf::from(path), source.into_bytes())).collect();
+            let app = crate::ingest::ingest_app_from_tree(tree).expect("extension app");
+            let returns = build_user_method_returns(&app);
+            let model = ClassId(Symbol::from("Widget"));
+            let scopes = ScopeRegistry::new();
+            let models = HashSet::from([model.clone()]);
+            let assocs = AssocRegistry::default();
+            let mut ctx = ctx_with(&scopes, &models, &assocs);
+            ctx.class_self = Some(model.clone());
+            ctx.user_returns = &returns;
+            for name in &names {
+                assert!(returns.defines_class_method(&model, &Symbol::from(*name)),
+                    "{name}: {body}, {parent}; models={:?}, modules={:?}",
+                    app.models.iter().map(|m| &m.name).collect::<Vec<_>>(),
+                    app.library_classes.iter().map(|c| (&c.name, &c.includes, c.methods.len())).collect::<Vec<_>>());
+                for recv in [None, Some(const_expr(span(), &model)), Some(syn(span(), ExprNode::SelfRef))] {
+                    for arity in 0..=2 {
+                        for blocked in [false, true] {
+                            let mut expr = syn(span(), ExprNode::Send {
+                                recv: recv.clone(), method: Symbol::from(*name),
+                                args: (0..arity).map(int_lit).collect(),
+                                block: blocked.then(|| int_lit(1)), parenthesized: true,
+                            });
+                            let source = expr.clone();
+                            rewrite(&mut expr, &ctx, &mut Locals::default());
+                            assert_eq!(expr, source, "extended {name}: {body}, {parent}; arity={arity}, block={blocked}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extended_method_returns_follow_ruby_ancestor_precedence() {
+        let modules = "module Values; def order(*args); [9, 8]; end; end\n\
+            module Queries; def order(*args); Widget.where(owner_id: 7); end; end\n\
+            module BaseValues; def order(*args); [3, 4]; end; end\n\
+            module Left; include BaseValues; def order(*args); Widget.where(owner_id: 7); end; end\n\
+            module Right; include BaseValues; end\n\
+            module SingletonOnly; def self.order(*args); [5, 6]; end; end";
+        for (body, parent, expected) in [
+            ("extend Values, Queries", "", false),
+            ("extend Queries, Values", "", true),
+            ("extend Values; extend Queries", "", true),
+            ("extend Queries; extend Values", "", false),
+            ("extend Values; extend Queries; extend Values", "", true),
+            ("extend Left; extend Right", "", true),
+            ("extend Values", "extend Queries", false),
+            ("extend Queries; def self.order(*args); [1, 2]; end", "", false),
+            ("extend SingletonOnly", "extend Queries", true),
+            ("include Values", "extend Queries", true),
+        ] {
+            let tree = [
+                ("db/schema.rb", "ActiveRecord::Schema.define do; create_table(\"widgets\") do |t|; t.integer \"owner_id\"; end; end".to_string()),
+                ("app/models/application_record.rb", format!("class ApplicationRecord < ActiveRecord::Base; primary_abstract_class; {parent}; end")),
+                ("app/models/widget.rb", format!("class Widget < ApplicationRecord; {body}; end")),
+                ("app/models/overrides.rb", modules.to_string()),
+            ].into_iter().map(|(path, source)| (std::path::PathBuf::from(path), source.into_bytes())).collect();
+            let app = crate::ingest::ingest_app_from_tree(tree).expect("precedence app");
+            let returns = build_user_method_returns(&app);
+            let model = ClassId(Symbol::from("Widget"));
+            assert!(returns.defines_class_method(&model, &Symbol::from("order")), "{body}");
+            assert_eq!(returns.class_return_model(&model, &Symbol::from("order")).is_some(), expected, "{body}; parent {parent}");
+            assert_eq!(returns.returns_non_relation(&model, &Symbol::from("order")), !expected, "{body}; parent {parent}");
+        }
+    }
+
+    #[test]
+    fn extended_method_lookup_uses_resolved_lexical_and_rooted_names() {
+        for (declaration, expected) in [
+            ("class Space::Widget < ApplicationRecord; extend Overrides; end", true),
+            ("module Space; class Widget < ApplicationRecord; extend Overrides; end; end", false),
+            ("module Space; class Widget < ApplicationRecord; extend ::Overrides; end; end", true),
+        ] {
+            let tree = [
+                ("db/schema.rb", "ActiveRecord::Schema.define do; create_table(\"widgets\") do |t|; t.integer \"owner_id\"; end; end".to_string()),
+                ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base; primary_abstract_class; end".to_string()),
+                ("app/models/widget.rb", "class Widget < ApplicationRecord; end".to_string()),
+                ("app/models/space/widget.rb", declaration.to_string()),
+                ("app/models/overrides.rb", "module Overrides; def order(*args); Widget.where(owner_id: 7); end; end".to_string()),
+                ("app/models/space/overrides.rb", "module Space; module Overrides; def order(*args); [9, 8]; end; end; end".to_string()),
+            ].into_iter().map(|(path, source)| (std::path::PathBuf::from(path), source.into_bytes())).collect();
+            let app = crate::ingest::ingest_app_from_tree(tree).expect("namespace app");
+            let returns = build_user_method_returns(&app);
+            let model = ClassId(Symbol::from("Space::Widget"));
+            assert!(returns.defines_class_method(&model, &Symbol::from("order")), "{declaration}");
+            assert_eq!(returns.class_return_model(&model, &Symbol::from("order")).is_some(), expected, "{declaration}");
+        }
+    }
+
+    #[test]
+    fn source_class_method_returns_follow_the_nearest_definition() {
+        let child = ClassId(Symbol::from("Child"));
+        let parent = ClassId(Symbol::from("Parent"));
+        let method = Symbol::from("order");
+        let mut returns = UserMethodReturns::new();
+        returns.parents.insert(child.clone(), parent.clone());
+        returns.class_methods.insert((parent.clone(), method.clone()));
+        returns.class.insert((parent.clone(), method.clone()), parent.clone());
+        assert!(returns.defines_class_method(&child, &method));
+        assert_eq!(returns.class_return_model(&child, &method), Some(parent));
+        returns.class_methods.insert((child.clone(), method.clone()));
+        assert_eq!(returns.class_return_model(&child, &method), None);
+    }
+
+    #[test]
+    fn non_relation_returns_follow_inheritance_without_overriding_a_child_scope() {
+        let child = ClassId(Symbol::from("Child"));
+        let parent = ClassId(Symbol::from("Parent"));
+        let method = Symbol::from("arranged");
+        let mut returns = UserMethodReturns::new();
+        returns.parents.insert(child.clone(), parent.clone());
+        returns.class_methods.insert((parent.clone(), method.clone()));
+        returns.non_relation_scopes.insert((parent, method.clone()));
+        assert!(returns.returns_non_relation(&child, &method));
+        returns.declared_scopes.insert((child.clone(), method.clone()));
+        assert!(!returns.returns_non_relation(&child, &method));
     }
 
     fn sym_lit(s: &str) -> Expr {

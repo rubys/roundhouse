@@ -267,7 +267,7 @@ pub(crate) fn lower_models_inner(
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     lower_models_inner_with_ruby_values(
         models, schema, extra_class_infos, params_specs, unfolded, materialization,
-        finder_inputs, false, false, ErrorsReaders::FieldRead, RuntimeRelation::Absent,
+        finder_inputs, false, false, ErrorsReaders::FieldRead, RuntimeRelation::Absent, None,
     )
 }
 
@@ -283,6 +283,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     param_binds: bool,
     errors_readers: ErrorsReaders,
     runtime_relation: RuntimeRelation,
+    source_methods: Option<&crate::analyze::SourceMethods<'_>>,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
@@ -292,7 +293,19 @@ pub(crate) fn lower_models_inner_with_ruby_values(
         let table = schema.tables.get(&model.table.0);
         // Register actual production definitions, even for unselected
         // models and when source overrides hide framework ownership.
-        classes.insert(model.name.clone(), build_class_info_with_finder_inputs(model, &methods, table, finder_inputs));
+        let mut info = build_class_info_with_finder_inputs(model, &methods, table, finder_inputs);
+        // Ruby emission has the complete source graph, including extended
+        // modules. Carry its winning definitions through the earlier Arel
+        // fold too, before a class-root call can turn into inline SQL.
+        if let Some(source) = source_methods {
+            for (name, method) in source.class_methods(&model.name) {
+                info.source_class_methods.insert(name.clone());
+                if let Some(signature) = &method.signature {
+                    info.class_methods.insert(name, signature.clone());
+                }
+            }
+        }
+        classes.insert(model.name.clone(), info);
         if !materialization.retains(&model.name) {
             continue;
         }
@@ -1892,6 +1905,7 @@ pub(crate) fn push_scope_methods(
     scopes: &crate::lower::scope_chain::ScopeRegistry,
     models_set: &std::collections::HashSet<ClassId>,
     assocs: &crate::lower::scope_chain::AssocRegistry,
+    user_returns: &crate::lower::scope_chain::UserMethodReturns,
 ) {
     use crate::dialect::{AccessorKind, ModelBodyItem, Param};
     use crate::expr::{Expr, ExprNode, LValue};
@@ -1936,6 +1950,7 @@ pub(crate) fn push_scope_methods(
             scopes,
             models_set,
             assocs,
+            user_returns,
         );
 
         // Rails relations are immutable, so every implicit-self root in

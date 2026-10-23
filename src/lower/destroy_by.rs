@@ -40,18 +40,21 @@ use crate::ident::Symbol;
 use crate::ty::Ty;
 
 pub fn apply_destroy_by_lowering(app: &mut App) {
-    super::for_each_hook_body(app, &mut rewrite);
+    let receivers = super::group_count::Receivers::new(app);
+    super::for_each_owned_hook_body(app, &mut |owner, body| rewrite(body, &receivers, owner));
     for view in &mut app.views {
-        rewrite(&mut view.body);
+        rewrite(&mut view.body, &receivers, None);
     }
 }
 
-fn rewrite(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut rewrite);
-    rewrite_node(expr);
+fn rewrite(expr: &mut Expr, receivers: &super::group_count::Receivers, owner: Option<&crate::ident::ClassId>) {
+    expr.node.for_each_child_mut(&mut |child| rewrite(child, receivers, owner));
+    rewrite_node(expr, receivers, owner);
 }
 
-pub(crate) fn rewrite_node(expr: &mut Expr) {
+pub(crate) fn rewrite_node(
+    expr: &mut Expr, receivers: &super::group_count::Receivers, owner: Option<&crate::ident::ClassId>,
+) {
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
         return;
     };
@@ -61,6 +64,7 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         "find_sole_by" => "sole",
         _ => return,
     };
+    if receivers.source_class_call(expr, owner) { return; }
     if args.len() != 1 {
         return;
     }

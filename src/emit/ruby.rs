@@ -233,13 +233,23 @@ fn materialize_models_with_param_binds(
     // to be held back on them here or there is nothing left to re-root.
     // Same survey both passes read, for the same reason the survey
     // covers the App rather than a slice.
-    let assoc_scopes = crate::lower::scope_chain::assoc_query_method_names(
+    let mut assoc_scopes = crate::lower::scope_chain::assoc_query_method_names(
         &crate::lower::scope_chain::survey_assoc_class_methods(
             app,
             &crate::lower::scope_chain::build_assoc_registry(&app.models),
             &crate::lower::scope_chain::build_scope_registry(&app.models),
         )
         .0,
+    );
+    // Keeping a query-name override at its class receiver also means
+    // keeping its query return lazy. Otherwise the earlier Arel fold
+    // materializes its body into an Array before the call-site guard
+    // can preserve `Model.order(...).pluck(...)`.
+    assoc_scopes.extend(
+        crate::lower::scope_chain::build_user_method_returns(app).class.keys()
+            .filter(|(_, method)| crate::lower::scope_chain::is_relation_chain_method(method.as_str())
+                || method.as_str() == "all")
+            .cloned(),
     );
     let lcs = crate::lower::model_to_library::lower_models_inner_with_ruby_values(
         &app.models,
@@ -253,6 +263,7 @@ fn materialize_models_with_param_binds(
         param_binds,
         crate::lower::model_to_library::ErrorsReaders::CreatedOnFirstRead,
         crate::lower::model_to_library::RuntimeRelation::Present,
+        Some(&crate::analyze::SourceMethods::new(app)),
     ).0;
     (lcs, params_specs)
 }
@@ -1262,6 +1273,12 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
             // lowering, which is what turns the `M.where` it writes
             // into a seeded Relation. See the module.
             crate::lower::records_to_relation_arg::rewrite_test_classes(&mut test_lcs, app);
+            let group_receivers = crate::lower::group_count::Receivers::new(app);
+            for lc in &mut test_lcs {
+                for method in &mut lc.methods {
+                    crate::lower::group_count::rewrite(&mut method.body, &group_receivers, Some(&lc.name));
+                }
+            }
             library::apply_scope_lowering(&mut test_lcs, app);
             // A route-helper argument as the helper's SIGNATURE takes
             // it, as app bodies get it: a String-typed segment (a slug,
