@@ -183,8 +183,12 @@ end
 "#,
     );
     assert!(!out.contains("touch(:code)"), "site should be inlined:\n{out}");
-    assert!(out.contains("__update_rcv.code = ActiveSupport.db_now"), "column stamped:\n{out}");
-    assert!(out.contains("__update_rcv.touch"), "then touched:\n{out}");
+    // `invitation&.touch(:code)` on a local: the nil guard reads the
+    // local (safe navigation evaluates it once either way), and the
+    // stamp and touch go to it.
+    assert!(out.contains("invitation.nil?"), "nil guard:\n{out}");
+    assert!(out.contains("invitation.code = ActiveSupport.db_now"), "column stamped:\n{out}");
+    assert!(out.contains("invitation.touch"), "then touched:\n{out}");
     assert!(diags.is_empty(), "{diags:?}");
 }
 

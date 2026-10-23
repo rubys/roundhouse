@@ -1202,7 +1202,13 @@ fn every_runtime_method_body_concretely_typed() {
     // nil) and forwards it through `super`, the same two gradual sites
     // `RecordNotDestroyed#initialize` carries (+2 in
     // action_dispatch/exceptions.rb, 868 -> 870).
-    const CEILING: usize = 870;
+    // MEASURED 885 on 2026-10-23 (safe navigation, on 870): a nil guard
+    // (`x&.y`, or `x.nil? ? nil : x.y` written out) keeps the gradual read
+    // of its call branch instead of joining it with nil into a union the
+    // ledger does not count (+6 action_controller/cache_control.rb, +4
+    // active_support_reporters.rb, +3 active_support_notifications.rb, +2
+    // active_record/connection.rb; 870 -> 885).
+    const CEILING: usize = 885;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

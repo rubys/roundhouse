@@ -134,3 +134,44 @@ fn several_includers_that_disagree_lend_nothing() {
     );
     assert!(!found.iter().any(|d| d.starts_with("error")), "{found:#?}");
 }
+
+/// The includers above, with `current_article` spelled each way Ruby
+/// writes a nil guard. `&.` reads as `x.nil? ? nil : x.m`, and joining
+/// the guard's nil with the unresolved call made a union the gradual
+/// ledger never reported: the escape vanished from `set_note` and the
+/// view. Every spelling reports what `x && x.m` reports.
+#[test]
+fn a_nil_guard_keeps_the_gradual_escape() {
+    let disagree = |body: &str| {
+        let inner = format!(
+            "module Impersonation\n  extend ActiveSupport::Concern\n\n  def current_article\n    {body}\n  end\nend\n"
+        );
+        let mut tree: HashMap<PathBuf, Vec<u8>> =
+            BASE.iter().map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec())).collect();
+        tree.insert(PathBuf::from("app/controllers/concerns/impersonation.rb"), inner.into_bytes());
+        for (p, c) in [
+            (
+                "app/controllers/application_controller.rb",
+                "class ApplicationController < ActionController::Base\n  include Impersonation\n\n  \
+                 private\n\n  def resume_comment\n    Comment.find_by(id: 1)\n  end\nend\n",
+            ),
+            (
+                "app/controllers/api/base_controller.rb",
+                "class Api::BaseController < ActionController::Base\n  include Impersonation\n\n  \
+                 private\n\n  def resume_comment\n    Comment.find(1)\n  end\nend\n",
+            ),
+        ] {
+            tree.insert(PathBuf::from(p), c.as_bytes().to_vec());
+        }
+        let mut app = ingest_app_from_tree(tree).expect("ingest tree");
+        roundhouse::session::analyze_and_lower(&mut app);
+        let mut found: Vec<String> = diagnose(&app).into_iter().map(|d| d.to_string()).collect();
+        found.sort();
+        found
+    };
+    let and = disagree("c = resume_comment\n    c && c.article");
+    assert_eq!(and.iter().filter(|d| d.contains("gradual_untyped")).count(), 3, "{and:#?}");
+    for body in ["resume_comment&.article", "c = resume_comment\n    c.nil? ? nil : c.article"] {
+        assert_eq!(disagree(body), and, "{body}");
+    }
+}

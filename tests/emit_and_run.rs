@@ -204,6 +204,10 @@ mod json_params;
 mod class_side_default_contract;
 #[path = "emit_and_run/class_side_default.rs"]
 mod class_side_default;
+#[path = "support/safe_navigation.rs"]
+mod safe_navigation_contract;
+#[path = "emit_and_run/safe_navigation.rs"]
+mod safe_navigation;
 #[path = "emit_and_run/helper_anonymous_rest.rs"]
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]

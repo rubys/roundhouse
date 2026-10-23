@@ -99,31 +99,46 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
 }
 
 /// `x.errors&.full_messages`, which `&.` binds as
-/// `(__safe_nav1 = x.errors) && __safe_nav1.full_messages`, and
-/// `x&.errors&.full_messages`, where the bound value is itself
-/// `x && x.errors`: the hop is the same identity, and it is nil-safe on
-/// its own (nil `errors` answers nil either way), so the binding goes
-/// with it. `e.record&.errors&.full_messages&.first` reads the messages
-/// whatever `e.record`'s type, as the `.` spelling does.
+/// `(__safe_nav1 = x.errors).nil? ? nil : __safe_nav1.full_messages`,
+/// and `x&.errors&.full_messages`, where the bound value is itself
+/// `x.nil? ? nil : x.errors`: the hop is the same identity, and it is
+/// nil-safe on its own (nil `errors` answers nil either way), so the
+/// binding goes with it. `e.record&.errors&.full_messages&.first` reads
+/// the messages whatever `e.record`'s type, as the `.` spelling does.
 fn fold_safe_nav(expr: &mut Expr) {
-    use crate::expr::{BoolOpKind, LValue};
+    use crate::expr::LValue;
     let is_errors = |e: &Expr| {
         matches!(&*e.node, ExprNode::Send { method, args, block: None, .. }
             if method.as_str() == "errors" && args.is_empty())
     };
-    let ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } = &*expr.node else { return };
-    let ExprNode::Assign { target: LValue::Var { name: temp, .. }, value } = &*left.node else { return };
-    let ExprNode::Send { recv: Some(read), method, args, block: None, .. } = &*right.node else { return };
+    let Some((subject, call)) = nil_guard(expr) else { return };
+    let ExprNode::Assign { target: LValue::Var { name: temp, .. }, value } = &*subject.node else { return };
+    let ExprNode::Send { recv: Some(read), method, args, block: None, .. } = &*call.node else { return };
     if method.as_str() != "full_messages"
         || !args.is_empty()
         || !matches!(&*read.node, ExprNode::Var { name, .. } if name == temp)
     {
         return;
     }
-    let folds = is_errors(value)
-        || matches!(&*value.node, ExprNode::BoolOp { op: BoolOpKind::And, right: inner, .. } if is_errors(inner));
+    let folds = is_errors(value) || nil_guard(value).is_some_and(|(_, inner)| is_errors(inner));
     if folds {
         let value = value.clone();
         *expr = value;
+    }
+}
+
+/// The subject and the call branch of `<subject>.nil? ? nil : <call>`.
+fn nil_guard(e: &Expr) -> Option<(&Expr, &Expr)> {
+    let ExprNode::If { cond, then_branch, else_branch } = &*e.node else { return None };
+    if !matches!(&*then_branch.node, ExprNode::Lit { value: crate::expr::Literal::Nil }) {
+        return None;
+    }
+    match &*cond.node {
+        ExprNode::Send { recv: Some(subject), method, args, block: None, .. }
+            if method.as_str() == "nil?" && args.is_empty() =>
+        {
+            Some((subject, else_branch))
+        }
+        _ => None,
     }
 }

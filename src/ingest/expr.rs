@@ -1276,56 +1276,20 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 block,
                 parenthesized,
             };
-            // Safe navigation `a&.b(args)` — desugar to `a && a.b(args)`
-            // (the IR has no safe-send flag). nil receiver → the And
-            // yields nil without dispatching, matching `&.`; a plain
-            // Send would have silently DROPPED the guard and crashed on
-            // nil at runtime. A receiver that is not a plain read is
-            // bound once first — `(__safe_nav17 = a.pop) && __safe_nav17.b`
-            // — because evaluating it twice is not harmless: campfire's
+            // Safe navigation `a&.b(args)`: `a.nil? ? nil : a.b(args)`
+            // (the IR has no safe-send flag). nil is the only value `&.`
+            // guards, so a `false` receiver dispatches, as in Ruby
+            // (`false&.to_s` is "false"). A receiver that is not a plain
+            // read is bound once first -
+            // `(__safe_nav17 = a.pop).nil? ? nil : __safe_nav17.b` -
+            // because evaluating it twice is not harmless: campfire's
             // `@idle[address].pop&.first` popped two connections and
-            // handed back the wrong one. One divergence stays: a `false`
-            // receiver skips the call where Ruby's `&.` would dispatch
-            // (nil is the only value `&.` guards) — acceptable until a
-            // real call site cares, at which point Send grows a `safe`
-            // flag.
+            // handed back the wrong one. The `nil?` test narrows the
+            // read (or the temp it just bound) in the call branch. The
+            // `a && a.b` desugar this replaced skipped the call on
+            // `false` (rubys/roundhouse#620).
             match (c.is_safe_navigation(), recv) {
-                (true, Some(r)) if is_plain_read(&r) => ExprNode::BoolOp {
-                    op: crate::expr::BoolOpKind::And,
-                    surface: crate::expr::BoolOpSurface::Symbol,
-                    left: r,
-                    right: Expr::new(span, send),
-                },
-                (true, Some(r)) => {
-                    // One local per site: a shared name would hold a
-                    // different type at each `&.` in a method, and a
-                    // local that does is polymorphic on spinel.
-                    // Not the receiver's start: every link of `a&.b&.c` starts where `a` does.
-                    let temp = Symbol::from(format!("__safe_nav{}", r.span.end));
-                    let read = Expr::new(
-                        r.span,
-                        ExprNode::Var { id: crate::ident::VarId(0), name: temp.clone() },
-                    );
-                    let bound = Expr::new(
-                        r.span,
-                        ExprNode::Assign {
-                            target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: temp },
-                            value: r,
-                        },
-                    );
-                    let ExprNode::Send { method, args, block, parenthesized, .. } = send else {
-                        unreachable!("built as a Send above")
-                    };
-                    ExprNode::BoolOp {
-                        op: crate::expr::BoolOpKind::And,
-                        surface: crate::expr::BoolOpSurface::Symbol,
-                        left: bound,
-                        right: Expr::new(
-                            span,
-                            ExprNode::Send { recv: Some(read), method, args, block, parenthesized },
-                        ),
-                    }
-                }
+                (true, Some(r)) => safe_navigation(r, send, span),
                 _ => send,
             }
         }
@@ -4235,6 +4199,48 @@ fn merge_call(recv: Expr, arg: Expr, span: Span) -> Expr {
             parenthesized: true,
         },
     )
+}
+
+/// `recv&.m(args)` from its receiver and the plain Send (`send`, whose
+/// receiver is `recv`): see the call site in `ingest_expr`.
+fn safe_navigation(recv: Expr, send: ExprNode, span: Span) -> ExprNode {
+    let is_nil = |subject: Expr| {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(subject),
+                method: Symbol::from("nil?"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+    let nil = Expr::new(span, ExprNode::Lit { value: Literal::Nil });
+    if is_plain_read(&recv) {
+        return ExprNode::If { cond: is_nil(recv), then_branch: nil, else_branch: Expr::new(span, send) };
+    }
+    // One local per site: a shared name would hold a different type at
+    // each `&.` in a method, and a local that does is polymorphic on
+    // spinel. Not the receiver's start: every link of `a&.b&.c` starts
+    // where `a` does.
+    let temp = Symbol::from(format!("__safe_nav{}", recv.span.end));
+    let read = Expr::new(recv.span, ExprNode::Var { id: crate::ident::VarId(0), name: temp.clone() });
+    let bound = Expr::new(
+        recv.span,
+        ExprNode::Assign {
+            target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: temp },
+            value: recv,
+        },
+    );
+    let ExprNode::Send { method, args, block, parenthesized, .. } = send else {
+        unreachable!("built as a Send by the caller")
+    };
+    ExprNode::If {
+        cond: is_nil(bound),
+        then_branch: nil,
+        else_branch: Expr::new(span, ExprNode::Send { recv: Some(read), method, args, block, parenthesized }),
+    }
 }
 
 /// A receiver `&.` may read twice without changing what the program

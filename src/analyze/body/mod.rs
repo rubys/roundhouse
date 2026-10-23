@@ -2622,6 +2622,15 @@ impl<'a> BodyTyper<'a> {
                 };
                 narrowing::drop_unstable_members(&mut else_ctx, &[&*cond, &*else_branch]);
                 let e = self.analyze_expr(else_branch, &else_ctx);
+                // A nil guard in front of a read the typer cannot resolve
+                // (`x.nil? ? nil : x.m`, which is how `x&.m` reads) answers
+                // that read, as `x && x.m` does: joined with the guard's
+                // nil, the unknown became one arm of a union, which the
+                // gradual ledger does not report and the return harvest
+                // strips, so the escape vanished from every reader.
+                if is_nil_guard(cond, then_branch) && e.is_unknown() {
+                    return e;
+                }
                 union_of(t, e)
             }
 
@@ -6237,6 +6246,13 @@ mod tests {
 
 /// The arms of `ty` a falsy value can come from -- `nil`, `false`, and
 /// anything not known to be truthy. `None` when there are none.
+/// `<subject>.nil? ? nil : ...`: the shape `x&.m` lowers to.
+fn is_nil_guard(cond: &Expr, then_branch: &Expr) -> bool {
+    matches!(&*then_branch.node, ExprNode::Lit { value: crate::expr::Literal::Nil })
+        && matches!(&*cond.node, ExprNode::Send { recv: Some(_), method, args, block: None, .. }
+            if method.as_str() == "nil?" && args.is_empty())
+}
+
 fn falsy_part(ty: &Ty) -> Option<Ty> {
     match ty {
         Ty::Union { variants } => {

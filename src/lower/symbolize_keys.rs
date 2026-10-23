@@ -66,7 +66,7 @@ fn is_request_params(e: &Expr) -> bool {
 
 /// A value with no static type read out of a container: an index,
 /// `fetch` or `dig` read, or the temporary `a&.b` binds it to
-/// (`(t = h["order"]) && t.as_json`). Such a value is a Hash, an Array
+/// (`(t = h["order"]).nil? ? nil : t.as_json`). Such a value is a Hash, an Array
 /// or a scalar, whose `as_json` is Rails' core_ext one, and
 /// `ActiveSupport::JSON.jsonable` answers it. Any other untyped
 /// receiver (a plain local, an ivar, a helper call that the controller

@@ -5818,6 +5818,12 @@ impl FoldedValue {
             FoldedValue::DateTimeStr(_) | FoldedValue::DateStr(_) => true,
         }
     }
+
+    /// `nil`, the one value safe navigation guards.
+    fn is_nil(&self) -> bool {
+        use crate::expr::{ExprNode, Literal};
+        matches!(self, FoldedValue::Lit(e) if matches!(&*e.node, ExprNode::Lit { value: Literal::Nil }))
+    }
 }
 
 /// Reduce `expr` to a `FoldedValue` at compile time, reading `env` (both
@@ -5869,12 +5875,26 @@ fn const_fold_expr(
                 ExprNode::Lit { value: crate::expr::Literal::Str { value: out } },
             )))
         }
-        // `nil&.x` / `false&.x` (Ruby's only safe-nav-guarded values) —
-        // `ingest::expr` desugars `a&.b` to `a && a.b` (or
-        // `(tmp = a) && tmp.b` for a non-plain-read receiver), so a
-        // literal-nil/false left operand already means the right-hand
-        // call never ran; short-circuit the same way here rather than
-        // fold into a call on nil.
+        // `nil&.x` - `ingest::expr` desugars `a&.b` to
+        // `a.nil? ? nil : a.b` (or `(tmp = a).nil? ? nil : tmp.b` for a
+        // non-plain-read receiver), so a literal-nil receiver means the
+        // call never ran; answer nil the same way here rather than fold
+        // into a call on nil. Any other receiver takes the call branch.
+        ExprNode::If { cond, then_branch, else_branch } => {
+            let ExprNode::Send { recv: Some(subject), method, args, block: None, .. } = &*cond.node else {
+                return None;
+            };
+            if method.as_str() != "nil?" || !args.is_empty() {
+                return None;
+            }
+            let subject = const_fold_expr(subject, env, consumed_spans)?;
+            if subject.is_nil() {
+                const_fold_expr(then_branch, env, consumed_spans)
+            } else {
+                const_fold_expr(else_branch, env, consumed_spans)
+            }
+        }
+        // `a && b` short-circuits on a falsy left operand, as in Ruby.
         ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } => {
             let l = const_fold_expr(left, env, consumed_spans)?;
             if !l.is_truthy() {

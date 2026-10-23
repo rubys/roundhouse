@@ -2174,8 +2174,9 @@ impl Analyzer {
         // write the value always evaluates counts: an array or hash
         // element, a call's receiver or argument, a cast, a chained write.
         // One in a block, a branch or a lambda may never run. Ingest
-        // desugars `a&.f(X = 1)` to `a && a.f(X = 1)`, so a safe-navigated
-        // call's arguments sit under a branch and are not walked.
+        // desugars `a&.f(X = 1)` to `a.nil? ? nil : a.f(X = 1)`, so a
+        // safe-navigated call's arguments sit under a branch and are not
+        // walked.
         fn nested_const_writes<'e>(value: &'e Expr, out: &mut Vec<(&'e Symbol, &'e Expr)>) {
             match &*value.node {
                 ExprNode::Assign { target: LValue::Const { path }, value: inner } => {

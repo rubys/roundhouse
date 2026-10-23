@@ -132,6 +132,10 @@ mod backticks;
 mod class_side_default_contract;
 #[path = "spinel_toolchain/class_side_default.rs"]
 mod class_side_default;
+#[path = "support/safe_navigation.rs"]
+mod safe_navigation_contract;
+#[path = "spinel_toolchain/safe_navigation.rs"]
+mod safe_navigation;
 #[path = "spinel_toolchain/action_text_sanitize.rs"]
 mod action_text_sanitize;
 #[path = "support/campfire_caches.rs"]

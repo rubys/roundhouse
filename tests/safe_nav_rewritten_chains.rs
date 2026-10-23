@@ -1,6 +1,6 @@
 //! Safe navigation in a chain that a lowering rewrites.
 //!
-//! `a&.b` is bound to a temp (`(__safe_nav1 = a) && __safe_nav1.b`) when
+//! `a&.b` is bound to a temp (`(__safe_nav1 = a).nil? ? nil : __safe_nav1.b`) when
 //! `a` is not a plain read, and the lowerings that rewrite
 //! `errors.full_messages`, `association(:x).loaded?` and a has_many
 //! reader followed by a query method each match the chain written with
