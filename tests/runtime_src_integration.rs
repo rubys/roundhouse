@@ -1202,7 +1202,11 @@ fn every_runtime_method_body_concretely_typed() {
     // nil) and forwards it through `super`, the same two gradual sites
     // `RecordNotDestroyed#initialize` carries (+2 in
     // action_dispatch/exceptions.rb, 868 -> 870).
-    const CEILING: usize = 870;
+    // MEASURED 875 on 2026-10-23 (on 870): `_run_save_callbacks` and its
+    // create/update/destroy/validation twins answer the value of the block
+    // `run_callbacks(:save) { … }` passes, whatever its type, held in a
+    // local around the after hook (+5 in active_record/connection.rb).
+    const CEILING: usize = 875;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

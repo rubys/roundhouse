@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Usage: scripts/ci-swift-install 6.4.1
+# Not swift-actions/setup-swift: v2 rejects the ubuntu-26.04 image, which Swift ships a build for only from 6.4.
+set -euo pipefail
+
+SWIFT_VERSION="${1:?usage: ci-swift-install <version>}"
+# Not sourced: os-release sets VERSION and would clobber the script's own.
+PLATFORM="ubuntu$(. /etc/os-release && echo "$VERSION_ID")"
+case "$(dpkg --print-architecture)" in
+    amd64) ARCH_SUFFIX="" ;;
+    arm64) ARCH_SUFFIX="-aarch64" ;;
+    *) echo "::error::no swift.org toolchain for $(dpkg --print-architecture)"; exit 1 ;;
+esac
+DEST="$HOME/swift-toolchain/${SWIFT_VERSION}-${PLATFORM}${ARCH_SUFFIX}"
+
+"$(dirname "$0")/ci-apt-install" binutils binutils-gold gnupg2 libc6-dev \
+    libcurl4-openssl-dev libedit2 libpython3-dev libsqlite3-0 libxml2-dev \
+    libncurses-dev libz3-dev pkg-config zlib1g-dev
+
+if [ ! -x "$DEST/usr/bin/swift" ]; then
+    url="https://download.swift.org/swift-${SWIFT_VERSION}-release/${PLATFORM//./}${ARCH_SUFFIX}/swift-${SWIFT_VERSION}-RELEASE/swift-${SWIFT_VERSION}-RELEASE-${PLATFORM}${ARCH_SUFFIX}.tar.gz"
+    work="$(mktemp -d)"
+    curl -fsSL --retry 3 --retry-all-errors --max-time 600 "$url" -o "$work/swift.tar.gz"
+    curl -fsSL --retry 3 --retry-all-errors "$url.sig" -o "$work/swift.tar.gz.sig"
+    # Not a plain fetch: the key file is served gzip-encoded and gpg would read no key.
+    curl -fsSL --retry 3 --retry-all-errors --compressed https://www.swift.org/keys/all-keys.asc -o "$work/keys.asc"
+    export GNUPGHOME="$work/gnupg"
+    mkdir -m 700 "$GNUPGHOME"
+    gpg --batch --quiet --import "$work/keys.asc"
+    gpg --batch --verify "$work/swift.tar.gz.sig" "$work/swift.tar.gz"
+    mkdir -p "$DEST"
+    tar -xzf "$work/swift.tar.gz" -C "$DEST" --strip-components=1
+    rm -rf "$work"
+fi
+
+echo "$DEST/usr/bin" >> "${GITHUB_PATH:-/dev/null}"
+"$DEST/usr/bin/swift" --version

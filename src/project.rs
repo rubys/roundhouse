@@ -1697,6 +1697,8 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (_, "attribute_in_database") if kernel.contains(&"attribute_in_database") => Some("ActiveRecord::Base#attribute_in_database"),
                 (_, "create_or_find_by") if kernel.contains(&"create_or_find_by") => Some("ActiveRecord::Relation#create_or_find_by"),
                 (_, "create_or_find_by!") if kernel.contains(&"create_or_find_by!") => Some("ActiveRecord::Relation#create_or_find_by!"),
+                // Not filtered by what the app defines: the model's own `_run_x_callbacks` is the generated chain, built on yield and catch.
+                (_, name) if name.starts_with("_run_") && name.ends_with("_callbacks") => Some("ActiveRecord::Base#run_callbacks"),
                 (Some(r), "[]") => match &*r.node {
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Array" => Some("Array[]"),
                     ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Hash" => Some("Hash[]"),

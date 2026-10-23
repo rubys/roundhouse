@@ -58,6 +58,7 @@ pub mod current_attributes;
 pub mod delegate;
 mod acts_as_votable;
 mod discard;
+mod model_callbacks;
 mod model_delegate;
 pub mod thread_mattr;
 pub mod model;

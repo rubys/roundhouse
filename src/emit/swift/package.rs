@@ -18,18 +18,10 @@ let package = Package(
     name: "roundhouse-app",
     platforms: [.macOS(.v14)],
     dependencies: [
-        // Cap below 2.27: Hummingbird 2.26 imports ServiceContextModule (via
-        // tracing). Floating from 2.5.0 let a reused showcase SPM tree miss
-        // that module (`swift build -c release` under /tmp/rh-swift-pass2).
-        // 2.27+ needs tools-version 6.2, and on Swift 6.2.1 the transitive
-        // swift-websocket 1.6.2 (via hummingbird-websocket) currently fails
-        // a lifetime check — so stay on the 2.26 line until that clears.
-        .package(url: "https://github.com/hummingbird-project/hummingbird.git", "2.26.0"..<"2.27.0"),
+        // Not below 2.28: 2.26 imports ServiceContextModule, which a reused SPM tree could miss.
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.28.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird-websocket.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
-        // Force ServiceContextModule into the graph so reused SPM trees still
-        // materialize the module Hummingbird 2.26 imports.
-        .package(url: "https://github.com/apple/swift-service-context.git", from: "1.1.0"),
     ],
     targets: [
         .systemLibrary(
@@ -42,7 +34,6 @@ let package = Package(
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
                 .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "ServiceContextModule", package: "swift-service-context"),
                 "CSQLite",
             ]
         ),

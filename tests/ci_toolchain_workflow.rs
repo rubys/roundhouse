@@ -111,7 +111,7 @@ fn uv_cache_keys_use_the_generated_dependency_source_before_emit() {
 }
 
 /// Swift compare-extra is the hosted outlier (~7–8 billable minutes). The
-/// job still installs Swift 6.1 and runs the same framework-tests +
+/// job still installs Swift 6.4.1 and runs the same framework-tests +
 /// `scripts/compare swift` check; it must cache SwiftPM checkouts so the
 /// Hummingbird/NIO clone is not paid on every run. Smoke uses the same
 /// cache key because its README `swift build` fetches the same pins.
@@ -124,17 +124,20 @@ fn swift_compare_and_smoke_cache_swiftpm_checkouts() {
         let steps = workflow["jobs"][job]["steps"].as_sequence().unwrap();
         let setup = steps
             .iter()
-            .find(|step| {
-                step["uses"]
-                    .as_str()
-                    .unwrap_or("")
-                    .starts_with("swift-actions/setup-swift@")
-            })
+            .find(|step| step["name"].as_str() == Some("Install Swift"))
             .unwrap_or_else(|| panic!("{job} installs Swift"));
         assert_eq!(
-            setup["with"]["swift-version"].as_str(),
-            Some("6.1"),
+            setup["run"].as_str(),
+            Some("\"$GITHUB_WORKSPACE/scripts/ci-swift-install\" 6.4.1"),
             "{job}"
+        );
+        let toolchain = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Cache Swift toolchain"))
+            .unwrap_or_else(|| panic!("{job} caches the Swift toolchain"));
+        assert!(
+            toolchain["with"]["key"].as_str().unwrap().ends_with("-6.4.1"),
+            "{job}: the toolchain cache key must track the installed version"
         );
         let cache = steps
             .iter()
@@ -154,7 +157,7 @@ fn swift_compare_and_smoke_cache_swiftpm_checkouts() {
             "{job}: {key}"
         );
         assert!(
-            key.contains("swift6.1"),
+            key.contains("swift6.4"),
             "{job}: cache key must track the Swift major.minor: {key}"
         );
         keys.push(key.to_string());

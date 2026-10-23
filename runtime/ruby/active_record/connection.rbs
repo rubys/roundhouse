@@ -115,6 +115,11 @@ module ActiveRecord
     def self.record_timestamps: () -> bool
     def update_column: (String | Symbol name, untyped value) -> bool
     def update_attribute: (String | Symbol name, untyped value) -> bool
+    def _run_save_callbacks: () ?{ () -> untyped } -> untyped
+    def _run_create_callbacks: () ?{ () -> untyped } -> untyped
+    def _run_update_callbacks: () ?{ () -> untyped } -> untyped
+    def _run_destroy_callbacks: () ?{ () -> untyped } -> untyped
+    def _run_validation_callbacks: () ?{ () -> untyped } -> untyped
     def update_columns: (Hash[Symbol | String, untyped] attributes) -> bool
     def delete: () -> Base
     def _as_json_only: (Array[Symbol] only) -> Hash[String, untyped]

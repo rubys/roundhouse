@@ -45,6 +45,8 @@ mod ancestry_source;
 mod acts_as_follower_source;
 #[path = "emit_and_run/hook_macro_source.rs"]
 mod hook_macro_source;
+#[path = "emit_and_run/model_callbacks.rs"]
+mod model_callbacks;
 #[path = "emit_and_run/gem_class_macros.rs"]
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]

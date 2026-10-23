@@ -1307,6 +1307,13 @@ impl<'a> BodyTyper<'a> {
         {
             return block_ret.cloned().unwrap_or(Ty::Untyped);
         }
+        // Not the block's value alone: a `throw` without a value leaves Kernel#catch answering nil.
+        if method.as_str() == "catch"
+            && (recv_ty.is_none() || !self.owns_operator(recv_ty, method, !instance_receiver))
+            && let Some(block) = block_ret
+        {
+            return union_of(block.clone(), Ty::Nil);
+        }
         // `Model.transaction { … }` / `ActiveRecord::Base.transaction
         // { … }` returns its block's value (commit) — the registered
         // class-side entry says Untyped ("we don't statically track"),

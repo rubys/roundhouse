@@ -1970,13 +1970,22 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.5.1'
-      - name: Install Swift
+      - &swift-platform
+        name: Name the Swift platform
+        id: swift-platform
         if: matrix.target == 'swift'
-        uses: swift-actions/setup-swift@v2
+        run: echo "release=$(. /etc/os-release && echo "$VERSION_ID")" >> "$GITHUB_OUTPUT"
+      - &swift-toolchain-cache
+        name: Cache Swift toolchain
+        if: matrix.target == 'swift'
+        uses: actions/cache@v6
         with:
-          # Stay on 6.1 while emit caps Hummingbird below 2.27 (2.27+ needs
-          # tools 6.2; on 6.2.1 swift-websocket 1.6.2 fails a lifetime check).
-          swift-version: '6.1'
+          path: ~/swift-toolchain
+          key: swift-toolchain-${{ runner.os }}-${{ steps.swift-platform.outputs.release }}-${{ runner.arch }}-6.4.1
+      - &swift-install
+        name: Install Swift
+        if: matrix.target == 'swift'
+        run: '"$GITHUB_WORKSPACE/scripts/ci-swift-install" 6.4.1'
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
         timeout-minutes: 8
@@ -1992,9 +2001,9 @@ jobs:
           path: |
             ~/.cache/org.swift.swiftpm
             ~/.swiftpm
-          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.1-${{ hashFiles('src/emit/swift/package.rs') }}
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.4-${{ hashFiles('src/emit/swift/package.rs') }}
           restore-keys: |
-            swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.1-
+            swiftpm-${{ runner.os }}-${{ runner.arch }}-swift6.4-
       - name: Install .NET (C#)
         if: matrix.target == 'csharp'
         uses: actions/setup-dotnet@v6
@@ -2490,12 +2499,9 @@ jobs:
         uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.5.1'
-      - name: Install Swift
-        if: matrix.target == 'swift'
-        uses: swift-actions/setup-swift@v2
-        with:
-          # Stay on 6.1 while emit caps Hummingbird below 2.27 (see compare-extra).
-          swift-version: '6.1'
+      - *swift-platform
+      - *swift-toolchain-cache
+      - *swift-install
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
         timeout-minutes: 8

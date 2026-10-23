@@ -12,7 +12,7 @@
 //! Requires a Swift toolchain (6+) on PATH and, on Linux, the
 //! `libsqlite3-dev` package (the CSQLite systemLibrary's header + link
 //! target — see docs/archive/swift-migration-plan.md decision 3). CI provides
-//! both via `swift-actions/setup-swift` + apt; locally, the Xcode CLT
+//! both via `scripts/ci-swift-install` + apt; locally, the Xcode CLT
 //! (macOS) or a swiftly/mise toolchain suffices.
 //!
 //! Marked `#[ignore]` so the default `cargo test` run stays fast. Run:
