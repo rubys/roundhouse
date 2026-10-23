@@ -7223,7 +7223,8 @@ fn merged_before_seed(
 /// The filter ivars an action's view starts from, replayed in the order
 /// Rails runs the chain. A filter that runs at its declared position and
 /// always assigns the ivar replaces what earlier filters wrote; behind a
-/// runtime `if:`/`unless:` it joins them, since it may not run.
+/// runtime `if:`/`unless:`, even one ingest could not read
+/// ([`Filter::unread_guard`]), it joins them, since it may not run.
 /// `only:`/`except:` are decided per action by [`before_filter_applies`].
 /// The replay cannot place any other write: an around callback's (it may
 /// follow `yield`), one in a filter prepended or named again later (by a
@@ -7261,7 +7262,8 @@ fn view_filter_seed(
         let guarded = filter.if_cond.is_some()
             || filter.unless_cond.is_some()
             || filter.if_cond_expr.is_some()
-            || filter.unless_cond_expr.is_some();
+            || filter.unless_cond_expr.is_some()
+            || filter.unread_guard;
         for (k, v) in fivars {
             let modeled = always.contains(k) && !v.is_unknown() && !v.is_open();
             let join = |prev: &Ty| crate::analyze::body::join_ivar_slot(prev.clone(), v.clone());
@@ -7403,6 +7405,7 @@ fn build_sourced_filter_chain(
                                 unless_cond: None,
                                 if_cond_expr: None,
                                 unless_cond_expr: None,
+                                unread_guard: false,
                                 block: Some(expr.clone()),
                                 prepend: false,
                             },
@@ -7451,6 +7454,7 @@ fn build_sourced_filter_chain(
                                 unless_cond: target_info.unless_cond,
                                 if_cond_expr: target_info.if_cond_expr,
                                 unless_cond_expr: target_info.unless_cond_expr,
+                                unread_guard: target_info.unread_guard,
                                 block: Some(expr.clone()),
                                 prepend: method.as_str() == "prepend_before_action",
                             },

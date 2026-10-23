@@ -1689,6 +1689,12 @@ pub struct Filter {
     /// Lambda/proc-form `unless:` guard body, negated at the call site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unless_cond_expr: Option<Expr>,
+    /// An `if:`/`unless:` whose value ingest could not read (an Array, a
+    /// callable object): the filter may not run, but no predicate is
+    /// carried, so the dispatch chain still calls it unguarded. Analysis
+    /// that relies on a filter running treats it as guarded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unread_guard: bool,
     /// The whole call for a block-form filter — `before_action do … end`
     /// as one `Send` with its block — so a chain entry synthesized for
     /// it can be located (the trace's `file:line`) and named. Never set

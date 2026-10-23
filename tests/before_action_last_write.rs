@@ -10,8 +10,9 @@
 //!
 //! The view map used to keep the FIRST filter's write, so this view got
 //! `Integer` in either declaration order. A filter behind a runtime
-//! `if:`/`unless:` may not run, so its write joins the earlier one.
-//! Writes the replay cannot place keep the earlier write, as before.
+//! `if:`/`unless:` may not run, so its write joins the earlier one, even
+//! when ingest cannot read the guard. Writes the replay cannot place keep
+//! the earlier write, as before.
 //!
 //! Every case runs with the controllers in both input orders.
 
@@ -134,12 +135,55 @@ fn a_runtime_guarded_later_filter_joins_the_earlier_write() {
 }
 
 #[test]
+fn a_guard_ingest_cannot_read_still_joins() {
+    // `if: [:enabled?]` is a Rails guard that ingest does not read; the
+    // filter may still be skipped, so its write must not replace.
+    let filters = "  before_action :one\n  before_action :two, if: [:enabled?]";
+    assert_eq!(posts_x(filters, S), "Integer | String");
+    let filters = "  before_action :one\n  before_action(unless: [:enabled?]) { @x = \"s\" }";
+    assert_eq!(posts_x(filters, "    nil"), "Integer | String");
+}
+
+/// Pins union dispatch, which this change leaves as it is: the guarded
+/// join types `@x` as `Integer | String`, and a call that one member
+/// answers passes. Rails raises `NoMethodError` on the Integer path.
+#[test]
+fn union_dispatch_accepts_a_call_one_guarded_member_answers() {
+    for guard in [
+        "if: :enabled?",
+        "if: -> { params[:x] }",
+        "unless: :enabled?",
+    ] {
+        let posts = posts(
+            &format!("  before_action :one\n  before_action :two, {guard}"),
+            S,
+        );
+        let files = files(
+            &[("posts", posts.as_str())],
+            "posts/index",
+            "<%= @x.upcase %>\n",
+        );
+        assert_eq!(view_x(&files, "posts/index"), "Integer | String", "{guard}");
+        let messages = analyze(&files, "posts/index", false).1;
+        assert!(
+            !messages.iter().any(|m| m.contains("upcase")),
+            "{guard}: {messages:?}"
+        );
+    }
+}
+
+#[test]
 fn an_action_restriction_is_decided_for_the_rendered_action() {
     for (restriction, expected) in [
         ("only: :index", "String"),
+        ("only: [:index, :show]", "String"),
+        ("only: %i[index show]", "String"),
         ("except: :show", "String"),
+        ("except: [:show, :edit]", "String"),
         ("only: :show", "Integer"),
+        ("only: %i[show edit]", "Integer"),
         ("except: :index", "Integer"),
+        ("except: [:index]", "Integer"),
     ] {
         let filters = format!("  before_action :one\n  before_action :two, {restriction}");
         assert_eq!(posts_x(&filters, S), expected, "{restriction}");

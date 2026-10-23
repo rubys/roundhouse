@@ -4264,6 +4264,7 @@ fn content_security_policy_filter(
         unless_cond: None,
         if_cond_expr: None,
         unless_cond_expr: None,
+        unread_guard: false,
         block: Some(expr),
         prepend: false,
     })
@@ -4356,6 +4357,7 @@ fn block_form_concern_filter(stmt: &ruby_prism::Node<'_>, file: &str) -> Option<
         unless_cond: None,
         if_cond_expr: None,
         unless_cond_expr: None,
+        unread_guard: false,
         block: Some(expr),
         prepend: false,
     })
