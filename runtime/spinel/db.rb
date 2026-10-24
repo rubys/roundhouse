@@ -115,6 +115,7 @@ module SQL
   # coercion for the -1 destructor is the spinel primitive validated in
   # spinel's test/ffi_ptr_int_literal.rb.
   ffi_func :sqlite3_bind_int64,        [:ptr, :int, :long],                   :int
+  ffi_func :sqlite3_bind_double,       [:ptr, :int, :double],                 :int
   ffi_func :sqlite3_bind_null,         [:ptr, :int],                          :int
   ffi_func :sqlite3_bind_text,         [:ptr, :int, :str, :int, :ptr],        :int
   # `sqlite3_column_type` reports the storage class of a column in the
@@ -140,6 +141,10 @@ module SQL
   # timeout per connection, and 64-bit integer columns.
   ffi_func :sqlite3_busy_timeout,      [:ptr, :int],                          :int
   ffi_func :sqlite3_column_int64,      [:ptr, :int],                          :long
+  # `execute_batch` splits its SQL where `sqlite3_complete` says a
+  # statement ends, and binds only a statement with as many `?`s as values.
+  ffi_func :sqlite3_complete,          [:str],                                :int
+  ffi_func :sqlite3_bind_parameter_count, [:ptr],                             :int
 
   # Out-params — sqlite3_open writes the db handle here, prepare_v2
   # writes the stmt handle. 8 bytes is enough for a 64-bit pointer.

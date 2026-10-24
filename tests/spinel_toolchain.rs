@@ -138,6 +138,10 @@ mod class_side_default_contract;
 mod class_side_default;
 #[path = "spinel_toolchain/action_text_sanitize.rs"]
 mod action_text_sanitize;
+#[path = "support/sqlite3_batch_transaction.rs"]
+mod sqlite3_batch_transaction_contract;
+#[path = "spinel_toolchain/sqlite3_batch_transaction.rs"]
+mod sqlite3_batch_transaction;
 #[path = "support/campfire_caches.rs"]
 mod campfire_caches_contract;
 #[path = "spinel_toolchain/campfire_caches.rs"]

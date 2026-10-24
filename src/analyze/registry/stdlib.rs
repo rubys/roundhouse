@@ -542,6 +542,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("readonly?", Ty::Bool),
         ("busy_timeout=", Ty::Int),
         ("busy_handler_timeout=", Ty::Int),
+        // A schema-owning app (hindmost's conversation index): the
+        // batch answers its last statement's first row; `transaction`
+        // answers its block's value (true without one).
+        ("execute_batch", Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }, Ty::Nil].into() }),
+        ("transaction", Ty::Untyped),
+        ("commit", Ty::Bool),
+        ("rollback", Ty::Bool),
+        ("transaction_active?", Ty::Bool),
     ]);
     // `ActiveSupport::Cache` — `expand_cache_key` and the bounded
     // `MemoryStore`, in runtime/spinel/active_support_cache.rb (the ruby

@@ -278,6 +278,10 @@ mod inline_filter_guard;
 mod before_action_return;
 #[path = "emit_and_run/sti_global_id.rs"]
 mod sti_global_id;
+#[path = "support/sqlite3_batch_transaction.rs"]
+mod sqlite3_batch_transaction_contract;
+#[path = "emit_and_run/sqlite3_batch_transaction.rs"]
+mod sqlite3_batch_transaction;
 #[path = "support/campfire_caches.rs"]
 mod campfire_caches_contract;
 #[path = "emit_and_run/campfire_caches.rs"]
