@@ -17,7 +17,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // propagate through dispatch without bottoming out at Var.
     // `Rails.env` is the one we can type concretely as Str.
     let mut rails_cls = ClassInfo::default();
-    for m in ["application", "logger", "cache", "configuration", "root", "public_path"] {
+    for m in ["application", "logger", "cache", "configuration", "public_path"] {
         rails_cls.class_methods.insert(Symbol::from(m), Ty::Untyped);
     }
     // `Rails.env` is an ActiveSupport::StringInquirer (a String
@@ -42,7 +42,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     let error_reporter = class("ActiveSupport::ErrorReporter");
     rails_cls.class_methods.insert(Symbol::from("event"), event_reporter.clone());
     rails_cls.class_methods.insert(Symbol::from("error"), error_reporter.clone());
+    // `Rails.root` is a Pathname in Rails; both lanes answer it with
+    // runtime/ruby/rails.rb's `Rails::AppPath`, so a call it lacks is an error.
+    let app_path = class("Rails::AppPath");
+    rails_cls.class_methods.insert(Symbol::from("root"), app_path.clone());
     classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
+    register_stdlib_class(classes, "Rails::AppPath", &[], &[
+        ("join", app_path.clone()), ("+", app_path.clone()), ("mkpath", app_path.clone()),
+        ("to_s", Ty::Str), ("to_path", Ty::Str), ("read", Ty::Str),
+        ("readlines", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }), ("exist?", Ty::Bool),
+    ]);
     register_stdlib_class(classes, "ActiveSupport", &[
         ("event_reporter", event_reporter.clone()), ("error_reporter", error_reporter.clone()),
         ("event_reporter=", event_reporter.clone()), ("error_reporter=", error_reporter.clone()),

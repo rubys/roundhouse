@@ -100,6 +100,7 @@ use super::app::{
     load_defaults_version, queue_adapter_line, raise_on_missing_line, read_rb_files, wrap_parameters_line,
     FilterParametersLine, InflectEffect, VideoPreviewArgsExtract, FRAMEWORK_CONFIG_KEYS,
 };
+use super::after_initialize::{carried_block, Site};
 use super::util::{
     class_name_path, constant_id_str, constant_path_of, find_all_classes_with_scope,
     flatten_statements,
@@ -175,6 +176,24 @@ struct Recognizer {
 /// direction; `tests/initializer_ledger.rs` pins each entry against the
 /// effect it has on the `App`.
 const RECOGNIZERS: &[Recognizer] = &[
+    Recognizer {
+        name: "after_initialize (Rails.application.config.after_initialize do … end, run at boot)",
+        origins: INIT,
+        levels: TOP,
+        reads: |p| carried(p, Site::Initializer),
+    },
+    Recognizer {
+        name: "after_initialize (config.after_initialize inside Rails.application.configure, run at boot)",
+        origins: INIT,
+        levels: &[Level::Nested],
+        reads: |p| carried(p, Site::Configure),
+    },
+    Recognizer {
+        name: "after_initialize (config.after_initialize in the Application class body, run at boot)",
+        origins: APP,
+        levels: TOP,
+        reads: |p| carried(p, Site::Application),
+    },
     Recognizer {
         name: "session_store (config.session_store key:)",
         origins: INIT_APP,
@@ -644,6 +663,11 @@ struct Stmt<'a> {
     within: Option<String>,
     /// Through the start of the next statement (or the end of the container).
     text: &'a str,
+}
+
+/// An `after_initialize` block `ingest::after_initialize` carries to boot.
+fn carried(p: &Probe<'_>, site: Site) -> bool {
+    p.node.as_call_node().is_some_and(|call| carried_block(&call, site).is_some())
 }
 
 /// `X.to_prepare { … }` / `X.to_run { … }` with a statement body: the

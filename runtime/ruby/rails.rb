@@ -123,6 +123,23 @@ module Rails
     def exist?
       File.exist?(@base)
     end
+
+    # Pathname#mkpath (`mkdir -p`): makes each missing directory, leaves an
+    # existing one, raises Errno::EEXIST through a file, answers the path.
+    def mkpath
+      parts = @base.split("/")
+      built = @base.start_with?("/") ? "/" : ""
+      i = 0
+      while i < parts.length
+        part = parts[i]
+        unless part.empty? || part == "."
+          built = built.empty? || built == "/" ? built + part : built + "/" + part
+          Dir.mkdir(built) unless Dir.exist?(built)
+        end
+        i += 1
+      end
+      self
+    end
   end
 
   # One store per process. A fresh `Cache.new` per call would make every

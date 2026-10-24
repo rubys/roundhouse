@@ -149,12 +149,24 @@ fn a_content_helper_allow_list_after_other_statements_is_read() {
 }
 
 #[test]
-fn an_after_initialize_hook_is_one_unconsumed_statement() {
-    let (_, ledger) = ingest(&[(
+fn an_after_initialize_hook_is_carried_unless_it_needs_its_surroundings() {
+    // The first runs at boot (ingest::after_initialize) and is consumed;
+    // `do |app|` takes the application Rails yields and the third reads the
+    // initializer's own local, which a carried body has neither of.
+    let (app, ledger) = ingest(&[(
         "config/initializers/hooks.rb",
-        "Rails.application.config.after_initialize do\n  Mailer.verify!\nend\n",
+        "limit = 5\n\
+         Rails.application.config.after_initialize do\n  Mailer.verify!\nend\n\
+         Rails.application.config.after_initialize do |app|\n  Mailer.verify!(app)\nend\n\
+         Rails.application.config.after_initialize do\n  Mailer.verify!(limit)\nend\n",
     )]);
-    assert_eq!(statements(&ledger), ["Rails.application.config.after_initialize"]);
+    let hooks: Vec<&str> = ledger
+        .iter()
+        .filter(|d| statement(d) == "Rails.application.config.after_initialize")
+        .map(location)
+        .collect();
+    assert_eq!(hooks, ["config/initializers/hooks.rb:5:1", "config/initializers/hooks.rb:8:1"]);
+    assert!(app.runs_after_initialize);
 }
 
 #[test]
@@ -321,9 +333,10 @@ fn application_rb_reports_config_statements_nothing_reads() {
     assert!(application.methods.iter().any(|m| m.name.as_str() == "config_time_zone"));
     assert!(application.methods.iter().any(|m| m.name.as_str() == "read_only?"));
     // ... load_defaults / time_zone are consumed, eager_load is inert, defs are methods.
-    assert_eq!(statements(&ledger), ["config.i18n.enforce_available_locales =", "config.after_initialize"]);
+    // `config.after_initialize` runs at boot (ingest::after_initialize), so it is consumed too.
+    assert_eq!(statements(&ledger), ["config.i18n.enforce_available_locales ="]);
     assert_eq!(owner(&ledger[0]), "host config/application.rb");
-    assert_eq!(location(&ledger[1]), "config/application.rb:10:5");
+    assert!(app.runs_after_initialize);
 }
 
 /// The tree of an in-tree PATH engine: its class body, initializers and
@@ -526,7 +539,7 @@ end
              Rack::Attack.throttle(\"req/ip\", limit: 300, period: 300) { |req| req.ip }
              OmniAuth.config.logger = Rails.logger
              Audit.record_boot
-             Rails.application.config.after_initialize { Audit.record_boot }
+             Rails.application.config.after_initialize { |app| Audit.record_boot }
              if ENV[\"SLOW\"]
   Rails.application.config.middleware.insert_before 0, Rack::Runtime
 end
