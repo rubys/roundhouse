@@ -183,6 +183,7 @@ module ActionController
     # is divergent and doesn't contradict the declared return.
     %a{abstract}
     def process_action: (Symbol _action_name) -> void
+    def recycle!: () -> void
 
     # `render(body, status:, content_type:, location:)` — sets @body,
     # @status, and optionally @content_type / @location. `status:` is
