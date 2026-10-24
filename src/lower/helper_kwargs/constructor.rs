@@ -355,7 +355,7 @@ pub(super) fn refuse_keyword_splats(
         .get(id.0.as_str())
         .map_or(id.0.as_str(), String::as_str);
     if let Some(reason) =
-        constructor_refusal_reason(params, expr.span, id.0.as_str(), class_name, args)
+        constructor_refusal_reason(params, expr.span, resolved_class_ref(recv), id.0.as_str(), class_name, args)
     {
         refuse_constructor(expr.span, crate::expr::ExprCold::diagnostic_mut(&mut expr.cold), reason, diagnostics);
     }
@@ -557,7 +557,7 @@ fn rewrite_instance_call(
             .get(id.0.as_str())
             .map_or(id.0.as_str(), String::as_str);
         if let Some(reason) =
-            constructor_refusal_reason(params, expr.span, id.0.as_str(), class_id, args)
+            constructor_refusal_reason(params, expr.span, resolved_class_ref(recv), id.0.as_str(), class_id, args)
         {
             refuse_constructor(expr.span, crate::expr::ExprCold::diagnostic_mut(&mut expr.cold), reason, diagnostics);
             return;
@@ -679,9 +679,18 @@ fn has_keyword_arguments(args: &[Expr]) -> bool {
     })
 }
 
+/// The analyzer's constant resolution answered this receiver: the
+/// reference resolved, by Ruby's lexical lookup, to the class its type
+/// names (`analyze::body`, `RESOLVED_CLASS_REF`). A type that only fell
+/// back to the written name carries no such answer.
+fn resolved_class_ref(recv: &Expr) -> bool {
+    recv.decisions & crate::expr::RESOLVED_CLASS_REF != 0
+}
+
 fn constructor_refusal_reason(
     params: &InstanceCallParams,
     span: crate::span::Span,
+    resolved: bool,
     unqualified_name: &str,
     class_name: &str,
     args: &[Expr],
@@ -689,7 +698,15 @@ fn constructor_refusal_reason(
     if !has_keyword_arguments(args) {
         return None;
     }
-    if params.ambiguous_names.contains(unqualified_name) && !params.model_names.contains(class_name)
+    // A leaf name two classes share (`Request`, `Fasp::Request`) is
+    // ambiguous as written. A reference the analyzer resolved is not: its
+    // type is the class Ruby's lexical lookup reaches, so a top-level
+    // `Request` outside `module Fasp` (including `class Fasp::Compact`,
+    // whose lexical scope is not `Fasp`) is the top-level class, and one
+    // inside it was already qualified to `Fasp::Request`.
+    if params.ambiguous_names.contains(unqualified_name)
+        && !resolved
+        && !params.model_names.contains(class_name)
     {
         return Some(
             "cannot verify constructor lookup because this unqualified class name is ambiguous",
