@@ -52,9 +52,10 @@ fn a_library_the_tree_defines_itself_is_not_required() {
     assert!(!boot.lines().any(|l| l.trim() == "require \"shellwords\""), "{boot}");
 }
 
-/// A library Spinel has no package for (`date`, `yaml`, ...) stays out
-/// of the spinel tree, whose `--require-gate` build would refuse it, and
-/// is carried on the ruby family.
+/// A library Spinel has no package for (`date`, ...) stays out of the
+/// spinel tree, whose `--require-gate` build would refuse it, and is
+/// carried on the ruby family. `yaml` has one (packages/yaml) and is
+/// carried on both.
 #[test]
 fn a_library_spinel_lacks_is_required_on_the_ruby_family_only() {
     let overlay = || {
@@ -68,9 +69,10 @@ fn a_library_spinel_lacks_is_required_on_the_ruby_family_only() {
         assert!(errors.is_empty(), "{target:?} errors: {errors:?}");
         let boot = std::fs::read_to_string(emitted.join("boot.rb")).expect("read boot.rb");
         assert!(boot.lines().any(|l| l.trim() == "require \"open3\""), "{target:?}:\n{boot}");
-        for lib in ["date", "yaml"] {
+        for (lib, on_spinel) in [("date", false), ("yaml", true)] {
             let line = format!("require {lib:?}");
-            assert_eq!(boot.lines().take(12).any(|l| l.trim() == line), carried, "{target:?} {lib}:\n{boot}");
+            let expected = carried || on_spinel;
+            assert_eq!(boot.lines().take(12).any(|l| l.trim() == line), expected, "{target:?} {lib}:\n{boot}");
         }
     }
 }

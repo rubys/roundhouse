@@ -57,6 +57,8 @@ mod source_gem_autoload;
 mod pay_exceptions;
 #[path = "emit_and_run/net_http_patch.rs"]
 mod net_http_patch;
+#[path = "emit_and_run/stdlib_psych_rexml_erb.rs"]
+mod stdlib_psych_rexml_erb;
 #[path = "emit_and_run/temporal_index_assign.rs"]
 mod temporal_index_assign;
 #[path = "support/class_attribute.rs"]

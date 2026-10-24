@@ -5294,7 +5294,7 @@ enum RequireTarget {
 /// before app requires were carried; the ruby family loads them all.
 const SPINEL_LACKS: &[&str] = &[
     "date", "delegate", "English", "etc", "io/nonblock", "io/wait", "ipaddr", "observer", "pp",
-    "weakref", "yaml",
+    "weakref",
 ];
 
 /// The app's own standard-library requires ([`App::app_requires`]) at
@@ -6133,8 +6133,8 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActiveRecord::Type::Integer",
     "ActiveRecord::Type::Value",
     // Thread-local state and the notification fan-out. ruby family and
-    // spinel, required from rails.rb. ConfigurationFile parses YAML, which
-    // Spinel does not ship, so that class stays on the ruby family.
+    // spinel, required from rails.rb. ConfigurationFile parses YAML and is
+    // kept out of every Spinel boot, so that class stays on the ruby family.
     "ActiveSupport::IsolatedExecutionState",
     "ActiveSupport::Notifications",
     "ActiveSupport::Notifications::Event",
@@ -7624,9 +7624,10 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
 /// ivar with the base's `Page`, which spinel refuses as a class-layout
 /// conflict (and which a Rails app without the gem never has). campfire,
 /// which paginates through it, keeps both.
-/// `ConfigurationFile.parse` loads YAML. Spinel's require gate treats
-/// `require "yaml"` as fatal (`SPINEL_LACKS`), and `rails.rb` would
-/// pull that file into every Spinel boot. The ruby family keeps both.
+/// `ConfigurationFile.parse` loads YAML, and `rails.rb` would pull that
+/// file, and with it spinel's whole psych package, into every Spinel
+/// boot; an app that names YAML gets the require itself (`BUNDLED`).
+/// The ruby family keeps both.
 fn drop_yaml_configuration_file(files: &mut Vec<(String, String)>) {
     const REQUIRE: &str = "require_relative \"active_support_configuration_file\"\n";
     if let Some((_, rails)) = files.iter_mut().find(|(path, _)| path == "runtime/rails.rb") {
@@ -9364,7 +9365,7 @@ fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 27] = [
+const BUNDLED: [(&str, &str); 29] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -9460,6 +9461,12 @@ const BUNDLED: [(&str, &str); 27] = [
     // require the constant is not REXML's at all on spinel: another
     // `Document` in the tree (the Nokogiri facade's) answers the name.
     ("REXML", "rexml/document"),
+    // `YAML.safe_load_file` / `rescue Psych::Exception`: Rails has loaded
+    // yaml before the app, so an app names both with no require. yaml.rb
+    // is `require "psych"` then `YAML = Psych`; spinel takes
+    // `packages/yaml` and `packages/psych`.
+    ("YAML", "yaml"),
+    ("Psych", "psych"),
 ];
 
 /// Every gap in a tree, as `(file index, require line)`. One walk,
@@ -12126,6 +12133,29 @@ mod tests {
         let feed = get("app/models/feed.rb");
         assert!(feed.starts_with("require \"rexml/document\"\n"), "{feed}");
         assert!(get("Gemfile").contains("gem \"rexml\"\n"), "{}", get("Gemfile"));
+    }
+
+    /// `YAML.safe_load_file` with `rescue Psych::Exception`: Rails has
+    /// loaded yaml before the app, so the app writes no require. The pass
+    /// writes `require "yaml"` for YAML and `require "psych"` for Psych
+    /// (spinel's packages/yaml and packages/psych), and the Gemfile gains
+    /// nothing: both are default gems.
+    #[test]
+    fn bundled_requires_write_yaml_and_psych_for_an_app_that_names_them() {
+        let mut files = vec![
+            ("Gemfile".to_string(), "source \"https://rubygems.org\"\n".to_string()),
+            (
+                "app/models/registry.rb".to_string(),
+                "class Registry\n  def self.read(path)\n    YAML.safe_load_file(path) || {}\n  rescue Psych::Exception\n    {}\n  end\nend\n"
+                    .to_string(),
+            ),
+        ];
+        write_bundled_requires(&mut files);
+        let get = |p: &str| &files.iter().find(|(q, _)| q == p).unwrap().1;
+        let registry = get("app/models/registry.rb");
+        assert!(registry.contains("require \"yaml\"\n"), "{registry}");
+        assert!(registry.contains("require \"psych\"\n"), "{registry}");
+        assert_eq!(get("Gemfile"), "source \"https://rubygems.org\"\n");
     }
 
     /// `ActionCable::Connection.build` is rewritten from the app, and the

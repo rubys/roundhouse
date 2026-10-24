@@ -323,25 +323,42 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("migrate", Ty::Nil),
         ("migration_connection_pool", Ty::Untyped),
     ], &[]);
-    // Psych/YAML — campfire's Purchaser loads `config/purchased_by.yml`
-    // via `YAML.load_file`. Register the class-side surface the corpus
-    // writes so the constant is modeled (not a silent raise stub) and
-    // ruby-family emit keeps the call. Return types stay gradual: the
-    // document shape is whatever the file held.
+    // `ERB.new(template, trim_mode: "-").result_with_hash(values)`: the
+    // template half of ERB (spinel's packages/erb, required by
+    // runtime/spinel/erb_spinel.rb). `src` is the generated Ruby source.
     register_stdlib_class(classes, "ERB", &[], &[
-        ("result", Ty::Str),
+        ("result", Ty::Str), ("result_with_hash", Ty::Str), ("src", Ty::Str),
     ]);
     {
         let db = classes.entry(ClassId(Symbol::from("Db"))).or_default();
         db.class_methods.entry(Symbol::from("capture_sql")).or_insert(Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
         db.class_methods.entry(Symbol::from("escape_string")).or_insert(Ty::Str);
     }
-    register_stdlib_class(classes, "YAML", &[
-        ("load", Ty::Untyped), ("load_file", Ty::Untyped),
-        ("safe_load", Ty::Untyped), ("safe_load_file", Ty::Untyped),
-        ("unsafe_load", Ty::Untyped),
-        ("dump", Ty::Str),
-    ], &[]);
+    // Psych/YAML: campfire's Purchaser loads `config/purchased_by.yml`
+    // via `YAML.load_file`. Register the class-side surface the corpus
+    // writes so the constant is modeled (not a silent raise stub) and
+    // ruby-family emit keeps the call. Return types stay gradual: the
+    // document shape is whatever the file held. `YAML` is `Psych`
+    // (yaml.rb: `YAML = Psych`), so the two names answer the same surface.
+    for yaml in ["YAML", "Psych"] {
+        register_stdlib_class(classes, yaml, &[
+            ("load", Ty::Untyped), ("load_file", Ty::Untyped),
+            ("safe_load", Ty::Untyped), ("safe_load_file", Ty::Untyped),
+            ("unsafe_load", Ty::Untyped), ("unsafe_load_file", Ty::Untyped),
+            ("dump", Ty::Str), ("safe_dump", Ty::Str),
+        ], &[]);
+    }
+    // rexml (a bundled gem, spinel's packages/rexml): `REXML::Document.new(xml)`
+    // and the tree under it. A Document is an Element in REXML; the
+    // elements it hands out stay gradual.
+    register_stdlib_class(classes, "REXML", &[], &[]);
+    classes.entry(ClassId(Symbol::from("REXML"))).or_default().is_module = true;
+    register_stdlib_class(classes, "REXML::Document", &[], &[
+        ("root", Ty::Untyped), ("elements", Ty::Untyped),
+        ("add_element", Ty::Untyped), ("get_elements", Ty::Untyped),
+        ("attribute", Ty::Untyped), ("text", Ty::Untyped),
+        ("to_s", Ty::Str),
+    ]);
     // Framework modules an app `include`s that emit already handles
     // (Attachable sgid, Turbo stream names, ActiveModel callbacks,
     // SanitizeHelper). Empty module markers so the unresolved-include
@@ -383,11 +400,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // (`lower::random_formatter` writes it so). `uuid_v5` / `uuid_v3`
     // hash a namespace and are not registered: they stay refused.
     register_stdlib_class(classes, "Digest::UUID", &[("uuid_v4", Ty::Str)], &[]);
+    // `Digest::MD5.file(path)` is `new.file(path)`: an instance of the
+    // digest class holding the file's bytes, read back with the same
+    // three readers (spinel's packages/digest answers an object with them).
     for digest in ["Digest::MD5", "Digest::SHA1", "Digest::SHA256"] {
+        let instance = Ty::Class { id: ClassId(Symbol::from(digest)), args: vec![].into() };
         register_stdlib_class(classes, digest, &[
             ("hexdigest", Ty::Str), ("digest", Ty::Str),
-            ("base64digest", Ty::Str),
-        ], &[]);
+            ("base64digest", Ty::Str), ("file", instance),
+        ], &[
+            ("hexdigest", Ty::Str), ("digest", Ty::Str),
+            ("base64digest", Ty::Str), ("to_s", Ty::Str),
+        ]);
     }
     // `useragent` + `platform_agent`, now PORTED into
     // `runtime/ruby/user_agent.rb` rather than stubbed. Method lists are
@@ -835,6 +859,21 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "CSV::MalformedCSVError",
     ] {
         register_stdlib_class(classes, exc, &[], &exception_surface);
+    }
+    // `rescue Psych::Exception` around `YAML.safe_load_file`: the errors a
+    // load raises, with Psych's own ancestry (psych/exception.rb,
+    // psych/syntax_error.rb), so a rescue of the base catches them all.
+    for (exc, parent) in [
+        ("Psych::Exception", "RuntimeError"),
+        ("Psych::SyntaxError", "Psych::Exception"),
+        ("Psych::DisallowedClass", "Psych::Exception"),
+        ("Psych::BadAlias", "Psych::Exception"),
+        ("Psych::AliasesNotEnabled", "Psych::BadAlias"),
+        ("Psych::AnchorNotDefined", "Psych::BadAlias"),
+    ] {
+        register_stdlib_class(classes, exc, &[], &exception_surface);
+        classes.entry(ClassId(Symbol::from(exc))).or_default().parent =
+            Some(ClassId(Symbol::from(parent)));
     }
     // Exception owners preserve their runtime ancestry, without claiming a
     // constructor implementation. The body typer refuses that missing API.
