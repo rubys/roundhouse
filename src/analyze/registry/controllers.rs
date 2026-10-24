@@ -495,6 +495,9 @@ pub(in crate::analyze) fn register(
         }
         jar.instance_methods.insert(Symbol::from("to_h"), Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Str) });
         jar.instance_methods.insert(Symbol::from("clear"), Ty::Nil);
+        // Rails' jar is Enumerable over its whole view; `each` yields
+        // name and value (`block_params_for`) and answers the jar.
+        jar.instance_methods.insert(Symbol::from("each"), jar_ty.clone());
         classes.insert(jar_id, jar);
         app_ctrl.class_methods.insert(Symbol::from("cookies"), jar_ty);
     }

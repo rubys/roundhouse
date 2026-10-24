@@ -593,6 +593,14 @@ impl<'a> BodyTyper<'a> {
             };
             return self.block_params_for(Some(&as_array), method, class_object_receiver);
         }
+        // The controller's cookie jar iterates names and values, both
+        // Strings (runtime/ruby/action_controller/cookies.rb, `each` over
+        // `to_h`).
+        if matches!(recv_ty, Ty::Class { id, .. } if id.0.as_str() == "ActionDispatch::Cookies::CookieJar")
+            && method.as_str() == "each"
+        {
+            return Some(vec![Ty::Str, Ty::Str]);
+        }
         match recv_ty {
             Ty::Str if method.as_str() == "bytes" => Some(vec![Ty::Int]),
             Ty::Array { elem } => match method.as_str() {
