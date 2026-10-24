@@ -2386,7 +2386,8 @@ end
     }
     super::model_delegate::lower_model_delegates(&mut app);
     super::on_load_reopen::drain_pending(&mut app);
-    gap_numericality_allow_on_untyped(&mut app);
+    // `numericality:` on an untyped attribute is decided per target
+    // (`refuse_numericality_allow_on_untyped`, `session::analyze_and_lower_for`).
     gap_acceptance_on_undeclared(&mut app);
     gap_uniqueness_on_polymorphic_attribute(&mut app);
     app.const_resolver = const_resolver;
@@ -2543,15 +2544,15 @@ fn walk_binary_assets<V: Vfs + ?Sized>(vfs: &V, root: &Path, dir: &Path, app: &m
     }
 }
 
-/// `numericality:` with `allow_nil:` / `allow_blank:` on an attribute the
-/// model does not type as a number (no Integer/Float column: an
+/// `numericality:` (with or without `allow_nil:` / `allow_blank:`) on an
+/// attribute the model does not type as a number (no Integer/Float column: an
 /// `attr_accessor` of an `ActiveModel::Model` form, fed request Strings)
-/// stays the reported gap. The lowered check does not parse a String
-/// number (#1158), so on such an attribute it would reject `"30"` where
-/// Rails accepts it. The whole `validates` call is refused, as an ingest
-/// refusal is. Run after the concern splice, when every model's
-/// validations and columns are known.
-fn gap_numericality_allow_on_untyped(app: &mut App) {
+/// is the reported gap on a target whose check does not parse a String
+/// number (#1158): there it would reject `"30"` where Rails accepts it. The
+/// whole `validates` call is refused, and the warnings are returned. The
+/// ruby family parses it (`emit::ruby::library::
+/// parse_untyped_numericality_input`) and does not run this.
+pub(crate) fn refuse_numericality_allow_on_untyped(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diagnostic> {
     use crate::dialect::{ModelBodyItem, ValidationRule};
     let mut gaps: Vec<(crate::span::Span, String)> = Vec::new();
     for model in &mut app.models {
@@ -2573,24 +2574,27 @@ fn gap_numericality_allow_on_untyped(app: &mut App) {
             }
             for rule in &validation.rules {
                 if let ValidationRule::Numericality { allow_nil, allow_blank, .. } = rule {
-                    let option = if *allow_blank == Some(true) {
-                        "allow_blank"
+                    // Without `allow_*` the check is `is_a?(Numeric)`, which
+                    // rejects `"12"` as surely: refused too.
+                    let construct = if *allow_blank == Some(true) {
+                        format!("validates :{}, numericality: allow_blank:", validation.attribute.as_str())
                     } else if *allow_nil == Some(true) {
-                        "allow_nil"
+                        format!("validates :{}, numericality: allow_nil:", validation.attribute.as_str())
                     } else {
-                        continue;
+                        format!("validates :{}, numericality:", validation.attribute.as_str())
                     };
-                    refused.push((i, item.span(), format!("validates :{}, numericality: {option}:", validation.attribute.as_str())));
+                    refused.push((i, item.span(), construct));
                 }
             }
         }
         refuse_validates_calls(model, refused, &mut gaps);
     }
-    report_validates_gaps(
+    validates_gap_diagnostics(
         app,
+        target,
         gaps,
         "an untyped attribute's String input is not parsed as a number (#1158); emitting the check would reject input Rails accepts",
-    );
+    )
 }
 
 /// `acceptance:` on an attribute the model does not declare as a column,
@@ -2704,6 +2708,25 @@ fn refuse_validates_calls(
     for (_, span, construct) in refused {
         gaps.push((span, construct));
     }
+}
+
+/// `report_validates_gaps` after ingest: the warnings go back to the
+/// caller, which reports them with its own diagnostics.
+fn validates_gap_diagnostics(
+    app: &App,
+    target: &str,
+    gaps: Vec<(crate::span::Span, String)>,
+    detail: &str,
+) -> Vec<crate::diagnostic::Diagnostic> {
+    gaps.into_iter()
+        .map(|(span, construct)| {
+            let file = crate::ide::source(app, span.file).map(|s| s.path.clone()).unwrap_or_default();
+            let mut diagnostic = crate::diagnostic::Diagnostic::unsupported(span, Some(crate::ident::Symbol::from(target)), construct, detail);
+            diagnostic.severity = crate::diagnostic::Severity::Warning;
+            survey::record(&IngestError::Unsupported { file, message: diagnostic.message.clone() });
+            diagnostic
+        })
+        .collect()
 }
 
 fn report_validates_gaps(app: &App, gaps: Vec<(crate::span::Span, String)>, detail: &str) {

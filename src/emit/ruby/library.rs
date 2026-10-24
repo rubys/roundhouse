@@ -126,6 +126,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_rich_text_content_memo(&mut lcs);
     apply_boolean_lowering(&mut lcs, app);
     apply_typed_writer_cast_lowering(&mut lcs, app);
+    parse_untyped_numericality_input(&mut lcs, app);
     apply_hydration_nil_lowering(&mut lcs, app);
     apply_time_format_lowering(&mut lcs, app);
     // Same rooting the view pipeline applies, for the same reason one
@@ -10016,6 +10017,60 @@ fn collect_numericality_checks(e: &Expr, out: &mut BTreeSet<Symbol>) {
         out.insert(col);
     }
     e.node.for_each_child(&mut |c| collect_numericality_checks(c, out));
+}
+
+/// Ruby-family pre-emit pass: a `numericality:` check on an attribute no
+/// column types (an `attr_accessor` of an `ActiveModel::Model` form, fed
+/// request Strings) reads the number Rails' validator parses from the value
+/// as given (`ActiveSupport.numericality_number(nil, @attr)`): `"12"` and
+/// `" 12 "` are numbers, `"12abc"` is not, and `only_integer` reads the raw
+/// text, so `"7.0"` is not an integer. The attribute keeps the String. A
+/// column's check is `apply_typed_writer_cast_lowering`'s.
+pub(crate) fn parse_untyped_numericality_input(lcs: &mut [LibraryClass], app: &App) {
+    use crate::dialect::{ModelBodyItem, ValidationRule};
+    for model in &app.models {
+        let columns: BTreeSet<Symbol> = app
+            .schema
+            .tables
+            .get(&model.table.0)
+            .map(|table| table.columns.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
+        let untyped: BTreeSet<Symbol> = model
+            .body
+            .iter()
+            .filter_map(|item| match item {
+                ModelBodyItem::Validation { validation, .. } => Some(validation),
+                _ => None,
+            })
+            .filter(|v| !columns.contains(&v.attribute))
+            .filter(|v| v.rules.iter().any(|r| matches!(r, ValidationRule::Numericality { .. })))
+            .map(|v| v.attribute.clone())
+            .collect();
+        if untyped.is_empty() {
+            continue;
+        }
+        let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else {
+            continue;
+        };
+        for method in &mut lc.methods {
+            read_parsed_in_numericality_checks(&mut method.body, &untyped);
+        }
+    }
+}
+
+fn read_parsed_in_numericality_checks(e: &mut Expr, untyped: &BTreeSet<Symbol>) {
+    if let Some(attr) = numericality_check_column(e).filter(|a| untyped.contains(a)) {
+        let number = sp_expr(ExprNode::Send {
+            recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] })),
+            method: Symbol::from("numericality_number"),
+            args: vec![sp_expr(ExprNode::Lit { value: Literal::Nil }), ivar_read(&attr)],
+            block: None,
+            parenthesized: true,
+        });
+        replace_ivar_reads(e, &attr, &number);
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| read_parsed_in_numericality_checks(c, untyped));
 }
 
 /// In each lowered `numericality:` check on a `checked` column, read the

@@ -2093,7 +2093,7 @@ pub fn futamura_whole_route(
     gaps: &[crate::ingest::IngestError],
 ) -> Result<emit::futamura::WholeRoute, String> {
     let mut lowered = ingested.clone();
-    let mut diags = crate::session::analyze_and_lower(&mut lowered);
+    let mut diags = crate::session::analyze_and_lower_for(&mut lowered, BuildTarget::Ruby);
     diags.extend(crate::analyze::diagnose(&lowered));
     crate::lower::relation_residue::elevate_dynamic_relation_for_target(&mut diags, BuildTarget::Ruby);
     crate::lower::params_residue::elevate_nested_params_for_target(&mut diags, BuildTarget::Ruby);
@@ -10587,7 +10587,7 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
         fs::remove_dir_all(&browse).map_err(|e| format!("clean {}: {e}", browse.display()))?;
     }
     fs::create_dir_all(&browse).map_err(|e| format!("mkdir {}: {e}", browse.display()))?;
-    let mut app =
+    let app =
         ingest_app(fixture).map_err(|e| format!("ingest {}: {e}", fixture.display()))?;
     // Futamura needs the types but none of the lowerings, same split as
     // the single-target driver (`bin/roundhouse`).
@@ -10596,17 +10596,21 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
         crate::analyze::Analyzer::new(&app).analyze(&mut app);
         app
     });
-    // Analyze + the same post-analyze shared lowerings as the
-    // single-target driver; the site build has no diagnostic surface,
-    // so the residue is dropped.
-    let _ = crate::session::analyze_and_lower(&mut app);
-
     for target in targets {
-        let app = match (target, &analyzed) {
-            (BuildTarget::Futamura, Some(analyzed)) => analyzed,
-            _ => &app,
+        // Analyze + the same post-analyze shared lowerings as the
+        // single-target driver, with the target's own pre-analysis
+        // choices (`session::analyze_and_lower_for`). What it refused or
+        // left behind is printed per target, as the CLI prints it.
+        let files = match (target, &analyzed) {
+            (BuildTarget::Futamura, Some(analyzed)) => target_files(analyzed, fixture, *target)?,
+            _ => {
+                let mut target_app = app.clone();
+                for d in crate::session::analyze_and_lower_for(&mut target_app, *target) {
+                    eprintln!("roundhouse: {}: {}", target.as_str(), d.render(&target_app.sources));
+                }
+                target_files(&target_app, fixture, *target)?
+            }
         };
-        let files = target_files(app, fixture, *target)?;
         let name = target.as_str();
 
         let json_path = out.join("browse").join(format!("{name}.json"));

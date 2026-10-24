@@ -47,12 +47,14 @@ fn allow_nil_and_allow_blank_lower_to_a_numericality_rule() {
 }
 
 /// On an attribute the model does not type as a number (an `attr_accessor`
-/// of an `ActiveModel::Model` form, fed request Strings), `allow_nil:` /
-/// `allow_blank:` with `numericality:` stays the reported gap: the lowered
-/// check does not parse a String number (#1158), so it would reject `"30"`
-/// where Rails accepts it. The same options on an integer column lower.
+/// of an `ActiveModel::Model` form, fed request Strings), `numericality:`
+/// with `allow_nil:` / `allow_blank:` is decided per target. The ruby family
+/// parses the String as Rails does (`tests/numericality_untyped.rs`), so it
+/// keeps the rule. A strict target's check does not parse it (#1158), so
+/// there it stays the reported gap, and the whole call goes. The same
+/// options on an integer column lower everywhere.
 #[test]
-fn on_an_untyped_attribute_the_options_stay_a_gap() {
+fn on_an_untyped_attribute_the_options_are_a_gap_only_where_unparsed() {
     use std::collections::HashMap;
     use std::path::PathBuf;
     let files: Vec<(&str, &str)> = vec![
@@ -66,9 +68,15 @@ fn on_an_untyped_attribute_the_options_stay_a_gap() {
     ];
     let tree: HashMap<PathBuf, Vec<u8>> = files.into_iter().map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec())).collect();
     roundhouse::ingest::survey::activate();
-    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
-    let gaps: Vec<String> = roundhouse::ingest::survey::drain().into_iter().map(|g| g.to_string()).collect();
-    let has_numericality = |model: &str, attr: &str| {
+    let ingested = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    assert!(roundhouse::ingest::survey::drain().iter().all(|g| !g.to_string().contains("#1158")), "ingest no longer refuses");
+    let has_validation = |app: &roundhouse::App, model: &str, attr: &str| {
+        app.models.iter().find(|m| m.name.0.as_str() == model).is_some_and(|m| {
+            m.body.iter().any(|item| matches!(item,
+                roundhouse::dialect::ModelBodyItem::Validation { validation, .. } if validation.attribute.as_str() == attr))
+        })
+    };
+    let has_numericality = |app: &roundhouse::App, model: &str, attr: &str| {
         app.models.iter().find(|m| m.name.0.as_str() == model).is_some_and(|m| {
             m.body.iter().any(|item| matches!(item,
                 roundhouse::dialect::ModelBodyItem::Validation { validation, .. }
@@ -76,23 +84,29 @@ fn on_an_untyped_attribute_the_options_stay_a_gap() {
                         && validation.rules.iter().any(|r| matches!(r, ValidationRule::Numericality { .. }))))
         })
     };
-    assert!(has_numericality("Policy", "age"), "an integer column lowers: {gaps:?}");
-    assert!(!has_numericality("SettingsForm", "age"), "{gaps:?}");
-    assert!(!has_numericality("SettingsForm", "limit"), "{gaps:?}");
-    for gap in ["validates :age, numericality: allow_blank:", "validates :limit, numericality: allow_nil:"] {
-        assert!(gaps.iter().any(|g| g.contains(gap) && g.contains("settings_form.rb") && g.contains("#1158")), "{gap}: {gaps:?}");
+
+    // The ruby family keeps every rule.
+    let mut ruby = ingested.clone();
+    let ruby_diags = roundhouse::session::analyze_and_lower_for(&mut ruby, roundhouse::project::BuildTarget::Ruby);
+    assert!(!ruby_diags.iter().any(|d| d.message.contains("#1158")), "{ruby_diags:?}");
+    for attr in ["age", "limit", "count", "level"] {
+        assert!(has_numericality(&ruby, "SettingsForm", attr), "{attr} kept on ruby");
     }
-    assert!(!gaps.iter().any(|g| g.contains("policy.rb")), "{gaps:?}");
+
+    // A strict target refuses the untyped lines, and keeps the column's.
+    let mut rust = ingested.clone();
+    let rust_diags: Vec<String> = roundhouse::session::analyze_and_lower_for(&mut rust, roundhouse::project::BuildTarget::Rust)
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+    assert!(has_numericality(&rust, "Policy", "age"), "an integer column lowers: {rust_diags:?}");
+    for gap in ["validates :age, numericality: allow_blank:", "validates :limit, numericality: allow_nil:"] {
+        assert!(rust_diags.iter().any(|g| g.contains(gap) && g.contains("(rust)") && g.contains("#1158")), "{gap}: {rust_diags:?}");
+    }
     // The whole call goes, as an ingest refusal does: `presence:` beside
     // the numericality is not kept, nor is the item a per-rule `if:` split
     // off the same call.
-    let form = app.models.iter().find(|m| m.name.0.as_str() == "SettingsForm").expect("form");
-    for attr in ["count", "level"] {
-        assert!(
-            !form.body.iter().any(|item| matches!(item,
-                roundhouse::dialect::ModelBodyItem::Validation { validation, .. } if validation.attribute.as_str() == attr)),
-            "no validation left for {attr}: {:?}",
-            form.body
-        );
+    for attr in ["age", "limit", "count", "level"] {
+        assert!(!has_validation(&rust, "SettingsForm", attr), "no validation left for {attr} on rust");
     }
 }
