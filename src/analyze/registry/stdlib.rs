@@ -288,6 +288,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("unlink", Ty::Int), ("delete", Ty::Int), ("rename", Ty::Int),
         ("join", Ty::Str), ("basename", Ty::Str), ("dirname", Ty::Str),
         ("extname", Ty::Str), ("expand_path", Ty::Str), ("size", Ty::Int),
+        // CRuby: `File.mtime/atime/ctime(path) -> Time`.
+        ("mtime", Ty::Time), ("atime", Ty::Time), ("ctime", Ty::Time),
     ], &[]);
     register_stdlib_class(classes, "Dir", &[
         ("entries", str_arr()), ("glob", str_arr()), ("[]", str_arr()),
