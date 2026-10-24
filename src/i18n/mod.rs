@@ -76,6 +76,11 @@ pub struct Catalog {
     /// `two` by the locale. A locale with none uses I18n's default.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plurals: BTreeMap<String, String>,
+    /// `ActiveSupport::JSON::Encoding.escape_js_separators_in_json`, which
+    /// the JSON a subtree's `to_json` folds to is written under: on unless
+    /// `config.load_defaults` is 8.1 or later, or the app sets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub escape_js_separators: bool,
 }
 
 /// A non-String value as I18n answers it: an Array of Strings and
@@ -723,6 +728,40 @@ impl Catalog {
         self.is_subtree(key) && !self.opaque.iter().any(|k| k.starts_with(&below))
     }
 
+    /// The node at `key` as the JSON ActiveSupport's `to_json` writes for
+    /// the Hash I18n answers there: its children in the files' order (a
+    /// key a later file redefines keeps its first place, as a Ruby Hash
+    /// merge keeps it), an empty mapping as `{}`, and each String escaped
+    /// as the encoder escapes it: `<`, `>` and `&` always, U+2028 and
+    /// U+2029 when `separators` (the default catalog's
+    /// `escape_js_separators`). `None` when the node holds anything but
+    /// Strings and mappings (an Array, a number, a nil).
+    pub fn subtree_json(&self, key: &str, separators: bool) -> Option<String> {
+        fn node(c: &Catalog, path: &str, separators: bool, out: &mut String) -> Option<()> {
+            out.push('{');
+            for (i, child) in c.order.get(path)?.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let below = format!("{path}.{child}");
+                out.push_str(&json_string(child, separators));
+                out.push(':');
+                match c.entries.get(&below) {
+                    Some(text) => out.push_str(&json_string(text, separators)),
+                    None => node(c, &below, separators, out)?,
+                }
+            }
+            out.push('}');
+            Some(())
+        }
+        if !self.plain_subtree(key) {
+            return None;
+        }
+        let mut out = String::new();
+        node(self, key, separators, &mut out)?;
+        Some(out)
+    }
+
     /// Every String leaf and every empty mapping (`None`), in the order
     /// the files give them, as a Ruby Hash built from them iterates.
     pub fn ordered_nodes(&self) -> Vec<(String, Option<&String>)> {
@@ -800,6 +839,20 @@ impl Catalog {
         let form = |f: &str| self.lookup(&format!("{key}.{f}")).map(str::to_string);
         Some(Translation::Plural { zero: form("zero"), one: form("one")?, other: form("other")? })
     }
+}
+
+/// `text` as a JSON string, escaped as ActiveSupport's encoder escapes it.
+fn json_string(text: &str, separators: bool) -> String {
+    let plain = serde_json::Value::String(text.to_string()).to_string();
+    let mut out = String::with_capacity(plain.len());
+    for c in plain.chars() {
+        match c {
+            '<' | '>' | '&' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            '\u{2028}' | '\u{2029}' if separators => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// `ActiveSupport::HtmlSafeTranslation.html_safe_translation_key?`: a
@@ -1310,6 +1363,27 @@ mod tests {
         let home = "Home".to_string();
         let ours: Vec<_> = c.ordered_nodes().into_iter().filter(|(k, _)| k == "feed" || k.starts_with("menu.")).collect();
         assert_eq!(ours, vec![("feed".to_string(), None), ("menu.more".to_string(), None), ("menu.home".to_string(), Some(&home))]);
+    }
+
+    #[test]
+    fn a_subtree_as_json_is_what_active_support_writes_in_the_files_order() {
+        // Rails 8.1.3: `I18n.t("js").to_json` for these files.
+        let c = catalog(&[
+            ("config/locales/a.yml", "en:\n  js:\n    zeta: \"Z0\"\n    alpha: \"<b>&</b>\"\n    nested:\n      y: \"why\"\n      b: \"bee\"\n    empty: {}\n    sep: \"a\\Lb\"\n"),
+            ("config/locales/b.yml", "en:\n  js:\n    late: \"L\"\n    zeta: \"Z\"\n"),
+        ]);
+        let esc = |n: u32| format!("\\u{n:04x}");
+        let (lt, gt, amp) = (esc(0x3c), esc(0x3e), esc(0x26));
+        let json = |sep: &str| format!(r#"{{"zeta":"Z","alpha":"{lt}b{gt}{amp}{lt}/b{gt}","nested":{{"y":"why","b":"bee"}},"empty":{{}},"sep":"a{sep}b","late":"L"}}"#);
+        assert_eq!(c.subtree_json("js", false).as_deref(), Some(json("\u{2028}").as_str()));
+        assert_eq!(c.subtree_json("js", true).as_deref(), Some(json(&esc(0x2028)).as_str()));
+        assert_eq!(c.subtree_json("js.nested", false).as_deref(), Some(r#"{"y":"why","b":"bee"}"#));
+        assert_eq!(c.subtree_json("js.empty", false).as_deref(), Some("{}"));
+        // A nil, a number or an Array inside: not folded.
+        let c = catalog(&[("config/locales/en.yml", "en:\n  gone:\n    a: \"x\"\n    b:\n  num:\n    a: 1\n")]);
+        assert_eq!(c.subtree_json("gone", false), None);
+        assert_eq!(c.subtree_json("num", false), None);
+        assert_eq!(c.subtree_json("missing", false), None);
     }
 
     #[test]

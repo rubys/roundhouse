@@ -2923,7 +2923,16 @@ Three gaps remain, all on spinel's side:
   literal prefix (`t("statuses.#{v}")`) folds every translation under
   the prefix into a `case` on the normalized key, falling back to the
   missing answer or `default:`. Where such a key names a subtree, Rails
-  answers a Hash; here it raises `NotImplementedError`. A key with no
+  answers a Hash; here it raises `NotImplementedError`. A literal key
+  that names a node of Strings, written `t("term.js").to_json` (a
+  template handing its strings to a script), folds to the JSON Rails
+  writes for that Hash, per locale: keys in the files' order, `<`, `>`
+  and `&` escaped, and U+2028 / U+2029 escaped as
+  `config.active_support.escape_js_separators_in_json` says (off under
+  `config.load_defaults` 8.1 or later, on before it, the app's own
+  setting winning). With options, or
+  over a node holding an Array, a number or a nil, it stays an error;
+  `escape_html_entities_in_json` is taken as Rails' default (on). A key with no
   literal prefix, or one reaching more than 400 translations, is an
   error rather than a guess. A `Rails::Engine` gem's `config/locales`
   load before the app's, read where Bundler installed the gem

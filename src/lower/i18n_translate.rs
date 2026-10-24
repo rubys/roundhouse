@@ -535,6 +535,84 @@ pub(crate) fn value_answer(catalog: &Catalog, recv: Option<&Expr>, method: &str,
     })
 }
 
+/// `t("term.js")` before a `.to_json` (`inner`): a key naming a node of Strings, which I18n
+/// answers as a nested Hash of them, and that Hash's JSON as
+/// ActiveSupport's `to_json` writes it (`Catalog::subtree_json`). A
+/// template hands its strings to a script this way
+/// (`<%= raw(t("term.js").to_json) %>`). The text per locale the call
+/// can run in, the default first: the first locale of the fallback
+/// chain that has the node answers it whole, as the gem's Fallbacks
+/// backend does. Only a literal key with no options and no `_html`
+/// key; `None` (the call stays what `resolves` says it is) for anything
+/// else, or when environments whose fallbacks differ answer differently.
+pub(crate) fn subtree_json(catalog: &Catalog, inner: &Expr, site: Site<'_>) -> Option<Vec<(String, String)>> {
+    let ExprNode::Send { recv, method, args, block, .. } = &*inner.node else { return None };
+    let site = if inner.decisions & crate::expr::HELPER_COPY_TRANSLATE != 0 { Site::View(None) } else { site };
+    let call = parse(recv.as_ref(), method.as_str(), args, block.as_ref(), site)?.ok()?;
+    if call.dynamic.is_some() || call.lookup.counted || !call.lookup.values.is_empty() || call.locale.is_some()
+        || !call.lookup.defaults.is_empty()
+    {
+        return None;
+    }
+    let key = Translate::full_key(&call.lookup, &call.lookup.key).ok()?;
+    if crate::i18n::is_html_safe_key(&key) {
+        return None;
+    }
+    let locales = catalog.locales();
+    if locales.len() > 1 && catalog.available_unknown.is_some() {
+        return None;
+    }
+    if (locales.len() > 1 || catalog.fallbacks.app.is_some() || !catalog.fallbacks.envs.is_empty()) && catalog.fallbacks.unknown.is_some() {
+        return None;
+    }
+    let lands = |c: &Catalog| c.entries.contains_key(&key) || c.opaque.contains(&key) || c.is_subtree(&key);
+    let mut per_locale: Vec<(String, String)> = Vec::new();
+    for variant in catalog.variants(&locales) {
+        let chain = match &variant.fallbacks {
+            Some(defaults) => crate::i18n::fallback_chain(&variant.locale, defaults),
+            None => vec![variant.locale.clone()],
+        };
+        let owner = chain.iter().filter_map(|l| catalog.catalog_for(l)).find(|c| lands(c))?;
+        let json = owner.subtree_json(&key, catalog.escape_js_separators)?;
+        match per_locale.iter().find(|(l, _)| *l == variant.locale) {
+            Some((_, seen)) if *seen != json => return None,
+            Some(_) => {}
+            None => per_locale.push((variant.locale.clone(), json)),
+        }
+    }
+    Some(per_locale)
+}
+
+/// The receiver of `expr` when it is a bare `<receiver>.to_json`.
+fn to_json_receiver(expr: &Expr) -> Option<&Expr> {
+    match &*expr.node {
+        ExprNode::Send { recv: Some(inner), method, args, block: None, .. } if method.as_str() == "to_json" && args.is_empty() => Some(inner),
+        _ => None,
+    }
+}
+
+/// The `subtree_json` texts as one expression: the text, or a `case` on
+/// `I18n.locale` whose else branch is the default locale's.
+fn subtree_json_expr(span: Span, mut per_locale: Vec<(String, String)>) -> Option<Expr> {
+    if per_locale.windows(2).all(|w| w[0].1 == w[1].1) {
+        return Some(lit(span, per_locale.pop()?.1));
+    }
+    let (_, default) = per_locale.remove(0);
+    let mut arms: Vec<Arm> = per_locale
+        .into_iter()
+        .map(|(l, json)| Arm { pattern: Pattern::Lit { value: Literal::Str { value: l } }, guard: None, body: lit(span, json) })
+        .collect();
+    arms.push(Arm { pattern: Pattern::Wildcard, guard: None, body: lit(span, default) });
+    let scrutinee = Expr::new(span, ExprNode::Send {
+        recv: Some(Expr { ty: Some(Ty::Sym), ..const_send(span, "I18n", "locale", vec![]) }),
+        method: Symbol::from("to_s"),
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    });
+    Some(typed(Expr::new(span, ExprNode::Case { scrutinee: typed(scrutinee), arms })))
+}
+
 const COUNT_BY_RULE: &str = "a count whose form a locale's own plural rule picks";
 
 /// A count meets a locale's own rule only when the call runs.
@@ -743,6 +821,10 @@ fn rewrite_default(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
 }
 
 fn rewrite(expr: &mut Expr, catalog: &Catalog, site: Site<'_>) {
+    if let Some(folded) = to_json_receiver(expr).and_then(|inner| subtree_json(catalog, inner, site)).and_then(|texts| subtree_json_expr(expr.span, texts)) {
+        *expr = folded;
+        return;
+    }
     expr.node.for_each_child_mut(&mut |c| rewrite(c, catalog, site));
     // Folded as the view's `t` it is, without the `raw` a controller body has no helper for: nothing renders this copy.
     if expr.decisions & crate::expr::HELPER_COPY_TRANSLATE != 0 {

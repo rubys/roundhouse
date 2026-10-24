@@ -494,6 +494,32 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
+    /// The controller scope a receiver-less translate call (or, with
+    /// `translate` false, any call) here reads for a lazy key, when it is
+    /// AbstractController::Translation's `t`.
+    fn translate_scope(&self, ctx: &Ctx, translate: bool, bare: bool) -> Option<String> {
+        match (!translate || ctx.in_view, bare && !ctx.class_side) {
+            (false, true) => self.translating_controller(ctx.self_ty.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Whose `t` a call here is (`lower::i18n_translate::Site`), given
+    /// `translate_scope`'s answer and the call's own decisions.
+    fn translate_site<'s>(&self, ctx: &'s Ctx, scope: &'s Option<String>, decisions: u64) -> crate::lower::i18n_translate::Site<'s> {
+        // An `app/helpers` module runs in the view, so its `t` is ActionView's (with no template for a lazy key).
+        let in_helper = !ctx.class_side
+            && matches!(ctx.self_ty.as_ref(), Some(Ty::Class { id, .. }) if self.helper_modules.is_some_and(|h| h.contains(id)));
+        let helper_copy = decisions & (crate::expr::HELPER_COPY_TRANSLATE | crate::expr::HELPER_BODY_TRANSLATE) != 0;
+        match (scope, ctx.in_view) {
+            (_, true) => crate::lower::i18n_translate::Site::View(ctx.view_name.as_ref().map(|v| v.as_str())),
+            _ if helper_copy => crate::lower::i18n_translate::Site::View(None),
+            (None, false) if in_helper => crate::lower::i18n_translate::Site::View(None),
+            (Some(scope), false) => crate::lower::i18n_translate::Site::Controller(scope),
+            (None, false) => crate::lower::i18n_translate::Site::Other,
+        }
+    }
+
     /// The lazy-lookup scope of a controller whose instance methods have
     /// `AbstractController::Translation`'s `t`: one descending from
     /// `ActionController::Base` that defines no `t` / `translate` of its
@@ -1862,6 +1888,21 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
+                // `t("term.js").to_json`: the Hash a key naming a node of Strings answers, written as JSON, which `lower::i18n_translate` folds to its text.
+                if method.as_str() == "to_json" && args.is_empty() && block.is_none()
+                    && let Some(r) = recv.as_mut()
+                    && let ExprNode::Send { recv: inner_recv, method: inner_method, .. } = &*r.node
+                    && matches!(inner_method.as_str(), "t" | "translate")
+                    && matches!(crate::expr::ExprCold::diagnostic(&r.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "I18n")
+                {
+                    let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
+                    let scope = self.translate_scope(ctx, true, inner_recv.is_none());
+                    let site = self.translate_site(ctx, &scope, r.decisions);
+                    if crate::lower::i18n_translate::subtree_json(catalog, r, site).is_some() {
+                        r.set_diagnostic(None);
+                        return Ty::Str;
+                    }
+                }
                 // Not by name alone: an application `tap`/`each` may answer its block's value.
                 if matches!(method.as_str(), "tap" | "each")
                     && let Some(b) = block.as_mut()
@@ -2347,21 +2388,8 @@ impl<'a> BodyTyper<'a> {
                 }
                 let translate = matches!(method.as_str(), "t" | "translate");
                 let catalog = self.i18n.map_or(crate::i18n::Catalog::rails_default(), |c| c.or_rails_default());
-                let scope = match (!translate || ctx.in_view, recv.is_none() && !ctx.class_side) {
-                    (false, true) => self.translating_controller(ctx.self_ty.as_ref()),
-                    _ => None,
-                };
-                // An `app/helpers` module runs in the view, so its `t` is ActionView's (with no template for a lazy key).
-                let in_helper = !ctx.class_side
-                    && matches!(ctx.self_ty.as_ref(), Some(Ty::Class { id, .. }) if self.helper_modules.is_some_and(|h| h.contains(id)));
-                let helper_copy = expr.decisions & (crate::expr::HELPER_COPY_TRANSLATE | crate::expr::HELPER_BODY_TRANSLATE) != 0;
-                let site = match (&scope, ctx.in_view) {
-                    (_, true) => crate::lower::i18n_translate::Site::View(ctx.view_name.as_ref().map(|v| v.as_str())),
-                    _ if helper_copy => crate::lower::i18n_translate::Site::View(None),
-                    (None, false) if in_helper => crate::lower::i18n_translate::Site::View(None),
-                    (Some(scope), false) => crate::lower::i18n_translate::Site::Controller(scope),
-                    (None, false) => crate::lower::i18n_translate::Site::Other,
-                };
+                let scope = self.translate_scope(ctx, translate, recv.is_none());
+                let site = self.translate_site(ctx, &scope, expr.decisions);
                 if translate
                     && crate::lower::i18n_translate::tree_answer(catalog, recv.as_ref(), method.as_str(), args, block.as_ref()).is_some()
                 {
