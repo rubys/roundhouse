@@ -866,6 +866,29 @@ module ActionController
       "action_controller/base"
     end
 
+    # Rails' `ActionController::Testing::Functional#recycle!`: a
+    # functional test runs every request through one controller, and
+    # each request starts from a fresh response. Here the response
+    # state lives on the controller, so it goes back to what
+    # `initialize` set; params, session, flash and the request are
+    # assigned again by the test's request.
+    def recycle!
+      @action_name = ""
+      @status = 200
+      @body = +""
+      @location = nil
+      @request_format = :html
+      @query_string = +""
+      @accepts_any_format = false
+      @vary_on_accept = false
+      @content_type = "text/html; charset=utf-8"
+      @content_type_explicit = false
+      @headers = ActionController::HeaderStore.new
+      @performed = false
+      @head_response = false
+      @cache_control = ActionController::CacheControlStore.new
+    end
+
     # Subclasses override. Error message omits `self.class.name` —
     # `.name`-style reflection forks across targets and the runtime
     # stack trace already identifies the receiver's class.

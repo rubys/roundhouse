@@ -264,6 +264,16 @@ module ActiveStorage
   # in the signed segment), so the router's own `.ext` format peel
   # (`moon.jpg` → `moon` + `format=jpg`) costs nothing here.
   module Routes
+    # The Rails paths of the controllers `table` names, for the test
+    # helper's `assert_recognizes`.
+    CONTROLLER_PATHS = {
+      active_storage_blobs_redirect: "active_storage/blobs/redirect",
+      active_storage_blobs_proxy: "active_storage/blobs/proxy",
+      active_storage_representations_redirect: "active_storage/representations/redirect",
+      active_storage_disk: "active_storage/disk",
+      active_storage_direct_uploads: "active_storage/direct_uploads"
+    }.freeze
+
     def self.table
       [
         ActionDispatch::Router::Route.new(

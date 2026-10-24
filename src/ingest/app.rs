@@ -2416,6 +2416,9 @@ end
     super::lock_versions::fold_lock_versions(&mut app);
     // Before analysis too, so `check` types the recount the emit writes (`Origin.reset_counters(id, :stories)`), rather than reporting a method the lowering answers.
     crate::lower::reset_counters::apply_reset_counters_lowering(&mut app);
+    // Before analysis, so the controller a functional test builds and the
+    // controllers' clearing methods are typed like source.
+    crate::lower::controller_test_case::prepare(&mut app);
     super::app_extension_calls::mark(&mut app);
     report_unmodelled_records(&app);
     super::unreachable_views::mark(&mut app);

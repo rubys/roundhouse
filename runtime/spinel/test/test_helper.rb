@@ -1439,8 +1439,97 @@ module RequestDispatch
 end
 
 module ActionDispatch
+  module Assertions
+    # Rails' `ActionDispatch::Assertions::RoutingAssertions`, the half
+    # that recognizes a path. `assert_generates` and `assert_routing`
+    # (which also generates the path from the options) are not here.
+    module RoutingAssertions
+      # `assert_recognizes(expected_options, path, extras = {}, message = nil)`.
+      # `path` is a String (a GET) or `{ method: verb, path: path }`;
+      # `method: :all` checks GET, POST, PUT and DELETE in turn. What
+      # the router recognizes is the route's `controller` and `action`
+      # (`controller` the Rails path of a namespaced one,
+      # "admin/posts"), its dynamic segments and `format` when the path
+      # has one, with `extras` merged over them; every key a String,
+      # as Rails' `path_parameters`. It must equal `expected_options`
+      # with its keys stringified and its values as given.
+      def assert_recognizes(expected_options, path, extras = {}, message = nil)
+        verb = "GET"
+        request_path = ""
+        if path.is_a?(Hash)
+          verb = path[:method].to_s.upcase
+          request_path = path[:path].to_s
+        else
+          request_path = path.to_s
+        end
+        if verb == "ALL"
+          ["GET", "POST", "PUT", "DELETE"].each do |each_verb|
+            assert_recognizes(expected_options, { method: each_verb, path: request_path }, extras, message)
+          end
+          return
+        end
+        recognized = recognized_path_parameters(verb, request_path)
+        extras.each { |key, value| recognized[key.to_s] = value }
+        expected = {}
+        expected_options.each { |key, value| expected[key.to_s] = value }
+        return if expected == recognized
+        raise(message || "The recognized options <#{recognized.inspect}> did not match <#{expected.inspect}>")
+      end
+
+      # Rails' `recognize_path` (`ActionDispatch::Routing::RouteSet`)
+      # over the app's route table, keyed by String, in the steps of
+      # the ruby overlay's `Rails.application.routes.recognize_path`:
+      # the whole string normalized unless it is a full URL (one
+      # leading slash, no doubled slash, no trailing slash, uppercase
+      # percent-encoded octets), then the query, the fragment and a
+      # URL's scheme and host cut off. What is left must match a route
+      # as it is, so a slash before the query (`/articles/1/?x=1`)
+      # matches none, as in Rails. Redirect routes are skipped, as
+      # Rails skips them.
+      def recognized_path_parameters(verb, path)
+        require_relative "../config/routes"
+        request_path = path
+        unless request_path.include?("://")
+          request_path = ("/" + request_path).squeeze("/")
+          request_path = request_path.delete_suffix("/") unless request_path == "/"
+          request_path = request_path.gsub(/%[a-f0-9]{2}/) { |octet| octet.upcase }
+        end
+        scheme = request_path.partition("://")[0]
+        # As in `URI.parse`: what comes before "://" is a scheme only
+        # when it holds no "/", "?" or "#"; otherwise the "://" is in
+        # the query or the fragment, and there is no host to cut off.
+        if request_path.include?("://") && !scheme.empty? && !scheme.include?("/") && !scheme.include?("?") && !scheme.include?("#")
+          # The authority ends at the first "/", "?" or "#": a slash in
+          # the query or the fragment is not the path's.
+          rest = request_path.partition("://")[2].partition("?")[0].partition("#")[0]
+          slash = rest.index("/")
+          request_path = slash.nil? ? "/" : rest[slash..]
+        end
+        request_path = request_path.partition("?")[0].partition("#")[0]
+        request_path = "/" + request_path unless request_path.start_with?("/")
+        table = ([RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table).reject { |route| route.controller == :roundhouse_redirects }
+        matched = ActionDispatch::Router.match(verb, request_path, table)
+        matched = nil if request_path != "/" && request_path.end_with?("/")
+        raise "No route matches #{path.inspect}" if matched.nil?
+        controller = RouteTable::CONTROLLER_PATHS[matched.controller] || ActiveStorage::Routes::CONTROLLER_PATHS[matched.controller] || matched.controller.to_s
+        recognized = { "controller" => controller, "action" => matched.action.to_s }
+        format = ""
+        matched.path_params.each do |name, value|
+          if name == "format"
+            format = value
+          else
+            recognized[name] = value
+          end
+        end
+        recognized["format"] = format unless format.empty?
+        recognized
+      end
+    end
+  end
+
   class IntegrationTest < TestBase
     include RequestDispatch
+    include Assertions::RoutingAssertions
   end
 
   # `ActionDispatch::Integration::Session.new(Rails.application)` — a
@@ -1645,6 +1734,149 @@ module ActionCable
           raise "Expected to reject connection but no rejection was made"
         end
         nil
+      end
+    end
+  end
+end
+
+module ActionController
+  # Rails' `ActionController::TestCase` (8.1): a functional test that
+  # runs one controller's actions directly, without routing a path.
+  # `@controller` (the controller under test) and `@__controller_route`
+  # (its router symbol) are assigned at the start of each test by the
+  # `controller_test_case` lowering, as Rails'
+  # `setup_controller_request_and_response` builds the controller before
+  # the test's own setup.
+  #
+  # `get :show, params: { id: 1 }` is Rails' `process`:
+  # - before each request but the first, the instance variables the
+  #   previous ones left on the controller are cleared, and the
+  #   controller's response state is reset (`recycle!`);
+  # - the params become what a request carries, Strings
+  #   (`ActionController::TestRequest#assign_parameters`: a record by
+  #   `to_param`, nil as "", nested Hashes and Arrays alike);
+  # - the route is checked as Rails generates it: a route of this
+  #   controller and action whose dynamic segments all have a value,
+  #   whatever its verb, the first in the table; none is "No route
+  #   matches", Rails' ActionController::UrlGenerationError. The values
+  #   used by the path are the path parameters, the rest the request's
+  #   params, and `format:` is one of them;
+  # - `session:` and `flash:` are merged into the test's session and
+  #   flash, which persist across the test's requests (`session[:u] = x`
+  #   before a request reaches it); `xhr: true` sets the XHR headers;
+  # - the action runs through the same `run_controller` an integration
+  #   test's request ends in, and `response` / `@response` is the result.
+  class TestCase < TestBase
+    include RequestDispatch
+    include ActionDispatch::Assertions::RoutingAssertions
+
+    def get(action, params: {}, session: {}, flash: {}, format: nil, xhr: false, as: nil)
+      process(action, "GET", params, session, flash, format, xhr, as)
+    end
+
+    def post(action, params: {}, session: {}, flash: {}, format: nil, xhr: false, as: nil)
+      process(action, "POST", params, session, flash, format, xhr, as)
+    end
+
+    def patch(action, params: {}, session: {}, flash: {}, format: nil, xhr: false, as: nil)
+      process(action, "PATCH", params, session, flash, format, xhr, as)
+    end
+
+    def put(action, params: {}, session: {}, flash: {}, format: nil, xhr: false, as: nil)
+      process(action, "PUT", params, session, flash, format, xhr, as)
+    end
+
+    def delete(action, params: {}, session: {}, flash: {}, format: nil, xhr: false, as: nil)
+      process(action, "DELETE", params, session, flash, format, xhr, as)
+    end
+
+    def head(action, params: {}, session: {}, flash: {}, format: nil, xhr: false, as: nil)
+      process(action, "HEAD", params, session, flash, format, xhr, as)
+    end
+
+    def session
+      @__session ||= ActionDispatch::Session.new
+    end
+
+    def flash
+      @__flash ||= ActionDispatch::Flash.new
+    end
+
+    def process(action, method, params, session_values, flash_values, format, xhr, as)
+      require_relative "../config/routes"
+      @controller.clear_instance_variables_between_requests if @__processed
+      @__processed = true
+      @controller.recycle!
+      wanted = action.to_s
+      request_params = stringify_keys({})
+      params.each { |key, value| request_params[key.to_s] = test_request_param(value) }
+      request_params["format"] = format.to_s unless format.nil?
+      route = nil
+      path_params = {}
+      path = ""
+      table = [RouteTable.root] + RouteTable.table
+      i = 0
+      while i < table.length && route.nil?
+        candidate = table[i]
+        i += 1
+        next unless candidate.controller == @__controller_route && candidate.action.to_s == wanted
+        captured = {}
+        segments = []
+        fits = true
+        candidate.pattern_parts.each do |part|
+          if part.start_with?(":") || part.start_with?("*")
+            value = request_params[part[1..]]
+            if value.nil? || value.to_s.empty?
+              fits = false
+            else
+              captured[part[1..]] = value.to_s
+              segments << value.to_s
+            end
+          else
+            segments << part
+          end
+        end
+        next unless fits
+        route = candidate
+        path_params = captured
+        path = segments.join("/")
+      end
+      if route.nil?
+        controller_path = RouteTable::CONTROLLER_PATHS[@__controller_route] || @__controller_route.to_s
+        raise "No route matches {action: #{wanted.inspect}, controller: #{controller_path.inspect}}"
+      end
+      path = "/" if path.empty?
+      unless format.nil?
+        path = path + "." + format.to_s
+        path_params["format"] = format.to_s
+      end
+      rest = stringify_keys({})
+      request_params.each { |key, value| rest[key] = value unless path_params.key?(key) }
+      session_values.each { |key, value| session[key] = value }
+      flash_values.each { |key, value| flash[key] = value }
+      headers = {}
+      if xhr
+        headers["HTTP_X_REQUESTED_WITH"] = "XMLHttpRequest"
+        headers["HTTP_ACCEPT"] = "text/javascript, text/html, application/xml, text/xml, */*"
+      end
+      run_controller(@controller, route.action, path_params, nil, method, method, path, "", rest, headers, as)
+    end
+
+    # A param value as a request carries it: what Rails' TestRequest
+    # gets back from encoding the params into the query or the body.
+    def test_request_param(value)
+      if value.is_a?(Hash)
+        out = stringify_keys({})
+        value.each { |key, inner| out[key.to_s] = test_request_param(inner) }
+        out
+      elsif value.is_a?(Array)
+        value.map { |inner| test_request_param(inner) }
+      elsif value.nil?
+        ""
+      elsif value.is_a?(ActiveRecord::Base)
+        value.to_param.to_s
+      else
+        value.to_s
       end
     end
   end
@@ -1894,6 +2126,15 @@ module RequestDispatch
                  when :comments then CommentsController.new
                  else ActiveStorage::Routes.instantiate_controller(matched.controller)
                  end
+    run_controller(controller, matched.action, matched.path_params, matched.req_format, method, wire_method, path, query, params, headers, as)
+  end
+
+  # The request through `controller`, once the route is known: the
+  # params, session, flash, cookies and request the controller reads,
+  # the action run inside a connection lease, and the response kept.
+  # `dispatch_request` comes here after the router matched the path;
+  # ActionController::TestCase#process with the controller it holds.
+  def run_controller(controller, action, path_params, req_format, method, wire_method, path, query, params, headers, as)
     # Test fixtures pass Symbol-keyed nested hashes (`{article: {title:
     # ...}}`); the wire-level request body is String-keyed at runtime.
     # Stringify recursively so the harness shape matches what the
@@ -1943,9 +2184,9 @@ module RequestDispatch
       from_query.each { |k, v| merged[k] = v }
     end
     # Rails' `params.merge!(path_parameters)`: the route's own segments win over both.
-    matched.path_params.each { |k, v| merged[k.to_s] = v }
+    path_params.each { |k, v| merged[k.to_s] = v }
     controller.params  = merged
-    controller.path_parameters = matched.path_params
+    controller.path_parameters = path_params
     controller.session = @__session ||= ActionDispatch::Session.new
     controller.flash   = @__flash   ||= ActionDispatch::Flash.new
     # The inbound jar is the browser's whole state — what the test has
@@ -1967,13 +2208,13 @@ module RequestDispatch
     # `to_sym`, the same shape main.rb uses and for the same reason: a
     # Symbol materialized from a runtime String is not a shape the
     # strict targets share.
-    path_format = matched.path_params.fetch("format", "")
+    path_format = path_params.fetch("format", "")
     controller.request_format = :json if path_format == "json"
     controller.request_format = :turbo_stream if path_format == "turbo_stream"
     controller.request_format = :rss if path_format == "rss"
     if path_format.empty?
-      controller.request_format = :json if matched.req_format == :json
-      controller.request_format = :rss if matched.req_format == :rss
+      controller.request_format = :json if req_format == :json
+      controller.request_format = :rss if req_format == :rss
     end
     controller.request_format = :json if as == :json
     # The request object, built the way the dispatcher builds it (see
@@ -2062,7 +2303,7 @@ module RequestDispatch
       Db.query_cache_begin unless cached
       Db.read_snapshot_begin if snapshot
       begin
-        controller.process_action(matched.action)
+        controller.process_action(action)
       ensure
         Db.read_snapshot_end if snapshot
         Db.query_cache_end unless cached
@@ -2073,7 +2314,7 @@ module RequestDispatch
         Db.query_cache_begin unless cached
         Db.read_snapshot_begin if snapshot
         begin
-          controller.process_action(matched.action)
+          controller.process_action(action)
         ensure
           Db.read_snapshot_end if snapshot
           Db.query_cache_end unless cached

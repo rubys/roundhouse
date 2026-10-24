@@ -147,6 +147,7 @@ pub mod param_rebind;
 pub mod to_sgid;
 pub mod cable_test_case;
 pub mod view_test_case;
+pub mod controller_test_case;
 pub mod current_set;
 pub mod update_writer_check;
 pub mod unscope_check;
