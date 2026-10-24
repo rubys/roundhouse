@@ -5682,6 +5682,116 @@ end
         .assert_passes();
 }
 
+/// `CONST.each do |k[, v]| define_method(…) { … } end` over a literal
+/// constant is the `def`s it makes: an Array's names, a Hash's names and
+/// values (read back from the constant), instance and class side, and a
+/// literal Array written in place. Expected values are Ruby's own.
+#[test]
+fn define_method_loops_over_literal_constants_run() {
+    emit_and_run::real_blog()
+        .write(
+            "app/services/labels.rb",
+            r##"class Labels
+  KINDS = %i[draft live].freeze
+  PREFIXES = { short: "S", long: "L" }.freeze
+
+  KINDS.each do |kind|
+    define_method(:"#{kind}?") do
+      @kind == kind
+    end
+  end
+
+  %w[red blue].each do |color|
+    define_method("#{color}_label") do |text|
+      "#{color}:#{text}"
+    end
+  end
+
+  class << self
+    PREFIXES.each do |slug, prefix|
+      define_method(:"#{slug}_prefix") do
+        "#{prefix}-#{slug}"
+      end
+    end
+  end
+
+  def initialize(kind)
+    @kind = kind
+  end
+end
+"##,
+        )
+        .run_ruby(
+            r##"draft = Labels.new(:draft)
+raise "draft?" unless draft.draft? && !draft.live?
+raise draft.red_label("x") unless draft.red_label("x") == "red:x" && draft.blue_label(1) == "blue:1"
+raise Labels.short_prefix unless Labels.short_prefix == "S-short" && Labels.long_prefix == "L-long""##,
+        )
+        .assert_passes();
+}
+
+/// The same loop in a concern's `included do class << self … end` is the
+/// includer's class methods, beside the block's plain `def`s.
+#[test]
+fn define_method_loops_in_an_included_class_body_reach_the_includer() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/lookups.rb",
+            r##"module Lookups
+  extend ActiveSupport::Concern
+
+  MAP = { short: "S", long: "L" }.freeze
+
+  included do
+    class << self
+      MAP.each do |slug, value|
+        define_method(:"#{slug}_code") do
+          "#{value}#{value}"
+        end
+      end
+
+      def plain
+        "p"
+      end
+    end
+  end
+end
+"##,
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Lookups\n")
+        .run_ruby(r##"raise [Article.short_code, Article.long_code, Article.plain].inspect unless [Article.short_code, Article.long_code, Article.plain] == ["SS", "LL", "p"]"##)
+        .assert_passes();
+}
+
+/// A loop whose body the substitution cannot keep is not unrolled: no
+/// `def` is invented for it.
+#[test]
+fn define_method_loops_the_substitution_cannot_keep_are_not_unrolled() {
+    for body in [
+        // writes the loop parameter
+        "KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      kind = :other\n      kind\n    end\n  end",
+        // reads a local outside the loop
+        "suffix = \"!\"\n  KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      suffix\n    end\n  end",
+        // yields the defining method's block
+        "KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      yield\n    end\n  end",
+        // a constant whose value is not a literal
+        "LIST.each do |kind|\n    define_method(:\"#{kind}?\") do\n      kind\n    end\n  end",
+        // `next` at the block's own level does not parse inside a `def`
+        "KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      next false if kind == :draft\n      true\n    end\n  end",
+        // a named visibility marker sets a generated method's visibility
+        "def draft?\n    true\n  end\n\n  KINDS.each do |kind|\n    define_method(:\"#{kind}?\") do\n      kind\n    end\n  end\n  private :draft?",
+    ] {
+        let (emitted, _errors) = emit_and_run::real_blog()
+            .write(
+                "app/services/labels.rb",
+                &format!("class Labels\n  KINDS = %i[draft live].freeze\n  LIST = KINDS.map(&:itself)\n\n  {body}\nend\n"),
+            )
+            .emit(roundhouse::project::BuildTarget::Ruby);
+        let labels = std::fs::read_to_string(emitted.join("app/models/labels.rb")).expect("labels.rb");
+        assert!(!labels.contains("def live?"), "{body}:\n{labels}");
+    }
+}
+
 /// `Float#to_d` / `Integer#to_d` build a BigDecimal without
 /// `bigdecimal/util`, and the decimal arithmetic after them runs:
 /// Float and Integer operands, comparison, `round`, and `floor`/`ceil`
@@ -9510,7 +9620,8 @@ fn included_block_defs_that_would_lose_their_precedence_stay_refused() {
     for concern in [
         "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    def shout\n      \"block\"\n    end\n  end\n\n  def shout\n    \"module\"\n  end\nend\n",
         "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include Comparable\n    def shout\n      \"block\"\n    end\n  end\nend\n",
-        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      %i[a b].each { |n| define_method(n) { n } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      %i[a b].each { |n| define_method(n) { yield } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
+        "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    class << self\n      private\n      %i[a b].each { |n| define_method(n) { n } }\n      def shout\n        \"block\"\n      end\n    end\n  end\nend\n",
         "module Shouty\n  extend ActiveSupport::Concern\n  class_methods do\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    def self.loud\n      \"block\"\n    end\n  end\nend\n",
         "module Shouty\n  extend ActiveSupport::Concern\n  module ClassMethods\n    def loud\n      \"carrier\"\n    end\n  end\n  included do\n    class << self\n      def loud\n        \"block\"\n      end\n    end\n  end\nend\n",
     ] {

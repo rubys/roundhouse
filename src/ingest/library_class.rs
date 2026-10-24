@@ -2119,14 +2119,23 @@ fn walk_decl_body<'pr>(
 }
 
 /// A `class << self` an `included do` block may hoist: nothing in it but
-/// `def`s and visibility markers, which the decl walk keeps. Any other
-/// statement (`MAP.each { define_method … }`) the walk would drop.
+/// `def`s, visibility markers and `define_method` loops the decl walk
+/// unrolls (`define_method_loop`). Any other statement the walk would drop.
 fn only_defs(body: Option<ruby_prism::Node<'_>>) -> bool {
     body.is_none_or(|body| {
-        flatten_statements(body).iter().all(|stmt| {
+        // The walk unrolls a loop only before any bare visibility marker;
+        // one after it would be hoisted and then dropped.
+        let mut bare_marker = false;
+        let statements = flatten_statements(body);
+        let named = super::define_method_loop::named_visibility(&statements);
+        statements.iter().all(|stmt| {
+            if let Some(call) = stmt.as_call_node().filter(|c| visibility::marker(c)) {
+                bare_marker |= call.arguments().is_none();
+                return true;
+            }
             visibility::definition(stmt).is_some()
                 || stmt.as_def_node().is_some()
-                || stmt.as_call_node().is_some_and(|c| visibility::marker(&c))
+                || (!bare_marker && super::define_method_loop::unrollable(stmt, &named))
         })
     })
 }
@@ -2179,6 +2188,11 @@ fn walk_decl_body_with_visibility<'pr>(
     };
 
     let statements = flatten_statements(b);
+    // This body's literal constants, for the `define_method` loops in it
+    // and in the bodies it encloses (`class << self`, `included do`).
+    let _constants = super::define_method_loop::Scope::enter(super::define_method_loop::ConstTable::of(owner, &statements));
+    let mut bare_visibility_marker = false;
+    let named_visibility = super::define_method_loop::named_visibility(&statements);
     if let Some(name) = super::util::hoisted_name_collision(&statements) {
         return Err(IngestError::Unsupported {
             file: file.into(),
@@ -2262,7 +2276,26 @@ fn walk_decl_body_with_visibility<'pr>(
                 && matches!(constant_id_str(&call.name()), "public" | "protected" | "private")
             {
                 module_function_active = false;
+                bare_visibility_marker = true;
             }
+            continue;
+        }
+        // `MAP.each do |k, v| define_method(…) { … } end`: the `def`s it
+        // makes. Not after a bare visibility marker, whose reach into a
+        // block's `define_method` this does not model, nor under
+        // `module_function` / `extend self`.
+        if !bare_visibility_marker
+            && !module_function_active
+            && !extend_self_active
+            && let Some(methods) = super::define_method_loop::unroll(
+                &statement,
+                owner,
+                file,
+                if mode.is_class_side() { MethodReceiver::Class } else { MethodReceiver::Instance },
+                &named_visibility,
+            )
+        {
+            out.methods.extend(methods);
             continue;
         }
         // `enums do Fill = new("fill") end` — sorbet-runtime's `T::Enum`
@@ -3936,6 +3969,8 @@ pub fn ingest_concern_class_method_spans(
     fn defs_in(body: Option<ruby_prism::Node<'_>>, file: &str, out: &mut Vec<Span>) {
         let Some(body) = body else { return };
         for stmt in flatten_statements(body) {
+            // A `define_method` loop's methods carry its name argument's span.
+            out.extend(super::define_method_loop::name_spans(&stmt, file));
             if let Some(def) = visibility::definition(&stmt) {
                 // The carrier's instance definitions become includer
                 // class methods. Its own singletons do not cross.
@@ -3961,6 +3996,7 @@ pub fn ingest_concern_class_method_spans(
         let id = ClassId(Symbol::from(full_path.join("::")));
 
         let Some(body) = module.body() else { continue };
+        let _constants = super::define_method_loop::Scope::enter(super::define_method_loop::ConstTable::of(&id, &flatten_statements(module.body().unwrap())));
         let mut spans: Vec<Span> = Vec::new();
         let mut bridges: Vec<Span> = Vec::new();
         let mut has_nested_carrier = false;
@@ -4783,6 +4819,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
         // class-body folding rules.
         let concern_consts = super::model::ClassConsts::collect(&flatten_statements(module.body().unwrap()), file);
         let block_visibility = super::visibility::Visibility::resolve(Some(&body), file, Some(&id)).ok();
+        let _constants = super::define_method_loop::Scope::enter(super::define_method_loop::ConstTable::of(&id, &flatten_statements(module.body().unwrap())));
         let mut items: Vec<ModelBodyItem> = Vec::new();
         let mut enums: Vec<ConcernEnumDecl> = Vec::new();
         let is_concern = flatten_statements(module.body().unwrap()).iter().any(|stmt| {
