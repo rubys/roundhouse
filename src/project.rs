@@ -5820,9 +5820,8 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
             writeln!(arms, "    when :{sym} then {class}.new").unwrap();
         }
     }
-    if lazy_requires {
-        apply_controller_paths(files, &flat);
-    }
+    // Both trees: the test helper's `assert_recognizes` reads it too.
+    apply_controller_paths(files, &flat);
     if arms.is_empty() {
         return;
     }
@@ -5898,10 +5897,10 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     }
 }
 
-/// Add `RouteTable::CONTROLLER_PATHS` to the routes.rb of a lazy tree.
-/// It maps the router symbol of a namespaced controller to the Rails
-/// controller path (`admin_posts: "admin/posts"`). The ruby overlay's
-/// `recognize_path` reads it. A top-level controller has no row, and
+/// Add `RouteTable::CONTROLLER_PATHS` to routes.rb. It maps the router
+/// symbol of a namespaced controller to the Rails controller path
+/// (`admin_posts: "admin/posts"`). The ruby overlay's `recognize_path`
+/// and the test helper's `assert_recognizes` read it. A top-level controller has no row, and
 /// `recognize_path` gives its router symbol. The path comes from the
 /// class name, so it differs from Rails for an acronym inflection
 /// (`admin/apikeys`, not `admin/api_keys`) or a digit after an
@@ -5945,13 +5944,16 @@ fn apply_controller_paths(files: &mut [(String, String)], flat: &[crate::lower::
 /// `main.rb` too.
 fn apply_route_table_root(files: &mut [(String, String)], app: &App) {
     const WITH_ROOT: &str = "[RouteTable.root] + RouteTable.table";
+    // The test helper's route generation puts the root back among the
+    // declarations (`RoutingAssertions#generated_route`).
+    const ROOT_INSERT: &str = "        routes.insert(RouteTable.root_position, RouteTable.root)\n";
     let has_root = crate::lower::flatten_routes(app).iter().any(|r| r.path == "/");
     if has_root {
         return;
     }
     for (path, content) in files.iter_mut() {
         if path == "main.rb" || path == "test/test_helper.rb" {
-            *content = content.replace(WITH_ROOT, "RouteTable.table");
+            *content = content.replace(WITH_ROOT, "RouteTable.table").replace(ROOT_INSERT, "");
         }
     }
 }

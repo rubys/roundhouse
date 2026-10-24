@@ -1439,8 +1439,243 @@ module RequestDispatch
 end
 
 module ActionDispatch
+  module Assertions
+    # Rails' `ActionDispatch::Assertions::RoutingAssertions`, the half
+    # that recognizes a path. `assert_generates` and `assert_routing`
+    # (which also generates the path from the options) are not here.
+    module RoutingAssertions
+      # `assert_recognizes(expected_options, path, extras = {}, message = nil)`.
+      # `path` is a String (a GET) or `{ method: verb, path: path }`;
+      # `method: :all` checks GET, POST, PUT and DELETE in turn. What
+      # the router recognizes is the route's `controller` and `action`
+      # (`controller` the Rails path of a namespaced one,
+      # "admin/posts"), its dynamic segments and `format` when the path
+      # has one, with `extras` merged over them; every key a String,
+      # as Rails' `path_parameters`. It must equal `expected_options`
+      # with its keys stringified and its values as given.
+      def assert_recognizes(expected_options, path, extras = {}, message = nil)
+        verb = "GET"
+        request_path = ""
+        if path.is_a?(Hash)
+          verb = path[:method].to_s.upcase
+          request_path = path[:path].to_s
+        else
+          request_path = path.to_s
+        end
+        if verb == "ALL"
+          ["GET", "POST", "PUT", "DELETE"].each do |each_verb|
+            assert_recognizes(expected_options, { method: each_verb, path: request_path }, extras, message)
+          end
+          return
+        end
+        recognized = recognized_path_parameters(verb, request_path)
+        extras.each { |key, value| recognized[key.to_s] = value }
+        expected = {}
+        expected_options.each { |key, value| expected[key.to_s] = value }
+        return if expected == recognized
+        raise(message || "The recognized options <#{recognized.inspect}> did not match <#{expected.inspect}>")
+      end
+
+      # Rails' `recognize_path` (`ActionDispatch::Routing::RouteSet`)
+      # over the app's route table, keyed by String, in the steps of
+      # the ruby overlay's `Rails.application.routes.recognize_path`:
+      # the whole string normalized unless it is a full URL (one
+      # leading slash, no doubled slash, no trailing slash, uppercase
+      # percent-encoded octets), then the query, the fragment and a
+      # URL's scheme and host cut off. What is left must match a route
+      # as it is, so a slash before the query (`/articles/1/?x=1`)
+      # matches none, as in Rails. Redirect routes are skipped, as
+      # Rails skips them.
+      def recognized_path_parameters(verb, path)
+        require_relative "../config/routes"
+        request_path = path
+        unless request_path.include?("://")
+          request_path = ("/" + request_path).squeeze("/")
+          request_path = request_path.delete_suffix("/") unless request_path == "/"
+          request_path = request_path.gsub(/%[a-f0-9]{2}/) { |octet| octet.upcase }
+        end
+        scheme = request_path.partition("://")[0]
+        # As in `URI.parse`: what comes before "://" is a scheme only
+        # when it holds no "/", "?" or "#"; otherwise the "://" is in
+        # the query or the fragment, and there is no host to cut off.
+        if request_path.include?("://") && !scheme.empty? && !scheme.include?("/") && !scheme.include?("?") && !scheme.include?("#")
+          # The authority ends at the first "/", "?" or "#": a slash in
+          # the query or the fragment is not the path's.
+          rest = request_path.partition("://")[2].partition("?")[0].partition("#")[0]
+          slash = rest.index("/")
+          request_path = slash.nil? ? "/" : rest[slash..]
+        end
+        request_path = request_path.partition("?")[0].partition("#")[0]
+        request_path = "/" + request_path unless request_path.start_with?("/")
+        table = ([RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table).reject { |route| route.controller == :roundhouse_redirects }
+        matched = ActionDispatch::Router.match(verb, request_path, table)
+        matched = nil if request_path != "/" && request_path.end_with?("/")
+        raise "No route matches #{path.inspect}" if matched.nil?
+        controller = RouteTable::CONTROLLER_PATHS[matched.controller] || ActiveStorage::Routes::CONTROLLER_PATHS[matched.controller] || matched.controller.to_s
+        recognized = { "controller" => controller, "action" => matched.action.to_s }
+        format = ""
+        matched.path_params.each do |name, value|
+          if name == "format"
+            format = value
+          else
+            recognized[name] = value
+          end
+        end
+        # A forced format (`get "/rss" => "home#index", format: "rss"`)
+        # is one of the route's defaults, which Rails recognizes too.
+        format = matched.req_format.to_s if format.empty? && !matched.req_format.nil?
+        recognized["format"] = format unless format.empty?
+        recognized
+      end
+
+      # Rails' `assert_generates(expected_path, options, defaults = {},
+      # extras = {}, message = nil)`: the path the routes generate from
+      # `options` (`generate_extras`) must be `expected_path`, and the
+      # options that went to the query instead of the path must be
+      # `extras`. A full URL is compared by its path.
+      def assert_generates(expected_path, options, defaults = {}, extras = {}, message = nil)
+        if expected_path.include?("://")
+          rest = expected_path.partition("://")[2]
+          slash = rest.index("/")
+          expected_path = slash.nil? ? "/" : rest[slash..]
+        else
+          expected_path = "/" + expected_path unless expected_path.start_with?("/")
+        end
+        given = generation_parts(defaults)
+        generation_parts(options).each { |key, value| given[key] = value }
+        route = generated_route(given)
+        query_keys = generated_query_keys(route, generation_parts(options))
+        found_extras = {}
+        options.each { |key, value| found_extras[key] = value if query_keys.include?(key.to_s) }
+        raise(message || "found extras <#{found_extras.inspect}>, not <#{extras.inspect}>") unless extras == found_extras
+        path = generated_route_path(route, given)
+        return if expected_path == path
+        raise(message || "The generated path <#{path}> did not match <#{expected_path}>")
+      end
+
+      # Rails' `assert_routing`: `assert_recognizes` one way, then
+      # `assert_generates` back from the options `defaults` does not
+      # name.
+      def assert_routing(path, options, defaults = {}, extras = {}, message = nil)
+        assert_recognizes(options, path, extras, message)
+        generate_options = {}
+        options.each { |key, value| generate_options[key] = value unless defaults.key?(key) }
+        request_path = path.is_a?(Hash) ? path[:path].to_s : path.to_s
+        assert_generates(request_path, generate_options, defaults, extras, message)
+      end
+
+      # The values a route is generated from, keyed by String, as
+      # `to_param` gives them; nil leaves the key out.
+      def generation_parts(options)
+        parts = {}
+        options.each do |key, value|
+          next if value.nil?
+          parts[key.to_s] = value.is_a?(ActiveRecord::Base) ? value.to_param.to_s : value.to_s
+        end
+        parts
+      end
+
+      # The route Rails' `Journey::Formatter#match_route` picks, over the
+      # app's routes in declaration order (redirects left out, as
+      # generation never yields them). A candidate's controller, action
+      # and forced format must equal the given ones; a route missing a
+      # value for one of its segments, or whose generated path its own
+      # constraints refuse, is skipped. Of the rest, the highest
+      # `Route#score` wins: two for each of those required defaults,
+      # one for each segment given a value (the implicit `(.:format)`
+      # counted too); a tie goes to the earlier route.
+      def generated_route(given)
+        require_relative "../config/routes"
+        routes = RouteTable.table.dup
+        routes.insert(RouteTable.root_position, RouteTable.root)
+        best = nil
+        best_score = -1
+        routes.each do |route|
+          next if route.controller == :roundhouse_redirects
+          controller = RouteTable::CONTROLLER_PATHS[route.controller] || route.controller.to_s
+          next unless given["controller"] == controller && given["action"] == route.action.to_s
+          required = 2
+          unless route.req_format.nil?
+            next unless given["format"] == route.req_format.to_s
+            required = 3
+          end
+          names = generation_segment_names(route.pattern)
+          next unless names.all? { |name| given.key?(name) }
+          path = generated_route_path(route, given)
+          bare = route.req_format.nil? && given.key?("format") ? path.delete_suffix("." + given["format"].to_s) : path
+          next if ActionDispatch::Router.match_pattern(route.pattern, bare, route.int_params + "", route.seg_constraints + "").nil?
+          score = required * 2 + names.length
+          score += 1 if route.req_format.nil? && route.pattern != "/" && given.key?("format")
+          if score > best_score
+            best = route
+            best_score = score
+          end
+        end
+        raise "No route matches {#{generation_options_text(given)}}" if best.nil?
+        best
+      end
+
+      # `{action: "show", controller: "articles"}`, as Rails' message
+      # spells the options it could not route.
+      def generation_options_text(given)
+        given.keys.sort.map { |key| "#{key}: #{given[key].inspect}" }.join(", ")
+      end
+
+      # The `:name` and `*name` segments of a route pattern, a literal
+      # prefix (`/~:user`) or suffix (`/c/:id.json`) aside.
+      def generation_segment_names(pattern)
+        names = []
+        pattern.split("/").each do |segment|
+          at = segment.index(":") || segment.index("*")
+          next if at.nil?
+          name = segment[at + 1, segment.length].to_s
+          stop = name.index(/[^A-Za-z0-9_]/)
+          names << (stop.nil? ? name : name[0, stop].to_s)
+        end
+        names
+      end
+
+      # The pattern with each segment's value in place, escaped as
+      # Journey escapes a segment (a glob as a path), and `.format`
+      # appended when the format was given and the route does not force
+      # one.
+      def generated_route_path(route, given)
+        out = []
+        route.pattern.split("/").each do |segment|
+          at = segment.index(":") || segment.index("*")
+          if at.nil?
+            out << segment
+            next
+          end
+          glob = segment[at, 1] == "*"
+          name = segment[at + 1, segment.length].to_s
+          stop = name.index(/[^A-Za-z0-9_]/)
+          tail = stop.nil? ? "" : name[stop, name.length].to_s
+          name = name[0, stop].to_s unless stop.nil?
+          value = ActionDispatch::Router.escape_path(given[name].to_s)
+          value = value.gsub("/", "%2F") unless glob
+          out << segment[0, at].to_s + value + tail
+        end
+        path = out.join("/")
+        path = "/" if path.empty?
+        path += "." + given["format"].to_s if route.req_format.nil? && route.pattern != "/" && given.key?("format")
+        path
+      end
+
+      # The options that go to the query: those neither a segment of the
+      # route nor one of its defaults (controller, action, a forced
+      # format) take.
+      def generated_query_keys(route, options)
+        used = generation_segment_names(route.pattern) + ["controller", "action"]
+        used << "format" if !route.req_format.nil? || route.pattern != "/"
+        options.keys.reject { |key| used.include?(key) }
+      end
+    end
+  end
+
   class IntegrationTest < TestBase
     include RequestDispatch
+    include Assertions::RoutingAssertions
   end
 
   # `ActionDispatch::Integration::Session.new(Rails.application)` — a
