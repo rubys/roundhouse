@@ -37,6 +37,8 @@ mod interval_columns;
 mod branch_local_join;
 #[path = "emit_and_run/utc_zone_time.rs"]
 mod utc_zone_time;
+#[path = "emit_and_run/rspec_specs.rs"]
+mod rspec_specs;
 #[path = "emit_and_run/discard.rs"]
 mod discard;
 #[path = "emit_and_run/callback_abort.rs"]

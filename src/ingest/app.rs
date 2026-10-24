@@ -1837,6 +1837,33 @@ end
 
     for entry in test_files {
         let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
+        // An RSpec file in a listed folder (`test_paths: [spec/models]`):
+        // a `*_spec.rb` whose top level is an example group. RSpec loads
+        // its own helper, never `test/test_helper.rb`, so nothing from
+        // that file is spliced into its modules. A `*_spec.rb` holding a
+        // test class is read as before.
+        if entry.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("_spec.rb"))
+            && super::spec::is_rspec_source(&source)
+        {
+            if let Some(tms) =
+                unwrap_or_record(super::spec::ingest_spec_files(&source, &entry.display().to_string()))?
+            {
+                for mut tm in tms {
+                    // Names are unique within one spec file, but two files
+                    // can give the same one (`article/comments_spec.rb` and
+                    // `article_comments_spec.rb`). A taken name gets the next
+                    // free number, as a repeated group does within a file.
+                    let base = tm.name.0.as_str().to_string();
+                    let mut n = 1;
+                    while app.test_modules.iter().any(|t| t.name == tm.name) {
+                        n += 1;
+                        tm.name = crate::ident::ClassId(Symbol::from(format!("{base}{n}").as_str()));
+                    }
+                    app.test_modules.push(tm);
+                }
+            }
+            continue;
+        }
         if let Some(tms) =
             unwrap_or_record(ingest_test_files(&source, &entry.display().to_string()))?
         {

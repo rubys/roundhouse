@@ -68,6 +68,47 @@ Roundhouse reads `test/test_helper.rb`, `test/test_helpers/`, and
 Transpiled projects include tests from the default folders and these
 folders.
 
+### RSpec specs
+
+A file whose name ends in `_spec.rb` in one of these folders is read as
+an RSpec spec, so an app with an RSpec suite can check that its build,
+the Spinel one included, still passes its specs:
+
+```yaml
+test_paths:
+  - spec/models
+```
+
+Every example group that owns examples becomes one test class, named by
+the spec file and the group: `spec/models/article_spec.rb`'s
+`context "without title"` is `ModelsArticleWithoutTitleSpec`. The class
+carries what RSpec gives its examples: the `let`s of every enclosing
+group (an inner one overrides an outer one), the `before` hooks from the
+outermost group in, and the group's helper methods. Each example is one
+test, and the emitted runner reports `<Class>: <N> tests passed`.
+
+The supported subset:
+
+- `RSpec.describe`, `describe`, `context`, with a constant, a string,
+  or both, and `type: :model`, `:lib` or `:request` metadata;
+- `let`, `let!`, `subject`, `subject(:name)`, `described_class`, and the
+  implicit `subject` (`described_class.new`);
+- `before`, `before(:each)`, `before(:example)`;
+- `it`, `specify`, `example`; an example without a block, and `xit`,
+  are pending in RSpec and are not tests here;
+- `expect(x)` and `is_expected` with `to`, `not_to` and `to_not`, and the
+  matchers `eq`, `eql`, `equal`, `be(x)`, `be_nil`, `be_truthy`,
+  `be_falsey`, `be_a`, `be_an`, `be_kind_of`, `be_a_kind_of`,
+  `be_instance_of`, `be_an_instance_of`, `be_<predicate>`,
+  `have_<predicate>`, and `include` of plain values.
+
+Anything else is refused by name: `roundhouse check` reports it, and
+`--continue` lists every refused construct and leaves out the examples
+that need it. Roundhouse does not read `spec/rails_helper.rb` or
+`spec/spec_helper.rb` yet, so configuration there (included modules,
+global hooks) does not reach the examples, and neither do test doubles,
+`expect { }` block expectations, shared examples or `after` hooks.
+
 ## `extensions`
 
 Roundhouse models Rails and a set of common gems. Project extensions
