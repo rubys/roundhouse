@@ -1179,19 +1179,44 @@ fn extension_owns_constant(app: &crate::App, gem: &str, path: &str) -> bool {
     }
 }
 
-/// Extension-owned constants need both their declared type and a runtime.
-/// `None` checks source analysis; a target also checks native availability.
+/// Unmodeled gems whose RBI was read. The RBI types their constants for
+/// `check`, but supplies no executable code, so a target that loads no
+/// Ruby gems has nothing behind them. PATH and `source_gems` gems are
+/// compiled from source, and their RBIs are never read.
+fn rbi_declared_unmodeled_gems(app: &crate::App) -> impl Iterator<Item = &str> {
+    let lock = app.gem_lock.as_ref();
+    app.gem_boundary.namespaces.keys().map(String::as_str).filter(move |gem| {
+        fate_of(gem) == GemFate::Unknown
+            && lock.is_some_and(|lock| lock.has(gem) && !lock.is_in_repo(gem) && !lock.is_source(gem))
+    })
+}
+
+/// The unmodeled gem whose RBI declares `path`. The lockfile must place
+/// `path` in that gem's namespace, so an RBI that reopens a class outside
+/// it (a stdlib class, another gem's) does not claim the class.
+fn rbi_declared_unmodeled_owner<'a>(app: &'a crate::App, path: &str) -> Option<&'a str> {
+    let lock = app.gem_lock.as_ref()?;
+    lock_gems_owning_constant(lock, path).into_iter().find(|gem| {
+        rbi_declared_unmodeled_gems(app).any(|declared| declared == *gem) && extension_owns_constant(app, gem, path)
+    })
+}
+
+/// Gem-owned constants need both their declared type and a runtime.
+/// `None` checks source analysis; a target also checks native availability:
+/// a target that loads no Ruby gems refuses the constants of a gem that a
+/// `gems.yml` row names, and of an unmodeled gem that only its RBI declares.
 pub(crate) fn extension_gem_refusals(app: &crate::App, target: Option<&str>) -> Vec<crate::diagnostic::Diagnostic> {
     use crate::diagnostic::Diagnostic;
     use crate::expr::{Expr, ExprNode};
     use crate::span::Span;
-    if app.extensions.is_empty() || matches!(target, Some("blog" | "futamura")) {
+    if matches!(target, Some("blog" | "futamura")) {
         return Vec::new();
     }
     let native_target = target.is_some_and(|target| !matches!(target, "ruby" | "jruby"));
-    if app.extensions.rails_dependent.is_empty()
-        && (!native_target || (app.extensions.runtime_gems.is_empty() && app.gem_boundary.loaded.is_empty()))
-    {
+    let native_owners = !app.extensions.runtime_gems.is_empty()
+        || !app.gem_boundary.loaded.is_empty()
+        || rbi_declared_unmodeled_gems(app).next().is_some();
+    if app.extensions.rails_dependent.is_empty() && !(native_target && native_owners) {
         return Vec::new();
     }
     fn refusal(app: &crate::App, target: Option<&str>, path: &str, span: Span) -> Option<Diagnostic> {
@@ -1206,7 +1231,8 @@ pub(crate) fn extension_gem_refusals(app: &crate::App, target: Option<&str>) -> 
         let target = target.filter(|target| !matches!(*target, "ruby" | "jruby"))?;
         let owner = app.extensions.runtime_gems.iter().map(|row| row.gem.as_str())
             .chain(app.gem_boundary.loaded.iter().map(String::as_str))
-            .find(|gem| extension_owns_constant(app, gem, path))?;
+            .find(|gem| extension_owns_constant(app, gem, path))
+            .or_else(|| rbi_declared_unmodeled_owner(app, path))?;
         Some(Diagnostic::unsupported(
             span,
             Some(crate::ident::Symbol::from(target)),

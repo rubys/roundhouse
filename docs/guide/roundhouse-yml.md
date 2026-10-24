@@ -185,6 +185,9 @@ standard-library gems. An RBI supplies types and ownership, not executable
 code. A gem in `rails_dependent` stays refused even when its RBI declares
 the referenced class, module, or value. Other targets refuse constants
 that depend on a native extension gem instead of emitting missing classes.
+They also refuse the constants of an unmodeled gem that only its RBI
+declares, with or without extension facts: the RBI types them, but nothing
+provides the gem there.
 
 Roundhouse records extension boot loads on each app. A lockfile dependency
 alone does not establish that a gem loads. A `runtime_gems` row does not
