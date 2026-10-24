@@ -143,9 +143,9 @@ require_relative "runtime/request_forgery_protection"
 # Rails' HTTP Token and Basic auth helpers — another reopen of
 # ActionController::Base, ruby-family only (see the file).
 require_relative "runtime/http_authentication"
-# The signatures on the session and flash cookies — the helpers the two
-# dispatchers restore and persist those cookies through (see the file).
-require_relative "runtime/signed_cookies"
+# Rails' encrypted session cookie, and the flash inside it: what the two
+# dispatchers restore and persist the session through (see the file).
+require_relative "runtime/cookie_store"
 # The mocha slot `lower::mocha` prepends to an app method a test stubs
 # (`User#reset_remote_connections`): the guard is in the APP's code, so it
 # runs in production too, where it asks the registry, finds nothing and

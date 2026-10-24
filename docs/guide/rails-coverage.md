@@ -304,19 +304,17 @@ What differs from Rails, and why:
   `request.base_url`. The ruby family now reads `X-Forwarded-Proto`
   (absolute URLs behind a TLS proxy are https, as in Rails), but
   `assume_ssl` is not modeled, so the check still compares hosts only.
-- **The session and flash cookies are signed, not encrypted.** Rails'
-  cookie store encrypts the session and keeps the flash inside it; the
-  ruby family signs the session and gives each flash message
-  (`flash_notice`, `flash_alert`) a signed cookie of its own — the same
-  HMAC `cookies.signed` uses, keyed from `SECRET_KEY_BASE`. A client can
-  read them but not forge them: a cookie that does not verify reads as
-  an empty session or no message. The session payload is not Rails'
-  JSON either, so a migration from Rails starts every session afresh;
-  Campfire's login rides its own signed cookie and carries over.
-  `cookies.encrypted` is Rails' jar (AES-256-GCM, the "authenticated
-  encrypted cookie" key from `SECRET_KEY_BASE`, JSON values), so a value
-  either side encrypted reads on the other; the session store does not
-  use it yet. An `expires:` given with a signed or encrypted write is
+- **The session cookie is Rails' `CookieStore`.** The ruby family
+  encrypts the session as Rails 8.1 does (AES-256-GCM, the
+  "authenticated encrypted cookie" key from `SECRET_KEY_BASE`), as JSON
+  with the flash inside it, so a session minted by Rails restores in
+  the emitted app and the other way round, value types included.
+  `cookies.encrypted` reads and writes the same way; an Action Cable
+  connection can authorize from `cookies.encrypted[session_key]`. Not
+  modeled: key rotation, the legacy AES-CBC cookies, and overridden
+  cookie salts, cipher or serializer; a session gets its `session_id`
+  when it is first written, and `reset_session` deletes the cookie
+  where Rails keeps one holding a fresh `session_id`. An `expires:` given with a signed or encrypted write is
   dropped: no `Expires` is sent and the value carries no expiry, so it
   reads for as long as the browser keeps it.
 - **An unset `SECRET_KEY_BASE` is generated, not fatal.** Rails

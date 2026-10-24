@@ -49,6 +49,12 @@ pub struct Response {
 
 impl Server {
     pub fn start(tree: &Path) -> Server {
+        Server::start_with_env(tree, &[])
+    }
+
+    /// `start`, with extra environment for the server (its
+    /// `SECRET_KEY_BASE`, say).
+    pub fn start_with_env(tree: &Path, env: &[(&str, &str)]) -> Server {
         let port = TcpListener::bind("127.0.0.1:0")
             .and_then(|l| l.local_addr())
             .expect("pick a free port")
@@ -61,6 +67,7 @@ impl Server {
             .env("PORT", port.to_string())
             .env("BLOG_DB", tree.join("native_http.sqlite3"))
             .env("SPINEL_WORKERS", "1")
+            .envs(env.iter().copied())
             .stdout(out)
             .stderr(err)
             .spawn()
@@ -135,6 +142,46 @@ impl Server {
         let headers = [("Content-Type", content_type), ("Accept", "application/json")];
         let (status, _, headers, body) = self.send("POST", path, &headers, body);
         Response { status, headers, body }
+    }
+
+    /// One request with exactly these headers: the status, every
+    /// `Set-Cookie` value, and the body.
+    pub fn exchange(&self, method: &str, path: &str, headers: &[(&str, &str)]) -> (u16, Vec<String>, String) {
+        let (status, set_cookies, _, body) = self.send(method, path, headers, "");
+        (status, set_cookies, body)
+    }
+
+    /// A WebSocket upgrade of `path` with these extra headers, answered
+    /// with the status of the handshake's response alone: a 101 leaves
+    /// the socket open, so the response is read only to the end of its
+    /// head, and the connection is then dropped.
+    pub fn handshake(&self, path: &str, headers: &[(&str, &str)]) -> u16 {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("connect");
+        stream.set_read_timeout(Some(Duration::from_secs(30))).expect("read timeout");
+        let mut request = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+        );
+        for (name, value) in headers {
+            if !value.is_empty() {
+                request.push_str(&format!("{name}: {value}\r\n"));
+            }
+        }
+        request.push_str("\r\n");
+        stream.write_all(request.as_bytes()).expect("send the handshake");
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte) {
+                Ok(1) => head.push(byte[0]),
+                _ => break,
+            }
+        }
+        let head = String::from_utf8_lossy(&head).into_owned();
+        head.split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("GET {path} (upgrade): no status line in {head:?}\n{}", self.log()))
     }
 
     /// One HTTP/1.1 request on its own connection: the status, every

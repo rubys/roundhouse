@@ -76,6 +76,10 @@ mod cable_actions;
 mod cable_broadcast_json_contract;
 #[path = "spinel_toolchain/cable_broadcast_json.rs"]
 mod cable_broadcast_json;
+#[path = "support/encrypted_session_cookie.rs"]
+mod encrypted_session_cookie_contract;
+#[path = "spinel_toolchain/encrypted_session_cookie.rs"]
+mod encrypted_session_cookie;
 #[path = "support/index_with.rs"]
 mod index_with_contract;
 #[path = "spinel_toolchain/index_with.rs"]

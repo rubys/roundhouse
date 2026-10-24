@@ -3773,7 +3773,7 @@ table it prints, and the gaps in it:
 | global_ids, sgids.generate | 4/4, 5/5 | |
 | sgids.verify | 19/24 | |
 | app_verifiers.blob_id / envelope / data | 8/8, 3/3, 7/7 | fixed with this entry: the blob verifier signed with signed-id's envelope |
-| encrypted_cookies.verify / generate | 20/20, 8/8 | `cookies.encrypted`; see "`cookies.encrypted` is Rails' encrypted cookie jar" below |
+| encrypted_cookies.verify / generate | 20/20, 8/8 | `cookies.encrypted` and the session store; see "`cookies.encrypted` is Rails' encrypted cookie jar" and "The session cookie is Rails' CookieStore" below |
 | csrf | 0/208 | not implemented |
 | passwords | 0/45 | not held |
 
@@ -3792,12 +3792,7 @@ path the runtime follows (`SignedGlobalId` unverified read), so a
 mention renders; any other attachable signed by an older install does
 not.
 
-**Not implemented.** The session cookie is SIGNED where Rails'
-`CookieStore` ENCRYPTS it (AES-256-GCM under
-`"authenticated encrypted cookie"`), so a Rails `_campfire_session` is
-not read after a migration — the flash and the CSRF secret start over,
-while the user stays signed in (the `session_token` cookie is signed and
-verifies). CSRF tokens are the session's own, unmasked (see
+**Not implemented.** CSRF tokens are the session's own, unmasked (see
 `runtime/spinel/request_forgery_protection.rb`'s header), so a form
 rendered by Rails does not post to the emit. Passwords: the ruby family
 runs the bcrypt gem; spinel's package is not yet held to these vectors.
@@ -4252,14 +4247,56 @@ pre-5.2 cookie without metadata), CRuby and the spinel binary alike.
   it. Rails records the expiry inside the encrypted envelope, so a
   copied short-lived cookie stops reading server-side. Only
   `.permanent` sets one. The signed jar has the same gap.
-- **The session cookie** is still the signed one (see "Not
-  implemented" in the vectors entry above): `cookies.encrypted[<session
-  key>]` reads nil in an emitted app until the session store writes
-  through this jar.
 - **Link cost (spinel):** AES-GCM comes from spinel's `packages/openssl`,
   which `runtime/spinel/message_digest.rb` requires, so every spinel web
   app now links libssl/libcrypto and a build host needs the OpenSSL
   headers.
+
+### The session cookie is Rails' CookieStore - CLOSED (ours, 2026-10-15)
+
+**Was:** the ruby family SIGNED the session (HMAC-SHA1 under
+"signed cookie") over its own `k=v` encoding and kept each flash message
+in a signed cookie of its own (`flash_notice`, `flash_alert`). Values
+came back as Strings, a session Rails wrote read as empty and Rails
+could not read ours, and an app whose Action Cable connection authorizes
+from `cookies.encrypted[session_options[:key]]` refused every handshake
+(401; the browser reconnects forever) while the same app worked under
+Puma.
+
+**Now (measured against Rails 8.1.4, `load_defaults 8.1`):** the
+session is `cookies.encrypted[<session key>]`'s value (see
+"`cookies.encrypted` is Rails' encrypted cookie jar" above for the
+format): the session as JSON, with the flash inside it as
+`"flash" => {"discard" => [], "flashes" => {...}}`
+(`runtime/spinel/cookie_store.rb`).
+`tests/emit_and_run/encrypted_session_cookie.rs` and its spinel twin
+run a sign-in, the `/cable` handshake and the flash through the emitted
+app, read a cookie Rails minted, and have Rails read the one the app
+wrote (the Rails half skips where the railties and actionpack gems are
+not installed).
+
+**Left as they are, each stated where it lives:**
+
+- **Not read:** `session_store` options other than `key:`
+  (`expire_after`, `domain`, `secure`), as before.
+- **`session_id`:** Rails gives a session its 32-hex `session_id` when
+  the session is first written in a request; here it is added when the
+  cookie is written, so `session[:session_id]` is nil during that first
+  request.
+- **`reset_session`** deletes the cookie; Rails writes one holding only
+  a fresh `session_id`. The app sees an empty session either way.
+- **Writes:** the cookie is written when the session's JSON changed;
+  Rails rewrites it (with a new IV) on every request that loaded the
+  session. A flash the request never read is dropped with the rest of
+  the shown ones, where Rails keeps it for the next request
+  (`Flash#to_persisted`, as before this change); flash keys other than
+  `notice` and `alert` are not read.
+- **The cookie name** defaults to `_session` when the app declares no
+  `session_store`; Rails derives `_<app>_session` from the application
+  name, so such an app's Rails cookie is not found under the default.
+- **Old cookies:** the signed `k=v` session and the `flash_notice` /
+  `flash_alert` cookies this runtime wrote before read as nothing: users
+  of an emitted app sign in once more after the upgrade.
 
 ### Signed cookies interoperate with Rails — CLOSED (ours)
 

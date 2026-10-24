@@ -180,6 +180,10 @@ mod cable_actions;
 mod cable_broadcast_json_contract;
 #[path = "emit_and_run/cable_broadcast_json.rs"]
 mod cable_broadcast_json;
+#[path = "support/encrypted_session_cookie.rs"]
+mod encrypted_session_cookie_contract;
+#[path = "emit_and_run/encrypted_session_cookie.rs"]
+mod encrypted_session_cookie;
 #[path = "support/index_with.rs"]
 mod index_with_contract;
 #[path = "emit_and_run/index_with.rs"]

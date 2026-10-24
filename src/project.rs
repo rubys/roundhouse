@@ -7168,12 +7168,13 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         files.push(("sig/runtime/local_secret.rbs".to_string(), rbs));
     }
 
-    // Signed-cookie sidecar — ActionDispatch::SignedCookie and the
-    // Session reopen in runtime/signed_cookies.rb (ruby family only).
+    // Session-cookie sidecar - ActionDispatch::CookieStore in
+    // runtime/cookie_store.rb, Rails' encrypted session cookie and the
+    // flash inside it (ruby family only).
     {
-        let rbs = crate::runtime_files::read_to_string("runtime/spinel/signed_cookies.rbs")
-            .map_err(|e| format!("read runtime/spinel/signed_cookies.rbs: {e}"))?;
-        files.push(("sig/runtime/signed_cookies.rbs".to_string(), rbs));
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/cookie_store.rbs")
+            .map_err(|e| format!("read runtime/spinel/cookie_store.rbs: {e}"))?;
+        files.push(("sig/runtime/cookie_store.rbs".to_string(), rbs));
     }
 
     // Hash#to_query nesting sidecar — the reopen in

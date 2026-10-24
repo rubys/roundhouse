@@ -293,12 +293,6 @@ module Main
     @route_table ||= [RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table
   end
 
-  # Tep::Server callback. Routes, runs the controller, copies
-  # status/body/location back, and persists per-request flash via
-  # cookies (flash_notice / flash_alert) so a `redirect_to … notice:`
-  # shows once on the redirect target and is then swept — matching the
-  # cookie-backed Rack path in ruby_overlay/main.rb. Session is still a
-  # fresh per-request object (not yet cookie-persisted), same as Rack.
   # How often the job fiber looks for work, in seconds. A cooperative
   # poll rather than a wakeup because there is nothing to wake on: the
   # queue is a plain Array and the enqueue happens on another fiber
@@ -567,9 +561,9 @@ module Main
     ActionController::Current.request = request_obj
     ActionController::Current.controller = controller
     # Cookie-carried session: restore the whole session from the session
-    # cookie (url-encoded k=v pairs; empty when absent or garbled).
-    # Persisted below only when the encoding changed — an action that
-    # leaves the session untouched emits no Set-Cookie.
+    # cookie, Rails' encrypted JSON (runtime/cookie_store.rb; empty when
+    # absent or unreadable). Persisted below only when the session changed
+    # - an action that leaves the session untouched emits no Set-Cookie.
     #
     # The NAME comes from `Rails.application.session_cookie_key`, not a
     # literal: apps declare it via `config.session_store :cookie_store,
@@ -580,14 +574,15 @@ module Main
     # configured one, so a literal here would clear the session on every
     # request.
     session_cookie = Rails.application.session_cookie_key
-    # SIGNED (runtime/signed_cookies.rb): a value that does not
-    # verify restores as an empty session. `session_in` is the restored
-    # session's PLAIN encoding — what the persist step below compares
-    # against, so an untouched session writes no Set-Cookie and a
-    # rejected one is not rewritten until the action changes it.
-    restored = ActionDispatch::Session.from_signed_cookie(
+    # ENCRYPTED: a value that does not decrypt for this cookie name
+    # restores as an empty session. `session_in` is the restored session's
+    # PLAIN JSON - what the persist step below compares against, since the
+    # cookie itself differs on every write (a fresh IV). An untouched
+    # session writes no Set-Cookie, and a rejected one is not rewritten
+    # until the action changes it.
+    restored = ActionDispatch::CookieStore.restore(
       req.cookies.fetch(session_cookie, ""), session_cookie)
-    session_in = restored.to_cookie
+    session_in = ActionDispatch::CookieStore.payload(restored)
     controller.assign_http_session(restored)
     # Controller-level cookie access (`cookies[:k]` reads, `cookies[:k] = v`
     # records writes surfaced as Set-Cookie below). The inbound jar is the
@@ -595,20 +590,12 @@ module Main
     # normalizes keys so Symbol-constant indexing (`cookies[:tag_filters]`)
     # resolves. Same shared ActionController::CookieJar the CRuby overlay uses.
     controller.cookies = ActionController::CookieJar.new(req.cookies)
-    # Inbound flash: each message rides its own SIGNED cookie
-    # (flash_notice / flash_alert; runtime/signed_cookies.rb) — one that
-    # does not verify reads as no message, so a client cannot make the
-    # next page show text of its choosing. Load
-    # through the constructor (NOT flash[:k]=) so to_persisted's show-once
-    # diff sees them as carried-in (value == @notice_was) and sweeps them.
-    # `fetch(name, "")` avoids a missing-key raise; a flash message is
-    # never empty, so non-empty == present.
-    inbound_flash = Tep.str_hash
-    cin = ActionDispatch::SignedCookie.verified(req.cookies.fetch("flash_notice", ""), "flash_notice")
-    inbound_flash["notice"] = cin if cin.length > 0
-    ain = ActionDispatch::SignedCookie.verified(req.cookies.fetch("flash_alert", ""), "flash_alert")
-    inbound_flash["alert"] = ain if ain.length > 0
-    controller.flash = ActionDispatch::Flash.new(inbound_flash)
+    # Inbound flash: the messages the session carries under "flash", as
+    # Rails keeps them (runtime/cookie_store.rb), so a client cannot make
+    # the next page show text of its choosing. Loaded through the
+    # constructor (NOT flash[:k]=) so to_persisted's show-once diff sees
+    # them as carried-in (value == @notice_was) and sweeps them.
+    controller.flash = ActionDispatch::Flash.new(ActionDispatch::CookieStore.inbound_flash(restored))
     controller.request_format = request_format
     controller.accepts_any_format = Main.accepts_any_format?(req.req_headers.fetch("accept", ""))
     # Rails' `Vary: Accept` on a render whose format came from the Accept
@@ -702,24 +689,6 @@ module Main
       i += 1
     end
 
-    # Outbound flash: persist messages set THIS request for the NEXT one.
-    # `to_persisted` returns only notice/alert that differ from the
-    # carried-in value (show-once); clear any inbound cookie that wasn't
-    # re-persisted so a consumed flash doesn't stick on the next nav.
-    persisted = controller.flash.to_persisted
-    pn = persisted.fetch("notice", "")
-    if pn.length > 0
-      Main.set_flash_cookie(res, "flash_notice", ActionDispatch::SignedCookie.sign(pn, "flash_notice"), request_obj.ssl?)
-    elsif req.cookies.fetch("flash_notice", "").length > 0
-      Main.clear_flash_cookie(res, "flash_notice")
-    end
-    pa = persisted.fetch("alert", "")
-    if pa.length > 0
-      Main.set_flash_cookie(res, "flash_alert", ActionDispatch::SignedCookie.sign(pa, "flash_alert"), request_obj.ssl?)
-    elsif req.cookies.fetch("flash_alert", "").length > 0
-      Main.clear_flash_cookie(res, "flash_alert")
-    end
-
     # Outbound cookies: serialize whatever the action recorded via
     # `cookies[:k] = v` / `cookies.permanent[:k] = v` as Set-Cookie. Empty
     # on a read-only request (the common GET path), so this is a no-op there.
@@ -752,21 +721,25 @@ module Main
     # `request.session_options[:skip] = true` (lobsters'
     # `clear_session_cookie`) leaves the cookie alone, as Rails'
     # session middleware skips its commit.
-    session_out = controller.session.to_cookie
+    #
+    # The flash goes into the session first, as Rails' `commit_flash`
+    # puts it there: the messages set this request, for the next one.
+    ActionDispatch::CookieStore.commit_flash(controller.session, controller.flash)
+    session_out = ActionDispatch::CookieStore.payload(controller.session)
     if session_out != session_in && !request_obj.session_skip?
-      if session_out == ""
-        Main.clear_flash_cookie(res, session_cookie)
+      if controller.session.to_hash.empty?
+        Main.clear_session_cookie(res, session_cookie)
       else
-        Main.set_flash_cookie(res, session_cookie,
-          ActionDispatch::Session.signed_cookie(session_out, session_cookie), request_obj.ssl?)
+        Main.set_session_cookie(res, session_cookie,
+          ActionDispatch::CookieStore.cookie_value(controller.session, session_cookie), request_obj.ssl?)
       end
     end
   end
 
-  # Flash cookies are HttpOnly + Path=/; the read side is server-only
-  # (no JS access). A set carries the message to the next request; a
-  # clear (empty value + Max-Age=0) expires a consumed one.
-  def self.set_flash_cookie(res, name, value, secure)
+  # The session cookie is HttpOnly + Path=/ + SameSite=Lax, as Rails'
+  # store writes it; the read side is server-only (no JS access). A clear
+  # (empty value + Max-Age=0) expires an emptied session.
+  def self.set_session_cookie(res, name, value, secure)
     opts = Tep.str_hash
     opts["Path"] = "/"
     opts["HttpOnly"] = +""
@@ -775,7 +748,7 @@ module Main
     res.set_cookie(name, value, opts)
   end
 
-  def self.clear_flash_cookie(res, name)
+  def self.clear_session_cookie(res, name)
     opts = Tep.str_hash
     opts["Path"] = "/"
     opts["Max-Age"] = "0"

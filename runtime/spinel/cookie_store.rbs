@@ -1,0 +1,11 @@
+# Typing for runtime/spinel/cookie_store.rb.
+module ActionDispatch
+  module CookieStore
+    def self.restore: (String raw, String name) -> Session
+    def self.payload: (Session session) -> String
+    def self.cookie_value: (Session session, String name) -> String
+    def self.generate_sid: () -> String
+    def self.inbound_flash: (Session session) -> Hash[String, String]
+    def self.commit_flash: (Session session, Flash flash) -> Session
+  end
+end
