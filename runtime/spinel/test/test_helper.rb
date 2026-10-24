@@ -1439,8 +1439,97 @@ module RequestDispatch
 end
 
 module ActionDispatch
+  module Assertions
+    # Rails' `ActionDispatch::Assertions::RoutingAssertions`, the half
+    # that recognizes a path. `assert_generates` and `assert_routing`
+    # (which also generates the path from the options) are not here.
+    module RoutingAssertions
+      # `assert_recognizes(expected_options, path, extras = {}, message = nil)`.
+      # `path` is a String (a GET) or `{ method: verb, path: path }`;
+      # `method: :all` checks GET, POST, PUT and DELETE in turn. What
+      # the router recognizes is the route's `controller` and `action`
+      # (`controller` the Rails path of a namespaced one,
+      # "admin/posts"), its dynamic segments and `format` when the path
+      # has one, with `extras` merged over them; every key a String,
+      # as Rails' `path_parameters`. It must equal `expected_options`
+      # with its keys stringified and its values as given.
+      def assert_recognizes(expected_options, path, extras = {}, message = nil)
+        verb = "GET"
+        request_path = ""
+        if path.is_a?(Hash)
+          verb = path[:method].to_s.upcase
+          request_path = path[:path].to_s
+        else
+          request_path = path.to_s
+        end
+        if verb == "ALL"
+          ["GET", "POST", "PUT", "DELETE"].each do |each_verb|
+            assert_recognizes(expected_options, { method: each_verb, path: request_path }, extras, message)
+          end
+          return
+        end
+        recognized = recognized_path_parameters(verb, request_path)
+        extras.each { |key, value| recognized[key.to_s] = value }
+        expected = {}
+        expected_options.each { |key, value| expected[key.to_s] = value }
+        return if expected == recognized
+        raise(message || "The recognized options <#{recognized.inspect}> did not match <#{expected.inspect}>")
+      end
+
+      # Rails' `recognize_path` (`ActionDispatch::Routing::RouteSet`)
+      # over the app's route table, keyed by String, in the steps of
+      # the ruby overlay's `Rails.application.routes.recognize_path`:
+      # the whole string normalized unless it is a full URL (one
+      # leading slash, no doubled slash, no trailing slash, uppercase
+      # percent-encoded octets), then the query, the fragment and a
+      # URL's scheme and host cut off. What is left must match a route
+      # as it is, so a slash before the query (`/articles/1/?x=1`)
+      # matches none, as in Rails. Redirect routes are skipped, as
+      # Rails skips them.
+      def recognized_path_parameters(verb, path)
+        require_relative "../config/routes"
+        request_path = path
+        unless request_path.include?("://")
+          request_path = ("/" + request_path).squeeze("/")
+          request_path = request_path.delete_suffix("/") unless request_path == "/"
+          request_path = request_path.gsub(/%[a-f0-9]{2}/) { |octet| octet.upcase }
+        end
+        scheme = request_path.partition("://")[0]
+        # As in `URI.parse`: what comes before "://" is a scheme only
+        # when it holds no "/", "?" or "#"; otherwise the "://" is in
+        # the query or the fragment, and there is no host to cut off.
+        if request_path.include?("://") && !scheme.empty? && !scheme.include?("/") && !scheme.include?("?") && !scheme.include?("#")
+          # The authority ends at the first "/", "?" or "#": a slash in
+          # the query or the fragment is not the path's.
+          rest = request_path.partition("://")[2].partition("?")[0].partition("#")[0]
+          slash = rest.index("/")
+          request_path = slash.nil? ? "/" : rest[slash..]
+        end
+        request_path = request_path.partition("?")[0].partition("#")[0]
+        request_path = "/" + request_path unless request_path.start_with?("/")
+        table = ([RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table).reject { |route| route.controller == :roundhouse_redirects }
+        matched = ActionDispatch::Router.match(verb, request_path, table)
+        matched = nil if request_path != "/" && request_path.end_with?("/")
+        raise "No route matches #{path.inspect}" if matched.nil?
+        controller = RouteTable::CONTROLLER_PATHS[matched.controller] || ActiveStorage::Routes::CONTROLLER_PATHS[matched.controller] || matched.controller.to_s
+        recognized = { "controller" => controller, "action" => matched.action.to_s }
+        format = ""
+        matched.path_params.each do |name, value|
+          if name == "format"
+            format = value
+          else
+            recognized[name] = value
+          end
+        end
+        recognized["format"] = format unless format.empty?
+        recognized
+      end
+    end
+  end
+
   class IntegrationTest < TestBase
     include RequestDispatch
+    include Assertions::RoutingAssertions
   end
 
   # `ActionDispatch::Integration::Session.new(Rails.application)` — a

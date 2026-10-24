@@ -237,6 +237,13 @@ end
 # inherit from this. Pure mixin of RequestDispatch; no methods of its
 # own here.
 module ActionDispatch
+  module Assertions
+    module RoutingAssertions
+      def assert_recognizes: (Hash[Symbol, untyped] expected_options, String | Hash[Symbol, untyped] path, ?Hash[untyped, untyped] extras, ?String? message) -> void
+      def recognized_path_parameters: (String verb, String path) -> Hash[String, untyped]
+    end
+  end
+
   class IntegrationTest < TestBase
   end
 

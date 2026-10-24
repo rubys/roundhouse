@@ -5820,9 +5820,8 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
             writeln!(arms, "    when :{sym} then {class}.new").unwrap();
         }
     }
-    if lazy_requires {
-        apply_controller_paths(files, &flat);
-    }
+    // Both trees: the test helper's `assert_recognizes` reads it too.
+    apply_controller_paths(files, &flat);
     if arms.is_empty() {
         return;
     }
@@ -5898,10 +5897,10 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     }
 }
 
-/// Add `RouteTable::CONTROLLER_PATHS` to the routes.rb of a lazy tree.
-/// It maps the router symbol of a namespaced controller to the Rails
-/// controller path (`admin_posts: "admin/posts"`). The ruby overlay's
-/// `recognize_path` reads it. A top-level controller has no row, and
+/// Add `RouteTable::CONTROLLER_PATHS` to routes.rb. It maps the router
+/// symbol of a namespaced controller to the Rails controller path
+/// (`admin_posts: "admin/posts"`). The ruby overlay's `recognize_path`
+/// and the test helper's `assert_recognizes` read it. A top-level controller has no row, and
 /// `recognize_path` gives its router symbol. The path comes from the
 /// class name, so it differs from Rails for an acronym inflection
 /// (`admin/apikeys`, not `admin/api_keys`) or a digit after an
