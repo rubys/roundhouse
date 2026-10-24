@@ -138,6 +138,12 @@ pub struct App {
     /// which answers `defined?(ActiveStorage)` from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loaded_frameworks: Option<Vec<String>>,
+    /// `config/database.yml`'s main database file per environment, as
+    /// `(environment, path)`: the flat `database:`, or the first entry of
+    /// a multi-database environment (Rails' primary). Environments whose
+    /// path is computed (ERB) are left out ([`crate::ingest::app`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub database_paths: Vec<(String, String)>,
     /// The environments whose `config/environments/<env>.rb` sets
     /// `config.assume_ssl = true` (TLS ends at a proxy in front of the app).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1051,6 +1057,7 @@ impl App {
             rbs_includes: HashMap::new(),
             gem_lock: None,
             loaded_frameworks: None,
+            database_paths: Vec::new(),
             assume_ssl_envs: Vec::new(),
             gem_boundary: Default::default(),
             extensions: Default::default(),

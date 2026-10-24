@@ -387,6 +387,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         }
     }
 
+    let database_yml = dir.join("config/database.yml");
+    if let Ok(text) = vfs.read_to_string(&database_yml) {
+        app.database_paths = database_paths(&text);
+    }
     if let Ok(entries) = vfs.read_dir(&dir.join("config/environments")) {
         let mut envs: Vec<String> = entries
             .iter()
@@ -11718,6 +11722,110 @@ fn locale_literal(value: &str) -> Option<String> {
         _ => return None,
     };
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The main database file per environment from `config/database.yml`,
+/// read as Rails reads it: an environment's own `database:`, or, for a
+/// multi-database environment, the configuration named `primary`, else the
+/// first one, after YAML merge keys (`<<: *default`) apply. ERB tags are
+/// replaced before parsing so `max_connections: <%= ... %>` lines do not
+/// stop the file from loading, and a line holding
+/// only a control or comment tag (`<% if ... %>`, `<% end %>`) is blanked,
+/// since a bare placeholder line would make the YAML invalid; a
+/// `database:` whose value was ERB is computed at boot in Rails, so that
+/// environment is left out and keeps the runtime's default.
+pub(crate) fn database_paths(text: &str) -> Vec<(String, String)> {
+    use serde_yaml_ng::Value;
+    const ERB_PLACEHOLDER: &str = "__roundhouse_erb__";
+    let text = text
+        .lines()
+        .map(|line| {
+            let t = line.trim();
+            let tag_only = t.starts_with("<%") && !t.starts_with("<%=") && t.ends_with("%>");
+            if tag_only { "" } else { line }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut plain = String::new();
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find("<%") {
+        plain.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find("%>") else { break };
+        plain.push_str(ERB_PLACEHOLDER);
+        rest = &rest[start + end + 2..];
+    }
+    plain.push_str(rest);
+    // Merge keys (`<<: *default`) resolve first, as Psych does when Rails loads the file.
+    let Ok(mut value) = serde_yaml_ng::from_str::<Value>(&plain) else { return Vec::new() };
+    if value.apply_merge().is_err() {
+        return Vec::new();
+    }
+    let Value::Mapping(root) = value else { return Vec::new() };
+    let database = |m: &serde_yaml_ng::Mapping| -> Option<String> {
+        match m.get(Value::from("database")) {
+            Some(Value::String(s)) if !s.contains(ERB_PLACEHOLDER) => Some(s.clone()),
+            _ => None,
+        }
+    };
+    let mut out = Vec::new();
+    for (env, config) in &root {
+        let (Value::String(env), Value::Mapping(config)) = (env, config) else { continue };
+        if config.contains_key(Value::from("database")) {
+            if let Some(path) = database(config) {
+                out.push((env.clone(), path));
+            }
+            continue;
+        }
+        // Multi-database: the configuration named `primary` is the
+        // default, else the first one (Rails' `primary?`).
+        let primary = match config.get(Value::from("primary")) {
+            Some(Value::Mapping(m)) => Some(m),
+            _ => config.iter().find_map(|(_, v)| match v {
+                Value::Mapping(m) => Some(m),
+                _ => None,
+            }),
+        };
+        if let Some(path) = primary.and_then(database) {
+            out.push((env.clone(), path));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod database_paths_tests {
+    use super::database_paths;
+
+    fn paths(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(e, p)| (e.to_string(), p.to_string())).collect()
+    }
+
+    #[test]
+    fn a_control_tag_on_its_own_line_leaves_the_rest_of_the_file_readable() {
+        let yml = "development:\n  database: storage/dev.sqlite3\n<% if ENV[\"CI\"] %>\ntest:\n  database: storage/ci.sqlite3\n<% end %>\n<%# a comment %>\n";
+        assert_eq!(
+            database_paths(yml),
+            paths(&[("development", "storage/dev.sqlite3"), ("test", "storage/ci.sqlite3")])
+        );
+    }
+
+    #[test]
+    fn a_database_inherited_through_a_merge_key_is_read() {
+        let yml = "default: &default\n  adapter: sqlite3\n  database: storage/shared.sqlite3\nproduction:\n  primary:\n    <<: *default\n  cache:\n    <<: *default\n    database: storage/cache.sqlite3\ntest:\n  <<: *default\n  database: storage/test.sqlite3\n";
+        assert_eq!(
+            database_paths(yml),
+            paths(&[("default", "storage/shared.sqlite3"), ("production", "storage/shared.sqlite3"), ("test", "storage/test.sqlite3")])
+        );
+    }
+
+    #[test]
+    fn a_multi_database_environment_takes_the_one_named_primary() {
+        let yml = "production:\n  cache:\n    database: storage/cache.sqlite3\n  primary:\n    database: storage/production.sqlite3\nstaging:\n  queue:\n    database: storage/queue.sqlite3\n  other:\n    database: storage/other.sqlite3\n";
+        assert_eq!(
+            database_paths(yml),
+            paths(&[("production", "storage/production.sqlite3"), ("staging", "storage/queue.sqlite3")])
+        );
+    }
 }
 
 /// `config.assume_ssl = true` on an uncommented line of an environment

@@ -230,7 +230,7 @@ if [[ "$LANE" == spinel ]]; then
     EMIT_PID=$!
 else
     step "booting the emit on :$EMIT_PORT"
-    ( cd "$OUT" && RAILS_ENV=development SECRET_KEY_BASE="$(ruby -e 'print "a" * 64')" \
+    ( cd "$OUT" && RAILS_ENV=development BLOG_DB="$OUT/storage/development.sqlite3" SECRET_KEY_BASE="$(ruby -e 'print "a" * 64')" \
         exec ruby -S puma -p "$EMIT_PORT" config.ru ) > "$DUMPS/emit-server.log" 2>&1 &
     EMIT_PID=$!
 fi
