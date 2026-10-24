@@ -2438,7 +2438,8 @@ fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) 
 ///      the automatic inverse, and a singleton method or unsaved change
 ///      on the owner is what the record must see);
 ///   2. `_autosave_<name>` saves an unsaved one and takes the id,
-///      folded into `before_validation`;
+///      folded into `_autosave_belongs_to`, which `save` calls before
+///      `valid?` so that a direct `valid?` writes nothing, as in Rails;
 ///   3. the constructor's `attrs[:<name>]` goes through that writer,
 ///      as Rails routes every attrs key through its writer, instead of
 ///      the shared lowering's bare foreign-key copy.
@@ -2487,10 +2488,12 @@ fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) 
 /// strict targets keep the gap they already had, ledgered in
 /// docs/pipeline/runtime.md.
 ///
-/// Ordering inside `before_validation` is load-bearing: the autosave
-/// call is pushed BEFORE the belongs_to `default:` statement, which is
-/// guarded on `@creator_id == 0`. Fill the key first or an explicitly
-/// assigned unsaved creator is overwritten by the default.
+/// The belongs_to `default:` statement in `before_validation` is
+/// guarded on `@creator_id == 0`, which an explicitly assigned unsaved
+/// creator also has. `save` calls `_autosave_belongs_to` ahead of
+/// `valid?`, so the key is filled first; a direct `valid?` has no
+/// autosave, so the guard also asks the reader
+/// (`guard_default_on_reader`).
 pub(crate) fn apply_belongs_to_autosave(lcs: &mut [LibraryClass], app: &App) {
     use crate::dialect::Association;
 
@@ -2532,10 +2535,79 @@ pub(crate) fn apply_belongs_to_autosave(lcs: &mut [LibraryClass], app: &App) {
                 ExprNode::Seq { exprs: vec![assign, stash_target(&name, span)] },
             );
             lc.methods.push(autosave_method(&lc.name, &name, &fk));
-            fold_before_validation(&mut lc.methods, &lc.name, &name);
+            fold_autosave_call_into_hook(&mut lc.methods, &lc.name, &name);
+            guard_default_on_reader(&mut lc.methods, &name, &fk);
             route_init_through_writer(lc, &name, &fk);
         }
     }
+}
+
+/// The shared `default:` statement in `before_validation`,
+/// `self.<name> = <default> if @fk.nil? || @fk == 0`, also requires
+/// `<name>.nil?`, as Rails' `association.default` checks the reader.
+/// An unsaved target assigned through the writer has a zero key until
+/// `save` autosaves it, and a direct `valid?` runs `before_validation`
+/// without that autosave. The key test stays first, so the reader
+/// answers from the stash and never queries.
+fn guard_default_on_reader(methods: &mut [MethodDef], name: &Symbol, fk: &Symbol) {
+    let Some(hook) = methods
+        .iter_mut()
+        .find(|m| m.name.as_str() == "before_validation" && m.receiver == MethodReceiver::Instance)
+    else {
+        return;
+    };
+    let writer = format!("{}=", name.as_str());
+    let guard = |stmt: &mut Expr| {
+        let ExprNode::If { cond, then_branch, .. } = &mut *stmt.node else { return };
+        let assigns = matches!(&*then_branch.node, ExprNode::Send { recv: Some(r), method, .. }
+            if matches!(&*r.node, ExprNode::SelfRef) && method.as_str() == writer);
+        // The default's statement only: a model's own block
+        // before_validation can assign the association under its own
+        // condition, and that keeps its meaning.
+        if !assigns || !is_default_key_test(cond, fk) {
+            return;
+        }
+        let span = cond.span;
+        let syn = |n| Expr::new(span, n);
+        let reader_nil = syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::Send {
+                recv: None,
+                method: name.clone(),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            })),
+            method: Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        });
+        *cond = syn(ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::And,
+            surface: crate::expr::BoolOpSurface::default(),
+            left: cond.clone(),
+            right: reader_nil,
+        });
+    };
+    match &mut *hook.body.node {
+        ExprNode::Seq { exprs } => exprs.iter_mut().for_each(guard),
+        _ => guard(&mut hook.body),
+    }
+}
+
+/// `@<fk>.nil? || @<fk> == 0`, the test `push_belongs_to_defaults`
+/// (lower::model_to_library::markers) guards a `default:` with.
+fn is_default_key_test(cond: &Expr, fk: &Symbol) -> bool {
+    let is_fk = |e: &Expr| matches!(&*e.node, ExprNode::Ivar { name } if name == fk);
+    let ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, right, .. } = &*cond.node else {
+        return false;
+    };
+    let nil_test = matches!(&*left.node, ExprNode::Send { recv: Some(r), method, args, .. }
+        if method.as_str() == "nil?" && args.is_empty() && is_fk(r));
+    let zero_test = matches!(&*right.node, ExprNode::Send { recv: Some(r), method, args, .. }
+        if method.as_str() == "==" && is_fk(r)
+            && matches!(args.as_slice(), [a] if matches!(&*a.node, ExprNode::Lit { value: Literal::Int { value: 0 } })));
+    nil_test && zero_test
 }
 
 /// `@<name>_cache = value; @<name>_loaded = true`
@@ -2710,9 +2782,9 @@ fn autosave_method(
     }
 }
 
-/// PREPEND, not append: see the ordering note on
-/// [`apply_belongs_to_autosave`].
-fn fold_before_validation(
+/// Prepended, as when this folded into `before_validation`, so the
+/// order the targets are saved in is unchanged.
+fn fold_autosave_call_into_hook(
     methods: &mut Vec<crate::dialect::MethodDef>,
     owner: &ClassId,
     name: &Symbol,
@@ -2728,7 +2800,7 @@ fn fold_before_validation(
             parenthesized: false,
         },
     );
-    let hook = Symbol::from("before_validation");
+    let hook = Symbol::from("_autosave_belongs_to");
     if let Some(existing) =
         methods.iter_mut().find(|m| m.name == hook && m.receiver == MethodReceiver::Instance)
     {

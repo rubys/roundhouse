@@ -43,6 +43,8 @@ check("save bc", run { a = Article.new(title: "x", body: body); a.stop_at = :bc;
 check("after_save as", run { a = Article.new(title: "x", body: body); a.stop_at = :as; a.save }, ["UncaughtThrowError: uncaught throw :abort", ["bv", "bs", "bc", "as"]])
 check("nothing inserted", Article.count, base)
 check("invalid runs after_validation", run { a = Article.new(title: "", body: body); a.stop_at = :invalid; a.save }, [false, ["bv", "av"]])
+check("valid? bv", run { a = Article.new(title: "x", body: body); a.stop_at = :bv; [a.valid?, a.errors.to_a] }, [[false, []], ["bv"]])
+check("valid? invalid runs after_validation", run { a = Article.new(title: "", body: body); a.stop_at = :invalid; a.valid? }, [false, ["bv", "av"]])
 check("bv halt clears earlier errors", run { a = Article.new(title: "", body: body); a.save; a.stop_at = :bv; a.save! }, ["ActiveRecord::RecordInvalid: Validation failed: ", ["bv", "bv"]])
 a = Article.create!(title: "u", body: body)
 check("update bu", run { a.stop_at = :bu; a.title = "v"; a.save }, [false, ["bv", "bs", "bu"]])

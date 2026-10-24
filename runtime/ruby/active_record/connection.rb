@@ -1544,18 +1544,27 @@ module ActiveRecord
       status = false
       @_save_halted = false
       self.class.transaction do
-        # Not left to valid?: a before_validation halt skips it, and Rails clears the errors ahead of that hook.
-        @errors = []
-        @error_details = []
-        ok = false
-        unless _halted_by_abort { before_validation }
-          ok = valid?
-          after_validation
-        end
+        # Ahead of valid?, as base.rb's save explains.
+        _autosave_belongs_to
+        ok = valid?
         status = ok ? save_after_validation : false
         raise ActiveRecord::Rollback unless status
       end
       status
+    end
+
+    # base.rb's body with before_validation able to halt it, as Rails'
+    # can: the validations and after_validation are skipped and the
+    # record is invalid with no errors. Rails clears the errors ahead
+    # of that hook, so a halt also drops the previous run's.
+    def valid?
+      @errors = []
+      @error_details = []
+      return false if _halted_by_abort { before_validation }
+      validate
+      ok = @errors.empty?
+      after_validation
+      ok
     end
 
     def save!

@@ -897,9 +897,11 @@ module ActiveRecord
     # ---- Instance lifecycle ------------------------------------------
 
     def save
-      before_validation
+      # Here and not in before_validation, which valid? runs: a
+      # direct valid? would write an unsaved belongs_to target, and
+      # Rails' does not (it autosaves in before_save).
+      _autosave_belongs_to
       ok = valid?
-      after_validation
       return false unless ok
 
       save_after_validation
@@ -1288,6 +1290,9 @@ module ActiveRecord
     def after_initialize;  end
     def before_validation; end
     def after_validation;  end
+    # Saves each unsaved belongs_to target and takes its id into the
+    # foreign key. The ruby family fills it (`apply_belongs_to_autosave`).
+    def _autosave_belongs_to; end
     def before_save;       end
     def after_save;        end
     def before_create;     end
@@ -1346,11 +1351,21 @@ module ActiveRecord
       self[:created_at] = now if creating && cols.include?(:created_at)
     end
 
+    # Rails runs the validation callbacks inside `valid?`
+    # (`run_validations!` wraps the validation chain), so a direct
+    # `valid?` runs them too, not only `save`. The answer is taken
+    # before `after_validation`, as Rails' is: an error that callback
+    # adds is on the record but does not change what `valid?` returns.
+    # The ruby family restates this in connection.rb so that a
+    # before_validation `throw :abort` halts it.
     def valid?
       @errors = []
       @error_details = []
+      before_validation
       validate
-      @errors.empty?
+      ok = @errors.empty?
+      after_validation
+      ok
     end
 
     # ---- Equality ---------------------------------------------------

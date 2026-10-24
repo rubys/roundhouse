@@ -196,6 +196,7 @@ module ActiveRecord
     def self.take: () -> Base?
     def self._hydrate_all: (String sql) -> Array[Base]
     def save: () -> bool
+    def valid?: () -> bool
     def save!: () -> Base
     def destroy: () -> (Base | false)
     def destroy!: () -> Base

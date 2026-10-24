@@ -307,6 +307,7 @@ module ActiveRecord
     def after_initialize: () -> void
     def before_validation: () -> void
     def after_validation: () -> void
+    def _autosave_belongs_to: () -> void
     def before_save: () -> void
     def after_save: () -> void
     def before_create: () -> void
