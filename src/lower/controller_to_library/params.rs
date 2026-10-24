@@ -100,6 +100,10 @@ pub struct ParamsSpec {
     /// Rails' `Parameters#as_json`: the permitted values, String-keyed
     /// (the class's `to_h`). Demand-gated like `wants_to_attrs`.
     pub wants_as_json: bool,
+    /// Proven membership calls that require scalar presence and value lookup.
+    pub lookup_methods: std::collections::BTreeSet<Symbol>,
+    /// Filters and writes need a shared mutable value representation first.
+    pub lookup_blocked: bool,
     /// Controllers whose bodies declared this exact permit list, in
     /// source order. Two controllers permitting the same fields share
     /// one class (campfire's `FirstRunsController` and `UsersController`
@@ -198,6 +202,12 @@ impl ParamsSpecs {
     }
 }
 
+impl ParamsSpec {
+    fn scalar_lookup(&self) -> bool {
+        !self.lookup_methods.is_empty() && !self.lookup_blocked && self.file_fields.is_empty()
+    }
+}
+
 /// The type a permitted field carries on the synthesized class: a
 /// String — the request's own shape — or, for a `has_one_attached`
 /// field, the uploaded file a multipart part became (nil when the
@@ -280,7 +290,65 @@ pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
     assign_class_ids(&mut specs);
     let mut specs = ParamsSpecs { specs, ..Default::default() };
     scan_create_demand(controllers, &mut specs);
+    scan_lookup_demand(controllers, &mut specs);
     specs
+}
+
+fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
+    let mut calls = Vec::new();
+    let mut blocked = Vec::new();
+    for controller in controllers {
+        let actions: Vec<_> = controller.actions().cloned().collect();
+        let helpers: BTreeMap<Symbol, ClassId> = helper_spec_map(&actions, specs).into_iter()
+            .map(|(name, spec)| (name, spec.class_id.clone())).collect();
+        for action in actions {
+            let sources = super::params_sources::ParamsSources::new(
+                &action.body, helpers.clone(), specs,
+            );
+            walk_all(&action.body, &mut |expr| {
+                if let ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } = &*expr.node {
+                    let recv = match target {
+                        LValue::Attr { recv, .. } | LValue::Index { recv, .. } => Some(recv),
+                        _ => None,
+                    };
+                    if let Some(class) = recv.and_then(|recv| sources.class(recv, specs)) {
+                        blocked.push(class);
+                    }
+                }
+                let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*expr.node else {
+                    return;
+                };
+                let class = sources.class(recv, specs).or_else(|| {
+                    match_reverse_merge(expr).or_else(|| match_permit_call_full(expr))
+                        .and_then(|(resource, fields, _)| {
+                        specs.find(&resource, &fields).map(|spec| spec.class_id.clone())
+                    })
+                });
+                let Some(class) = class else { return };
+                if matches!(method.as_str(), "key?" | "include?")
+                    && args.len() == 1 && block.is_none()
+                {
+                    calls.push((class, method.clone()));
+                } else if matches!(method.as_str(), "compact" | "except" | "merge" | "merge!"
+                    | "reverse_merge" | "reverse_merge!" | "delete" | "[]=")
+                    || (method.as_str().ends_with('=')
+                        && !matches!(method.as_str(), "==" | "===" | "!=" | "<=" | ">="))
+                {
+                    blocked.push(class);
+                }
+            });
+        }
+    }
+    for (class, method) in calls {
+        if let Some(spec) = specs.specs.iter_mut().find(|spec| spec.class_id == class) {
+            spec.lookup_methods.insert(method);
+        }
+    }
+    for class in blocked {
+        if let Some(spec) = specs.specs.iter_mut().find(|spec| spec.class_id == class) {
+            spec.lookup_blocked = true;
+        }
+    }
 }
 
 /// Second phase: which specs a `<Model>.create(<helper>)` call site
@@ -411,6 +479,8 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 wants_create_bang: false,
                 wants_to_attrs: false,
                 wants_as_json: false,
+                lookup_methods: Default::default(),
+                lookup_blocked: false,
                 declaring: Vec::new(),
                 is_canonical: true,
                 file_fields: std::collections::BTreeSet::new(),
@@ -461,6 +531,8 @@ fn record(
                 wants_create_bang: false,
                 wants_to_attrs: false,
                 wants_as_json: false,
+                lookup_methods: Default::default(),
+                lookup_blocked: false,
                 declaring: vec![controller.clone()],
                 is_canonical: false,
                 file_fields: std::collections::BTreeSet::new(),
@@ -1283,7 +1355,37 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
         methods.push(synth_attr_writer(&spec.class_id, &flag, Ty::Bool));
     }
     methods.push(synth_from_raw(spec));
-    methods.push(synth_index_read(spec));
+    if spec.scalar_lookup() {
+        methods.extend(synth_lookup_helpers(&spec.class_id));
+        let values = Symbol::from("__rh_permitted_values");
+        methods.push(synth_attr_reader(&spec.class_id, &values, params_hash_ty()));
+        methods.push(synth_attr_writer(&spec.class_id, &values, params_hash_ty()));
+        methods.push(synth_scalar_lookup(spec, "[]"));
+        for method in ["key?", "include?"] {
+            if spec.lookup_methods.contains(&Symbol::from(method)) {
+                methods.push(synth_scalar_lookup(spec, method));
+            }
+        }
+    } else {
+        methods.push(synth_index_read(spec));
+        if !spec.lookup_methods.is_empty() {
+            use crate::diagnostic::{Diagnostic, DiagnosticKind};
+            let kind = DiagnosticKind::LowerResidue {
+                pass: Symbol::from("params_scalar_lookup"),
+                construct: Symbol::from("lookup"),
+                reason: Symbol::from("mutable or file-bearing params"),
+            };
+            crate::emit::diagnostics::push(Diagnostic {
+                span: spec.span,
+                severity: Diagnostic::default_severity(&kind),
+                kind,
+                message: format!(
+                    "scalar lookup on {} is unsupported with params filters, writes, or uploaded-file fields",
+                    spec.class_id.0,
+                ),
+            });
+        }
+    }
     methods.push(synth_to_h(spec));
     if spec.wants_as_json {
         methods.push(synth_as_json(&spec.class_id));
@@ -1332,6 +1434,12 @@ fn synth_params_initialize(spec: &ParamsSpec) -> MethodDef {
     let owner = &spec.class_id;
     let fields = &spec.fields;
     let mut stmts: Vec<Expr> = Vec::new();
+    if spec.scalar_lookup() {
+        stmts.push(expr(ExprNode::Assign {
+            target: LValue::Ivar { name: Symbol::from("__rh_permitted_values") },
+            value: expr(ExprNode::Hash { entries: vec![], kwargs: false }, Some(params_hash_ty())),
+        }, Some(params_hash_ty())));
+    }
     {
         for field in fields {
             stmts.push(Expr::new(
@@ -1685,6 +1793,26 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
         },
     ));
 
+    if spec.scalar_lookup() {
+        let names = fields.iter().map(|field| str_lit(field.as_str())).collect();
+        let values = with_ty(Expr::new(Span::synthetic(), ExprNode::Send {
+            recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![owner.0.clone()] })),
+            method: Symbol::from("__rh_scalar_values"),
+            args: vec![
+                var(&sub, hash_ty.clone()),
+                with_ty(Expr::new(Span::synthetic(), ExprNode::Array { elements: names, style: Default::default() }),
+                    Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+            ], block: None, parenthesized: true,
+        }), params_hash_ty());
+        stmts.push(Expr::new(Span::synthetic(), ExprNode::Assign {
+            target: LValue::Attr {
+                recv: var(&instance, owner_ty.clone()),
+                name: Symbol::from("__rh_permitted_values"),
+            },
+            value: values,
+        }));
+    }
+
     for field in fields {
         let setter = |name: Symbol, value: Expr| Expr::new(
             Span::synthetic(),
@@ -1830,6 +1958,82 @@ pub(super) fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         is_async: false,
         mutates_self: false,
         block_param: None,
+    }
+}
+
+fn param_value_ty() -> Ty {
+    Ty::Class { id: ClassId(Symbol::from("Roundhouse::ParamValue")), args: vec![].into() }
+}
+
+fn synth_lookup_helpers(owner: &ClassId) -> Vec<MethodDef> {
+    let source = r#"class GeneratedParams
+  def self.__rh_scalar_values(sub, fields)
+    filtered = {}
+    i = 0
+    while i < fields.length
+      field = fields[i]
+      if sub.key?(field)
+        value = sub.fetch(field, nil)
+        unless value.is_a?(Hash) || value.is_a?(Array)
+          filtered[field] = value
+        end
+      end
+      i = i + 1
+    end
+    filtered
+  end
+
+  def self.__rh_param_value(values, key)
+    values.fetch(key, nil)
+  end
+end
+"#;
+    let signatures = r#"class GeneratedParams
+  def self.__rh_scalar_values: (Hash[String, Roundhouse::ParamValue], Array[String]) -> Hash[String, Roundhouse::ParamValue]
+  def self.__rh_param_value: (Hash[String, Roundhouse::ParamValue], String) -> Roundhouse::ParamValue
+end
+"#;
+    crate::runtime_src::parse_library_with_rbs(source.as_bytes(), signatures, "<params_lookup>")
+        .expect("typed params lookup template")
+        .into_iter().flat_map(|class| class.methods)
+        .map(|mut method| {
+            method.enclosing_class = Some(owner.0.clone());
+            method
+        }).collect()
+}
+
+fn params_hash_ty() -> Ty {
+    Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(param_value_ty()) }
+}
+
+fn synth_scalar_lookup(spec: &ParamsSpec, method: &str) -> MethodDef {
+    let key = Symbol::from("key");
+    let key_ty = Ty::Union { variants: vec![Ty::Str, Ty::Sym].into() };
+    let key_string = expr(ExprNode::Send {
+        recv: Some(expr(ExprNode::Var { id: VarId(0), name: key.clone() }, Some(key_ty.clone()))),
+        method: Symbol::from("to_s"), args: vec![], block: None, parenthesized: false,
+    }, Some(Ty::Str));
+    let values = expr(ExprNode::Ivar { name: Symbol::from("__rh_permitted_values") }, Some(params_hash_ty()));
+    let ret = if method == "[]" { param_value_ty() } else { Ty::Bool };
+    let body = if method == "[]" {
+        expr(ExprNode::Send {
+            recv: Some(expr(ExprNode::Const { path: vec![spec.class_id.0.clone()] }, None)),
+            method: Symbol::from("__rh_param_value"), args: vec![values, key_string], block: None, parenthesized: true,
+        }, Some(ret.clone()))
+    } else {
+        expr(ExprNode::Send {
+            recv: Some(values), method: Symbol::from("key?"), args: vec![key_string],
+            block: None, parenthesized: true,
+        }, Some(ret.clone()))
+    };
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None, has_anonymous_block: false,
+        name_span: Span::synthetic(), name: Symbol::from(method),
+        receiver: MethodReceiver::Instance, params: vec![Param::positional(key.clone())],
+        body, signature: Some(fn_sig(vec![(key, key_ty)], ret)),
+        effects: EffectSet::default(), enclosing_class: Some(spec.class_id.0.clone()),
+        kind: AccessorKind::Method, is_async: false, mutates_self: false, block_param: None,
     }
 }
 
@@ -2459,6 +2663,9 @@ pub(crate) fn permitted_field_tys(
         std::collections::HashMap<String, Ty>,
     > = std::collections::HashMap::new();
     for spec in specs.iter() {
+        if spec.scalar_lookup() {
+            continue;
+        }
         let mut set = std::collections::HashMap::new();
         for f in &spec.fields {
             set.insert(f.as_str().to_string(), field_ty(spec, f));
