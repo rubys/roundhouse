@@ -1455,12 +1455,14 @@ fn struct_class(
     }
 }
 
-/// `Result = Struct.new(:a, :b, keyword_init: true) do … end` written
+/// `Result = Struct.new(:a, :b[, keyword_init: true]) do … end` written
 /// directly in a class or module body, read as the class it defines.
 struct StructConstant<'pr> {
     name: Symbol,
     members: Vec<Symbol>,
     keyword_init: bool,
+    /// `keyword_init: false` written out.
+    positional_written: bool,
     body: Option<ruby_prism::Node<'pr>>,
 }
 
@@ -1486,15 +1488,20 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
     }
     let mut members = Vec::new();
     let mut keyword_init = false;
+    let mut positional_written = false;
     for arg in call.arguments()?.arguments().iter() {
         if let Some(options) = arg.as_keyword_hash_node() {
             let elements: Vec<_> = options.elements().iter().collect();
             let [pair] = elements.as_slice() else { return None };
             let pair = pair.as_assoc_node()?;
-            if symbol_value(&pair.key()).as_deref() != Some("keyword_init") || pair.value().as_true_node().is_none() {
+            // `keyword_init: false` is the positional form, written out.
+            if symbol_value(&pair.key()).as_deref() != Some("keyword_init")
+                || (pair.value().as_true_node().is_none() && pair.value().as_false_node().is_none())
+            {
                 return None;
             }
-            keyword_init = true;
+            keyword_init = pair.value().as_true_node().is_some();
+            positional_written = !keyword_init;
             continue;
         }
         let member = symbol_value(&arg)?;
@@ -1507,8 +1514,11 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
         }
         members.push(Symbol::from(member));
     }
-    // Not the positional form: since Ruby 3.2 it takes keywords too, which a positional constructor would bind to its first member.
-    if members.is_empty() || !keyword_init {
+    // The positional form too: since Ruby 3.2 it also takes keywords, which
+    // the positional constructor would bind to its first member, so analysis
+    // refuses a keyword `new` on it (`positional_struct`), as for a
+    // `Struct.new(...)` superclass.
+    if members.is_empty() {
         return None;
     }
     let body = match call.block() {
@@ -1524,13 +1534,21 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
                 if !statements.body().iter().all(|stmt| stmt.as_def_node().is_some()) {
                     return None;
                 }
+                // Not an `initialize` of its own: in Ruby the generated one is
+                // the anonymous Struct parent's, which its `super` reaches. Here
+                // both would sit in one class, and that `super` would miss.
+                if statements.body().iter().any(|stmt| {
+                    stmt.as_def_node().is_some_and(|def| def.receiver().is_none() && constant_id_str(&def.name()) == "initialize")
+                }) {
+                    return None;
+                }
             } else if body.is_some() {
                 return None;
             }
             body
         }
     };
-    Some(StructConstant { name: Symbol::from(""), members, keyword_init, body })
+    Some(StructConstant { name: Symbol::from(""), members, keyword_init, positional_written, body })
 }
 
 /// The classes `owner`'s body defines through `X = Struct.new(…)`, with
@@ -1603,6 +1621,7 @@ fn struct_constant_classes(
             crate::dialect::LibraryClassOrigin::StructConstant {
                 members: spec.members.clone(),
                 keyword_init: spec.keyword_init,
+                positional_written: spec.positional_written,
             },
         );
         if spec.body.is_some() {

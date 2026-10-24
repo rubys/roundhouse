@@ -2261,7 +2261,7 @@ impl<'a> BodyTyper<'a> {
                 {
                     dispatched = Ty::Untyped;
                 }
-                // Not left to the positional constructor: since Ruby 3.2 a Struct takes keywords too, which it would bind to its first member.
+                // Not left to the positional constructor: since Ruby 3.2 a Struct takes keywords too (bound by member name), which the emitted positional constructor would bind to its first member.
                 if method.as_str() == "new"
                     && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
                     && matches!(args.last().map(|a| &*a.node), Some(ExprNode::Hash { kwargs: true, .. }))
@@ -2270,7 +2270,7 @@ impl<'a> BodyTyper<'a> {
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
                         construct: Symbol::from("Struct keyword construction"),
-                        detail: "a `Struct.new(...)` superclass is built positionally; keyword arguments would land in its first member".to_string(),
+                        detail: "keyword construction of a `Struct.new(...)` without `keyword_init:` is not modeled: the emitted constructor is positional and would bind the keywords to its first member".to_string(),
                     }));
                 }
                 // `PTY.spawn(..., &maybe)` when `maybe` is nilable: Ruby

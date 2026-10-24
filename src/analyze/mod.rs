@@ -1148,7 +1148,19 @@ impl Analyzer {
             let mut current = Some(lc);
             for _ in 0..32 {
                 let Some(class) = current else { break };
-                if matches!(class.origin, Some(crate::dialect::LibraryClassOrigin::StructSuperclass { .. })) {
+                // A class-side `new` of its own decides what `new` takes.
+                if class.methods.iter().any(|m| m.name.as_str() == "new" && m.receiver == crate::dialect::MethodReceiver::Class) {
+                    break;
+                }
+                if matches!(
+                    class.origin,
+                    Some(
+                        crate::dialect::LibraryClassOrigin::StructSuperclass { .. }
+                            // Omitted `keyword_init`: Ruby binds keywords by member name,
+                            // which the positional constructor does not.
+                            | crate::dialect::LibraryClassOrigin::StructConstant { keyword_init: false, positional_written: false, .. }
+                    )
+                ) {
                     if let Some(info) = classes.get_mut(&lc.name) {
                         info.positional_struct = true;
                     }

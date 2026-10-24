@@ -1257,6 +1257,11 @@ pub enum LibraryClassOrigin {
     StructConstant {
         members: Vec<Symbol>,
         keyword_init: bool,
+        /// `keyword_init: false` written out: Ruby then passes a keyword
+        /// call as one Hash to the first member, as the positional
+        /// constructor does. Omitted, Ruby binds keywords by member name.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        positional_written: bool,
     },
     /// A `Dry::Struct` class lowered into its readers and constructor
     /// (`ingest::dry_struct`). Carried so a target can tell the coercions
