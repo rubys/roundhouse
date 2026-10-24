@@ -83,7 +83,7 @@ pub fn apply_active_model_model_synthesis(app: &mut App) -> Vec<Diagnostic> {
         }
         let writers = attribute_writers(&lc.methods);
         let owner = lc.name.clone();
-        lc.methods.push(attributes_initialize(&owner, Span::synthetic(), &writers));
+        lc.methods.push(attributes_initialize(&owner, Span::synthetic(), &writers, &[]));
         if !defines(lc, "valid?") {
             lc.methods.push(constant_predicate(&owner, "valid?", true));
         }
@@ -163,6 +163,7 @@ pub(crate) fn attributes_initialize(
     owner: &ClassId,
     span: Span,
     names: &[Symbol],
+    through_writers: &[Symbol],
 ) -> MethodDef {
     let attrs = Symbol::from("attrs");
     let assigns: Vec<Expr> = names
@@ -187,6 +188,20 @@ pub(crate) fn attributes_initialize(
                     parenthesized: true,
                 },
             );
+            // An `attribute :name, :type` is assigned through its writer,
+            // which casts, as Rails' `assign_attributes` does.
+            if through_writers.contains(name) {
+                return Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(Expr::new(span, ExprNode::SelfRef)),
+                        method: Symbol::from(format!("{}=", name.as_str())),
+                        args: vec![read],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+            }
             Expr::new(
                 span,
                 ExprNode::Assign { target: LValue::Ivar { name: name.clone() }, value: read },

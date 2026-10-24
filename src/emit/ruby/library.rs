@@ -9912,26 +9912,59 @@ pub(crate) fn apply_boolean_lowering(lcs: &mut [LibraryClass], app: &App) {
 /// alone, as is the primary key's.
 pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &App) {
     for model in &app.models {
-        let Some(table) = app.schema.tables.get(&model.table.0) else {
-            continue;
-        };
-        let casts: HashMap<Symbol, &'static str> = table
-            .columns
-            .iter()
-            // A stored array column's writer takes the Array; its
-            // elements are not cast (`lower::array_columns`).
-            .filter(|c| !c.primary_key && !c.array_stored && !model.enums.contains_key(&c.name))
-            .filter_map(|c| {
-                let cast = match c.col_type {
-                    crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt => "cast_integer",
-                    crate::schema::ColumnType::Float => "cast_float",
-                    crate::schema::ColumnType::Decimal { .. } => "cast_decimal",
-                    crate::schema::ColumnType::Boolean => "cast_boolean",
-                    _ => return None,
-                };
-                Some((c.name.clone(), cast))
+        let table = app.schema.tables.get(&model.table.0);
+        let mut casts: HashMap<Symbol, &'static str> = table
+            .map(|table| {
+                table
+                    .columns
+                    .iter()
+                    // A stored array column's writer takes the Array; its
+                    // elements are not cast (`lower::array_columns`).
+                    .filter(|c| !c.primary_key && !c.array_stored && !model.enums.contains_key(&c.name))
+                    .filter_map(|c| {
+                        let cast = match c.col_type {
+                            crate::schema::ColumnType::Integer | crate::schema::ColumnType::BigInt => "cast_integer",
+                            crate::schema::ColumnType::Float => "cast_float",
+                            crate::schema::ColumnType::Decimal { .. } => "cast_decimal",
+                            crate::schema::ColumnType::Boolean => "cast_boolean",
+                            _ => return None,
+                        };
+                        Some((c.name.clone(), cast))
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
+        // A model's `attribute :name, :type` writers cast as ActiveModel's
+        // types do, as `ingest::active_model_attributes` casts a plain
+        // class's: an `ActiveModel::Model` form's and an ActiveRecord
+        // model's alike (Rails 8.1.4). Over a column, Rails' declared type
+        // replaces the column's everywhere, but here only the writer would
+        // follow it, so a column keeps its own cast unless the two agree
+        // (`markers::attribute_matches_column`; the mismatch is reported
+        // with the model DSL). An enum column keeps its mapping too: the
+        // enum decorates the attribute (`"archived"` stays a label).
+        // `:boolean` already casts inline (`markers::push_attribute_api_methods`).
+        {
+            for (name, ty) in crate::lower::model_to_library::markers::attribute_api_decls(&model.body) {
+                if model.enums.contains_key(&name) {
+                    continue;
+                }
+                if let Some(col) = table.and_then(|t| t.columns.iter().find(|c| c.name == name))
+                    && !crate::lower::model_to_library::markers::attribute_matches_column(ty.as_str(), col)
+                {
+                    continue;
+                }
+                let cast = match ty.as_str() {
+                    "string" => "cast_string",
+                    "integer" => "cast_integer",
+                    "float" => "cast_float",
+                    "decimal" => "cast_decimal",
+                    "datetime" => "cast_datetime",
+                    _ => continue,
+                };
+                casts.insert(name, cast);
+            }
+        }
         if casts.is_empty() {
             continue;
         }
@@ -9944,7 +9977,9 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
         for m in &lc.methods {
             collect_numericality_checks(&m.body, &mut checked);
         }
-        checked.retain(|c| casts.contains_key(c));
+        // Columns only: an ActiveModel attribute has no `_before_type_cast`,
+        // so its check reads the cast value (`"abc"` is 0, Rails 8.1.4).
+        checked.retain(|c| casts.contains_key(c) && table.is_some_and(|t| t.columns.iter().any(|col| col.name == *c)));
         for m in &mut lc.methods {
             if m.receiver != MethodReceiver::Instance || m.kind != crate::dialect::AccessorKind::AttributeWriter {
                 if !checked.is_empty() {

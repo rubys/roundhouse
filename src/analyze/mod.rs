@@ -1395,7 +1395,11 @@ impl Analyzer {
                     let id = mixin_path_id(path);
                     let name = id.0.as_str().to_string();
                     let segs: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                    // The model path provides the Attributes API itself
+                    // (`markers::push_attribute_api_methods`); a declaration
+                    // it can't lower reports on its own line.
                     let known = crate::ingest::util::is_view_helper_marker_include(&segs)
+                        || segs == ["ActiveModel", "Attributes"]
                         || self.classes.contains_key(&id)
                         || body::RUBY_TOP_LEVEL.contains(&name.as_str());
                     (!known).then_some(name)

@@ -295,7 +295,16 @@ pub(super) fn push_active_model_constructor(methods: &mut Vec<MethodDef>, model:
     if defines_initialize {
         return;
     }
-    let names = super::markers::declared_attr_names(model);
+    let mut names = super::markers::declared_attr_names(model);
+    // `attribute :name, :type` (ActiveModel::Attributes) names, assigned
+    // through their casting writers.
+    let attribute_api: Vec<Symbol> =
+        super::markers::attribute_api_decls(&model.body).into_iter().map(|(name, _)| name).collect();
+    for name in &attribute_api {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
     if names.is_empty() {
         return;
     }
@@ -308,6 +317,7 @@ pub(super) fn push_active_model_constructor(methods: &mut Vec<MethodDef>, model:
         &model.name,
         model.span,
         &names,
+        &attribute_api,
     ));
 }
 

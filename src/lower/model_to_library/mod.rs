@@ -926,6 +926,34 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         if name == "attribute" {
             if let ExprNode::Send { args, .. } = &*expr.node {
                 if args.len() == 2 {
+                    // Over a column of another type, the column's cast,
+                    // reader and storage are kept
+                    // (`markers::attribute_matches_column`): reported.
+                    if let (
+                        ExprNode::Lit { value: Literal::Sym { value: attr } },
+                        ExprNode::Lit { value: Literal::Sym { value: ty } },
+                    ) = (&*args[0].node, &*args[1].node)
+                        && !model.enums.contains_key(attr)
+                        && let Some(col) = schema
+                            .tables
+                            .get(&model.table.0)
+                            .and_then(|t| t.columns.iter().find(|c| c.name == *attr))
+                        && !self::markers::attribute_matches_column(ty.as_str(), col)
+                    {
+                        let mut d = Diagnostic::unsupported(
+                            expr.span,
+                            None,
+                            name,
+                            format!(
+                                "`attribute :{attr}, :{ty}` over a {}{} column on `{}`: the column's type is kept (its reader and storage don't follow the declared type)",
+                                column_type_word(&col.col_type),
+                                if col.array { " array" } else { "" },
+                                model.name.0.as_str()
+                            ),
+                        );
+                        d.severity = Severity::Warning;
+                        crate::emit::diagnostics::push(d);
+                    }
                     continue;
                 }
             }
@@ -984,6 +1012,22 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         );
         d.severity = Severity::Warning;
         crate::emit::diagnostics::push(d);
+    }
+}
+
+/// The schema word for a column type, for a diagnostic.
+fn column_type_word(t: &crate::schema::ColumnType) -> String {
+    use crate::schema::ColumnType;
+    match t {
+        ColumnType::String { .. } => "string".into(),
+        ColumnType::Text => "text".into(),
+        ColumnType::Integer => "integer".into(),
+        ColumnType::BigInt => "bigint".into(),
+        ColumnType::Float => "float".into(),
+        ColumnType::Decimal { .. } => "decimal".into(),
+        ColumnType::Boolean => "boolean".into(),
+        ColumnType::DateTime => "datetime".into(),
+        other => format!("{other:?}").to_lowercase(),
     }
 }
 

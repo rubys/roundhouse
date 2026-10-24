@@ -503,6 +503,42 @@ pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &M
     }
 }
 
+/// Whether `attribute :name, :<ty>` over a column of `col` keeps that
+/// column's storage and reader. Rails' declared type replaces the
+/// column's everywhere (Rails 8.1.4: `attribute :enabled, :string` over a
+/// boolean column reads `"true"` back, and `:boolean` over a string column
+/// casts `"yes"` to true), but only a model's writer takes the attribute's
+/// cast here: the reader, hydration, the SQL escape and
+/// `read_attribute`/`write_attribute` follow the column. So the
+/// attribute's cast applies only where the two agree, which is the
+/// column's own type:
+///
+/// | column | attribute type |
+/// |---|---|
+/// | string, text | `:string` |
+/// | integer, bigint | `:integer` |
+/// | float | `:float` |
+/// | decimal | `:decimal` |
+/// | boolean | `:boolean` |
+/// | datetime | `:datetime` |
+///
+/// Any other pair keeps the column's cast and is reported, and so does an
+/// array column (`t.bigint "tag_ids", array: true`): its value is an
+/// Array, whose element type is not the column's.
+pub(crate) fn attribute_matches_column(ty: &str, col: &crate::schema::Column) -> bool {
+    use crate::schema::ColumnType;
+    !col.array
+        && matches!(
+        (ty, &col.col_type),
+        ("string", ColumnType::String { .. } | ColumnType::Text)
+            | ("integer", ColumnType::Integer | ColumnType::BigInt)
+            | ("float", ColumnType::Float)
+            | ("decimal", ColumnType::Decimal { .. })
+            | ("boolean", ColumnType::Boolean)
+            | ("datetime", ColumnType::DateTime)
+    )
+}
+
 /// `attribute :name, :type` declarations (the Rails Attributes API) in
 /// a model body — `(name, type)` pairs, both symbol literals. The
 /// 2-arg form only; `default:`-carrying declarations stay unclaimed

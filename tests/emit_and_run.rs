@@ -13,6 +13,8 @@ mod pundit_app;
 mod session_cookie_key;
 #[path = "emit_and_run/active_model_attributes.rs"]
 mod active_model_attributes;
+#[path = "emit_and_run/active_model_attributes_form.rs"]
+mod active_model_attributes_form;
 #[path = "emit_and_run/arel_nodes.rs"]
 mod arel_nodes;
 #[path = "emit_and_run/permit_private_writer.rs"]
