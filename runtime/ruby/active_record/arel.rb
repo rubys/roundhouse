@@ -33,8 +33,12 @@ module Arel
       text = Nodes.replace_named(text, key, Nodes.embed(named[key.to_sym]))
     end
     if !positional.empty? || !named.empty?
-      missing = Nodes.unbound_name(text)
-      raise BindError, "missing value for :#{missing}" unless missing.nil?
+      # Not held in a local: Spinel refuses a local holding the name
+      # (matz/spinel#9258), and the second scan only runs on the way to
+      # the raise.
+      unless Nodes.unbound_name(text).nil?
+        raise BindError, "missing value for :#{Nodes.unbound_name(text)}"
+      end
     end
     Nodes::SqlLiteral.new(text)
   end
