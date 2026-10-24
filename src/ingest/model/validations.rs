@@ -1205,7 +1205,7 @@ fn parse_set(value: &Node<'_>, file: &str, exclusion: bool, class_consts: &super
         };
         let child = assoc.value();
         match key.as_str() {
-            "in" | "within" => match inclusion_values(&child, class_consts) {
+            "in" | "within" => match inclusion_values(&child, class_consts).or_else(|| inclusion_call(&child, file)) {
                 Some(spec) => values = Some(spec),
                 None => gaps.push(format!("{label}: in")),
             },
@@ -1565,6 +1565,8 @@ fn number_value(node: &Node<'_>) -> Option<f64> {
 enum InclusionSpec {
     List(Vec<Literal>),
     Range(crate::dialect::InclusionRange),
+    /// A set the record answers at validation time (`in: ->(r) { … }`).
+    Call(crate::expr::Expr),
 }
 
 /// The membership (`inclusion:`) or non-membership (`exclusion:`) rule for
@@ -1574,6 +1576,8 @@ fn set_rule(spec: InclusionSpec, exclusion: bool) -> crate::dialect::ValidationR
     let (values, range) = match spec {
         InclusionSpec::List(values) => (values, None),
         InclusionSpec::Range(range) => (Vec::new(), Some(range)),
+        InclusionSpec::Call(set) if exclusion => return ValidationRule::ExclusionCall { set },
+        InclusionSpec::Call(set) => return ValidationRule::InclusionCall { set },
     };
     if exclusion {
         ValidationRule::Exclusion { values, range }
@@ -1628,6 +1632,109 @@ fn inclusion_values(node: &Node<'_>, class_consts: &super::ClassConsts) -> Optio
         end: right,
         exclusive: range.is_exclude_end(),
     }))
+}
+
+/// `in: ->(record) { body }`, `in: -> { body }`, `lambda { |r| … }`,
+/// `proc { … }` or `in: :method` (Rails' `ResolveValue`): a zero-arity
+/// callable runs on the record (`instance_exec`), so its body reads as
+/// written in the record's method; a one-parameter callable is called
+/// with the record (`value.call(record)`), so its parameter becomes
+/// `self`; a Symbol is that method of the record. A one-parameter body
+/// keeps the class body's `self` in Rails, so one that calls a method
+/// without a receiver or reads `self` would run on the record here, not
+/// the class: it stays a gap, as does anything else (more parameters, a
+/// body ingest can't read).
+fn inclusion_call(node: &Node<'_>, file: &str) -> Option<InclusionSpec> {
+    use crate::expr::{Expr, ExprNode};
+    if let Some(name) = symbol_value(node) {
+        return Some(InclusionSpec::Call(Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Send { recv: None, method: Symbol::from(name.as_str()), args: vec![], block: None, parenthesized: false },
+        )));
+    }
+    let expr = super::super::expr::ingest_expr(node, file).ok()?;
+    let lambda = match &*expr.node {
+        ExprNode::Lambda { .. } => expr.clone(),
+        // `lambda { |r| … }` / `proc { … }` / `Proc.new { … }`.
+        ExprNode::Send { recv, method, args, block: Some(block), .. }
+            if args.is_empty()
+                && matches!(&*block.node, ExprNode::Lambda { .. })
+                && match recv {
+                    None => matches!(method.as_str(), "lambda" | "proc"),
+                    Some(r) => method.as_str() == "new" && matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Proc"),
+                } =>
+        {
+            block.clone()
+        }
+        _ => return None,
+    };
+    let ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. } = &*lambda.node else {
+        return None;
+    };
+    if !extra_params.is_empty() || params.len() > 1 {
+        return None;
+    }
+    // `-> { _1.allowed }` takes one parameter (arity 1, so Rails calls it
+    // with the record), which the parsed lambda does not list. Two or more
+    // (`_1`, `_2`) make Rails raise `ArgumentError`: a gap.
+    let numbered = match numbered_parameters(node) {
+        Some(0) | None => None,
+        Some(1) => Some(Symbol::from("_1")),
+        Some(_) => return None,
+    };
+    let mut body = body.clone();
+    if let Some(param) = params.first().or(numbered.as_ref()) {
+        if reads_implicit_self(&body) {
+            return None;
+        }
+        replace_var_with_self(&mut body, param);
+    }
+    Some(InclusionSpec::Call(body))
+}
+
+/// The highest numbered parameter (`_1`, `_2`, …) a lambda literal or a
+/// `lambda`/`proc`/`Proc.new` block reads, or `None` when it declares none.
+fn numbered_parameters(node: &Node<'_>) -> Option<u8> {
+    let params = if let Some(lambda) = node.as_lambda_node() {
+        lambda.parameters()
+    } else {
+        node.as_call_node()?.block()?.as_block_node()?.parameters()
+    };
+    Some(params?.as_numbered_parameters_node()?.maximum())
+}
+
+/// Whether `e` calls a method without a receiver or reads `self`.
+fn reads_implicit_self(e: &crate::expr::Expr) -> bool {
+    use crate::expr::ExprNode;
+    if matches!(&*e.node, ExprNode::SelfRef | ExprNode::Send { recv: None, .. }) {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || reads_implicit_self(c));
+    found
+}
+
+/// The record a callable `in:` is given is the validating record itself.
+/// A nested block that names a parameter the same rebinds it, so its body
+/// is left alone.
+fn replace_var_with_self(e: &mut crate::expr::Expr, name: &Symbol) {
+    use crate::expr::ExprNode;
+    match &*e.node {
+        ExprNode::Var { name: n, .. } if n == name => {
+            *e = crate::expr::Expr::new(e.span, ExprNode::SelfRef);
+            return;
+        }
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, .. }
+            if params.contains(name)
+                || rest_param.as_ref() == Some(name)
+                || block_param.as_ref() == Some(name)
+                || extra_params.iter().any(|p| p.name == *name) =>
+        {
+            return;
+        }
+        _ => {}
+    }
+    e.node.for_each_child_mut(&mut |c| replace_var_with_self(c, name));
 }
 
 fn literal_atom(node: &Node<'_>) -> Option<Literal> {

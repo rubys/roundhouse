@@ -720,6 +720,13 @@ pub enum ValidationRule {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         range: Option<InclusionRange>,
     },
+    /// `inclusion: { in: ->(record) { … } }`, `in: -> { … }` or `in: :method`:
+    /// the set Rails asks for at validation time, with the record as
+    /// `self` (a lambda's parameter is `self`). `set.include?(value)`
+    /// decides, so a nil set raises `NoMethodError` as it does in Rails.
+    InclusionCall { set: Expr },
+    /// `exclusion:` with a callable `in:`, as `InclusionCall`.
+    ExclusionCall { set: Expr },
     Custom {
         method: Symbol,
         /// `validate :m, if: :pred` / `unless: :pred` — the instance

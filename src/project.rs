@@ -6626,9 +6626,12 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             );
         }
         // A strict emit spelled these as methods its class objects do not have.
+        // A constant path through a value (`CONST_PATH`) is one too, also
+        // where a lowering builds it after the analysis (a validation's
+        // callable `in:`).
         if !matches!(target, "jruby" | "spinel")
             && let crate::expr::ExprNode::Send { method, .. } = &*expr.node
-            && expr.decisions & crate::expr::MODULE_QUERY != 0
+            && expr.decisions & (crate::expr::MODULE_QUERY | crate::expr::CONST_PATH) != 0
         {
             emit::diagnostics::report_unsupported(
                 expr.span,
@@ -6829,6 +6832,17 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     }
     for helper in &app.routes.direct_helpers {
         visit(&helper.body);
+    }
+    // A validation's callable `in:` is read on the record, after the
+    // analysis (`ValidationRule::InclusionCall`).
+    for model in &app.models {
+        for validation in model.validations() {
+            for rule in &validation.rules {
+                if let crate::dialect::ValidationRule::InclusionCall { set } | crate::dialect::ValidationRule::ExclusionCall { set } = rule {
+                    visit(set);
+                }
+            }
+        }
     }
     for function in &app.sql_functions {
         let methods = match &function.kind {

@@ -3551,7 +3551,8 @@ end
 }
 
 /// `inclusion: { in: NAME }` folds a list constant with each element's
-/// kind kept; a computed list (`in: ->(r) { … }`) stays the reported gap.
+/// kind kept; a computed list (`in: ->(r) { … }`) is the set the record
+/// answers when it validates.
 #[test]
 fn inclusion_in_a_list_constant_folds_with_its_kinds() {
     let (model, warnings, _) = ingest_widget(
@@ -3577,8 +3578,15 @@ end
             if matches!(values.as_slice(), [Literal::Sym { .. }, Literal::Sym { .. }])),
         "{:?}", rule("kind")
     );
-    assert!(rule("tier").is_none(), "a lambda list stays a gap: {rules:?}");
-    assert!(warnings.iter().any(|w| w.contains("validates :tier, inclusion: in:")), "{warnings:?}");
+    // A lambda `in:` is asked on the record (`tests/inclusion_callable.rs`):
+    // its parameter is `self`, so `w.class::MODES` reads the record's class.
+    assert!(
+        matches!(rule("tier").map(|v| v.rules.as_slice()), Some([roundhouse::dialect::ValidationRule::InclusionCall { set }])
+            if matches!(&*set.node, roundhouse::expr::ExprNode::Send { method, recv: Some(recv), .. }
+                if method.as_str() == "const_get" && matches!(&*recv.node, roundhouse::expr::ExprNode::Send { recv: Some(base), .. } if matches!(&*base.node, roundhouse::expr::ExprNode::SelfRef)))),
+        "{:?}", rule("tier")
+    );
+    assert!(!warnings.iter().any(|w| w.contains("validates :tier")), "{warnings:?}");
 }
 
 /// A list constant reassigned to something ingest can't fold no longer

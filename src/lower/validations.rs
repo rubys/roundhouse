@@ -186,6 +186,9 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
         // Not a `Check`: the emitted `validate` body is
         // `inline_acceptance_check`.
         ValidationRule::Acceptance { .. } => {}
+        // Not a `Check`: the set is read on the record when it validates
+        // (`inline_set_call_check`).
+        ValidationRule::InclusionCall { .. } | ValidationRule::ExclusionCall { .. } => {}
         // `allow_nil` is not a `Check`. This fan-out is only read by
         // `tests/lower_validations.rs`. The emitted `validate` body is
         // `inline_length_check`, which is where nil is decided.

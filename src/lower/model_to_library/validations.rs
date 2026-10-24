@@ -632,12 +632,20 @@ fn validation_rule_to_calls(
             *allow_blank,
             runtime_relation,
         ),
+        ValidationRule::Inclusion { values, range } if range.is_none() && is_array_ty(attr_ty) => {
+            vec![inline_set_call_check(msgs, attr, &literal_list(values), false, attr_ty)]
+        }
+        ValidationRule::Exclusion { values, range } if range.is_none() && is_array_ty(attr_ty) => {
+            vec![inline_set_call_check(msgs, attr, &literal_list(values), true, attr_ty)]
+        }
         ValidationRule::Inclusion { values, range } => {
             vec![inline_inclusion_check(msgs, attr, values, range.as_ref())]
         }
         ValidationRule::Exclusion { values, range } => {
             vec![inline_exclusion_check(msgs, attr, values, range.as_ref())]
         }
+        ValidationRule::InclusionCall { set } => vec![inline_set_call_check(msgs, attr, set, false, attr_ty)],
+        ValidationRule::ExclusionCall { set } => vec![inline_set_call_check(msgs, attr, set, true, attr_ty)],
         // `validate :validate_url` — a method the model defines, which
         // adds to `errors` itself. The synthesized `validate` just
         // calls it; everything else about the shape (when it runs, what
@@ -1184,6 +1192,97 @@ fn inline_inclusion_check(
     let push_err =
         errors_push(attr.as_str(), msgs.error(attr.as_str(), "inclusion", &Default::default()));
     if_with_nil_else(not_included, push_err)
+}
+
+/// Inline `inclusion:` / `exclusion:` with a callable `in:`, the set read
+/// on the record when it validates (Rails' `Clusivity#include?`):
+///   if !(<set>).include?(@attr)      # inclusion: "is not included in the list"
+///   if (<set>).include?(@attr)       # exclusion: "is reserved"
+///     errors << …
+///   end
+///
+/// An Array value (an array column the target stores as an Array) is in
+/// the set when every element is, as `Clusivity#include?` checks it:
+/// `@attr.all? { |v| (<set>).include?(v) }` (nil is asked of the set as
+/// it is). So an exclusion rejects it
+/// only when all of its elements are reserved, and `[]` is in every set.
+/// The set is read once per element there, where Rails reads it once.
+fn inline_set_call_check(msgs: Messages, attr: &Symbol, set: &Expr, exclusion: bool, attr_ty: Option<&Ty>) -> Expr {
+    let include_call = if is_array_ty(attr_ty) {
+        let elem = Symbol::from("v");
+        let test = send(
+            set.clone(),
+            "include?",
+            vec![Expr::new(Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: elem.clone() })],
+        );
+        let block = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                extra_params: Vec::new(),
+                rest_param: None,
+                params: vec![elem],
+                block_param: None,
+                body: test,
+                block_style: crate::expr::BlockStyle::Brace,
+            },
+        );
+        let all = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send { recv: Some(ivar(attr)), method: Symbol::from("all?"), args: vec![], block: Some(block), parenthesized: false },
+        );
+        // A nil column value isn't an Array: Rails asks the set for nil.
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: send(ivar(attr), "nil?", vec![]),
+                then_branch: send(set.clone(), "include?", vec![ivar(attr)]),
+                else_branch: all,
+            },
+        )
+    } else {
+        send(set.clone(), "include?", vec![ivar(attr)])
+    };
+    let cond = if exclusion {
+        include_call
+    } else {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(include_call),
+                method: Symbol::from("!"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+    let kind = if exclusion { "exclusion" } else { "inclusion" };
+    let push_err = errors_push(attr.as_str(), msgs.error(attr.as_str(), kind, &Default::default()));
+    if_with_nil_else(cond, push_err)
+}
+
+/// An Array slot, nullable or not (`ty_of_column_slot`'s stored array
+/// column, `Array[T] | nil` when the column allows null).
+fn is_array_ty(ty: Option<&Ty>) -> bool {
+    match ty {
+        Some(Ty::Array { .. }) => true,
+        Some(Ty::Union { variants }) => {
+            variants.iter().any(|v| matches!(v, Ty::Array { .. }))
+                && variants.iter().all(|v| matches!(v, Ty::Array { .. } | Ty::Nil))
+        }
+        _ => false,
+    }
+}
+
+/// `[v1, v2]`, a literal `in:` list as an expression.
+fn literal_list(values: &[Literal]) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Array {
+            elements: values.iter().map(|lit| Expr::new(Span::synthetic(), ExprNode::Lit { value: lit.clone() })).collect(),
+            style: ArrayStyle::Brackets,
+        },
+    )
 }
 
 /// Inline `validates :attr, exclusion: { in: … }`, Rails' "is reserved":
