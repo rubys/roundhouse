@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/session_read_untyped.rs"]
+mod session_read_untyped;
 #[path = "emit_and_run/session_cookie_key.rs"]
 mod session_cookie_key;
 #[path = "emit_and_run/active_model_attributes.rs"]

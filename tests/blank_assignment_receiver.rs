@@ -43,10 +43,13 @@ fn assignment_receiver_grounds_and_assigns_exactly_once() {
     let body = controller_body(
         &WRAP.replace("%s", "if (rd = session[:redirect_to]).present?\n      redirect_to rd\n    end"),
     );
-    // Grounded, not left as a dynamic `present?` send.
+    // Not left as a dynamic `present?` send on the value. A session read is
+    // untyped (it answers whatever was stored, an Integer as well as a
+    // String), so the predicate goes to `ActiveSupport.present?(value)`,
+    // which is nil-safe for every value.
     assert!(
-        !body.contains("\"present?\""),
-        "present? should be grounded:\n{body}"
+        body.contains("Const { path: [Symbol(\"ActiveSupport\")] }"),
+        "present? should go to ActiveSupport.present?:\n{body}"
     );
     // The assignment survives — and appears exactly once, so the session
     // read is not duplicated.
