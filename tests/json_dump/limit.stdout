@@ -1,0 +1,8 @@
+"[{\"a\":[1]}]"
+"[{\"a\":[1]}]"
+"[[[1]]]"
+"[[[1]]]"
+"[[[1]]]"
+ArgumentError:exceed depth limit
+""
+ArgumentError:exceed depth limit

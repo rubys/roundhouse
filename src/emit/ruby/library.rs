@@ -9057,39 +9057,33 @@ fn replays_foreign_class_body(lc: &LibraryClass, app: &App, classes: &[LibraryCl
 /// not one of them. Anything else stays dropped and reported
 /// (`replays_foreign_class_body`).
 fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [LibraryClass]) -> Vec<&'a Expr> {
-    if lc.is_module {
-        return Vec::new();
-    }
     let app_module = |path: &[Symbol]| -> Option<&LibraryClass> {
-        // `written_names` has already rewritten this path in place to
-        // Rubydex's resolved answer (or left it as written when Rubydex
-        // had none, or the call has no source span to resolve from —
-        // a synthesized class body). Reading it back here keeps this
-        // lookup from disagreeing with the analyzer's own
-        // `fold_extended_modules`, which asks Rubydex for the same
-        // span; the nested-under-this-class guess is kept only as a
-        // fallback for an unresolved path (e.g. `extend SymbolEnum`
-        // from a DSL this emitter itself expands, which never had a
-        // source span `written_names` could resolve).
-        // A rooted `::M` names the top-level M only: drop the empty
-        // leading segment for the lookup and skip the nested guess.
+        // Written paths have already been source-resolved. A class-local
+        // constant can still name a module alias; follow only literal
+        // constant aliases, and require a source module at the end.
         let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
-        let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
-        let nested = if rooted { written.clone() } else { format!("{}::{written}", lc.name.0.as_str()) };
-        match NameIndex::current(app).filter(|index| index.covers(classes)) {
-            Some(index) => index.library_classes.get(&written).into_iter().flatten()
-                .chain(index.library_classes.get(&nested).into_iter().flatten().filter(|_| !rooted))
-                .copied()
-                .filter(|&j| {
-                    let c = &classes[j];
-                    c.is_module && c.origin.is_none()
-                })
-                .min()
-                .map(|j| &classes[j]),
-            None => classes.iter().find(|c| {
-                c.is_module && c.origin.is_none() && (c.name.0.as_str() == written || c.name.0.as_str() == nested)
-            }),
+        let mut written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty())
+            .collect::<Vec<_>>().join("::");
+        for _ in 0..32 {
+            let nested = if rooted { written.clone() } else { format!("{}::{written}", lc.name.0.as_str()) };
+            let module = match NameIndex::current(app).filter(|index| index.covers(classes)) {
+                Some(index) => index.library_classes.get(&written).into_iter().flatten()
+                    .chain(index.library_classes.get(&nested).into_iter().flatten().filter(|_| !rooted))
+                    .copied().filter(|&j| classes[j].is_module && classes[j].origin.is_none())
+                    .min().map(|j| &classes[j]),
+                None => classes.iter().find(|c| c.is_module && c.origin.is_none()
+                    && (c.name.0.as_str() == written || c.name.0.as_str() == nested)),
+            };
+            if module.is_some() { return module; }
+            let alias = classes.iter().find_map(|owner| owner.constants.iter().find_map(|(name, value)| {
+                let full = format!("{}::{}", owner.name.0.as_str(), name.as_str());
+                if full != written && full != nested { return None; }
+                let ExprNode::Const { path } = &*value.node else { return None };
+                Some(path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"))
+            }))?;
+            written = alias;
         }
+        None
     };
     let mut extended: Vec<&LibraryClass> = Vec::new();
     let mut out = Vec::new();

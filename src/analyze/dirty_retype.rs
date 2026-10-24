@@ -7,6 +7,27 @@ use crate::App;
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
+/// Evidence consumed by public protocol checks in addition to return tables.
+#[derive(Clone)]
+pub(super) struct ProtocolEvidence {
+    visibility: HashMap<(crate::dialect::MethodReceiver, Symbol), crate::dialect::MethodVisibility>,
+    ambiguous_returns: HashSet<(crate::dialect::MethodReceiver, Symbol)>,
+}
+
+impl ProtocolEvidence {
+    pub(super) fn of(class: &ClassInfo) -> Self {
+        Self {
+            visibility: class.method_visibility.clone(),
+            ambiguous_returns: class.ambiguous_method_returns.clone(),
+        }
+    }
+
+    pub(super) fn matches(&self, class: &ClassInfo) -> bool {
+        self.visibility == class.method_visibility
+            && self.ambiguous_returns == class.ambiguous_method_returns
+    }
+}
+
 /// Snapshot of inference the fixpoint refines: per-class instance/class
 /// method return types plus `inferred_params`. Used for convergence
 /// checks (`inference_matches`).
@@ -14,6 +35,7 @@ use crate::ty::Ty;
 pub(super) struct InferenceSig {
     pub instance: HashMap<ClassId, HashMap<Symbol, Ty>>,
     pub class_methods: HashMap<ClassId, HashMap<Symbol, Ty>>,
+    pub protocol: HashMap<ClassId, ProtocolEvidence>,
     pub params: HashMap<super::ParamKey, Vec<Ty>>,
 }
 
@@ -68,8 +90,17 @@ pub(super) fn dirty_classes_for_retype(
     let mut dirty: HashSet<ClassId> = HashSet::new();
     let mut moved_by_class: HashMap<ClassId, BTreeSet<Symbol>> = HashMap::new();
     for (id, cls) in classes {
+        if !prev.protocol.get(id).is_some_and(|before| before.matches(cls)) {
+            return None;
+        }
         let mut names = moved_method_names(&cls.instance_methods, prev.instance.get(id));
         names.extend(moved_method_names(&cls.class_methods, prev.class_methods.get(id)));
+        // JSON.dump reads these protocols implicitly; its source call graph
+        // contains JSON.dump, not destination.to_io/write/respond_to?. Until
+        // those implicit edges are represented, retype all their consumers.
+        if names.iter().any(|name| matches!(name.as_str(), "to_io" | "write" | "respond_to?")) {
+            return None;
+        }
         match prev_block_value.get(id) {
             Some(before) if before == &cls.block_value_methods => {}
             Some(before) => {

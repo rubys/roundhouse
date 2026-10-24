@@ -1,0 +1,30 @@
+NaN
+[NaN,{"value":NaN}]
+NaN
+NaN
+"NaN"
+Infinity
+[Infinity,{"value":Infinity}]
+Infinity
+Infinity
+"Infinity"
+-Infinity
+[-Infinity,{"value":-Infinity}]
+-Infinity
+-Infinity
+"-Infinity"
+203
+203
+203
+ArgumentError:exceed depth limit
+""
+607
+607
+607
+ArgumentError:exceed depth limit
+""
+809
+809
+809
+ArgumentError:exceed depth limit
+""

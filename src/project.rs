@@ -6988,6 +6988,13 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         files.push(("sig/runtime/json_column.rbs".to_string(), rbs));
     }
 
+    // dump is polymorphic: its destination, after to_io, or String.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/json_impl.rbs")
+            .map_err(|e| format!("read runtime/spinel/json_impl.rbs: {e}"))?;
+        files.push(("sig/runtime/json_impl.rbs".to_string(), rbs));
+    }
+
     // ActiveJob payload codecs. Same reason as the JSON-column sidecar:
     // the readers take parsed JSON, which only the sidecar can type.
     {

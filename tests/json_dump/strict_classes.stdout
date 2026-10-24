@@ -1,0 +1,57 @@
+JSON::GeneratorError:ReviewArray not allowed in JSON
+JSON::GeneratorError:ReviewHash not allowed in JSON
+JSON::GeneratorError:ReviewString not allowed in JSON
+JSON::GeneratorError:ReviewArray not allowed in JSON
+""
+JSON::GeneratorError:ReviewHash not allowed in JSON
+""
+JSON::GeneratorError:ReviewString not allowed in JSON
+""
+JSON::GeneratorError:ReviewArray not allowed in JSON
+""
+JSON::GeneratorError:ReviewHash not allowed in JSON
+""
+JSON::GeneratorError:ReviewString not allowed in JSON
+""
+JSON::GeneratorError:ReviewChildArray not allowed in JSON
+""
+JSON::GeneratorError:ReviewArray not allowed in JSON
+""
+JSON::GeneratorError:ReviewNumber not allowed in JSON
+""
+JSON::GeneratorError:ReviewTaggedArray not allowed in JSON
+""
+JSON::GeneratorError:ReviewTaggedHash not allowed in JSON
+""
+JSON::GeneratorError:ReviewTaggedString not allowed in JSON
+""
+JSON::GeneratorError:ReviewArray not allowed in JSON
+""
+JSON::GeneratorError:ReviewHash not allowed in JSON
+""
+JSON::GeneratorError:ReviewString not allowed in JSON
+""
+true
+"null"
+true
+"true"
+true
+"false"
+true
+"\"s\""
+true
+"1"
+true
+"1.5"
+true
+"[]"
+true
+"{}"
+true
+"[1]"
+true
+"{\"a\":\"s\"}"
+"{\"key\":1}"
+"[]"
+"{}"
+"\"\""

@@ -10,14 +10,18 @@
 //! the arguments must be the same JSON, and the payload must have Rails'
 //! keys and values, apart from `job_id` and `enqueued_at`.
 //!
-//! The spinel test runs the same driver compiled by spinel and requires
-//! the same output as CRuby. Marked `#[ignore]`, as the other spinel
-//! tests are; it needs `spinel` on PATH:
+//! The spinel test runs the same driver compiled by spinel against a
+//! checked-in CRuby golden, verified by the unit test below. It needs
+//! `spinel` on PATH, without adding Ruby to the native framework job:
 //!
 //!     cargo test --test active_job_payload -- --ignored
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+// MRI 3.4.11 / json 2.9.1. Regenerate with that Ruby on PATH:
+// UPDATE_ACTIVE_JOB_PAYLOAD_GOLDEN=1 cargo test --test active_job_payload payloads_match_rails_and_read_back
+const CRUBY_GOLDEN: &str = include_str!("active_job_payload/cruby.stdout");
 
 const SOURCES: &[(&str, &str)] = &[
     ("runtime/spinel/base64.rb", "base64.rb"),
@@ -100,12 +104,17 @@ fn payloads_match_rails_and_read_back() {
     let keys = |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
     assert_eq!(keys(&job), keys(&rails_job), "the payload's keys differ from Rails'");
     assert_eq!(job, rails_job, "the payload differs from Rails' job.serialize");
+
+    if std::env::var("UPDATE_ACTIVE_JOB_PAYLOAD_GOLDEN").as_deref() == Ok("1") {
+        std::fs::write(root().join("tests/active_job_payload/cruby.stdout"), &stdout).unwrap();
+    } else {
+        assert_eq!(stdout, CRUBY_GOLDEN, "the CRuby payload golden drifted");
+    }
 }
 
 #[test]
 #[ignore]
 fn the_spinel_binary_writes_and_reads_as_cruby_does() {
-    let cruby = run_cruby(&scratch("roundhouse-active-job-payload-cruby-for-spinel"));
     let dir = scratch("roundhouse-active-job-payload-spinel");
     let build = Command::new("spinel")
         .args(["driver.rb", "-o", "driver"])
@@ -120,8 +129,9 @@ fn the_spinel_binary_writes_and_reads_as_cruby_does() {
     );
     let out = Command::new(dir.join("driver")).current_dir(&dir).output().unwrap();
     let binary = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "the native driver failed:\n{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(
-        binary, cruby,
-        "the binary and CRuby disagree\n=== spinel ===\n{binary}\n=== CRuby ===\n{cruby}"
+        binary, CRUBY_GOLDEN,
+        "the binary differs from the unit-verified CRuby payload golden"
     );
 }

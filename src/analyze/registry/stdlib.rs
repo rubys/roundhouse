@@ -1054,7 +1054,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // report the missing runtime at project emission.
     let string_io = Ty::Class { id: ClassId(Symbol::from("StringIO")), args: vec![].into() };
     register_stdlib_class(classes, "StringIO", &[], &[
-        ("string", Ty::Str), ("<<", string_io),
+        ("string", Ty::Str), ("<<", string_io), ("write", Ty::Int),
     ]);
     // `IO` / `Process` / `Timeout` — Campfire tip names these as Consts
     // in indexed app source (`time_limited_video_previewer`, web-push
@@ -1323,16 +1323,21 @@ fn register_stdlib_class(
     class_methods: &[(&str, Ty)],
     instance_methods: &[(&str, Ty)],
 ) {
+    use crate::dialect::{MethodReceiver, MethodVisibility};
     let cls = classes.entry(ClassId(Symbol::from(name))).or_default();
     for (m, ty) in class_methods {
         cls.class_methods
             .entry(Symbol::from(*m))
             .or_insert_with(|| ty.clone());
+        cls.method_visibility.entry((MethodReceiver::Class, Symbol::from(*m)))
+            .or_insert(MethodVisibility::Public);
     }
     for (m, ty) in instance_methods {
         cls.instance_methods
             .entry(Symbol::from(*m))
             .or_insert_with(|| ty.clone());
+        cls.method_visibility.entry((MethodReceiver::Instance, Symbol::from(*m)))
+            .or_insert(MethodVisibility::Public);
     }
 }
 

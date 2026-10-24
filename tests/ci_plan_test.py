@@ -189,6 +189,26 @@ class Routing(unittest.TestCase):
                 self.assertEqual(plan["spinel_tests"], ["framework_tests_spinel"])
                 self.assertEqual(plan["archives"], [])
 
+    def test_json_dump_inputs_select_native_comparisons(self):
+        for path in [
+            "runtime/spinel/json_impl.rb",
+            "runtime/spinel/json_impl.rbs",
+            "src/analyze/body/send.rs",
+            "src/analyze/body/mod.rs",
+            "src/analyze/mod.rs",
+            "src/analyze/dirty_retype.rs",
+            "src/analyze/registry/stdlib.rs",
+            "src/emit/ruby/library.rs",
+            "tests/json_dump.rs",
+            "tests/json_dump/included_visibility.stdout",
+            "tests/json_dump/encoder_defaults.stdout",
+            "tests/json_dump/protocol_overrides.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("json_dump", plan["spinel_tests"])
+                self.assertTrue(set(ci.CORE + ["spinel-framework"]).issubset(plan["jobs"]))
+
     def test_missing_plan_output_fails_gates_without_crashing(self):
         with (
             patch.dict(os.environ, {"CI_PLAN": "", "CI_NEEDS": "{}"}, clear=False),
@@ -615,7 +635,7 @@ class Routing(unittest.TestCase):
         # must too when that file is the only change.
         self.assertEqual(
             ci.select(["src/emit/ruby/library.rs"])["spinel_tests"],
-            [*ci.PARAM_BIND_TESTS, "generated_columns_spinel"],
+            [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "json_dump"],
         )
         self.assertEqual(
             ci.select(["runtime/spinel/db.rb"])["spinel_tests"],

@@ -1,0 +1,41 @@
+args [null,true,false,42,-7,1099511627776,1.5,0.1,-2.5e-08,1.0e+20,"plain","quote\" backslash\\ nl\n tab\t ctrl\u0001 <&> é ✓  ","",{"_aj_serialized":"ActiveJob::Serializers::SymbolSerializer","value":"open"},{"_aj_globalid":"gid://campfire/Room/7"},{"_aj_globalid":"gid://campfire/Rooms::Open/8"},{"_aj_serialized":"ActiveJob::Serializers::TimeSerializer","value":"2026-10-09T12:14:56.123456789Z"},{"_aj_serialized":"ActiveJob::Serializers::TimeSerializer","value":"2026-10-09T12:14:56.000000005Z"},[1,2,3],["a","b"],[],[true,false],[{"_aj_serialized":"ActiveJob::Serializers::SymbolSerializer","value":"x"},{"_aj_serialized":"ActiveJob::Serializers::SymbolSerializer","value":"y"}]]
+ok job_id is a v4 uuid
+ok enqueued_at is now
+job {"job_class":"PushMessageJob","job_id":"<job_id>","provider_job_id":null,"queue_name":"default","priority":null,"arguments":[null,true,false,42,-7,1099511627776,1.5,0.1,-2.5e-08,1.0e+20,"plain","quote\" backslash\\ nl\n tab\t ctrl\u0001 <&> é ✓  ","",{"_aj_serialized":"ActiveJob::Serializers::SymbolSerializer","value":"open"},{"_aj_globalid":"gid://campfire/Room/7"},{"_aj_globalid":"gid://campfire/Rooms::Open/8"},{"_aj_serialized":"ActiveJob::Serializers::TimeSerializer","value":"2026-10-09T12:14:56.123456789Z"},{"_aj_serialized":"ActiveJob::Serializers::TimeSerializer","value":"2026-10-09T12:14:56.000000005Z"},[1,2,3],["a","b"],[],[true,false],[{"_aj_serialized":"ActiveJob::Serializers::SymbolSerializer","value":"x"},{"_aj_serialized":"ActiveJob::Serializers::SymbolSerializer","value":"y"}]],"executions":0,"exception_executions":{},"locale":"en","timezone":"UTC","enqueued_at":"<enqueued_at>","scheduled_at":null}
+ok count
+ok null
+ok bool true
+ok bool false
+ok int
+ok negative int
+ok big int
+ok float
+ok float 0.1
+ok small float
+ok large float
+ok string
+ok escaped string
+ok empty string
+ok symbol
+ok record
+ok STI record comes back as its subclass
+ok time to the nanosecond
+ok time with 5ns
+ok int array
+ok string array
+ok empty array
+ok bool array
+ok symbol array
+ok time with an offset
+ok time without fractions
+ok a deleted record raises
+ok another app's gid raises
+ok another model raises
+ok a plain value where a record goes raises
+ok the wrong serializer raises
+ok NaN is refused at enqueue
+ok pending counts both kinds
+ok FIFO across both kinds
+ok a raise is not a run
+ok the queue is empty
+done

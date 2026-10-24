@@ -1,0 +1,12 @@
+true
+"{\"a\":[1]}"
+true
+"prefix:[true,null]"
+1
+true
+"{\"a\":[1]}{}"
+1
+"{}"
+true
+"{\"file\":2}"
+IOError

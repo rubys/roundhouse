@@ -101,6 +101,7 @@ SPINEL_TESTS = [
     "jbuilder_array_value_spinel",
     "active_job_payload",
     "render_json_encoder_spinel",
+    "json_dump",
     "url_helpers_absolute_spinel",
     "jbuilder_extract_attributes_spinel",
     "hash_to_query_symbol_keys_spinel",
@@ -132,6 +133,7 @@ SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_PUSH_INPUTS - {"runtime/spinel/sidekiq_redis.rb"}
 # test binary's compile included), for balancing its shards; a suite not
 # listed counts as one Spinel build.
 SPINEL_TEST_SECONDS = {
+    "json_dump": 900,
     "spinel_transaction_connection": 501,
     "spinel_stmt_cache_lru": 203,
     "param_binds": 181,
@@ -192,6 +194,16 @@ ACTIVE_JOB_PAYLOAD_INPUTS = {
     "runtime/spinel/active_job_serialization.rb",
     "runtime/spinel/global_id_locator.rb",
     "runtime/spinel/base64.rb",
+}
+JSON_DUMP_INPUTS = {
+    "runtime/spinel/json_impl.rb",
+    "runtime/spinel/json_impl.rbs",
+    "src/analyze/body/send.rs",
+    "src/analyze/body/mod.rs",
+    "src/analyze/mod.rs",
+    "src/analyze/dirty_retype.rs",
+    "src/analyze/registry/stdlib.rs",
+    "src/emit/ruby/library.rs",
 }
 # Inputs of the PostgreSQL Db gate (tests/spinel_pg_db.rs): the shim, its
 # RBS, the contract and time parsing it compiles with, and the cases.
@@ -537,6 +549,8 @@ def native_coverage(path):
         suites.update(owned_tests)
     if path in ACTIVE_JOB_PAYLOAD_INPUTS or path.startswith("tests/active_job_payload/"):
         suites.add("active_job_payload")
+    if path in JSON_DUMP_INPUTS or path.startswith("tests/json_dump/"):
+        suites.add("json_dump")
     if path in SIDEKIQ_PUSH_INPUTS or path.startswith("tests/sidekiq_push/"):
         suites.add("sidekiq_push")
     if (
