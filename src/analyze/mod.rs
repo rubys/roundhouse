@@ -4900,6 +4900,11 @@ impl Analyzer {
         // — the authentication generator's shape, in every Rails 8 app.
         let view_ctx = ClassId(Symbol::from("ActionView::Base"));
         for name in &app.view_visible_controller_methods {
+            if app.helper_method_index.get(name)
+                .is_some_and(|owner| registry::view::has_instance_helper(app, name, owner))
+            {
+                continue; // The selected helper owner is projected below.
+            }
             let owners = app
                 .controllers
                 .iter()
@@ -4910,6 +4915,29 @@ impl Analyzer {
                 .find_map(|c| c.instance_methods.get(name).cloned());
             if let Some(ty) = ty {
                 self.classes.entry(view_ctx.clone()).or_default().instance_methods.insert(name.clone(), ty);
+            }
+        }
+        // Rails helper lookup has already selected an owner. Copy that
+        // owner's full entry, including unknown returns and declared
+        // signatures, rather than preserving a framework or another
+        // included module's answer for the same spelling.
+        for (name, owner) in &app.helper_method_index {
+            if !registry::view::has_instance_helper(app, name, owner) {
+                continue;
+            }
+            let ty = self.classes.get(owner)
+                .and_then(|c| c.instance_methods.get(name)).cloned();
+            let folded_class_method = self.concern_folded.get(&view_ctx)
+                .is_some_and(|(_, names)| names.contains(name));
+            let view = self.classes.entry(view_ctx.clone()).or_default();
+            if folded_class_method {
+                // Including a helper does not expose its singleton methods.
+                view.class_methods.remove(name);
+            }
+            if !self.declared_signatures.contains(&(view_ctx.clone(), name.clone()))
+                && let Some(ty) = ty
+            {
+                view.instance_methods.insert(name.clone(), ty);
             }
         }
     }
