@@ -278,6 +278,8 @@ mod inline_filter_guard;
 mod before_action_return;
 #[path = "emit_and_run/sti_global_id.rs"]
 mod sti_global_id;
+#[path = "emit_and_run/global_id_app.rs"]
+mod global_id_app;
 #[path = "support/campfire_caches.rs"]
 mod campfire_caches_contract;
 #[path = "emit_and_run/campfire_caches.rs"]

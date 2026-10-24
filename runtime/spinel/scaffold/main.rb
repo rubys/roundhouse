@@ -907,9 +907,9 @@ SidekiqPush.announce if JobRegistry.sidekiq?
 Thread.new do
   Main.job_loop
 end
-# The server announces itself by the app's own name (the underscored
-# module wrapping its Rails::Application, which ingest writes into
-# config/application.rb), not by the binary's file name.
+# The server announces itself by the app's own name (its GlobalID app
+# name, which ingest writes into config/application.rb), not by the
+# binary's file name.
 Tep::APP.name = Rails.application.global_id_app
 # Tep::Server::Threaded is the thread-per-connection server: a green
 # thread per connection, every wait a park (recv, write, sleep, and the

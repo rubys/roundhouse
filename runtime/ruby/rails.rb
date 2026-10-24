@@ -520,10 +520,11 @@ module Rails
 
     # `GlobalID.app` — the first segment of every `gid://<app>/<Model>/
     # <id>` URI this runtime mints. Rails derives it from the
-    # application's railtie name (`campfire_application` minus the
-    # suffix); ingest reads the module wrapping `class Application <
-    # Rails::Application` in config/application.rb and synthesizes an
-    # override here, exactly as it does for `session_cookie_key`.
+    # application's railtie name minus the `_application` suffix,
+    # dasherized (`my_app_application` -> "my-app"); ingest reads the
+    # class inheriting `Rails::Application` in config/application.rb
+    # and synthesizes an override here, exactly as it does for
+    # `session_cookie_key`.
     #
     # The default is deliberately generic: an app whose config/
     # application.rb ingest could not read still mints well-formed gids,
