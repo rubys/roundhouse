@@ -65,7 +65,7 @@ env:
   # tree, tested against a live Redis in sidekiq-live. The same repository
   # and tag the emitted spin.toml pins (src/project.rs); bump both together.
   SPINEL_REDIS_REPO: rubys/spinel-redis
-  SPINEL_REDIS_REF: v0.3.0
+  SPINEL_REDIS_REF: v0.3.1
 
 jobs:
   plan:
@@ -1024,9 +1024,10 @@ jobs:
           STATUS: ${{ job.status }}
         run: echo "shard-${{ matrix.shard }}=$STATUS" >> "$GITHUB_OUTPUT"
 
-  # Sidekiq pushes against a real Redis (tests/sidekiq_push_live.rs): the
-  # push runtime over redis-rb under CRuby, and over spinel-redis compiled
-  # by Spinel, each read back through real Sidekiq's API. Planned only
+  # Sidekiq pushes and the worker role against a real Redis
+  # (tests/sidekiq_push_live.rs, tests/sidekiq_worker_live.rs): the
+  # runtime over redis-rb under CRuby, and over spinel-redis compiled by
+  # Spinel, each read back through real Sidekiq's API. Planned only
   # when the push runtime, its client or the gate changes. Advisory like
   # the other Spinel jobs, since the Spinel half tracks spinel-build.
   sidekiq-live:
@@ -1076,7 +1077,9 @@ jobs:
         env:
           SIDEKIQ_LIVE_REDIS_URL: redis://127.0.0.1:6379/15
           SPINEL_REDIS_DIR: ${{ github.workspace }}/spinel-redis
-        run: cargo test --test sidekiq_push_live -- --ignored --nocapture --test-threads=1
+        run: |
+          cargo test --test sidekiq_push_live -- --ignored --nocapture --test-threads=1
+          cargo test --test sidekiq_worker_live -- --ignored --nocapture --test-threads=1
       - *advisory-result
 
   # Campfire conformance runs ONCE Campfire's own suite against a

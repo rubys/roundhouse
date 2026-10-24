@@ -394,13 +394,42 @@ fn application_name(nodes: Vec<Node<'_>>, prefix: &[String]) -> Option<String> {
     None
 }
 
-fn default_key(name: &str) -> String {
+/// Rails' `railtie_name` less its `_application` suffix: the
+/// underscored path of the class inheriting `Rails::Application`
+/// (`Outer::HTMLApp::Application` → "outer_html_app"). Both the default
+/// session key and `GlobalID.app` start from it.
+fn railtie_base(name: &str) -> String {
     let underscored = crate::naming::underscore_words(name);
-    format!(
-        "_{}_session",
-        underscored
-            .strip_suffix("_application")
-            .unwrap_or(&underscored)
+    underscored
+        .strip_suffix("_application")
+        .unwrap_or(&underscored)
+        .to_string()
+}
+
+/// The `railtie_base` of the application class in config/application.rb
+/// `source`, None when it declares no `Rails::Application` subclass.
+pub(super) fn application_railtie_base(source: &[u8]) -> Option<String> {
+    application_class_name(source).map(|name| railtie_base(&name))
+}
+
+/// `GlobalID.app` for the application class in config/application.rb
+/// `source`: globalid's railtie removes every `_application` from the
+/// railtie name, not just the last, then dasherizes, so
+/// `MyApplication::Application` is `my`.
+pub(super) fn application_global_id_app(source: &[u8]) -> Option<String> {
+    application_class_name(source)
+        .map(|name| crate::naming::underscore_words(&name).replace("_application", "").replace('_', "-"))
+}
+
+fn application_class_name(source: &[u8]) -> Option<String> {
+    let parsed = super::prism::parse_silent(source);
+    application_name(
+        parsed
+            .node()
+            .as_program_node()
+            .map(|p| p.statements().body().iter().collect())
+            .unwrap_or_default(),
+        &[],
     )
 }
 
@@ -413,15 +442,7 @@ pub(super) fn synthesize<V: Vfs + ?Sized>(
 ) -> IngestResult<Option<String>> {
     let app_path = dir.join("config/application.rb");
     let app_bytes = vfs.read(&app_path).unwrap_or_default();
-    let app_parsed = super::prism::parse_silent(&app_bytes);
-    let name = application_name(
-        app_parsed
-            .node()
-            .as_program_node()
-            .map(|p| p.statements().body().iter().collect())
-            .unwrap_or_default(),
-        &[],
-    );
+    let base = application_railtie_base(&app_bytes);
     let application = read_file(vfs, &app_path)?;
     let env_dir = dir.join("config/environments");
     let mut env_files: Vec<PathBuf> = if vfs.is_dir(&env_dir) {
@@ -451,13 +472,12 @@ pub(super) fn synthesize<V: Vfs + ?Sized>(
             initializers.extend(read_file(vfs, &path)?);
         }
     }
-    if name.is_none() && application.is_empty() && environments.is_empty() && initializers.is_empty()
+    if base.is_none() && application.is_empty() && environments.is_empty() && initializers.is_empty()
     {
         return Ok(None);
     }
-    let key = name
-        .as_deref()
-        .map(default_key)
+    let key = base
+        .map(|base| format!("_{base}_session"))
         .unwrap_or_else(|| "_session".to_string());
     let code = |found: &[Step]| {
         replay(found, "").map_err(|message| IngestError::Unsupported {

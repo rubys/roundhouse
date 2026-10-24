@@ -131,6 +131,66 @@ module SidekiqRedis
     nil
   end
 
+  # ---- the worker (runtime/sidekiq_worker.rb) --------------------------
+  #
+  # The worker holds its own connections, one per processor thread and
+  # one for control, so these take the connection rather than sharing
+  # CONN. A blocking BRPOP's read deadline is its own timeout plus
+  # READ_TIMEOUT on both clients, as redis-rb sets it.
+
+  def self.worker_open(url)
+    open(url, SidekiqPush.password)
+  end
+
+  # BRPOP: [key, value], or [] when the timeout passes (redis-rb answers
+  # nil there; spinel-redis answers []).
+  def self.fetch(conn, keys, timeout)
+    popped = conn.brpop(keys, timeout: timeout)
+    popped.nil? ? [] : popped
+  end
+
+  # The jobs back on the right of their queues, where BRPOP takes them
+  # next: one RPUSH per queue, the jobs in the order given, in one round
+  # trip, as Sidekiq's bulk_requeue sends them.
+  def self.requeue(conn, keys, jobs)
+    order = []
+    i = 0
+    while i < keys.length
+      order.push(keys[i]) unless order.include?(keys[i])
+      i += 1
+    end
+    conn.pipelined do |p|
+      order.each do |key|
+        batch = []
+        j = 0
+        while j < keys.length
+          batch.push(jobs[j]) if keys[j] == key
+          j += 1
+        end
+        p.rpush(key, batch)
+      end
+    end
+    nil
+  end
+
+  # ZADD dead, then the trims by age (scores up to `oldest`) and by
+  # count (ranks 0..`keep`, a negative String).
+  def self.write_dead(conn, now, json, oldest, keep)
+    conn.pipelined do |p|
+      p.zadd("dead", now, json)
+      p.zremrangebyscore("dead", "-inf", oldest)
+      p.zremrangebyrank("dead", "0", keep)
+    end
+    nil
+  end
+
+  # Leave at once, with processor threads still parked: no at_exit, no
+  # ensure, as Sidekiq's process ends after its requeue.
+  def self.hard_exit(code)
+    $stdout.flush
+    exit!(code)
+  end
+
   def self.close_quietly(conn)
     begin
       conn.close

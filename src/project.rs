@@ -3500,6 +3500,11 @@ fn ruby_family_runtime_files(
     } else {
         String::new()
     };
+    let sidekiq_worker = if sidekiq {
+        crate::runtime_files::read_to_string(SIDEKIQ_WORKER)?
+    } else {
+        String::new()
+    };
     for (path, content) in files.iter_mut() {
         if path == "runtime/ipaddr.rb" {
             *content = IPADDR_STDLIB.to_string();
@@ -3608,6 +3613,9 @@ fn ruby_family_runtime_files(
         // a tree on queue_adapter :sidekiq (`needs_redis`).
         if path == "runtime/sidekiq_redis.rb" && sidekiq {
             *content = sidekiq_client.clone();
+        }
+        if path == "runtime/sidekiq_worker.rb" && sidekiq {
+            *content = sidekiq_worker.clone();
         }
         // `TcpSocketStub`: the table as written, and `TCPSocket.open`
         // reopened to consult it — the seam the strict client asks from
@@ -3846,6 +3854,11 @@ fn ruby_family_runtime_files(
         "",
         &mut files,
     )?;
+    // `ruby sidekiq.rb`, the worker role's entry, only where there is a
+    // worker to run.
+    if !sidekiq {
+        files.retain(|(p, _)| p != "sidekiq.rb");
+    }
 
     // Library classes (app/models/<stem>.rb for the ingested support
     // classes) and the regenerated app/views.rb aggregator are inherited
@@ -4875,6 +4888,11 @@ const SIDEKIQ_REGISTRY_FLAG: &str = "  def self.sidekiq?\n    true\n  end\n";
 /// The real Redis connection for a tree on `:sidekiq`, swapped in for the
 /// raising façade at `runtime/sidekiq_redis.rb` on every Ruby-family lane.
 const SIDEKIQ_REDIS_CLIENT: &str = "runtime/spinel/sidekiq/sidekiq_redis.rb";
+
+/// The worker role for a tree on `:sidekiq`, swapped in for the façade at
+/// `runtime/sidekiq_worker.rb` on every Ruby-family lane, as the client
+/// above is.
+const SIDEKIQ_WORKER: &str = "runtime/spinel/sidekiq/sidekiq_worker.rb";
 
 /// The body of `JobRegistry.sidekiq_redis_url` or `_password` for one
 /// `configure_client` setting: `""` when the app gives none, so the push
@@ -7029,7 +7047,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     // Sidekiq pushes (queue_adapter :sidekiq): the envelope writer and
     // the Redis façade. `spin_shape` drops the façade's sidecar when it
     // swaps in the real client, whose surface is inferred.
-    for name in ["sidekiq_push", "sidekiq_redis"] {
+    for name in ["sidekiq_push", "sidekiq_redis", "sidekiq_envelope", "sidekiq_worker"] {
         let src = format!("runtime/spinel/{name}.rbs");
         let rbs = crate::runtime_files::read_to_string(&src).map_err(|e| format!("read {src}: {e}"))?;
         files.push((format!("sig/runtime/{name}.rbs"), rbs));
@@ -9895,7 +9913,14 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             .ok_or("spin_shape: the app is on queue_adapter :sidekiq but runtime/sidekiq_redis.rb \
                     is not in the spinel file set")?;
         facade.1 = client;
-        files.retain(|(p, _)| p != "runtime/sidekiq_redis.rbs");
+        let worker = crate::runtime_files::read_to_string(SIDEKIQ_WORKER)?;
+        let facade = files
+            .iter_mut()
+            .find(|(p, _)| p == "runtime/sidekiq_worker.rb")
+            .ok_or("spin_shape: the app is on queue_adapter :sidekiq but runtime/sidekiq_worker.rb \
+                    is not in the spinel file set")?;
+        facade.1 = worker;
+        files.retain(|(p, _)| p != "runtime/sidekiq_redis.rbs" && p != "runtime/sidekiq_worker.rbs");
     }
 
     // commonmarker: no façade to swap (Markdowner's own façade stands aside
@@ -10036,7 +10061,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # or tag, never a SHA. 0.3.0 adds the connect_timeout: and\n\
              # read_timeout: this push sets to 0.2.0's url:, AUTH, zadd and\n\
              # pipelined.\n\
-             redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.3.0\" }\n",
+             redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.3.1\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));

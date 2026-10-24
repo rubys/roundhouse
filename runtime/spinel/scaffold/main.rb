@@ -821,6 +821,18 @@ end
 # CLI surface. Flags override the PORT/WORKERS env vars; --help exits
 # before any DB or server setup runs. Parsed with a plain while loop
 # (no OptionParser — stdlib optparse isn't in the spinel subset).
+# `./app sidekiq [options]`: the worker role instead of the server. It
+# pulls jobs from Redis and runs them until TERM, and never returns (see
+# runtime/sidekiq_worker.rb). No socket is served, so no Cable
+# transport and no in-process drain thread; jobs a job enqueues still
+# push to Redis.
+if ARGV.length > 0 && ARGV[0] == "sidekiq"
+  SidekiqWorker.prepare_pool(ARGV)
+  Main.configure_default_adapter!
+  Db.checkpoint_in_background!
+  ActiveJob.register_drain
+  SidekiqWorker.cli(ARGV)
+end
 port = (ENV["PORT"] || "3000").to_i
 workers = (ENV["WORKERS"] || "1").to_i
 binding_arg = ""
@@ -836,6 +848,7 @@ while i < ARGV.length
     puts "  -b, --binding IP bind to IP (BINDING env; default localhost in development, 0.0.0.0 otherwise)"
     puts "      --unix-bind URL add unix:///absolute/path?mode=600 (UNIX_BIND env; default disabled)"
     puts "  -h, --help       show this help and exit"
+    puts "  sidekiq [options]  run jobs from Redis instead of serving HTTP (sidekiq --help)"
     puts ""
     puts "  OS workers per process: one per core; SPINEL_WORKERS=N caps it"
     puts "  TEP_SERVER=fiber runs the fiber-per-connection server instead"
@@ -907,9 +920,9 @@ SidekiqPush.announce if JobRegistry.sidekiq?
 Thread.new do
   Main.job_loop
 end
-# The server announces itself by the app's own name (the underscored
-# module wrapping its Rails::Application, which ingest writes into
-# config/application.rb), not by the binary's file name.
+# The server announces itself by the app's own name (its GlobalID app
+# name, which ingest writes into config/application.rb), not by the
+# binary's file name.
 Tep::APP.name = Rails.application.global_id_app
 # Tep::Server::Threaded is the thread-per-connection server: a green
 # thread per connection, every wait a park (recv, write, sleep, and the

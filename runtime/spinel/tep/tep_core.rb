@@ -5,8 +5,8 @@ require_relative "../http_headers"
 
 module Tep
   # The name the server announces itself by. scaffold/main.rb sets
-  # Tep::APP.name to the app's own name (the underscored module that
-  # wraps its Rails::Application, supplied by ingest) before it starts
+  # Tep::APP.name to the app's own name (its GlobalID app name,
+  # supplied by ingest) before it starts
   # the server; the binary's file name is the fallback.
   def self.display_name
     n = Tep::APP.name

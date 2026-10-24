@@ -107,6 +107,7 @@ SPINEL_TESTS = [
     "storage_proxy_path_spinel",
     "filter_block_params_spinel",
     "sidekiq_push",
+    "sidekiq_worker",
     "model_queries_spinel",
     "default_scope_spinel",
     "default_scope_dynamic_spinel",
@@ -123,11 +124,19 @@ SIDEKIQ_PUSH_INPUTS = {
     "runtime/spinel/sidekiq_redis.rb",
     "runtime/spinel/job_registry.rb",
 }
-# Inputs of the live Sidekiq gate (tests/sidekiq_push_live.rs, the
-# sidekiq-live job): the push runtime, its real Redis client, and the gate.
-SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_PUSH_INPUTS - {"runtime/spinel/sidekiq_redis.rb"}) | {
+# Inputs of the Sidekiq worker gate (tests/sidekiq_worker.rs): the push
+# runtime its drivers load, plus the envelope and the worker role.
+SIDEKIQ_WORKER_INPUTS = SIDEKIQ_PUSH_INPUTS | {
+    "runtime/spinel/sidekiq_envelope.rb",
+    "runtime/spinel/sidekiq/sidekiq_worker.rb",
+}
+# Inputs of the live Sidekiq gates (tests/sidekiq_push_live.rs and
+# tests/sidekiq_worker_live.rs, the sidekiq-live job): the push runtime,
+# the worker, their real Redis client, and the gates.
+SIDEKIQ_LIVE_INPUTS = (SIDEKIQ_WORKER_INPUTS - {"runtime/spinel/sidekiq_redis.rb"}) | {
     "runtime/spinel/sidekiq/sidekiq_redis.rb",
     "tests/sidekiq_push_live.rs",
+    "tests/sidekiq_worker_live.rs",
 }
 # Seconds each suite took in spinel-framework (main run 38936441376, its
 # test binary's compile included), for balancing its shards; a suite not
@@ -166,6 +175,7 @@ SPINEL_TEST_SECONDS = {
             "rails_compat_vectors_spinel",
             "active_job_payload",
             "sidekiq_push",
+            "sidekiq_worker",
         ],
         5,
     ),
@@ -540,6 +550,8 @@ def native_coverage(path):
         suites.add("active_job_payload")
     if path in SIDEKIQ_PUSH_INPUTS or path.startswith("tests/sidekiq_push/"):
         suites.add("sidekiq_push")
+    if path in SIDEKIQ_WORKER_INPUTS or path.startswith("tests/sidekiq_worker/"):
+        suites.add("sidekiq_worker")
     if (
         path.startswith(("tests/rails_compat/", "tests/params_vectors/"))
         or path == "tests/rails_compat_vectors.rb"
@@ -663,7 +675,7 @@ def select(
             jobs_selected.update(CORE)
         if native:
             reasons.append(f"{path}: native Spinel core")
-        if path in SIDEKIQ_LIVE_INPUTS or path.startswith("tests/sidekiq_push_live/"):
+        if path in SIDEKIQ_LIVE_INPUTS or path.startswith(("tests/sidekiq_push_live/", "tests/sidekiq_worker_live/")):
             spinel = True
             jobs_selected.add("sidekiq-live")
             reasons.append(f"{path}: live Sidekiq gate")

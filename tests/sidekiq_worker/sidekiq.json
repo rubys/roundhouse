@@ -1,0 +1,363 @@
+{
+  "versions": {
+    "sidekiq": "8.1.7",
+    "activejob": "8.1.3",
+    "redis_client": "0.31.0",
+    "redis_server": "7.0.15"
+  },
+  "strict": {
+    "args": "-q high -q low -c 1 -t 1",
+    "ran_in_order": [
+      "h1",
+      "l1"
+    ],
+    "popped_from_high_pinned": [
+      "{\"retry\":true,\"queue\":\"high\",\"wrapped\":\"RecordJob\",\"args\":[{\"job_class\":\"RecordJob\",\"job_id\":\"00000000-0000-4000-8000-000000000000\",\"provider_job_id\":null,\"queue_name\":\"high\",\"priority\":null,\"arguments\":[\"h1\"],\"executions\":0,\"exception_executions\":{},\"locale\":\"en\",\"timezone\":null,\"enqueued_at\":\"2026-10-23T00:00:00.000000000Z\",\"scheduled_at\":null}],\"class\":\"Sidekiq::ActiveJob::Wrapper\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}",
+      "{\"retry\":0,\"queue\":\"high\",\"wrapped\":\"BoomJob\",\"args\":[{\"job_class\":\"BoomJob\",\"job_id\":\"00000000-0000-4000-8000-000000000000\",\"provider_job_id\":null,\"queue_name\":\"high\",\"priority\":null,\"arguments\":[\"b1\"],\"executions\":0,\"exception_executions\":{},\"locale\":\"en\",\"timezone\":null,\"enqueued_at\":\"2026-10-23T00:00:00.000000000Z\",\"scheduled_at\":null}],\"class\":\"Sidekiq::ActiveJob::Wrapper\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}",
+      "{\"class\":\"Sidekiq::ActiveJob::Wrapper\",\"args\":[not json",
+      "{\"retry\":3,\"queue\":\"staging\",\"wrapped\":\"BoomJob\",\"args\":[{\"job_class\":\"BoomJob\",\"job_id\":\"00000000-0000-4000-8000-000000000000\",\"provider_job_id\":null,\"queue_name\":\"staging\",\"priority\":null,\"arguments\":[\"r3\"],\"executions\":0,\"exception_executions\":{},\"locale\":\"en\",\"timezone\":null,\"enqueued_at\":\"2026-10-23T00:00:00.000000000Z\",\"scheduled_at\":null}],\"class\":\"Sidekiq::ActiveJob::Wrapper\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124,\"error_message\":\"old message\",\"error_class\":\"OldError\",\"failed_at\":1000000000000,\"retry_count\":3,\"retried_at\":1000000010000}"
+    ],
+    "round_trips": [
+      {
+        "kind": "call",
+        "commands": [
+          {
+            "argv": [
+              "brpop",
+              "queue:high",
+              "queue:low",
+              "2"
+            ]
+          }
+        ]
+      },
+      {
+        "kind": "multi",
+        "commands": [
+          {
+            "argv": [
+              "multi"
+            ]
+          },
+          {
+            "argv": [
+              "zadd",
+              "dead",
+              "<now as Float#to_s>"
+            ],
+            "envelope_keys": [
+              "retry",
+              "queue",
+              "wrapped",
+              "args",
+              "class",
+              "jid",
+              "created_at",
+              "enqueued_at",
+              "error_message",
+              "error_class",
+              "failed_at",
+              "retry_count"
+            ],
+            "envelope": {
+              "retry": 0,
+              "queue": "high",
+              "wrapped": "BoomJob",
+              "args": [
+                {
+                  "job_class": "BoomJob",
+                  "job_id": "<uuid>",
+                  "provider_job_id": null,
+                  "queue_name": "high",
+                  "priority": null,
+                  "arguments": [
+                    "b1"
+                  ],
+                  "executions": 0,
+                  "exception_executions": {},
+                  "locale": "en",
+                  "timezone": null,
+                  "enqueued_at": "<iso8601(9)>",
+                  "scheduled_at": null
+                }
+              ],
+              "class": "Sidekiq::ActiveJob::Wrapper",
+              "jid": "<jid>",
+              "created_at": "<ms>",
+              "enqueued_at": "<ms>",
+              "error_message": "boom \"b1\"\nsecond line",
+              "error_class": "ArgumentError",
+              "failed_at": "<ms>",
+              "retry_count": 0
+            }
+          },
+          {
+            "argv": [
+              "zremrangebyscore",
+              "dead",
+              "-inf",
+              "<now - 15552000>"
+            ]
+          },
+          {
+            "argv": [
+              "zremrangebyrank",
+              "dead",
+              "0",
+              "-10000"
+            ]
+          },
+          {
+            "argv": [
+              "exec"
+            ]
+          }
+        ]
+      },
+      {
+        "kind": "call",
+        "commands": [
+          {
+            "argv": [
+              "brpop",
+              "queue:high",
+              "queue:low",
+              "2"
+            ]
+          }
+        ]
+      },
+      {
+        "kind": "multi",
+        "commands": [
+          {
+            "argv": [
+              "multi"
+            ]
+          },
+          {
+            "argv": [
+              "zadd",
+              "dead",
+              "<now as Float#to_s>"
+            ],
+            "raw": "{\"class\":\"Sidekiq::ActiveJob::Wrapper\",\"args\":[not json"
+          },
+          {
+            "argv": [
+              "zremrangebyscore",
+              "dead",
+              "-inf",
+              "<now - 15552000>"
+            ]
+          },
+          {
+            "argv": [
+              "zremrangebyrank",
+              "dead",
+              "0",
+              "-10000"
+            ]
+          },
+          {
+            "argv": [
+              "exec"
+            ]
+          }
+        ]
+      },
+      {
+        "kind": "call",
+        "commands": [
+          {
+            "argv": [
+              "brpop",
+              "queue:high",
+              "queue:low",
+              "2"
+            ]
+          }
+        ]
+      },
+      {
+        "kind": "multi",
+        "commands": [
+          {
+            "argv": [
+              "multi"
+            ]
+          },
+          {
+            "argv": [
+              "zadd",
+              "dead",
+              "<now as Float#to_s>"
+            ],
+            "envelope_keys": [
+              "retry",
+              "queue",
+              "wrapped",
+              "args",
+              "class",
+              "jid",
+              "created_at",
+              "enqueued_at",
+              "error_message",
+              "error_class",
+              "failed_at",
+              "retry_count",
+              "retried_at"
+            ],
+            "envelope": {
+              "retry": 3,
+              "queue": "high",
+              "wrapped": "BoomJob",
+              "args": [
+                {
+                  "job_class": "BoomJob",
+                  "job_id": "<uuid>",
+                  "provider_job_id": null,
+                  "queue_name": "staging",
+                  "priority": null,
+                  "arguments": [
+                    "r3"
+                  ],
+                  "executions": 0,
+                  "exception_executions": {},
+                  "locale": "en",
+                  "timezone": null,
+                  "enqueued_at": "<iso8601(9)>",
+                  "scheduled_at": null
+                }
+              ],
+              "class": "Sidekiq::ActiveJob::Wrapper",
+              "jid": "<jid>",
+              "created_at": "<ms>",
+              "enqueued_at": "<ms>",
+              "error_message": "boom \"r3\"\nsecond line",
+              "error_class": "ArgumentError",
+              "failed_at": 1000000000000,
+              "retry_count": 4,
+              "retried_at": "<ms>"
+            }
+          },
+          {
+            "argv": [
+              "zremrangebyscore",
+              "dead",
+              "-inf",
+              "<now - 15552000>"
+            ]
+          },
+          {
+            "argv": [
+              "zremrangebyrank",
+              "dead",
+              "0",
+              "-10000"
+            ]
+          },
+          {
+            "argv": [
+              "exec"
+            ]
+          }
+        ]
+      },
+      {
+        "kind": "call",
+        "commands": [
+          {
+            "argv": [
+              "brpop",
+              "queue:high",
+              "queue:low",
+              "2"
+            ]
+          }
+        ]
+      }
+    ],
+    "dead_after": [
+      [
+        "retry",
+        "queue",
+        "wrapped",
+        "args",
+        "class",
+        "jid",
+        "created_at",
+        "enqueued_at",
+        "error_message",
+        "error_class",
+        "failed_at",
+        "retry_count"
+      ],
+      "{\"class\":\"Sidekiq::ActiveJob::Wrapper\",\"args\":[not json",
+      [
+        "retry",
+        "queue",
+        "wrapped",
+        "args",
+        "class",
+        "jid",
+        "created_at",
+        "enqueued_at",
+        "error_message",
+        "error_class",
+        "failed_at",
+        "retry_count",
+        "retried_at"
+      ]
+    ]
+  },
+  "weighted": {
+    "args": "-q a,2 -q b,1 -c 1 -t 1",
+    "fetches": 200,
+    "brpop_shapes": [
+      [
+        "brpop",
+        [
+          "queue:a",
+          "queue:b"
+        ],
+        "2"
+      ]
+    ],
+    "orders_seen": [
+      [
+        "queue:a",
+        "queue:b"
+      ],
+      [
+        "queue:b",
+        "queue:a"
+      ]
+    ],
+    "queue_a_first_share_between_0.5_and_0.85": true
+  },
+  "shutdown": {
+    "args": "-q default -c 1 -t 1",
+    "timeline": [
+      "after TSTP: queue:default holds 1",
+      "after TERM: queue:default holds 2"
+    ],
+    "round_trips": [
+      {
+        "kind": "pipelined",
+        "commands": [
+          {
+            "argv": [
+              "rpush",
+              "queue:default"
+            ],
+            "values": [
+              "<envelope>"
+            ]
+          }
+        ]
+      }
+    ],
+    "requeue_is_the_pushed_text": true
+  }
+}

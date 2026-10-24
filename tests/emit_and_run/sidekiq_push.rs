@@ -54,7 +54,7 @@ fn a_spinel_tree_on_sidekiq_gets_spinel_redis() {
     let manifest = read(&emitted, "spin.toml");
     assert!(
         manifest.contains(
-            "redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.3.0\" }"
+            "redis = { git = \"https://github.com/rubys/spinel-redis\", ref = \"v0.3.1\" }"
         ),
         "{manifest}"
     );
@@ -93,6 +93,66 @@ fn an_app_not_on_sidekiq_keeps_the_facade_and_no_dependency() {
     let (emitted, _) = plain().emit(BuildTarget::Ruby);
     assert!(read(&emitted, "runtime/sidekiq_redis.rb").contains("this tree has no Redis client"));
     assert!(!read(&emitted, "Gemfile").contains("gem \"redis\""));
+}
+
+/// The worker role: a tree on `:sidekiq` gets the real worker in place of
+/// the façade, and the ruby tree its `sidekiq.rb` entry. Every other tree
+/// keeps the façade, whose `cli` says the app isn't on Sidekiq, and no
+/// `sidekiq.rb`.
+#[test]
+fn a_tree_on_sidekiq_gets_the_worker_role() {
+    let (emitted, errors) = on_sidekiq().emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let worker = read(&emitted, "runtime/sidekiq_worker.rb");
+    assert!(worker.contains("def self.processor(index)"), "{worker}");
+    assert!(!emitted.join("runtime/sidekiq_worker.rbs").exists(), "the façade's sidecar must drop");
+    assert!(read(&emitted, "main.rb").contains("SidekiqWorker.cli(ARGV)"));
+    assert!(read(&emitted, "runtime/sidekiq_envelope.rbs").contains("def self.with_error"));
+
+    for target in [BuildTarget::Ruby, BuildTarget::Jruby] {
+        let (emitted, errors) = on_sidekiq().emit(target);
+        assert!(errors.is_empty(), "{errors:#?}");
+        assert!(read(&emitted, "runtime/sidekiq_worker.rb").contains("def self.processor(index)"));
+        assert!(read(&emitted, "sidekiq.rb").contains("SidekiqWorker.cli(ARGV)"));
+    }
+
+    let plain = || {
+        emit_and_run::real_blog()
+            .write("app/jobs/article_job.rb", JOB)
+            .edit("app/models/article.rb", "  validates :title, presence: true\n", ENQUEUE)
+    };
+    for target in [BuildTarget::Spinel, BuildTarget::Ruby] {
+        let (emitted, _) = plain().emit(target);
+        let facade = read(&emitted, "runtime/sidekiq_worker.rb");
+        assert!(facade.contains("doesn't use queue_adapter :sidekiq") && !facade.contains("processor"), "{facade}");
+        assert!(!emitted.join("sidekiq.rb").exists());
+    }
+}
+
+const WORKER_SCRIPT: &str = r##"SidekiqWorker::LOGGING[0] = false
+raise "parse" unless SidekiqWorker.parse(["sidekiq", "-q", "critical,3", "-q", "default", "-c", "4"]) == ""
+raise "queues #{SidekiqWorker::QUEUES.inspect}" unless SidekiqWorker::QUEUES == ["queue:critical"] * 3 + ["queue:default"]
+raise "concurrency" unless SidekiqWorker::CONCURRENCY[0] == 4
+ENV.delete("DATABASE_POOL_SIZE")
+SidekiqWorker.prepare_pool(["sidekiq", "-c", "10"])
+raise "pool #{ENV["DATABASE_POOL_SIZE"]}" unless ENV["DATABASE_POOL_SIZE"] == "12"
+article = Article.create!(title: "Worker title", body: "A long enough article body.")
+json = JobRegistry.payload_article_job(article)
+raise "no outcome" unless ActiveJob.perform_parsed(JSON.parse(json)) == ActiveJob::PERFORM_RAN
+article.destroy
+raise "gone" unless ActiveJob.perform_parsed(JSON.parse(json)) == ActiveJob::PERFORM_FAILED
+raise ActiveJob.failure_class unless ActiveJob.failure_class == "ActiveJob::DeserializationError"
+puts "worker role passed"
+"##;
+
+/// The emitted ruby tree's worker parses Sidekiq's options, sizes the
+/// database pool, and runs the app's own payload job through
+/// `perform_parsed`, a gone record failing as DeserializationError.
+#[test]
+fn the_worker_role_runs_the_apps_jobs() {
+    let run = on_sidekiq().run_ruby(WORKER_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("worker role passed"), "{}", run.stdout);
 }
 
 #[test]
